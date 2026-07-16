@@ -1,9 +1,9 @@
 #![warn(missing_docs)]
-//! EVM contract lifecycle adapter.
+//! EVM contract state adapter.
 //!
-//! This crate binds reusable contract lifecycle states to capability providers
+//! This crate binds reusable contract states to capability providers
 //! and owns the runtime runner bindings for deploy, configure, and validate
-//! lifecycle states. It does not own JSON-RPC endpoints, signer-provider
+//! states. It does not own JSON-RPC endpoints, signer-provider
 //! resolution, keystore loading, artifact-store implementations, binaries, or
 //! operation topology. Runtime source routing and signing are supplied through
 //! process-local provider traits.
@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{keccak256, Address, B256};
-use mfm_adapter_contracts::evm_contract_lifecycle_adapter_binding;
 use mfm_artifact_capabilities::ArtifactEvidenceRef as CapabilityArtifactEvidenceRef;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::CapabilitySpec;
@@ -29,9 +28,9 @@ use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadCapability,
     EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityProvider,
-    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest,
-    EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest,
-    EvmLogsReadProvider, EvmLogsReadRequest, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
+    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCodeReadProvider, EvmFeeReadProvider,
+    EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadProvider,
+    EvmLogsReadRequest, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
     EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceReadProvider,
     EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
@@ -41,25 +40,19 @@ use mfm_evm_contract_model::{
     configured_contract_stage, constructor_data, contract_instance_resource_kind,
     decode_single_output_to_json, deployed_contract_stage, expected_matches, parse_artifact,
     prepare_validate_assertions, resolve_function_call, validation_report_resource_kind,
-    validation_report_stage, BlockSelector as ModelBlockSelector, BlockTag, ConfigurationClaim,
-    ConfigurationSnapshot, ConfiguredContractInstance, ConfiguredContractInstanceRef,
+    validation_report_stage, ConfiguredContractInstance, ConfiguredContractInstanceRef,
     ContextBoundValidationReport, ContractArtifactConfig, ContractCallConfig,
-    ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance, DeployedContractInstance,
-    EventAssertionConfig, EvmCodeHash, EvmContractContext, EvmNetworkContext, ExpectedValue,
-    ExternalAdoptionEvidence, ExternalCodeReadEvidence, ExternalEventAssertionEvidence,
-    ExternalEvmSourceEvidence, ExternalReadAssertionEvidence, ImportFromMfmRun,
-    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef, ParsedAbi,
-    ReadAssertionConfig, SourceCellOrOutputRef, SourceRunTerminalEvent, ValidationEventResult,
-    ValidationReadResult,
+    ContractLifecycleStage, DeployedContractInstance, EventAssertionConfig, EvmContractContext,
+    EvmNetworkContext, ExpectedValue, LifecycleArtifactEvidenceRef, ParsedAbi, ReadAssertionConfig,
+    ValidationEventEvidence, ValidationEventResult, ValidationReadEvidence, ValidationReadResult,
+    ValidationSourceEvidence,
 };
 use mfm_evm_core::encoding::normalize_address;
 use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
 use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
 use mfm_evm_core::tx::{parse_address, parse_u128_quantity, Eip1559TxToSign, LegacyTxToSign};
 use mfm_evm_signing::EvmSigningRequest;
-use mfm_ids::{
-    short_stable_id_fragment, ContentDigest, DigestAlgorithm, EventId, NodeId, SchemaId,
-};
+use mfm_ids::{short_stable_id_fragment, ContentDigest, DigestAlgorithm, NodeId, SchemaId};
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
@@ -89,12 +82,10 @@ use mfm_state_evm_contracts::{
     ContextContractValidationReadRequest, ContextValidateContractInput, ContractDeployConfirmation,
     ContractDeployReceipt, ContractTransactionIdempotency, ContractTransactionReceipt,
     ContractTransactionSubmission, ContractTransactionSubmissions, ContractValidationReadResponse,
-    ImportConfiguredContractState, ImportDeployedContractState,
 };
 use mfm_state_evm_contracts::{
     ConfigureAction, DeployAction, EvmSignerIntent, EvmTransactionPolicy,
-    EvmTransactionStyle as ConfigTransactionStyle, ImportConfiguredSpec, ImportDeployedSpec,
-    ReceiptRetryPolicy, ValidateAction,
+    EvmTransactionStyle as ConfigTransactionStyle, ReceiptRetryPolicy, ValidateAction,
 };
 use mfm_store::v1 as store;
 use mfm_values::{ContextBoundOutput, MfmConfig, MfmValue};
@@ -112,10 +103,10 @@ mod replay_adapter;
 mod runner_bindings;
 pub(crate) use self::mutation_support::{
     block_selector, configure_action_requires_artifact, configure_action_transaction_inputs,
-    contract_lifecycle_side_effect_missing, deploy_action_data,
-    deploy_contract_address_from_prepared, digest_bytes, ensure_configured_input_context,
-    ensure_deployed_input_context, ensure_replay_confirmation_depth, ensure_schema,
-    evm_network_context_ref, lifecycle_evidence_ref, optional_policy_quantity, parse_optional_wei,
+    contract_state_side_effect_missing, deploy_action_data, deploy_contract_address_from_prepared,
+    digest_bytes, ensure_configured_input_context, ensure_deployed_input_context,
+    ensure_replay_confirmation_depth, ensure_schema, evm_network_context_ref,
+    lifecycle_evidence_ref, optional_policy_quantity, parse_optional_wei,
     parse_prepared_transaction_hash, prepare_transactions_request, prepared_anchor_submissions,
     prepared_mutation_reconstruction, public_key_hex, reconstruct_prepared_mutation,
     recover_unknown_prepared_contract_submission, replay_adapter_error, replay_contract_mismatch,
@@ -126,36 +117,24 @@ pub(crate) use self::mutation_support::{
     PreparedTransaction, PreparedTransactionInput,
 };
 pub use self::mutation_support::{
-    ensure_prepared_invocation_public, is_contract_lifecycle_replay_intent,
+    ensure_prepared_invocation_public, is_contract_state_replay_intent,
 };
 use self::read_validation::{
-    context_stage_for_lifecycle_stage, decode_source_run_committed_stream, digest_for_value,
-    import_configured_requires_artifact, import_configured_with_reads, import_deployed_with_reads,
-    lifecycle_artifact_requirement, run_artifact_requirement, source_run_admitted,
-    validate_context_contract_with_reads, validate_source_run_authority,
-    validation_assertions_required, SourceRunAuthorityEvidence,
+    context_stage_for_lifecycle_stage, validate_context_contract_with_reads,
+    validation_assertions_required,
 };
-use self::replay_adapter::contract_side_effect_replay_evidence;
-pub use self::replay_adapter::{replay_verifier_id, verify_contract_lifecycle_replay};
+use self::replay_adapter::contract_state_side_effect_replay_evidence;
 #[cfg(test)]
-use self::replay_adapter::{
-    verify_contract_confirmation_schema, verify_contract_receipt_artifact,
-    verify_contract_receipt_schema, verify_prepared_transaction_data_matches_inputs,
-    verify_replay_intent_matches_prepared, verify_replayed_external_adoption,
-    verify_validation_results_match_action, verify_validation_source_evidence,
-    EvmContractLifecycleReplayVerifier,
-};
+use self::replay_adapter::verify_validation_source_evidence;
+pub use self::replay_adapter::{replay_verifier_id, verify_contract_state_replay};
 pub(crate) use self::runner_bindings::contract_profile_artifact_requirement;
-pub use self::runner_bindings::register_contract_lifecycle_runners_with_factory;
+pub use self::runner_bindings::register_contract_state_runners_with_factory;
 #[cfg(test)]
-pub(crate) use self::runner_bindings::{
-    account_nonce_resource_key, read_receipts_with_poll, verified_finality_confirmations,
-    ContractNonceResourceScope,
-};
+pub(crate) use self::runner_bindings::{account_nonce_resource_key, ContractNonceResourceScope};
 
 const REPLAY_VERIFIER_ID: &str = "mfm.evm.contract.replay.v1";
 
-/// Result type for lifecycle adapter operations.
+/// Result type for contract-state adapter operations.
 pub type Result<T> = std::result::Result<T, EvmContractAdapterError>;
 
 /// Capability providers needed for mutation phases.
@@ -263,7 +242,7 @@ pub struct PreparedContractInvocation {
     pub prepared_version: u64,
     /// Mutation phase.
     pub phase: ContractMutationPhase,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: mfm_values::ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
@@ -423,14 +402,14 @@ impl fmt::Debug for PreparedContractMutation {
     }
 }
 
-/// EVM contract lifecycle adapter over explicit capability providers.
+/// EVM contract-state adapter over explicit capability providers.
 #[derive(Debug, Clone, Copy)]
-pub struct EvmContractLifecycleAdapter<'a> {
+pub struct EvmContractStateAdapter<'a> {
     mutation: EvmContractMutationProviders<'a>,
     reads: EvmContractReadProviders<'a>,
 }
 
-impl<'a> EvmContractLifecycleAdapter<'a> {
+impl<'a> EvmContractStateAdapter<'a> {
     /// Creates an adapter from process-local provider sets.
     pub fn new(
         mutation: EvmContractMutationProviders<'a>,
@@ -949,10 +928,10 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
 
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
-const ADAPTER_FACTORY: &str = "evm_contract_lifecycle_adapter";
+const ADAPTER_FACTORY: &str = "evm_contract_states_adapter";
 const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm_contracts.runtime.v1";
 
-/// EVM capability provider set required by contract lifecycle runners.
+/// EVM capability provider set required by contract state runners.
 ///
 /// Concrete implementations are supplied by app assembly or tests; this trait
 /// only groups the capability contracts the adapter needs.
@@ -1019,11 +998,10 @@ pub trait EvmContractRuntimeFactory: Send + Sync {
     fn runtime_for(&self, binding: EvmNetworkBinding) -> mfm_runtime::Result<EvmContractRuntime>;
 }
 
-/// Process-local read capability set for one EVM contract lifecycle route.
+/// Process-local read capability set for one EVM contract state route.
 #[derive(Clone)]
 pub struct EvmContractReadRuntime {
     evm: Arc<dyn EvmContractReadProvider>,
-    source_run_registry: Option<mfm_certify::CertificationRegistry>,
 }
 
 impl fmt::Debug for EvmContractReadRuntime {
@@ -1036,21 +1014,7 @@ impl fmt::Debug for EvmContractReadRuntime {
 impl EvmContractReadRuntime {
     /// Creates an EVM contract read runtime from explicit process-local providers.
     pub fn new(evm: Arc<dyn EvmContractReadProvider>) -> Self {
-        Self {
-            evm,
-            source_run_registry: None,
-        }
-    }
-
-    /// Creates an EVM contract read runtime with source-run import registry authority.
-    pub fn new_with_source_run_import_registry(
-        evm: Arc<dyn EvmContractReadProvider>,
-        source_run_registry: mfm_certify::CertificationRegistry,
-    ) -> Self {
-        Self {
-            evm,
-            source_run_registry: Some(source_run_registry),
-        }
+        Self { evm }
     }
 
     /// Executes context-bound validation reads through this process-local read runtime.
@@ -1073,47 +1037,9 @@ impl EvmContractReadRuntime {
         )
         .await
     }
-
-    /// Admits a deployed-stage import through this process-local read runtime.
-    pub async fn import_deployed(
-        &self,
-        import: &ImportDeployedSpec,
-        context: &mfm_program::CertifiedContext<EvmContractContext>,
-        artifacts: &dyn store::RetainedArtifactReadProvider,
-    ) -> Result<DeployedContractInstance> {
-        let evm = self.evm.as_ref();
-        import_deployed_with_reads(
-            EvmContractReadProviders::from_provider(evm),
-            import,
-            context,
-            artifacts,
-            self.source_run_registry.as_ref(),
-        )
-        .await
-    }
-
-    /// Admits a configured-stage import through this process-local read runtime.
-    pub async fn import_configured(
-        &self,
-        import: &ImportConfiguredSpec,
-        context: &mfm_program::CertifiedContext<EvmContractContext>,
-        artifact: Option<&ContractArtifactConfig>,
-        artifacts: &dyn store::RetainedArtifactReadProvider,
-    ) -> Result<ConfiguredContractInstance> {
-        let evm = self.evm.as_ref();
-        import_configured_with_reads(
-            EvmContractReadProviders::from_provider(evm),
-            import,
-            context,
-            artifact,
-            artifacts,
-            self.source_run_registry.as_ref(),
-        )
-        .await
-    }
 }
 
-/// Process-local runtime capability set for one EVM contract lifecycle route.
+/// Process-local runtime capability set for one EVM contract state route.
 #[derive(Clone)]
 pub struct EvmContractRuntime {
     evm: Arc<dyn EvmContractProvider>,
@@ -1132,9 +1058,9 @@ impl EvmContractRuntime {
         Self { evm, signer }
     }
 
-    fn adapter(&self) -> EvmContractLifecycleAdapter<'_> {
+    fn adapter(&self) -> EvmContractStateAdapter<'_> {
         let evm = self.evm.as_ref();
-        EvmContractLifecycleAdapter::new(
+        EvmContractStateAdapter::new(
             EvmContractMutationProviders::from_evm_and_signer(evm, self.signer.as_ref()),
             EvmContractReadProviders::from_contract_provider(evm),
         )
@@ -1175,23 +1101,8 @@ pub enum EvmContractAdapterError {
     #[error("contract context mismatch")]
     ContextMismatch,
     /// Required contract artifact was absent.
-    #[error("contract artifact is required for this lifecycle phase")]
+    #[error("contract artifact is required for this state")]
     MissingContractArtifact,
-    /// Source-run import evidence was missing, unreadable, or mismatched.
-    #[error("source-run import evidence failed validation: {0}")]
-    SourceRunImportEvidence(String),
-    /// External adoption required bytecode but none was observed.
-    #[error("external contract code was missing")]
-    ExternalCodeMissing,
-    /// External adoption observed bytecode did not match the required hash.
-    #[error("external contract code hash mismatch")]
-    ExternalCodeHashMismatch,
-    /// External configured adoption assertions did not all pass.
-    #[error("external configured adoption assertions failed")]
-    ExternalAdoptionAssertionsFailed,
-    /// External configured adoption did not provide required observed evidence.
-    #[error("external configured claim is not allowed by policy")]
-    ExternalConfiguredClaimNotAllowed,
     /// Fee data was unavailable for the requested transaction style.
     #[error("EVM fee data unavailable for transaction style")]
     FeeUnavailable,

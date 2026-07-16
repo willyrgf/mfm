@@ -11,7 +11,7 @@ const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001";
 const VALID_SCHEMA_ID: &str =
     "schema:mfm.test.public:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000002";
-const CONTRACT_DEPLOY_ENTRY_POINT: &str = "mfm.evm.contract/deploy@1";
+const UNKNOWN_ENTRY_POINT: &str = "mfm.unknown/missing@1";
 
 fn test_app() -> axum::Router {
     mfm_rest_api::make_app(mfm_integration_tests::test_support::in_memory_rest_app_state())
@@ -56,9 +56,9 @@ async fn health_and_ready_endpoints_report_liveness_and_readiness() {
 async fn start_requires_the_strict_entry_point_request_envelope() {
     let app = test_app();
     for body in [
-        serde_json::json!({"entry_point": CONTRACT_DEPLOY_ENTRY_POINT}),
+        serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT}),
         serde_json::json!({
-            "entry_point": CONTRACT_DEPLOY_ENTRY_POINT,
+            "entry_point": UNKNOWN_ENTRY_POINT,
             "request": {},
             "unexpected": true
         }),
@@ -85,20 +85,15 @@ async fn start_rejects_unknown_exact_entry_point_before_catalog_access() {
 }
 
 #[tokio::test]
-async fn start_requires_catalog_authority_after_exact_request_validation() {
+async fn start_rejects_an_unknown_entry_point_without_catalog_access() {
     let response = test_app()
         .oneshot(json_post(
             "/v1/runs/start",
-            serde_json::json!({"entry_point": CONTRACT_DEPLOY_ENTRY_POINT, "request": {}}),
+            serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT, "request": {}}),
         ))
         .await
         .unwrap();
-    assert_error(
-        response,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "CatalogStoreUnavailable",
-    )
-    .await;
+    assert_error(response, StatusCode::BAD_REQUEST, "EntryPointNotFound").await;
 }
 
 #[tokio::test]
@@ -114,7 +109,7 @@ async fn read_role_refuses_live_start() {
     let response = app
         .oneshot(json_post(
             "/v1/runs/start",
-            serde_json::json!({"entry_point": CONTRACT_DEPLOY_ENTRY_POINT, "request": {}}),
+            serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT, "request": {}}),
         ))
         .await
         .unwrap();

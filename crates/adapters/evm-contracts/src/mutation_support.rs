@@ -319,18 +319,20 @@ pub(super) fn parse_b256_hex(value: &str) -> Result<B256> {
 }
 
 /// Identifies side-effect intents owned by this adapter's replay verifier.
-pub fn is_contract_lifecycle_replay_intent(
+pub fn is_contract_state_replay_intent(
     intent: &side_effect::IntentPersisted,
 ) -> replay::Result<bool> {
-    let binding = evm_contract_lifecycle_adapter_binding().map_err(replay_adapter_error)?;
-    Ok(intent.adapter_kind == *binding.adapter_kind()
-        && intent.adapter_version == *binding.adapter_version())
+    let adapter_kind =
+        mfm_state_evm_contracts::contract_states_adapter_kind().map_err(replay_adapter_error)?;
+    let adapter_version =
+        mfm_state_evm_contracts::contract_states_adapter_version().map_err(replay_adapter_error)?;
+    Ok(intent.adapter_kind == adapter_kind && intent.adapter_version == adapter_version)
 }
 
-pub(super) fn contract_lifecycle_side_effect_missing(phase: &str) -> replay::ReplayError {
+pub(super) fn contract_state_side_effect_missing(phase: &str) -> replay::ReplayError {
     replay::ReplayError::new(
         replay::ReplayErrorKind::SideEffectMissing,
-        format!("missing contract lifecycle {phase} evidence"),
+        format!("missing contract state {phase} evidence"),
     )
 }
 
@@ -823,7 +825,7 @@ pub(super) fn ensure_schema(
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
-            format!("{label} schema did not match contract lifecycle schema"),
+            format!("{label} schema did not match contract-state schema"),
         ))
     }
 }
@@ -870,7 +872,7 @@ pub(super) fn ensure_replay_confirmation_depth(
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
             format!(
-                "contract lifecycle confirmation depth {confirmations} is below certified depth {required_depth}"
+                "contract-state confirmation depth {confirmations} is below certified depth {required_depth}"
             ),
         ))
     }

@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Typed EVM contract lifecycle state contracts.
+//! Typed EVM contract state contracts.
 //!
 //! This crate owns reusable deploy, configure, and validate state contracts for EVM
 //! contracts. The state definitions expose semantic intents, typestate values, adapter
@@ -18,35 +18,32 @@
 
 use std::future;
 
-use mfm_adapter_contracts::evm_contract_lifecycle_adapter_binding;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::CapabilitySetFor;
 use mfm_effects::{ApplySideEffect, ReadExternal};
 use mfm_evm_capabilities::{
-    EvmCallReadCapability, EvmChainIdentityCapability, EvmCodeReadCapability, EvmFeeReadCapability,
+    EvmCallReadCapability, EvmChainIdentityCapability, EvmFeeReadCapability,
     EvmGasEstimateCapability, EvmLogsReadCapability, EvmNonceOccupancyReadCapability,
     EvmNonceReadCapability, EvmReceiptReadCapability, EvmTransactionSubmitCapability,
 };
 pub mod config;
 pub use config::{
     ConfigureAction, DeployAction, EvmSignerIntent, EvmTransactionPolicy, EvmTransactionStyle,
-    ImportConfiguredSpec, ImportDeployedSpec, ReceiptRetryPolicy, ValidateAction,
-    MAX_RECEIPT_POLLS, MAX_RECEIPT_POLL_INTERVAL_MS, MAX_RECEIPT_TOTAL_WAIT_MS,
+    ReceiptRetryPolicy, ValidateAction, MAX_RECEIPT_POLLS, MAX_RECEIPT_POLL_INTERVAL_MS,
+    MAX_RECEIPT_TOTAL_WAIT_MS,
 };
 use mfm_evm_contract_model::{
     configured_contract_stage, contract_instance_resource_kind, deployed_contract_stage,
     expected_matches, validation_report_resource_kind, validation_report_stage,
-    AdoptExternalAddress, ConfigurationClaim, ConfigurationSnapshot, ConfiguredContractInstance,
-    ConfiguredContractInstanceRef, ConfiguredFrom, ContextBoundValidationReport, ContractAddress,
-    ContractCallConfig, ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance,
-    DeployedContractInstance, EventAssertionConfig, EvmContractContext, ExternalAdoptionEvidence,
-    ExternalEventAssertionEvidence, ExternalEvmSourceEvidence, ExternalReadAssertionEvidence,
-    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
-    ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
+    ConfiguredContractInstance, ConfiguredContractInstanceRef, ConfiguredFrom,
+    ContextBoundValidationReport, ContractAddress, ContractCallConfig, ContractLifecycleStage,
+    ContractProfileDigestRef, DeployedContractInstance, EventAssertionConfig, EvmContractContext,
+    LifecycleArtifactEvidenceRef, ReadAssertionConfig, ValidationEventEvidence,
+    ValidationEventResult, ValidationReadEvidence, ValidationReadResult,
 };
 use mfm_ids::{
-    ContextResourceKind, ContextStage, DescriptorId, DigestAlgorithm, SchemaId, StateKind,
-    StateVersion,
+    AdapterKind, AdapterVersion, ContextResourceKind, ContextStage, DescriptorId, DigestAlgorithm,
+    SchemaId, StateKind, StateVersion,
 };
 use mfm_program::{
     AdapterBindingSpec, IdempotencyKey, ReadState, ResourceClaim, ResourceNamespace,
@@ -54,7 +51,7 @@ use mfm_program::{
 };
 use mfm_program_derive::{MfmValue, StateInput};
 use mfm_signing::SigningCapability;
-use mfm_values::{ContextBoundOutput, ContextRefValue};
+use mfm_values::ContextRefValue;
 use serde::{Deserialize, Serialize};
 
 #[path = "mutations.rs"]
@@ -65,11 +62,9 @@ pub use self::mutations::{ContextBoundConfigureContractState, ContextBoundDeploy
 mod validation;
 pub use self::validation::ContextBoundValidateContractState;
 
-#[path = "imports.rs"]
-mod imports;
-pub use self::imports::{ImportConfiguredContractState, ImportDeployedContractState};
-
 const NAMESPACE: &str = "mfm.evm.contract";
+const CONTRACT_STATES_ADAPTER_NAME: &str = "contract_states";
+const CONTRACT_STATES_ADAPTER_VERSION: &str = "mfm.evm.contract_states.adapter.v1";
 const ACCOUNT_NONCE_RESOURCE_NAMESPACE: &str = "mfm.evm.contract.account_nonce";
 const ACCOUNT_NONCE_RESOURCE_KEY_SCHEMA: &str = "mfm.evm.contract.resource_key.account_nonce";
 
@@ -90,19 +85,31 @@ type ContractValidationReadCaps = (
     EvmLogsReadCapability,
 );
 
-type ContractImportReadCaps = (
-    EvmChainIdentityCapability,
-    EvmCodeReadCapability,
-    EvmCallReadCapability,
-    EvmLogsReadCapability,
-);
+/// Returns the stable adapter kind for the reusable EVM contract states.
+pub fn contract_states_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
+    AdapterKind::new(
+        NAMESPACE,
+        CONTRACT_STATES_ADAPTER_NAME,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.evm.contract.adapter:contract_states"),
+    )
+}
+
+/// Returns the stable adapter version for the reusable EVM contract states.
+pub fn contract_states_adapter_version() -> Result<AdapterVersion, mfm_ids::IdentityError> {
+    AdapterVersion::new(CONTRACT_STATES_ADAPTER_VERSION)
+}
 
 fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
-    let binding = evm_contract_lifecycle_adapter_binding()
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
     Ok(vec![AdapterBindingSpec {
-        adapter_kind: binding.adapter_kind().clone(),
-        adapter_version: binding.adapter_version().clone(),
+        adapter_kind: contract_states_adapter_kind().map_err(|error| {
+            mfm_program::PlanError::Key(format!("EVM contract state adapter kind invalid: {error}"))
+        })?,
+        adapter_version: contract_states_adapter_version().map_err(|error| {
+            mfm_program::PlanError::Key(format!(
+                "EVM contract state adapter version invalid: {error}"
+            ))
+        })?,
     }])
 }
 
@@ -148,7 +155,7 @@ pub fn account_nonce_resource_claim() -> mfm_program::Result<ResourceClaim> {
 
 fn adapter_required_error(state_name: &'static str) -> StateError {
     StateError::Message(format!(
-        "{state_name} requires an EVM contract lifecycle adapter runner"
+        "{state_name} requires an EVM contract state adapter runner"
     ))
 }
 
@@ -181,7 +188,7 @@ fn produces_context(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
 #[mfm(schema = "mfm.evm.contract.input.context_configure")]
 pub struct ContextConfigureContractInput {
-    /// Context-bound deployed contract emitted by deploy or import-deployed states.
+    /// Context-bound deployed contract emitted by the deploy state.
     pub deployed: DeployedContractInstance,
 }
 
@@ -189,7 +196,7 @@ pub struct ContextConfigureContractInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
 #[mfm(schema = "mfm.evm.contract.input.context_validate")]
 pub struct ContextValidateContractInput {
-    /// Context-bound configured contract emitted by configure or import-configured states.
+    /// Context-bound configured contract emitted by the configure state.
     pub configured: ConfiguredContractInstance,
 }
 
@@ -203,7 +210,7 @@ pub struct ContextValidateContractInput {
 pub struct ContextContractTransactionIntent {
     /// Intent contract version.
     pub intent_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Stable semantic network id from the certified context.
     pub network_id: String,
@@ -257,7 +264,7 @@ pub struct ContextContractConfigureIntent {
     pub transactions: Vec<ContextContractTransactionIntent>,
 }
 
-/// Idempotency input for contract lifecycle mutation states.
+/// Idempotency input for contract mutation states.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
@@ -279,7 +286,7 @@ pub struct ContractTransactionIdempotency {
 pub struct ContractTransactionSubmission {
     /// Submission contract version.
     pub submission_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
@@ -301,7 +308,7 @@ pub struct ContractTransactionSubmission {
 pub struct ContractTransactionSubmissions {
     /// Aggregate contract version.
     pub submissions_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
@@ -321,7 +328,7 @@ pub struct ContractTransactionSubmissions {
 pub struct ContractTransactionReceipt {
     /// Receipt contract version.
     pub receipt_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
@@ -347,7 +354,7 @@ pub struct ContractTransactionReceipt {
 pub struct ContractDeployReceipt {
     /// Receipt-level contract version.
     pub receipt_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
@@ -369,7 +376,7 @@ pub struct ContractDeployReceipt {
 pub struct ContractDeployConfirmation {
     /// Confirmation contract version.
     pub confirmation_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
@@ -393,22 +400,14 @@ pub struct ContractDeployConfirmation {
 pub struct ContextContractConfigureReceipt {
     /// Receipt-level contract version.
     pub receipt_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
     /// Context resource stage being produced.
     pub resource_stage: ContractLifecycleStage,
-    /// Configure node id captured by certified invocation evidence.
-    pub configure_node: LifecycleNodeIdRef,
     /// Observed transaction receipts.
     pub receipts: Vec<ContractTransactionReceipt>,
-    /// Configuration call evidence refs.
-    pub call_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
-    /// Confirmation read/event evidence refs.
-    pub confirmation_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
-    /// Highest observed configuration block, when known.
-    pub configured_block_number: Option<u64>,
 }
 
 /// Configuration confirmation for context-bound configure states.
@@ -421,7 +420,7 @@ pub struct ContextContractConfigureReceipt {
 pub struct ContextContractConfigureConfirmation {
     /// Confirmation contract version.
     pub confirmation_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
@@ -429,16 +428,8 @@ pub struct ContextContractConfigureConfirmation {
     pub resource_stage: ContractLifecycleStage,
     /// Confirmations proven by the confirmation adapter when this artifact was recorded.
     pub confirmations: u64,
-    /// Configure node id captured by certified invocation evidence.
-    pub configure_node: LifecycleNodeIdRef,
     /// Confirmed transaction receipts.
     pub receipts: Vec<ContractTransactionReceipt>,
-    /// Configuration call evidence refs.
-    pub call_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
-    /// Confirmation read/event evidence refs.
-    pub confirmation_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
-    /// Highest observed configuration block, when known.
-    pub configured_block_number: Option<u64>,
 }
 
 /// Read request used by context-bound contract validation adapters.
@@ -451,7 +442,7 @@ pub struct ContextContractConfigureConfirmation {
 pub struct ContextContractValidationReadRequest {
     /// Request contract version.
     pub request_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Digest of the configured input value this read request was derived from.
     pub configured_input_digest: ContractProfileDigestRef,
@@ -477,7 +468,7 @@ pub struct ContextContractValidationReadRequest {
 pub struct ContractValidationReadResponse {
     /// Response contract version.
     pub response_version: u64,
-    /// Certified contract lifecycle context ref.
+    /// Certified contract context ref.
     pub context_ref: ContextRefValue,
     /// Digest of the configured input value this response is bound to.
     pub configured_input_digest: ContractProfileDigestRef,
@@ -489,20 +480,14 @@ pub struct ContractValidationReadResponse {
     pub observed_chain_id: u64,
     /// Redaction-safe client version label.
     pub client_version: String,
-    /// Results for configured-intent read confirmations.
-    pub configuration_read_results: Vec<ValidationReadResult>,
-    /// Results for configured-intent event confirmations.
-    pub configuration_event_results: Vec<ValidationEventResult>,
     /// Results for validation read assertions.
     pub read_results: Vec<ValidationReadResult>,
     /// Results for validation event assertions.
     pub event_results: Vec<ValidationEventResult>,
     /// Replayable read assertion evidence.
-    pub validation_read_evidence: Vec<ExternalReadAssertionEvidence>,
+    pub validation_read_evidence: Vec<ValidationReadEvidence>,
     /// Replayable event assertion evidence.
-    pub validation_event_evidence: Vec<ExternalEventAssertionEvidence>,
-    /// Retained lifecycle evidence refs available to the terminal report.
-    pub evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+    pub validation_event_evidence: Vec<ValidationEventEvidence>,
 }
 
 /// Recomputes whether a read validation result passes.
@@ -622,46 +607,18 @@ fn deployed_instance_from_receipt(
 ) -> StateResult<DeployedContractInstance> {
     let address = ContractAddress::new(contract_address)
         .map_err(|error| StateError::Message(error.to_string()))?;
-    let deploy_evidence = receipt
-        .receipt_evidence
-        .clone()
-        .into_iter()
-        .collect::<Vec<_>>();
     Ok(DeployedContractInstance {
         lifecycle_version: 1,
         context_ref: ContextRefValue::from(context.context_ref().clone()),
         address,
-        deploy_provenance: DeployProvenance::MfmDeploy {
-            deploy_tx_hash: receipt.transaction_hash.clone(),
-        },
-        deploy_evidence,
-        external_adoption_evidence: None,
-        deployed_block_number: Some(receipt.block_number),
+        deployed_block_number: receipt.block_number,
     })
 }
 
-struct ContextConfigureOutputEvidence<'a> {
-    receipts: &'a [ContractTransactionReceipt],
-    configured_block_number: Option<u64>,
-    configure_node: LifecycleNodeIdRef,
-    call_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
-    confirmation_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
-}
-
 fn configured_instance_from_evidence(
-    action: &ConfigureAction,
     input: &ContextConfigureContractInput,
-    evidence: ContextConfigureOutputEvidence<'_>,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
 ) -> StateResult<ConfiguredContractInstance> {
-    let mut retained_evidence = evidence
-        .receipts
-        .iter()
-        .filter_map(|receipt| receipt.receipt_evidence.clone())
-        .collect::<Vec<_>>();
-    retained_evidence.extend(evidence.call_evidence_refs.iter().cloned());
-    retained_evidence.extend(evidence.confirmation_evidence_refs.iter().cloned());
-
     Ok(ConfiguredContractInstance {
         lifecycle_version: 1,
         context_ref: ContextRefValue::from(context.context_ref().clone()),
@@ -670,22 +627,6 @@ fn configured_instance_from_evidence(
             deployed_context_ref: ContextRefValue::from(context.context_ref().clone()),
             deployed_address: input.deployed.address.clone(),
         },
-        configuration_claim: ConfigurationClaim::MfmConfigured {
-            configure_node: evidence.configure_node,
-            configure_action_digest: digest_for_config(action)?,
-            call_evidence_refs: evidence.call_evidence_refs,
-            confirmation_evidence_refs: evidence.confirmation_evidence_refs,
-        },
-        configure_or_import_evidence: retained_evidence,
-        external_adoption_evidence: None,
-        configured_block_number: evidence.configured_block_number.or_else(|| {
-            evidence
-                .receipts
-                .iter()
-                .map(|receipt| receipt.block_number)
-                .max()
-        }),
-        asserted_configuration_snapshot: None,
     })
 }
 
@@ -698,163 +639,6 @@ where
     let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|error| StateError::Message(format!("config canonicalization failed: {error}")))?;
     Ok(ContractProfileDigestRef::from(canonical.content_digest()))
-}
-
-fn ensure_verified_source_run_import<T>(
-    evidence: &ImportFromMfmRunEvidence,
-    value: &T,
-    required_stage: ContractLifecycleStage,
-) -> StateResult<()>
-where
-    T: ContextBoundOutput + mfm_values::MfmValue + Serialize,
-{
-    if value.context_ref() != evidence.source_context_ref.as_context_ref()
-        || value.context_resource_kind() != contract_instance_resource_kind()
-        || value.context_stage() != context_stage_for_lifecycle_stage(required_stage)
-        || digest_for_config(value)? != evidence.source_value_digest
-    {
-        return Err(import_admission_error("source-run import"));
-    }
-    Ok(())
-}
-
-fn source_run_import_evidence_refs(
-    evidence: &ImportFromMfmRunEvidence,
-) -> Vec<LifecycleArtifactEvidenceRef> {
-    vec![
-        evidence.source_spec_artifact_ref.clone(),
-        evidence.source_spec_certificate_ref.clone(),
-        evidence.source_run_stream_ref.clone(),
-        evidence
-            .source_value_artifact_ref_or_inline_canonical_value
-            .clone(),
-    ]
-}
-
-fn external_source_matches_context(
-    source: &ExternalEvmSourceEvidence,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
-) -> bool {
-    source.network_id.as_str() == context.value().network.network_id.as_str()
-        && source.expected_chain_id == context.value().network.expected_chain_id()
-        && source.observed_chain_id == context.value().network.expected_chain_id()
-}
-
-fn ensure_external_adoption_evidence(
-    evidence: &ExternalAdoptionEvidence,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
-    required_stage: ContractLifecycleStage,
-    adoption: &AdoptExternalAddress,
-) -> StateResult<()> {
-    let policy = &adoption.evidence_policy;
-    let expected_network_context_ref = digest_for_config(&context.value().network)?.to_string();
-    if evidence.context_ref.as_context_ref() != context.context_ref()
-        || evidence.evm_network_context_ref != expected_network_context_ref
-        || evidence.resource_stage != required_stage
-        || evidence.observed_chain_id != context.value().network.expected_chain_id()
-        || evidence.evidence_policy_digest != digest_for_config(policy)?
-    {
-        return Err(import_admission_error("external adoption"));
-    }
-    if policy.require_code || policy.expected_code_hash.is_some() {
-        let Some(code) = evidence.code_read_evidence.as_ref() else {
-            return Err(import_admission_error("external adoption"));
-        };
-        if code.address != adoption.address
-            || !external_source_matches_context(&code.source, context)
-            || (policy.require_code && code.observed_code_byte_len == 0)
-        {
-            return Err(import_admission_error("external adoption"));
-        }
-        if let Some(expected_code_hash) = &policy.expected_code_hash {
-            if &code.observed_code_hash != expected_code_hash {
-                return Err(import_admission_error("external adoption"));
-            }
-        }
-    }
-    if evidence.read_assertion_evidence.len() != policy.initial_read_assertions.len()
-        || evidence.event_assertion_evidence.len() != policy.initial_event_assertions.len()
-    {
-        return Err(import_admission_error("external adoption"));
-    }
-    for (record, assertion) in evidence
-        .read_assertion_evidence
-        .iter()
-        .zip(policy.initial_read_assertions.iter())
-    {
-        if !external_source_matches_context(&record.source, context)
-            || record.result.function.as_str() != assertion.function.as_str()
-            || record.result.args != assertion.args
-            || record.result.expected != assertion.expected
-        {
-            return Err(import_admission_error("external adoption"));
-        }
-        require_validation_read_result_canonical_passed(&record.result)?;
-        if !validation_read_result_passes(&record.result) {
-            return Err(import_admission_error("external adoption"));
-        }
-    }
-    for (record, assertion) in evidence
-        .event_assertion_evidence
-        .iter()
-        .zip(policy.initial_event_assertions.iter())
-    {
-        if assertion.from_block.is_some() || assertion.to_block.is_some() {
-            return Err(import_admission_error("external adoption"));
-        }
-        if !external_source_matches_context(&record.source, context)
-            || record.result.event.as_str() != assertion.event.as_str()
-            || record.result.min_count != assertion.min_count
-        {
-            return Err(import_admission_error("external adoption"));
-        }
-        require_validation_event_result_canonical_passed(&record.result)?;
-        if !validation_event_result_passes(&record.result) {
-            return Err(import_admission_error("external adoption"));
-        }
-    }
-    Ok(())
-}
-
-fn deployed_instance_from_verified_external_adoption(
-    adoption: &AdoptExternalAddress,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
-    evidence: ExternalAdoptionEvidence,
-    deployed_block_number: Option<u64>,
-) -> StateResult<DeployedContractInstance> {
-    ensure_external_adoption_evidence(
-        &evidence,
-        context,
-        ContractLifecycleStage::Deployed,
-        adoption,
-    )?;
-    Ok(DeployedContractInstance {
-        lifecycle_version: 1,
-        context_ref: ContextRefValue::from(context.context_ref().clone()),
-        address: adoption.address.clone(),
-        deploy_provenance: DeployProvenance::ExternalAdoption {
-            provenance_label: adoption.provenance_label.clone(),
-            evidence_policy_digest: evidence.evidence_policy_digest.clone(),
-        },
-        deploy_evidence: Vec::new(),
-        external_adoption_evidence: Some(evidence),
-        deployed_block_number,
-    })
-}
-
-fn context_stage_for_lifecycle_stage(
-    stage: ContractLifecycleStage,
-) -> &'static mfm_ids::ContextStage {
-    match stage {
-        ContractLifecycleStage::Deployed => deployed_contract_stage(),
-        ContractLifecycleStage::Configured => configured_contract_stage(),
-    }
-}
-
-fn import_admission_error(state_name: &'static str) -> StateError {
-    StateError::Message(format!(
-        "{state_name} requires certified import evidence before producing a context-bound resource"
-    ))
 }
 
 fn idempotency_from_intent<T>(intent: &T) -> StateResult<ContractTransactionIdempotency>

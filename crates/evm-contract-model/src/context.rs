@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 
 use mfm_program::MfmContext;
 
-/// Shared observation identity for EVM lifecycle reads.
+/// Shared observation identity for EVM contract-state reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
@@ -38,7 +38,7 @@ impl<'de> Deserialize<'de> for FinalityOrObservationPolicy {
     }
 }
 
-/// Certified EVM network context shared by contract lifecycle phases.
+/// Certified EVM network context shared by contract states.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
@@ -103,7 +103,7 @@ impl<'de> Deserialize<'de> for EvmNetworkContext {
     }
 }
 
-/// Digest-oriented contract profile identity shared by lifecycle phases.
+/// Digest-oriented contract profile identity shared by contract states.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
@@ -113,9 +113,9 @@ impl<'de> Deserialize<'de> for EvmNetworkContext {
 pub struct ContractProfile {
     /// Stable profile identifier.
     pub profile_id: ContractProfileId,
-    /// Optional retained artifact digest shared by lifecycle phases.
+    /// Optional retained artifact digest shared by contract states.
     pub artifact_digest: Option<ContractProfileDigestRef>,
-    /// Optional retained artifact evidence reference shared by executable lifecycle phases.
+    /// Optional retained artifact evidence reference shared by executable contract states.
     pub artifact_ref: Option<LifecycleArtifactEvidenceRef>,
     /// Optional ABI or interface digest.
     pub interface_digest: Option<ContractProfileDigestRef>,
@@ -163,7 +163,7 @@ impl<'de> Deserialize<'de> for ContractProfile {
     }
 }
 
-/// Certified EVM contract lifecycle context.
+/// Certified EVM contract context shared by direct state graphs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
 #[mfm(
     namespace = "mfm.evm.contract",
@@ -171,7 +171,7 @@ impl<'de> Deserialize<'de> for ContractProfile {
     schema = "mfm.evm.contract.value.contract_context"
 )]
 pub struct EvmContractContext {
-    /// Stable lifecycle key within the authored workflow.
+    /// Stable contract key within the authored graph.
     pub lifecycle_key: LifecycleKey,
     /// Semantic network context.
     pub network: EvmNetworkContext,

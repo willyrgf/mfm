@@ -393,15 +393,10 @@ mfm_cli ops list
 mfm_cli --output-format json ops list
 ```
 
-JSON output returns the descriptors under `entry_points`. The current production surface is:
-
-- `mfm.evm.contract/deploy@1`
-- `mfm.evm.contract/configure@1`
-- `mfm.evm.contract/validate@1`
-- `mfm.evm.contract/lifecycle@1`
-
-There is no latest-version selection. BTC/EVM balance collection and the portfolio snapshot
-objective are internal while the anchored receipt cutover is in progress.
+JSON output returns the descriptors under `entry_points`. During the contract-state cleanup phase
+the production surface intentionally has no public entry points. Reusable deploy, configure, and
+validate states are library-only and cannot be started through this command. There is no
+latest-version selection or compatibility alias.
 
 ## Run Commands (Experimental)
 
@@ -451,45 +446,11 @@ mfm_cli run start --entry-point <ID> --request <PATH> [OPTIONS]
 - `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
   `$MFM_RUNTIME_CONFIG_FILE`). Read-only commands do not use this option.
 
-Publish values once through setup, then submit a request such as:
-
-```sh
-mfm_cli setup import --file setup.local.toml
-mfm_cli run start \
-  --entry-point mfm.evm.contract/deploy@1 \
-  --request contract-deploy-request.json
-```
-
-For contract deployment, `contract-deploy-request.json` has the exact shape:
-
-```json
-{
-  "context": {
-    "name": "acme/contract-context",
-    "digest": "content:sha256-jcs-v1:..."
-  },
-  "deploy_action": {
-    "name": "acme/deploy-action",
-    "digest": "content:sha256-jcs-v1:..."
-  }
-}
-```
-
 The repository includes a complete strict-import fixture at
 `examples/setup/organization.toml`; copy it to a local setup file before importing.
 
-The portfolio model accepts direct native and ERC-20 holding sources, but its complete snapshot
-objective is not publicly published during the collector cutover. Likewise, the EVM native
-collector is internal. `ops list` is the authoritative current public surface.
-
-EVM contract entry-point config shapes and import authority rules are documented in
-[`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
-
-For local development against a managed persistent run-store database, use:
-
-```sh
-nix run .#mfm-start -- --entry-point mfm.evm.contract/deploy@1 --request contract-deploy-request.json
-```
+`ops list` is the authoritative public surface. The setup fixture publishes portfolio config only;
+it does not create an independently startable collector or contract workflow.
 
 `.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
 command, keeps the data directory under the Nixfied state root for `mfm/dev/9`,
@@ -499,9 +460,9 @@ runs the typed store migrations, sets `DATABASE_URL`, and then delegates to
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
-contains the framework public-output renderer, EVM contract domain runners, and internal collector
-and portfolio runners used by certified graphs. All currently registered public entry-point
-operations use version `1`.
+contains only runner families with a current certified public graph consumer. Reusable EVM
+contract-state runners are exercised from their library test graph, not registered speculatively
+by the CLI.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the

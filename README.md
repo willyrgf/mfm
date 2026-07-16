@@ -62,7 +62,7 @@ User-facing docs:
 
 - CLI docs + output contract: [`bin/cli/README.md`](bin/cli/README.md)
 - REST API docs: [`bin/rest-api/README.md`](bin/rest-api/README.md)
-- EVM contract lifecycle contract: [`docs/evm-contract-lifecycle.md`](docs/evm-contract-lifecycle.md)
+- EVM contract state contract: [`docs/evm-contract-states.md`](docs/evm-contract-states.md)
 - EVM runtime routing runbook: [`docs/evm-rpc-routing.md`](docs/evm-rpc-routing.md)
 
 Crate docs:
@@ -121,7 +121,7 @@ Run binaries locally:
 ```bash
 nix run .#mfm -- --help
 nix run .#mfm -- setup import --file examples/setup/organization.toml
-nix run .#mfm-start -- --entry-point mfm.evm.contract/deploy@1 --request contract-deploy-request.json
+nix run .#mfm -- ops list
 cargo run -p mfm -- --help
 cargo run -p mfm-rest-api
 ```

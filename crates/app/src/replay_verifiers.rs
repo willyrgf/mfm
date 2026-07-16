@@ -22,8 +22,8 @@ struct ReplayVerifierRegistration {
 
 /// The one production replay verifier registry compiled into the application.
 ///
-/// Verifiers are evidence-only domain functions. The certification registry is passed through
-/// because some domain contracts validate imported certified runs in addition to this run.
+/// Verifiers are evidence-only domain functions. The certification registry supplies the trusted
+/// descriptor authority needed to validate the retained certified run.
 pub(crate) struct ReplayVerifierRegistry {
     registrations: &'static [ReplayVerifierRegistration],
 }
@@ -62,15 +62,6 @@ impl ReplayVerifierRegistry {
                     ],
                     intent_matcher: None,
                     verifier: verify_evm,
-                },
-                ReplayVerifierRegistration {
-                    state_keys: &[state_key::<
-                        mfm_state_evm_contracts::ContextBoundValidateContractState,
-                    >],
-                    intent_matcher: Some(
-                        mfm_adapters_evm_contracts::is_contract_lifecycle_replay_intent,
-                    ),
-                    verifier: verify_contracts,
                 },
                 ReplayVerifierRegistration {
                     state_keys: &[],
@@ -142,10 +133,6 @@ fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Resul
 
 fn verify_evm(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
     mfm_adapters_evm::verify_evm_collector_replay(broker)
-}
-
-fn verify_contracts(broker: &ReplayBroker, registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(broker, registry)
 }
 
 fn verify_proof(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {

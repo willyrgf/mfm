@@ -1,7 +1,7 @@
 use super::*;
 
-/// Registers context-bound contract lifecycle runners with the supplied runtime factory.
-pub fn register_contract_lifecycle_runners_with_factory(
+/// Registers context-bound contract state runners with the supplied runtime factory.
+pub fn register_contract_state_runners_with_factory(
     registry: &mut ErasedRunnerRegistry,
     factory: Arc<dyn EvmContractRuntimeFactory>,
 ) -> mfm_runtime::Result<()> {
@@ -13,25 +13,17 @@ pub fn register_contract_lifecycle_runners_with_factory(
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     let validate_descriptor = mfm_program::state_descriptor::<ContextBoundValidateContractState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    let import_deployed_descriptor =
-        mfm_program::state_descriptor::<mfm_state_evm_contracts::ImportDeployedContractState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    let import_configured_descriptor =
-        mfm_program::state_descriptor::<mfm_state_evm_contracts::ImportConfiguredContractState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     for descriptor in [
         &deploy_descriptor,
         &configure_descriptor,
         &validate_descriptor,
-        &import_deployed_descriptor,
-        &import_configured_descriptor,
     ] {
         register_contract_capabilities(registry, descriptor.capabilities(), &implementation_id)?;
     }
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-evm-contracts",
-        "evm-contract-lifecycle-context",
+        "evm-contract-states-context",
         env!("CARGO_PKG_VERSION"),
     )?;
     let side_effect_factory =
@@ -40,11 +32,13 @@ pub fn register_contract_lifecycle_runners_with_factory(
         executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
     let adapter_factory =
         executable_identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
-    let adapter_binding = evm_contract_lifecycle_adapter_binding()
+    let adapter_kind = mfm_state_evm_contracts::contract_states_adapter_kind()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let adapter_version = mfm_state_evm_contracts::contract_states_adapter_version()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     registrations.register_adapter_executable_with_factory(
-        adapter_binding.adapter_kind().clone(),
-        adapter_binding.adapter_version().clone(),
+        adapter_kind,
+        adapter_version,
         &adapter_factory,
     )?;
     let deploy = registrations
@@ -72,27 +66,12 @@ pub fn register_contract_lifecycle_runners_with_factory(
             extractor: TypedContextOutputExtractor::new(),
         }),
     )?;
-    registrations
-        .register_state_runner_with_factory::<mfm_state_evm_contracts::ImportDeployedContractState>(
-            &read_factory,
-            Arc::new(ImportDeployedRunner {
-                factory: factory.clone(),
-                extractor: TypedContextOutputExtractor::new(),
-            }),
-        )?;
-    registrations.register_state_runner_with_factory::<mfm_state_evm_contracts::ImportConfiguredContractState>(
-        &read_factory,
-        Arc::new(ImportConfiguredRunner {
-            factory: factory.clone(),
-            extractor: TypedContextOutputExtractor::new(),
-        }),
-    )?;
     registrations.register_side_effect_verify_runner_with_factory(
         deploy.descriptor_id().clone(),
         &read_factory,
         Arc::new(ContextContractVerifyRunner {
             factory: factory.clone(),
-            extractor: ContractLifecycleContextOutputExtractor::new(),
+            extractor: ContractStateContextOutputExtractor::new(),
         }),
     )?;
     registrations.register_side_effect_verify_runner_with_factory(
@@ -100,7 +79,7 @@ pub fn register_contract_lifecycle_runners_with_factory(
         &read_factory,
         Arc::new(ContextContractVerifyRunner {
             factory,
-            extractor: ContractLifecycleContextOutputExtractor::new(),
+            extractor: ContractStateContextOutputExtractor::new(),
         }),
     )?;
     Ok(())

@@ -1,10 +1,11 @@
 #![warn(missing_docs)]
 //! Typed application assembly for certified MFM runs.
 //!
-//! `mfm-app` is the typed boundary used by binaries and process adapters. Callers select an
-//! exact entry-point id and catalog-backed request; this crate resolves,
-//! plans, certifies, stages launch material, and wires typed services for start, resume, replay,
-//! and public-output rendering.
+//! `mfm-app` is the typed boundary used by binaries and process adapters. Its published
+//! objectives use exact entry-point ids and catalog-backed requests; this crate resolves, plans,
+//! certifies, stages launch material, and wires typed services for start, resume, replay, and
+//! public-output rendering. The transition before publishing the portfolio objective deliberately
+//! has no public entry point.
 //!
 //! Production binaries should construct run services through the Postgres-backed factory exported by
 //! this crate, while tests can use explicit test-support stores.
@@ -21,13 +22,11 @@ use mfm_capabilities::{ProviderDiagnosticCode, ProviderDiagnosticValue};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
-use mfm_evm_contract_model::{
-    ContractArtifactConfig, EvmContractContext, LifecycleArtifactEvidenceRef,
-};
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
-    SpecHash, StoreScopeId,
+    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SpecHash, StoreScopeId,
 };
+#[cfg(any(test, feature = "test-support"))]
+use mfm_ids::{SeedId, SemanticTypeId};
 use mfm_replay::v1::{ReplayBroker, ReplayReadAuthority, RetainedSourceFactReplayEvent};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
@@ -37,7 +36,6 @@ use mfm_runtime::{
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_store::v1::RunEventStore;
-use mfm_values::MfmConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
@@ -67,7 +65,6 @@ mod btc_collector;
 mod config_setup;
 mod entry_point;
 mod evm_collector;
-mod evm_contracts;
 mod fact_index;
 mod live_transports;
 mod portfolio_snapshot;
@@ -248,13 +245,6 @@ pub fn production_runner_registry(
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     portfolio_snapshot::register_portfolio_snapshot_runners(&mut registry, artifacts.clone())?;
-    let source_run_registry = production_certification_registry()?;
-    evm_contracts::register_contract_lifecycle_runners(
-        &mut registry,
-        artifacts.clone(),
-        runtime_config.clone(),
-        source_run_registry,
-    )?;
     btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),
@@ -355,9 +345,6 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
     mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut registry)?;
     registry.register_fact_type::<mfm_op_evm_collectors::EvmAddressNativeBalanceSnapshotFact>()?;
     registry.register_fact_type::<mfm_op_evm_collectors::EvmAddressErc20BalanceSnapshotFact>()?;
-    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
-        &mut registry,
-    )?;
     mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
         &mut registry,
     )?;
@@ -437,6 +424,7 @@ impl InvocationKey {
             .map_err(invocation_key_error)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn mint() -> Result<Self, AppError> {
         Self::new(format!("mfm.invocation_key.v1:{}", uuid::Uuid::new_v4()))
     }
@@ -487,6 +475,7 @@ pub struct ManualResolutionRecordRequest {
 }
 
 /// Config bytes supplied to a typed run start request.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub(crate) struct RunLaunchConfigArtifact {
     /// Certified config schema id.
@@ -498,6 +487,7 @@ pub(crate) struct RunLaunchConfigArtifact {
 }
 
 /// Seed bytes supplied to a typed run start request.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub(crate) struct RunLaunchSeedArtifact {
     /// Seed id from the certified spec.
@@ -812,47 +802,14 @@ where
     let source_fact_events =
         retained_source_fact_events_from_query_evidence(store, artifacts, verified_view.events())
             .await?;
-    let context_artifacts =
-        certified_evm_context_artifacts_for_replay(artifacts, runtime_spec).await?;
     Ok(
         ReplayReadAuthority::from_verified_run_history_view_with_source_facts_and_artifacts(
             runtime_spec,
             verified_view,
             source_fact_events,
-            context_artifacts,
+            Vec::new(),
         )?,
     )
-}
-
-async fn certified_evm_context_artifacts_for_replay(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<Vec<store::VerifiedRunArtifactBytes>, AppError> {
-    let descriptor = evm_contract_context_descriptor()?;
-    let mut retained = Vec::new();
-    for context in &runtime_spec.envelope().spec.contexts {
-        if context.context_descriptor_id != descriptor.context_descriptor_id
-            || context.schema_id != descriptor.schema_id
-            || context.semantic_type_id != descriptor.semantic_type_id
-            || context.canonicalizer_identity != descriptor.canonicalizer_identity
-        {
-            continue;
-        }
-        let context =
-            mfm_program::CertifiedContext::<EvmContractContext>::from_certified_spec(context)
-                .map_err(|_| certified_evm_context_artifact_error())?;
-        let Some(reference) = context.value().contract_profile.artifact_ref.as_ref() else {
-            continue;
-        };
-        let requirement = evm_contract_profile_artifact_requirement(reference)?;
-        retained.push(
-            artifacts
-                .read_retained_artifact(&requirement)
-                .await
-                .map_err(async_app_store_error)?,
-        );
-    }
-    Ok(retained)
 }
 
 /// Returns the default JSON media type used by typed CLI seed inputs.
@@ -914,6 +871,7 @@ pub fn prepare_typed_program_run_launch_for_test(
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn certify_launch_plan(
     plan: &mfm_program::TypedProgramLaunchPlan,
     certification_registry: &CertificationRegistry,
@@ -957,6 +915,7 @@ fn certify_launch_plan(
     Ok((certified_spec, scoped_registry, config_inputs, seed_inputs))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {
     AppError::backend(
         ErrorClass::BadRequest,
@@ -965,11 +924,13 @@ fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppErro
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn entry_point_launch_internal_error(code: &'static str, message: &'static str) -> AppError {
     AppError::backend(ErrorClass::Internal, code, message)
 }
 
 /// Certifier-backed typed spec authority plus launch metadata for a typed run start.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct CertifiedRunLaunchInput<'a> {
     /// Certifier-backed typed spec authority.
     pub(crate) certified_spec: CertifiedTypedSpec,
@@ -984,6 +945,7 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
 }
 
 /// Builds a typed run-start request from certifier-backed typed spec authority and launch inputs.
+#[cfg(any(test, feature = "test-support"))]
 fn prepare_certified_run_launch(
     input: CertifiedRunLaunchInput<'_>,
     config_inputs: Vec<RunLaunchConfigArtifact>,
@@ -1024,6 +986,7 @@ fn prepare_certified_run_launch(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn invocation_key_digest_or_mint(key: Option<&InvocationKey>) -> Result<ContentDigest, AppError> {
     match key {
         Some(key) => key.digest(),

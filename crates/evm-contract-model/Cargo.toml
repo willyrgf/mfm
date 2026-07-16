@@ -2,7 +2,7 @@
 name = "mfm-evm-contract-model"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable EVM contract lifecycle model and ABI preparation helpers"
+description = "Reusable EVM contract-state model and ABI preparation helpers"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 

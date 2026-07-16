@@ -214,33 +214,17 @@ Response shape:
 the same catalog-reference contract as the CLI; the REST layer delegates exact resolution,
 planning, certification, admission, and verified rendering to app assembly.
 
-Request shape:
-
-```json
-{
-  "entry_point": "mfm.evm.contract/deploy@1",
-  "request": {
-    "context": {
-      "name": "acme/contract-context",
-      "digest": "content:sha256-jcs-v1:..."
-    },
-    "deploy_action": {
-      "name": "acme/deploy-action",
-      "digest": "content:sha256-jcs-v1:..."
-    }
-  },
-  "invocation_key": "optional-key"
-}
-```
+The endpoint shape remains an `entry_point`, `request`, and optional `invocation_key` JSON object.
+During the contract-state cleanup phase no public entry-point id is registered, so every attempted
+start is rejected with `EntryPointNotFound`. Reusable contract states are library-only and have no
+REST request schema.
 
 Request notes:
 
 - `entry_point` is required and must be one exact id, including namespace and version.
 - `request` is required, must be a JSON object, and is rejected when it contains unknown fields.
-- Requests contain exact catalog references (`name` and `digest`); name-only selection and latest
-  resolution do not exist.
-- The exact public ids are returned by the CLI `ops list` command; BTC/EVM balance collection and
-  the portfolio snapshot objective are internal during the anchored receipt cutover.
+- Requests for a published objective contain exact catalog references (`name` and `digest`);
+  name-only selection and latest resolution do not exist.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
   store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
@@ -256,67 +240,11 @@ execution lane for the same base work identity, start reports `already_active` w
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
-EVM contract deploy:
-
-```json
-{
-  "entry_point": "mfm.evm.contract/deploy@1",
-  "request": {
-    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
-    "deploy_action": {"name": "acme/deploy", "digest": "content:sha256-jcs-v1:..."}
-  }
-}
-```
-
-EVM contract configure:
-
-```json
-{
-  "entry_point": "mfm.evm.contract/configure@1",
-  "request": {
-    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
-    "import_deployed": {"name": "acme/import-deployed", "digest": "content:sha256-jcs-v1:..."},
-    "configure_action": {"name": "acme/configure", "digest": "content:sha256-jcs-v1:..."}
-  }
-}
-```
-
-EVM contract validate:
-
-```json
-{
-  "entry_point": "mfm.evm.contract/validate@1",
-  "request": {
-    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
-    "import_configured": {"name": "acme/import-configured", "digest": "content:sha256-jcs-v1:..."},
-    "validate_action": {"name": "acme/validate", "digest": "content:sha256-jcs-v1:..."}
-  }
-}
-```
-
-EVM contract lifecycle:
-
-```json
-{
-  "entry_point": "mfm.evm.contract/lifecycle@1",
-  "request": {
-    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
-    "deploy_action": {"name": "acme/deploy", "digest": "content:sha256-jcs-v1:..."},
-    "configure_action": {"name": "acme/configure", "digest": "content:sha256-jcs-v1:..."},
-    "validate_action": {"name": "acme/validate", "digest": "content:sha256-jcs-v1:..."}
-  }
-}
-```
-
-EVM contract entry configs carry certified lifecycle context, action specs, import specs, artifact
-evidence refs, and non-secret signer intent. The runtime resolves the certified context network id
-and action signer ref through `MFM_RUNTIME_CONFIG_FILE`. Process-local RPC endpoints, auth headers,
-keystore paths, unlock files, and private material never belong in the entry-point config.
-Source-run EVM imports use `kind: "from_mfm_run"` with both `source` and required retained
-`evidence`; identifiers, public output JSON, projection rows, and raw lifecycle payloads are not
-accepted as import authority.
-The full lifecycle contract is documented in
-[`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
+Reusable EVM contract states carry certified context, action specs, retained side-effect evidence,
+and non-secret signer intent. They are described in
+[`../../docs/evm-contract-states.md`](../../docs/evm-contract-states.md), not exposed as REST
+operations. RPC endpoints, auth headers, keystore paths, unlock files, and private material remain
+runtime-only.
 
 Stable launch error codes:
 

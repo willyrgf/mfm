@@ -1,9 +1,5 @@
 use super::*;
 
-pub(super) fn deploy_action(chain_id: u64) -> ValidatedConfig<DeployAction> {
-    deploy_action_for_style("eip1559", chain_id)
-}
-
 pub(super) fn deploy_action_for_style(style: &str, chain_id: u64) -> ValidatedConfig<DeployAction> {
     ValidatedConfig::new(
         serde_json::from_value(json!({
@@ -19,17 +15,6 @@ pub(super) fn deploy_action_for_style(style: &str, chain_id: u64) -> ValidatedCo
         .expect("deploy action"),
     )
     .expect("valid deploy action")
-}
-
-pub(super) fn configure_action(calls: serde_json::Value) -> ConfigureAction {
-    serde_json::from_value(json!({
-        "signer": {
-            "signer_ref": "deployer",
-            "expected_signer_address": "0x0000000000000000000000000000000000000000",
-        },
-        "calls": calls,
-    }))
-    .expect("configure action")
 }
 
 pub(super) fn contract_artifact_config() -> ContractArtifactConfig {
@@ -65,7 +50,7 @@ impl DeployPreparationFixture {
         }
     }
 
-    pub(super) fn adapter(&self) -> EvmContractLifecycleAdapter<'_> {
+    pub(super) fn adapter(&self) -> EvmContractStateAdapter<'_> {
         adapter(&self.providers)
     }
 
@@ -110,7 +95,6 @@ pub(super) struct TestEvmProviders {
     mode: TestEvmProviderMode,
     evidence: RedactedEvmSourceEvidence,
     submit_count: Arc<Mutex<u32>>,
-    receipt_failure_reads: Arc<Mutex<u32>>,
 }
 
 #[derive(Clone, Copy)]
@@ -121,20 +105,11 @@ pub(super) enum TestEvmProviderMode {
         pending_nonce: u64,
         occupancy_mode: RecoveryOccupancyMode,
     },
-    SubmitHashMismatch {
-        returned_hash: B256,
-    },
-    ReceiptFailure,
-    Finality,
 }
 
 impl TestEvmProviders {
     pub(super) fn preparation() -> Self {
         Self::new(TestEvmProviderMode::Preparation)
-    }
-
-    pub(super) fn preparation_for(network_id: &str, expected_chain_id: u64) -> Self {
-        Self::preparation().with_source(network_id, expected_chain_id)
     }
 
     pub(super) fn recovery(
@@ -151,29 +126,6 @@ impl TestEvmProviders {
             },
             evidence: test_evm_evidence(),
             submit_count,
-            receipt_failure_reads: Arc::new(Mutex::new(0)),
-        }
-    }
-
-    pub(super) fn receipt_failure(reads: Arc<Mutex<u32>>) -> Self {
-        Self {
-            mode: TestEvmProviderMode::ReceiptFailure,
-            evidence: test_evm_evidence(),
-            submit_count: Arc::new(Mutex::new(0)),
-            receipt_failure_reads: reads,
-        }
-    }
-
-    pub(super) fn finality() -> Self {
-        Self::new(TestEvmProviderMode::Finality)
-    }
-
-    pub(super) fn submit_hash_mismatch(returned_hash: B256, submit_count: Arc<Mutex<u32>>) -> Self {
-        Self {
-            mode: TestEvmProviderMode::SubmitHashMismatch { returned_hash },
-            evidence: test_evm_evidence(),
-            submit_count,
-            receipt_failure_reads: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -182,16 +134,7 @@ impl TestEvmProviders {
             mode,
             evidence: test_evm_evidence(),
             submit_count: Arc::new(Mutex::new(0)),
-            receipt_failure_reads: Arc::new(Mutex::new(0)),
         }
-    }
-
-    pub(super) fn with_source(mut self, network_id: &str, expected_chain_id: u64) -> Self {
-        self.evidence = evidence_for_source(
-            &EvmNetworkId::new(network_id).expect("test network"),
-            expected_chain_id,
-        );
-        self
     }
 }
 
@@ -240,28 +183,6 @@ pub(super) async fn recover_submission(
     .expect("recovered")
 }
 
-pub(super) async fn start_with_submit_hash_mismatch(
-    mismatched_hash: B256,
-    prepared: &PreparedContractMutation,
-) -> (ContractSubmissionDecision, Arc<Mutex<u32>>) {
-    let submit_count = Arc::new(Mutex::new(0));
-    let runtime = runtime_from_provider(TestEvmProviders::submit_hash_mismatch(
-        mismatched_hash,
-        Arc::clone(&submit_count),
-    ));
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
-        prepared,
-        SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
-    )
-    .await
-    .expect("submission decision");
-
-    (decision, submit_count)
-}
-
 pub(super) fn expected_transaction_hash(prepared: &PreparedContractMutation) -> &str {
     &prepared.evidence().transactions[0].expected_transaction_hash
 }
@@ -301,23 +222,6 @@ pub(super) fn assert_unknown_submission(
     );
 }
 
-pub(super) fn assert_hash_mismatch_ambiguity(
-    decision: ContractSubmissionDecision,
-    submit_count: &Arc<Mutex<u32>>,
-    expected_count: u32,
-) -> ContractTransactionSubmissions {
-    let SideEffectSubmissionDecision::Ambiguous {
-        ambiguity_code,
-        evidence,
-    } = decision
-    else {
-        panic!("expected transaction-hash mismatch ambiguity");
-    };
-    assert_submit_count(submit_count, expected_count);
-    assert_eq!(ambiguity_code.as_str(), "mfm.evm.transaction_hash_mismatch");
-    evidence
-}
-
 pub(super) async fn assert_recovery_observed(
     receipt_mode: RecoveryReceiptMode,
     expected_count: u32,
@@ -344,10 +248,6 @@ pub(super) fn unexpected_evm_call<'a, T>(capability: &'static str) -> EvmCapabil
     Box::pin(async move { panic!("unexpected test EVM capability call: {capability}") })
 }
 
-pub(super) fn unexpected_signing_call<'a>() -> mfm_signing::SigningFuture<'a> {
-    Box::pin(async { panic!("unexpected test signing provider call") })
-}
-
 impl EvmChainIdentityProvider for TestEvmProviders {
     fn chain_identity<'a>(
         &'a self,
@@ -356,16 +256,15 @@ impl EvmChainIdentityProvider for TestEvmProviders {
         let evidence = self.evidence.clone();
         let chain_id = evidence.expected_chain_id;
         match self.mode {
-            TestEvmProviderMode::Preparation
-            | TestEvmProviderMode::Recovery { .. }
-            | TestEvmProviderMode::SubmitHashMismatch { .. } => Box::pin(async move {
-                Ok(EvmChainIdentityResponse {
-                    evidence,
-                    chain_id,
-                    client_version: Some("test-client".to_owned()),
+            TestEvmProviderMode::Preparation | TestEvmProviderMode::Recovery { .. } => {
+                Box::pin(async move {
+                    Ok(EvmChainIdentityResponse {
+                        evidence,
+                        chain_id,
+                        client_version: Some("test-client".to_owned()),
+                    })
                 })
-            }),
-            _ => unexpected_evm_call("chain_identity"),
+            }
         }
     }
 }
@@ -375,19 +274,7 @@ impl EvmBlockReadProvider for TestEvmProviders {
         &'a self,
         _request: &'a EvmBlockReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
-        match self.mode {
-            TestEvmProviderMode::Finality => {
-                let evidence = self.evidence.clone();
-                Box::pin(async move {
-                    Ok(EvmBlockReadResponse {
-                        evidence,
-                        block_number: 64,
-                        block_hash: B256::from([0x64; 32]),
-                    })
-                })
-            }
-            _ => unexpected_evm_call("read_block"),
-        }
+        unexpected_evm_call("read_block")
     }
 }
 
@@ -411,7 +298,6 @@ impl EvmNonceReadProvider for TestEvmProviders {
                     })
                 })
             }
-            _ => unexpected_evm_call("read_nonce"),
         }
     }
 }
@@ -477,17 +363,6 @@ impl EvmTransactionSubmitProvider for TestEvmProviders {
                     })
                 })
             }
-            TestEvmProviderMode::SubmitHashMismatch { returned_hash } => {
-                let submit_count = Arc::clone(&self.submit_count);
-                let evidence = self.evidence.clone();
-                Box::pin(async move {
-                    *submit_count.lock().expect("submit count") += 1;
-                    Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
-                        evidence,
-                        transaction_hash: returned_hash,
-                    })
-                })
-            }
             _ => unexpected_evm_call("submit_transaction"),
         }
     }
@@ -513,14 +388,6 @@ impl EvmReceiptReadProvider for TestEvmProviders {
                         RecoveryReceiptMode::Pending => Err(EvmCapabilityError::ReceiptPending),
                         RecoveryReceiptMode::ProviderFailure => Err(test_evm_provider_failure()),
                     }
-                })
-            }
-            TestEvmProviderMode::ReceiptFailure => {
-                let reads = Arc::clone(&self.receipt_failure_reads);
-                Box::pin(async move {
-                    let mut reads = reads.lock().map_err(|_| test_evm_provider_failure())?;
-                    *reads += 1;
-                    Err(test_evm_provider_failure())
                 })
             }
             _ => unexpected_evm_call("read_receipt"),
@@ -600,19 +467,16 @@ impl EvmLogsReadProvider for TestEvmProviders {
 impl SigningProvider for TestEvmProviders {
     fn sign<'a>(&'a self, request: &'a SigningRequest) -> mfm_signing::SigningFuture<'a> {
         match self.mode {
-            TestEvmProviderMode::Preparation
-            | TestEvmProviderMode::Recovery { .. }
-            | TestEvmProviderMode::SubmitHashMismatch { .. } => {
+            TestEvmProviderMode::Preparation | TestEvmProviderMode::Recovery { .. } => {
                 let result = test_signing_result(request);
                 Box::pin(async move { result })
             }
-            _ => unexpected_signing_call(),
         }
     }
 }
 
-pub(super) fn adapter(providers: &TestEvmProviders) -> EvmContractLifecycleAdapter<'_> {
-    EvmContractLifecycleAdapter::new(
+pub(super) fn adapter(providers: &TestEvmProviders) -> EvmContractStateAdapter<'_> {
+    EvmContractStateAdapter::new(
         EvmContractMutationProviders::from_evm_and_signer(providers, providers),
         EvmContractReadProviders::from_provider(providers),
     )

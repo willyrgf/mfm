@@ -1,12 +1,8 @@
 use std::collections::BTreeMap;
 
 use mfm_catalog_model::CatalogName;
-use mfm_evm_contract_model::EvmContractContext;
 use mfm_ids::{ContentDigest, SchemaId};
 use mfm_portfolio_model::portfolio::PortfolioConfig;
-use mfm_state_evm_contracts::{
-    ConfigureAction, DeployAction, ImportConfiguredSpec, ImportDeployedSpec, ValidateAction,
-};
 use mfm_storage_postgres::{
     CatalogValueKey, CatalogValueRow, PostgresStore, MAX_CATALOG_VALUE_BYTES,
 };
@@ -63,18 +59,6 @@ struct SetupEntry {
 enum SetupValue {
     #[serde(rename = "portfolio")]
     Portfolio(PortfolioConfig),
-    #[serde(rename = "evm_contract_context")]
-    EvmContractContext(EvmContractContext),
-    #[serde(rename = "evm_deploy_action")]
-    EvmDeployAction(DeployAction),
-    #[serde(rename = "evm_configure_action")]
-    EvmConfigureAction(ConfigureAction),
-    #[serde(rename = "evm_validate_action")]
-    EvmValidateAction(ValidateAction),
-    #[serde(rename = "evm_import_deployed")]
-    EvmImportDeployed(ImportDeployedSpec),
-    #[serde(rename = "evm_import_configured")]
-    EvmImportConfigured(ImportConfiguredSpec),
 }
 
 /// Imports and publishes a complete TOML setup document atomically.
@@ -220,12 +204,6 @@ struct PreparedValue {
 fn prepare_value(value: SetupValue) -> Result<PreparedValue, AppError> {
     match value {
         SetupValue::Portfolio(config) => prepare_config(config.normalized()),
-        SetupValue::EvmContractContext(config) => prepare_config(config),
-        SetupValue::EvmDeployAction(config) => prepare_config(config),
-        SetupValue::EvmConfigureAction(config) => prepare_config(config),
-        SetupValue::EvmValidateAction(config) => prepare_config(config),
-        SetupValue::EvmImportDeployed(config) => prepare_config(config),
-        SetupValue::EvmImportConfigured(config) => prepare_config(config),
     }
 }
 
@@ -350,111 +328,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn complete_setup_fixture_decodes_and_prepares_every_v1_kind() {
+    fn setup_fixture_decodes_and_prepares_the_portfolio_value() {
         let document: SetupDocument = toml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/setup/organization.toml"
         )))
-        .expect("complete setup fixture");
-        assert_eq!(document.values.len(), 7);
+        .expect("setup fixture");
+        assert_eq!(document.values.len(), 1);
         for entry in document.values {
-            let prepared = prepare_value(entry.value).expect("fixture value prepares");
+            let prepared = prepare_value(entry.value).expect("portfolio value prepares");
             assert!(!prepared.canonical_json.is_empty());
         }
     }
 
     #[test]
     fn setup_document_rejects_unknown_fields_at_the_envelope() {
-        let error = toml::from_str::<SetupDocument>(
-            r#"
-                [[values]]
-                name = "acme/value"
-                kind = "evm_validate_action"
-                unexpected = true
-
-                [values.value]
-            "#,
-        )
-        .expect_err("unknown setup field");
+        let mut document: toml::Value = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/setup/organization.toml"
+        )))
+        .expect("setup fixture as toml value");
+        document
+            .get_mut("values")
+            .and_then(toml::Value::as_array_mut)
+            .and_then(|values| values.first_mut())
+            .and_then(toml::Value::as_table_mut)
+            .expect("setup entry")
+            .insert("unexpected".to_owned(), toml::Value::Boolean(true));
+        let document = toml::to_string(&document).expect("setup document serializes");
+        let error = toml::from_str::<SetupDocument>(&document).expect_err("unknown setup field");
         assert!(error.to_string().contains("unknown field"));
-    }
-
-    #[test]
-    fn registered_nested_setup_types_reject_unknown_fields() {
-        for document in [
-            r#"
-                [[values]]
-                name = "acme/portfolio"
-                kind = "portfolio"
-
-                [values.value]
-                portfolio_id = "portfolio"
-                quote_codes = ["USD"]
-                networks = []
-                symbol_configs = []
-                metadata = {}
-
-                [[values.value.wallets]]
-                wallet_id = "wallet"
-                network_id = "network"
-                symbol_ids = []
-                metadata = {}
-
-                [values.value.wallets.subject]
-                kind = "evm_address"
-                address = "0x0000000000000000000000000000000000000001"
-
-                [values.value.wallets.implementation]
-                kind = "address_only"
-                unexpected = true
-            "#,
-            r#"
-                [[values]]
-                name = "acme/context"
-                kind = "evm_contract_context"
-
-                [values.value]
-                lifecycle_key = "lifecycle"
-
-                [values.value.network]
-                network_id = "ethereum-mainnet"
-                expected_chain_id = 1
-                unexpected = true
-
-                [values.value.contract_profile]
-                profile_id = "profile"
-            "#,
-            r#"
-                [[values]]
-                name = "acme/deploy"
-                kind = "evm_deploy_action"
-
-                [values.value.signer]
-                signer_ref = "deployer"
-                expected_signer_address = "0x0000000000000000000000000000000000000001"
-
-                [values.value.transaction]
-                style = "eip1559"
-                unexpected = true
-            "#,
-            r#"
-                [[values]]
-                name = "acme/import"
-                kind = "evm_import_deployed"
-
-                [values.value]
-                kind = "adopt_external_address"
-
-                [values.value.adoption]
-                address = "0x0000000000000000000000000000000000000001"
-                provenance_label = "audited"
-                unexpected = true
-            "#,
-        ] {
-            let error = toml::from_str::<SetupDocument>(document)
-                .expect_err("nested setup fields must be rejected");
-            assert!(error.to_string().contains("unknown field"), "{error}");
-        }
     }
 
     #[test]
@@ -493,7 +396,7 @@ mod tests {
             .get("values")
             .and_then(toml::Value::as_array)
             .expect("setup values array");
-        assert_eq!(values.len(), 7);
+        assert_eq!(values.len(), 1);
 
         for index in 0..values.len() {
             let mut document = base.clone();
@@ -525,7 +428,7 @@ mod tests {
             .get("values")
             .and_then(toml::Value::as_array)
             .expect("setup values array");
-        assert_eq!(values.len(), 7);
+        assert_eq!(values.len(), 1);
 
         for index in 0..values.len() {
             let mut document = base.clone();
@@ -546,29 +449,6 @@ mod tests {
                 .expect_err("unknown field must be rejected for every setup kind");
             assert!(error.to_string().contains("unknown field"), "{error}");
         }
-    }
-
-    #[test]
-    fn setup_rejects_float_values_in_typed_configs() {
-        let error = toml::from_str::<SetupDocument>(
-            r#"
-                [[values]]
-                name = "acme/context"
-                kind = "evm_contract_context"
-
-                [values.value]
-                lifecycle_key = "float-check"
-
-                [values.value.network]
-                network_id = "ethereum-mainnet"
-                expected_chain_id = 1.5
-
-                [values.value.contract_profile]
-                profile_id = "float-check"
-            "#,
-        )
-        .expect_err("float values must not enter hashed configuration");
-        assert!(error.to_string().contains("invalid") || error.to_string().contains("float"));
     }
 
     #[test]

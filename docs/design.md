@@ -262,6 +262,12 @@ supplies replay implementations backed only by recorded facts, typed artifacts, 
 evidence. Adapters translate state-owned intent into capability calls and evidence phases without
 moving protocol IO or signer material into state code.
 
+The reusable EVM contract deploy, configure, and validate states are direct graph primitives.
+They have no public operation id, setup kind, continuation import, external-adoption authority, or
+app runner registration. Certification accepts configure only after the deploy descriptor and
+validate only after the configure descriptor; adapter-library factories bind their live providers
+for a graph that explicitly uses those states.
+
 App assembly keeps evidence-only services separate from live driver services. Status, stream
 inspection, list/watch, replay, and public-output rendering construct only store, artifact, and
 certification/replay authority; they do not parse live runtime config, construct live EVM transports,

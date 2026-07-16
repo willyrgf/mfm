@@ -29,7 +29,7 @@ async fn start_requires_database_before_entry_point_resolution() {
 
 fn start_args(request: PathBuf) -> StartArgs {
     StartArgs {
-        entry_point: "mfm.evm.contract/deploy@1".to_owned(),
+        entry_point: "mfm.unknown/missing@1".to_owned(),
         request,
         invocation_key: None,
         runtime_config: None,

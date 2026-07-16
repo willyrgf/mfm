@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn replay_prepared_invocation(
     prepared: Option<&replay::PreparedInvocationReplayEvidence>,
 ) -> replay::Result<PreparedContractInvocation> {
-    let prepared = prepared.ok_or_else(|| contract_lifecycle_side_effect_missing("prepared"))?;
+    let prepared = prepared.ok_or_else(|| contract_state_side_effect_missing("prepared"))?;
     let evidence: PreparedContractInvocation =
         serde_json::from_slice(&prepared.artifact_bytes).map_err(replay_json_error)?;
     ensure_prepared_invocation_public(&evidence).map_err(replay_adapter_error)?;
@@ -37,7 +37,7 @@ pub(crate) fn verify_prepared_matches_certified_side_effect_context(
     ) = (&certified.node_context, &certified.output_context)
     else {
         return Err(replay_contract_mismatch(
-            "contract lifecycle side effect is missing certified context authority",
+            "contract-state side effect is missing certified context authority",
         ));
     };
     if context_ref != output_context_ref
@@ -127,7 +127,7 @@ pub(crate) fn verify_replay_intent_matches_prepared(
     }
     Err(replay::ReplayError::new(
         replay::ReplayErrorKind::SideEffectMismatch,
-        "contract lifecycle side-effect intent schema did not match deploy or configure intent",
+        "contract-state side-effect intent schema did not match deploy or configure intent",
     ))
 }
 
@@ -234,7 +234,7 @@ pub(crate) fn verify_transaction_intent_matches_prepared(
     {
         return Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
-            "contract lifecycle intent context does not match prepared invocation",
+            "contract-state intent context does not match prepared invocation",
         ));
     }
     let expected_to = intent
@@ -252,7 +252,7 @@ pub(crate) fn verify_transaction_intent_matches_prepared(
     {
         return Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
-            "contract lifecycle transaction intent does not match prepared transaction",
+            "contract-state transaction intent does not match prepared transaction",
         ));
     }
     verify_transaction_policy_matches_prepared(&intent.transaction, transaction)
@@ -339,7 +339,7 @@ pub(crate) fn verify_contract_receipt_schema(schema: &SchemaId) -> replay::Resul
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
-            "receipt schema did not match contract lifecycle schemas",
+            "receipt schema did not match contract-state schemas",
         ))
     }
 }
@@ -363,7 +363,7 @@ pub(crate) fn verify_contract_receipt_artifact(
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
-            "receipt schema did not match contract lifecycle schemas",
+            "receipt schema did not match contract-state schemas",
         ))
     }
 }
@@ -387,7 +387,7 @@ pub(crate) fn verify_contract_confirmation_schema(
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
-            "confirmation schema did not match contract lifecycle schemas",
+            "confirmation schema did not match contract-state schemas",
         ))
     }
 }
@@ -411,7 +411,7 @@ pub(crate) fn verify_contract_confirmation_artifact(
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
-            "confirmation schema did not match contract lifecycle schemas",
+            "confirmation schema did not match contract-state schemas",
         ))
     }
 }

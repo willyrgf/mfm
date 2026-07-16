@@ -164,7 +164,7 @@ where
                 read_receipts_with_poll(&runtime, prepared.evidence(), &submissions).await?;
             Ok(SideEffectObservedEvidence::new(
                 plan.receipt_from_observed(prepared.evidence(), receipts)?,
-                contract_side_effect_replay_evidence()?,
+                contract_state_side_effect_replay_evidence()?,
             ))
         })
     }
@@ -198,7 +198,7 @@ where
             .await?;
             Ok(SideEffectObservedEvidence::new(
                 P::confirmation_from_receipt(receipt, confirmations),
-                contract_side_effect_replay_evidence()?,
+                contract_state_side_effect_replay_evidence()?,
             ))
         })
     }
@@ -341,19 +341,15 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
 
     fn receipt_from_observed(
         &self,
-        _prepared: &PreparedContractInvocation,
+        prepared: &PreparedContractInvocation,
         receipts: Vec<ContractTransactionReceipt>,
     ) -> mfm_runtime::Result<Self::Receipt> {
         Ok(ContextContractConfigureReceipt {
             receipt_version: 1,
-            context_ref: _prepared.context_ref.clone(),
-            evm_network_context_ref: _prepared.evm_network_context_ref.clone(),
-            resource_stage: _prepared.resource_stage,
-            configure_node: LifecycleNodeIdRef::from(self.node_id.clone()),
-            configured_block_number: receipts.iter().map(|receipt| receipt.block_number).max(),
+            context_ref: prepared.context_ref.clone(),
+            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+            resource_stage: prepared.resource_stage,
             receipts,
-            call_evidence_refs: Vec::new(),
-            confirmation_evidence_refs: Vec::new(),
         })
     }
 
@@ -379,11 +375,7 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
             evm_network_context_ref: receipt.evm_network_context_ref,
             resource_stage: receipt.resource_stage,
             confirmations,
-            configure_node: receipt.configure_node,
             receipts: receipt.receipts,
-            call_evidence_refs: receipt.call_evidence_refs,
-            confirmation_evidence_refs: receipt.confirmation_evidence_refs,
-            configured_block_number: receipt.configured_block_number,
         }
     }
 

@@ -43,21 +43,10 @@ fn test_ops_help_and_list() {
         .stdout
         .clone();
     let rendered = String::from_utf8(output).expect("ops output is UTF-8");
-    for operation in [
-        "evm_contract_configure",
-        "evm_contract_deploy",
-        "evm_contract_lifecycle",
-        "evm_contract_validate",
-    ] {
-        assert!(
-            rendered.contains(operation),
-            "missing {operation}: {rendered}"
-        );
-    }
-    assert!(rendered
-        .lines()
-        .filter(|line| !line.is_empty())
-        .all(|line| line.contains("request_schema_id=schema:")));
+    assert!(
+        rendered.trim().is_empty(),
+        "unexpected public operation: {rendered}"
+    );
 }
 
 #[test]

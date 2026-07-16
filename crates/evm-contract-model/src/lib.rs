@@ -1,12 +1,12 @@
 #![warn(missing_docs)]
-//! Reusable EVM contract lifecycle model and ABI preparation helpers.
+//! Reusable EVM contract-state model and ABI preparation helpers.
 //!
 //! This crate owns pure contract data shaping:
 //!
 //! - contract artifact parsing
 //! - ABI calldata encoding
 //! - validation assertion preparation
-//! - lifecycle typestate values
+//! - direct deploy/configure/validate typestate values
 //! - typed artifact evidence references
 //!
 //! ```rust
@@ -64,8 +64,8 @@ use mfm_evm_core::abi as common_abi;
 use mfm_evm_core::encoding;
 use mfm_evm_core::hex as common_hex;
 use mfm_ids::{
-    ArtifactId, CellId, ContentDigest, ContextDescriptorId, ContextRef, ContextResourceKind,
-    ContextStage, DescriptorId, EventId, NodeId, RunId, SchemaId, SemanticTypeId, SpecHash,
+    ArtifactId, ContentDigest, ContextRef, ContextResourceKind, ContextStage, SchemaId,
+    SemanticTypeId,
 };
 use mfm_program_derive::{MfmConfig, MfmValue};
 use mfm_values::{ContextBoundOutput, ContextRefValue};
@@ -269,7 +269,7 @@ impl<'de> Deserialize<'de> for ExpectedValue {
 
 impl_json_text_value!(ExpectedValue);
 
-/// Typed artifact evidence reference used by contract lifecycle values.
+/// Typed artifact evidence reference used by contract-state values.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(

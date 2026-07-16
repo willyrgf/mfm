@@ -19,7 +19,6 @@ thiserror = { workspace = true }
 
 mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../adapters/evm" }
-mfm-adapters-evm-contracts = { path = "../adapters/evm-contracts" }
 mfm-adapters-portfolio = { path = "../adapters/portfolio" }
 mfm-artifact-capabilities = { path = "../artifact-capabilities" }
 mfm-btc-capabilities = { path = "../btc-capabilities" }
@@ -30,13 +29,11 @@ mfm-certify = { path = "../kernel/certify" }
 mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
-mfm-evm-contract-model = { path = "../evm-contract-model" }
 mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }
 mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
-mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-snapshot = { path = "../ops/portfolio-snapshot-op" }
 mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-op-proof = { path = "../ops/proof-op" }
@@ -45,10 +42,8 @@ mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-runtime-config = { path = "../runtime-config" }
 mfm-state-portfolio = { path = "../states/portfolio" }
-mfm-state-evm-contracts = { path = "../states/evm-contracts" }
 mfm-states-btc = { path = "../states/btc" }
 mfm-states-evm = { path = "../states/evm" }
-mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-signing = { path = "../signing" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }

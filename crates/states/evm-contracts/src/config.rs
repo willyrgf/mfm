@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
-//! Reusable EVM contract lifecycle action and import configs.
+//! Reusable EVM contract action configs.
 //!
-//! This module owns deterministic, non-secret action and import config types for
-//! context-bound deploy, configure, validate, and import workflows. It does not
+//! This module owns deterministic, non-secret action config types for
+//! context-bound deploy, configure, and validate workflows. It does not
 //! carry runtime endpoints, provider lookup details, signer material locations,
 //! artifact store handles, machine ids, or workflow topology.
 //!
@@ -22,9 +22,8 @@
 
 use alloy_primitives::Address;
 use mfm_evm_contract_model::{
-    AbiArgumentValue, AdoptExternalAddress, ContractCallConfig, EventAssertionConfig,
-    EvmContractScalarError, ImportFromMfmRun, ImportFromMfmRunEvidence, ReadAssertionConfig,
-    WeiAmount,
+    AbiArgumentValue, ContractCallConfig, EventAssertionConfig, EvmContractScalarError,
+    ReadAssertionConfig, WeiAmount,
 };
 use mfm_evm_core::encoding::address_hex_lower;
 use mfm_evm_core::tx::parse_address;
@@ -480,8 +479,6 @@ impl<'de> Deserialize<'de> for DeployAction {
 pub struct ConfigureAction {
     signer: EvmSignerIntent,
     calls: Vec<ContractCallConfig>,
-    confirmation_read_assertions: Vec<ReadAssertionConfig>,
-    confirmation_event_assertions: Vec<EventAssertionConfig>,
     transaction: EvmTransactionPolicy,
     receipt: ReceiptRetryPolicy,
 }
@@ -495,16 +492,6 @@ impl ConfigureAction {
     /// Returns configured contract calls.
     pub fn calls(&self) -> &[ContractCallConfig] {
         &self.calls
-    }
-
-    /// Returns read confirmation assertions.
-    pub fn confirmation_read_assertions(&self) -> &[ReadAssertionConfig] {
-        &self.confirmation_read_assertions
-    }
-
-    /// Returns event confirmation assertions.
-    pub fn confirmation_event_assertions(&self) -> &[EventAssertionConfig] {
-        &self.confirmation_event_assertions
     }
 
     /// Returns transaction policy.
@@ -530,10 +517,6 @@ impl<'de> Deserialize<'de> for ConfigureAction {
             #[serde(default)]
             calls: Vec<ContractCallConfig>,
             #[serde(default)]
-            confirmation_read_assertions: Vec<ReadAssertionConfig>,
-            #[serde(default)]
-            confirmation_event_assertions: Vec<EventAssertionConfig>,
-            #[serde(default)]
             transaction: EvmTransactionPolicy,
             #[serde(default)]
             receipt: ReceiptRetryPolicy,
@@ -543,8 +526,6 @@ impl<'de> Deserialize<'de> for ConfigureAction {
         Ok(Self {
             signer: raw.signer,
             calls: raw.calls,
-            confirmation_read_assertions: raw.confirmation_read_assertions,
-            confirmation_event_assertions: raw.confirmation_event_assertions,
             transaction: raw.transaction,
             receipt: raw.receipt,
         })
@@ -576,52 +557,4 @@ impl ValidateAction {
     pub fn event_assertions(&self) -> &[EventAssertionConfig] {
         &self.event_assertions
     }
-}
-
-/// Import spec for producing a deployed stage under a certified context.
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "import-deployed-spec",
-    schema = "mfm.evm.contract.config.import_deployed"
-)]
-pub enum ImportDeployedSpec {
-    /// Import a deployed instance from another verified MFM run.
-    FromMfmRun {
-        /// Source-run import request.
-        source: ImportFromMfmRun,
-        /// Replay-verifiable source-run import evidence.
-        evidence: ImportFromMfmRunEvidence,
-    },
-    /// Adopt an external address as a deployed instance.
-    AdoptExternalAddress {
-        /// External address adoption request.
-        adoption: AdoptExternalAddress,
-    },
-}
-
-/// Import spec for producing a configured stage under a certified context.
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "import-configured-spec",
-    schema = "mfm.evm.contract.config.import_configured"
-)]
-pub enum ImportConfiguredSpec {
-    /// Import a configured instance from another verified MFM run.
-    FromMfmRun {
-        /// Source-run import request.
-        source: ImportFromMfmRun,
-        /// Replay-verifiable source-run import evidence.
-        evidence: ImportFromMfmRunEvidence,
-    },
-    /// Adopt an external address as a configured instance.
-    AdoptExternalAddress {
-        /// External address adoption request.
-        adoption: AdoptExternalAddress,
-    },
 }

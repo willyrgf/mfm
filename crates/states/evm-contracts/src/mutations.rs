@@ -144,10 +144,7 @@ impl StateSpec for ContextBoundConfigureContractState {
         requires_context(
             contract_instance_resource_kind(),
             deployed_contract_stage(),
-            vec![
-                descriptor_id_for_state::<ContextBoundDeployContractState>()?,
-                descriptor_id_for_state::<ImportDeployedContractState>()?,
-            ],
+            vec![descriptor_id_for_state::<ContextBoundDeployContractState>()?],
         )
     }
 
@@ -222,41 +219,19 @@ impl SideEffectState for ContextBoundConfigureContractState {
         &self,
         input: &Self::Input,
         _intent: &Self::Intent,
-        receipt: &Self::Receipt,
+        _receipt: &Self::Receipt,
         context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        configured_instance_from_evidence(
-            &self.action,
-            input,
-            ContextConfigureOutputEvidence {
-                receipts: &receipt.receipts,
-                configured_block_number: receipt.configured_block_number,
-                configure_node: receipt.configure_node.clone(),
-                call_evidence_refs: receipt.call_evidence_refs.clone(),
-                confirmation_evidence_refs: receipt.confirmation_evidence_refs.clone(),
-            },
-            context,
-        )
+        configured_instance_from_evidence(input, context)
     }
 
     fn output_from_confirmation(
         &self,
         input: &Self::Input,
         _intent: &Self::Intent,
-        confirmation: &Self::Confirmation,
+        _confirmation: &Self::Confirmation,
         context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        configured_instance_from_evidence(
-            &self.action,
-            input,
-            ContextConfigureOutputEvidence {
-                receipts: &confirmation.receipts,
-                configured_block_number: confirmation.configured_block_number,
-                configure_node: confirmation.configure_node.clone(),
-                call_evidence_refs: confirmation.call_evidence_refs.clone(),
-                confirmation_evidence_refs: confirmation.confirmation_evidence_refs.clone(),
-            },
-            context,
-        )
+        configured_instance_from_evidence(input, context)
     }
 }

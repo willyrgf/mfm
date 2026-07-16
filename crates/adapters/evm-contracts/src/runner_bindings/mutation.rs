@@ -71,7 +71,6 @@ pub(super) struct ContextDeployMutationPlan {
 }
 
 pub(super) struct ContextConfigureMutationPlan {
-    pub(super) node_id: NodeId,
     pub(super) action: ValidatedConfig<ConfigureAction>,
     pub(super) state: ContextBoundConfigureContractState,
     pub(super) input: ContextConfigureContractInput,
@@ -443,7 +442,6 @@ async fn context_configure_mutation_plan_for_inputs(
         .idempotency_input(&input, &intent, &context)
         .map_err(runtime_state_error)?;
     Ok(ContextConfigureMutationPlan {
-        node_id: node.node_id.clone(),
         action,
         state,
         input,

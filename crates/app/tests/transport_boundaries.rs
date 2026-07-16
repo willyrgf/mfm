@@ -88,7 +88,6 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
             include_str!("../../adapters/portfolio/src/lib.rs"),
         ),
         ("app", include_str!("../src/lib.rs")),
-        ("app-evm-contracts", include_str!("../src/evm_contracts.rs")),
         ("app-btc-collector", include_str!("../src/btc_collector.rs")),
     ];
 

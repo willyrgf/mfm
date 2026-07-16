@@ -2108,17 +2108,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-adapter-contracts"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-evm-capabilities",
- "mfm-ids",
- "thiserror",
-]
-
-[[package]]
 name = "mfm-adapters-btc-jsonrpc"
 version = "0.1.0"
 dependencies = [
@@ -2173,7 +2162,6 @@ name = "mfm-adapters-evm-contracts"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "mfm-adapter-contracts",
  "mfm-artifact-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
@@ -2232,7 +2220,6 @@ dependencies = [
  "k256",
  "mfm-adapters-btc-jsonrpc",
  "mfm-adapters-evm",
- "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
  "mfm-artifact-capabilities",
  "mfm-btc-capabilities",
@@ -2243,14 +2230,12 @@ dependencies = [
  "mfm-effects",
  "mfm-events",
  "mfm-evm-capabilities",
- "mfm-evm-contract-model",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
  "mfm-manual-auth",
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
- "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-snapshot",
  "mfm-op-proof",
  "mfm-portfolio-model",
@@ -2259,10 +2244,8 @@ dependencies = [
  "mfm-replay",
  "mfm-runtime",
  "mfm-runtime-config",
- "mfm-signers-keystore",
  "mfm-signing",
  "mfm-spec",
- "mfm-state-evm-contracts",
  "mfm-state-portfolio",
  "mfm-states-btc",
  "mfm-states-evm",
@@ -2493,9 +2476,11 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "axum",
+ "hex",
  "k256",
  "mfm-adapters-btc-jsonrpc",
  "mfm-adapters-evm",
+ "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
  "mfm-app",
  "mfm-btc-capabilities",
@@ -2504,6 +2489,7 @@ dependencies = [
  "mfm-events",
  "mfm-evm-capabilities",
  "mfm-evm-contract-model",
+ "mfm-evm-signing",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
@@ -2512,8 +2498,11 @@ dependencies = [
  "mfm-op-portfolio-snapshot",
  "mfm-portfolio-model",
  "mfm-program",
+ "mfm-program-derive",
  "mfm-rest-api",
  "mfm-runtime",
+ "mfm-signing",
+ "mfm-spec",
  "mfm-state-evm-contracts",
  "mfm-states-btc",
  "mfm-states-evm",
@@ -2572,25 +2561,6 @@ dependencies = [
  "mfm-states-evm",
  "mfm-values",
  "serde",
-]
-
-[[package]]
-name = "mfm-op-evm-contract-lifecycle"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-certify",
- "mfm-evm-contract-model",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-spec",
- "mfm-state-evm-contracts",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
- "trybuild",
 ]
 
 [[package]]
@@ -2810,9 +2780,9 @@ name = "mfm-state-evm-contracts"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "mfm-adapter-contracts",
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-certify",
  "mfm-effects",
  "mfm-evm-capabilities",
  "mfm-evm-contract-model",

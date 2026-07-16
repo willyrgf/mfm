@@ -201,7 +201,7 @@ evm_string_scalar!(
     "lifecycle_key",
     "lifecycle-key",
     "mfm.evm.contract.id.lifecycle_key",
-    "Stable contract lifecycle context key."
+    "Stable contract-state context key."
 );
 
 evm_string_scalar!(
@@ -229,15 +229,6 @@ evm_string_scalar!(
     "observation-policy-id",
     "mfm.evm.contract.id.observation_policy",
     "Checked observation policy identity used by certified EVM contexts."
-);
-
-evm_string_scalar!(
-    ProvenanceLabel,
-    require_non_empty,
-    "provenance_label",
-    "provenance-label",
-    "mfm.evm.contract.value.provenance_label",
-    "Redaction-safe lifecycle provenance label."
 );
 
 macro_rules! evidence_identity_scalar {
@@ -406,69 +397,6 @@ evidence_identity_scalar!(
     "contract-profile-digest-ref",
     "mfm.evm.contract.id.contract_profile_digest",
     "Checked content digest reference carried by a contract profile."
-);
-
-evidence_identity_scalar!(
-    LifecycleRunIdRef,
-    RunId,
-    "run_id",
-    "lifecycle-run-id-ref",
-    "mfm.evm.contract.id.lifecycle_run",
-    "Checked source run id reference carried by lifecycle import evidence."
-);
-
-evidence_identity_scalar!(
-    LifecycleSpecHashRef,
-    SpecHash,
-    "spec_hash",
-    "lifecycle-spec-hash-ref",
-    "mfm.evm.contract.id.lifecycle_spec_hash",
-    "Checked source spec hash reference carried by lifecycle import evidence."
-);
-
-evidence_identity_scalar!(
-    LifecycleCellIdRef,
-    CellId,
-    "cell_id",
-    "lifecycle-cell-id-ref",
-    "mfm.evm.contract.id.lifecycle_cell",
-    "Checked source cell id reference carried by lifecycle import evidence."
-);
-
-evidence_identity_scalar!(
-    LifecycleNodeIdRef,
-    NodeId,
-    "node_id",
-    "lifecycle-node-id-ref",
-    "mfm.evm.contract.id.lifecycle_node",
-    "Checked lifecycle node id reference carried by provenance claims."
-);
-
-evidence_identity_scalar!(
-    LifecycleDescriptorIdRef,
-    DescriptorId,
-    "descriptor_id",
-    "lifecycle-descriptor-id-ref",
-    "mfm.evm.contract.id.lifecycle_descriptor",
-    "Checked lifecycle descriptor id reference carried by import evidence."
-);
-
-evidence_identity_scalar!(
-    LifecycleContextDescriptorIdRef,
-    ContextDescriptorId,
-    "context_descriptor_id",
-    "lifecycle-context-descriptor-id-ref",
-    "mfm.evm.contract.id.lifecycle_context_descriptor",
-    "Checked context descriptor id reference carried by import evidence."
-);
-
-evidence_identity_scalar!(
-    LifecycleEventIdRef,
-    EventId,
-    "event_id",
-    "lifecycle-event-id-ref",
-    "mfm.evm.contract.id.lifecycle_event",
-    "Checked terminal event id reference carried by lifecycle import evidence."
 );
 
 /// Checked wei quantity rendered in the authored EVM quantity format.

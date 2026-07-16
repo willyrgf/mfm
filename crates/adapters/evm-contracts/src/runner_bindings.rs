@@ -2,7 +2,7 @@ use super::*;
 
 #[path = "runner_bindings/registration.rs"]
 mod registration;
-pub use self::registration::register_contract_lifecycle_runners_with_factory;
+pub use self::registration::register_contract_state_runners_with_factory;
 
 #[path = "runner_bindings/verify.rs"]
 mod verify;
@@ -33,47 +33,9 @@ impl ErasedNodeRunner for ContextContractValidateRunner {
     }
 }
 
-struct ImportDeployedRunner {
-    factory: Arc<dyn EvmContractRuntimeFactory>,
-    extractor: TypedContextOutputExtractor<DeployedContractInstance>,
-}
-
-impl ErasedNodeRunner for ImportDeployedRunner {
-    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        validate_context_runtime(&ctx, self.factory.as_ref())
-    }
-
-    fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
-        Some(&self.extractor)
-    }
-
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move { run_import_deployed(ctx, self.factory.as_ref()).await })
-    }
-}
-
-struct ImportConfiguredRunner {
-    factory: Arc<dyn EvmContractRuntimeFactory>,
-    extractor: TypedContextOutputExtractor<ConfiguredContractInstance>,
-}
-
-impl ErasedNodeRunner for ImportConfiguredRunner {
-    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        validate_context_runtime(&ctx, self.factory.as_ref())
-    }
-
-    fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
-        Some(&self.extractor)
-    }
-
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move { run_import_configured(ctx, self.factory.as_ref()).await })
-    }
-}
-
 struct ContextContractVerifyRunner {
     factory: Arc<dyn EvmContractRuntimeFactory>,
-    extractor: ContractLifecycleContextOutputExtractor,
+    extractor: ContractStateContextOutputExtractor,
 }
 
 impl ErasedNodeRunner for ContextContractVerifyRunner {
@@ -91,13 +53,13 @@ impl ErasedNodeRunner for ContextContractVerifyRunner {
     }
 }
 
-struct ContractLifecycleContextOutputExtractor {
+struct ContractStateContextOutputExtractor {
     deployed: TypedContextOutputExtractor<DeployedContractInstance>,
     configured: TypedContextOutputExtractor<ConfiguredContractInstance>,
     validation_report: TypedContextOutputExtractor<ContextBoundValidationReport>,
 }
 
-impl ContractLifecycleContextOutputExtractor {
+impl ContractStateContextOutputExtractor {
     const fn new() -> Self {
         Self {
             deployed: TypedContextOutputExtractor::new(),
@@ -107,7 +69,7 @@ impl ContractLifecycleContextOutputExtractor {
     }
 }
 
-impl mfm_runtime::ContextOutputExtractor for ContractLifecycleContextOutputExtractor {
+impl mfm_runtime::ContextOutputExtractor for ContractStateContextOutputExtractor {
     fn validate_context_output(
         &self,
         cell_context: &spec::CellContextSpec,
@@ -349,45 +311,6 @@ async fn run_context_validate(
     ErasedRunnerOutput::state_output(&ctx, &report)
 }
 
-async fn run_import_deployed(
-    ctx: ErasedRunCtx<'_>,
-    factory: &dyn EvmContractRuntimeFactory,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let import =
-        load_runner_config_for_node::<ImportDeployedSpec>(ctx.node(), factory.artifacts()).await?;
-    let context = ctx.certified_context::<EvmContractContext>()?;
-    let runtime = read_context_runtime(factory, &context)?;
-    let deployed = runtime
-        .import_deployed(import.as_ref(), &context, factory.artifacts())
-        .await?;
-    ErasedRunnerOutput::state_output(&ctx, &deployed)
-}
-
-async fn run_import_configured(
-    ctx: ErasedRunCtx<'_>,
-    factory: &dyn EvmContractRuntimeFactory,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let import =
-        load_runner_config_for_node::<ImportConfiguredSpec>(ctx.node(), factory.artifacts())
-            .await?;
-    let context = ctx.certified_context::<EvmContractContext>()?;
-    let artifact = if import_configured_requires_artifact(import.as_ref()) {
-        Some(load_context_profile_artifact(&context, factory.artifacts()).await?)
-    } else {
-        None
-    };
-    let runtime = read_context_runtime(factory, &context)?;
-    let configured = runtime
-        .import_configured(
-            import.as_ref(),
-            &context,
-            artifact.as_ref(),
-            factory.artifacts(),
-        )
-        .await?;
-    ErasedRunnerOutput::state_output(&ctx, &configured)
-}
-
 pub(crate) async fn read_receipts_with_poll(
     runtime: &EvmContractRuntime,
     prepared: &PreparedContractInvocation,
@@ -409,7 +332,7 @@ pub(crate) async fn read_receipts_with_poll(
             Err(EvmContractAdapterError::EvmCapability(EvmCapabilityError::ReceiptPending)) => {
                 if attempt + 1 == max_polls {
                     return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                        "contract lifecycle receipt polling exhausted".to_owned(),
+                        "contract-state receipt polling exhausted".to_owned(),
                     ));
                 }
                 sleep(Duration::from_millis(receipt_policy.poll_interval_ms())).await;
@@ -419,7 +342,7 @@ pub(crate) async fn read_receipts_with_poll(
     }
 
     Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-        "contract lifecycle receipt polling exhausted".to_owned(),
+        "contract-state receipt polling exhausted".to_owned(),
     ))
 }
 
@@ -432,12 +355,12 @@ fn finalized_depth_for_submit_node(submit_node: &spec::NodeSpec) -> mfm_runtime:
         Some(spec::SideEffectVerificationSpec::Finalized { depth }) => Ok(*depth),
         Some(spec::SideEffectVerificationSpec::Receipt) => {
             Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-                "contract lifecycle submit node {} has receipt-only verification",
+                "contract-state submit node {} has receipt-only verification",
                 submit_node.node_id
             )))
         }
         None => Err(mfm_runtime::RuntimeError::InvalidSpec(format!(
-            "contract lifecycle submit node {} lacks side-effect contract",
+            "contract-state submit node {} lacks side-effect contract",
             submit_node.node_id
         ))),
     }
@@ -451,7 +374,7 @@ pub(crate) async fn verified_finality_confirmations(
     let Some(highest_receipt_block) = receipts.iter().map(|receipt| receipt.block_number).max()
     else {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "contract lifecycle finality requires at least one receipt".to_owned(),
+            "contract-state finality requires at least one receipt".to_owned(),
         ));
     };
     let latest_block = runtime
@@ -464,12 +387,12 @@ pub(crate) async fn verified_finality_confirmations(
         .map(|distance| distance.saturating_add(1))
         .ok_or_else(|| {
             mfm_runtime::RuntimeError::Blocked(format!(
-                "contract lifecycle finality latest block {latest_block} is behind receipt block {highest_receipt_block}"
+                "contract-state finality latest block {latest_block} is behind receipt block {highest_receipt_block}"
             ))
         })?;
     if confirmations < required_depth {
         return Err(mfm_runtime::RuntimeError::Blocked(format!(
-            "contract lifecycle finality depth {required_depth} not reached; observed {confirmations}"
+            "contract-state finality depth {required_depth} not reached; observed {confirmations}"
         )));
     }
     Ok(confirmations)
@@ -596,11 +519,13 @@ async fn load_prepared_invocation_for_node(
 }
 
 fn evm_transaction_submit_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    let binding = evm_contract_lifecycle_adapter_binding()
+    let adapter_kind = mfm_state_evm_contracts::contract_states_adapter_kind()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let adapter_version = mfm_state_evm_contracts::contract_states_adapter_version()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     RunnerCapabilityBinding::for_capability::<EvmTransactionSubmitCapability>(
-        binding.adapter_kind().clone(),
-        binding.adapter_version().clone(),
+        adapter_kind,
+        adapter_version,
     )
 }
 
@@ -610,7 +535,7 @@ fn projected_side_effect_for_submit<'a>(
 ) -> mfm_runtime::Result<&'a store::SideEffectProjection> {
     let contract = submit_node.side_effect.as_ref().ok_or_else(|| {
         mfm_runtime::RuntimeError::InvalidSpec(format!(
-            "contract lifecycle submit node {} lacks side-effect contract",
+            "contract-state submit node {} lacks side-effect contract",
             submit_node.node_id
         ))
     })?;
@@ -618,7 +543,7 @@ fn projected_side_effect_for_submit<'a>(
         spec::side_effect_pair_id(&submit_node.node_id, &submit_node.output_cell, contract)
             .map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidSpec(format!(
-                    "contract lifecycle submit node {} pair id is invalid: {error}",
+                    "contract-state submit node {} pair id is invalid: {error}",
                     submit_node.node_id
                 ))
             })?;
@@ -626,7 +551,7 @@ fn projected_side_effect_for_submit<'a>(
         .side_effect_for_pair(ctx.run_id(), &pair_id)
         .ok_or_else(|| {
             mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-                "contract lifecycle side-effect projection missing for submit node {}",
+                "contract-state side-effect projection missing for submit node {}",
                 submit_node.node_id
             ))
         })
@@ -644,7 +569,7 @@ fn projected_prepared_artifact_for_submit(
 
 fn missing_side_effect_artifact(label: &str) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-        "contract lifecycle side-effect {label} artifact is missing"
+        "contract-state side-effect {label} artifact is missing"
     ))
 }
 

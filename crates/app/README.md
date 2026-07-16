@@ -19,9 +19,9 @@ and appends all rows atomically. Run-start requests are strict JSON objects cont
 records the resolved name/schema/digest as launch evidence. The resulting typed draft and
 certified spec contain concrete values, never catalog references.
 
-Domain runner behavior lives in adapter crates. For EVM contract lifecycles, `mfm-app` wires
-concrete process resources such as JSON-RPC clients, artifact readers, and keystore-backed signer
-providers into adapter runner factories; it does not own lifecycle planning or state semantics.
+Domain runner behavior lives in adapter crates. Reusable EVM contract states are exercised by
+their library-level adapter test graph; `mfm-app` does not register speculative contract runners
+without a current certified public graph consumer.
 
 After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
 reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They

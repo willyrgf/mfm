@@ -142,13 +142,9 @@ The public discovery surface exposes only exact ids and request schema ids. It d
 implement latest selection, accepted encodings, a registry digest, a dynamic builder trait, or
 public registration helpers.
 
-The superseded implementation formerly exposed additional portfolio and collector ids. They are
-not current interfaces. During the receipt cutover, the registered public ids are:
-
-- `mfm.evm.contract/deploy@1`
-- `mfm.evm.contract/configure@1`
-- `mfm.evm.contract/validate@1`
-- `mfm.evm.contract/lifecycle@1`
+The superseded implementation formerly exposed contract entry ids. They are not current
+interfaces. The retained deploy, configure, and validate contracts are composable state
+descriptors only; they have no app registration, setup kind, or catalog request.
 
 ### Operation-owned config
 
@@ -157,8 +153,8 @@ Current config ownership follows the semantic boundaries:
 - Portfolio collection is internal and derives demand from `mfm_portfolio_model::PortfolioConfig`.
 - BTC and EVM collection policies are closed internal operation policy, not public authored
   collector config.
-- EVM state config/support types are owned by `mfm-state-evm-contracts`; the four lifecycle entry
-  configs are owned by `mfm-op-evm-contract-lifecycle`.
+- EVM state config/support types are owned by `mfm-state-evm-contracts`; the retained state graph
+  is exercised through the reusable adapter library rather than a public operation package.
 - `mfm-op-portfolio-snapshot` owns exact portfolio-demand derivation, family collection,
   content-bound receipt assembly, receipt-pinned reporting, and the one internal public-output
   root binding. The former tracker package is deleted.
@@ -190,17 +186,10 @@ collector/report launch paths are not supported.
 
 ## Current public entry-point inventory
 
-The private app dispatch currently publishes four exact version-1 contract entry points. Run start
-accepts strict JSON requests only; setup TOML publishes the referenced values. The portfolio
-snapshot graph is internal during this collection cutover, and standalone portfolio and collector
-surfaces described by earlier revisions of this RFC are removed.
-
-| Exact entry point | Request references | Main semantic content | Live runtime config |
-|---|---|---|---|
-| `mfm.evm.contract/deploy@1` | context + deploy action refs | Lifecycle context and deploy action | EVM route plus signer binding |
-| `mfm.evm.contract/configure@1` | context + import + configure refs | Deployed import and configure action | EVM route plus signer binding |
-| `mfm.evm.contract/validate@1` | context + import + validate refs | Configured import and validation action | EVM route; signer only when required by state |
-| `mfm.evm.contract/lifecycle@1` | context + deploy/configure/validate refs | Complete lifecycle composition | EVM route plus signer binding |
+This historical RFC no longer describes a current public entry-point inventory. During the
+contract-state cleanup phase, app discovery is intentionally empty. Setup TOML publishes only
+portfolio configuration, and the direct deploy-to-configure-to-validate graph is available solely
+to library consumers and its test graph.
 
 The internal BTC chain-head checkpoint operation is intentionally not a public entry point.
 
@@ -860,12 +849,11 @@ facades or compatibility readers.
 - Delete `crates/portfolio-config` and its authored, canonical, build-report, parse, and
   canonicalization types.
 - Delete `crates/evm-contract-config` atomically rather than preserving a facade or re-export crate.
-  Move `DeployAction`, `ConfigureAction`, `ValidateAction`, `ImportDeployedSpec`,
-  `ImportConfiguredSpec`, `EvmSignerIntent`, `EvmTransactionStyle`, `EvmTransactionPolicy`, and
-  `ReceiptRetryPolicy` to `mfm-state-evm-contracts`, where they are state configs or supporting state
-  policy. Move the four `EvmContract*EntryConfig` types to
-  `mfm-op-evm-contract-lifecycle`, where they are operation configs. Keep context, scalar,
-  assertion, lifecycle-value, provenance, and evidence types in `mfm-evm-contract-model`.
+  Retain `DeployAction`, `ConfigureAction`, `ValidateAction`, `EvmSignerIntent`,
+  `EvmTransactionStyle`, `EvmTransactionPolicy`, and `ReceiptRetryPolicy` in
+  `mfm-state-evm-contracts` as state configs or supporting state policy. The historical public
+  contract entry configs and continuation imports are deleted; context, scalar, direct typestate,
+  assertion, and evidence types remain in `mfm-evm-contract-model`.
 - Preserve the EVM types' explicit schema and semantic identities during the ownership move. Move
   their tests to the new owners, make receipt-limit constants private unless a public consumer
   requires them, and add ordinary entry-config constructors rather than constructing through JSON.
@@ -1080,7 +1068,8 @@ The implemented state above is grounded in these repository surfaces:
 - `crates/portfolio/model`: direct portfolio config ownership;
 - `crates/ops/btc-collectors-op`: BTC collector config;
 - `crates/ops/evm-collectors-op`: EVM collector config;
-- `crates/states/evm-contracts` and `crates/ops/evm-contract-lifecycle-op`: EVM config ownership;
+- `crates/states/evm-contracts` and `tests/integration/tests/contract_state_graph.rs`: direct EVM
+  state config ownership and executable library graph coverage;
 - `crates/ops/portfolio-snapshot-op`: complete collection, receipt-pinned report, and root graph;
 - `docs/evm-rpc-routing.md` and `docs/btc-rpc-routing.md`: runtime routing contracts;
 - `.gitignore` and `nixfied.nix`: explicit local setup/runtime ignores and generated runtime path.

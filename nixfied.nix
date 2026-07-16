@@ -260,22 +260,6 @@ in
         "mfm_cli"
       ];
     };
-    parity-catalog-setup = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "catalog_setup_resolution"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
     parity-cli-setup = cargoLeaf {
       run = [
         "cargo"
@@ -375,10 +359,6 @@ in
           task = "parity-postgres-state-events";
           dependsOn = [ "postgres-sqlx-check" ];
         };
-        parity-catalog-setup = {
-          task = "parity-catalog-setup";
-          dependsOn = [ "postgres-sqlx-check" ];
-        };
         parity-cli-setup = {
           task = "parity-cli-setup";
           dependsOn = [ "mfm-cli-build" ];
@@ -389,10 +369,7 @@ in
         };
         parity-postgres-rest-api = {
           task = "parity-postgres-rest-api";
-          dependsOn = [
-            "parity-postgres-state-events"
-            "parity-catalog-setup"
-          ];
+          dependsOn = [ "parity-postgres-state-events" ];
         };
       };
     };

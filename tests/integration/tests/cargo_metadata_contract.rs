@@ -218,44 +218,6 @@ fn category_dependency_rules_reject_forbidden_edges() {
 }
 
 #[test]
-fn state_category_allows_adapter_contracts_and_rejects_adapters() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-state-portfolio",
-        "mfm-adapter-contracts",
-        &root.join("crates/adapter-contracts"),
-    );
-
-    validate_category_dependency_rules(&metadata, &root)
-        .expect("state may depend on neutral adapter contract crate");
-
-    push_synthetic_workspace_package(
-        &mut metadata,
-        &root,
-        "mfm-adapter-fixture",
-        "crates/adapters/fixture/Cargo.toml",
-        "adapter",
-    );
-    push_path_dependency(
-        &mut metadata,
-        "mfm-state-portfolio",
-        "mfm-adapter-fixture",
-        &root.join("crates/adapters/fixture"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=state")
-            && error.contains("dependency_category=adapter")
-            && error.contains("mfm-adapter-fixture"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn category_dependency_rules_reject_forbidden_binary_edges() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);
@@ -345,8 +307,8 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
     let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
     assert_eq!(
         packages.len(),
-        51,
-        "the consolidated portfolio snapshot workspace has 51 packages"
+        49,
+        "the consolidated portfolio snapshot workspace has 49 packages"
     );
 
     for removed in [
@@ -355,6 +317,8 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
         "mfm-evm-contract-config",
         "mfm-stream-store-postgres",
         "mfm-op-portfolio-tracker",
+        "mfm-op-evm-contract-lifecycle",
+        "mfm-adapter-contracts",
     ] {
         assert!(
             packages.iter().all(|package| package.name != removed),

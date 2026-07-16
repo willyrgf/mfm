@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 use mfm_btc_capabilities::{BtcBalanceReadProvider, BtcChainHeadReadProvider, BtcSourceBinding};
 use mfm_evm_capabilities::EvmNetworkBinding;
-use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 
 use crate::MFM_RUNTIME_CONFIG_FILE;
 
@@ -39,7 +38,6 @@ pub(crate) struct LiveTransportRuntime {
     btc_router: OnceLock<
         mfm_runtime::Result<Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>>,
     >,
-    signer_provider: OnceLock<mfm_runtime::Result<Arc<KeystoreSignerProvider>>>,
 }
 
 impl LiveTransportRuntime {
@@ -49,7 +47,6 @@ impl LiveTransportRuntime {
             parsed_config: OnceLock::new(),
             evm_client: OnceLock::new(),
             btc_router: OnceLock::new(),
-            signer_provider: OnceLock::new(),
         }
     }
 
@@ -69,16 +66,6 @@ impl LiveTransportRuntime {
         self.evm_client()?
             .bind_network(binding)
             .map_err(runtime_evm_transport_error)
-    }
-
-    pub(crate) fn signer_provider(&self) -> mfm_runtime::Result<Arc<KeystoreSignerProvider>> {
-        self.signer_provider
-            .get_or_init(|| {
-                self.runtime_config_with_required_signers()
-                    .and_then(|config| keystore_signer_provider_from_config(&config))
-                    .map(Arc::new)
-            })
-            .clone()
     }
 
     fn evm_client(&self) -> mfm_runtime::Result<Arc<mfm_transports_evm::EvmJsonRpcClient>> {
@@ -142,28 +129,6 @@ impl LiveTransportRuntime {
         Ok(self
             .runtime_config_optional()?
             .and_then(|config| config.btc().cloned()))
-    }
-
-    fn runtime_config_with_required_signers(
-        &self,
-    ) -> mfm_runtime::Result<Arc<mfm_runtime_config::RuntimeConfig>> {
-        let config = self.runtime_config()?;
-        if config.evm().is_none() {
-            return Err(mfm_runtime::RuntimeError::RunnerBinding(
-                "missing EVM runtime config".to_owned(),
-            ));
-        }
-        if config.keystores().is_empty() {
-            return Err(mfm_runtime::RuntimeError::RunnerBinding(
-                "missing keystore runtime config".to_owned(),
-            ));
-        }
-        if config.signers().is_empty() {
-            return Err(mfm_runtime::RuntimeError::RunnerBinding(
-                "missing signer runtime config".to_owned(),
-            ));
-        }
-        Ok(config)
     }
 }
 
@@ -279,31 +244,6 @@ fn btc_json_rpc_client(
     };
     mfm_transports_btc_jsonrpc_http::BtcJsonRpcClient::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))
-}
-
-fn keystore_signer_provider_from_config(
-    runtime_config: &mfm_runtime_config::RuntimeConfig,
-) -> mfm_runtime::Result<KeystoreSignerProvider> {
-    let entries = runtime_config.signers().iter().map(|(signer_ref, signer)| {
-        let signer = signer.as_keystore();
-        let keystore = runtime_config
-            .keystores()
-            .get(signer.keystore_ref())
-            .ok_or_else(|| {
-                mfm_runtime::RuntimeError::RunnerBinding(
-                    "missing keystore profile for signer binding".to_owned(),
-                )
-            })?;
-        Ok(KeystoreSignerRegistryEntry::new(
-            signer_ref.clone(),
-            signer.entry_id(),
-            keystore.keystore_path().expose_path(),
-            keystore.unlock_file().expose_path(),
-        ))
-    });
-    Ok(KeystoreSignerProvider::new(
-        entries.collect::<mfm_runtime::Result<Vec<_>>>()?,
-    ))
 }
 
 fn runtime_config_error(

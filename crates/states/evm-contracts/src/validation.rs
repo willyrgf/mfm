@@ -40,20 +40,10 @@ impl ContextBoundValidateContractState {
                 "validation read response context does not match certified invocation".to_owned(),
             ));
         }
-        require_validation_read_results_canonical_passed(&response.configuration_read_results)?;
-        require_validation_event_results_canonical_passed(&response.configuration_event_results)?;
         require_validation_read_results_canonical_passed(&response.read_results)?;
         require_validation_event_results_canonical_passed(&response.event_results)?;
 
         let valid = response.observed_chain_id == context.value().network.expected_chain_id()
-            && response
-                .configuration_read_results
-                .iter()
-                .all(validation_read_result_passes)
-            && response
-                .configuration_event_results
-                .iter()
-                .all(validation_event_result_passes)
             && response
                 .read_results
                 .iter()
@@ -68,13 +58,10 @@ impl ContextBoundValidateContractState {
             context_ref: ContextRefValue::from(context.context_ref().clone()),
             configured_instance: ConfiguredContractInstanceRef::from_configured(&input.configured),
             observed_chain_id: response.observed_chain_id,
-            configuration_read_results: response.configuration_read_results,
-            configuration_event_results: response.configuration_event_results,
             read_results: response.read_results,
             event_results: response.event_results,
             validation_read_evidence: response.validation_read_evidence,
             validation_event_evidence: response.validation_event_evidence,
-            evidence_refs: response.evidence_refs,
             valid,
         })
     }
@@ -108,10 +95,7 @@ impl StateSpec for ContextBoundValidateContractState {
         requires_context(
             contract_instance_resource_kind(),
             configured_contract_stage(),
-            vec![
-                descriptor_id_for_state::<ContextBoundConfigureContractState>()?,
-                descriptor_id_for_state::<ImportConfiguredContractState>()?,
-            ],
+            vec![descriptor_id_for_state::<ContextBoundConfigureContractState>()?],
         )
     }
 

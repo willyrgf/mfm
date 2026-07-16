@@ -1,77 +1,5 @@
 use super::*;
 
-pub(super) fn evm_contract_context_descriptor(
-) -> Result<spec::StateContextDescriptorRequirementSpec, AppError> {
-    let spec::StateContextDescriptorSpec::Required(descriptor) =
-        <EvmContractContext as mfm_program::StateContext>::descriptor()
-            .map_err(|_| certified_evm_context_artifact_error())?
-    else {
-        return Err(certified_evm_context_artifact_error());
-    };
-    Ok(*descriptor)
-}
-
-pub(super) fn evm_contract_profile_artifact_requirement(
-    reference: &LifecycleArtifactEvidenceRef,
-) -> Result<store::EventArtifactRequirement, AppError> {
-    let schema_id = reference
-        .schema_id()
-        .map_err(|_| certified_evm_context_artifact_error())?
-        .ok_or_else(certified_evm_context_artifact_error)?;
-    let expected_schema = <ContractArtifactConfig as MfmConfig>::schema_id()
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    if schema_id != expected_schema
-        || reference
-            .semantic_type_id()
-            .map_err(|_| certified_evm_context_artifact_error())?
-            .is_some()
-    {
-        return Err(certified_evm_context_artifact_error());
-    }
-    let artifact_id = reference
-        .artifact_id()
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    let digest = reference
-        .content_digest()
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    let media_type = spec::MediaType::new("application/json")
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: artifact_id.clone(),
-        digest: digest.clone(),
-        byte_len: reference.byte_len(),
-        media_type: media_type.clone(),
-        schema_id: Some(schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    Ok(store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id,
-        evidence_hash: evidence
-            .evidence_hash()
-            .map_err(|_| certified_evm_context_artifact_error())?,
-        digest: Some(digest),
-        byte_len: Some(reference.byte_len()),
-        media_type: Some(media_type),
-        schema_id: Some(schema_id),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    })
-}
-
-pub(super) fn certified_evm_context_artifact_error() -> AppError {
-    AppError::backend(
-        ErrorClass::Internal,
-        "CertifiedEvmContextArtifactInvalid",
-        "Certified EVM context artifact failed replay verification",
-    )
-}
-
 pub(super) async fn retained_source_fact_events_from_query_evidence<S, A>(
     store: &S,
     artifacts: &A,
@@ -130,6 +58,7 @@ where
     Ok(source_events.into_values().collect())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
@@ -157,6 +86,7 @@ pub(super) fn certified_spec_launch_artifact(
     ))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn certified_spec_certificate_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
@@ -198,6 +128,7 @@ pub(super) fn certified_spec_certificate_launch_artifact(
     ))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn config_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     registry: &CertificationRegistry,
@@ -276,6 +207,7 @@ pub(super) fn config_launch_artifacts_for_spec(
     Ok(validated)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fact_descriptor_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     registry: &CertificationRegistry,
@@ -332,6 +264,7 @@ pub(super) fn fact_descriptor_launch_artifacts_for_spec(
     Ok(artifacts)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn framework_config_launch_artifacts_for_spec(
     execution_spec: &spec::TypedExecutionSpec,
 ) -> Result<Vec<RunLaunchConfigArtifact>, AppError> {
@@ -361,6 +294,7 @@ pub(super) fn framework_config_launch_artifacts_for_spec(
     Ok(artifacts)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn framework_config_matches_ref(
     execution_spec: &spec::TypedExecutionSpec,
     config_ref: &spec::ConfigRef,
@@ -389,6 +323,7 @@ pub(super) fn framework_config_matches_ref(
     Ok(false)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn seed_launch_cells_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     seeds: Vec<RunLaunchSeedArtifact>,
@@ -469,6 +404,7 @@ pub(super) fn seed_launch_cells_for_spec(
     Ok(seed_refs)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn launch_artifact(
     bytes: Vec<u8>,
     media_type: spec::MediaType,
@@ -499,10 +435,12 @@ pub(super) fn content_digest_for_bytes(bytes: &[u8]) -> ContentDigest {
     ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
     ArtifactId::from_digest(digest.algorithm(), *digest.digest())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn config_input_key(schema_id: &SchemaId, digest: &ContentDigest) -> String {
     format!("{schema_id}:{digest}")
 }
@@ -562,6 +500,7 @@ pub(super) fn artifact_referenced_artifact_requirement(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn config_ref_artifact_requirement(
     config_ref: &spec::ConfigRef,
 ) -> Result<store::EventArtifactRequirement, AppError> {
@@ -591,6 +530,7 @@ pub(super) fn config_ref_artifact_requirement(
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn seed_artifact_requirement(
     seed_spec: &spec::SeedSpec,
     evidence: &store::ArtifactEvidenceRef,

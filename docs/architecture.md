@@ -449,12 +449,11 @@ must check both.
 
 Public names should describe what the user means, not how the implementation was assembled.
 
-Allowed public names:
+Allowed domain terms in public documentation:
 
-- contract deployment
-- contract configuration
-- contract validation
-- contract lifecycle
+- contract deployment state
+- contract configuration state
+- contract validation state
 - EVM transaction intent
 - EVM RPC source
 - signer reference
@@ -466,6 +465,11 @@ Disallowed public names:
 - parity fixture names
 - implementation recipe names
 - transport crate names exposed as route or command names
+
+Reusable contract-state descriptors may use deployment, configuration, and validation language,
+but they do not imply a public operation or setup surface. The app publishes only certified
+objectives with a current consumer; a reusable state graph is tested through its state and adapter
+libraries instead.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 

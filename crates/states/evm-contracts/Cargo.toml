@@ -2,7 +2,7 @@
 name = "mfm-state-evm-contracts"
 version = "0.1.0"
 edition = "2021"
-description = "Typed EVM contract lifecycle state contracts"
+description = "Typed EVM contract state contracts"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -14,7 +14,6 @@ alloy-primitives = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-mfm-adapter-contracts = { path = "../../adapter-contracts", version = "0.1.0" }
 mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
 mfm-capabilities = { path = "../../kernel/capabilities", version = "0.1.0" }
 mfm-effects = { path = "../../kernel/effects", version = "0.1.0" }
@@ -28,4 +27,5 @@ mfm-values = { path = "../../kernel/values", version = "0.1.0" }
 mfm-signing = { path = "../../signing", version = "0.1.0" }
 
 [dev-dependencies]
+mfm-certify = { path = "../../kernel/certify", version = "0.1.0" }
 trybuild = "1.0"

@@ -1,6 +1,6 @@
 # Typed EVM Runtime Config
 
-Status: typed transport runbook for EVM-backed portfolio and contract-lifecycle workflows.
+Status: typed transport runbook for EVM-backed portfolio and reusable contract-state workflows.
 
 EVM RPC endpoints and signer provider bindings are live runtime inputs. They are not semantic run
 authority and must not be persisted in manifests, events, artifacts, public outputs, fixtures, or
@@ -10,7 +10,7 @@ Normative architecture references:
 
 - `docs/design.md`
 - `docs/architecture.md`
-- `docs/evm-contract-lifecycle.md`
+- `docs/evm-contract-states.md`
 
 ## Runtime Config File
 
@@ -51,7 +51,8 @@ entry_id = "00000000-0000-0000-0000-000000000000"
 JSON with the same shape is also accepted by `mfm-runtime-config`.
 
 Runtime config validation rejects source-level chain ids. Expected chain id comes from workflow
-semantics: portfolio `NetworkConfig.chain_id` or contract lifecycle `network.expected_chain_id`.
+semantics: portfolio `NetworkConfig.chain_id` or reusable contract-state
+`EvmContractContext.network.expected_chain_id`.
 
 ## Provider-Bound Requests
 
@@ -88,9 +89,9 @@ messages, response bodies, or runtime config paths.
 
 ## Signing
 
-Contract lifecycle configs carry only signer intent: non-secret `signer_ref` and expected signer
-address. App assembly resolves `signer_ref` through the runtime config signer registry when a
-mutation workflow needs signing. Validation-only workflows do not require signer bindings.
+Contract-state configs carry only signer intent: non-secret `signer_ref` and expected signer
+address. A reusable adapter resolves `signer_ref` through a runtime signer registry when a
+mutation state needs signing. Read-only validation does not require signer bindings.
 
 Keystore paths, unlock files, passwords, private keys, mnemonics, signed material, and raw
 transactions remain runtime-only and must be redacted from diagnostics.
@@ -102,10 +103,10 @@ must not open live RPC connections or consult runtime config.
 
 EVM collector replay recomputes native and ERC-20 reads from retained evidence without a live
 provider: it validates the destination, calldata, canonical hash selector, raw return bytes,
-source binding, re-verified anchor, decoded output, and recorded fact evidence. EVM contract replay
-recomputes the certified semantic binding from the lifecycle context and context-bound artifacts,
-then checks stored fact evidence, side-effect evidence, import evidence, validation evidence, and
-terminal output artifacts against that expected authority.
+source binding, re-verified anchor, decoded output, and recorded fact evidence. EVM contract-state
+replay recomputes the certified semantic binding from the contract context and context-bound
+artifacts, then checks stored side-effect evidence, validation evidence, and terminal output
+artifacts against that expected authority.
 
 ## Contributor Guidance
 

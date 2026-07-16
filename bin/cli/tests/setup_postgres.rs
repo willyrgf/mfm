@@ -112,7 +112,7 @@ async fn setup_cli_import_list_and_export_preserve_the_catalog_contract() {
     let values = imported["data"]["values"]
         .as_array()
         .expect("import values");
-    assert_eq!(values.len(), 7);
+    assert_eq!(values.len(), 1);
     for value in values {
         let object = value.as_object().expect("identity object");
         assert_eq!(object.len(), 3);
@@ -122,8 +122,8 @@ async fn setup_cli_import_list_and_export_preserve_the_catalog_contract() {
     }
     let identity = values
         .iter()
-        .find(|value| value["name"] == "acme/contract-context")
-        .expect("contract context identity");
+        .find(|value| value["name"] == "acme/dual-mainnet")
+        .expect("portfolio identity");
     let schema_id = identity["schema_id"].as_str().expect("schema id");
     let digest = identity["digest"].as_str().expect("digest");
 
@@ -137,14 +137,14 @@ async fn setup_cli_import_list_and_export_preserve_the_catalog_contract() {
             .as_array()
             .expect("listed values")
             .len(),
-        7
+        1
     );
 
-    let first_output = directory.path().join("context-one.json");
-    let second_output = directory.path().join("context-two.json");
+    let first_output = directory.path().join("portfolio-one.json");
+    let second_output = directory.path().join("portfolio-two.json");
     let exported = json_output(run_cli(
         &scoped_url,
-        &export_args("acme/contract-context", schema_id, digest, &first_output),
+        &export_args("acme/dual-mainnet", schema_id, digest, &first_output),
     ));
     assert_eq!(
         exported["data"]["values"]
@@ -156,14 +156,14 @@ async fn setup_cli_import_list_and_export_preserve_the_catalog_contract() {
     let first_bytes = std::fs::read(&first_output).expect("first export");
     json_output(run_cli(
         &scoped_url,
-        &export_args("acme/contract-context", schema_id, digest, &second_output),
+        &export_args("acme/dual-mainnet", schema_id, digest, &second_output),
     ));
     let second_bytes = std::fs::read(&second_output).expect("second export");
     assert_eq!(first_bytes, second_bytes);
 
     let existing = run_cli(
         &scoped_url,
-        &export_args("acme/contract-context", schema_id, digest, &first_output),
+        &export_args("acme/dual-mainnet", schema_id, digest, &first_output),
     );
     assert!(!existing.status.success());
     let error: Value = serde_json::from_slice(&existing.stderr).expect("existing path error JSON");
@@ -176,7 +176,7 @@ async fn setup_cli_import_list_and_export_preserve_the_catalog_contract() {
         .fetch_one(&pool)
         .await
         .expect("catalog count");
-    assert_eq!(count, 7);
+    assert_eq!(count, 1);
     pool.close().await;
     drop_postgres_schema(&database_url, &schema).await;
 }
