@@ -14,7 +14,7 @@ use serde::{de, Deserialize, Serialize};
 use crate::native_balance_collect::{state_kind, state_version};
 use crate::{
     canonical_evm_block_hash, EvmErc20BalanceBatchReceipt, EvmJointTip,
-    EvmNativeBalanceBatchReceipt, EvmStateError,
+    EvmNativeBalanceBatchReceipt, EvmStateError, RedactedEvmProviderSourceBinding,
 };
 
 /// Certified expectation for the resource receipts required by one EVM network collection.
@@ -75,6 +75,7 @@ pub struct EvmNetworkCollectionReceipt {
     chain_id: u64,
     block_number: u64,
     block_hash: String,
+    source_binding: RedactedEvmProviderSourceBinding,
     native_balance_receipt: Option<EvmNativeBalanceBatchReceipt>,
     erc20_balance_receipt: Option<EvmErc20BalanceBatchReceipt>,
 }
@@ -85,6 +86,7 @@ impl EvmNetworkCollectionReceipt {
         chain_id: u64,
         block_number: u64,
         block_hash: String,
+        source_binding: RedactedEvmProviderSourceBinding,
         native_balance_receipt: Option<EvmNativeBalanceBatchReceipt>,
         erc20_balance_receipt: Option<EvmErc20BalanceBatchReceipt>,
     ) -> Result<Self, EvmStateError> {
@@ -100,12 +102,19 @@ impl EvmNetworkCollectionReceipt {
                     .to_owned(),
             });
         }
+        if !source_binding.is_bound_to(&network, chain_id) {
+            return Err(EvmStateError::InvalidInput {
+                reason: "EVM network collection receipt source binding did not match its network"
+                    .to_owned(),
+            });
+        }
         let block_hash = canonical_evm_block_hash(block_hash)?;
         if let Some(receipt) = &native_balance_receipt {
             if receipt.network() != network
                 || receipt.chain_id() != chain_id
                 || receipt.block_number() != block_number
                 || receipt.block_hash() != block_hash
+                || receipt.source_binding() != &source_binding
             {
                 return Err(EvmStateError::InvalidInput {
                     reason: "EVM native resource receipt did not match the network anchor"
@@ -118,6 +127,7 @@ impl EvmNetworkCollectionReceipt {
                 || receipt.chain_id() != chain_id
                 || receipt.block_number() != block_number
                 || receipt.block_hash() != block_hash
+                || receipt.source_binding() != &source_binding
             {
                 return Err(EvmStateError::InvalidInput {
                     reason: "EVM ERC-20 resource receipt did not match the network anchor"
@@ -130,6 +140,7 @@ impl EvmNetworkCollectionReceipt {
             chain_id,
             block_number,
             block_hash,
+            source_binding,
             native_balance_receipt,
             erc20_balance_receipt,
         })
@@ -155,6 +166,11 @@ impl EvmNetworkCollectionReceipt {
         &self.block_hash
     }
 
+    /// Returns the exact redacted provider source for this collection receipt.
+    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+        &self.source_binding
+    }
+
     /// Returns the native resource receipt when native demand was configured.
     pub fn native_balance_receipt(&self) -> Option<&EvmNativeBalanceBatchReceipt> {
         self.native_balance_receipt.as_ref()
@@ -178,6 +194,7 @@ impl<'de> Deserialize<'de> for EvmNetworkCollectionReceipt {
             chain_id: u64,
             block_number: u64,
             block_hash: String,
+            source_binding: RedactedEvmProviderSourceBinding,
             native_balance_receipt: Option<EvmNativeBalanceBatchReceipt>,
             erc20_balance_receipt: Option<EvmErc20BalanceBatchReceipt>,
         }
@@ -188,6 +205,7 @@ impl<'de> Deserialize<'de> for EvmNetworkCollectionReceipt {
             wire.chain_id,
             wire.block_number,
             wire.block_hash,
+            wire.source_binding,
             wire.native_balance_receipt,
             wire.erc20_balance_receipt,
         )
@@ -278,6 +296,7 @@ pub fn assemble_evm_network_collection_receipt(
         input.joint_tip.chain_id(),
         input.joint_tip.block_number(),
         input.joint_tip.block_hash().to_owned(),
+        input.joint_tip.source_binding().clone(),
         native_balance_receipt,
         erc20_balance_receipt,
     )
@@ -308,7 +327,15 @@ mod tests {
     }
 
     fn tip() -> EvmJointTip {
-        EvmJointTip::new("ethereum-mainnet", 1, 100, HASH).expect("tip")
+        EvmJointTip::new(
+            "ethereum-mainnet",
+            1,
+            100,
+            HASH,
+            RedactedEvmProviderSourceBinding::new("ethereum-mainnet", 1, "primary", "default")
+                .expect("source binding"),
+        )
+        .expect("tip")
     }
 
     fn native_receipt() -> EvmNativeBalanceBatchReceipt {
@@ -370,6 +397,7 @@ mod tests {
         assert!(receipt.native_balance_receipt().is_some());
         assert!(receipt.erc20_balance_receipt().is_some());
         assert_eq!(receipt.block_hash(), HASH);
+        assert_eq!(receipt.source_binding(), tip().source_binding());
 
         assert!(assemble_evm_network_collection_receipt(
             &config,
@@ -385,5 +413,10 @@ mod tests {
         tampered["block_hash"] =
             serde_json::json!("0x2222222222222222222222222222222222222222222222222222222222222222");
         assert!(serde_json::from_value::<EvmNetworkCollectionReceipt>(tampered).is_err());
+
+        let mut substituted_source = serde_json::to_value(&receipt).expect("receipt JSON");
+        substituted_source["native_balance_receipt"]["source_binding"]["source_ref"] =
+            serde_json::json!("secondary");
+        assert!(serde_json::from_value::<EvmNetworkCollectionReceipt>(substituted_source).is_err());
     }
 }

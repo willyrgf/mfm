@@ -19,8 +19,8 @@ use mfm_evm_capabilities::{
     EvmBalanceReadCapability, EvmBalanceReadProvider, EvmBalanceReadRequest,
     EvmBlockReadCapability, EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector,
     EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse,
-    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef,
-    RedactedEvmSourceEvidence, EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
+    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId, RedactedEvmSourceEvidence,
+    EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
@@ -50,8 +50,8 @@ use mfm_states_evm::{
     ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
     ObserveErc20TokenMetadataState, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
     ObserveEvmNativeBalanceState, RecordErc20BalanceFactState, RecordEvmNativeBalanceFactState,
-    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
-    EVM_JOINT_TIP_SOURCE_READS,
+    RedactedEvmProviderSourceBinding, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
+    ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
@@ -65,51 +65,6 @@ const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.jsonrpc",
-    name = "source_read_evidence",
-    version = "1",
-    schema = "mfm.evm.jsonrpc.external_read.source"
-)]
-struct EvmSourceReadEvidence {
-    network_id: String,
-    expected_chain_id: u64,
-    observed_chain_id: u64,
-    source_ref: String,
-    policy_id: String,
-}
-
-impl EvmSourceReadEvidence {
-    fn from_capability(evidence: &mfm_evm_capabilities::RedactedEvmSourceEvidence) -> Self {
-        Self {
-            network_id: evidence.network_id.as_str().to_owned(),
-            expected_chain_id: evidence.expected_chain_id,
-            observed_chain_id: evidence.observed_chain_id,
-            source_ref: evidence.source_ref.as_str().to_owned(),
-            policy_id: evidence.policy_id.as_str().to_owned(),
-        }
-    }
-
-    fn to_capability(&self) -> Result<RedactedEvmSourceEvidence> {
-        let network_id = EvmNetworkId::new(&self.network_id)
-            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
-        let binding = EvmNetworkBinding::new(network_id, self.expected_chain_id)
-            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
-        let source_ref = EvmSourceRef::new(&self.source_ref)
-            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
-        let policy_id = EvmSourcePolicyId::new(&self.policy_id)
-            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
-        RedactedEvmSourceEvidence::from_binding(
-            &binding,
-            self.observed_chain_id,
-            source_ref,
-            policy_id,
-        )
-        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.evm.jsonrpc",
     name = "joint_tip_read_evidence",
     version = "1",
     schema = "mfm.evm.jsonrpc.external_read.joint_tip"
@@ -118,20 +73,20 @@ struct EvmJointTipReadEvidence {
     request_block_selector: String,
     response_block_number: u64,
     response_block_hash: String,
-    source: EvmSourceReadEvidence,
+    source: RedactedEvmProviderSourceBinding,
 }
 
 impl EvmJointTipReadEvidence {
     fn from_capability(
         request: &EvmBlockReadRequest,
         response: &mfm_evm_capabilities::EvmBlockReadResponse,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             request_block_selector: evm_block_selector_text(request.block()),
             response_block_number: response.block_number,
             response_block_hash: format!("{:#x}", response.block_hash),
-            source: EvmSourceReadEvidence::from_capability(&response.evidence),
-        }
+            source: source_binding_from_capability(&response.evidence)?,
+        })
     }
 }
 
@@ -146,11 +101,11 @@ struct EvmNativeBalanceReadEvidence {
     balance_request_account: String,
     balance_request_block_selector: String,
     balance_response_wei: String,
-    balance_source: EvmSourceReadEvidence,
+    balance_source: RedactedEvmProviderSourceBinding,
     verification_request_block_selector: String,
     verification_response_block_number: u64,
     verification_response_block_hash: String,
-    verification_source: EvmSourceReadEvidence,
+    verification_source: RedactedEvmProviderSourceBinding,
 }
 
 impl EvmNativeBalanceReadEvidence {
@@ -159,21 +114,19 @@ impl EvmNativeBalanceReadEvidence {
         balance_response: &mfm_evm_capabilities::EvmBalanceReadResponse,
         verification_request: &EvmBlockReadRequest,
         verification_response: &mfm_evm_capabilities::EvmBlockReadResponse,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             balance_request_account: format!("{:#x}", balance_request.account()),
             balance_request_block_selector: evm_block_selector_text(balance_request.block()),
             balance_response_wei: balance_response.balance_wei.to_string(),
-            balance_source: EvmSourceReadEvidence::from_capability(&balance_response.evidence),
+            balance_source: source_binding_from_capability(&balance_response.evidence)?,
             verification_request_block_selector: evm_block_selector_text(
                 verification_request.block(),
             ),
             verification_response_block_number: verification_response.block_number,
             verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
-            verification_source: EvmSourceReadEvidence::from_capability(
-                &verification_response.evidence,
-            ),
-        }
+            verification_source: source_binding_from_capability(&verification_response.evidence)?,
+        })
     }
 }
 
@@ -224,11 +177,11 @@ struct EvmErc20CallReadEvidence {
     calldata: String,
     block_selector: EvmCanonicalHashSelectorEvidence,
     return_data: String,
-    source: EvmSourceReadEvidence,
+    source: RedactedEvmProviderSourceBinding,
     verification_block_hash: String,
     verification_response_block_number: u64,
     verification_response_block_hash: String,
-    verification_source: EvmSourceReadEvidence,
+    verification_source: RedactedEvmProviderSourceBinding,
 }
 
 impl EvmErc20CallReadEvidence {
@@ -243,13 +196,11 @@ impl EvmErc20CallReadEvidence {
             calldata: mfm_evm_core::hex::bytes_to_hex_prefixed(request.calldata()),
             block_selector: EvmCanonicalHashSelectorEvidence::from_selector(request.block())?,
             return_data: mfm_evm_core::hex::bytes_to_hex_prefixed(&response.return_data),
-            source: EvmSourceReadEvidence::from_capability(&response.evidence),
+            source: source_binding_from_capability(&response.evidence)?,
             verification_block_hash: hash_selector_text(verification_request.block())?,
             verification_response_block_number: verification_response.block_number,
             verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
-            verification_source: EvmSourceReadEvidence::from_capability(
-                &verification_response.evidence,
-            ),
+            verification_source: source_binding_from_capability(&verification_response.evidence)?,
         })
     }
 
@@ -287,12 +238,12 @@ impl EvmErc20CallReadEvidence {
         Ok((
             EvmCallReadRequest::new(destination, calldata, block),
             EvmCallReadResponse {
-                evidence: self.source.to_capability()?,
+                evidence: capability_source_from_binding(&self.source)?,
                 return_data,
             },
             EvmBlockReadRequest::new(EvmBlockSelector::Hash(verification_block_hash)),
             mfm_evm_capabilities::EvmBlockReadResponse {
-                evidence: self.verification_source.to_capability()?,
+                evidence: capability_source_from_binding(&self.verification_source)?,
                 block_number: self.verification_response_block_number,
                 block_hash: verification_hash,
             },
@@ -305,6 +256,21 @@ fn hash_selector_text(selector: &EvmBlockSelector) -> Result<String> {
         return Err(EvmAdapterError::InvalidCapabilityRequest);
     };
     Ok(format!("{block_hash:#x}"))
+}
+
+fn source_binding_from_capability(
+    evidence: &RedactedEvmSourceEvidence,
+) -> Result<RedactedEvmProviderSourceBinding> {
+    RedactedEvmProviderSourceBinding::from_capability(evidence)
+        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
+}
+
+fn capability_source_from_binding(
+    binding: &RedactedEvmProviderSourceBinding,
+) -> Result<RedactedEvmSourceEvidence> {
+    binding
+        .to_capability()
+        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
 }
 
 fn evm_block_selector_text(selector: &EvmBlockSelector) -> String {
@@ -577,10 +543,10 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
                 .materialize_response(&response)
                 .map_err(evm_state_runtime_error)?;
             let request = EvmBlockReadRequest::new(EvmBlockSelector::Latest);
+            let evidence = EvmJointTipReadEvidence::from_capability(&request, &response)
+                .map_err(evm_adapter_runtime_error)?;
             let mut output = RunnerOutputBuilder::new(&ctx);
-            output.record_external_read_evidence(&EvmJointTipReadEvidence::from_capability(
-                &request, &response,
-            ))?;
+            output.record_external_read_evidence(&evidence)?;
             output.state_output(&tip)?;
             Ok(output.finish())
         })
@@ -648,9 +614,10 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
             // Explicit tip equality check (number must match joint tip as well).
             if verified_tip.block_number() != input.joint_tip.block_number()
                 || verified_tip.block_hash() != input.joint_tip.block_hash()
+                || verified_tip.source_binding() != input.joint_tip.source_binding()
             {
                 return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                    "tip drift or hash mismatch before Platform write".to_owned(),
+                    "tip drift, hash, or provider-source mismatch before Platform write".to_owned(),
                 ));
             }
             let observation = state
@@ -659,15 +626,15 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
             let balance_request =
                 EvmBalanceReadRequest::new(account, EvmBlockSelector::Hash(tip_hash));
             let verification_request = EvmBlockReadRequest::new(EvmBlockSelector::Hash(tip_hash));
+            let evidence = EvmNativeBalanceReadEvidence::from_capability(
+                &balance_request,
+                &balance,
+                &verification_request,
+                &verified_block,
+            )
+            .map_err(evm_adapter_runtime_error)?;
             let mut output = RunnerOutputBuilder::new(&ctx);
-            output.record_external_read_evidence(
-                &EvmNativeBalanceReadEvidence::from_capability(
-                    &balance_request,
-                    &balance,
-                    &verification_request,
-                    &verified_block,
-                ),
-            )?;
+            output.record_external_read_evidence(&evidence)?;
             output.state_output(&observation)?;
             Ok(output.finish())
         })
@@ -1000,11 +967,15 @@ fn verify_evm_shared_joint_tips(
     metadata_frames: &[replay::ProducedCellReplayFrame],
     balance_frames: &[replay::ProducedCellReplayFrame],
 ) -> replay::Result<()> {
-    let mut anchors = BTreeMap::<String, (u64, String)>::new();
+    let mut anchors = BTreeMap::<String, (u64, String, RedactedEvmProviderSourceBinding)>::new();
     for frame in native_frames {
         let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
         let tip = replay_joint_tip_input(broker, &frame.node)?;
-        let anchor = (tip.block_number(), tip.block_hash().to_owned());
+        let anchor = (
+            tip.block_number(),
+            tip.block_hash().to_owned(),
+            tip.source_binding().clone(),
+        );
         let (network, _, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
         if anchors
             .insert(network.to_owned(), anchor.clone())
@@ -1018,7 +989,11 @@ fn verify_evm_shared_joint_tips(
     for frame in metadata_frames {
         let config: ObserveErc20TokenMetadataConfig = replay_node_config(broker, &frame.node)?;
         let tip = replay_joint_tip_input(broker, &frame.node)?;
-        let anchor = (tip.block_number(), tip.block_hash().to_owned());
+        let anchor = (
+            tip.block_number(),
+            tip.block_hash().to_owned(),
+            tip.source_binding().clone(),
+        );
         let (network, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
         if anchors
             .insert(network.to_owned(), anchor.clone())
@@ -1032,7 +1007,11 @@ fn verify_evm_shared_joint_tips(
     for frame in balance_frames {
         let config: ObserveErc20BalanceConfig = replay_node_config(broker, &frame.node)?;
         let tip = replay_joint_tip_input(broker, &frame.node)?;
-        let anchor = (tip.block_number(), tip.block_hash().to_owned());
+        let anchor = (
+            tip.block_number(),
+            tip.block_hash().to_owned(),
+            tip.source_binding().clone(),
+        );
         let (network, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
         if anchors
             .insert(network.to_owned(), anchor.clone())
@@ -1056,7 +1035,9 @@ fn verify_evm_joint_tip_replay(broker: &replay::ReplayBroker) -> replay::Result<
         let config: ResolveEvmJointTipConfig = replay_node_config(broker, &frame.node)?;
         let evidence: EvmJointTipReadEvidence = replay_external_read_evidence(broker, frame)?;
         if evidence.request_block_selector != "latest"
-            || !evm_source_matches(&evidence.source, &config.network, config.chain_id)
+            || !evidence
+                .source
+                .is_bound_to(&config.network, config.chain_id)
         {
             return Err(replay_evm_mismatch(
                 "EVM joint-tip read evidence did not match certified request or source binding",
@@ -1069,6 +1050,7 @@ fn verify_evm_joint_tip_replay(broker: &replay::ReplayBroker) -> replay::Result<
             config.chain_id,
             evidence.response_block_number,
             format!("{block_hash:#x}"),
+            evidence.source,
         )
         .map_err(replay_adapter_error)?;
         ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
@@ -1094,27 +1076,27 @@ fn verify_evm_native_balance_observation_replay(
         chain_id,
         evidence.verification_response_block_number,
         &evidence.verification_response_block_hash,
+        evidence.verification_source.clone(),
     )
     .map_err(replay_adapter_error)?;
     if evidence.balance_request_account != format!("{account:#x}")
         || evidence.balance_request_block_selector != expected_selector
         || evidence.verification_request_block_selector != expected_selector
-        || evidence.verification_response_block_number != input_tip.block_number()
-        || verified_tip.block_hash() != input_tip.block_hash()
-        || !evm_source_matches(&evidence.balance_source, network, chain_id)
-        || !evm_source_matches(&evidence.verification_source, network, chain_id)
+        || verified_tip != input_tip
+        || evidence.balance_source != *input_tip.source_binding()
     {
         return Err(replay_evm_mismatch(
             "EVM native-balance read evidence did not match certified requests or source binding",
         ));
     }
+    let balance_evidence =
+        capability_source_from_binding(&evidence.balance_source).map_err(replay_adapter_error)?;
     let expected = normalize_evm_native_balance_observation(
         &config,
         &input_tip,
         &verified_tip,
         &evidence.balance_response_wei,
-        evidence.balance_source.observed_chain_id,
-        &evidence.balance_source.network_id,
+        &balance_evidence,
     )
     .map_err(replay_adapter_error)?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
@@ -1133,16 +1115,13 @@ fn verify_erc20_token_metadata_replay(
             "ERC-20 metadata anchor re-verification did not use the call hash selector",
         ));
     }
-    let (network, chain_id) = config.evm_network_parts().map_err(replay_adapter_error)?;
-    if !evm_source_matches(
-        &EvmSourceReadEvidence::from_capability(&response.evidence),
-        network,
-        chain_id,
-    ) || !evm_source_matches(
-        &EvmSourceReadEvidence::from_capability(&verification.evidence),
-        network,
-        chain_id,
-    ) {
+    if !joint_tip
+        .source_binding()
+        .matches_capability(&response.evidence)
+        || !joint_tip
+            .source_binding()
+            .matches_capability(&verification.evidence)
+    {
         return Err(replay_evm_mismatch(
             "ERC-20 metadata read evidence did not match certified source binding",
         ));
@@ -1176,16 +1155,15 @@ fn verify_erc20_balance_observation_replay(
             "ERC-20 balance anchor re-verification did not use the call hash selector",
         ));
     }
-    let (network, chain_id) = config.evm_network_parts().map_err(replay_adapter_error)?;
-    if !evm_source_matches(
-        &EvmSourceReadEvidence::from_capability(&response.evidence),
-        network,
-        chain_id,
-    ) || !evm_source_matches(
-        &EvmSourceReadEvidence::from_capability(&verification.evidence),
-        network,
-        chain_id,
-    ) {
+    if !input
+        .joint_tip
+        .source_binding()
+        .matches_capability(&response.evidence)
+        || !input
+            .joint_tip
+            .source_binding()
+            .matches_capability(&verification.evidence)
+    {
         return Err(replay_evm_mismatch(
             "ERC-20 balance read evidence did not match certified source binding",
         ));
@@ -1673,14 +1651,6 @@ where
     serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)
 }
 
-fn evm_source_matches(source: &EvmSourceReadEvidence, network: &str, chain_id: u64) -> bool {
-    source.network_id == network
-        && source.expected_chain_id == chain_id
-        && source.observed_chain_id == chain_id
-        && !source.source_ref.trim().is_empty()
-        && !source.policy_id.trim().is_empty()
-}
-
 fn ensure_canonical_value_matches<T: serde::Serialize>(
     expected: &T,
     actual: &[u8],
@@ -1756,6 +1726,7 @@ fn replay_evm_mismatch(message: &'static str) -> replay::ReplayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
 
     const HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const TOKEN: &str = "0x0000000000000000000000000000000000000001";
@@ -1813,9 +1784,14 @@ mod tests {
         assert_eq!(evidence.verification_block_hash, HASH);
         assert_eq!(evidence.verification_response_block_number, 100);
         assert_eq!(evidence.verification_response_block_hash, HASH);
-        assert_eq!(evidence.source.network_id, "ethereum-mainnet");
-        assert_eq!(evidence.source.source_ref, "primary");
-        assert_eq!(evidence.source.policy_id, "default");
+        assert_eq!(evidence.source.network(), "ethereum-mainnet");
+        assert_eq!(evidence.source.chain_id(), 1);
+        assert_eq!(evidence.source.source_ref(), "primary");
+        assert_eq!(evidence.source.policy_id(), "default");
+        let value = serde_json::to_value(&evidence).expect("JSON value");
+        assert_eq!(value["source"]["network"], "ethereum-mainnet");
+        assert_eq!(value["source"]["chain_id"], 1);
+        assert!(value["source"].get("observed_chain_id").is_none());
         let rendered = serde_json::to_string(&evidence).expect("json");
         for forbidden in ["http://", "https://", "authorization", "password"] {
             assert!(!rendered.contains(forbidden), "leaked {forbidden}");

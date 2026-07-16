@@ -52,34 +52,62 @@ fn balance_config(account: &str) -> ObserveErc20BalanceConfig {
 }
 
 fn evidence() -> RedactedEvmSourceEvidence {
+    evidence_for("primary", "default")
+}
+
+fn evidence_for(source_ref: &str, policy_id: &str) -> RedactedEvmSourceEvidence {
     let binding = EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet").expect("net"), 1)
         .expect("binding");
     RedactedEvmSourceEvidence::from_binding(
         &binding,
         1,
-        EvmSourceRef::new("primary").expect("source"),
-        EvmSourcePolicyId::new("default").expect("policy"),
+        EvmSourceRef::new(source_ref).expect("source"),
+        EvmSourcePolicyId::new(policy_id).expect("policy"),
     )
     .expect("evidence")
 }
 
+fn source_binding() -> RedactedEvmProviderSourceBinding {
+    RedactedEvmProviderSourceBinding::from_capability(&evidence()).expect("source binding")
+}
+
+fn source_binding_for(source_ref: &str) -> RedactedEvmProviderSourceBinding {
+    RedactedEvmProviderSourceBinding::from_capability(&evidence_for(source_ref, "default"))
+        .expect("source binding")
+}
+
 fn block_response(number: u64, hash: &str) -> EvmBlockReadResponse {
+    block_response_with_evidence(number, hash, evidence())
+}
+
+fn block_response_with_evidence(
+    number: u64,
+    hash: &str,
+    evidence: RedactedEvmSourceEvidence,
+) -> EvmBlockReadResponse {
     EvmBlockReadResponse {
-        evidence: evidence(),
+        evidence,
         block_number: number,
         block_hash: B256::from_str(hash.strip_prefix("0x").expect("prefix")).expect("hash"),
     }
 }
 
 fn call_response(return_data: impl Into<Vec<u8>>) -> EvmCallReadResponse {
+    call_response_with_evidence(return_data, evidence())
+}
+
+fn call_response_with_evidence(
+    return_data: impl Into<Vec<u8>>,
+    evidence: RedactedEvmSourceEvidence,
+) -> EvmCallReadResponse {
     EvmCallReadResponse {
-        evidence: evidence(),
+        evidence,
         return_data: return_data.into(),
     }
 }
 
 fn tip() -> EvmJointTip {
-    EvmJointTip::new("ethereum-mainnet", 1, 100, HASH_A).expect("tip")
+    EvmJointTip::new("ethereum-mainnet", 1, 100, HASH_A, source_binding()).expect("tip")
 }
 
 fn metadata(decimals: u8) -> EvmErc20TokenMetadata {
@@ -179,6 +207,77 @@ fn metadata_rejects_malformed_words_and_anchor_drift() {
 }
 
 #[test]
+fn erc20_reads_and_metadata_reject_substituted_provider_source() {
+    let metadata_config = metadata_config();
+    let tip = tip();
+    let metadata_request = erc20_metadata_call_request(&metadata_config, &tip).expect("request");
+    let mut decimals = [0u8; 32];
+    decimals[31] = 18;
+    for substituted_evidence in [
+        evidence_for("secondary", "default"),
+        evidence_for("primary", "secondary"),
+    ] {
+        assert!(normalize_erc20_token_metadata_from_capability(
+            &metadata_config,
+            &tip,
+            &metadata_request,
+            &call_response_with_evidence(decimals, substituted_evidence),
+            &block_response(100, HASH_A),
+        )
+        .is_err());
+    }
+    assert!(normalize_erc20_token_metadata_from_capability(
+        &metadata_config,
+        &tip,
+        &metadata_request,
+        &call_response(decimals),
+        &block_response_with_evidence(100, HASH_A, evidence_for("secondary", "default")),
+    )
+    .is_err());
+
+    let metadata = metadata(18);
+    assert_eq!(metadata.source_binding(), tip.source_binding());
+    let balance_config = balance_config(ACCT_A);
+    let input = ObserveErc20BalanceInput {
+        joint_tip: tip.clone(),
+        metadata,
+    };
+    let balance_request = erc20_balance_call_request(&balance_config, &input).expect("request");
+    assert!(normalize_erc20_balance_from_capability(
+        &balance_config,
+        &input,
+        &balance_request,
+        &call_response_with_evidence([0u8; 32], evidence_for("secondary", "default")),
+        &block_response(100, HASH_A),
+    )
+    .is_err());
+    assert!(normalize_erc20_balance_from_capability(
+        &balance_config,
+        &input,
+        &balance_request,
+        &call_response([0u8; 32]),
+        &block_response_with_evidence(100, HASH_A, evidence_for("secondary", "default")),
+    )
+    .is_err());
+
+    let substituted_metadata = EvmErc20TokenMetadata::new(
+        "ethereum-mainnet",
+        1,
+        TOKEN_A,
+        18,
+        100,
+        HASH_A,
+        source_binding_for("secondary"),
+    )
+    .expect("metadata");
+    let substituted_input = ObserveErc20BalanceInput {
+        joint_tip: tip,
+        metadata: substituted_metadata,
+    };
+    assert!(erc20_balance_call_request(&balance_config, &substituted_input).is_err());
+}
+
+#[test]
 fn balance_request_has_exact_padding_and_binding() {
     let config = balance_config(ACCT_A);
     let input = ObserveErc20BalanceInput {
@@ -253,8 +352,16 @@ fn balance_rejects_network_chain_and_metadata_tip_mismatches() {
     wrong_chain.network = semantic_evm_network("ethereum-mainnet", 2);
     assert!(erc20_balance_call_request(&wrong_chain, &input).is_err());
 
-    let wrong_metadata = EvmErc20TokenMetadata::new("ethereum-mainnet", 1, TOKEN_A, 18, 99, HASH_A)
-        .expect("metadata");
+    let wrong_metadata = EvmErc20TokenMetadata::new(
+        "ethereum-mainnet",
+        1,
+        TOKEN_A,
+        18,
+        99,
+        HASH_A,
+        source_binding(),
+    )
+    .expect("metadata");
     let wrong_tip_input = ObserveErc20BalanceInput {
         joint_tip: tip(),
         metadata: wrong_metadata,
@@ -421,6 +528,7 @@ fn erc20_receipt_preserves_zero_and_rejects_tampered_material() {
         })
         .expect("receipt");
     assert_eq!(receipt.entries().len(), 1);
+    assert_eq!(receipt.source_binding(), tip().source_binding());
     assert_eq!(receipt.entries()[0].coverage(), EVM_ERC20_BALANCE_COVERAGE);
     assert_eq!(
         receipt.entries()[0].source_status(),

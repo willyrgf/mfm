@@ -637,7 +637,12 @@ runner registry, live transports, signer providers, keystores, or live capabilit
 
 Live provider identity is enforced by bound provider implementations. Runners derive a certified
 semantic binding, such as EVM `network_id` plus expected chain id or Bitcoin `network_id`,
-`source_identity`, and expected network tag, before issuing operation-only capability requests. A
+`source_identity`, and expected network tag, before issuing operation-only capability requests. An
+EVM collection's resolved joint tip persists one redacted provider-source binding:
+`network_id`, chain id, `source_ref`, and `policy_id`. Every native balance, ERC-20 metadata,
+ERC-20 balance, and hash re-verification response must equal that binding exactly. The binding is
+also carried through the ERC-20 metadata and EVM resource/network receipts, so live execution and
+evidence-only replay reject source drift or substitution even when the network and chain match. A
 route that resolves but observes incompatible source evidence fails after `RunAdmitted` as an
 attempt/capability failure with a closed redacted provider diagnostic. Provider diagnostics carry a
 provider family, stable diagnostic code, optional redaction-safe operation id, and closed

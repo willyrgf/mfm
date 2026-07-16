@@ -35,7 +35,7 @@ use crate::{
     address_erc20_balance_fact_visibility, canonical_evm_block_hash,
     validate_canonical_erc20_contract_address, EvmAddressErc20BalanceObservation,
     EvmAddressErc20BalanceResponse, EvmAddressErc20BalanceSnapshotFact,
-    EvmAddressErc20BalanceSubject, EvmJointTip, EvmStateError,
+    EvmAddressErc20BalanceSubject, EvmJointTip, EvmStateError, RedactedEvmProviderSourceBinding,
 };
 
 /// Exact number of source reads for one anchored ERC-20 `decimals()` observation.
@@ -121,6 +121,7 @@ pub struct EvmErc20TokenMetadata {
     decimals: u8,
     block_number: u64,
     block_hash: String,
+    source_binding: RedactedEvmProviderSourceBinding,
     source_read_count: u64,
 }
 
@@ -133,6 +134,7 @@ impl EvmErc20TokenMetadata {
         decimals: u8,
         block_number: u64,
         block_hash: impl Into<String>,
+        source_binding: RedactedEvmProviderSourceBinding,
     ) -> Result<Self, EvmStateError> {
         let network = network.into();
         let contract_address = contract_address.into();
@@ -146,6 +148,12 @@ impl EvmErc20TokenMetadata {
                 reason: "erc20 metadata chain_id must be non-zero".to_owned(),
             });
         }
+        if !source_binding.is_bound_to(&network, chain_id) {
+            return Err(EvmStateError::InvalidInput {
+                reason: "erc20 metadata source binding does not match its network and chain"
+                    .to_owned(),
+            });
+        }
         validate_canonical_erc20_contract_address(&contract_address)?;
         let block_hash = canonical_evm_block_hash(block_hash)?;
         Ok(Self {
@@ -155,6 +163,7 @@ impl EvmErc20TokenMetadata {
             decimals,
             block_number,
             block_hash,
+            source_binding,
             source_read_count: EVM_ERC20_METADATA_OBSERVE_SOURCE_READS,
         })
     }
@@ -189,6 +198,11 @@ impl EvmErc20TokenMetadata {
         &self.block_hash
     }
 
+    /// Returns the exact redacted provider source that supplied this metadata.
+    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+        &self.source_binding
+    }
+
     /// Returns the exact state-owned source-read count.
     pub const fn source_read_count(&self) -> u64 {
         self.source_read_count
@@ -206,6 +220,7 @@ impl EvmErc20TokenMetadata {
             self.decimals,
             self.block_number,
             self.block_hash.clone(),
+            self.source_binding.clone(),
         )?;
         if &rebuilt != self {
             return Err(EvmStateError::InvalidInput {
@@ -222,6 +237,7 @@ impl EvmErc20TokenMetadata {
             || self.contract_address != config.contract_address.as_str()
             || self.block_number != joint_tip.block_number()
             || self.block_hash != joint_tip.block_hash()
+            || self.source_binding != *joint_tip.source_binding()
         {
             return Err(EvmStateError::InvalidInput {
                 reason: "erc20 metadata does not match balance config and shared joint tip"
@@ -275,7 +291,7 @@ pub fn normalize_erc20_token_metadata_from_capability(
     let (network, chain_id) = config
         .evm_network_parts()
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
-    require_call_source_binding(&response.evidence, network, chain_id, "erc20 metadata")?;
+    require_call_source_binding(joint_tip, &response.evidence, "erc20 metadata")?;
     verify_joint_tip_response(network, chain_id, joint_tip, verification, "erc20 metadata")?;
     let decimals = mfm_evm_core::encoding::decode_erc20_decimals_result(&response.return_data)
         .map_err(|_| EvmStateError::InvalidInput {
@@ -288,6 +304,7 @@ pub fn normalize_erc20_token_metadata_from_capability(
         decimals,
         joint_tip.block_number(),
         joint_tip.block_hash(),
+        joint_tip.source_binding().clone(),
     )
 }
 
@@ -478,7 +495,7 @@ pub fn normalize_erc20_balance_from_capability(
     let (network, chain_id) = config
         .evm_network_parts()
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
-    require_call_source_binding(&response.evidence, network, chain_id, "erc20 balance")?;
+    require_call_source_binding(&input.joint_tip, &response.evidence, "erc20 balance")?;
     verify_joint_tip_response(
         network,
         chain_id,
@@ -886,6 +903,7 @@ pub struct EvmErc20BalanceBatchReceipt {
     chain_id: u64,
     block_number: u64,
     block_hash: String,
+    source_binding: RedactedEvmProviderSourceBinding,
     successful_observation_count: u64,
     entries: Vec<EvmErc20BalanceReceiptEntry>,
 }
@@ -896,6 +914,7 @@ impl EvmErc20BalanceBatchReceipt {
         chain_id: u64,
         block_number: u64,
         block_hash: String,
+        source_binding: RedactedEvmProviderSourceBinding,
         successful_observation_count: u64,
         entries: Vec<EvmErc20BalanceReceiptEntry>,
     ) -> Result<Self, EvmStateError> {
@@ -913,6 +932,12 @@ impl EvmErc20BalanceBatchReceipt {
         if successful_observation_count != expected_count {
             return Err(EvmStateError::InvalidInput {
                 reason: "EVM ERC-20 balance receipt successful count did not match entries"
+                    .to_owned(),
+            });
+        }
+        if !source_binding.is_bound_to(&network, chain_id) {
+            return Err(EvmStateError::InvalidInput {
+                reason: "EVM ERC-20 balance receipt source binding did not match its network"
                     .to_owned(),
             });
         }
@@ -947,6 +972,7 @@ impl EvmErc20BalanceBatchReceipt {
             chain_id,
             block_number,
             block_hash,
+            source_binding,
             successful_observation_count,
             entries,
         })
@@ -972,6 +998,11 @@ impl EvmErc20BalanceBatchReceipt {
         &self.block_hash
     }
 
+    /// Returns the exact redacted provider source for this collection receipt.
+    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+        &self.source_binding
+    }
+
     /// Returns the completed source observation count.
     pub const fn successful_observation_count(&self) -> u64 {
         self.successful_observation_count
@@ -995,6 +1026,7 @@ impl<'de> Deserialize<'de> for EvmErc20BalanceBatchReceipt {
             chain_id: u64,
             block_number: u64,
             block_hash: String,
+            source_binding: RedactedEvmProviderSourceBinding,
             successful_observation_count: u64,
             entries: Vec<EvmErc20BalanceReceiptEntry>,
         }
@@ -1005,6 +1037,7 @@ impl<'de> Deserialize<'de> for EvmErc20BalanceBatchReceipt {
             wire.chain_id,
             wire.block_number,
             wire.block_hash,
+            wire.source_binding,
             wire.successful_observation_count,
             wire.entries,
         )
@@ -1072,6 +1105,7 @@ pub fn assemble_evm_erc20_balance_batch_receipt(
         input.joint_tip.chain_id(),
         input.joint_tip.block_number(),
         input.joint_tip.block_hash().to_owned(),
+        input.joint_tip.source_binding().clone(),
         count,
         entries,
     )
@@ -1113,19 +1147,15 @@ fn parse_joint_tip_hash(joint_tip: &EvmJointTip) -> Result<B256, EvmStateError> 
 }
 
 fn require_call_source_binding(
+    joint_tip: &EvmJointTip,
     evidence: &mfm_evm_capabilities::RedactedEvmSourceEvidence,
-    network: &str,
-    chain_id: u64,
     observation: &'static str,
 ) -> Result<(), EvmStateError> {
-    if evidence.network_id.as_str() != network
-        || evidence.expected_chain_id != chain_id
-        || evidence.observed_chain_id != chain_id
-        || evidence.source_ref.as_str().is_empty()
-        || evidence.policy_id.as_str().is_empty()
-    {
+    if !joint_tip.source_binding().matches_capability(evidence) {
         return Err(EvmStateError::InvalidInput {
-            reason: format!("{observation} call response did not match certified source binding"),
+            reason: format!(
+                "{observation} call response did not match the shared provider source binding"
+            ),
         });
     }
     Ok(())
@@ -1139,11 +1169,7 @@ fn verify_joint_tip_response(
     observation: &'static str,
 ) -> Result<(), EvmStateError> {
     let verified_tip = EvmJointTip::from_block_response(network, chain_id, verification)?;
-    if verified_tip.network() != joint_tip.network()
-        || verified_tip.chain_id() != joint_tip.chain_id()
-        || verified_tip.block_number() != joint_tip.block_number()
-        || verified_tip.block_hash() != joint_tip.block_hash()
-    {
+    if &verified_tip != joint_tip {
         return Err(EvmStateError::InvalidInput {
             reason: format!("{observation} anchor re-verification drifted from shared joint tip"),
         });

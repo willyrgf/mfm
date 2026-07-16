@@ -25,6 +25,7 @@
 mod erc20_balance_collect;
 mod native_balance_collect;
 mod network_collection_receipt;
+mod source_binding;
 
 pub use erc20_balance_collect::{
     assemble_evm_erc20_balance_batch_receipt, erc20_balance_call_request,
@@ -68,6 +69,8 @@ pub use network_collection_receipt::{
     AssembleEvmNetworkCollectionReceiptInputHandles, AssembleEvmNetworkCollectionReceiptState,
     EvmNetworkCollectionReceipt,
 };
+
+pub use source_binding::RedactedEvmProviderSourceBinding;
 
 use std::str::FromStr;
 

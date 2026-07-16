@@ -1022,8 +1022,20 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("EVM network");
-        let tip =
-            mfm_states_evm::EvmJointTip::new("ethereum-mainnet", 1, 20, EVM_HASH).expect("EVM tip");
+        let tip = mfm_states_evm::EvmJointTip::new(
+            "ethereum-mainnet",
+            1,
+            20,
+            EVM_HASH,
+            mfm_states_evm::RedactedEvmProviderSourceBinding::new(
+                "ethereum-mainnet",
+                1,
+                "primary",
+                "default",
+            )
+            .expect("source binding"),
+        )
+        .expect("EVM tip");
         let native = include_native.then(|| {
             let fact = mfm_states_evm::EvmAddressNativeBalanceSnapshotFact::try_new(
                 mfm_states_evm::EvmAddressNativeBalanceSubject::new("ethereum-mainnet", 1, account)
