@@ -81,7 +81,7 @@ async fn selects_exact_receipt_facts_and_projects_receipt_pins() {
     )
     .expect("valuations");
     let snapshot = assemble_snapshot(
-        &AssembleSnapshotConfig::new(2, portfolio).expect("snapshot config"),
+        &AssembleSnapshotConfig::new(portfolio).expect("snapshot config"),
         AssembleSnapshotInput {
             subjects,
             holdings: selected,
@@ -90,7 +90,7 @@ async fn selects_exact_receipt_facts_and_projects_receipt_pins() {
         },
     )
     .expect("snapshot");
-    let report = mfm_state_portfolio::project_report_from_snapshot(snapshot, 2).expect("report");
+    let report = mfm_state_portfolio::project_report_from_snapshot(snapshot).expect("report");
     assert_eq!(report.portfolio_id, "dual-mainnet");
 }
 

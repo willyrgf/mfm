@@ -164,6 +164,17 @@ async fn snapshot_root_preserves_zero_btc_native_and_erc20_values() {
         .json
         .expect("zero snapshot JSON")
         .to_string();
+    let rendered_value: Value = serde_json::from_str(&rendered).expect("public output JSON value");
+    assert_eq!(
+        rendered_value["snapshot"]["schema_version"],
+        json!(1),
+        "the public snapshot contract starts at version 1"
+    );
+    assert_eq!(
+        rendered_value["report"]["schema_version"],
+        json!(1),
+        "the public report contract starts at version 1"
+    );
     assert_eq!(
         rendered.matches("\"raw_dec\":\"0\"").count(),
         3,

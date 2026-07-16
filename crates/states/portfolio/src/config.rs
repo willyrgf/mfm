@@ -109,33 +109,22 @@ impl ResolveValuationsConfig {
 
 /// Config for snapshot assembly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     schema = "mfm.portfolio.config.assemble_snapshot",
     validate = "validate_assemble_snapshot_config"
 )]
 pub struct AssembleSnapshotConfig {
-    /// Snapshot schema version to emit.
-    pub(super) snapshot_version: NonZeroU64,
     /// Portfolio config carried into the public snapshot.
     pub(super) portfolio: PortfolioConfig,
 }
 
 impl AssembleSnapshotConfig {
     /// Creates validated snapshot-assembly config.
-    pub fn new(snapshot_version: u64, portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
-        let snapshot_version = NonZeroU64::new(snapshot_version)
-            .ok_or_else(|| ConfigError::new("snapshot schema version must be non-zero"))?;
-        let config = Self {
-            snapshot_version,
-            portfolio,
-        };
+    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
+        let config = Self { portfolio };
         validate_assemble_snapshot_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Returns the snapshot schema version to emit.
-    pub const fn snapshot_version(&self) -> u64 {
-        self.snapshot_version.get()
     }
 
     /// Returns the portfolio config carried into the public snapshot.
@@ -145,26 +134,10 @@ impl AssembleSnapshotConfig {
 }
 
 /// Config for report projection.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(schema = "mfm.portfolio.config.project_report")]
-pub struct ProjectReportConfig {
-    /// Report schema version to emit.
-    pub(super) report_version: NonZeroU64,
-}
-
-impl ProjectReportConfig {
-    /// Creates validated report-projection config.
-    pub fn new(report_version: u64) -> Result<Self, ConfigError> {
-        let report_version = NonZeroU64::new(report_version)
-            .ok_or_else(|| ConfigError::new("report schema version must be non-zero"))?;
-        Ok(Self { report_version })
-    }
-
-    /// Returns the report schema version to emit.
-    pub const fn report_version(&self) -> u64 {
-        self.report_version.get()
-    }
-}
+pub struct ProjectReportConfig {}
 
 fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
     validate_normalized_portfolio(&config.portfolio)

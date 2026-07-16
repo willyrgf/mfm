@@ -38,6 +38,8 @@ and selects facts only when their content and anchor match that receipt.
 The root returns `PortfolioPublicOutputs` with exactly `snapshot` and `report`. It preserves zero
 holdings, exposes direct quote totals, and does not expose receipt entries, source keys, fact
 identities, artifact references, provider evidence, scan bounds, or runtime routes.
+Both public values emit `schema_version: 1`; snapshot and report version selection is not a
+request or certified-state policy.
 
 After admission the catalog is not run authority. Resume, replay, status, stream inspection, and
 public-output rendering use the certified spec and retained evidence. Live capability routes remain

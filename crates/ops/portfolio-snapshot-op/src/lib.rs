@@ -538,7 +538,7 @@ fn expand_receipt_pinned_report<'program, 'scope>(
     let snapshot = builder.state::<AssembleSnapshotState, _>(
         mfm_program::StateKey::new("assemble_snapshot")?,
         NoContext,
-        AssembleSnapshotConfig::new(2, portfolio.clone())
+        AssembleSnapshotConfig::new(portfolio.clone())
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
         AssembleSnapshotInputHandles {
             subjects,
@@ -550,8 +550,7 @@ fn expand_receipt_pinned_report<'program, 'scope>(
     let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
         mfm_program::StateKey::new("project_report")?,
         NoContext,
-        ProjectReportConfig::new(2)
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        ProjectReportConfig::default(),
         ProjectReportInputHandles {
             snapshot: snapshot.clone(),
         },

@@ -95,6 +95,9 @@ pub struct PortfolioSnapshot {
 }
 
 impl PortfolioSnapshot {
+    /// The only supported public snapshot schema version.
+    pub const SCHEMA_VERSION: u64 = 1;
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.network_pins
@@ -133,6 +136,9 @@ pub struct PortfolioReport {
 }
 
 impl PortfolioReport {
+    /// The only supported public report schema version.
+    pub const SCHEMA_VERSION: u64 = 1;
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.network_pins

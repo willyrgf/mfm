@@ -214,9 +214,7 @@ impl PureState for AssembleSnapshotState {
 }
 
 /// State that projects the canonical public report from a snapshot.
-pub struct ProjectReportState {
-    config: ProjectReportConfig,
-}
+pub struct ProjectReportState;
 
 impl StateSpec for ProjectReportState {
     type Config = ProjectReportConfig;
@@ -238,10 +236,8 @@ impl StateSpec for ProjectReportState {
         "mfm.portfolio.project_report"
     }
 
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
+    fn new(_config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self)
     }
 }
 
@@ -251,6 +247,6 @@ impl PureState for ProjectReportState {
         input: Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        project_report_from_snapshot(input.snapshot, self.config.report_version())
+        project_report_from_snapshot(input.snapshot)
     }
 }

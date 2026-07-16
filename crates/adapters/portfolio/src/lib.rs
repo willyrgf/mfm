@@ -248,7 +248,7 @@ struct ProjectReportRunner {
 impl ErasedNodeRunner for ProjectReportRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_runner_config_for_node::<ProjectReportConfig>(
+            let _config = load_runner_config_for_node::<ProjectReportConfig>(
                 ctx.node(),
                 self.artifacts.as_ref(),
             )
@@ -258,11 +258,10 @@ impl ErasedNodeRunner for ProjectReportRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = mfm_state_portfolio::project_report_from_snapshot(
-                input.snapshot,
-                config.as_ref().report_version(),
-            )
-            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+            let output = mfm_state_portfolio::project_report_from_snapshot(input.snapshot)
+                .map_err(|error| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                })?;
             state_output(ctx, &output)
         })
     }

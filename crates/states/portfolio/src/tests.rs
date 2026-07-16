@@ -175,6 +175,22 @@ fn unknown_portfolio_config_fields_are_rejected_on_decode() {
     );
 }
 
+#[test]
+fn output_projection_configs_carry_no_version_policy() {
+    let mut snapshot_config =
+        serde_json::to_value(AssembleSnapshotConfig::new(sample_portfolio()).expect("config"))
+            .expect("snapshot config serializes");
+    assert!(snapshot_config.get("snapshot_version").is_none());
+    snapshot_config["snapshot_version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<AssembleSnapshotConfig>(snapshot_config).is_err());
+
+    let mut report_config =
+        serde_json::to_value(ProjectReportConfig::default()).expect("report config serializes");
+    assert_eq!(report_config, serde_json::json!({}));
+    report_config["report_version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<ProjectReportConfig>(report_config).is_err());
+}
+
 fn assert_unknown_field_rejected<T>(input: &str, label: &str)
 where
     T: serde::de::DeserializeOwned,
@@ -394,7 +410,7 @@ fn fixed_price_selection_assembles_direct_totals_and_receipt_pins() {
     .expect("valuations");
 
     let snapshot = assemble_snapshot(
-        &AssembleSnapshotConfig::new(2, portfolio).expect("assemble config"),
+        &AssembleSnapshotConfig::new(portfolio).expect("assemble config"),
         AssembleSnapshotInput {
             subjects,
             holdings: SelectedHoldings {
@@ -406,8 +422,14 @@ fn fixed_price_selection_assembles_direct_totals_and_receipt_pins() {
     )
     .expect("snapshot");
     assert_eq!(snapshot.network_pins, receipt.network_anchors());
+    assert_eq!(snapshot.schema_version, PortfolioSnapshot::SCHEMA_VERSION);
 
-    let report = project_report_from_snapshot(snapshot, 2).expect("report");
+    let mut unsupported_snapshot = snapshot.clone();
+    unsupported_snapshot.schema_version = 2;
+    assert!(project_report_from_snapshot(unsupported_snapshot).is_err());
+
+    let report = project_report_from_snapshot(snapshot).expect("report");
+    assert_eq!(report.schema_version, PortfolioReport::SCHEMA_VERSION);
     assert_eq!(report.totals_by_quote[0].total_value_dec, "2.5");
     assert_eq!(
         report.wallet_summaries[0].totals_by_quote[0].total_value_dec,
@@ -427,7 +449,7 @@ fn direct_total_reducer_preserves_configured_zero_rows() {
     )
     .expect("valuations");
     let snapshot = assemble_snapshot(
-        &AssembleSnapshotConfig::new(2, portfolio).expect("assemble config"),
+        &AssembleSnapshotConfig::new(portfolio).expect("assemble config"),
         AssembleSnapshotInput {
             subjects,
             holdings: SelectedHoldings {
@@ -439,7 +461,7 @@ fn direct_total_reducer_preserves_configured_zero_rows() {
     )
     .expect("snapshot");
 
-    let report = project_report_from_snapshot(snapshot, 2).expect("report");
+    let report = project_report_from_snapshot(snapshot).expect("report");
     assert_eq!(report.wallet_summaries[0].totals_by_quote.len(), 1);
     assert_eq!(
         report.wallet_summaries[0].totals_by_quote[0].total_value_dec,
@@ -451,7 +473,7 @@ fn direct_total_reducer_preserves_configured_zero_rows() {
 #[test]
 fn assemble_hard_fails_on_missing_or_substituted_receipt_observations() {
     let portfolio = sample_portfolio();
-    let config = AssembleSnapshotConfig::new(2, portfolio.clone()).expect("assemble config");
+    let config = AssembleSnapshotConfig::new(portfolio.clone()).expect("assemble config");
     let subjects = resolve_subjects_from_config(
         &ResolveSubjectsConfig::new(portfolio.clone()).expect("subjects config"),
     );

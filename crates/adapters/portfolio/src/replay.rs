@@ -176,10 +176,9 @@ pub fn verify_portfolio_replay(
     verify_replay_output_bytes(&snapshot_frame, &snapshot, "assembled snapshot")?;
 
     let report_frame = replay_single_state_frame::<ProjectReportState>(broker, "projected report")?;
-    let report_config: ProjectReportConfig = replay_node_config(broker, &report_frame.node)?;
-    let report =
-        mfm_state_portfolio::project_report_from_snapshot(snapshot, report_config.report_version())
-            .map_err(replay_adapter_error)?;
+    let _: ProjectReportConfig = replay_node_config(broker, &report_frame.node)?;
+    let report = mfm_state_portfolio::project_report_from_snapshot(snapshot)
+        .map_err(replay_adapter_error)?;
     verify_replay_output_bytes(&report_frame, &report, "project report")
 }
 

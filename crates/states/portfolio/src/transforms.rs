@@ -351,7 +351,7 @@ pub fn assemble_snapshot(
     symbol_configs.sort_by(|left, right| left.symbol_id.cmp(&right.symbol_id));
 
     let mut snapshot = PortfolioSnapshot {
-        schema_version: config.snapshot_version(),
+        schema_version: PortfolioSnapshot::SCHEMA_VERSION,
         portfolio_id: config.portfolio.portfolio_id.to_string(),
         network_pins,
         wallets,
@@ -361,11 +361,13 @@ pub fn assemble_snapshot(
     Ok(snapshot)
 }
 
-/// Projects a canonical portfolio report from a snapshot.
-pub fn project_report_from_snapshot(
-    snapshot: PortfolioSnapshot,
-    report_version: u64,
-) -> StateResult<PortfolioReport> {
+/// Projects the version-1 canonical portfolio report from a version-1 snapshot.
+pub fn project_report_from_snapshot(snapshot: PortfolioSnapshot) -> StateResult<PortfolioReport> {
+    if snapshot.schema_version != PortfolioSnapshot::SCHEMA_VERSION {
+        return Err(StateError::Message(
+            "portfolio snapshot schema version is not supported".to_owned(),
+        ));
+    }
     let report_quotes = collect_report_quotes(&snapshot);
     let mut portfolio_totals = initialized_quote_totals(&report_quotes);
     let wallet_summaries = snapshot
@@ -383,7 +385,7 @@ pub fn project_report_from_snapshot(
         .collect::<StateResult<Vec<_>>>()?;
 
     let mut report = PortfolioReport {
-        schema_version: report_version,
+        schema_version: PortfolioReport::SCHEMA_VERSION,
         portfolio_id: snapshot.portfolio_id,
         network_pins: snapshot.network_pins,
         wallet_summaries,
