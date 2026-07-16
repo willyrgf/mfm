@@ -161,9 +161,7 @@ struct VerifiedContractSideEffectFrame {
 
 #[derive(Debug, Clone)]
 enum VerifiedContractSideEffectTerminal {
-    DeployReceipt(ContractDeployReceipt),
-    DeployConfirmation(ContractDeployConfirmation),
-    ConfigureReceipt(ContextContractConfigureReceipt),
+    DeployConfirmation(Box<ContractDeployConfirmation>),
     ConfigureConfirmation(ContextContractConfigureConfirmation),
 }
 
@@ -177,6 +175,7 @@ fn verify_contract_state_replay_frame(
         .spec
         .side_effect_verify_pair_for_pair_id(&frame.intent.pair_id)
         .map_err(replay_adapter_error)?;
+    require_finalized_contract_state_verification(pair.submit_node)?;
     let Some(submission_request) = frame.submission_request() else {
         return Err(contract_state_side_effect_missing("submission"));
     };
@@ -185,15 +184,14 @@ fn verify_contract_state_replay_frame(
     };
 
     broker.verify_side_effect_submission(&submission_request, verifier)?;
-    let receipt = broker.verify_side_effect_receipt(&receipt_request, verifier)?;
-    let receipt_terminal = decode_verified_contract_receipt(&receipt)?;
-    let terminal = if let Some(confirmation_request) = frame.confirmation_request() {
-        let confirmation =
-            broker.verify_side_effect_confirmation(&confirmation_request, verifier)?;
-        decode_verified_contract_confirmation(&confirmation)?
-    } else {
-        receipt_terminal
-    };
+    broker.verify_side_effect_receipt(&receipt_request, verifier)?;
+    let confirmation_request = frame.confirmation_request().ok_or_else(|| {
+        replay_contract_mismatch(
+            "finalized contract state side effect has no confirmation replay evidence",
+        )
+    })?;
+    let confirmation = broker.verify_side_effect_confirmation(&confirmation_request, verifier)?;
+    let terminal = decode_verified_contract_confirmation(&confirmation)?;
     let prepared = broker.side_effect_prepared_invocation(&receipt_request)?;
     let prepared = replay_prepared_invocation(Some(&prepared))?;
     let intent_evidence = replay_side_effect_intent(broker, frame.intent)?;
@@ -211,6 +209,25 @@ fn verify_contract_state_replay_frame(
         prepared,
         terminal,
     })
+}
+
+fn require_finalized_contract_state_verification(node: &spec::NodeSpec) -> replay::Result<()> {
+    match node
+        .side_effect
+        .as_ref()
+        .map(|contract| &contract.verification)
+    {
+        Some(spec::SideEffectVerificationSpec::Finalized { depth }) if *depth > 0 => Ok(()),
+        Some(spec::SideEffectVerificationSpec::Finalized { .. }) => Err(replay_contract_mismatch(
+            "contract state side effect has a non-positive finalized verification depth",
+        )),
+        Some(spec::SideEffectVerificationSpec::Receipt) => Err(replay_contract_mismatch(
+            "contract state side effect used receipt-only verification",
+        )),
+        None => Err(replay_contract_mismatch(
+            "contract state side effect lacks a certified verification policy",
+        )),
+    }
 }
 
 fn replay_side_effect_intent(
@@ -237,27 +254,6 @@ fn replay_side_effect_intent(
     })
 }
 
-fn decode_verified_contract_receipt(
-    receipt: &replay::ReceiptReplayEvidence,
-) -> replay::Result<VerifiedContractSideEffectTerminal> {
-    let deploy = ContractDeployReceipt::schema_id().map_err(replay_value_error)?;
-    let configure = ContextContractConfigureReceipt::schema_id().map_err(replay_value_error)?;
-    if receipt.receipt.receipt_schema_id == deploy {
-        serde_json::from_slice(&receipt.artifact_bytes)
-            .map(VerifiedContractSideEffectTerminal::DeployReceipt)
-            .map_err(replay_json_error)
-    } else if receipt.receipt.receipt_schema_id == configure {
-        serde_json::from_slice(&receipt.artifact_bytes)
-            .map(VerifiedContractSideEffectTerminal::ConfigureReceipt)
-            .map_err(replay_json_error)
-    } else {
-        Err(replay::ReplayError::new(
-            replay::ReplayErrorKind::SideEffectMismatch,
-            "receipt schema did not match contract state schemas",
-        ))
-    }
-}
-
 fn decode_verified_contract_confirmation(
     confirmation: &replay::ConfirmationReplayEvidence,
 ) -> replay::Result<VerifiedContractSideEffectTerminal> {
@@ -266,6 +262,7 @@ fn decode_verified_contract_confirmation(
         ContextContractConfigureConfirmation::schema_id().map_err(replay_value_error)?;
     if confirmation.confirmation.confirmation_schema_id == deploy {
         serde_json::from_slice(&confirmation.artifact_bytes)
+            .map(Box::new)
             .map(VerifiedContractSideEffectTerminal::DeployConfirmation)
             .map_err(replay_json_error)
     } else if confirmation.confirmation.confirmation_schema_id == configure {
@@ -423,9 +420,6 @@ fn expected_deployed_output_from_verified_side_effect(
     )
     .map_err(replay_adapter_error)?;
     match &side_effect.terminal {
-        VerifiedContractSideEffectTerminal::DeployReceipt(receipt) => state
-            .output_from_receipt(&(), intent, receipt, context)
-            .map_err(replay_adapter_error),
         VerifiedContractSideEffectTerminal::DeployConfirmation(confirmation) => state
             .output_from_confirmation(&(), intent, confirmation, context)
             .map_err(replay_adapter_error),
@@ -461,9 +455,6 @@ fn expected_configured_output_from_verified_side_effect(
     .map_err(replay_adapter_error)?;
     let input = ContextConfigureContractInput { deployed };
     match &side_effect.terminal {
-        VerifiedContractSideEffectTerminal::ConfigureReceipt(receipt) => state
-            .output_from_receipt(&input, intent, receipt, context)
-            .map_err(replay_adapter_error),
         VerifiedContractSideEffectTerminal::ConfigureConfirmation(confirmation) => state
             .output_from_confirmation(&input, intent, confirmation, context)
             .map_err(replay_adapter_error),
@@ -614,6 +605,11 @@ fn verify_validation_report_replay_output(
             "validation report configured instance context does not match certified context",
         ));
     }
+    if output.observed_chain_id != context.value().network.expected_chain_id() {
+        return Err(replay_contract_mismatch(
+            "validation report observed chain does not match certified context",
+        ));
+    }
     let configured_input = replay_input_cell_value::<ConfiguredContractInstance>(
         broker,
         &frame.node,
@@ -642,6 +638,13 @@ fn verify_validation_report_replay_output(
     for result in &output.event_results {
         require_validation_event_result_canonical_passed(result).map_err(replay_adapter_error)?;
     }
+    let code_identity =
+        replay_validation_code_identity_projection(broker, frame, &context, &configured_input)?;
+    if output.code_identity != code_identity {
+        return Err(replay_contract_mismatch(
+            "validation report code identity projection does not match retained external evidence",
+        ));
+    }
     let valid = output.observed_chain_id == context.value().network.expected_chain_id()
         && output
             .read_results
@@ -650,13 +653,140 @@ fn verify_validation_report_replay_output(
         && output
             .event_results
             .iter()
-            .all(validation_event_result_passes);
+            .all(validation_event_result_passes)
+        && replay_code_identity_matches_expected(
+            context.value().contract_profile.deployed_code_hash.as_ref(),
+            code_identity.as_ref(),
+        );
     if output.valid != valid {
         return Err(replay_contract_mismatch(
             "validation report validity does not match retained evidence",
         ));
     }
     Ok(())
+}
+
+fn replay_validation_code_identity_projection(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    configured: &ConfiguredContractInstance,
+) -> replay::Result<Option<mfm_evm_contract_model::ValidationCodeIdentityReport>> {
+    let expected = context.value().contract_profile.deployed_code_hash.as_ref();
+    let evidence = replay_validation_code_identity_evidence(broker, frame)?;
+    match (expected, evidence) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(replay_contract_mismatch(
+            "validation retained code identity evidence without a certified expected hash",
+        )),
+        (Some(_), None) => Err(replay_contract_mismatch(
+            "validation omitted code identity evidence required by the certified profile",
+        )),
+        (Some(_), Some(evidence)) => {
+            verify_replayed_code_identity_evidence(context, configured, &evidence).map(Some)
+        }
+    }
+}
+
+fn replay_validation_code_identity_evidence(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<Option<ValidationCodeIdentityEvidence>> {
+    let schema = ValidationCodeIdentityEvidence::schema_id().map_err(replay_value_error)?;
+    let references = broker
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::ArtifactReferenced(reference)
+                if reference.node_id.as_ref() == Some(&frame.produced.node_id)
+                    && reference.attempt_id.as_ref() == Some(&frame.produced.attempt_id)
+                    && reference.artifact_ref.role
+                        == events::ArtifactRole::ExternalReadEvidence
+                    && reference.artifact_ref.schema_id == schema =>
+            {
+                Some(reference)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return Ok(None);
+    }
+    if references.len() != 1 {
+        return Err(replay_contract_mismatch(
+            "validation recorded more than one code identity evidence artifact",
+        ));
+    }
+    let reference = references[0];
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: reference.artifact_ref.artifact_id.clone(),
+        evidence_hash: reference.artifact_ref.evidence_hash.clone(),
+        digest: Some(reference.artifact_ref.content_digest.clone()),
+        byte_len: Some(reference.artifact_ref.byte_len),
+        media_type: Some(reference.artifact_ref.media_type.clone()),
+        schema_id: Some(schema),
+        semantic_type_id: None,
+        producer_node_id: Some(frame.produced.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::ExternalReadEvidence),
+    };
+    let artifact = broker.retained_artifact(&requirement)?;
+    serde_json::from_slice(&artifact.artifact_bytes)
+        .map(Some)
+        .map_err(replay_json_error)
+}
+
+pub(super) fn verify_replayed_code_identity_evidence(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    configured: &ConfiguredContractInstance,
+    evidence: &ValidationCodeIdentityEvidence,
+) -> replay::Result<mfm_evm_contract_model::ValidationCodeIdentityReport> {
+    let selector = &evidence.selector;
+    if evidence.evidence_version != 1
+        || selector.address != configured.address
+        || selector.block_number != configured.anchor.block_number
+        || selector.block_hash != configured.anchor.block_hash
+        || !selector.require_canonical
+    {
+        return Err(replay_contract_mismatch(
+            "validation code identity selector does not match configured anchor",
+        ));
+    }
+    verify_validation_source(context, &evidence.source)?;
+    if evidence.source.source_ref.trim().is_empty() || evidence.source.policy_id.trim().is_empty() {
+        return Err(replay_contract_mismatch(
+            "validation code identity source evidence was not authenticated",
+        ));
+    }
+    let observed_byte_len = u64::try_from(evidence.runtime_bytecode.len())
+        .map_err(|_| replay_contract_mismatch("validation runtime bytecode length exceeds u64"))?;
+    let recomputed_hash = EvmCodeHash::new(format!("{:?}", keccak256(&evidence.runtime_bytecode)))
+        .map_err(replay_model_error)?;
+    if evidence.observed_byte_len != observed_byte_len
+        || evidence.observed_code_hash != recomputed_hash
+    {
+        return Err(replay_contract_mismatch(
+            "validation code identity metadata does not match retained runtime bytecode",
+        ));
+    }
+    Ok(mfm_evm_contract_model::ValidationCodeIdentityReport {
+        observed_byte_len,
+        observed_code_hash: recomputed_hash,
+    })
+}
+
+fn replay_code_identity_matches_expected(
+    expected: Option<&EvmCodeHash>,
+    report: Option<&mfm_evm_contract_model::ValidationCodeIdentityReport>,
+) -> bool {
+    match (expected, report) {
+        (None, None) => true,
+        (Some(expected), Some(report)) => {
+            report.observed_byte_len > 0 && &report.observed_code_hash == expected
+        }
+        _ => false,
+    }
 }
 
 fn verify_context_bound_replay_output<T>(
@@ -846,6 +976,11 @@ fn verify_validation_source(
     {
         return Err(replay_contract_mismatch(
             "validation EVM source evidence does not match certified context",
+        ));
+    }
+    if evidence.source_ref.trim().is_empty() || evidence.policy_id.trim().is_empty() {
+        return Err(replay_contract_mismatch(
+            "validation EVM source evidence was not authenticated",
         ));
     }
     EvmNetworkId::new(evidence.network_id.as_str()).map_err(replay_adapter_error)?;

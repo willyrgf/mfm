@@ -432,6 +432,7 @@ impl EvmJsonRpcClient {
             .and_then(Value::as_str)
             .ok_or(EvmTransportError::InvalidResponse)
             .and_then(parse_u64)?;
+        let block_hash = parse_b256_field(&result, "blockHash")?;
         let status = result
             .get("status")
             .and_then(Value::as_str)
@@ -441,6 +442,7 @@ impl EvmJsonRpcClient {
             evidence: selected.evidence.clone(),
             transaction_hash,
             block_number,
+            block_hash,
             status,
         })
     }

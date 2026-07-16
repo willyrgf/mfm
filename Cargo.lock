@@ -2499,6 +2499,7 @@ dependencies = [
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
+ "mfm-replay",
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-signing",

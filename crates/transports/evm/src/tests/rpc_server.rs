@@ -22,6 +22,10 @@ impl TestRpcServer {
         Self::spawn_with_mode(TestRpcMode::EmptyCode { chain_id }).await
     }
 
+    pub(super) async fn spawn_malformed_code(chain_id: &'static str) -> Self {
+        Self::spawn_with_mode(TestRpcMode::MalformedCode { chain_id }).await
+    }
+
     pub(super) async fn spawn_nonce_occupancy(chain_id: &'static str) -> Self {
         Self::spawn_with_mode(TestRpcMode::NonceOccupancy { chain_id }).await
     }
@@ -32,6 +36,10 @@ impl TestRpcServer {
 
     pub(super) async fn spawn_receipt_hash_mismatch(chain_id: &'static str) -> Self {
         Self::spawn_with_mode(TestRpcMode::ReceiptHashMismatch { chain_id }).await
+    }
+
+    pub(super) async fn spawn_receipt_missing_block_hash(chain_id: &'static str) -> Self {
+        Self::spawn_with_mode(TestRpcMode::ReceiptMissingBlockHash { chain_id }).await
     }
 
     pub(super) async fn spawn_log_filter_mismatch(chain_id: &'static str) -> Self {
@@ -157,6 +165,24 @@ impl TestRpcServer {
                                 body
                             )
                         }
+                        TestRpcMode::MalformedCode { chain_id } => {
+                            let result = if method == "eth_getCode" {
+                                json!("0xnot-hex")
+                            } else {
+                                rpc_result(chain_id, &method)
+                            };
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": result,
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
                         TestRpcMode::NonceOccupancy { chain_id } => {
                             let result = nonce_occupancy_rpc_result(chain_id, &method);
                             let body = serde_json::json!({
@@ -187,6 +213,28 @@ impl TestRpcServer {
                         }
                         TestRpcMode::ReceiptHashMismatch { chain_id } => {
                             let result = receipt_hash_mismatch_rpc_result(chain_id, &method);
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": result,
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
+                        TestRpcMode::ReceiptMissingBlockHash { chain_id } => {
+                            let result = if method == "eth_getTransactionReceipt" {
+                                json!({
+                                    "transactionHash": HASH_HEX,
+                                    "blockNumber": "0x2a",
+                                    "status": "0x1",
+                                })
+                            } else {
+                                rpc_result(chain_id, &method)
+                            };
                             let body = serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "id": 1,
@@ -269,9 +317,11 @@ enum TestRpcMode {
     LegacyFee { chain_id: &'static str },
     PendingReceipt { chain_id: &'static str },
     EmptyCode { chain_id: &'static str },
+    MalformedCode { chain_id: &'static str },
     NonceOccupancy { chain_id: &'static str },
     BlockIdentityMismatch { chain_id: &'static str },
     ReceiptHashMismatch { chain_id: &'static str },
+    ReceiptMissingBlockHash { chain_id: &'static str },
     LogFilterMismatch { chain_id: &'static str },
     LogMissingBlockNumber { chain_id: &'static str },
     Failure,
@@ -337,6 +387,7 @@ fn rpc_result(chain_id: &str, method: &str) -> Value {
         "eth_getTransactionReceipt" => json!({
             "transactionHash": HASH_HEX,
             "blockNumber": "0x2a",
+            "blockHash": HASH_HEX,
             "status": "0x1",
         }),
         other => panic!("unexpected method {other}"),
@@ -393,6 +444,7 @@ fn receipt_hash_mismatch_rpc_result(chain_id: &str, method: &str) -> Value {
         "eth_getTransactionReceipt" => json!({
             "transactionHash": OCCUPYING_HASH_HEX,
             "blockNumber": "0x2a",
+            "blockHash": HASH_HEX,
             "status": "0x1",
         }),
         other => rpc_result(chain_id, other),

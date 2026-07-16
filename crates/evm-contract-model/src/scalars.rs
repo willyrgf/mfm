@@ -647,3 +647,94 @@ impl From<EvmCodeHash> for String {
         value.raw
     }
 }
+
+/// Normalized lowercase `0x`-prefixed 32-byte EVM block hash.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "evm-block-hash",
+    schema = "mfm.evm.contract.value.evm_block_hash",
+    transparent_string
+)]
+pub struct EvmBlockHash {
+    raw: String,
+}
+
+impl EvmBlockHash {
+    /// Creates a normalized 32-byte EVM block hash.
+    pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+        let raw = value.into();
+        let normalized = common_hex::normalize_hex_str(&raw).map_err(|error| {
+            EvmContractScalarError::InvalidString {
+                kind: "evm_block_hash",
+                message: error.message,
+            }
+        })?;
+        let bytes = common_hex::hex_to_bytes(&normalized).map_err(|error| {
+            EvmContractScalarError::InvalidString {
+                kind: "evm_block_hash",
+                message: error.message,
+            }
+        })?;
+        if bytes.len() != 32 {
+            return Err(EvmContractScalarError::InvalidString {
+                kind: "evm_block_hash",
+                message: "block hash must be 32 bytes".to_owned(),
+            });
+        }
+        Ok(Self { raw: normalized })
+    }
+
+    /// Returns the canonical lowercase block hash.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its canonical string representation.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for EvmBlockHash {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for EvmBlockHash {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for EvmBlockHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EvmBlockHash {
+    type Err = EvmContractScalarError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for EvmBlockHash {
+    type Error = EvmContractScalarError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<EvmBlockHash> for String {
+    fn from(value: EvmBlockHash) -> Self {
+        value.raw
+    }
+}

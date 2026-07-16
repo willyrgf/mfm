@@ -190,6 +190,7 @@ async fn supports_core_evm_json_rpc_calls() {
         .await
         .expect("receipt");
     assert_eq!(receipt.block_number, 42);
+    assert_eq!(receipt.block_hash, HASH_HEX.parse::<B256>().expect("hash"));
     assert!(receipt.status);
 
     assert_eq!(
@@ -257,6 +258,19 @@ async fn pending_receipt_is_typed_capability_error() {
 }
 
 #[tokio::test]
+async fn receipt_read_requires_a_canonical_block_hash() {
+    let server = TestRpcServer::spawn_receipt_missing_block_hash("0x1").await;
+    let client = client_for(&server.url, "primary", "mainnet");
+
+    assert!(client
+        .read_receipt(&EvmReceiptReadRequest::new(
+            HASH_HEX.parse::<B256>().expect("hash"),
+        ))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn code_read_preserves_empty_code_observation() {
     let server = TestRpcServer::spawn_empty_code("0x1").await;
     let client = client_for(&server.url, "primary", "mainnet");
@@ -270,6 +284,20 @@ async fn code_read_preserves_empty_code_observation() {
 
     assert!(response.code.is_empty());
     assert_eq!(response.code_hash, alloy_primitives::keccak256([]));
+}
+
+#[tokio::test]
+async fn code_read_rejects_malformed_runtime_bytecode() {
+    let server = TestRpcServer::spawn_malformed_code("0x1").await;
+    let client = client_for(&server.url, "primary", "mainnet");
+
+    assert!(client
+        .read_code(&EvmCodeReadRequest::new(
+            address!("0x1111111111111111111111111111111111111111"),
+            EvmBlockSelector::Latest,
+        ))
+        .await
+        .is_err());
 }
 
 #[tokio::test]

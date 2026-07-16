@@ -177,7 +177,7 @@ where
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
-            let (_plan, runtime) = self
+            let (plan, runtime) = self
                 .load_plan_and_runtime(ctx, submit_node, submit_inputs)
                 .await?;
             let required_depth = finalized_depth_for_submit_node(submit_node)?;
@@ -190,9 +190,12 @@ where
             .await?;
             let receipt_evidence = CapabilityArtifactEvidenceRef::from(receipt_evidence);
             let receipt = P::receipt_with_evidence(receipt, &receipt_evidence);
+            let anchor = P::confirmation_anchor(&receipt)?;
             let confirmations = verified_finality_confirmations(
                 &runtime,
-                P::receipt_transactions(&receipt),
+                &anchor,
+                plan.network_id(),
+                plan.expected_chain_id(),
                 required_depth,
             )
             .await?;
@@ -259,7 +262,9 @@ trait ContractVerifyPhase: ContractMutationPlanOps + Sized + Send + Sync + 'stat
         evidence: &CapabilityArtifactEvidenceRef,
     ) -> Self::Receipt;
 
-    fn receipt_transactions(receipt: &Self::Receipt) -> &[ContractTransactionReceipt];
+    fn confirmation_anchor(
+        receipt: &Self::Receipt,
+    ) -> mfm_runtime::Result<ConfiguredContractAnchor>;
 
     fn confirmation_from_receipt(receipt: Self::Receipt, confirmations: u64) -> Self::Confirmation;
 
@@ -300,8 +305,13 @@ impl ContractVerifyPhase for ContextDeployMutationPlan {
         deploy_receipt_with_evidence(receipt, evidence)
     }
 
-    fn receipt_transactions(receipt: &Self::Receipt) -> &[ContractTransactionReceipt] {
-        std::slice::from_ref(&receipt.receipt)
+    fn confirmation_anchor(
+        receipt: &Self::Receipt,
+    ) -> mfm_runtime::Result<ConfiguredContractAnchor> {
+        Ok(ConfiguredContractAnchor {
+            block_number: receipt.receipt.block_number,
+            block_hash: receipt.receipt.block_hash.clone(),
+        })
     }
 
     fn confirmation_from_receipt(receipt: Self::Receipt, confirmations: u64) -> Self::Confirmation {
@@ -349,6 +359,11 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
             context_ref: prepared.context_ref.clone(),
             evm_network_context_ref: prepared.evm_network_context_ref.clone(),
             resource_stage: prepared.resource_stage,
+            anchor: mfm_state_evm_contracts::configured_contract_anchor_from_receipts(
+                &self.input,
+                &receipts,
+            )
+            .map_err(runtime_state_error)?,
             receipts,
         })
     }
@@ -364,8 +379,10 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
         receipt
     }
 
-    fn receipt_transactions(receipt: &Self::Receipt) -> &[ContractTransactionReceipt] {
-        &receipt.receipts
+    fn confirmation_anchor(
+        receipt: &Self::Receipt,
+    ) -> mfm_runtime::Result<ConfiguredContractAnchor> {
+        Ok(receipt.anchor.clone())
     }
 
     fn confirmation_from_receipt(receipt: Self::Receipt, confirmations: u64) -> Self::Confirmation {
@@ -376,6 +393,7 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
             resource_stage: receipt.resource_stage,
             confirmations,
             receipts: receipt.receipts,
+            anchor: receipt.anchor,
         }
     }
 

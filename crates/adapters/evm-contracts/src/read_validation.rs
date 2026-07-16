@@ -16,6 +16,26 @@ pub(super) async fn validate_context_contract_with_reads(
     ensure_configured_input_context(input, context)?;
 
     let chain = read_chain_identity(reads.chain_identity).await?;
+    ensure_evm_source_matches_binding(
+        &chain.evidence,
+        context.value().network.network_id.as_str(),
+        context.value().network.expected_chain_id(),
+    )?;
+    if chain.chain_id != context.value().network.expected_chain_id() {
+        return Err(EvmContractAdapterError::ContextMismatch);
+    }
+    let code_identity_evidence = match &request.code_identity {
+        Some(request) => Some(
+            read_code_identity(
+                reads.code,
+                request,
+                context.value().network.network_id.as_str(),
+                context.value().network.expected_chain_id(),
+            )
+            .await?,
+        ),
+        None => None,
+    };
     let assertion_context = prepare_validation_assertion_context(
         artifact,
         input.configured.address.as_str(),
@@ -37,10 +57,53 @@ pub(super) async fn validate_context_contract_with_reads(
         resource_stage: ContractLifecycleStage::Configured,
         observed_chain_id: chain.chain_id,
         client_version: chain.client_version.unwrap_or_else(|| "unknown".to_owned()),
+        code_identity_evidence,
         read_results: evaluated.read_results,
         event_results: evaluated.event_results,
         validation_read_evidence: evaluated.read_evidence,
         validation_event_evidence: evaluated.event_evidence,
+    })
+}
+
+async fn read_code_identity(
+    provider: &dyn EvmCodeReadProvider,
+    request: &mfm_evm_contract_model::ValidationCodeIdentityRequest,
+    network_id: &str,
+    expected_chain_id: u64,
+) -> Result<ValidationCodeIdentityEvidence> {
+    if !request.selector.require_canonical {
+        return Err(EvmContractAdapterError::InvalidCodeIdentityEvidence);
+    }
+    let address = parse_address(request.selector.address.as_str(), "contract_address")
+        .map_err(|error| EvmContractAdapterError::Model(error.message))?;
+    let block_hash = request
+        .selector
+        .block_hash
+        .as_str()
+        .parse::<B256>()
+        .map_err(|_| EvmContractAdapterError::InvalidCodeIdentityEvidence)?;
+    let response = provider
+        .read_code(&EvmCodeReadRequest::new(
+            address,
+            EvmBlockSelector::Hash(block_hash),
+        ))
+        .await?;
+    ensure_evm_source_matches_binding(&response.evidence, network_id, expected_chain_id)?;
+    let observed_byte_len = u64::try_from(response.code.len())
+        .map_err(|_| EvmContractAdapterError::InvalidCodeIdentityEvidence)?;
+    let recomputed_hash = keccak256(&response.code);
+    if response.code_hash != recomputed_hash {
+        return Err(EvmContractAdapterError::InvalidCodeIdentityEvidence);
+    }
+    let observed_code_hash = EvmCodeHash::new(format!("{recomputed_hash:?}"))
+        .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
+    Ok(ValidationCodeIdentityEvidence {
+        evidence_version: 1,
+        selector: request.selector.clone(),
+        source: validation_source_evidence(&response.evidence),
+        runtime_bytecode: response.code,
+        observed_byte_len,
+        observed_code_hash,
     })
 }
 

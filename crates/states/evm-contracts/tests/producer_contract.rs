@@ -2,7 +2,7 @@ use mfm_capabilities::NoCaps;
 use mfm_effects::Pure;
 use mfm_evm_contract_model::{
     contract_instance_resource_kind, deployed_contract_stage, ContextBoundValidationReport,
-    ContractAddress, DeployedContractInstance, EvmContractContext,
+    ContractAddress, DeployedContractInstance, EvmBlockHash, EvmContractContext,
 };
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
 use mfm_program::{
@@ -80,6 +80,8 @@ impl PureState for UnapprovedDeployedProducer {
             address: ContractAddress::new("0x000000000000000000000000000000000000beef")
                 .map_err(|error| StateError::Message(error.to_string()))?,
             deployed_block_number: 1,
+            deployed_block_hash: EvmBlockHash::new(format!("0x{}", "01".repeat(32)))
+                .map_err(|error| StateError::Message(error.to_string()))?,
         })
     }
 }
@@ -148,7 +150,7 @@ fn direct_state_graph(
                         deploy_action(),
                         (),
                         account_nonce_resource_claim()?,
-                        SideEffectVerificationSpec::Receipt,
+                        SideEffectVerificationSpec::Finalized { depth: 1 },
                     )?
                     .into_handle()
             };
@@ -160,7 +162,7 @@ fn direct_state_graph(
                     configure_action(),
                     ContextConfigureContractInputHandles { deployed },
                     account_nonce_resource_claim()?,
-                    SideEffectVerificationSpec::Receipt,
+                    SideEffectVerificationSpec::Finalized { depth: 1 },
                 )?
                 .into_handle();
             let validation = root.scope().state::<ContextBoundValidateContractState, _>(

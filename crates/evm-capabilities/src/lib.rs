@@ -998,6 +998,11 @@ pub struct EvmReceiptReadResponse {
     pub transaction_hash: B256,
     /// Block number that included the transaction.
     pub block_number: u64,
+    /// Canonical block hash that included the transaction.
+    ///
+    /// Receipt consumers must retain this alongside `block_number`; a block
+    /// number on its own cannot bind a receipt to a canonical chain history.
+    pub block_hash: B256,
     /// Receipt status success flag.
     pub status: bool,
 }

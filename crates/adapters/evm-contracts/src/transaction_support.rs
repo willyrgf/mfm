@@ -383,6 +383,7 @@ impl EvmReceiptReadProvider for TestEvmProviders {
                             evidence,
                             transaction_hash,
                             block_number: 42,
+                            block_hash: B256::repeat_byte(0x42),
                             status: true,
                         }),
                         RecoveryReceiptMode::Pending => Err(EvmCapabilityError::ReceiptPending),

@@ -22,9 +22,10 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::CapabilitySetFor;
 use mfm_effects::{ApplySideEffect, ReadExternal};
 use mfm_evm_capabilities::{
-    EvmCallReadCapability, EvmChainIdentityCapability, EvmFeeReadCapability,
-    EvmGasEstimateCapability, EvmLogsReadCapability, EvmNonceOccupancyReadCapability,
-    EvmNonceReadCapability, EvmReceiptReadCapability, EvmTransactionSubmitCapability,
+    EvmBlockReadCapability, EvmCallReadCapability, EvmChainIdentityCapability,
+    EvmCodeReadCapability, EvmFeeReadCapability, EvmGasEstimateCapability, EvmLogsReadCapability,
+    EvmNonceOccupancyReadCapability, EvmNonceReadCapability, EvmReceiptReadCapability,
+    EvmTransactionSubmitCapability,
 };
 pub mod config;
 pub use config::{
@@ -35,11 +36,12 @@ pub use config::{
 use mfm_evm_contract_model::{
     configured_contract_stage, contract_instance_resource_kind, deployed_contract_stage,
     expected_matches, validation_report_resource_kind, validation_report_stage,
-    ConfiguredContractInstance, ConfiguredContractInstanceRef, ConfiguredFrom,
-    ContextBoundValidationReport, ContractAddress, ContractCallConfig, ContractLifecycleStage,
-    ContractProfileDigestRef, DeployedContractInstance, EventAssertionConfig, EvmContractContext,
-    LifecycleArtifactEvidenceRef, ReadAssertionConfig, ValidationEventEvidence,
-    ValidationEventResult, ValidationReadEvidence, ValidationReadResult,
+    ConfiguredContractAnchor, ConfiguredContractInstance, ConfiguredContractInstanceRef,
+    ConfiguredFrom, ContextBoundValidationReport, ContractAddress, ContractCallConfig,
+    ContractLifecycleStage, ContractProfileDigestRef, DeployedContractInstance,
+    EventAssertionConfig, EvmBlockHash, EvmContractContext, LifecycleArtifactEvidenceRef,
+    ReadAssertionConfig, ValidationCodeIdentityEvidence, ValidationCodeIdentityRequest,
+    ValidationEventEvidence, ValidationEventResult, ValidationReadEvidence, ValidationReadResult,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ContextResourceKind, ContextStage, DescriptorId, DigestAlgorithm,
@@ -69,7 +71,7 @@ const ACCOUNT_NONCE_RESOURCE_NAMESPACE: &str = "mfm.evm.contract.account_nonce";
 const ACCOUNT_NONCE_RESOURCE_KEY_SCHEMA: &str = "mfm.evm.contract.resource_key.account_nonce";
 
 type ContractMutationCaps = (
-    EvmChainIdentityCapability,
+    EvmBlockReadCapability,
     EvmNonceReadCapability,
     EvmFeeReadCapability,
     EvmGasEstimateCapability,
@@ -81,6 +83,7 @@ type ContractMutationCaps = (
 
 type ContractValidationReadCaps = (
     EvmChainIdentityCapability,
+    EvmCodeReadCapability,
     EvmCallReadCapability,
     EvmLogsReadCapability,
 );
@@ -338,6 +341,8 @@ pub struct ContractTransactionReceipt {
     pub transaction_hash: String,
     /// Block number that included the transaction.
     pub block_number: u64,
+    /// Canonical block hash that included the transaction.
+    pub block_hash: EvmBlockHash,
     /// Whether the transaction succeeded.
     pub status: bool,
     /// Typed artifact evidence reference for the retained receipt.
@@ -408,6 +413,8 @@ pub struct ContextContractConfigureReceipt {
     pub resource_stage: ContractLifecycleStage,
     /// Observed transaction receipts.
     pub receipts: Vec<ContractTransactionReceipt>,
+    /// Exact configured-chain anchor selected from successful receipts or deployment.
+    pub anchor: ConfiguredContractAnchor,
 }
 
 /// Configuration confirmation for context-bound configure states.
@@ -430,6 +437,8 @@ pub struct ContextContractConfigureConfirmation {
     pub confirmations: u64,
     /// Confirmed transaction receipts.
     pub receipts: Vec<ContractTransactionReceipt>,
+    /// Canonical finalized configured-chain anchor.
+    pub anchor: ConfiguredContractAnchor,
 }
 
 /// Read request used by context-bound contract validation adapters.
@@ -452,6 +461,8 @@ pub struct ContextContractValidationReadRequest {
     pub network_id: String,
     /// Expected EVM chain id from the certified context.
     pub expected_chain_id: u64,
+    /// Optional exact deployed-runtime-code identity assertion.
+    pub code_identity: Option<ValidationCodeIdentityRequest>,
     /// Read assertions evaluated by the adapter.
     pub read_assertions: Vec<ReadAssertionConfig>,
     /// Event assertions evaluated by the adapter.
@@ -480,6 +491,8 @@ pub struct ContractValidationReadResponse {
     pub observed_chain_id: u64,
     /// Redaction-safe client version label.
     pub client_version: String,
+    /// Optional raw deployed-runtime-code identity evidence.
+    pub code_identity_evidence: Option<ValidationCodeIdentityEvidence>,
     /// Results for validation read assertions.
     pub read_results: Vec<ValidationReadResult>,
     /// Results for validation event assertions.
@@ -612,11 +625,13 @@ fn deployed_instance_from_receipt(
         context_ref: ContextRefValue::from(context.context_ref().clone()),
         address,
         deployed_block_number: receipt.block_number,
+        deployed_block_hash: receipt.block_hash.clone(),
     })
 }
 
 fn configured_instance_from_evidence(
     input: &ContextConfigureContractInput,
+    anchor: &ConfiguredContractAnchor,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
 ) -> StateResult<ConfiguredContractInstance> {
     Ok(ConfiguredContractInstance {
@@ -627,6 +642,37 @@ fn configured_instance_from_evidence(
             deployed_context_ref: ContextRefValue::from(context.context_ref().clone()),
             deployed_address: input.deployed.address.clone(),
         },
+        anchor: anchor.clone(),
+    })
+}
+
+/// Selects the configured-contract anchor from certified configuration receipt order.
+///
+/// An empty configuration carries forward the direct deployment anchor. Otherwise
+/// the last successful configuration receipt is authoritative.
+pub fn configured_contract_anchor_from_receipts(
+    input: &ContextConfigureContractInput,
+    receipts: &[ContractTransactionReceipt],
+) -> StateResult<ConfiguredContractAnchor> {
+    if receipts.is_empty() {
+        return Ok(ConfiguredContractAnchor {
+            block_number: input.deployed.deployed_block_number,
+            block_hash: input.deployed.deployed_block_hash.clone(),
+        });
+    }
+
+    let receipt = receipts
+        .iter()
+        .rev()
+        .find(|receipt| receipt.status)
+        .ok_or_else(|| {
+            StateError::Message(
+                "configuration receipt evidence has no successful transaction".to_owned(),
+            )
+        })?;
+    Ok(ConfiguredContractAnchor {
+        block_number: receipt.block_number,
+        block_hash: receipt.block_hash.clone(),
     })
 }
 

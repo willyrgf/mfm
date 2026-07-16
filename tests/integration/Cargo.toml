@@ -51,6 +51,7 @@ mfm-evm-signing = { path = "../../crates/evm-signing" }
 mfm-state-evm-contracts = { path = "../../crates/states/evm-contracts" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
 mfm-program-derive = { path = "../../crates/kernel/program-derive" }
+mfm-replay = { path = "../../crates/kernel/replay" }
 mfm-signing = { path = "../../crates/signing" }
 mfm-spec = { path = "../../crates/kernel/spec" }
 tower = "0.5"

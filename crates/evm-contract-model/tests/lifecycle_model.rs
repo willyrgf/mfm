@@ -99,6 +99,8 @@ fn direct_contract_values_expose_only_direct_lineage() {
         context_ref: context.clone(),
         address: address.clone(),
         deployed_block_number: 10,
+        deployed_block_hash: EvmBlockHash::new(format!("0x{}", "40".repeat(32)))
+            .expect("block hash"),
     };
     let configured = ConfiguredContractInstance {
         lifecycle_version: 1,
@@ -107,6 +109,10 @@ fn direct_contract_values_expose_only_direct_lineage() {
         configured_from: ConfiguredFrom {
             deployed_context_ref: context.clone(),
             deployed_address: address,
+        },
+        anchor: ConfiguredContractAnchor {
+            block_number: 11,
+            block_hash: EvmBlockHash::new(format!("0x{}", "41".repeat(32))).expect("block hash"),
         },
     };
 

@@ -445,7 +445,8 @@ pub(crate) fn verify_contract_configure_receipt_matches_prepared(
         ContractLifecycleStage::Configured,
         "configure receipt context does not match prepared invocation",
     )?;
-    verify_transaction_receipts_match_prepared(prepared, &receipt.receipts)
+    verify_transaction_receipts_match_prepared(prepared, &receipt.receipts)?;
+    verify_configure_anchor_matches_receipts(&receipt.anchor, &receipt.receipts)
 }
 
 pub(crate) fn verify_contract_deploy_confirmation_matches_prepared(
@@ -480,7 +481,28 @@ pub(crate) fn verify_contract_configure_confirmation_matches_prepared(
         ContractLifecycleStage::Configured,
         "configure confirmation context does not match prepared invocation",
     )?;
-    verify_transaction_receipts_match_prepared(prepared, &confirmation.receipts)
+    verify_transaction_receipts_match_prepared(prepared, &confirmation.receipts)?;
+    verify_configure_anchor_matches_receipts(&confirmation.anchor, &confirmation.receipts)
+}
+
+fn verify_configure_anchor_matches_receipts(
+    anchor: &ConfiguredContractAnchor,
+    receipts: &[ContractTransactionReceipt],
+) -> replay::Result<()> {
+    let Some(receipt) = receipts.iter().rev().find(|receipt| receipt.status) else {
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        return Err(replay_contract_mismatch(
+            "configure receipt evidence has no successful transaction",
+        ));
+    };
+    if anchor.block_number != receipt.block_number || anchor.block_hash != receipt.block_hash {
+        return Err(replay_contract_mismatch(
+            "configured anchor does not match the last successful configuration receipt",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_prepared_context(

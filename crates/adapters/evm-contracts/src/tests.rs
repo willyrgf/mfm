@@ -5,7 +5,11 @@ use mfm_evm_capabilities::{
     EvmLogsReadResponse, EvmNonceReadResponse, EvmReceiptReadResponse, EvmSourcePolicyId,
     EvmSourceRef, RedactedEvmSourceEvidence,
 };
-use mfm_evm_contract_model::{BlockSelector, BlockTag, ContractAddress, EvmContractContext};
+use mfm_evm_contract_model::{
+    BlockSelector, BlockTag, ConfiguredContractAnchor, ConfiguredContractInstance, ConfiguredFrom,
+    ContractAddress, EvmBlockHash, EvmCodeHash, EvmContractContext, ValidationCodeIdentityEvidence,
+    ValidationCodeIdentitySelector,
+};
 use mfm_evm_signing::{
     primitive_signature_from_bytes, recover_signing_address,
     EvmTransactionStyle as SigningTransactionStyle,
@@ -399,6 +403,89 @@ fn evidence_only_validation_replay_rejects_tampered_result_evidence() {
     let mut tampered = result;
     tampered.actual = ExpectedValue::from_json_value(&json!(false)).expect("actual");
     assert!(verify_validation_source_evidence(&context, &[tampered], &[], &[], &[]).is_err());
+}
+
+#[test]
+fn code_identity_replay_recomputes_retained_bytecode_metadata() {
+    let context = certified_contract_context("ethereum-mainnet", 1);
+    let context_ref = mfm_values::ContextRefValue::from(context.context_ref().clone());
+    let address =
+        ContractAddress::new("0x1111111111111111111111111111111111111111").expect("address");
+    let block_hash = EvmBlockHash::new(format!("0x{}", "42".repeat(32))).expect("block hash");
+    let configured = ConfiguredContractInstance {
+        lifecycle_version: 1,
+        context_ref: context_ref.clone(),
+        address: address.clone(),
+        configured_from: ConfiguredFrom {
+            deployed_context_ref: context_ref,
+            deployed_address: address.clone(),
+        },
+        anchor: ConfiguredContractAnchor {
+            block_number: 42,
+            block_hash: block_hash.clone(),
+        },
+    };
+    let runtime_bytecode = vec![0x60, 0x00];
+    let observed_code_hash = EvmCodeHash::new(format!(
+        "{:?}",
+        alloy_primitives::keccak256(&runtime_bytecode)
+    ))
+    .expect("code hash");
+    let evidence = ValidationCodeIdentityEvidence {
+        evidence_version: 1,
+        selector: ValidationCodeIdentitySelector {
+            address,
+            block_number: 42,
+            block_hash,
+            require_canonical: true,
+        },
+        source: ValidationSourceEvidence {
+            network_id: "ethereum-mainnet".to_owned(),
+            expected_chain_id: 1,
+            observed_chain_id: 1,
+            source_ref: "local".to_owned(),
+            policy_id: "test".to_owned(),
+        },
+        observed_byte_len: runtime_bytecode.len() as u64,
+        observed_code_hash,
+        runtime_bytecode,
+    };
+    super::replay_adapter::verify_replayed_code_identity_evidence(&context, &configured, &evidence)
+        .expect("untampered code identity evidence");
+
+    let mut tampered_bytes = evidence.clone();
+    tampered_bytes.runtime_bytecode.push(0x01);
+    assert!(
+        super::replay_adapter::verify_replayed_code_identity_evidence(
+            &context,
+            &configured,
+            &tampered_bytes,
+        )
+        .is_err()
+    );
+
+    let mut tampered_length = evidence.clone();
+    tampered_length.observed_byte_len += 1;
+    assert!(
+        super::replay_adapter::verify_replayed_code_identity_evidence(
+            &context,
+            &configured,
+            &tampered_length,
+        )
+        .is_err()
+    );
+
+    let mut tampered_hash = evidence;
+    tampered_hash.observed_code_hash =
+        EvmCodeHash::new(format!("0x{}", "00".repeat(32))).expect("code hash");
+    assert!(
+        super::replay_adapter::verify_replayed_code_identity_evidence(
+            &context,
+            &configured,
+            &tampered_hash,
+        )
+        .is_err()
+    );
 }
 
 #[test]

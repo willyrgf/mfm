@@ -82,6 +82,21 @@ capability only: `decimals()` and `balanceOf(address)` retain the destination, e
 canonical hash selector, raw return bytes, and redacted certified-source identity as external-read
 evidence. Each call is followed by an exact hash block re-verification before a fact is recorded.
 
+Reusable contract-state receipt reads retain both `blockNumber` and `blockHash`; a receipt without
+the hash is malformed. Configure selects a `ConfiguredContractAnchor` from the last successful
+configuration receipt in certified transaction order, or from the deployment receipt when no
+configuration transaction is submitted. Before confirmation, the adapter reads the canonical block
+at that number, compares its hash to the retained anchor, and proves its finality depth against the
+bound source.
+
+When a certified contract profile supplies `deployed_code_hash`, validation uses the generic
+`eth_getCode` capability at the configured anchor's EIP-1898 selector
+`{ blockHash, requireCanonical: true }`. The retained external-read evidence contains raw runtime
+bytecode, the exact address/hash selector, redacted source evidence, byte length, and recomputed
+Keccak-256 hash. Empty or different authenticated code is a successful `valid: false` report;
+malformed, unbound, or internally inconsistent evidence fails the attempt. Without a profile hash,
+validation makes no code RPC call and records no code-identity evidence.
+
 Transport failures, HTTP status failures, JSON-RPC error objects, malformed responses, and source
 mismatches are classified as redacted provider diagnostics. Diagnostics may carry the stable EVM
 operation id and numeric status/error code, but never endpoint URLs, authorization headers, provider
@@ -106,7 +121,9 @@ provider: it validates the destination, calldata, canonical hash selector, raw r
 source binding, re-verified anchor, decoded output, and recorded fact evidence. EVM contract-state
 replay recomputes the certified semantic binding from the contract context and context-bound
 artifacts, then checks stored side-effect evidence, validation evidence, and terminal output
-artifacts against that expected authority.
+artifacts against that expected authority. For optional contract code identity it verifies the
+external artifact's retained identity and bytes, recomputes byte length and Keccak-256, and checks
+the address, source, canonical selector, profile hash, and projected report value without live RPC.
 
 ## Contributor Guidance
 

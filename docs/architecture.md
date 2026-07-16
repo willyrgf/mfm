@@ -428,11 +428,14 @@ Capability names must describe the authority being granted, not the workflow req
 Allowed:
 
 - `mfm.evm.chain_identity.read`
+- `mfm.evm.block.read`
 - `mfm.evm.call.read`
+- `mfm.evm.code.read`
 - `mfm.evm.logs.read`
 - `mfm.evm.nonce.read`
 - `mfm.evm.nonce_occupancy.read`
 - `mfm.evm.transaction.submit`
+- `mfm.evm.receipt.read`
 - `mfm.signing.sign`
 - `mfm.artifact.read`
 

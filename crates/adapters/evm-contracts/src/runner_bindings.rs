@@ -184,6 +184,9 @@ fn validate_context_mutation_runtime_for_node(
     node: &spec::NodeSpec,
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<()> {
+    // Contract outputs retain a canonical validation anchor, so receipt-only
+    // verification cannot be terminal for these mutations.
+    finalized_depth_for_submit_node(node)?;
     let context = ctx
         .runtime_spec()
         .invocation_context_for_node(node)?
@@ -305,10 +308,16 @@ async fn run_context_validate(
     let response = runtime
         .validate_context_contract(&action, &input, &context, artifact.as_ref(), &request)
         .await?;
+    let code_identity_evidence = response.code_identity_evidence.clone();
     let report = state
         .report_from_response(&input, response, &context)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    ErasedRunnerOutput::state_output(&ctx, &report)
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    if let Some(evidence) = code_identity_evidence {
+        output.record_external_read_evidence(&evidence)?;
+    }
+    output.state_output(&report)?;
+    Ok(output.finish())
 }
 
 pub(crate) async fn read_receipts_with_poll(
@@ -352,7 +361,13 @@ fn finalized_depth_for_submit_node(submit_node: &spec::NodeSpec) -> mfm_runtime:
         .as_ref()
         .map(|contract| &contract.verification)
     {
-        Some(spec::SideEffectVerificationSpec::Finalized { depth }) => Ok(*depth),
+        Some(spec::SideEffectVerificationSpec::Finalized { depth }) if *depth > 0 => Ok(*depth),
+        Some(spec::SideEffectVerificationSpec::Finalized { .. }) => {
+            Err(mfm_runtime::RuntimeError::InvalidSpec(format!(
+                "contract-state submit node {} has a non-positive finalized verification depth",
+                submit_node.node_id
+            )))
+        }
         Some(spec::SideEffectVerificationSpec::Receipt) => {
             Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
                 "contract-state submit node {} has receipt-only verification",
@@ -368,26 +383,28 @@ fn finalized_depth_for_submit_node(submit_node: &spec::NodeSpec) -> mfm_runtime:
 
 pub(crate) async fn verified_finality_confirmations(
     runtime: &EvmContractRuntime,
-    receipts: &[ContractTransactionReceipt],
+    anchor: &ConfiguredContractAnchor,
+    network_id: &str,
+    expected_chain_id: u64,
     required_depth: u64,
 ) -> mfm_runtime::Result<u64> {
-    let Some(highest_receipt_block) = receipts.iter().map(|receipt| receipt.block_number).max()
-    else {
-        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "contract-state finality requires at least one receipt".to_owned(),
-        ));
-    };
+    runtime
+        .adapter()
+        .verify_canonical_anchor(anchor, network_id, expected_chain_id)
+        .await
+        .map_err(mfm_runtime::RuntimeError::from)?;
     let latest_block = runtime
         .adapter()
-        .latest_block_number()
+        .latest_block_number(network_id, expected_chain_id)
         .await
         .map_err(mfm_runtime::RuntimeError::from)?;
     let confirmations = latest_block
-        .checked_sub(highest_receipt_block)
+        .checked_sub(anchor.block_number)
         .map(|distance| distance.saturating_add(1))
         .ok_or_else(|| {
             mfm_runtime::RuntimeError::Blocked(format!(
-                "contract-state finality latest block {latest_block} is behind receipt block {highest_receipt_block}"
+                "contract-state finality latest block {latest_block} is behind receipt block {}",
+                anchor.block_number,
             ))
         })?;
     if confirmations < required_depth {

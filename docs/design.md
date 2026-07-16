@@ -268,6 +268,15 @@ app runner registration. Certification accepts configure only after the deploy d
 validate only after the configure descriptor; adapter-library factories bind their live providers
 for a graph that explicitly uses those states.
 
+Direct contract receipt lineage is hash-bound. Every successful receipt retains its block number
+and block hash. Configure carries a `ConfiguredContractAnchor` selected from the last successful
+configure receipt in certified transaction order, or from the deployment receipt when no configure
+transaction was submitted. Confirmation proves that exact hash canonical and final before it can
+anchor validation. When a contract profile supplies `deployed_code_hash`, validation uses generic
+EVM code-read authority at that exact EIP-1898 hash selector and retains raw runtime bytecode as
+external-read evidence. Replay rechecks the artifact identity and bytes, selector/source binding,
+length, and Keccak-256. A missing profile hash means no code-read authority is exercised.
+
 App assembly keeps evidence-only services separate from live driver services. Status, stream
 inspection, list/watch, replay, and public-output rendering construct only store, artifact, and
 certification/replay authority; they do not parse live runtime config, construct live EVM transports,

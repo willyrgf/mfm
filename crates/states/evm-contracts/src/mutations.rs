@@ -219,19 +219,33 @@ impl SideEffectState for ContextBoundConfigureContractState {
         &self,
         input: &Self::Input,
         _intent: &Self::Intent,
-        _receipt: &Self::Receipt,
+        receipt: &Self::Receipt,
         context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        configured_instance_from_evidence(input, context)
+        let expected_anchor = configured_contract_anchor_from_receipts(input, &receipt.receipts)?;
+        if receipt.anchor != expected_anchor {
+            return Err(StateError::Message(
+                "configuration receipt anchor does not match certified receipt order".to_owned(),
+            ));
+        }
+        configured_instance_from_evidence(input, &receipt.anchor, context)
     }
 
     fn output_from_confirmation(
         &self,
         input: &Self::Input,
         _intent: &Self::Intent,
-        _confirmation: &Self::Confirmation,
+        confirmation: &Self::Confirmation,
         context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        configured_instance_from_evidence(input, context)
+        let expected_anchor =
+            configured_contract_anchor_from_receipts(input, &confirmation.receipts)?;
+        if confirmation.anchor != expected_anchor {
+            return Err(StateError::Message(
+                "configuration confirmation anchor does not match certified receipt order"
+                    .to_owned(),
+            ));
+        }
+        configured_instance_from_evidence(input, &confirmation.anchor, context)
     }
 }

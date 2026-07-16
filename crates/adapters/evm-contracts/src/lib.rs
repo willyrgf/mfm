@@ -28,9 +28,9 @@ use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadCapability,
     EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityProvider,
-    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCodeReadProvider, EvmFeeReadProvider,
-    EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
+    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest,
+    EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest,
+    EvmLogsReadProvider, EvmLogsReadRequest, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
     EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceReadProvider,
     EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
@@ -40,10 +40,11 @@ use mfm_evm_contract_model::{
     configured_contract_stage, constructor_data, contract_instance_resource_kind,
     decode_single_output_to_json, deployed_contract_stage, expected_matches, parse_artifact,
     prepare_validate_assertions, resolve_function_call, validation_report_resource_kind,
-    validation_report_stage, ConfiguredContractInstance, ConfiguredContractInstanceRef,
-    ContextBoundValidationReport, ContractArtifactConfig, ContractCallConfig,
-    ContractLifecycleStage, DeployedContractInstance, EventAssertionConfig, EvmContractContext,
-    EvmNetworkContext, ExpectedValue, LifecycleArtifactEvidenceRef, ParsedAbi, ReadAssertionConfig,
+    validation_report_stage, ConfiguredContractAnchor, ConfiguredContractInstance,
+    ConfiguredContractInstanceRef, ContextBoundValidationReport, ContractArtifactConfig,
+    ContractCallConfig, ContractLifecycleStage, DeployedContractInstance, EventAssertionConfig,
+    EvmBlockHash, EvmCodeHash, EvmContractContext, EvmNetworkContext, ExpectedValue,
+    LifecycleArtifactEvidenceRef, ParsedAbi, ReadAssertionConfig, ValidationCodeIdentityEvidence,
     ValidationEventEvidence, ValidationEventResult, ValidationReadEvidence, ValidationReadResult,
     ValidationSourceEvidence,
 };
@@ -62,12 +63,12 @@ use mfm_runtime::{
     CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
     ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs,
     PreInvocationRunCtx, PreInvocationRunnerFuture, RunnerCapabilityBinding,
-    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
-    RuntimeDiagnostic, RuntimeFailure, SideEffectDriver, SideEffectDriverCallbacks,
-    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
-    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
-    TypedContextOutputExtractor,
+    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerOutputBuilder,
+    RunnerRegistrationBuilder, RuntimeDiagnostic, RuntimeFailure, SideEffectDriver,
+    SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
+    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks,
+    SideEffectVerifyDriver, TypedContextOutputExtractor,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;
@@ -140,8 +141,6 @@ pub type Result<T> = std::result::Result<T, EvmContractAdapterError>;
 /// Capability providers needed for mutation phases.
 #[derive(Clone, Copy)]
 pub struct EvmContractMutationProviders<'a> {
-    /// Chain identity provider.
-    pub chain_identity: &'a dyn EvmChainIdentityProvider,
     /// Block summary provider.
     pub block: &'a dyn EvmBlockReadProvider,
     /// Nonce provider.
@@ -167,7 +166,6 @@ impl<'a> EvmContractMutationProviders<'a> {
         signer: &'a dyn SigningProvider,
     ) -> Self {
         Self {
-            chain_identity: evm,
             block: evm,
             nonce: evm,
             fee: evm,
@@ -419,13 +417,48 @@ impl<'a> EvmContractStateAdapter<'a> {
     }
 
     /// Reads the latest block number for mutation finality checks.
-    pub async fn latest_block_number(&self) -> Result<u64> {
+    pub async fn latest_block_number(
+        &self,
+        network_id: &str,
+        expected_chain_id: u64,
+    ) -> Result<u64> {
         let response = self
             .mutation
             .block
             .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Latest))
             .await?;
+        ensure_evm_source_matches_binding(&response.evidence, network_id, expected_chain_id)?;
         Ok(response.block_number)
+    }
+
+    /// Verifies that one retained receipt anchor remains the canonical block at
+    /// its exact hash before it is used for finality or validation.
+    pub async fn verify_canonical_anchor(
+        &self,
+        anchor: &ConfiguredContractAnchor,
+        network_id: &str,
+        expected_chain_id: u64,
+    ) -> Result<()> {
+        let block_hash = anchor
+            .block_hash
+            .as_str()
+            .parse::<B256>()
+            .map_err(|_| EvmContractAdapterError::InvalidReceiptAnchor)?;
+        let response = self
+            .mutation
+            .block
+            // A number query returns the canonical block at that height; compare
+            // its hash to the receipt anchor rather than accepting a block merely
+            // because the provider can look it up by hash.
+            .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Number(
+                anchor.block_number,
+            )))
+            .await?;
+        ensure_evm_source_matches_binding(&response.evidence, network_id, expected_chain_id)?;
+        if response.block_number != anchor.block_number || response.block_hash != block_hash {
+            return Err(EvmContractAdapterError::InvalidReceiptAnchor);
+        }
+        Ok(())
     }
 
     /// Prepares a context-bound deploy invocation from certified context.
@@ -613,6 +646,11 @@ impl<'a> EvmContractStateAdapter<'a> {
                 .read_receipt(&EvmReceiptReadRequest::new(transaction_hash))
                 .await?;
             let response = verify_receipt_response(transaction_hash, response)?;
+            ensure_evm_source_matches_binding(
+                &response.evidence,
+                &prepared.network_id,
+                prepared.expected_chain_id,
+            )?;
             receipts.push(ContractTransactionReceipt {
                 receipt_version: 1,
                 context_ref: prepared.context_ref.clone(),
@@ -620,6 +658,7 @@ impl<'a> EvmContractStateAdapter<'a> {
                 resource_stage: prepared.resource_stage,
                 transaction_hash: format!("{:?}", response.transaction_hash),
                 block_number: response.block_number,
+                block_hash: evm_block_hash(response.block_hash)?,
                 status: response.status,
                 receipt_evidence: None,
             });
@@ -649,7 +688,12 @@ impl<'a> EvmContractStateAdapter<'a> {
                 .await
             {
                 Ok(response) => {
-                    verify_receipt_response(transaction_hash, response)?;
+                    let response = verify_receipt_response(transaction_hash, response)?;
+                    ensure_evm_source_matches_binding(
+                        &response.evidence,
+                        &prepared.network_id,
+                        prepared.expected_chain_id,
+                    )?;
                 }
                 Err(EvmCapabilityError::ReceiptPending) => {
                     unlanded_transactions.push(transaction);
@@ -926,6 +970,22 @@ impl<'a> EvmContractStateAdapter<'a> {
     }
 }
 
+fn ensure_evm_source_matches_binding(
+    evidence: &RedactedEvmSourceEvidence,
+    network_id: &str,
+    expected_chain_id: u64,
+) -> Result<()> {
+    if evidence.network_id.as_str() != network_id
+        || evidence.expected_chain_id != expected_chain_id
+        || evidence.observed_chain_id != expected_chain_id
+        || evidence.source_ref.as_str().trim().is_empty()
+        || evidence.policy_id.as_str().trim().is_empty()
+    {
+        return Err(EvmContractAdapterError::ContextMismatch);
+    }
+    Ok(())
+}
+
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const ADAPTER_FACTORY: &str = "evm_contract_states_adapter";
@@ -1112,6 +1172,12 @@ pub enum EvmContractAdapterError {
     /// Transaction receipt reported failure.
     #[error("EVM transaction failed")]
     TransactionFailed,
+    /// Runtime-code identity response was malformed or internally inconsistent.
+    #[error("EVM runtime-code identity evidence was invalid")]
+    InvalidCodeIdentityEvidence,
+    /// Receipt block number and hash did not form a canonical anchor.
+    #[error("EVM receipt block anchor was invalid")]
+    InvalidReceiptAnchor,
     /// Prepared invocation evidence was malformed.
     #[error("prepared invocation was invalid")]
     InvalidPreparedInvocation,
@@ -1153,6 +1219,11 @@ impl From<EvmContractAdapterError> for mfm_runtime::RuntimeError {
             error => Self::InvalidRunnerOutput(error.to_string()),
         }
     }
+}
+
+fn evm_block_hash(value: B256) -> Result<EvmBlockHash> {
+    EvmBlockHash::new(format!("{value:?}"))
+        .map_err(|error| EvmContractAdapterError::Model(error.to_string()))
 }
 
 impl From<EvmContractAdapterError> for replay::ReplayError {
