@@ -155,6 +155,17 @@ fn dual_mainnet_runtime_example_resolves_from_env() {
 }
 
 #[test]
+fn ethereum_mainnet_runtime_example_resolves_without_bitcoin_credentials() {
+    let _env = locked_env([("MFM_ETHEREUM_MAINNET_RPC_URL", "http://127.0.0.1:8545")]);
+    let raw = include_str!("../../../examples/configs/runtime-ethereum-mainnet.toml");
+
+    let runtime = RuntimeConfig::from_str(raw, RuntimeConfigFormat::Toml).expect("runtime config");
+
+    assert_eq!(runtime.evm().expect("evm").routes().len(), 1);
+    assert!(runtime.btc().is_none());
+}
+
+#[test]
 fn required_runtime_families_must_exist() {
     for (name, requirement) in [
         ("btc", RuntimeConfigRequirement::btc()),
