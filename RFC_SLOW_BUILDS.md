@@ -1,1402 +1,996 @@
-# RFC: faster Rust builds and verification
+# RFC: evidence-led Rust build architecture for MFM
 
-Status: accepted near-term remediation; long-term cache architecture under evaluation
+Status: proposed revision; completed remediation retained, architecture experiments pending
 
-Date: 2026-07-14
+Date: 2026-07-16
 
-## Summary
+This revision supersedes the previous forward plan in this file. The results of
+the original Phases 00–07 remain valid evidence. The attempted Phase 08 was
+reverted, and the old Phases 09–17 are withdrawn.
 
-MFM's compile and verification workflow is slow enough to interrupt normal
-development, and its persistent build artifacts have grown disproportionately
-large. The problem is not one unusually slow crate. It is the interaction of:
+## Executive decision
 
-- comprehensive workspace-wide verification;
-- duplicated test execution;
-- avoidable artifact invalidation;
-- one long-lived Nixfied Cargo target serving many build shapes and checkouts;
-- incremental compilation and unpacked split debug information in verification
-  builds;
-- expensive test, doctest, compile-fail, and live-service execution.
+MFM will not decide its long-term Rust cache architecture before testing the
+remaining credible alternatives against the same workloads.
 
-MFM will address this with two intentionally different build lanes:
+Until that decision, MFM uses one pinned build environment with two artifact
+lanes:
 
-1. a fast, incremental developer lane for focused feedback; and
-2. a comprehensive, disk-efficient verification lane for the existing Nixfied
-   gates and CI.
+1. developers enter the Nix-provided environment and let Cargo own fast,
+   incremental, worktree-local compilation; and
+2. comprehensive verification runs through Nixfied, which lets Cargo compile
+   the live workspace under a compact, isolated verification policy and owns
+   services, task ordering, state, and evidence.
 
-The first implementation work will remove demonstrably duplicated work and the
-redundant SQLx package clean. The verification lane will then receive a
-centrally enforced artifact policy and a purpose-specific, bounded Cargo target
-cache. MFM will next evaluate Nix-native compiled artifacts before evaluating
-compiler-object caching with `sccache`. The long-term platform design will be
-selected only after the improved Cargo baseline, Nix-native artifacts,
-`sccache`, and any justified hybrid have been measured under the same
-workloads.
+This is not a Cargo environment competing with a Nix environment. Cargo runs
+inside the Nix-pinned environment in both lanes. The split is between mutable
+artifact policies and assurance levels, not between toolchains.
 
-This RFC does not weaken the test matrix, merge architectural crates, change
-public behavior, or replace full verification with the developer lane.
+The long-term CI and verification strategy remains open. The candidates to
+test are:
 
-### Decisions and hypotheses
+- the current scoped Cargo target on a persistent trusted runner;
+- a bounded `sccache` object cache around the same Cargo build;
+- a coarse Nix-native verification artifact built with Crane and consumed
+  directly by Nixfied; and
+- the current target-only design if no added mechanism produces enough value.
 
-The following decisions are accepted independently of the long-term cache
-mechanism:
+Test execution and task scheduling are measured as an independent candidate
+work stream because compilation is no longer the majority of every full gate.
+MFM will not build a second per-crate Cargo graph in Nix, write a project-local
+Rust build framework, copy mutable targets out of `/nix/store`, or cache a
+successful test result.
 
-- remove confirmed duplicate test execution;
-- remove the redundant SQLx package clean;
-- separate focused developer feedback from comprehensive verification;
-- give verification an explicit, disk-efficient artifact policy;
-- isolate mutable Cargo targets by purpose and worktree/slot;
-- preserve the complete assurance matrix; and
-- require controlled, comparable measurements before adopting an optimization.
+The experiments come first. A later decision phase will define the selected
+architecture, ownership, trust, retention, rollback, and gate governance. Only
+after those definitions are complete will the final phase update
+[the Nixfied capability-gap handoff](docs/nixfied-capability-gaps.md) for
+discussion with Nixfied's architects. The current handoff document remains a
+provisional Phase 06 record and should not be sent as Revision 2's architecture
+request before that final phase.
 
-The long-term verification cache remains a hypothesis to test. The candidate
-designs are:
+## Why the previous RFC stops here
 
-1. the improved mutable Cargo target without an additional compilation cache;
-2. immutable Nix derivations for dependency and verification artifacts;
-3. compiler-unit reuse through `sccache`; and
-4. a hybrid, but only if its measured benefit justifies operating both systems.
+The original RFC was valuable through Phase 07, but its later plan treated
+Nix-native compilation as a sequence to implement rather than a hypothesis to
+falsify. Phase 08 exposed that mistake: MFM generated stand-in dependency
+sources and produced an output that no verification task consumed. The output
+could exist and be cached without making any MFM gate faster or more correct.
 
-| Candidate | Reuse unit | Expected strength | Primary limitation |
-| --- | --- | --- | --- |
-| Improved Cargo target | Cargo fingerprints and incremental units | Lowest complexity and fastest warm edit loop | Mutable, path-sensitive, and difficult to share safely |
-| Nix-native artifacts | Immutable declared derivation outputs | Exact cross-worktree reuse with reproducible ownership | Rebuild quality depends on derivation/source granularity |
-| `sccache` | Individual compatible `rustc` requests | Reuse across different Cargo invocations and source snapshots | Does not cover linking, rustdoc, execution, or ambient inputs |
-| Hybrid | Nix artifacts plus compiler-object reuse where non-overlapping | Potentially covers exact and compiler-unit reuse | Two invalidation, storage, trust, and failure models |
+The lesson is broader than that failed pilot:
 
-No candidate is selected by this RFC before the evaluation completes.
+- an artifact has no value until an authoritative or shadow workload consumes
+  it;
+- a successful derivation is not evidence of useful reuse;
+- a dependency cache must be measured through the final artifact that consumes
+  it;
+- immutable compilation does not reduce test, service, or parity execution;
+- per-crate derivations would make MFM maintain Cargo's unit-graph semantics a
+  second time; and
+- choosing a cache before measuring real CI transfer and execution costs
+  optimizes the mechanism rather than the platform.
 
-## Problem situation
+The old Phase 08 implementation and its repository-owned stub generator were
+removed. Nothing from that pilot is part of the current design. The old
+Phases 09–17 have no approval or implementation status.
 
-The MFM workspace contains many deliberately small crates with strong typed
-boundaries. Its verification matrix includes workspace compilation, Clippy,
-Nextest, doctests, trybuild UI contracts, Cargo metadata contracts, SQLx schema
-checks, and live-service parity tests. Those checks protect architecture and
-runtime behavior and are not accidental overhead.
+## Retained foundation
 
-The current workflow nevertheless combines comprehensive assurance with build
-artifact policies better suited to interactive development. It also performs
-some work twice and explicitly invalidates artifacts immediately before later
-tasks need related build units. As a result:
+The replacement RFC does not discard successful work. It treats the following
+results as the starting point documented in
+[the controlled baseline](docs/slow-build-baseline.md).
 
-- broad gates are used where focused feedback is sufficient during iteration;
-- verification stores large amounts of incremental and split-debug state;
-- source-path, feature, profile, and checkout changes accumulate in a shared
-  target tree;
-- clean and partially invalidated runs vary substantially in duration;
-- direct Cargo and Nixfied builds cannot safely reuse each other's raw target
-  directories;
-- compile-time improvements alone cannot eliminate the substantial time spent
-  executing tests and parity checks.
-
-The required solution is therefore a build-system and task-graph design, not a
-single compiler flag or dependency cleanup.
-
-## Evidence and interpretation
-
-The investigation used the current `mfm3` checkout, workspace configuration in
-[Cargo.toml](Cargo.toml), Cargo metadata and tree inspection, task definitions
-in [nixfied.nix](nixfied.nix), persisted Nixfied run records, and the existing
-build artifacts.
-
-### Workspace and artifact observations
-
-| Measurement | Observation |
+| Original phase | Retained conclusion |
 | --- | --- |
-| Workspace | 53 packages and 100 targets |
-| Fully resolved metadata universe | 504 packages and 1,808 dependency edges |
-| Active host graph | Approximately 348 packages on the inspected Linux feature/target surface |
-| Active build machinery | Approximately 30 build-script packages and 18 proc-macro crates on that surface |
-| Local Cargo target | Approximately 11 GiB in `target/` |
-| Nixfied Cargo target | Approximately 44 GiB in persistent Nixfied state |
-| Nixfied incremental artifacts | Approximately 21 GiB |
-| Nixfied dependency artifacts | Approximately 19 GiB |
-| Nixfied trybuild artifacts | Approximately 4 GiB |
-| Split-debug artifacts | Approximately 190,000 `.dwo` files occupying about 12 GiB |
-| Warm workspace check | `cargo check --workspace --all-targets` completed in 1.77 seconds |
+| 00–01: RFC and baseline | Keep. The work established a reproducible inventory, exposed an approximately 18 GiB verification target, quantified split-debug and incremental artifacts, and recorded a disk-full failure. |
+| 02: duplicate app tests | Keep. One explicit workspace Nextest run preserves the same 974 identifiers while removing 70 duplicate executions and reducing the full graph from 14 to 13 tasks. |
+| 03: SQLx preclean | Keep. The destructive package clean is gone, and the disposable schema mutation check proves online schema drift still fails closed. |
+| 04: developer lane | Keep. The pinned development shell and `.#quick` convenience path provide one toolchain for direct Cargo development. `.#quick` is useful but is not the primary performance mechanism. |
+| 05: compact artifacts | Keep. Verification storage fell from approximately 17–18 GiB to 9.8 GiB; incremental artifacts and `.dwo` files fell to zero while source-line diagnostics remained available. |
+| 06: scoped target identity | Retain provisionally as the current baseline. It proved identity, isolation, and invalidation but produced no material speed or storage gain. Cache-family inspection, leases, retention, and cleanup remain incomplete in the pinned Nixfied runtime. |
+| 07: profile experiment | Keep the negative result. The default profile beat both `codegen-units=256` and `opt-level=1`; neither setting belongs in the verification policy. |
+| 08: dependency artifact | Reject and keep reverted. The custom generated stubs were not a faithful build boundary, and no verification artifact consumed the output. |
 
-The 504-package metadata result is not the graph compiled by every host build.
-It includes inactive platform packages, optional feature surfaces, and multiple
-versions selected by different dependency branches. Dependency cleanup remains
-worthwhile when verified, but the raw resolved-package count must not be used as
-the primary optimization target.
+Completed remediation may be changed only with new evidence. It is not
+reopened merely because this RFC resets the future phase plan.
 
-The 1.77-second warm check is also not a clean-build benchmark. It demonstrates
-that Cargo is already fast when the correct artifacts exist. The slow path is
-dominated by missing, fragmented, or invalidated artifacts plus real test and
-service execution.
+## Current facts
 
-### Timing evidence and its limitations
+### Build and assurance surface
 
-The original investigation selected a persisted 440.6-second Nixfied run. That
-run contained a parity task that has since been removed from the current task
-graph, so it is useful diagnostic evidence but not a valid current baseline.
+The measured workspace has 53 packages and 100 Cargo targets. Its complete
+assurance surface includes:
 
-More recent full runs using the current task graph ranged from approximately
-230 to 643 seconds depending on cache and invalidation state. This variance is
-itself evidence of an unstable artifact strategy. It also means that an
-uncontrolled single run must not be used to accept or reject an optimization.
+- 974 Nextest test identifiers across 99 binaries;
+- 53 doctest binaries and 42 discovered doctests;
+- nine trybuild harnesses, 80 Rust UI cases, and 71 checked stderr baselines;
+- Cargo metadata and architecture contracts;
+- offline and online SQLx checks, including deliberate schema mutation;
+- six database/parity leaves under managed Postgres; and
+- 13 tasks in the full Nixfied CI graph.
 
-In the selected 440.6-second run:
+Counts are useful diagnostics, but exact identifiers and selected features are
+the coverage contract. An experiment does not pass merely because its total
+count is similar.
 
-- workspace Nextest took 112.6 seconds, including approximately 77.3 seconds
-  of test execution;
-- workspace doctests took 130.1 seconds;
-- the separate `mfm-app` test-support task took 27.7 seconds;
-- a parity report task spent approximately 56 seconds executing its test.
+MFM also has compile inputs that are easy for a source filter or per-crate
+builder to miss:
 
-In a later 230.6-second current-graph run:
+- build scripts observe migrations and `.sqlx` metadata;
+- tests use `include_str!` across crate and binary boundaries;
+- trybuild launches nested Cargo processes against UI sources and `.stderr`
+  expectations; and
+- SQLx online preparation observes a live schema that is not a normal compiler
+  input.
 
-- workspace Nextest took 76.7 seconds;
-- the separate `mfm-app` test-support task took 19.9 seconds;
-- workspace doctests took 16.5 seconds;
-- one parity report task took 66.8 seconds.
+These are correctness constraints for every cache experiment.
 
-The difference between the runs shows the importance of controlling cache
-state. The execution portions also establish a ceiling for changes that affect
-only compilation.
+### What the timings say
 
-### Confirmed duplicated test execution
+The Phase 07 default-profile comparison recorded:
 
-The workspace Nextest invocation already includes the `mfm-app` tests compiled
-with `test-support`. The `mfm-integration-tests` package enables
-`mfm-app/test-support` as a normal dependency in
-[tests/integration/Cargo.toml](tests/integration/Cargo.toml), so workspace
-feature unification makes those tests available to the workspace run.
+| State | Full CI | Nextest task | Nextest compile | Nextest execution | Parity duration sum |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Clean | 341.392s | 160.765s | 45.93s | 114.415s | 95.368s |
+| Warm | 226.593s | 110.181s | 25.10s | 84.651s | 78.136s |
 
-The test identifiers from the separate `mfm-app` invocation exactly matched
-the corresponding identifiers in workspace Nextest in the inspected runs: 70
-duplicated tests in the original run and 44 in a later run after the test graph
-changed. This is duplicated execution, not additional assurance.
+These are controlled reference-host observations, not promises for current
+GitHub runners. Later committed-tree confirmations also showed substantial
+host and service variance. Revision 2 therefore begins by refreshing the
+baseline on the environments where a decision will apply.
 
-### Confirmed SQLx invalidation
+The clean-to-warm difference above is 114.799 seconds, or approximately 33.6%
+of the clean run. Even an impossible compilation cache with zero lookup,
+transfer, linking, and realization cost could not remove the test and service
+execution floor. Nextest execution alone exceeded its logged compile interval
+in both runs. The parity durations add real cost as well, although concurrent
+tasks mean their sum must not be added directly to wall time.
 
-The online SQLx task in [nixfied.nix](nixfied.nix) explicitly runs:
+The correct optimization order is therefore:
 
-```text
-cargo clean -p mfm-stream-store-postgres
-```
+1. preserve fast focused development;
+2. remove governance or task-graph re-execution that provides no new evidence;
+3. measure execution topology and compilation reuse separately;
+4. choose the least complex qualifying mechanism; and
+5. optimize another layer only when the residual profile still justifies it.
 
-before `cargo sqlx prepare --check`. The pinned SQLx CLI already performs a
-minimal-project recompilation setup: it touches the relevant package target
-sources and has its own cleaning fallback when that setup fails. MFM's
-preceding package clean is therefore redundant and removes reusable outputs for
-all profiles and feature shapes of the package.
+### What is and is not cached today
 
-A separate target directory is not the initial solution. SQLx touches source
-mtimes in the shared checkout, which can still make the ordinary verification
-target stale, while a second target forces another compilation. The correct
-first step is to remove the explicit clean, keep SQLx in the verification
-target, and measure the resulting invalidation.
+Nix currently provides the pinned Rust toolchain, Cargo Nextest, SQLx CLI,
+native tools, Nixfied runtime, model, launchers, and packaged CLI closure.
+Nixfied's `cacheEnv` gives verification Cargo a stable runtime-owned target
+path. It is a placement and identity mechanism, not result memoization; each
+leaf still executes.
 
-### Current profile and cache behavior
+The public verification launchers are Nix store outputs, but their Cargo
+artifacts are not. At runtime Cargo compiles the live checkout into mutable
+Nixfied state. Conversely, the packaged `mfm` CLI is a real Nix derivation, but
+it builds a release binary from the whole repository and does not supply the
+verification feature, test-binary, doctest, or parity surface.
 
-The workspace development and test profiles in [Cargo.toml](Cargo.toml) use
-unpacked split debug information. The existing `[profile.ci]` inherits the test
-profile and sets `codegen-units = 256`, which is effectively the normal
-development/test default in the current incremental configuration. Nixfied
-tasks do not select that profile consistently, so it does not currently define
-a verification artifact policy.
+The GitHub workflow restores `~/.cache/nix`, while `NIXFIED_STATE_DIR` lives in
+ephemeral runner storage. That does not preserve the MFM Cargo target and does
+not by itself substitute MFM-specific Nix store outputs. Claims about CI reuse
+must include the actual store, object cache, or runner lifecycle that supplies
+the reused bytes.
 
-Nixfied sets one target directory for its Cargo leaves:
+## Architectural boundary under test
 
-```text
-CARGO_TARGET_DIR=${stateDir}/cargo-target
-```
+The following boundary is the provisional default and the baseline against
+which alternatives compete.
 
-The project id and state slot can be shared by sibling checkouts. Raw Cargo
-target trees contain absolute source paths, fingerprints, profiles, feature
-sets, incremental state, and locks. Sharing one mutable tree across direct
-Cargo, Nixfied, CI, or concurrent worktrees produces unreliable reuse and
-unbounded accumulation.
+| Authority | Responsibility |
+| --- | --- |
+| Nix | Pin and realize Rust, Cargo tools, native dependencies, immutable packages, and any explicitly selected immutable CI artifacts. |
+| Cargo | Resolve and schedule the live Rust unit graph, fingerprints, features, profiles, build scripts, proc macros, rustdoc, linking, and developer incremental compilation. |
+| Nixfied model | Declare project tasks, closures, services, dependencies, cache identities, and public verbs. |
+| Nixfied runtime | Execute tasks, own mutable state and services, enforce placement and lifecycle, and retain run evidence. |
+| CI provider | Supply ephemeral or persistent compute and the explicitly selected trusted artifact transport. |
 
-The [GitHub checks workflow](.github/workflows/checks.yml) currently preserves
-the Nix download/evaluation cache but places `NIXFIED_STATE_DIR` in ephemeral
-runner storage. Rust compilation artifacts are therefore cold on each hosted
-runner.
+The practical lanes are:
 
-### Current Nix derivation boundary
+| Lane | Entry point | Source | Artifact policy | Purpose |
+| --- | --- | --- | --- | --- |
+| Focused development | persistent `nix develop` session, optionally activated by an environment tool, then direct Cargo | live worktree | incremental, full developer diagnostics, worktree-local target | edit/check/test feedback |
+| Broad local verification | `nix run .#check`, `.#test`, `.#test-db`, or `.#ci` | live worktree | compact, nonincremental, Nixfied-scoped target | comprehensive evidence and managed services |
+| CI verification | `nix run .#ci` | clean checkout | candidate selected by this RFC | merge evidence on Linux and macOS |
+| Packaging | `nix build .#mfm` or `nix run .#mfm` | immutable Nix source | Nix derivation output | distributable CLI |
 
-Nix already avoids rebuilding the Nixfied runtime and generated application
-launchers when their declared inputs are unchanged. That reuse does not
-currently extend to MFM's verification artifacts.
+One public experience does not require one artifact cache. The unification
+that matters is the pinned toolchain, declared task graph, feature/test
+contracts, and evidence. Developer incremental state and durable verification
+state have different invalidation, concurrency, retention, and diagnostic
+requirements and should not be forced into one writable tree.
 
-The `check`, `test`, `test-db`, and `ci` applications are generated from the
-Nixfied model and live in `/nix/store`, but they are launchers. At runtime they
-execute Cargo against the live workspace and write mutable outputs to
-`${stateDir}/cargo-target`. The `.rlib` files, proc macros, test binaries,
-fingerprints, and incremental units are therefore unknown to the Nix derivation
-graph.
+## Questions this RFC must answer
 
-The packaged `mfm` CLI in [flake.nix](flake.nix) is a real
-`buildRustPackage` derivation and demonstrates exact derivation reuse. Its
-current granularity is too coarse for verification caching:
+Revision 2 is complete only when it can answer all of these with measurements:
 
-- `src = ./.` makes the repository source tree one input, so an unrelated
-  tracked-file change can change the derivation;
-- the `cargoDeps` derivation contains vendored dependency sources, not compiled
-  dependency artifacts;
-- a changed MFM source derivation therefore recompiles the final Cargo graph;
-  and
-- it builds the release CLI, not the verification feature/profile/test matrix.
+1. Does the two-lane artifact model remain the best developer and verification
+   boundary, or does a supported Cargo mechanism safely improve cross-worktree
+   reuse?
+2. Is cold CI compilation material enough to justify persistent runners,
+   compiler-object caching, or immutable Nix artifacts after transfer and
+   lifecycle costs?
+3. Which part of full-gate latency is compilation, linking, rustdoc, test
+   execution, service startup, service execution, or avoidable task ordering?
+4. Can one successful `.#ci` run on an exact commit supersede separately run
+   component gates without losing evidence?
+5. If Nix builds verification artifacts, can Nixfied consume those immutable
+   closures directly without realizing them for unrelated tasks or copying a
+   Cargo target?
+6. Which cache ownership, inspection, lease, retention, cleanup, and evidence
+   capabilities actually belong in Nixfied after the long-term design is
+   selected?
 
-Nix can cache MFM compilation only when compilation itself becomes a declared
-derivation output. Pointing Cargo at `/nix/store` is not a solution: the store
-is immutable while Cargo target directories are mutable.
+## Hard constraints
 
-The local Nix store can safely share identical derivation outputs across
-worktrees without an external cache. A fresh hosted CI runner has no local MFM
-outputs, so cross-run CI reuse would still require a trusted binary cache or a
-persistent runner. Platform-specific outputs also remain separate.
-
-## Goals
-
-This RFC has the following goals:
-
-1. provide fast, focused feedback during normal development;
-2. reduce the median duration and variance of comprehensive verification;
-3. bound verification artifact size and inode growth;
-4. remove duplicated work without reducing coverage;
-5. preserve useful source-line diagnostics and backtraces;
-6. preserve reproducibility with the Nix-pinned Rust toolchain;
-7. make cache ownership, isolation, invalidation, and cleanup explicit;
-8. measure compilation, execution, and service costs independently;
-9. determine whether Nix-native compiled artifacts provide safe reuse across
-   worktrees and verification runs; and
-10. select the simplest long-term cache architecture that meets the measured
-    performance, storage, correctness, and operational requirements.
-
-## Non-goals
-
-This RFC does not authorize:
-
-- removing or weakening trybuild, doctest, metadata, SQLx, database, CLI, REST,
-  keystore, or parity checks;
-- merging crates solely to reduce Cargo package count;
-- sharing one raw Cargo target directory across worktrees or build lanes;
-- caching secret material or service state;
-- changing CLI, REST, persisted-data, replay, or architecture contracts;
-- treating static unused-dependency reports as automatic removal decisions;
-- assuming that a Nix-stored launcher implies Nix-stored Cargo artifacts;
-- introducing one derivation per workspace crate before simpler granularity is
-  measured;
-- caching successful test results merely because compiled artifacts are
-  cacheable;
-- accepting a faster build with worse correctness or materially worse
-  diagnostics.
-
-## Design constraints
-
-Every implementation stage remains subject to
+Every experiment and decision remains subject to
 [the code-quality policy](docs/code-quality.md),
 [the architecture taxonomy](docs/architecture.md), and
-[the design contract](docs/design.md). In particular:
+[the design contract](docs/design.md).
 
-- library and binary crate boundaries remain intact;
-- state logic does not gain ambient I/O to simplify testing or caching;
-- append-only, atomic, content-addressed, and canonical-hashing contracts are
-  unchanged;
-- secrets must not enter manifests, events, artifacts, outputs, diagnostics,
-  test fixtures, or caches;
-- CLI and REST text and JSON contracts remain stable;
-- security-sensitive keystore and signing behavior remains fully covered; and
-- a missing cache-lifecycle or task-model capability must be added properly,
-  not approximated with a fragile shell workaround.
+The following are non-negotiable:
 
-## Decision
+- the complete test, doctest, trybuild, SQLx, metadata, database, CLI, REST,
+  keystore, and parity surface remains present;
+- exact test identifiers, features, and environment-sensitive checks are
+  compared at the same source revision;
+- online SQLx schema validation executes live and is not satisfied by a
+  compiler-cache hit;
+- tests execute on every authoritative gate; compiled-artifact reuse is not
+  test-result reuse;
+- no secret-bearing environment, database credential, mnemonic, key, or
+  fixture enters a report or cache;
+- developer and verification mutable targets are not shared;
+- mutable Cargo targets are never copied from or written into `/nix/store`;
+- cache writes from untrusted workflows are prohibited unless the backend has
+  a reviewed isolation model that prevents poisoning trusted builds;
+- cache identity includes platform, architecture, exact toolchain, profile,
+  features, build policy, and every mechanism-specific correctness input;
+- every persistent cache has one owner, bounded retention, inspection,
+  concurrency semantics, and safe cleanup before adoption;
+- every candidate has a cache-bypass or cacheless path; and
+- missing framework support is reported and designed properly rather than
+  replaced by shell deletion, target copying, path rewriting, or generated
+  stand-in crates.
 
-### 1. Establish two build lanes
+## Candidate assessment before testing
 
-#### Developer lane
+### Current scoped Cargo target
 
-The developer lane is optimized for edit-feedback latency:
+This is the control candidate. It has the lowest complexity and already gives
+fast reuse when the right artifacts remain available. Its limitations are
+mutable state, source-path sensitivity, cold hosted runners, incomplete
+Nixfied cache lifecycle, and storage multiplication across slots and
+worktrees.
 
-- use the repository-pinned Rust environment through a development shell or an
-  equivalent repository-owned entry point;
-- retain incremental compilation and full development debugging information;
-- use a target directory owned by the current worktree;
-- prefer focused commands such as `cargo check -p <package>` and
-  `cargo test -p <package>`;
-- provide a non-gating `quick` entry point for formatting plus a broad type
-  check when package-level selection is not convenient.
+It remains a valid long-term winner. A technology is not required merely
+because this RFC evaluates technologies.
 
-The initial `quick` contract should be equivalent to:
+### Persistent trusted runner
+
+A persistent runner can retain the current Cargo target and Nix store without
+archive creation or transfer. It tests the simplest explanation for the
+remaining cold/warm gap: keep the cache that Cargo already understands on the
+machine that will reuse it.
+
+The experiment must include host maintenance, isolation between repositories
+and worktrees, trusted-job admission, disk limits, cache-family cleanup,
+concurrent writer behavior, Nix store garbage collection, and recovery after a
+failed or canceled run. A fast warm run is insufficient if the runner becomes
+an unbounded, privileged mutable host.
+
+### `sccache`
+
+`sccache` preserves Cargo as the build planner and reuses compatible `rustc`
+requests across target directories and source snapshots. It is the smallest
+candidate that can add cross-run compiler reuse without creating a second Rust
+dependency graph.
+
+Its official Rust support requires incremental compilation to be disabled and
+does not cache crates whose compiler invocation links final artifacts, such as
+binaries and proc macros. Filesystem-reading proc macros are a correctness
+caveat. It also does not eliminate rustdoc, Cargo planning, linking, test
+execution, or service work. The pilot must report end-to-end time, not only a
+headline cache-hit rate.
+
+The first test is a bounded local or persistent-runner cache. Remote CI
+persistence is tested only if the local screening result qualifies. Online
+SQLx preparation runs with the compiler wrapper disabled. A cache-bypass run
+must produce the same inventory and results.
+
+### Crane dependency and verification artifacts
+
+Crane is the only Nix-native Rust builder in the initial experiment set. It
+continues to invoke Cargo while providing a maintained dependency-artifact
+pattern and final-artifact consumers. This is materially different from
+reimplementing Cargo's package graph as one Nix derivation per crate.
+
+The pilot is one end-to-end chain:
+
+1. a pinned Crane dependency build produces `cargoArtifacts`;
+2. a final verification build explicitly consumes those `cargoArtifacts`;
+3. the final output contains a real Nextest archive or equivalent declared
+   test-binary bundle; and
+4. an opt-in Nixfied task executes that immutable output directly.
+
+There is no standalone “dependency artifact succeeded” milestone. If the final
+build does not consume the dependency output, or Nixfied cannot execute the
+result, the pilot fails. MFM will not maintain a source-stub generator. Crane's
+documented internal dummy-source technique may be used by the pinned upstream
+library, but it is accepted only as an implementation detail of an artifact
+that a real downstream build consumes.
+
+The source set must explicitly include every compile or test input required by
+MFM, including manifests, Rust sources, build scripts, migrations, `.sqlx`
+metadata, trybuild `.rs` and `.stderr` files, examples or fixtures used by
+`include_str!`/`include_bytes!`, target configuration, and relevant generated
+inputs. A generic Rust-only source filter is not sufficient.
+
+A Nextest archive is not the entire gate. Doctests are outside Nextest, and
+trybuild tests may require a relocatable workspace plus nested Cargo. The
+experiment must prove whether trybuild works from the immutable bundle. If it
+does not, the report must identify the residual runtime-Cargo lane instead of
+claiming full replacement.
+
+Fresh hosted CI receives Nix reuse only through a persistent store or a signed,
+trusted binary cache. Nix evaluation, derivation build, NAR creation,
+upload/download, substitution, closure size, and signing/retention operations
+all count toward the result. The artifact must not be added to a common model
+in a way that makes `.#quick`, model admission, or unrelated tasks realize the
+large closure eagerly.
+
+### Execution topology
+
+Execution topology is a first-class candidate even though it is not a cache.
+The current full graph serializes broad check, workspace tests, keystore parity,
+and the database composite. Trybuild suites are intentionally serialized
+because they launch nested Cargo under a shared target lock. Some database
+leaves are ordered by evidence dependencies rather than CPU availability.
+
+The experiment will distinguish:
+
+- build contention from executable test time;
+- useful Nextest concurrency from CPU and memory oversubscription;
+- trybuild's nested compilation from its UI-case execution;
+- service startup from parity test execution;
+- true data/service dependencies from conservative task ordering; and
+- execution partitioning gains from duplicated artifact transfer or setup.
+
+No ordering edge is removed merely because two tasks appear independent. Any
+parallel candidate must preserve service isolation, schema isolation, evidence
+ordering, resource bounds, and deterministic failure diagnostics.
+
+### Per-crate Nix builders and a new MFM Nix library
+
+`crate2nix`, `cargo2nix`, and a new MFM-specific graph generator are not initial
+candidates. They translate Cargo metadata into a second per-crate build graph,
+while Cargo's exact unit graph varies by command, target, features, profile,
+host/target roles, build scripts, proc macros, and test targets. Cargo's unit
+graph interface remains unstable.
+
+MFM also has cross-workspace included sources and a large verification surface.
+Current crate2nix documentation describes test support as experimental and
+notes workspace-source and target-specific feature restrictions. These tools
+may be reconsidered only if the bounded Crane pilot proves that coarse reuse
+is valuable but insufficient, and a new RFC demonstrates why maintaining a
+second graph is cheaper and safer than the measured alternatives.
+
+### Cargo `build-dir` evolution
+
+Cargo now permits separating intermediate `build-dir` from final `target-dir`, and the
+MFM toolchain accepted a shared `CARGO_BUILD_BUILD_DIR` in disposable probes.
+One focused package probe produced these exploratory results:
+
+| Probe | Observation |
+| --- | ---: |
+| Seed build into a fresh shared build directory | 3.23s |
+| Different target directory, same shared build directory | 0.07s |
+| Different target directory, fresh build directory control | 2.94s |
+| Identical workspace copied to another path, same build directory | 0.08s |
+| Comment edit in the copied leaf crate | 0.45s |
+| Original and edited copies after both variants existed | 0.08s each |
+
+These results are promising but not adoption evidence. The Cargo team does not
+currently endorse sharing one build directory across workspaces. The new
+content-scoped layout, granular locking, cross-workspace caching, and automatic
+stale-unit cleanup are still evolving. Revision 2 records a bounded
+compatibility probe but will not make unsupported cross-workspace sharing an
+authoritative MFM path. Cargo-native support should replace a custom cache when
+its ownership and compatibility contract becomes official.
+
+## Common experiment contract
+
+### Canonical source and cache matrix
+
+Every compilation candidate is tested against the same cases:
+
+1. clean environment with no MFM artifact cache;
+2. exact unchanged rerun;
+3. documentation-only tracked-file change;
+4. edit to a leaf workspace crate;
+5. edit to a widely shared crate such as `mfm-ids` or `mfm-canonical`;
+6. change to a manifest or `Cargo.lock`;
+7. feature or verification-profile change;
+8. build-script, migration, `.sqlx`, included-file, or trybuild-baseline change;
+9. identical source in a second worktree path;
+10. concurrent worktrees or slots when the candidate permits concurrency;
+11. exact toolchain or target-platform change; and
+12. explicit cache bypass followed by normal reuse.
+
+Source edits use disposable worktrees or generated patches with recorded
+digests. They are restored before repository gates run. No experiment mutates
+an active developer or authoritative verification cache merely to manufacture
+a clean state.
+
+### Measurements
+
+Each run records:
+
+- source commit, dirty-state fingerprint, worktree identity, and experiment
+  configuration;
+- operating system, architecture, runner class, CPU, memory, filesystem, and
+  relevant host load;
+- exact Nix, Nixpkgs, Nixfied, Rust, Cargo, Nextest, SQLx, Crane, and `sccache`
+  identities as applicable;
+- model hash, task graph, command, features, profiles, and cache state;
+- Nix evaluation, realization, build, substitution, and transfer time;
+- Cargo planning, compilation, linking, rustdoc, and nested-Cargo time where
+  observable;
+- test execution, service startup, parity execution, and total wall time;
+- exact Nextest identifiers and hashes plus doctest, trybuild, SQLx, metadata,
+  database, CLI, REST, and keystore inventories;
+- Cargo target, compiler cache, Nix output and closure sizes, NAR sizes, file
+  counts, and repeated-run growth;
+- hit, miss, cacheability, eviction, upload, download, and bypass statistics;
+  and
+- failure diagnostics, backtrace file/line quality, cleanup behavior, and
+  recovery after cancellation.
+
+Task durations that overlap are not summed and presented as wall time. A
+compiler hit rate is not presented as end-to-end improvement. A local Nix
+store hit is not presented as fresh-CI reuse. Every report distinguishes facts,
+inferences, and unverified surfaces.
+
+### Screening and qualification
+
+Experiments use two stages so obviously poor candidates do not consume a full
+cross-platform matrix.
+
+Screening uses isolated Linux runs with at least two clean and three warm
+samples, plus exact-source, leaf-edit, shared-crate-edit, and bypass cases. A
+candidate stops at screening when it:
+
+- changes coverage or results;
+- has an unexplained cache hit after a compile-relevant input change;
+- cannot be consumed by the workload it claims to accelerate;
+- cannot define safe ownership, trust, or cleanup;
+- increases median end-to-end time; or
+- saves less time than its measured lookup, realization, or transfer overhead
+  with no compensating correctness or operational benefit.
+
+Qualification uses at least three clean and five warm samples on the actual
+target environments, including hosted or persistent Linux and macOS as
+applicable. It runs the complete source/cache matrix and reports distributions,
+not only the median. Platform-specific strategies are allowed, but an
+unmeasured platform is not silently covered by another platform's result.
+
+### Correctness vetoes
+
+Any of the following rejects a candidate regardless of speed:
+
+- missing or changed required test identifiers, features, doctests, trybuild
+  cases, SQLx checks, parity leaves, or output contracts;
+- stale success after a compile-relevant source, schema, toolchain, target,
+  feature, or profile change;
+- secret persistence or an untrusted cache write reaching trusted builds;
+- mutation of Nix store outputs or copying a mutable target as a cache format;
+- unsafe cleanup, path traversal, symlink following, state-family confusion,
+  or deletion of service/run evidence;
+- concurrent corruption or an undefined same-cache writer policy;
+- diagnostics that no longer identify actionable source files and lines; or
+- a hidden fallback that rebuilds through a different toolchain or undeclared
+  host dependency.
+
+### Materiality and complexity
+
+A cache or runner candidate qualifies for architectural consideration only if
+it improves the median end-to-end target workload by both at least 15% and at
+least 30 seconds, or if it supplies a separately approved reproducibility or
+operational property that the baseline cannot provide. It must not introduce a
+repeatable regression greater than 10% in comparable cacheless, changed-source,
+or warm workloads.
+
+Those thresholds are gates for consideration, not an automatic selection.
+The decision also weighs:
+
+- maintenance and upgrade burden;
+- number of artifact authorities and invalidation models;
+- storage and network cost;
+- trusted infrastructure requirements;
+- failure and rollback behavior;
+- visibility into cache use and misses;
+- performance with no cache; and
+- whether execution, rather than compilation, is now the dominant residual.
+
+The target-only baseline wins ties. A combination is considered only when each
+component qualifies independently and an isolated combined experiment proves
+material additive value. Using different single mechanisms in different
+environments is not considered a hybrid when each invocation has one clear
+artifact authority.
+
+## Revision 2 phase plan
+
+Revision 2 phase identifiers use the `R2-` prefix so they cannot be confused
+with the completed original phases recorded in the baseline report.
+
+Each phase is separately approved. Experimental code lives in a disposable
+worktree or explicitly temporary experiment branch unless the phase says
+otherwise. A report-only conclusion is a valid success. No pilot dependency,
+task, workflow, cache directory, generated source, or flake input remains in
+the main branch merely to preserve a failed experiment.
+
+### R2-00: accept the reset
+
+Change:
+
+- replace the old forward plan with this RFC;
+- preserve the original Phase 00–07 evidence and Phase 08 rejection; and
+- make no build, workflow, cache, test, or runtime behavior change.
+
+Evaluate:
+
+- local links and Markdown structure;
+- consistency with the current flake, Nixfied model, CI workflow, and baseline;
+- explicit separation of experiments from decisions; and
+- repository-required documentation verification.
+
+Expected commit subject:
 
 ```text
-cargo fmt --all -- --check
-cargo check --workspace --lib --bins
+docs: reset slow-build architecture evaluation
 ```
 
-The quick lane is not evidence that the comprehensive gates passed.
+Stop decision: approve or revise the experiment contract before running a new
+candidate.
 
-#### Verification lane
+### R2-01: refresh the workload and gate baseline
 
-The verification lane is optimized for assurance, reproducibility, and bounded
-artifacts:
+Change:
 
-- preserve `nix run .#check`, `nix run .#test`, `nix run .#test-db`, and
-  `nix run .#ci` as the comprehensive entry points;
-- use a Nixfied-owned, slot-scoped Cargo target distinct from direct Cargo;
-- disable incremental compilation;
-- retain line-table debug information but disable split-debug artifacts;
-- cover every Cargo leaf, including nested Cargo launched by trybuild and SQLx;
-- clean only the active build cache through an explicit scoped maintenance
-  operation, never through ad hoc recursive deletion of Nixfied state.
+- extend the baseline report with current local Linux, hosted Linux, and hosted
+  macOS observations at one exact revision;
+- add no cache technology; and
+- record the admitted task graph and public-gate equivalence.
 
-The two lanes intentionally do not share raw Cargo targets. If cross-lane or
-cross-worktree reuse is later introduced, it will share content-addressed
-compiler outputs rather than mutable Cargo state.
+Test:
 
-### 2. Consolidate the workspace test execution
+- focused Cargo check/test from a persistent Nix development environment;
+- `.#quick`, each public Nixfied gate, `.#ci`, and `nix flake check`;
+- clean and warm compilation versus execution/service decomposition;
+- exact test, feature, doctest, trybuild, SQLx, metadata, and parity inventory;
+- whether `nix flake check` currently performs Rust compilation;
+- whether `.#ci` contains the same `check`, `test`, and `test-db` leaves and
+  semantics exposed by the component verbs; and
+- the real contribution-workflow cost of running component gates and then
+  rerunning `.#ci` on the same source revision.
 
-Workspace Nextest will explicitly select the required app feature:
+Expected commit subject:
 
 ```text
-cargo nextest run --workspace --features mfm-app/test-support
+docs: refresh build workload baseline
 ```
 
-The separate `mfm-app` test-support Nextest task and its composite dependency
-will then be removed. Acceptance is based on comparing test identifiers and
-required feature-specific tests at the same commit, not merely on comparing a
-total count.
+Stop decision: freeze the canonical workloads and determine whether gate
+governance is eligible for a later policy change. Do not change `AGENTS.md` in
+this phase.
 
-All nine trybuild harnesses, their UI cases, and the complete workspace
-Nextest coverage remain mandatory.
+### R2-02: test the developer build boundary
 
-### 3. Remove the redundant SQLx package clean
+Change:
 
-The explicit `cargo clean -p mfm-stream-store-postgres` will be removed from the
-online SQLx task. SQLx will initially continue to use the shared verification
-target so that its built-in minimal recompilation behavior can be measured
-without paying for a second target tree.
+- add only reportable, disposable probes; and
+- keep direct Cargo, `.#quick`, and all public gates unchanged.
 
-Online SQLx preparation must remain uncached by any compiler-object cache. The
-database schema is ambient proc-macro input that is not represented in a normal
-compiler cache key. A cache hit that bypasses macro execution could incorrectly
-accept stale SQLx metadata.
+Test:
 
-Acceptance must include a disposable-schema mutation test proving that
-`cargo sqlx prepare --check` fails after a schema change when Rust sources have
-not changed.
+- persistent `nix develop` plus focused Cargo against invoking `.#quick` for
+  each edit cycle;
+- warm leaf, reverse-dependent, and broad-check feedback;
+- independent worktree-local target behavior and disk growth;
+- stable `build-dir` separation with distinct target directories;
+- identical-source relocation, one-leaf edit, concurrent access, trybuild,
+  rust-analyzer coexistence, and cleanup; and
+- the nightly new build layout only as an upstream compatibility observation.
 
-### 4. Enforce the verification artifact policy centrally
+Unsupported cross-workspace build-directory sharing cannot win this phase. The
+result is either confirmation of the current developer boundary or a list of
+upstream Cargo conditions that would justify retesting it later.
 
-The initial verification policy is:
+Expected commit subject:
 
 ```text
-CARGO_INCREMENTAL=0
-CARGO_PROFILE_DEV_DEBUG=1
-CARGO_PROFILE_TEST_DEBUG=1
-CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off
-CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=off
+docs: record developer build boundary experiment
 ```
 
-`debug=1` retains line tables while avoiding full debug payloads. Applying the
-policy in the Nixfied verification environment covers `cargo check`, Clippy,
-builds, tests, doctests, SQLx-internal Cargo, and trybuild's nested development
-builds. Direct developer Cargo remains unaffected.
+Stop decision: define the developer-lane input to the final architecture
+comparison.
 
-This central policy is preferred over relying only on `--profile ci`, because
-it is easy for an internal or nested Cargo invocation to omit the named
-profile. The existing ineffective `[profile.ci]` should be removed or replaced
-as part of this change so it cannot imply coverage it does not provide.
+### R2-03: test verification execution topology
 
-Before fixing additional profile values, benchmark:
+Change:
 
-- the nonincremental default `codegen-units` against `256`; and
-- `opt-level=0` against `opt-level=1` for total compile-plus-test time.
+- create opt-in or disposable task-graph variants only; and
+- make no ordering or partitioning change authoritative.
 
-An optimized test profile is accepted only when total gate time improves and
-debug assertions, overflow checks, diagnostics, and test behavior remain
-intact.
+Test:
 
-### 5. Use purpose-specific, bounded target caches
+- Nextest worker counts and, where useful, partitions against a precompiled or
+  fully warm test set;
+- serialized trybuild versus safe alternatives that do not contend on one
+  Cargo lock;
+- doctest cost and whether it overlaps safely with binary test execution;
+- Postgres startup, migration, schema isolation, and each parity leaf's true
+  dependency/resource requirements;
+- current serial composite ordering against bounded parallel candidates;
+- CPU, memory, disk, Cargo-lock, service-port, and failure-diagnostic behavior;
+  and
+- total wall time without counting duplicated compilation or setup as an
+  execution improvement.
 
-The Nixfied verification target should use Nixfied's first-class cache
-environment mechanism rather than a single raw `${stateDir}/cargo-target`.
-Its identity must include:
+Any qualifying topology change becomes a separately scoped implementation
+proposal. This experiment does not weaken or cache test execution.
 
-- operating system and target architecture;
-- the exact Rust compiler/toolchain closure or version;
-- the Nixfied slot or other concurrent-worktree isolation boundary; and
-- an explicit verification-policy version.
+Expected commit subject:
 
-`Cargo.lock` should not create a new local target-directory identity on every
-dependency update. Cargo already fingerprints dependency changes inside the
-target, while lock-keyed directories would leave large orphan caches behind.
+```text
+docs: record verification execution experiment
+```
 
-Cache lifecycle must be explicit and scoped to the build cache. Cleanup must
-not traverse or delete Postgres data, run records, parity logs, or other
-Nixfied service and diagnostic state. If the required cache-family garbage
-collection is missing, it should be added properly rather than approximated
-with `find -delete` or broad slot deletion.
+Stop decision: identify execution improvements worth carrying into the
+candidate comparison and record the remaining compilation ceiling.
 
-### 6. Evaluate Nix-native compiled artifacts
+### R2-04: test persistent Cargo verification
 
-After task deduplication, profile selection, and the improved mutable-target
-baseline are stable, MFM will test whether compilation should cross the Nix
-derivation boundary.
+Change:
 
-#### Pilot shape
+- run the current compact, scoped Cargo verification target on a disposable
+  persistent trusted runner or equivalent isolated long-lived host; and
+- add no compiler wrapper or Nix-built verification artifact.
 
-The first pilot will use coarse, intentional layers rather than immediately
-generating a derivation for every workspace crate:
+Test:
 
-1. a dependency-artifact derivation that can remain unchanged across ordinary
-   MFM source edits; and
-2. one or more verification-artifact derivations producing the final binaries
-   required by a declared feature/profile surface.
+- the complete common source/cache matrix;
+- unchanged, leaf-edit, shared-crate-edit, and cross-worktree reuse;
+- trusted-job admission and repository/worktree isolation;
+- same-slot and cross-slot concurrency;
+- Cargo target and Nix store size, repeated growth, retention, garbage
+  collection, inspection, and cancellation recovery;
+- the effect of the pinned Nixfied runtime's missing cache-family lifecycle;
+  and
+- total ownership and maintenance cost compared with ephemeral hosted runners.
 
-The verification outputs may include a Nextest archive or equivalent immutable
-test-binary bundle, the MFM CLI used by parity tests, and other final binaries
-that Nixfied can execute directly. Nixfied remains responsible for live
-service lifecycle, runtime environment, task evidence, and test execution.
+Expected commit subject:
 
-The pilot must not copy a prewarmed Cargo target tree from `/nix/store` into
-mutable state. It should expose final immutable artifacts as declared Nixfied
-closures. If first-class model support is missing, that support must be added
-properly rather than approximated with shell copying or path rewriting.
+```text
+docs: record persistent cargo verification experiment
+```
 
-Doctests and trybuild require explicit treatment. A Nextest archive alone does
-not replace doctest execution, and trybuild test binaries can launch nested
-Cargo compilations. Those checks may remain in the runtime Cargo lane or become
-separate pure derivations, but the pilot must preserve their complete coverage
-and report their cost separately.
+Stop decision: qualify the runner/target baseline, reject it, or identify a
+framework capability that must be included in the final handoff.
 
-#### Source and derivation correctness
+### R2-05: test bounded `sccache`
 
-The pilot must declare every compile-relevant input, including as applicable:
+Change:
 
-- workspace and package manifests and `Cargo.lock`;
-- Rust sources, build scripts, proc-macro sources, and generated-source inputs;
-- SQLx offline metadata and migrations consumed at compile time;
-- files read through `include_bytes!`, `include_str!`, or equivalent paths;
-- target, feature, profile, compiler, linker, and platform configuration; and
-- environment values that can affect compilation.
+- add a pinned, opt-in compiler wrapper only in an isolated experiment;
+- retain the compact nonincremental verification profile;
+- bound the cache and expose a bypass; and
+- disable the wrapper for online SQLx preparation.
 
-Source filtering should exclude files proven not to affect compilation, so a
-documentation-only edit does not rebuild Rust artifacts. It must fail toward
-rebuilding rather than risk a false cache hit when an input is uncertain.
+Test:
 
-Online SQLx preparation remains a live, uncached task. Database schema and
-service state must not be smuggled into an otherwise pure derivation.
+- the common source/cache matrix and exact coverage inventory;
+- local exact-hit, second-worktree, leaf-edit, and shared-crate hit rates;
+- cacheable versus non-cacheable compiler requests, proc macros, binaries,
+  linking, rustdoc, trybuild, and residual execution;
+- source-path normalization and false-hit probes for filesystem-reading macros
+  and included files;
+- cache size, evictions, lookup overhead, corruption behavior, and cleanup; and
+- byte-for-byte or semantically equivalent results under cache bypass.
 
-#### Granularity decision
+Only after local screening qualifies may the phase test trusted CI persistence.
+That extension includes archive or remote transfer time, read/write trust,
+poisoning boundaries, retention, Linux/macOS separation, and failure when the
+cache backend is unavailable.
 
-The initial dependency/final-artifact split should recover most third-party
-compilation without generating a large Nix graph. A finer workspace-crate
-derivation graph will be considered only if measurements show that unchanged
-MFM crates still dominate rebuild time.
+Expected commit subject:
 
-A per-crate design would need to preserve Cargo resolver behavior, feature
-unification, host/target separation, build-script and proc-macro dependencies,
-and reverse-dependency invalidation. Its evaluation must include Nix evaluation
-time, derivation count, closure size, and garbage-collection behavior, not only
-compile time.
+```text
+docs: record bounded sccache experiment
+```
 
-The pilot may use an established Nix Rust build pattern such as a
-dependency-only derivation, but selection of a new flake input or build
-framework is part of the evaluation. This RFC does not authorize a dependency
-solely because it can produce a successful prototype.
+Stop decision: qualify or reject `sccache` as a standalone environment-specific
+candidate. Do not combine it with Crane in this phase.
 
-### 7. Evaluate compiler-object caching after the Nix pilot
+### R2-06: test a consumed Crane verification artifact
 
-After the Nix-native pilot establishes its reuse granularity and operational
-cost, MFM will run a bounded `sccache` comparison on Linux when compilation
-remains material:
+Change:
 
-- use the Nix-pinned `sccache` package;
-- keep incremental compilation disabled in the verification lane;
-- start with a bounded local cache of approximately 2 GiB;
-- persist only the compiler-object cache in CI, never the Cargo target tree;
-- key CI cache archives by platform, architecture, exact Rust/Nix toolchain,
-  `Cargo.lock`, and cache-policy version;
-- allow writes only from trusted workflows and never place secrets in cached
-  inputs or outputs;
-- disable the compiler cache for online SQLx preparation;
-- retain a periodic cache-bypass CI run.
+- pin Crane only in an isolated pilot;
+- build a real dependency artifact and a final consumer in one experiment;
+- produce a Nextest archive or equivalent immutable verification bundle;
+- expose an opt-in Nixfied execution path only if the model can consume the
+  closure directly; and
+- leave public gates authoritative and unchanged.
 
-Build scripts, proc macros, linking, rustdoc, and actual test execution are not
-all eliminated by compiler-object caching. The pilot will be rejected if its
-transfer, lookup, and whole-crate recompilation overhead does not produce a net
-improvement. It will not be combined with Nix-native compiled artifacts unless
-an isolated hybrid measurement demonstrates additional value and a clear cache
-ownership model.
+Test:
 
-### 8. Treat dependency and scheduling work as later optimizations
+- proof from derivation inputs/logs that the final artifact consumed the
+  dependency output;
+- the complete common source/cache matrix, including explicit non-Rust inputs;
+- exact test-binary and test-identifier parity with Cargo verification;
+- execution from an immutable output without target copying or mutation;
+- relocation and nested-Cargo behavior of all nine trybuild harnesses;
+- the residual Cargo lane for doctests, trybuild if necessary, and online SQLx;
+- Nixfied model admission and unrelated-task realization cost;
+- local-store exact hits and changed-source rebuild boundaries;
+- output, closure, NAR, evaluation, build, substitution, and garbage-collection
+  sizes/costs; and
+- signed binary-cache transfer and trust on fresh Linux/macOS runners only
+  after local screening qualifies.
 
-After build-policy changes have a controlled baseline, separate changes may:
+The pilot fails immediately if it generates repository-owned stand-in crate
+sources, leaves the dependency output unconsumed, copies a mutable target, or
+cannot execute the final artifact. Missing Nixfied task-specific closure
+support is a reported capability gap, not permission for a shell workaround.
 
-- narrow Tokio's workspace `full` feature set where feature analysis proves a
-  smaller set is correct;
-- reconcile Reqwest feature variants where transport security and trust
-  semantics remain unchanged;
-- remove verified unused direct dependencies;
-- reduce active duplicate transitive versions where upstream constraints
-  permit it;
-- change doctest or parity scheduling when measurements show available
-  parallelism without Cargo locks, service conflicts, or CPU contention.
+Expected commit subject:
 
-These changes must not be mixed into the build-policy rollout. Raw lockfile
-duplication and package count are not sufficient justification.
+```text
+docs: record consumed nix artifact experiment
+```
 
-## Gated implementation and commit protocol
+Stop decision: qualify or reject coarse Nix-native verification. Per-crate Nix
+derivations remain out of scope.
 
-This RFC is not authorization to execute the whole sequence in one work
-session or pull request. A request to begin implementation authorizes only the
-next approved phase.
+### R2-07: compare qualifying candidates
 
-### Mandatory stop rule
+Change:
 
-Each successful phase produces at most one logical commit. After evaluating
-that clean commit, the engineer must stop, deliver the phase report below, and
-wait for explicit owner approval before preparing or implementing the next
-phase.
+- rerun only candidates that passed screening under the qualification matrix;
+- normalize reports into one comparison; and
+- introduce no default architecture.
 
-The stop applies even when:
+Test:
 
-- every test and performance threshold passes;
-- the next change appears mechanical;
-- the remaining token, time, or CI budget is available; or
-- multiple later phases could be implemented together conveniently.
+- three clean and five warm runs on each target environment;
+- identical source/cache, coverage, trust, storage, and failure cases;
+- end-to-end local, persistent-runner, and fresh-hosted behavior as applicable;
+- residual compilation, linking, rustdoc, execution, and service costs;
+- cacheless and backend-unavailable behavior; and
+- any combined candidate only after separate owner approval and only when both
+  standalone components qualified with a specific additive hypothesis.
 
-Do not start background measurements, edit files, add dependencies, or prepare
-the next phase while awaiting approval. Approval for one phase does not imply
-approval for another.
+The report fills this decision table with measured values:
 
-One phase/one commit is a success-path maximum, not a requirement to commit
-broken or unjustified work:
+| Candidate/environment | Full-gate distribution | Leaf/shared edit | Transfer/realization | Persistent bytes | Coverage | Operations | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Scoped Cargo target | pending | pending | none | pending | pending | pending | pending |
+| Persistent runner | pending | pending | none | pending | pending | pending | pending |
+| `sccache` | pending | pending | pending | pending | pending | pending | pending |
+| Crane artifact | pending | pending | pending | pending | pending | pending | pending |
+| Execution topology | pending | n/a | n/a | pending | pending | pending | pending |
 
-- if a correctness or coverage check fails before commit, do not commit;
-- if required underlying Nixfied support is missing, do not add a shell
-  workaround; stop and report the capability gap;
-- if post-commit evaluation finds a regression, stop and recommend keep,
-  revert, or redesign without taking that action automatically;
-- if an experiment has no qualifying implementation, record a report-only
-  conclusion rather than manufacturing an empty or knowingly inferior code
-  commit.
+Expected commit subject:
 
-### Per-phase workflow
+```text
+docs: compare qualifying build candidates
+```
 
-For every phase, in order:
+Stop decision: declare the evidence decision-quality or request one narrowly
+defined missing measurement. Do not select by preference or prototype effort
+already spent.
 
-1. Confirm explicit approval for that phase and its stated scope.
-2. Confirm the worktree has no unrelated changes. Preserve all user-owned
-   changes and stop if they overlap the phase.
-3. Record the parent commit, toolchain, host, cache state, task graph, relevant
-   baseline measurements, and test inventory.
-4. Implement only the phase outcome. Experimental alternatives use isolated
-   targets or worktrees and are not accumulated in the main worktree.
-5. Run focused checks while developing and compare the relevant inventories
-   before and after the change.
-6. Before committing, run the repository-required gates:
+### R2-08: select and define the long-term architecture
 
-   ```text
-   nix run .#check
-   nix run .#test
-   nix run .#test-db
-   ```
+Change:
 
-7. Run `nix run .#ci` for any phase that changes build tasks, test selection,
-   SQLx behavior, profiles, cache behavior, Nix derivations, GitHub workflows,
-   or the selected default architecture.
-8. Create one commit with a lower-case subject and only the phase's logical
-   change.
-9. Evaluate the clean committed tree using the phase-specific matrix. Record
-   exact commands, Nixfied run ids, timings, storage, coverage, and any
-   unverified surface. Never report a dirty-worktree Nix result as an
-   exact-derivation cache result.
-10. Deliver the phase report and stop. Do not proceed until the owner explicitly
-    selects proceed, hold, revert, or redesign.
+- update this RFC and add an ADR if appropriate;
+- select the least complex qualifying strategy for development, broad local
+  verification, hosted or persistent CI, and packaging;
+- define artifact authority, identities, inputs, ownership, trust, retention,
+  inspection, concurrency, cleanup, evidence, failure, and rollback;
+- decide whether execution-topology changes proceed in a separate
+  implementation plan; and
+- decide gate governance, including whether one successful `.#ci` on an exact
+  candidate supersedes separate `.#check`, `.#test`, and `.#test-db` runs.
 
-Documentation-only commits remain subject to the repository's current
-pre-commit gate policy. If that policy changes independently, this workflow
-follows the new authoritative policy.
+The decision may keep the provisional Cargo/Nix/Nixfied boundary, add one
+environment-specific cache, use immutable CI artifacts, or select no new
+compilation cache. It must explicitly state what was rejected and why.
 
-### Required phase report
+This phase defines rollout prerequisites but does not silently enable the
+winner. Implementation and rollout require a new, small, reviewable plan after
+the architecture and any upstream dependencies are accepted.
 
-Every stop report must be self-contained and use this shape:
+Expected commit subject:
+
+```text
+docs: select mfm build architecture
+```
+
+Stop decision: owner approval of the complete long-term definition and the
+minimal upstream capabilities it requires.
+
+### R2-09: finalize the Nixfied architect handoff
+
+This is the final phase of this RFC and cannot begin before R2-08 is accepted.
+
+Change:
+
+- rewrite [the Nixfied capability-gap document](docs/nixfied-capability-gaps.md)
+  from the selected architecture rather than the provisional Phase 06 design;
+- remove requests that belong only to rejected candidates;
+- separate capabilities required for rollout from optional future improvements;
+- include minimal reproductions, exact pinned revisions/ABIs, security and
+  lifecycle invariants, and framework-level acceptance tests; and
+- map each request to the experiment and decision evidence that justifies it.
+
+The handoff must answer, where applicable:
+
+- whether Nixfied owns Cargo cache-family inspection, leases, retention, and
+  garbage collection;
+- whether task-specific immutable closures can avoid eager realization by
+  unrelated tasks;
+- how a task reports the immutable or mutable artifact identity it consumed;
+- how cache cleanup preserves service state, run records, logs, and evidence;
+- how worktree, slot, process, and concurrent-writer identity are enforced; and
+- which behavior MFM will own locally instead of requesting from Nixfied.
+
+Evaluate:
+
+- every request has a selected-architecture consumer;
+- every P0 has a failing MFM scenario and a framework-level acceptance test;
+- no request asks Nixfied to reproduce Cargo's unit graph or become a Rust
+  compiler cache;
+- the document is understandable without the abandoned Phase 08 design; and
+- MFM's owner approves the document before it is sent to Nixfied's architects.
+
+Expected commit subject:
+
+```text
+docs: finalize nixfied capability handoff
+```
+
+Stop decision: send the reviewed document to Nixfied's architects, then create
+a separate implementation plan once required framework decisions are known.
+
+## Phase governance
+
+Approval to rewrite this RFC authorizes only R2-00. Each later phase requires
+explicit approval and stops after its report. One phase should produce at most
+one logical main-branch commit; temporary experiment branches may contain the
+minimum commits needed to obtain CI evidence and are removed after the report.
+
+For every phase:
+
+1. confirm the exact scope, clean base commit, and absence of overlapping
+   user-owned work;
+2. record the host, toolchain, source, task graph, cache state, and baseline
+   before changing an experiment;
+3. use focused Cargo checks while developing and isolate destructive or
+   cache-state probes;
+4. preserve the exact coverage inventory and run all repository-required gates
+   before any main-branch commit;
+5. run `nix run .#ci` for major, final, task, cache, Nix, workflow, or
+   architecture changes under the currently authoritative repository policy;
+6. evaluate the clean committed report tree and distinguish dirty-worktree
+   measurements from exact derivation/cache results;
+7. remove temporary pilot surfaces that are not part of the report; and
+8. deliver a self-contained stop report with recommendation and unverified
+   surfaces.
+
+A failed experiment is not repaired with a narrower claim after the fact. It
+is reported as failed or mixed, with the exact residual surface. A missing
+framework feature is a blocker for that candidate, not permission to add a
+project-local approximation.
+
+## Required phase report
+
+Every phase report uses this minimum shape:
 
 ```text
 Phase:
-Commit: <hash and lower-case subject, or "not committed">
+Commit: <hash and lower-case subject, or not committed>
 Outcome: passed | failed | mixed | blocked
 
 Changed:
-- files and behavior changed
+- durable report/config changes
+- temporary experiment surfaces and their cleanup
 - explicit non-changes
 
 Verification:
-- focused checks and results
-- check/test/test-db/ci results and durations
-- test, doctest, trybuild, schema, and parity inventory comparison
+- focused checks
+- required gates and run identifiers
+- exact coverage and feature inventory comparison
 
 Measurements:
-- parent versus candidate timings under named cache states
-- compile/link versus execution time
-- Cargo target, Nix closure/store, inode, and cache statistics
+- source/cache cases and sample distributions
+- compile/link/rustdoc versus execution/service time
+- target/cache/store/closure/NAR/file statistics
+- transfer, hit/miss, cleanup, and failure behavior
 
 Acceptance:
-- each applicable threshold: pass | fail | not yet applicable
+- correctness vetoes
+- screening or qualification thresholds
+- operational and platform requirements
 
 Risks and limitations:
-- failures, variance, missing platforms, operational cost, and uncertainty
+- variance, missing environments, unsupported behavior, and uncertainty
 
 Recommendation:
-- proceed | hold | revert | redesign
-- exact scope requested for the next phase
+- proceed | hold | reject | redesign
+- exact scope requested next
 ```
 
-Never include database credentials, private paths containing secrets, private
-keys, mnemonics, or secret-bearing environment values in a report. Report
-sanitized command shapes and Nixfied run identifiers instead.
-
-### Phase and commit plan
-
-#### Phase 00: land the accepted RFC
-
-Change:
-
-- commit this RFC as the sole documentation change;
-- establish the gated execution and measurement contract; and
-- make no build, workflow, or runtime behavior change.
-
-Evaluate:
-
-- validate Markdown whitespace and every local link;
-- confirm the RFC distinguishes observations from controlled baselines; and
-- run the repository-required pre-commit gates.
-
-Expected commit subject:
-
-```text
-docs: define gated slow-build evaluation
-```
-
-Stop report decision: approve or revise the execution contract before any
-performance implementation begins.
-
-#### Phase 01: record the controlled baseline
-
-Change:
-
-- add one repository-owned baseline report under `docs/` containing the
-  measurement context, commands, run ids, test inventory, and results;
-- measure the clean Phase 00 commit, not the later report commit; and
-- make no build configuration change.
-
-Evaluate:
-
-- three isolated clean runs and five warm runs where feasible;
-- focused leaf, broad quick-equivalent check, each public Nixfied gate, and full
-  CI;
-- Linux and macOS, explicitly marking any platform not yet available; and
-- compilation, linking, execution, service, target-size, `.dwo`, inode, and
-  variance measurements separately.
-
-Expected commit subject:
-
-```text
-docs: record controlled build baseline
-```
-
-Stop report decision: accept the baseline as decision-quality or repeat it
-before changing behavior.
-
-#### Phase 02: remove duplicate app test execution
-
-Change:
-
-- make `mfm-app/test-support` explicit in workspace Nextest;
-- remove the separate app Nextest task and composite edge; and
-- change no other test selection or ordering.
-
-Evaluate:
-
-- compare exact Nextest test identifiers before and after;
-- prove the app tests and manual-resolution coverage remain present;
-- run all nine trybuild harnesses and all discovered doctests; and
-- measure removed execution and any compile/fingerprint difference.
-
-Expected commit subject:
-
-```text
-remove duplicate mfm app test run
-```
-
-Stop report decision: keep, revert, or redesign the consolidation.
-
-#### Phase 03: remove redundant SQLx invalidation
-
-Change:
-
-- remove MFM's explicit package clean from online SQLx preparation;
-- add or strengthen a disposable-schema mutation check; and
-- leave online SQLx uncached.
-
-Evaluate:
-
-- prove unchanged schema and checked metadata pass;
-- prove a schema mutation with unchanged Rust sources fails;
-- restore the disposable schema and prove the gate passes again; and
-- measure which Cargo units rebuild before and after the change.
-
-Expected commit subject:
-
-```text
-stop precleaning postgres sqlx artifacts
-```
-
-Stop report decision: keep only if drift detection and cleanup semantics remain
-fail-closed.
-
-#### Phase 04: add the developer lane
-
-Change:
-
-- expose the repository-pinned development environment;
-- add the non-gating `quick` entry point; and
-- keep all comprehensive gate commands and semantics unchanged.
-
-Evaluate:
-
-- focused package check/test latency;
-- the quick command's exact target surface;
-- toolchain equality with Nixfied verification; and
-- proof that `quick` is neither called by nor substituted for a full gate.
-
-Expected commit subject:
-
-```text
-add pinned quick development lane
-```
-
-Stop report decision: accept the inner-loop contract before changing
-verification artifacts.
-
-#### Phase 05: compact verification artifacts
-
-Change:
-
-- centrally disable verification incremental compilation;
-- select line-table debug information and disable split-debug artifacts;
-- remove or replace the ineffective `[profile.ci]`; and
-- leave direct developer Cargo profiles unchanged.
-
-Evaluate:
-
-- clean and warm gate time;
-- backtrace file/line quality on Linux and macOS;
-- target, incremental, `.dwo`, inode, and trybuild sizes after two full runs;
-- complete test and feature inventory; and
-- rollback behavior when the policy version changes.
-
-Expected commit subject:
-
-```text
-use compact verification build artifacts
-```
-
-Stop report decision: keep, revert, or adjust the verification artifact policy.
-
-#### Phase 06: isolate mutable verification targets
-
-Change:
-
-- replace the undifferentiated target path with a Nixfied cache environment
-  identity scoped by platform, toolchain, slot/worktree boundary, and policy;
-- add only safe, build-cache-scoped lifecycle behavior; and
-- do not alter Postgres, run-record, or diagnostic state cleanup.
-
-Evaluate:
-
-- reuse in repeated runs from one worktree;
-- isolation between two concurrent worktrees and slots;
-- compiler/toolchain and policy-version invalidation;
-- cleanup protection for service and diagnostic state; and
-- disk growth across repeated and changed-input runs.
-
-Expected commit subject:
-
-```text
-scope verification cargo artifacts by slot
-```
-
-Stop report decision: if Nixfied lacks correct cache-family lifecycle support,
-report the upstream capability needed instead of continuing locally.
-
-#### Phase 07: select measured profile tuning
-
-Change:
-
-- compare codegen-unit defaults with `256` and `opt-level=0` with
-  `opt-level=1` using isolated variants;
-- commit only a qualifying winner plus its documented rationale; or
-- commit a report-only rejection when the baseline remains best.
-
-Evaluate:
-
-- total compile, link, test, doctest, trybuild, and parity time;
-- debug assertions, overflow checks, diagnostics, and backtraces;
-- clean, warm, and one-leaf-edit behavior; and
-- Linux/macOS consistency.
-
-Expected commit subject, selected according to the result:
-
-```text
-tune verification profile from measurements
-```
-
-or:
-
-```text
-docs: record verification profile experiment
-```
-
-Stop report decision: freeze the winning baseline used by both cache pilots.
-
-#### Phase 08: add an opt-in Nix dependency-artifact pilot
-
-Change:
-
-- add a non-default derivation that separates compiled third-party dependencies
-  from final MFM artifacts;
-- declare and regression-test compile-relevant inputs; and
-- avoid changing public Nixfied gates.
-
-Evaluate:
-
-- exact source, documentation-only, leaf-crate, shared-crate, manifest/lock,
-  feature/profile, and cross-worktree changes;
-- derivations rebuilt versus reused;
-- evaluation/build time and output/closure size; and
-- source-filter false-hit and conservative-rebuild tests.
-
-Expected commit subject:
-
-```text
-add nix dependency artifact pilot
-```
-
-Stop report decision: if a new Nix Rust framework or flake input is required,
-report its justification and alternatives before adding it in a separately
-approved phase.
-
-#### Phase 09: add opt-in Nix verification artifacts
-
-Change:
-
-- build a declared feature/profile bundle containing the feasible final test
-  binaries, Nextest archive or equivalent, and CLI artifact;
-- keep the bundle opt-in; and
-- do not copy a Cargo target from the Nix store.
-
-Evaluate:
-
-- binary and test inventory against the mutable-target baseline;
-- runtime closure completeness and backtrace quality;
-- exact-hit and source-change rebuild behavior;
-- doctest and trybuild surfaces not represented by the bundle; and
-- artifact and closure size.
-
-Expected commit subject:
-
-```text
-add nix verification artifact bundle
-```
-
-Stop report decision: approve direct Nixfied consumption only after artifact
-coverage and purity are understood.
-
-#### Phase 10: execute Nix artifacts through shadow verification
-
-Change:
-
-- add an opt-in, non-public-gating Nixfied task that executes immutable test
-  artifacts directly from declared closures;
-- retain runtime Cargo tasks as the authoritative comparison; and
-- leave live-service parity and online SQLx unchanged.
-
-Evaluate:
-
-- result and test-identifier equality with authoritative workspace tests;
-- execution without writable target copying or undeclared host tools;
-- task evidence and failure diagnostics; and
-- exact-source and changed-source end-to-end wall time.
-
-Expected commit subject:
-
-```text
-run nix artifacts through shadow verification
-```
-
-Stop report decision: approve or reject expansion into live-service parity.
-
-#### Phase 11: execute Nix artifacts through shadow parity
-
-Change:
-
-- extend only the opt-in shadow path to parity tests whose binaries can be
-  built purely;
-- keep Postgres lifecycle and test execution under Nixfied; and
-- keep online SQLx preparation live and uncached.
-
-Evaluate:
-
-- parity result, output, schema, and service-lifecycle equality;
-- ambient-input isolation and SQLx drift behavior;
-- compile versus service/test execution time; and
-- closure portability on Linux and macOS.
-
-Expected commit subject:
-
-```text
-run nix artifacts through shadow parity
-```
-
-Stop report decision: determine whether the Nix pilot has enough coverage for
-a formal candidate assessment.
-
-#### Phase 12: record the Nix-native pilot conclusion
-
-Change:
-
-- add a decision-quality Nix pilot report under `docs/`;
-- classify each acceptance criterion and unresolved surface; and
-- keep all pilot tasks opt-in.
-
-Evaluate:
-
-- persistent local store versus fresh runner behavior;
-- binary-cache transfer and trust costs if tested;
-- full source-change matrix and Linux/macOS results;
-- storage, garbage-collection, evaluation, and maintenance cost; and
-- whether finer per-crate derivations are justified by measured residual work.
-
-Expected commit subject:
-
-```text
-docs: record nix artifact pilot results
-```
-
-Stop report decision: proceed to `sccache`, request a narrower Nix refinement,
-or hold because compilation is no longer material.
-
-#### Phase 13: add an opt-in local `sccache` pilot
-
-Change:
-
-- add the Nix-pinned compiler cache to an opt-in verification path;
-- enforce its size bound and nonincremental profile; and
-- explicitly disable it for online SQLx preparation.
-
-Evaluate:
-
-- cold, warm, one-leaf-edit, shared-crate, and cache-bypass results;
-- cacheable requests, hits, misses, evictions, and lookup overhead;
-- linking, rustdoc, trybuild, and execution time left uncached;
-- target plus cache disk consumption; and
-- result equality with both the target-only and Nix-native candidates.
-
-Expected commit subject:
-
-```text
-add bounded local rust compiler cache pilot
-```
-
-Stop report decision: approve CI persistence only if local results meet the
-pilot thresholds.
-
-#### Phase 14: pilot `sccache` persistence in CI
-
-This phase is conditional and requires separate approval after Phase 13.
-
-Change:
-
-- persist only the bounded compiler-object cache on Linux CI;
-- key it by the declared platform, toolchain, lock, and policy inputs;
-- restrict writes to trusted workflows; and
-- retain a cache-bypass comparison.
-
-Evaluate:
-
-- fresh, restored, and bypass CI runs;
-- upload/download time, hit rate, archive size, retention, and failure behavior;
-- untrusted pull-request read/write boundaries and secret exclusion; and
-- whether macOS deserves a separate later pilot.
-
-Expected commit subject:
-
-```text
-pilot bounded rust compiler cache in ci
-```
-
-Stop report decision: classify `sccache` as eligible, rejected, or requiring a
-bounded follow-up.
-
-#### Phase 15: select the long-term architecture
-
-Change:
-
-- update this RFC or add an ADR with the comparable target-only, Nix-native,
-  `sccache`, and hybrid results;
-- select the least complex qualifying design, which may differ between
-  persistent workstations and ephemeral CI; and
-- define the rollout and rollback plan without enabling it yet.
-
-Evaluate:
-
-- every common correctness, performance, storage, security, diagnostic, and
-  lifecycle criterion;
-- operational dependencies and maintenance burden;
-- sensitivity to cacheless and changed-input scenarios; and
-- whether a hybrid's incremental gain justifies two cache models.
-
-Expected commit subject:
-
-```text
-docs: select long-term build cache architecture
-```
-
-Stop report decision: explicit owner approval is required before changing the
-authoritative verification path.
-
-#### Phase 16: enable the selected architecture
-
-Change:
-
-- make only the approved candidate authoritative for the agreed environment;
-- retain a documented bypass/rollback path; and
-- preserve public gate names, coverage, and output contracts.
-
-Evaluate:
-
-- the full clean/warm/change matrix on Linux and macOS;
-- cacheless and rollback runs;
-- all comprehensive Nixfied gates and CI; and
-- repeated-run storage and lifecycle behavior.
-
-Expected commit subject:
-
-```text
-enable selected verification cache architecture
-```
-
-Stop report decision: accept the rollout, roll it back, or hold before cleanup.
-
-#### Phase 17: remove rejected pilot surfaces and finalize the record
-
-Change:
-
-- remove opt-in tasks, packages, workflow branches, and dependencies belonging
-  only to rejected candidates;
-- retain reusable measurement support only when justified; and
-- mark the RFC implemented with final measured results and operating guidance.
-
-Evaluate:
-
-- absence of dead tasks, flake inputs, cache directories, and workflow paths;
-- model/schema, Cargo metadata, full gate, and CI correctness;
-- documentation and command-contract consistency; and
-- final disk, timing, and test-inventory comparison against Phase 01.
-
-Expected commit subject:
-
-```text
-remove rejected build cache pilots
-```
-
-Stop report decision: final merge-readiness review. Dependency-feature,
-unused-dependency, transitive-version, and scheduling optimizations are new
-work streams and require their own approved phase/commit plans.
-
-## Measurement protocol
-
-Every performance decision must record:
-
-- commit and worktree identity;
-- operating system, architecture, CPU, memory, and storage context;
-- exact Rust, Cargo, Nextest, SQLx CLI, Nix, and Nixfied versions;
-- task graph and selected feature/profile surfaces;
-- whether the target and compiler cache are clean, warm, or deliberately
-  invalidated;
-- compilation/link time separately from test and service execution;
-- per-task wall time;
-- target-directory size, incremental size, trybuild size, `.dwo` count, and
-  file count;
-- Nix evaluation, realization, build, substitution, and artifact-copy time;
-- the set and count of Nix derivations rebuilt, reused locally, or substituted;
-- Nix output and transitive closure sizes for MFM-specific artifacts;
-- compiler-cache request, hit, miss, eviction, and transfer statistics when
-  applicable.
-
-Use fresh isolated targets for clean measurements instead of cleaning an
-active developer or verification cache. At minimum, compare three clean runs
-and five warm runs on Linux and macOS. Use medians for acceptance and retain
-the distribution so cache variance is visible.
-
-The baseline must also include:
-
-- a focused leaf-package check;
-- the broad developer quick check;
-- each individual Nixfied gate; and
-- the full CI composite.
-
-Each cache candidate must be exercised against the same source-change matrix:
-
-- exact unchanged source;
-- a documentation-only tracked-file change;
-- a change to one leaf workspace crate;
-- a change to a widely shared workspace crate;
-- a manifest or `Cargo.lock` change;
-- a feature/profile change;
-- a second worktree with identical source inputs; and
-- a fresh environment with no MFM-specific local cache.
-
-Nix-native measurements must distinguish a warm local store from a fresh
-hosted runner. Where a binary cache is evaluated, upload, download,
-substitution, signing, retention, and operational costs count toward the
-result. `sccache` measurements must likewise include archive or remote transfer
-cost rather than reporting compiler hit rate alone.
-
-## Acceptance criteria
-
-The staged solution is accepted only if it satisfies all correctness and
-coverage requirements at the same commit.
-
-### Correctness and coverage
-
-- Workspace test identifiers are unchanged after deduplication, except for the
-  removed duplicate execution.
-- Required `mfm-app/test-support` tests, including manual-resolution coverage,
-  remain present.
-- All trybuild harnesses and UI cases continue to run.
-- All discovered doctests, Cargo metadata contracts, SQLx checks, database
-  parity tests, state-event checks, CLI tests, REST tests, and keystore parity
-  tests continue to run.
-- The disposable-schema mutation test proves that online SQLx drift is not
-  hidden by caching.
-- CLI and REST output contracts and persisted formats are unchanged.
-- Verification failures retain actionable source file and line information.
-
-### Performance and storage
-
-- Focused warm leaf feedback has a median below 10 seconds on the reference
-  Linux development host.
-- The existing 1.77-second warm workspace check does not regress by more than
-  10% under comparable conditions.
-- Full-gate median wall time improves by at least 20% without increased
-  flakiness.
-- Verification artifact storage decreases by at least 40%, with a target of
-  no more than 15 GiB after two complete runs.
-- `.dwo` inode count decreases by at least 80%.
-- A repeated unchanged full gate grows the target by less than 2%.
-
-### Nix-native artifact pilot
-
-The Nix-native design remains eligible only if:
-
-- an exact unchanged derivation performs no Rust recompilation;
-- ordinary workspace source edits reuse the compiled third-party dependency
-  layer;
-- changes to files proven not to be compile inputs do not invalidate Rust
-  artifacts;
-- all compile-relevant inputs are represented in derivation identity, with
-  deliberate regression tests for build-script, included-file, SQLx metadata,
-  target, feature, and profile changes;
-- Nixfied executes final artifacts directly from declared immutable closures
-  without copying or mutating a Cargo target tree;
-- the same test identifiers and feature surfaces are exercised as in the
-  mutable-target baseline;
-- live-service and online SQLx behavior remains outside cached compilation;
-- local-store and optional binary-cache lifecycles have explicit ownership,
-  size bounds, trust policy, and garbage-collection behavior; and
-- total verification time improves by at least 20% in a workload where
-  compilation is material, after Nix evaluation, realization, and transfer
-  overhead.
-
-The initial pilot caches compiled artifacts, not successful test results.
-Caching a pure test result would change verification execution semantics and
-requires a separate decision.
-
-### Compiler-cache pilot
-
-`sccache` is adopted only if:
-
-- median cold CI time improves by at least 20% after cache transfer overhead;
-- the second-run hit rate for cacheable compiler requests is at least 50%, with
-  60% or higher preferred;
-- warm single-edit developer performance does not regress, because the
-  compiler cache is not imposed on the incremental developer lane;
-- a cache-bypass run produces the same results; and
-- the configured size bound and trust policy are enforced.
-
-### Long-term architecture decision
-
-The final decision will use the complete results rather than assuming one
-cache mechanism must serve every environment. It may select different
-strategies for persistent developer workstations and ephemeral CI when the
-tradeoff is explicit.
-
-The chosen design must be the least complex candidate that satisfies coverage,
-performance, storage, correctness, diagnostics, security, and lifecycle
-requirements. A hybrid is selected only when its incremental benefit is
-material after accounting for two invalidation models, two storage lifecycles,
-and additional failure modes. The target-only baseline remains a valid winner
-if the near-term fixes already meet the thresholds.
-
-Failure to meet an acceptance threshold causes that stage to be rolled back or
-redesigned without rolling back earlier independently successful stages.
-
-## Risks and mitigations
-
-### Reduced debug information
-
-Line-table debug information is expected to preserve actionable backtraces but
-does not provide the same debugger experience as full development debug data.
-The developer lane retains full debugging information, and verification-profile
-adoption requires explicit backtrace inspection on Linux and macOS.
-
-### Nonincremental verification builds
-
-Disabling incremental compilation can make some isolated rebuilds slower. It
-is expected to reduce persistent size, invalidation complexity, and cold-CI
-cache payloads. The decision is based on full-gate median time and storage, not
-compile time alone.
-
-### Nix source-input correctness
-
-An incomplete source filter can produce a false Nix cache hit when a build
-script, macro, SQLx query, or included file changes. The pilot must enumerate
-and regression-test non-obvious inputs. When relevance cannot be proven, the
-file remains an input and causes a conservative rebuild.
-
-### Nix derivation granularity
-
-A derivation that contains the whole repository rebuilds too much, while a
-derivation per crate/feature/profile/target combination can create excessive
-evaluation cost, closure growth, and maintenance complexity. Granularity is a
-measured design variable. The rollout begins with dependency and final-artifact
-layers and introduces finer units only when their benefit is demonstrated.
-
-### Local-store and CI asymmetry
-
-The local Nix store provides safe cross-worktree reuse on a persistent machine,
-but fresh hosted CI runners do not retain MFM outputs. CI results must not claim
-Nix reuse unless the required output was actually present or substituted from
-a trusted binary cache, and the cost of that cache is included.
-
-### Compiled artifacts versus test results
-
-Reusing a test binary does not mean reusing the test's successful outcome.
-Initial experiments continue to execute tests and parity workflows. Any future
-proposal to cache pure test results must define trust, determinism, invalidation,
-and evidence semantics separately.
-
-### Compiler-cache correctness
-
-Compiler caches do not automatically model ambient inputs. Online SQLx is
-explicitly excluded, cache writes are restricted to trusted workflows, no
-secrets may enter the cache, and cache-bypass verification remains available.
-
-### Cache accumulation
-
-Keyed caches can replace one unbounded directory with many orphan directories.
-The design therefore requires bounded caches and scoped lifecycle management;
-it does not create a new target for every `Cargo.lock` revision.
-
-### Parallel task contention
-
-Starting more tasks simultaneously may increase wall time on the reference
-eight-core host or create service conflicts. Parallelism changes require
-resource and isolation measurements rather than assuming that a wider DAG is
-faster.
-
-## Rejected alternatives
-
-### Add `sccache` first
-
-Rejected because it does not remove duplicate tests, SQLx invalidation, linking,
-rustdoc work, or test execution. It may also make incremental single-edit
-development worse. It remains a measured later-stage optimization.
-
-### Assume Nix already caches Nixfied Cargo outputs
-
-Rejected because Nix currently caches the launcher and tool closures, while
-Cargo writes verification artifacts to mutable Nixfied state at runtime. Nix
-cannot reuse outputs that are absent from its derivation graph.
-
-### Treat the current `buildRustPackage` as sufficient granularity
-
-Rejected because the packaged CLI uses the repository as one source input and
-does not provide compiled dependency or verification-test layers. It proves
-exact derivation reuse, but an ordinary source change still invalidates the
-coarse final build.
-
-### Generate one Nix derivation per workspace crate immediately
-
-Rejected as the first experiment because Cargo features, host/target units,
-build scripts, proc macros, profiles, tests, and reverse dependencies multiply
-the graph. The dependency/final-artifact split must be measured before taking
-on per-crate graph generation.
-
-### Seed a mutable Cargo target from `/nix/store`
-
-Rejected because Cargo expects to update its target, while Nix outputs are
-immutable. Copying a prewarmed target would add transfer cost and recreate the
-fingerprint, path, ownership, and cleanup problems this RFC is intended to
-remove.
-
-### Share one Cargo target everywhere
-
-Rejected because target trees contain path-, profile-, feature-, and
-toolchain-sensitive mutable state and locks. Cross-worktree sharing caused
-accumulation and invalidation rather than dependable reuse.
-
-### Put SQLx in a second target immediately
-
-Rejected as the first step because SQLx still touches source mtimes in the
-shared checkout and a second target forces duplicate compilation. Remove the
-redundant clean and measure before considering stronger isolation.
-
-### Globally cache online SQLx preparation
-
-Rejected because database schema is ambient proc-macro input. A compiler cache
-hit could bypass the macro execution required to detect schema drift.
-
-### Remove compile-fail, doctest, or parity coverage
-
-Rejected because these checks enforce public typestate, documentation,
-metadata, persistence, and live-service contracts. The solution optimizes how
-they run, not whether they run.
-
-### Merge crates to reduce Cargo package count
-
-Rejected because MFM's crate boundaries encode the architecture taxonomy and
-keep libraries reusable without binary coupling. Package-count reduction is
-not worth weakening those boundaries.
-
-### Treat dependency updates as the primary remedy
-
-Rejected because much of the resolved duplication is inactive on a given host,
-and dependency/feature changes can alter security or platform semantics. They
-belong in small, verified follow-ups.
-
-### Broad or ad hoc cleanup
-
-Rejected because Nixfied state also contains service data and diagnostic run
-artifacts. Cleanup must target a known build-cache family and must not use
-fragile recursive deletion rules.
-
-## Verification governance
-
-The developer lane is non-gating. Until
-[repository policy](AGENTS.md) is deliberately changed, agents and contributors
-must still run `nix run .#check`, `nix run .#test`, and `nix run .#test-db`
-before each commit and `nix run .#ci` for major work or final merge-readiness
-validation.
-
-If MFM later wants fast multi-commit local workflows, gate frequency should be
-changed explicitly in `AGENTS.md` and enforced at push, review, or merge time.
-That governance decision is separate from this RFC's build architecture and
-must not be inferred merely from the existence of `quick`.
+Reports contain no credentials, secrets, private keys, mnemonics, or
+secret-bearing paths or environment values.
+
+## Explicitly rejected shortcuts
+
+The following are outside Revision 2 without a new RFC:
+
+- one writable Cargo target shared by developer, verification, CI, and sibling
+  worktrees;
+- a repository-owned generator that fabricates dependency crate sources;
+- a Nix derivation whose output is not consumed by the measured workload;
+- copying a prewarmed Cargo target from `/nix/store` into mutable state;
+- one Nix derivation per crate as the first or default solution;
+- an MFM-specific replacement for Cargo's unit graph;
+- calling a Nix launcher or vendored source derivation a compiled Rust cache;
+- persisting the entire mutable Cargo target through a generic CI archive;
+- enabling `sccache` in the incremental developer lane or online SQLx check;
+- combining Crane and `sccache` before either qualifies independently;
+- treating local Nix store hits as fresh hosted-CI results;
+- caching successful test outcomes;
+- removing trybuild, doctest, SQLx, parity, metadata, CLI, REST, or keystore
+  coverage to meet a latency target;
+- merging architectural crates to reduce package count;
+- broad Nixfied slot deletion or shell-level recursive cleanup presented as
+  cache-family lifecycle; and
+- changing gate policy before proving exact task/evidence equivalence.
+
+## Likely outcomes, without preselecting one
+
+The evidence may support different mechanisms at different boundaries:
+
+- developers may keep Nix-provided tools plus worktree-local incremental Cargo;
+- broad local verification may keep the compact Nixfied Cargo target;
+- trusted persistent CI may reuse that target without transfer;
+- ephemeral CI may use `sccache` or a signed Nix verification artifact if one
+  qualifies after transfer costs;
+- packaging may remain a coarse `buildRustPackage` derivation; and
+- full-gate latency may improve more from execution topology and gate
+  governance than from another compile cache.
+
+That is still one coherent platform if every boundary has one documented
+artifact authority and the same source, toolchain, coverage, and evidence
+contract. Uniformity of mechanism is less important than clarity of ownership.
+
+## External technical references
+
+- [Cargo build cache](https://doc.rust-lang.org/cargo/reference/build-cache.html)
+  and [`build.build-dir` configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildbuild-dir)
+- [Cargo unstable unit graph](https://doc.rust-lang.org/cargo/reference/unstable.html#unit-graph)
+- [Cargo build-directory layout v2 and cross-workspace-cache direction](https://blog.rust-lang.org/2026/03/13/call-for-testing-build-dir-layout-v2/)
+- [Crane artifact reuse](https://crane.dev/introduction/artifact-reuse.html)
+  and [API](https://crane.dev/API.html)
+- [Nextest archived builds](https://nexte.st/docs/ci-features/archiving/)
+  and [test-runner scope](https://nexte.st/)
+- [`sccache` Rust limitations](https://github.com/mozilla/sccache/blob/main/docs/Rust.md)
+- [Nix signed binary-cache configuration](https://nix.dev/guides/recipes/add-binary-cache.html)
+- [crate2nix known restrictions](https://nix-community.github.io/crate2nix/90_reference/20_known_restrictions/)
+- [cargo2nix granular-build design](https://github.com/cargo2nix/cargo2nix)
+- [Pinned Nixfied architecture](https://github.com/willyrgf/nixfied/blob/b0681e45ab76d5023d9c5e033087d34adf98e90b/docs/ARCHITECTURE.md)
