@@ -29,7 +29,7 @@ assert_eq!(store.store_authority(), &authority);
 
 `PostgresStore::connect` performs the same authority validation before returning
 a store. Authority validation checks that PostgreSQL is reachable, the SQLx
-migration ledger matches the compiled migrations, required catalog objects are
+migration ledger matches the compiled migrations, required schema objects are
 present with expected contracts, stale retired tables are absent, and the
 singleton `store_metadata` row contains the expected contract version and a
 valid store-owned scope id. These failures are reported through closed

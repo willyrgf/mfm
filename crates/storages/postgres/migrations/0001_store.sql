@@ -408,15 +408,12 @@ CREATE TABLE run_observation_cursors (
 );
 
 CREATE TABLE catalog_values (
-  name TEXT COLLATE "C" NOT NULL,
+  target TEXT COLLATE "C" PRIMARY KEY,
   schema_id TEXT COLLATE "C" NOT NULL,
   digest TEXT COLLATE "C" NOT NULL,
   canonical_json BYTEA NOT NULL,
-  PRIMARY KEY (name, schema_id, digest),
-  CONSTRAINT catalog_values_name_grammar CHECK (
-    octet_length(name) BETWEEN 1 AND 256
-    AND name ~ '^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$'
-    AND name !~ '(^|/)(\.|\.\.)(/|$)'
+  CONSTRAINT catalog_values_target_bounds CHECK (
+    octet_length(target) BETWEEN 1 AND 256
   ),
   CONSTRAINT catalog_values_schema_id_bounds CHECK (
     octet_length(schema_id) BETWEEN 1 AND 1024
@@ -429,9 +426,6 @@ CREATE TABLE catalog_values (
     octet_length(canonical_json) BETWEEN 1 AND 262144
   )
 );
-
-CREATE INDEX catalog_values_identity_idx
-ON catalog_values (name, schema_id, digest);
 
 CREATE TRIGGER store_metadata_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON store_metadata
@@ -463,8 +457,4 @@ FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_observation_cursors_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON run_observation_cursors
-FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
-
-CREATE TRIGGER catalog_values_no_update
-BEFORE UPDATE OR DELETE OR TRUNCATE ON catalog_values
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();

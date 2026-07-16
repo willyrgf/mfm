@@ -385,8 +385,8 @@ mfm_cli --output-format json keystore tx-sign \
 
 ### `ops list`
 
-Lists the exact public entry-point ids and request schema ids compiled into the binary. It does not
-connect to PostgreSQL or load runtime configuration.
+Lists the exact public entry-point ids compiled into the binary. It does not connect to PostgreSQL
+or load runtime configuration.
 
 ```sh
 mfm_cli ops list
@@ -397,6 +397,26 @@ JSON output returns the descriptors under `entry_points`. The production surface
 one entry point, `mfm.portfolio/snapshot@1`. Reusable deploy, configure, and validate states are
 library-only and cannot be started through this command. There is no latest-version selection,
 compatibility alias, collector root, report-only mode, or contract workflow entry point.
+
+### `setup import`, `setup list`, and `setup export`
+
+Setup owns the current target-keyed configuration before admission:
+
+```sh
+mfm_cli setup import ./organization.toml
+mfm_cli setup list
+mfm_cli setup export acme/primary --output ./portfolio.json
+```
+
+The import document is strict TOML with a closed `configs` list. Each configuration derives its
+target from its intrinsic domain id; a portfolio config with `portfolio_id = "acme/primary"`
+publishes target `acme/primary`. Import is atomic and reports `created`, `updated`, or `unchanged`
+for every target. `setup list` returns only current targets in stable order. `setup export` writes
+one target's verified canonical JSON to a new path and never overwrites an existing file.
+
+There is no setup name, catalog digest selector, revision/history lookup, cursor, or delete
+command. Importing a replacement configuration changes only that target's current row; already
+admitted runs retain their concrete certified configuration and are unaffected.
 
 ## Run Commands (Experimental)
 
@@ -426,19 +446,18 @@ or resume certified typed runs.
 
 ### `run start`
 
-Starts a run from an exact entry-point id and a strict JSON request file. The request contains
-exact catalog references (`name` plus `digest`). Catalog values are
-resolved and validated by app assembly before planning; the resulting typed spec is then certified
-and admitted.
+Starts a run from an exact entry-point id and a target. The app resolves the target's current
+configuration and validates its schema, canonical bytes/digest, semantics, and embedded domain id
+before planning; the resulting typed spec is then certified and admitted.
 
 **Usage:**
 ```sh
-mfm_cli run start --entry-point <ID> --request <PATH> [OPTIONS]
+mfm_cli run start <ENTRY_POINT> <TARGET> [OPTIONS]
 ```
 
 **Key Options:**
-- `--entry-point <ID>`: Exact public entry-point id, including namespace and version.
-- `--request <PATH>`: Strict JSON request file containing exact catalog references.
+- `<ENTRY_POINT>`: Exact public entry-point id, including namespace and version.
+- `<TARGET>`: Stable configuration target such as `acme/primary`.
 - `--invocation-key <KEY>`: Uses caller-provided invocation identity for retry-stable starts. When
   omitted, the app mints a fresh opaque invocation key. The raw key is not persisted; only a
   domain-separated digest enters run identity material.
@@ -449,26 +468,21 @@ mfm_cli run start --entry-point <ID> --request <PATH> [OPTIONS]
 The repository includes a complete strict-import fixture at
 `examples/setup/organization.toml`; copy it to a local setup file before importing.
 `examples/setup/portfolio-erc20.toml` is the runnable token-only counterpart; pair it with an
-Ethereum runtime route and import its returned exact catalog reference before starting.
+Ethereum runtime route and start it by its derived target after importing.
 
 `ops list` is the authoritative public surface. The setup fixture publishes portfolio config only;
 it does not create an independently startable collector or contract workflow.
 
-The sole public request is:
+For example:
 
-```json
-{
-  "portfolio": {
-    "name": "acme/dual-mainnet",
-    "digest": "content:sha256-jcs-v1:..."
-  }
-}
+```sh
+mfm_cli run start mfm.portfolio/snapshot@1 acme/dual-mainnet
 ```
 
-The digest must be the exact value printed by `mfm_cli setup import` or `mfm_cli setup list`.
-Unknown request fields, old entry-point ids, unversioned ids, and latest-like forms are rejected.
-The request cannot select collector policies, child configs, native decimals, runtime routes, or a
-collect/reuse/report-only mode.
+The target selects only its current `PortfolioConfig`. Old `--entry-point` and `--request` flags,
+JSON request files, catalog `{name,digest}` objects, old entry-point ids, unversioned ids, and
+latest-like forms are rejected. The target cannot select collector policies, child configs, native
+decimals, runtime routes, or a collect/reuse/report-only mode.
 
 `.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
 command, keeps the data directory under the Nixfied state root for `mfm/dev/9`,
@@ -489,13 +503,14 @@ execution lane for the same base work identity, start reports `already_active` w
 
 Stable launch errors include:
 
-- `EntryPointRequestReadFailed`: the JSON request file could not be read.
-- `EntryPointRequestInvalid`: the request file is not valid strict JSON for the selected entry point.
 - `EntryPointNotFound`: the exact entry-point id is not registered.
-- `CatalogValueNotFound`: an exact referenced catalog value is missing.
-- `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
-- `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
-- `CatalogValueValidationFailed`: a catalog row fails semantic portfolio validation.
+- `ConfiguredTargetInvalid`: the target is not a valid portfolio id.
+- `ConfiguredValueNotFound`: the target has no current configuration.
+- `ConfiguredValueSchemaInvalid`: the target's current row has the wrong schema.
+- `ConfiguredValueTypeInvalid`: the target's current row does not decode as a portfolio config.
+- `ConfiguredValueCanonicalMismatch`: a current row fails canonical byte/digest verification.
+- `ConfiguredValueValidationFailed`: a current row fails semantic portfolio validation.
+- `ConfiguredTargetMismatch`: the config's embedded portfolio id differs from the selected target.
 - `PortfolioSnapshotPlanFailed`: the concrete portfolio cannot expand into the snapshot objective.
 - `EntryPointCertificationFailed`: app assembly could not certify the planned typed spec.
 - `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production

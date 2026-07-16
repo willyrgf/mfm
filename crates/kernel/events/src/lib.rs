@@ -11,7 +11,8 @@ use mfm_ids::{
     ContentDigest, DescriptorId, DigestAlgorithm, EventId, IdentityError, LoweringVersion, NodeId,
     PrintableAscii1024 as CheckedPrintableAscii1024, PrintableAscii512 as CheckedPrintableAscii512,
     RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion,
-    StateKind, StateVersion, StoreScopeId, VisibleAscii256 as CheckedVisibleAscii256,
+    StableAuthorKey, StateKind, StateVersion, StoreScopeId,
+    VisibleAscii256 as CheckedVisibleAscii256,
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellContextSpec, CellProducer, DescriptorIdentity, MediaType,

@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use mfm_catalog_model::CatalogName;
-use mfm_ids::{ContentDigest, SchemaId};
+use mfm_ids::{ContentDigest, SchemaId, StableAuthorKey};
 use mfm_portfolio_model::portfolio::PortfolioConfig;
 use mfm_storage_postgres::{
-    CatalogValueKey, CatalogValueRow, PostgresStore, MAX_CATALOG_VALUE_BYTES,
+    ConfiguredValuePublication, ConfiguredValuePublicationStatus, ConfiguredValueRow,
+    PostgresStore, MAX_CONFIGURED_VALUE_BYTES,
 };
 use mfm_values::{MfmConfig, ValidatedConfig};
 use serde::Deserialize;
@@ -14,49 +14,44 @@ use crate::{AppError, ErrorClass};
 
 const MAX_SETUP_FILE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Identity returned for a catalog value without exposing its canonical payload.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
-pub struct CatalogValueIdentity {
-    /// Catalog name.
-    pub name: String,
+/// The result of publishing one setup configuration without exposing its canonical payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SetupConfigPublication {
+    /// Stable target derived from the typed configuration's intrinsic domain id.
+    pub target: String,
     /// Typed config schema identity.
     #[serde(serialize_with = "serialize_schema_id")]
     pub schema_id: SchemaId,
     /// Exact content digest.
     #[serde(serialize_with = "serialize_content_digest")]
     pub digest: ContentDigest,
+    /// Whether import created, updated, or left the current value unchanged.
+    pub status: SetupConfigPublicationStatus,
 }
 
-/// Keyset cursor for bounded catalog listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogListCursor {
-    /// Last catalog name returned by the previous page.
-    pub name: String,
-    /// Last schema id returned by the previous page.
-    pub schema_id: SchemaId,
-    /// Last digest returned by the previous page.
-    pub digest: ContentDigest,
+/// Observable result of publishing a current setup configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupConfigPublicationStatus {
+    /// The target had no current configuration before import.
+    Created,
+    /// The target's current configuration changed.
+    Updated,
+    /// The target already held identical canonical configuration.
+    Unchanged,
 }
 
 /// Strict setup document accepted by the application publisher.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetupDocument {
-    values: Vec<SetupEntry>,
+    configs: Vec<SetupConfig>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SetupEntry {
-    name: CatalogName,
-    #[serde(flatten)]
-    value: SetupValue,
-}
-
-/// Closed set of catalog resource types accepted by setup import.
+/// Closed set of concrete configuration types accepted by setup import.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", content = "value", deny_unknown_fields)]
-enum SetupValue {
+enum SetupConfig {
     #[serde(rename = "portfolio")]
     Portfolio(PortfolioConfig),
 }
@@ -65,51 +60,27 @@ enum SetupValue {
 pub async fn import_setup_toml(
     store: &PostgresStore,
     bytes: &[u8],
-) -> Result<Vec<CatalogValueIdentity>, AppError> {
+) -> Result<Vec<SetupConfigPublication>, AppError> {
     let document = parse_setup_document(bytes)?;
-    let mut prepared = BTreeMap::<CatalogValueKey, Vec<u8>>::new();
-    for entry in document.values {
-        let prepared_value = prepare_value(entry.value)?;
-        let key = CatalogValueKey::new(
-            entry.name.as_str(),
-            prepared_value.schema_id,
-            prepared_value.digest,
-        )
-        .map_err(|_| {
-            AppError::new(
-                ErrorClass::BadRequest,
-                "CatalogValueIdentityInvalid",
-                "The setup value identity is invalid",
-            )
-        })?;
-        if let Some(previous) = prepared.get(&key) {
-            if previous != &prepared_value.canonical_json {
-                return Err(AppError::new(
-                    ErrorClass::Conflict,
-                    "SetupDuplicateConflict",
-                    "The setup document contains conflicting duplicate catalog values",
-                ));
-            }
-        } else {
-            prepared.insert(key.clone(), prepared_value.canonical_json);
+    let mut prepared = BTreeMap::<StableAuthorKey, ConfiguredValueRow>::new();
+    for config in document.configs {
+        let prepared_value = prepare_setup_config(config)?;
+        if prepared
+            .insert(prepared_value.target.clone(), prepared_value)
+            .is_some()
+        {
+            return Err(AppError::new(
+                ErrorClass::Conflict,
+                "SetupDuplicateTarget",
+                "The setup document contains a duplicate configuration target",
+            ));
         }
     }
-    let rows = prepared
-        .into_iter()
-        .map(|(key, canonical_json)| CatalogValueRow {
-            key,
-            canonical_json,
-        })
-        .collect::<Vec<_>>();
-    let identities = rows
-        .iter()
-        .map(|row| identity_from_key(&row.key))
-        .collect::<Vec<_>>();
-    store
-        .append_catalog_values(&rows)
+    let publications = store
+        .publish_configured_values(&prepared.into_values().collect::<Vec<_>>())
         .await
         .map_err(AppError::from)?;
-    Ok(identities)
+    Ok(publications.into_iter().map(Into::into).collect())
 }
 
 fn parse_setup_document(bytes: &[u8]) -> Result<SetupDocument, AppError> {
@@ -136,78 +107,66 @@ fn parse_setup_document(bytes: &[u8]) -> Result<SetupDocument, AppError> {
     })
 }
 
-/// Lists exact catalog identities using bounded keyset pagination.
-pub async fn list_catalog_values(
-    store: &PostgresStore,
-    cursor: Option<&CatalogListCursor>,
-    limit: u32,
-) -> Result<Vec<CatalogValueIdentity>, AppError> {
-    let after = cursor
-        .map(|cursor| {
-            CatalogValueKey::new(
-                cursor.name.clone(),
-                cursor.schema_id.clone(),
-                cursor.digest.clone(),
-            )
-        })
-        .transpose()
-        .map_err(|_| {
-            AppError::new(
-                ErrorClass::BadRequest,
-                "CatalogCursorInvalid",
-                "The catalog list cursor is invalid",
-            )
-        })?;
+/// Lists current configured targets in stable target order.
+pub async fn list_setup_targets(store: &PostgresStore) -> Result<Vec<String>, AppError> {
     store
-        .list_catalog_values(after.as_ref(), limit)
+        .list_configured_targets()
         .await
         .map_err(AppError::from)
-        .map(|values| values.iter().map(identity_from_key).collect())
+        .map(|targets| {
+            targets
+                .into_iter()
+                .map(|target| target.into_string())
+                .collect()
+        })
 }
 
-/// Loads one exact catalog value for export after storage integrity verification.
-pub async fn export_catalog_value(
-    store: &PostgresStore,
-    identity: &CatalogValueIdentity,
-) -> Result<Vec<u8>, AppError> {
-    let key = CatalogValueKey::new(
-        identity.name.clone(),
-        identity.schema_id.clone(),
-        identity.digest.clone(),
-    )
-    .map_err(|_| {
+/// Exports the current configuration for one target after storage integrity verification.
+pub async fn export_setup_target(store: &PostgresStore, target: &str) -> Result<Vec<u8>, AppError> {
+    let target = StableAuthorKey::new(target).map_err(|_| {
         AppError::new(
             ErrorClass::BadRequest,
-            "CatalogValueIdentityInvalid",
-            "The catalog value identity is invalid",
+            "ConfiguredTargetInvalid",
+            "The configuration target is invalid",
         )
     })?;
     store
-        .export_catalog_value(&key)
+        .load_configured_value(&target)
         .await
         .map_err(AppError::from)?
         .map(|row| row.canonical_json)
         .ok_or_else(|| {
             AppError::not_found(
-                "CatalogValueNotFound",
-                "The exact catalog value was not found",
+                "ConfiguredValueNotFound",
+                "The current configuration target was not found",
             )
         })
 }
 
-struct PreparedValue {
-    schema_id: SchemaId,
-    digest: ContentDigest,
-    canonical_json: Vec<u8>,
-}
-
-fn prepare_value(value: SetupValue) -> Result<PreparedValue, AppError> {
+fn prepare_setup_config(value: SetupConfig) -> Result<ConfiguredValueRow, AppError> {
+    let target = target_for_setup_config(&value)?;
     match value {
-        SetupValue::Portfolio(config) => prepare_config(config.normalized()),
+        SetupConfig::Portfolio(config) => prepare_config(target, config.normalized()),
     }
 }
 
-fn prepare_config<T: MfmConfig>(config: T) -> Result<PreparedValue, AppError> {
+fn target_for_setup_config(value: &SetupConfig) -> Result<StableAuthorKey, AppError> {
+    let target = match value {
+        SetupConfig::Portfolio(config) => config.portfolio_id.as_str(),
+    };
+    StableAuthorKey::new(target).map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "SetupTargetInvalid",
+            "A typed setup configuration has an invalid target",
+        )
+    })
+}
+
+fn prepare_config<T: MfmConfig>(
+    target: StableAuthorKey,
+    config: T,
+) -> Result<ConfiguredValueRow, AppError> {
     let validated = ValidatedConfig::new(config).map_err(|_| {
         AppError::new(
             ErrorClass::BadRequest,
@@ -222,7 +181,7 @@ fn prepare_config<T: MfmConfig>(config: T) -> Result<PreparedValue, AppError> {
             "A setup value could not be canonicalized",
         )
     })?;
-    if canonical.as_bytes().len() > MAX_CATALOG_VALUE_BYTES {
+    if canonical.as_bytes().len() > MAX_CONFIGURED_VALUE_BYTES {
         return Err(AppError::new(
             ErrorClass::BadRequest,
             "SetupValueTooLarge",
@@ -250,10 +209,18 @@ fn prepare_config<T: MfmConfig>(config: T) -> Result<PreparedValue, AppError> {
             "A setup value schema is invalid",
         )
     })?;
-    Ok(PreparedValue {
+    ConfiguredValueRow::new(
+        target,
         schema_id,
-        digest: canonical.content_digest(),
-        canonical_json: canonical.as_bytes().to_vec(),
+        canonical.content_digest(),
+        canonical.as_bytes().to_vec(),
+    )
+    .map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "SetupValueStorageInvalid",
+            "A prepared setup value is invalid for configuration storage",
+        )
     })
 }
 
@@ -299,11 +266,20 @@ fn uri_contains_userinfo(value: &str) -> bool {
     !url.username().is_empty() || url.password().is_some()
 }
 
-fn identity_from_key(key: &CatalogValueKey) -> CatalogValueIdentity {
-    CatalogValueIdentity {
-        name: key.name.clone(),
-        schema_id: key.schema_id.clone(),
-        digest: key.digest.clone(),
+impl From<ConfiguredValuePublication> for SetupConfigPublication {
+    fn from(value: ConfiguredValuePublication) -> Self {
+        Self {
+            target: value.row.target.into_string(),
+            schema_id: value.row.schema_id,
+            digest: value.row.digest,
+            status: match value.status {
+                ConfiguredValuePublicationStatus::Created => SetupConfigPublicationStatus::Created,
+                ConfiguredValuePublicationStatus::Updated => SetupConfigPublicationStatus::Updated,
+                ConfiguredValuePublicationStatus::Unchanged => {
+                    SetupConfigPublicationStatus::Unchanged
+                }
+            },
+        }
     }
 }
 
@@ -324,7 +300,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::secret_field_path;
-    use super::{parse_setup_document, prepare_value, SetupDocument, MAX_SETUP_FILE_BYTES};
+    use super::{parse_setup_document, prepare_setup_config, SetupDocument, MAX_SETUP_FILE_BYTES};
     use serde_json::json;
 
     #[test]
@@ -340,9 +316,9 @@ mod tests {
             )),
         ] {
             let document: SetupDocument = toml::from_str(fixture).expect("setup fixture");
-            assert_eq!(document.values.len(), 1);
-            for entry in document.values {
-                let prepared = prepare_value(entry.value).expect("portfolio value prepares");
+            assert_eq!(document.configs.len(), 1);
+            for config in document.configs {
+                let prepared = prepare_setup_config(config).expect("portfolio value prepares");
                 assert!(!prepared.canonical_json.is_empty());
             }
         }
@@ -360,13 +336,28 @@ mod tests {
             "evm_import_deployed",
             "evm_import_configured",
         ] {
-            let document = format!(
-                "[[values]]\nname = \"acme/removed\"\nkind = \"{kind}\"\n\n[values.value]\n"
-            );
+            let document = format!("[[configs]]\nkind = \"{kind}\"\n\n[configs.value]\n");
             let error = parse_setup_document(document.as_bytes())
                 .expect_err("removed setup kind must not decode");
             assert_eq!(error.code, "SetupDocumentInvalid", "{kind}");
         }
+    }
+
+    #[test]
+    fn setup_rejects_removed_catalog_name_and_values_envelopes() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/setup/organization.toml"
+        ));
+        let named = fixture.replacen("[[configs]]", "[[configs]]\nname = \"acme/legacy-name\"", 1);
+        let error = parse_setup_document(named.as_bytes())
+            .expect_err("independent catalog names must be rejected");
+        assert_eq!(error.code, "SetupDocumentInvalid");
+
+        let values = fixture.replace("configs", "values");
+        let error = parse_setup_document(values.as_bytes())
+            .expect_err("the removed values envelope must be rejected");
+        assert_eq!(error.code, "SetupDocumentInvalid");
     }
 
     #[test]
@@ -377,15 +368,14 @@ mod tests {
         )))
         .expect("setup fixture as toml value");
         document
-            .get_mut("values")
+            .get_mut("configs")
             .and_then(toml::Value::as_array_mut)
-            .and_then(|values| values.first_mut())
+            .and_then(|configs| configs.first_mut())
             .and_then(toml::Value::as_table_mut)
             .expect("setup entry")
             .insert("unexpected".to_owned(), toml::Value::Boolean(true));
         let document = toml::to_string(&document).expect("setup document serializes");
-        let error = toml::from_str::<SetupDocument>(&document).expect_err("unknown setup field");
-        assert!(error.to_string().contains("unknown field"));
+        toml::from_str::<SetupDocument>(&document).expect_err("unknown setup field");
     }
 
     #[test]
@@ -420,18 +410,18 @@ mod tests {
             "/../../examples/setup/organization.toml"
         )))
         .expect("setup fixture as toml value");
-        let values = base
-            .get("values")
+        let configs = base
+            .get("configs")
             .and_then(toml::Value::as_array)
-            .expect("setup values array");
-        assert_eq!(values.len(), 1);
+            .expect("setup configs array");
+        assert_eq!(configs.len(), 1);
 
-        for index in 0..values.len() {
+        for index in 0..configs.len() {
             let mut document = base.clone();
             let value = document
-                .get_mut("values")
+                .get_mut("configs")
                 .and_then(toml::Value::as_array_mut)
-                .and_then(|values| values.get_mut(index))
+                .and_then(|configs| configs.get_mut(index))
                 .and_then(toml::Value::as_table_mut)
                 .and_then(|entry| entry.get_mut("value"))
                 .expect("setup value");
@@ -452,18 +442,18 @@ mod tests {
             "/../../examples/setup/organization.toml"
         )))
         .expect("setup fixture as toml value");
-        let values = base
-            .get("values")
+        let configs = base
+            .get("configs")
             .and_then(toml::Value::as_array)
-            .expect("setup values array");
-        assert_eq!(values.len(), 1);
+            .expect("setup configs array");
+        assert_eq!(configs.len(), 1);
 
-        for index in 0..values.len() {
+        for index in 0..configs.len() {
             let mut document = base.clone();
             let value = document
-                .get_mut("values")
+                .get_mut("configs")
                 .and_then(toml::Value::as_array_mut)
-                .and_then(|values| values.get_mut(index))
+                .and_then(|configs| configs.get_mut(index))
                 .and_then(toml::Value::as_table_mut)
                 .and_then(|entry| entry.get_mut("value"))
                 .and_then(toml::Value::as_table_mut)
@@ -490,7 +480,7 @@ mod tests {
         assert_eq!(invalid_utf8.code, "SetupDocumentInvalid");
 
         let malformed =
-            parse_setup_document(b"[[values]\nname = \"").expect_err("malformed setup TOML");
+            parse_setup_document(b"[[configs]\nkind = \"").expect_err("malformed setup TOML");
         assert_eq!(malformed.code, "SetupDocumentInvalid");
     }
 
@@ -502,9 +492,9 @@ mod tests {
         )))
         .expect("setup fixture as toml value");
         let metadata = document
-            .get_mut("values")
+            .get_mut("configs")
             .and_then(toml::Value::as_array_mut)
-            .and_then(|values| values.first_mut())
+            .and_then(|configs| configs.first_mut())
             .and_then(toml::Value::as_table_mut)
             .and_then(|entry| entry.get_mut("value"))
             .and_then(toml::Value::as_table_mut)
@@ -517,16 +507,14 @@ mod tests {
         );
         let bytes = toml::to_string(&document).expect("oversized setup serializes");
         let document = parse_setup_document(bytes.as_bytes()).expect("oversized value parses");
-        let error = prepare_value(
+        let error = prepare_setup_config(
             document
-                .values
+                .configs
                 .into_iter()
                 .next()
-                .expect("portfolio entry")
-                .value,
+                .expect("portfolio config"),
         )
-        .err()
-        .expect("oversized value must be rejected before storage");
+        .expect_err("oversized value must be rejected before storage");
         assert_eq!(error.code, "SetupValueTooLarge");
         assert!(!error.message.contains("large_public_note"));
     }
@@ -540,9 +528,9 @@ mod tests {
         .expect("setup fixture as toml value");
         let mut reordered = base.clone();
         let value = reordered
-            .get_mut("values")
+            .get_mut("configs")
             .and_then(toml::Value::as_array_mut)
-            .and_then(|values| values.first_mut())
+            .and_then(|configs| configs.first_mut())
             .and_then(toml::Value::as_table_mut)
             .and_then(|entry| entry.get_mut("value"))
             .and_then(toml::Value::as_table_mut)
@@ -567,22 +555,14 @@ mod tests {
                 .as_bytes(),
         )
         .expect("reordered setup parses");
-        let first = prepare_value(
-            first
-                .values
-                .into_iter()
-                .next()
-                .expect("base portfolio")
-                .value,
-        )
-        .expect("base portfolio prepares");
-        let second = prepare_value(
+        let first = prepare_setup_config(first.configs.into_iter().next().expect("base portfolio"))
+            .expect("base portfolio prepares");
+        let second = prepare_setup_config(
             second
-                .values
+                .configs
                 .into_iter()
                 .next()
-                .expect("reordered portfolio")
-                .value,
+                .expect("reordered portfolio"),
         )
         .expect("reordered portfolio prepares");
         assert_eq!(first.digest, second.digest);

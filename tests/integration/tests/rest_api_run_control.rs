@@ -1,4 +1,4 @@
-//! REST run-control contract tests for the exact catalog-backed ingress.
+//! REST run-control contract tests for exact entry-point and target ingress.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -53,10 +53,14 @@ async fn health_and_ready_endpoints_report_liveness_and_readiness() {
 }
 
 #[tokio::test]
-async fn start_requires_the_strict_entry_point_request_envelope() {
+async fn start_requires_the_strict_entry_point_target_envelope() {
     let app = test_app();
     for body in [
         serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT}),
+        serde_json::json!({
+            "entry_point": UNKNOWN_ENTRY_POINT,
+            "target": {"name": "acme/primary", "digest": "content:sha256-jcs-v1:deadbeef"},
+        }),
         serde_json::json!({
             "entry_point": UNKNOWN_ENTRY_POINT,
             "request": {},
@@ -73,27 +77,37 @@ async fn start_requires_the_strict_entry_point_request_envelope() {
 }
 
 #[tokio::test]
-async fn start_rejects_unknown_exact_entry_point_before_catalog_access() {
+async fn start_requires_configuration_authority_after_a_valid_target_envelope() {
     let response = test_app()
         .oneshot(json_post(
             "/v1/runs/start",
-            serde_json::json!({"entry_point": "mfm.unknown/missing@1", "request": {}}),
+            serde_json::json!({"entry_point": "mfm.unknown/missing@1", "target": "acme/primary"}),
         ))
         .await
         .unwrap();
-    assert_error(response, StatusCode::BAD_REQUEST, "EntryPointNotFound").await;
+    assert_error(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "ConfiguredStoreUnavailable",
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn start_rejects_an_unknown_entry_point_without_catalog_access() {
+async fn unknown_entry_points_do_not_bypass_configuration_authority() {
     let response = test_app()
         .oneshot(json_post(
             "/v1/runs/start",
-            serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT, "request": {}}),
+            serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT, "target": "acme/primary"}),
         ))
         .await
         .unwrap();
-    assert_error(response, StatusCode::BAD_REQUEST, "EntryPointNotFound").await;
+    assert_error(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "ConfiguredStoreUnavailable",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -102,14 +116,14 @@ async fn read_role_refuses_live_start() {
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Read,
         store: fixture.store.clone(),
-        catalog_store: None,
+        configured_store: None,
         runtime_config_path: None,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
     let response = app
         .oneshot(json_post(
             "/v1/runs/start",
-            serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT, "request": {}}),
+            serde_json::json!({"entry_point": UNKNOWN_ENTRY_POINT, "target": "acme/primary"}),
         ))
         .await
         .unwrap();

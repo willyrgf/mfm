@@ -39,38 +39,14 @@ fn invalid_run_id_has_domain_error() {
 }
 
 #[tokio::test]
-async fn run_start_accepts_entry_point_shape() {
+async fn run_start_accepts_entry_point_and_target_shape_before_configuration_lookup() {
     let _env_guard = ENV_LOCK.lock().await;
     let response = test_app()
         .oneshot(json_post(
             "/v1/runs/start",
             json!({
                 "entry_point": "mfm.unknown/missing@1",
-                "request": {}
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let value = response_json(response).await;
-    assert_eq!(value["status"], "error");
-    assert_eq!(value["error"]["code"], "EntryPointNotFound");
-}
-
-#[tokio::test]
-async fn run_start_recognizes_the_snapshot_entry_point_before_catalog_resolution() {
-    let response = test_app()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            json!({
-                "entry_point": "mfm.portfolio/snapshot@1",
-                "request": {
-                    "portfolio": {
-                        "name": "acme/primary",
-                        "digest": "content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001"
-                    }
-                }
+                "target": "acme/primary"
             }),
         ))
         .await
@@ -78,7 +54,26 @@ async fn run_start_recognizes_the_snapshot_entry_point_before_catalog_resolution
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let value = response_json(response).await;
-    assert_eq!(value["error"]["code"], "CatalogStoreUnavailable");
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["error"]["code"], "ConfiguredStoreUnavailable");
+}
+
+#[tokio::test]
+async fn run_start_recognizes_the_snapshot_entry_point_before_target_resolution() {
+    let response = test_app()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            json!({
+                "entry_point": "mfm.portfolio/snapshot@1",
+                "target": "acme/primary"
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let value = response_json(response).await;
+    assert_eq!(value["error"]["code"], "ConfiguredStoreUnavailable");
 }
 
 #[tokio::test]
@@ -87,7 +82,7 @@ async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
     let app = make_app(AppState {
         role: RestProcessRole::Read,
         store: fixture.store.clone(),
-        catalog_store: None,
+        configured_store: None,
         runtime_config_path: None,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
@@ -100,7 +95,7 @@ async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
                 .uri("/v1/runs/start")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"entry_point":"mfm.unknown/missing@1","request":{}}"#,
+                    r#"{"entry_point":"mfm.unknown/missing@1","target":"acme/primary"}"#,
                 ))
                 .expect("request"),
         )
@@ -134,16 +129,16 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
     let app = make_app(AppState {
         role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
-        catalog_store: None,
+        configured_store: None,
         runtime_config_path: Some(config_path.clone()),
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
-    assert_entry_point_not_found(&app).await;
+    assert_start_requires_configured_store(&app).await;
 
     std::fs::write(&config_path, "not valid toml = [").expect("replace runtime config");
 
-    assert_entry_point_not_found(&app).await;
+    assert_start_requires_configured_store(&app).await;
 }
 
 #[tokio::test]
@@ -268,7 +263,7 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
     let app = make_app(AppState {
         role: RestProcessRole::Live,
         store: fixture.store.clone(),
-        catalog_store: None,
+        configured_store: None,
         runtime_config_path: None,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
@@ -317,21 +312,21 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
     assert_eq!(unknown_error["error"], control_error["error"]);
 }
 
-async fn assert_entry_point_not_found(app: &axum::Router) {
+async fn assert_start_requires_configured_store(app: &axum::Router) {
     let response = app
         .clone()
         .oneshot(json_post(
             "/v1/runs/start",
             json!({
                 "entry_point": "mfm.unknown/missing@1",
-                "request": {}
+                "target": "acme/primary"
             }),
         ))
         .await
         .expect("response");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let value = response_json(response).await;
-    assert_eq!(value["error"]["code"], "EntryPointNotFound");
+    assert_eq!(value["error"]["code"], "ConfiguredStoreUnavailable");
 }
 
 async fn locked_env<const N: usize>(pairs: [(&'static str, &str); N]) -> EnvGuard {
@@ -409,7 +404,7 @@ fn test_app() -> axum::Router {
     make_app(AppState {
         role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
-        catalog_store: None,
+        configured_store: None,
         runtime_config_path: None,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     })

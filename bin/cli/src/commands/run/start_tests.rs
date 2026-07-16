@@ -2,11 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn start_rejects_empty_invocation_key_before_store_connection() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let request = tmp.path().join("request.json");
-    std::fs::write(&request, "{}").expect("write request");
-
-    let mut args = start_args(request);
+    let mut args = start_args();
     args.invocation_key = Some(String::new());
 
     let error = execute_internal(&args)
@@ -17,20 +13,16 @@ async fn start_rejects_empty_invocation_key_before_store_connection() {
 
 #[tokio::test]
 async fn start_requires_database_before_entry_point_resolution() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let request = tmp.path().join("request.json");
-    std::fs::write(&request, "{}").expect("write request");
-
-    let error = execute_internal(&start_args(request))
+    let error = execute_internal(&start_args())
         .await
         .expect_err("missing database url");
     assert_eq!(error.code, "MissingDatabaseUrl");
 }
 
-fn start_args(request: PathBuf) -> StartArgs {
+fn start_args() -> StartArgs {
     StartArgs {
         entry_point: "mfm.unknown/missing@1".to_owned(),
-        request,
+        target: "acme/primary".to_owned(),
         invocation_key: None,
         runtime_config: None,
         stores: RunStoresArgs { database_url: None },

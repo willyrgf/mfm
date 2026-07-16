@@ -23,11 +23,14 @@
 //! # }
 //! ```
 
-mod catalog;
+mod configured_values;
 mod run_store;
 mod schema;
 
-pub use catalog::{CatalogValueKey, CatalogValueRow, MAX_CATALOG_VALUE_BYTES};
+pub use configured_values::{
+    ConfiguredValuePublication, ConfiguredValuePublicationStatus, ConfiguredValueRow,
+    MAX_CONFIGURED_VALUE_BYTES,
+};
 pub use run_store::{
     PostgresFactQueryResult, PostgresFactQueryRow, PostgresStore, PostgresStoreAuthority,
     PostgresStoreAuthorityError, PostgresStoreError,

@@ -331,28 +331,26 @@ fn unknown_run_completion_outcome_tag_is_rejected() {
 
 #[test]
 fn launch_evidence_codec_sorts_deduplicates_and_rejects_legacy_fields() {
-    let source_a = events::CatalogSourceEvidence::new(
-        "acme/a",
+    let source_a = events::ConfiguredTargetEvidence::new(
+        StableAuthorKey::new("acme/a").expect("target a"),
         schema_id("mfm.test.catalog", 101),
         content_digest(102),
-    )
-    .expect("source a");
-    let source_b = events::CatalogSourceEvidence::new(
-        "acme/b",
+    );
+    let source_b = events::ConfiguredTargetEvidence::new(
+        StableAuthorKey::new("acme/b").expect("target b"),
         schema_id("mfm.test.catalog", 103),
         content_digest(104),
-    )
-    .expect("source b");
+    );
     let evidence = events::EntryPointLaunchEvidence::new(
-        "mfm.test/catalog-backed@1",
+        "mfm.test/configured-target@1",
         vec![source_b.clone(), source_a.clone(), source_a],
     )
     .expect("launch evidence");
     assert_eq!(
         evidence
-            .catalog_sources
+            .configured_targets
             .iter()
-            .map(|source| source.name.as_str())
+            .map(|source| source.target.as_str())
             .collect::<Vec<_>>(),
         vec!["acme/a", "acme/b"]
     );
@@ -389,11 +387,11 @@ fn launch_evidence_codec_sorts_deduplicates_and_rejects_legacy_fields() {
     unknown_source
         .get_mut("entry_point")
         .and_then(serde_json::Value::as_object_mut)
-        .and_then(|entry_point| entry_point.get_mut("catalog_sources"))
+        .and_then(|entry_point| entry_point.get_mut("configured_targets"))
         .and_then(serde_json::Value::as_array_mut)
         .and_then(|sources| sources.first_mut())
         .and_then(serde_json::Value::as_object_mut)
-        .expect("catalog source")
+        .expect("configured target")
         .insert("unexpected".to_owned(), serde_json::json!(true));
     assert!(payload_from_json_value(&unknown_source).is_err());
 

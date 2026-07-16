@@ -11,7 +11,7 @@ mod ops;
 pub(crate) mod result;
 /// Run lifecycle and artifact commands.
 mod run;
-/// Immutable configuration catalog setup commands.
+/// Current target-keyed configuration setup commands.
 mod setup;
 
 pub(crate) const OUTPUT_FORMAT_ENV: &str = "MFM_OUTPUT_FORMAT";
@@ -133,7 +133,7 @@ enum Commands {
         #[command(subcommand)]
         command: ops::OpsCommand,
     },
-    /// Immutable configuration catalog setup
+    /// Current target-keyed configuration setup
     Setup {
         /// Nested setup command to execute.
         #[command(subcommand)]

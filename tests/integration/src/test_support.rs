@@ -122,7 +122,7 @@ pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         store,
-        catalog_store: None,
+        configured_store: None,
         runtime_config_path: None,
         fact_index,
     }

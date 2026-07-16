@@ -5,7 +5,7 @@ use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPaylo
 use mfm_ids::{
     AdapterVersion, ArtifactId, AttemptId, CapabilityVersion, CellId, ContentDigest,
     DigestAlgorithm, EffectKind, EffectVersion, LoweringVersion, NodeId, RunId, SchemaId, SeedId,
-    SideEffectPairId, SpecHash, SpecVersion, StateVersion,
+    SideEffectPairId, SpecHash, SpecVersion, StableAuthorKey, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,

@@ -775,13 +775,13 @@ fn entry_point_launch_evidence_json(
     evidence: &events::EntryPointLaunchEvidence,
 ) -> serde_json::Value {
     serde_json::json!({
-        "catalog_sources": evidence
-            .catalog_sources
+        "configured_targets": evidence
+            .configured_targets
             .iter()
             .map(|source| {
                 serde_json::json!({
                     "digest": source.digest.as_str(),
-                    "name": source.name.as_str(),
+                    "target": source.target.as_str(),
                     "schema_id": source.schema_id.as_str(),
                 })
             })

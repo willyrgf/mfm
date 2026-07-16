@@ -73,7 +73,7 @@ Crate docs:
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
-- Storage (typed run events and catalog values, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
+- Storage (typed run events and current configuration, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
 
 Design notes / planning:
 
@@ -121,7 +121,7 @@ Run binaries locally:
 
 ```bash
 nix run .#mfm -- --help
-nix run .#mfm -- setup import --file examples/setup/organization.toml
+nix run .#mfm -- setup import examples/setup/organization.toml
 nix run .#mfm -- ops list
 cargo run -p mfm -- --help
 cargo run -p mfm-rest-api

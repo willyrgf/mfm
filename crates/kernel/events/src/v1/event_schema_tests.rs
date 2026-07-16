@@ -17,7 +17,7 @@ pub(super) fn v1_event_schema_golden() {
     assert_eq!(all_event_schema_descriptors().len(), 31);
     assert_eq!(
         rows,
-        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:59b7f25a359ef90fd4f7cf2f80f3077234f2b374d674aa944d2e6831de5db059
+        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:e6f2a19c3f35479e6ba58a4e497469e0f1d34d983dfcf4129de74f4099ec63b4
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:b60ebe4bc262799c154a596362ae57672801f54e1b18d703572848626ccef3f0

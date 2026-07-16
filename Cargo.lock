@@ -2224,7 +2224,6 @@ dependencies = [
  "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-catalog-model",
  "mfm-certify",
  "mfm-effects",
  "mfm-events",
@@ -2313,18 +2312,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "trybuild",
-]
-
-[[package]]
-name = "mfm-catalog-model"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-ids",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

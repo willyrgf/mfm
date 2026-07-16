@@ -196,8 +196,8 @@ pub struct AppState<S = PostgresStore> {
     pub role: RestProcessRole,
     /// Certified typed run-event and artifact authority store.
     pub store: S,
-    /// Catalog authority used only during exact run-start preparation.
-    pub catalog_store: Option<PostgresStore>,
+    /// Mutable configured-value store used only during new run preparation.
+    pub configured_store: Option<PostgresStore>,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
     /// Platform/Control fact-index used by portfolio snapshot and collector runners.
@@ -207,7 +207,7 @@ pub struct AppState<S = PostgresStore> {
 #[derive(Clone)]
 struct RouterState<S> {
     app: AppState<S>,
-    catalog_store: Option<PostgresStore>,
+    configured_store: Option<PostgresStore>,
     live_services: Arc<OnceLock<Result<RunServices<S, S>, ApiError>>>,
     read_services: Arc<OnceLock<Result<RunReadServices<S, S>, ApiError>>>,
 }
@@ -301,7 +301,7 @@ pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultApp
     let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     Ok(AppState {
         role,
-        catalog_store: Some(store.clone()),
+        configured_store: Some(store.clone()),
         store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
         fact_index,
@@ -330,7 +330,7 @@ where
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
     let state = RouterState {
-        catalog_store: state.catalog_store.clone(),
+        configured_store: state.configured_store.clone(),
         app: state,
         live_services: Arc::new(OnceLock::new()),
         read_services: Arc::new(OnceLock::new()),
@@ -438,7 +438,7 @@ enum ManualResolutionKind {
 #[serde(deny_unknown_fields)]
 struct RunStartBody {
     entry_point: String,
-    request: serde_json::Value,
+    target: String,
     #[serde(default)]
     invocation_key: Option<String>,
 }
@@ -684,18 +684,17 @@ where
     let services = state.live_services()?;
     let store_scope_id = services.load_store_scope_id().await?;
     let invocation_key = req.invocation_key.map(InvocationKey::new).transpose()?;
-    mfm_app::validate_entry_point_id(&req.entry_point)?;
-    let catalog_store = state.catalog_store.as_ref().ok_or_else(|| {
+    let configured_store = state.configured_store.as_ref().ok_or_else(|| {
         ApiError::backend(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "CatalogStoreUnavailable",
-            "Catalog authority is unavailable for run preparation",
+            "ConfiguredStoreUnavailable",
+            "Configured-value authority is unavailable for run preparation",
         )
     })?;
     let request = mfm_app::prepare_entry_point_run_launch(
-        catalog_store,
+        configured_store,
         &req.entry_point,
-        &req.request,
+        &req.target,
         services.certification_registry(),
         store_scope_id,
         invocation_key,

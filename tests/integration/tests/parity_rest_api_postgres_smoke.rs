@@ -13,6 +13,7 @@ use mfm_portfolio_model::portfolio::PortfolioConfig;
 use mfm_store::v1::{RunEventStore, StoreScopeStore};
 use mfm_values::MfmConfig;
 use serde_json::json;
+use sqlx::PgPool;
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -28,7 +29,7 @@ async fn parity_rest_postgres_smoke() {
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
-        catalog_store: Some(store.clone()),
+        configured_store: Some(store.clone()),
         store,
         runtime_config_path: None,
     });
@@ -49,6 +50,21 @@ async fn parity_rest_postgres_smoke() {
     assert_eq!(ready_v["status"], "success");
     assert_eq!(ready_v["data"]["checks"]["run_store"], "ready");
 
+    let unknown = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            json!({
+                "entry_point": "mfm.unknown/missing@1",
+                "target": "acme/primary",
+            }),
+        ))
+        .await
+        .expect("unknown entry-point response");
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    let unknown = response_json(unknown).await;
+    assert_eq!(unknown["error"]["code"], "EntryPointNotFound");
+
     let absent_status = app
         .clone()
         .oneshot(
@@ -66,7 +82,7 @@ async fn parity_rest_postgres_smoke() {
 }
 
 #[tokio::test]
-async fn parity_portfolio_snapshot_admission_resolves_one_exact_catalog_value() {
+async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_target() {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_postgres_schema("portfolio_snapshot_admission");
@@ -74,64 +90,136 @@ async fn parity_portfolio_snapshot_admission_resolves_one_exact_catalog_value() 
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
     let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
 
-    let identities = mfm_app::import_setup_toml(
+    let publications = mfm_app::import_setup_toml(
         &store,
         include_bytes!("../../../examples/setup/organization.toml"),
     )
     .await
     .expect("publish portfolio-only setup");
-    assert_eq!(identities.len(), 1, "setup exposes one portfolio value");
-    let identity = &identities[0];
+    assert_eq!(publications.len(), 1, "setup exposes one portfolio config");
+    let publication = &publications[0];
     assert_eq!(
-        identity.schema_id,
+        publication.schema_id,
         PortfolioConfig::schema_id().expect("portfolio schema")
     );
 
-    let request = json!({
-        "portfolio": {
-            "name": identity.name,
-            "digest": identity.digest.as_str(),
-        }
-    });
     let store_scope_id = store.load_store_scope_id().await.expect("store scope");
     let launch = mfm_app::prepare_entry_point_run_launch(
         &store,
         "mfm.portfolio/snapshot@1",
-        &request,
+        &publication.target,
         &mfm_app::production_certification_registry().expect("production certification registry"),
-        store_scope_id,
+        store_scope_id.clone(),
         Some(mfm_app::InvocationKey::new("postgres-portfolio-admission").expect("invocation key")),
     )
     .await
-    .expect("prepare exact portfolio snapshot admission");
+    .expect("prepare current portfolio snapshot admission");
 
     assert_eq!(
         launch.evidence.entry_point.entry_point_id.as_str(),
         "mfm.portfolio/snapshot@1"
     );
-    assert_eq!(launch.evidence.entry_point.catalog_sources.len(), 1);
-    let source = &launch.evidence.entry_point.catalog_sources[0];
-    assert_eq!(source.name.as_str(), identity.name);
-    assert_eq!(source.schema_id, identity.schema_id);
-    assert_eq!(source.digest, identity.digest);
+    assert_eq!(launch.evidence.entry_point.configured_targets.len(), 1);
+    let source = &launch.evidence.entry_point.configured_targets[0];
+    assert_eq!(source.target.as_str(), publication.target);
+    assert_eq!(source.schema_id, publication.schema_id);
+    assert_eq!(source.digest, publication.digest);
     assert!(launch
         .evidence
         .config_artifacts
         .iter()
-        .any(|artifact| artifact.evidence.schema_id.as_ref() == Some(&identity.schema_id)));
+        .any(|artifact| artifact.evidence.schema_id.as_ref() == Some(&publication.schema_id)));
+
+    let registry = mfm_app::production_certification_registry()
+        .expect("production certification registry for rejection checks");
+    let invalid_target = mfm_app::prepare_entry_point_run_launch(
+        &store,
+        "mfm.portfolio/snapshot@1",
+        "mfm.reserved",
+        &registry,
+        store_scope_id.clone(),
+        None,
+    )
+    .await
+    .expect_err("invalid target grammar must be rejected");
+    assert_eq!(invalid_target.code, "ConfiguredTargetInvalid");
+
+    let canonical_json = mfm_app::export_setup_target(&store, &publication.target)
+        .await
+        .expect("export current portfolio configuration");
+    let configured_pool = PgPool::connect(&scoped_database_url)
+        .await
+        .expect("connect for current configuration rejection checks");
+    sqlx::query("UPDATE catalog_values SET schema_id = $2 WHERE target = $1")
+        .bind(&publication.target)
+        .bind(
+            "schema:mfm.test.wrong_current_config:1:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .execute(&configured_pool)
+        .await
+        .expect("replace current schema for rejection check");
+    let wrong_schema = mfm_app::prepare_entry_point_run_launch(
+        &store,
+        "mfm.portfolio/snapshot@1",
+        &publication.target,
+        &registry,
+        store_scope_id.clone(),
+        None,
+    )
+    .await
+    .expect_err("wrong current schema must be rejected");
+    assert_eq!(wrong_schema.code, "ConfiguredValueSchemaInvalid");
+
+    let restored = mfm_app::import_setup_toml(
+        &store,
+        include_bytes!("../../../examples/setup/organization.toml"),
+    )
+    .await
+    .expect("restore current portfolio configuration after schema check");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored[0].status,
+        mfm_app::SetupConfigPublicationStatus::Updated
+    );
+
+    sqlx::query(
+        "INSERT INTO catalog_values (target, schema_id, digest, canonical_json) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("acme/other")
+    .bind(publication.schema_id.as_str())
+    .bind(publication.digest.as_str())
+    .bind(canonical_json)
+    .execute(&configured_pool)
+    .await
+    .expect("publish mismatched target row");
+    let mismatch = mfm_app::prepare_entry_point_run_launch(
+        &store,
+        "mfm.portfolio/snapshot@1",
+        "acme/other",
+        &registry,
+        store_scope_id,
+        None,
+    )
+    .await
+    .expect_err("embedded portfolio id must match the selected target");
+    assert_eq!(mismatch.code, "ConfiguredTargetMismatch");
+
+    configured_pool.close().await;
 
     drop_postgres_schema(&database_url, &schema).await;
 }
 
 #[tokio::test]
-async fn parity_rest_snapshot_start_retains_catalog_evidence_and_replays_without_live_inputs() {
+async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_replays_without_live_inputs(
+) {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_postgres_schema("portfolio_snapshot_rest");
     create_postgres_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
     let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
-    let identity = mfm_app::import_setup_toml(
+    let publication = mfm_app::import_setup_toml(
         &store,
         include_bytes!("../../../examples/setup/organization.toml"),
     )
@@ -139,7 +227,7 @@ async fn parity_rest_snapshot_start_retains_catalog_evidence_and_replays_without
     .expect("publish portfolio-only setup")
     .into_iter()
     .next()
-    .expect("one setup identity");
+    .expect("one setup publication");
     let rpc_url = start_collectors_rpc_mock().await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_config_path =
@@ -147,18 +235,13 @@ async fn parity_rest_snapshot_start_retains_catalog_evidence_and_replays_without
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
-        catalog_store: Some(store.clone()),
+        configured_store: Some(store.clone()),
         store: store.clone(),
         runtime_config_path: Some(runtime_config_path.clone()),
     });
     let request = json!({
         "entry_point": "mfm.portfolio/snapshot@1",
-        "request": {
-            "portfolio": {
-                "name": identity.name,
-                "digest": identity.digest.as_str(),
-            }
-        },
+        "target": publication.target.clone(),
         "invocation_key": "postgres-rest-portfolio-snapshot",
     });
 
@@ -169,13 +252,8 @@ async fn parity_rest_snapshot_start_retains_catalog_evidence_and_replays_without
         }),
         json!({
             "entry_point": "mfm.portfolio/snapshot@1",
-            "request": {
-                "portfolio": {
-                    "name": identity.name,
-                    "digest": identity.digest.as_str(),
-                },
-                "policy": {},
-            },
+            "target": publication.target.clone(),
+            "request": {},
         }),
     ] {
         let malformed = app
@@ -185,7 +263,7 @@ async fn parity_rest_snapshot_start_retains_catalog_evidence_and_replays_without
             .expect("REST malformed-request response");
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
         let malformed = response_json(malformed).await;
-        assert_eq!(malformed["error"]["code"], "EntryPointRequestInvalid");
+        assert_eq!(malformed["error"]["code"], "InvalidJson");
     }
 
     let response = app
@@ -219,17 +297,17 @@ async fn parity_rest_snapshot_start_retains_catalog_evidence_and_replays_without
         admitted.entry_point.entry_point_id.as_str(),
         "mfm.portfolio/snapshot@1"
     );
-    assert_eq!(admitted.entry_point.catalog_sources.len(), 1);
-    let source = &admitted.entry_point.catalog_sources[0];
-    assert_eq!(source.name.as_str(), identity.name);
-    assert_eq!(source.schema_id, identity.schema_id);
-    assert_eq!(source.digest, identity.digest);
+    assert_eq!(admitted.entry_point.configured_targets.len(), 1);
+    let source = &admitted.entry_point.configured_targets[0];
+    assert_eq!(source.target.as_str(), publication.target);
+    assert_eq!(source.schema_id, publication.schema_id);
+    assert_eq!(source.digest, publication.digest);
 
     std::fs::remove_file(&runtime_config_path).expect("remove live runtime config");
     let reader = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Read,
         fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
-        catalog_store: None,
+        configured_store: None,
         store,
         runtime_config_path: None,
     });

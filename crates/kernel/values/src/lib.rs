@@ -231,7 +231,7 @@ impl<C: MfmConfig> ValidatedConfig<C> {
 
     /// Serializes the validated config through the shared canonical JSON path.
     ///
-    /// Program certification and catalog publication both use this method so a semantic config
+    /// Program certification and configuration publication both use this method so a semantic config
     /// has one canonical byte representation and one content digest implementation.
     pub fn canonical_json(
         &self,

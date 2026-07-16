@@ -23,7 +23,6 @@ mfm-adapters-portfolio = { path = "../adapters/portfolio" }
 mfm-artifact-capabilities = { path = "../artifact-capabilities" }
 mfm-btc-capabilities = { path = "../btc-capabilities" }
 mfm-canonical = { path = "../kernel/canonical" }
-mfm-catalog-model = { path = "../catalog-model" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }

@@ -144,7 +144,7 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         | "RendererVersion" => visible_ascii_256_type(type_name),
         "PublicFieldPath" => public_field_path_type(),
         "ResourceNamespace" => resource_namespace_type(),
-        "RendererKind" => stable_author_key_type(type_name),
+        "RendererKind" | "StableAuthorKey" => stable_author_key_type(type_name),
         "RunnerFactoryId"
         | "NixDerivationHash"
         | "NixOutputHash"
@@ -159,8 +159,7 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         | "AmbiguityCode"
         | "ErrorCode"
         | "ClaimFencingToken"
-        | "EntryPointId"
-        | "CatalogSourceName" => visible_ascii_256_type(type_name),
+        | "EntryPointId" => visible_ascii_256_type(type_name),
         "EntryPointLaunchEvidence" => struct_type(
             "EntryPointLaunchEvidence",
             vec![
@@ -170,16 +169,16 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
                     EventFieldCardinality::Required,
                 ),
                 schema_field(
-                    "catalog_sources",
-                    "CatalogSourceEvidence",
+                    "configured_targets",
+                    "ConfiguredTargetEvidence",
                     EventFieldCardinality::Repeated,
                 ),
             ],
         ),
-        "CatalogSourceEvidence" => struct_type(
-            "CatalogSourceEvidence",
+        "ConfiguredTargetEvidence" => struct_type(
+            "ConfiguredTargetEvidence",
             vec![
-                schema_field("name", "CatalogSourceName", EventFieldCardinality::Required),
+                schema_field("target", "StableAuthorKey", EventFieldCardinality::Required),
                 schema_field("schema_id", "SchemaId", EventFieldCardinality::Required),
                 schema_field("digest", "ContentDigest", EventFieldCardinality::Required),
             ],

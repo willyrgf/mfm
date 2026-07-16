@@ -278,7 +278,7 @@ async fn direct_contract_states_resume_submission_and_confirmation_boundaries() 
 }
 
 fn assert_contract_entry_points_are_absent() {
-    let entry_points = mfm_app::entry_point_summaries().expect("entry-point discovery");
+    let entry_points = mfm_app::entry_point_summaries();
     assert_eq!(
         entry_points
             .iter()
@@ -293,9 +293,12 @@ fn assert_contract_entry_points_are_absent() {
         "mfm.evm.contract/validate@1",
         "mfm.evm.contract/lifecycle@1",
     ] {
-        let error = mfm_app::validate_entry_point_id(id)
-            .expect_err("a reusable contract state must not be public");
-        assert_eq!(error.code, "EntryPointNotFound", "{id}");
+        assert!(
+            entry_points
+                .iter()
+                .all(|entry_point| entry_point.entry_point_id != id),
+            "a reusable contract state must not be public: {id}"
+        );
     }
 }
 

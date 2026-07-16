@@ -967,18 +967,19 @@ fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvi
 fn parse_entry_point_launch_evidence(
     json: &serde_json::Value,
 ) -> Result<events::EntryPointLaunchEvidence> {
-    require_exact_object_keys(json, &["catalog_sources", "entry_point_id"])?;
-    let catalog_sources = parse_vec(json, "catalog_sources", |source| {
-        require_exact_object_keys(source, &["digest", "name", "schema_id"])?;
-        Ok(events::CatalogSourceEvidence::new(
-            required_str(source, "name")?,
+    require_exact_object_keys(json, &["configured_targets", "entry_point_id"])?;
+    let configured_targets = parse_vec(json, "configured_targets", |source| {
+        require_exact_object_keys(source, &["digest", "schema_id", "target"])?;
+        Ok(events::ConfiguredTargetEvidence::new(
+            mfm_ids::StableAuthorKey::new(required_str(source, "target")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
             parse_identity(required_str(source, "schema_id")?)?,
             parse_identity(required_str(source, "digest")?)?,
-        )?)
+        ))
     })?;
     Ok(events::EntryPointLaunchEvidence::new(
         required_str(json, "entry_point_id")?,
-        catalog_sources,
+        configured_targets,
     )?)
 }
 

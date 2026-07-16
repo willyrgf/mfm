@@ -494,22 +494,22 @@ pub struct RunAdmitted {
 pub struct EntryPointLaunchEvidence {
     /// Exact public entry-point id selected by application assembly.
     pub entry_point_id: EntryPointId,
-    /// Immutable catalog identities resolved while preparing the launch.
-    pub catalog_sources: Vec<CatalogSourceEvidence>,
+    /// Exact configured targets resolved while preparing the launch.
+    pub configured_targets: Vec<ConfiguredTargetEvidence>,
 }
 
 impl EntryPointLaunchEvidence {
-    /// Creates launch evidence and canonicalizes its catalog-source ordering.
+    /// Creates launch evidence and canonicalizes its configured-target ordering.
     pub fn new(
         entry_point_id: impl AsRef<str>,
-        mut catalog_sources: Vec<CatalogSourceEvidence>,
+        mut configured_targets: Vec<ConfiguredTargetEvidence>,
     ) -> Result<Self> {
         let entry_point_id = EntryPointId::new(entry_point_id)?;
-        catalog_sources.sort();
-        catalog_sources.dedup();
+        configured_targets.sort();
+        configured_targets.dedup();
         Ok(Self {
             entry_point_id,
-            catalog_sources,
+            configured_targets,
         })
     }
 }
@@ -536,76 +536,26 @@ impl EntryPointId {
     }
 }
 
-/// Checked catalog name stored in launch evidence.
+/// One exact current configuration identity resolved during launch preparation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CatalogSourceName(CheckedVisibleAscii256);
-
-impl CatalogSourceName {
-    /// Creates a checked catalog name using the catalog grammar.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = value.as_ref();
-        validate_catalog_name(value).map_err(|_| EventError::InvalidString {
-            field: "catalog source name",
-            value: value.to_owned(),
-        })?;
-        CheckedVisibleAscii256::new(value)
-            .map(Self)
-            .map_err(|_| EventError::InvalidString {
-                field: "catalog source name",
-                value: value.to_owned(),
-            })
-    }
-
-    /// Returns the catalog name string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-/// One exact catalog value identity resolved during launch preparation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CatalogSourceEvidence {
-    /// Catalog name.
-    pub name: CatalogSourceName,
+pub struct ConfiguredTargetEvidence {
+    /// Stable configuration target.
+    pub target: StableAuthorKey,
     /// Expected typed config schema id.
     pub schema_id: SchemaId,
     /// Content digest of the resolved canonical value.
     pub digest: ContentDigest,
 }
 
-impl CatalogSourceEvidence {
-    /// Creates checked catalog source evidence.
-    pub fn new(name: impl AsRef<str>, schema_id: SchemaId, digest: ContentDigest) -> Result<Self> {
-        Ok(Self {
-            name: CatalogSourceName::new(name)?,
+impl ConfiguredTargetEvidence {
+    /// Creates exact configuration evidence from a checked stable target.
+    pub fn new(target: StableAuthorKey, schema_id: SchemaId, digest: ContentDigest) -> Self {
+        Self {
+            target,
             schema_id,
             digest,
-        })
-    }
-}
-
-fn validate_catalog_name(value: &str) -> std::result::Result<(), ()> {
-    if value.is_empty() || value.len() > 256 || !value.is_ascii() {
-        return Err(());
-    }
-    for segment in value.split('/') {
-        let mut chars = segment.chars();
-        let Some(first) = chars.next() else {
-            return Err(());
-        };
-        if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-            return Err(());
-        }
-        if segment == "."
-            || segment == ".."
-            || chars.any(|ch| {
-                !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
-            })
-        {
-            return Err(());
         }
     }
-    Ok(())
 }
 
 /// Seed cell evidence bound by `RunAdmitted`.

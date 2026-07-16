@@ -2,9 +2,9 @@
 //! Typed application assembly for certified MFM runs.
 //!
 //! `mfm-app` is the typed boundary used by binaries and process adapters. Its published
-//! objective uses one exact entry-point id and one catalog-backed portfolio request; this crate
-//! resolves, plans, certifies, stages launch material, and wires typed services for start, resume,
-//! replay, and public-output rendering.
+//! objective uses one exact entry-point id and one target-keyed portfolio selection; this crate
+//! resolves the current target, plans, certifies, stages launch material, and wires typed services
+//! for start, resume, replay, and public-output rendering.
 //!
 //! Production binaries should construct run services through the Postgres-backed factory exported by
 //! this crate, while tests can use explicit test-support stores.
@@ -86,13 +86,10 @@ pub use self::services::{RunReadServices, RunServices};
 use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
 
 pub use config_setup::{
-    export_catalog_value, import_setup_toml, list_catalog_values, CatalogListCursor,
-    CatalogValueIdentity,
+    export_setup_target, import_setup_toml, list_setup_targets, SetupConfigPublication,
+    SetupConfigPublicationStatus,
 };
-pub use entry_point::{
-    entry_point_summaries, prepare_entry_point_run_launch, validate_entry_point_id,
-    EntryPointSummary,
-};
+pub use entry_point::{entry_point_summaries, prepare_entry_point_run_launch, EntryPointSummary};
 
 #[path = "errors.rs"]
 mod errors;

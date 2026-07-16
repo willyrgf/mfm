@@ -298,14 +298,14 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
 }
 
 #[test]
-fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
+fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
     let root = repo_root();
     let metadata = workspace_metadata(&root);
     let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
     assert_eq!(
         packages.len(),
-        49,
-        "the consolidated portfolio snapshot workspace has 49 packages"
+        48,
+        "the configured-target portfolio snapshot workspace has 48 packages"
     );
 
     for removed in [
@@ -316,6 +316,7 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
         "mfm-op-portfolio-tracker",
         "mfm-op-evm-contract-lifecycle",
         "mfm-adapter-contracts",
+        "mfm-catalog-model",
     ] {
         assert!(
             packages.iter().all(|package| package.name != removed),
@@ -333,11 +334,9 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
         .iter()
         .map(|package| (package.name.as_str(), package))
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(
-        by_name
-            .get("mfm-catalog-model")
-            .map(|package| package.category),
-        Some(CrateCategory::DomainModel)
+    assert!(
+        !by_name.contains_key("mfm-catalog-model"),
+        "the deleted catalog-model package must not remain in workspace metadata"
     );
     assert_eq!(
         by_name
@@ -350,10 +349,6 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
         .get("mfm-storage-postgres")
         .expect("renamed PostgreSQL storage package");
     for dependency in path_dependencies(&metadata, storage.name.as_str(), &by_name) {
-        assert_ne!(
-            dependency.name, "mfm-catalog-model",
-            "storage must remain independent from typed catalog request identities"
-        );
         assert!(!matches!(
             dependency.category,
             CrateCategory::DomainModel | CrateCategory::DomainConfig
@@ -405,7 +400,7 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
 }
 
 #[test]
-fn config_catalog_source_boundaries_are_enforced() {
+fn configured_target_source_boundaries_are_enforced() {
     let root = repo_root();
     let metadata = workspace_metadata(&root);
     let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
@@ -414,38 +409,11 @@ fn config_catalog_source_boundaries_are_enforced() {
         .map(|package| (package.name.as_str(), package))
         .collect::<BTreeMap<_, _>>();
 
-    let catalog_users = packages
-        .iter()
-        .filter(|package| {
-            path_dependencies(&metadata, package.name.as_str(), &by_name)
-                .iter()
-                .any(|dependency| dependency.name == "mfm-catalog-model")
-        })
-        .map(|package| package.name.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        catalog_users,
-        BTreeSet::from(["mfm-app"]),
-        "catalog identity users must stay at the app ingress boundary"
-    );
-
     let sources = rust_sources(&root);
-    let allowed_catalog_ref_paths = [
-        root.join("crates/catalog-model/src"),
-        root.join("crates/app/src"),
-    ];
-    for path in &sources {
-        let source = fs::read_to_string(path).expect("read Rust source");
-        if source.contains("CatalogRef") {
-            assert!(
-                allowed_catalog_ref_paths
-                    .iter()
-                    .any(|allowed| path.starts_with(allowed)),
-                "CatalogRef crossed its boundary: {}",
-                path.display()
-            );
-        }
-    }
+    assert!(
+        !root.join("crates/catalog-model/Cargo.toml").exists(),
+        "the deleted catalog-model package must not retain a manifest"
+    );
 
     let storage_root = root.join("crates/storages");
     for path in sources
@@ -453,7 +421,7 @@ fn config_catalog_source_boundaries_are_enforced() {
         .filter(|path| path.starts_with(&storage_root))
     {
         let source = fs::read_to_string(path).expect("read storage Rust source");
-        for forbidden in ["CatalogRef", "MfmConfig", "ValidatedConfig<"] {
+        for forbidden in ["MfmConfig", "ValidatedConfig<"] {
             assert!(
                 !source.contains(forbidden),
                 "storage source {} imports or names domain type {forbidden}",
@@ -463,11 +431,10 @@ fn config_catalog_source_boundaries_are_enforced() {
     }
 
     let app_root = root.join("crates/app/src");
-    let catalog_methods = [
-        "append_catalog_values(",
-        ".load_catalog_value(",
-        ".list_catalog_values(",
-        ".export_catalog_value(",
+    let configured_value_methods = [
+        "publish_configured_values(",
+        ".load_configured_value(",
+        ".list_configured_targets(",
     ];
     for path in &sources {
         if path.starts_with(&storage_root) || path.starts_with(&app_root) {
@@ -475,8 +442,10 @@ fn config_catalog_source_boundaries_are_enforced() {
         }
         let source = fs::read_to_string(path).expect("read Rust source");
         assert!(
-            !catalog_methods.iter().any(|method| source.contains(method)),
-            "non-app source directly calls catalog persistence: {}",
+            !configured_value_methods
+                .iter()
+                .any(|method| source.contains(method)),
+            "non-app source directly calls configured-value persistence: {}",
             path.display()
         );
     }
@@ -486,7 +455,7 @@ fn config_catalog_source_boundaries_are_enforced() {
         let source = fs::read_to_string(path).expect("read binary Rust source");
         for forbidden in [
             "SetupDocument",
-            "SetupValue",
+            "enum SetupConfig",
             "toml::from_str",
             "ValidatedConfig<",
             "MfmConfig",
@@ -503,8 +472,8 @@ fn config_catalog_source_boundaries_are_enforced() {
         fs::read_to_string(root.join("crates/ops/portfolio-snapshot-op/src/lib.rs"))
             .expect("read composed operation source");
     assert!(
-        !composed_source.contains("CatalogRef"),
-        "portfolio composition and its certified graph helpers must not retain CatalogRef"
+        !composed_source.contains("ConfiguredValue"),
+        "portfolio composition and its certified graph helpers must not retain configured storage"
     );
     assert!(
         composed_source.contains("type Config = PortfolioConfig"),

@@ -4,12 +4,15 @@
 use std::path::Path;
 
 use assert_cmd::Command;
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, StatusCode};
 use mfm_app::{PostgresSchema, PostgresStore};
 use mfm_events::v1::KernelEventPayload;
 use mfm_store::v1::RunEventStore;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::{AssertSqlSafe, PgPool};
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 // This path-included shared support also serves the integration parity suites.
 #[allow(dead_code)]
@@ -17,6 +20,7 @@ use tempfile::TempDir;
 mod run_control_support;
 
 const SETUP_FIXTURE: &str = include_str!("../../../examples/setup/organization.toml");
+const TARGET: &str = "acme/primary";
 
 fn unique_postgres_schema() -> String {
     format!("cli_setup_{}", uuid::Uuid::new_v4().simple())
@@ -60,6 +64,11 @@ fn json_output(output: std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("CLI JSON output")
 }
 
+fn json_error(output: std::process::Output) -> Value {
+    assert!(!output.status.success(), "CLI unexpectedly succeeded");
+    serde_json::from_slice(&output.stderr).expect("CLI JSON error")
+}
+
 fn run_cli(database_url: &str, args: &[&str]) -> std::process::Output {
     Command::cargo_bin("mfm_cli")
         .expect("mfm_cli binary")
@@ -69,175 +78,53 @@ fn run_cli(database_url: &str, args: &[&str]) -> std::process::Output {
         .expect("run mfm_cli")
 }
 
-fn export_args<'a>(
-    name: &'a str,
-    schema_id: &'a str,
-    digest: &'a str,
-    path: &'a Path,
-) -> Vec<&'a str> {
+fn import_args(path: &Path) -> Vec<&str> {
+    vec![
+        "--output-format",
+        "json",
+        "setup",
+        "import",
+        path.to_str().expect("setup path"),
+    ]
+}
+
+fn export_args<'a>(target: &'a str, path: &'a Path) -> Vec<&'a str> {
     vec![
         "--output-format",
         "json",
         "setup",
         "export",
-        "--name",
-        name,
-        "--schema-id",
-        schema_id,
-        "--digest",
-        digest,
+        target,
         "--output",
         path.to_str().expect("export path"),
     ]
 }
 
-#[tokio::test]
-async fn setup_cli_catalog_and_snapshot_start_preserve_the_public_contract() {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let schema = unique_postgres_schema();
-    create_postgres_schema(&database_url, &schema).await;
-    let scoped_url = schema_scoped_database_url(&database_url, &schema);
-    PostgresSchema::migrate(&scoped_url)
-        .await
-        .expect("migrate CLI schema");
+fn start_args<'a>(
+    target: &'a str,
+    invocation_key: &'a str,
+    runtime_config_path: &'a Path,
+) -> Vec<&'a str> {
+    vec![
+        "--output-format",
+        "json",
+        "run",
+        "start",
+        "mfm.portfolio/snapshot@1",
+        target,
+        "--invocation-key",
+        invocation_key,
+        "--runtime-config",
+        runtime_config_path.to_str().expect("runtime config path"),
+    ]
+}
 
-    let entry_points = json_output(run_cli(
-        &scoped_url,
-        &["--output-format", "json", "ops", "list"],
-    ));
-    assert_eq!(entry_points["status"], "success");
-    let entry_points = entry_points["data"]["entry_points"]
-        .as_array()
-        .expect("CLI entry-point list");
-    assert_eq!(entry_points.len(), 1);
-    assert_eq!(
-        entry_points[0]["entry_point_id"], "mfm.portfolio/snapshot@1",
-        "CLI discovery exposes exactly the one public portfolio objective"
-    );
-    assert!(entry_points[0]["request_schema_id"].is_string());
-
-    let directory = TempDir::new().expect("temporary setup directory");
-    let setup_path = directory.path().join("organization.toml");
-    std::fs::write(&setup_path, SETUP_FIXTURE).expect("write setup fixture");
-    let imported = json_output(run_cli(
-        &scoped_url,
-        &[
-            "--output-format",
-            "json",
-            "setup",
-            "import",
-            "--file",
-            setup_path.to_str().expect("setup path"),
-        ],
-    ));
-    assert_eq!(imported["status"], "success");
-    let values = imported["data"]["values"]
-        .as_array()
-        .expect("import values");
-    assert_eq!(values.len(), 1);
-    for value in values {
-        let object = value.as_object().expect("identity object");
-        assert_eq!(object.len(), 3);
-        assert!(object.contains_key("name"));
-        assert!(object.contains_key("schema_id"));
-        assert!(object.contains_key("digest"));
-    }
-    let identity = values
-        .iter()
-        .find(|value| value["name"] == "acme/dual-mainnet")
-        .expect("portfolio identity");
-    let schema_id = identity["schema_id"].as_str().expect("schema id");
-    let digest = identity["digest"].as_str().expect("digest");
-
-    let listed = json_output(run_cli(
-        &scoped_url,
-        &["--output-format", "json", "setup", "list", "--limit", "100"],
-    ));
-    assert_eq!(listed["status"], "success");
-    assert_eq!(
-        listed["data"]["values"]
-            .as_array()
-            .expect("listed values")
-            .len(),
-        1
-    );
-
-    let first_output = directory.path().join("portfolio-one.json");
-    let second_output = directory.path().join("portfolio-two.json");
-    let exported = json_output(run_cli(
-        &scoped_url,
-        &export_args("acme/dual-mainnet", schema_id, digest, &first_output),
-    ));
-    assert_eq!(
-        exported["data"]["values"]
-            .as_array()
-            .expect("export identity")
-            .len(),
-        1
-    );
-    let first_bytes = std::fs::read(&first_output).expect("first export");
-    json_output(run_cli(
-        &scoped_url,
-        &export_args("acme/dual-mainnet", schema_id, digest, &second_output),
-    ));
-    let second_bytes = std::fs::read(&second_output).expect("second export");
-    assert_eq!(first_bytes, second_bytes);
-
-    let existing = run_cli(
-        &scoped_url,
-        &export_args("acme/dual-mainnet", schema_id, digest, &first_output),
-    );
-    assert!(!existing.status.success());
-    let error: Value = serde_json::from_slice(&existing.stderr).expect("existing path error JSON");
-    assert_eq!(error["error"]["code"], "CatalogExportPathExists");
-
-    let portfolio_name = identity["name"].as_str().expect("portfolio name");
-    let portfolio_digest = identity["digest"].as_str().expect("portfolio digest");
-    let request_path = directory.path().join("snapshot-request.json");
-    let request = serde_json::json!({
-        "portfolio": {
-            "name": portfolio_name,
-            "digest": portfolio_digest,
-        }
-    });
-    std::fs::write(
-        &request_path,
-        serde_json::to_vec(&request).expect("serialize snapshot request"),
-    )
-    .expect("write snapshot request");
-    let rpc_url = run_control_support::start_collectors_rpc_mock().await;
-    let runtime_config_path =
-        run_control_support::write_collectors_runtime_config_for_test(directory.path(), &rpc_url);
-    let started = json_output(run_cli(
-        &scoped_url,
-        &[
-            "--output-format",
-            "json",
-            "run",
-            "start",
-            "--entry-point",
-            "mfm.portfolio/snapshot@1",
-            "--request",
-            request_path.to_str().expect("snapshot request path"),
-            "--invocation-key",
-            "postgres-cli-portfolio-snapshot",
-            "--runtime-config",
-            runtime_config_path.to_str().expect("runtime config path"),
-        ],
-    ));
-    assert_eq!(started["status"], "success");
-    assert_eq!(started["data"]["outcome"], "admitted");
-    assert_eq!(started["data"]["run"]["run_mode"], "completed");
-    let run_id: mfm_ids::RunId = started["data"]["run"]["run_id"]
-        .as_str()
-        .expect("started run id")
-        .parse()
-        .expect("typed started run id");
-    let store = PostgresStore::connect(&scoped_url)
-        .await
-        .expect("connect catalog-backed run store");
+async fn admission_evidence(
+    store: &PostgresStore,
+    run_id: &mfm_ids::RunId,
+) -> (String, String, String) {
     let stream = store
-        .load_run_stream(&run_id)
+        .load_run_stream(run_id)
         .await
         .expect("started run stream");
     let admitted = stream
@@ -251,28 +138,217 @@ async fn setup_cli_catalog_and_snapshot_start_preserve_the_public_contract() {
         admitted.entry_point.entry_point_id.as_str(),
         "mfm.portfolio/snapshot@1"
     );
-    assert_eq!(admitted.entry_point.catalog_sources.len(), 1);
-    let source = &admitted.entry_point.catalog_sources[0];
-    assert_eq!(source.name.as_str(), portfolio_name);
-    assert_eq!(source.schema_id.as_str(), schema_id);
-    assert_eq!(source.digest.as_str(), portfolio_digest);
+    assert_eq!(admitted.entry_point.configured_targets.len(), 1);
+    let source = &admitted.entry_point.configured_targets[0];
+    (
+        source.target.as_str().to_owned(),
+        source.schema_id.as_str().to_owned(),
+        source.digest.as_str().to_owned(),
+    )
+}
+
+async fn response_json(response: axum::response::Response) -> Value {
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read REST body");
+    serde_json::from_slice(&body).expect("REST JSON response")
+}
+
+#[tokio::test]
+async fn configured_target_cli_and_rest_replace_current_config_without_replay_dependency() {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let schema = unique_postgres_schema();
+    create_postgres_schema(&database_url, &schema).await;
+    let scoped_url = schema_scoped_database_url(&database_url, &schema);
+    PostgresSchema::migrate(&scoped_url)
+        .await
+        .expect("migrate CLI schema");
+
+    let entry_points = json_output(run_cli(
+        &scoped_url,
+        &["--output-format", "json", "ops", "list"],
+    ));
+    let entry_points = entry_points["data"]["entry_points"]
+        .as_array()
+        .expect("CLI entry-point list");
+    assert_eq!(
+        entry_points,
+        &[json!({"entry_point_id": "mfm.portfolio/snapshot@1"})]
+    );
+
+    let directory = TempDir::new().expect("temporary setup directory");
+    let setup_a_path = directory.path().join("organization-a.toml");
+    std::fs::write(&setup_a_path, SETUP_FIXTURE).expect("write setup A");
+    let imported_a = json_output(run_cli(&scoped_url, &import_args(&setup_a_path)));
+    let configs_a = imported_a["data"]["configs"]
+        .as_array()
+        .expect("import A configs");
+    assert_eq!(configs_a.len(), 1);
+    let config_a = &configs_a[0];
+    assert_eq!(config_a["target"], TARGET);
+    assert_eq!(config_a["status"], "created");
+    let digest_a = config_a["digest"].as_str().expect("A digest").to_owned();
+    let schema_id = config_a["schema_id"]
+        .as_str()
+        .expect("schema id")
+        .to_owned();
+
+    let listed = json_output(run_cli(
+        &scoped_url,
+        &["--output-format", "json", "setup", "list"],
+    ));
+    assert_eq!(listed["data"]["targets"], json!([TARGET]));
+
+    let first_output = directory.path().join("portfolio-one.json");
+    let second_output = directory.path().join("portfolio-two.json");
+    let exported = json_output(run_cli(&scoped_url, &export_args(TARGET, &first_output)));
+    assert_eq!(exported["data"], json!({"target": TARGET}));
+    let first_bytes = std::fs::read(&first_output).expect("first export");
+    json_output(run_cli(&scoped_url, &export_args(TARGET, &second_output)));
+    assert_eq!(
+        first_bytes,
+        std::fs::read(&second_output).expect("second export")
+    );
+    let existing = json_error(run_cli(&scoped_url, &export_args(TARGET, &first_output)));
+    assert_eq!(existing["error"]["code"], "SetupExportPathExists");
+
+    let rpc_url = run_control_support::start_collectors_rpc_mock().await;
+    let runtime_config_path =
+        run_control_support::write_collectors_runtime_config_for_test(directory.path(), &rpc_url);
+    let started_a = json_output(run_cli(
+        &scoped_url,
+        &start_args(TARGET, "postgres-cli-portfolio-a", &runtime_config_path),
+    ));
+    assert_eq!(started_a["data"]["outcome"], "admitted");
+    assert_eq!(started_a["data"]["run"]["run_mode"], "completed");
+    let run_a: mfm_ids::RunId = started_a["data"]["run"]["run_id"]
+        .as_str()
+        .expect("A run id")
+        .parse()
+        .expect("typed A run id");
+    let store = PostgresStore::connect(&scoped_url)
+        .await
+        .expect("connect configured run store");
+    assert_eq!(
+        admission_evidence(&store, &run_a).await,
+        (TARGET.to_owned(), schema_id.clone(), digest_a.clone())
+    );
+
+    let setup_b = SETUP_FIXTURE.replacen(
+        "metadata = {}",
+        "metadata = { revision = \"replacement\" }",
+        1,
+    );
+    let setup_b_path = directory.path().join("organization-b.toml");
+    std::fs::write(&setup_b_path, setup_b).expect("write setup B");
+    let imported_b = json_output(run_cli(&scoped_url, &import_args(&setup_b_path)));
+    let config_b = imported_b["data"]["configs"]
+        .as_array()
+        .and_then(|configs| configs.first())
+        .expect("import B config");
+    assert_eq!(config_b["target"], TARGET);
+    assert_eq!(config_b["status"], "updated");
+    let digest_b = config_b["digest"].as_str().expect("B digest").to_owned();
+    assert_ne!(digest_b, digest_a);
+
+    let started_b = json_output(run_cli(
+        &scoped_url,
+        &start_args(TARGET, "postgres-cli-portfolio-b", &runtime_config_path),
+    ));
+    assert_eq!(started_b["data"]["outcome"], "admitted");
+    let run_b: mfm_ids::RunId = started_b["data"]["run"]["run_id"]
+        .as_str()
+        .expect("B run id")
+        .parse()
+        .expect("typed B run id");
+    let cli_evidence_b = admission_evidence(&store, &run_b).await;
+    assert_eq!(
+        cli_evidence_b,
+        (TARGET.to_owned(), schema_id.clone(), digest_b.clone())
+    );
+
+    let attached_b = json_output(run_cli(
+        &scoped_url,
+        &start_args(TARGET, "postgres-cli-portfolio-b", &runtime_config_path),
+    ));
+    assert_eq!(attached_b["data"]["outcome"], "attached");
+    assert_eq!(attached_b["data"]["run"]["run_id"], run_b.as_str());
+
+    let rest = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        role: mfm_rest_api::RestProcessRole::Live,
+        fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
+        configured_store: Some(store.clone()),
+        store: store.clone(),
+        runtime_config_path: Some(runtime_config_path.clone()),
+    });
+    let rest_response = rest
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/runs/start")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "entry_point": "mfm.portfolio/snapshot@1",
+                        "target": TARGET,
+                        "invocation_key": "postgres-cli-portfolio-b",
+                    })
+                    .to_string(),
+                ))
+                .expect("REST request"),
+        )
+        .await
+        .expect("REST response");
+    assert_eq!(rest_response.status(), StatusCode::OK);
+    let rest_response = response_json(rest_response).await;
+    assert_eq!(rest_response["data"]["outcome"], "attached");
+    let rest_run: mfm_ids::RunId = rest_response["data"]["run"]["run_id"]
+        .as_str()
+        .expect("REST run id")
+        .parse()
+        .expect("typed REST run id");
+    assert_eq!(rest_run, run_b);
+    assert_eq!(admission_evidence(&store, &rest_run).await, cli_evidence_b);
+
+    let duplicate_path = directory.path().join("duplicate-targets.toml");
+    std::fs::write(&duplicate_path, format!("{SETUP_FIXTURE}\n{SETUP_FIXTURE}"))
+        .expect("write duplicate targets");
+    let duplicate = json_error(run_cli(&scoped_url, &import_args(&duplicate_path)));
+    assert_eq!(duplicate["error"]["code"], "SetupDuplicateTarget");
+
+    let configured_pool = PgPool::connect(&scoped_url)
+        .await
+        .expect("connect for current configuration removal");
+    sqlx::query("DELETE FROM catalog_values")
+        .execute(&configured_pool)
+        .await
+        .expect("remove mutable current configuration");
+    configured_pool.close().await;
+    let resumed_a = json_output(run_cli(
+        &scoped_url,
+        &[
+            "--output-format",
+            "json",
+            "run",
+            "resume",
+            run_a.as_str(),
+            "--runtime-config",
+            runtime_config_path.to_str().expect("runtime config path"),
+        ],
+    ));
+    assert_eq!(resumed_a["data"]["run_id"], run_a.as_str());
 
     std::fs::remove_file(&runtime_config_path).expect("remove live runtime config");
     let replay = json_output(run_cli(
         &scoped_url,
-        &["--output-format", "json", "run", "replay", run_id.as_str()],
+        &["--output-format", "json", "run", "replay", run_a.as_str()],
     ));
-    assert_eq!(replay["status"], "success");
     assert_eq!(replay["data"]["run_mode"], "completed");
 
-    let pool = PgPool::connect(&scoped_url)
-        .await
-        .expect("connect CLI schema");
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM catalog_values")
-        .fetch_one(&pool)
-        .await
-        .expect("catalog count");
-    assert_eq!(count, 1);
-    pool.close().await;
+    let listed_after_deletion = json_output(run_cli(
+        &scoped_url,
+        &["--output-format", "json", "setup", "list"],
+    ));
+    assert_eq!(listed_after_deletion["data"]["targets"], json!([]));
     drop_postgres_schema(&database_url, &schema).await;
 }

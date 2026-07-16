@@ -210,23 +210,17 @@ Response shape:
 
 ## Start A Run
 
-`POST /v1/runs/start` accepts one exact entry-point id and a strict JSON request. The request uses
-the same catalog-reference contract as the CLI; the REST layer delegates exact resolution,
-planning, certification, admission, and verified rendering to app assembly.
+`POST /v1/runs/start` accepts one exact entry-point id and one stable target. The REST layer
+delegates current-target resolution, planning, certification, admission, and verified rendering to
+app assembly.
 
-The endpoint shape remains an `entry_point`, `request`, and optional `invocation_key` JSON object.
-The only accepted entry point is `mfm.portfolio/snapshot@1`; its request is exactly one portfolio
-catalog reference:
+The endpoint shape is an `entry_point`, `target`, and optional `invocation_key` JSON object. The
+only accepted entry point is `mfm.portfolio/snapshot@1`:
 
 ```json
 {
   "entry_point": "mfm.portfolio/snapshot@1",
-  "request": {
-    "portfolio": {
-      "name": "acme/primary",
-      "digest": "content:sha256-jcs-v1:..."
-    }
-  }
+  "target": "acme/primary"
 }
 ```
 
@@ -237,9 +231,10 @@ rejected.
 Request notes:
 
 - `entry_point` is required and must be one exact id, including namespace and version.
-- `request` is required, must be a JSON object, and is rejected when it contains unknown fields.
-- Requests for a published objective contain exact catalog references (`name` and `digest`);
-  name-only selection and latest resolution do not exist.
+- `target` is required, must be a stable target string, and is rejected when the envelope contains
+  unknown fields.
+- A published objective selects the target's current configuration only; catalog name/digest
+  objects, revision/history lookup, and latest resolution do not exist.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
   store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
@@ -265,12 +260,14 @@ Stable launch error codes:
 
 - `InvalidJson`: the request envelope is not accepted by the route schema.
 - `EntryPointNotFound`: the exact entry-point id is not registered.
-- `EntryPointRequestInvalid`: the request does not match the selected strict schema.
-- `CatalogStoreUnavailable`: catalog authority is unavailable during new-run preparation.
-- `CatalogValueNotFound`: an exact referenced catalog value is missing.
-- `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
-- `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
-- `CatalogValueValidationFailed`: a catalog value fails semantic validation.
+- `ConfiguredStoreUnavailable`: current configuration is unavailable during new-run preparation.
+- `ConfiguredTargetInvalid`: the target is not valid for the selected entry point.
+- `ConfiguredValueNotFound`: the target has no current configuration.
+- `ConfiguredValueSchemaInvalid`: the target's current row has the wrong schema.
+- `ConfiguredValueTypeInvalid`: the target's current row does not decode as the expected type.
+- `ConfiguredValueCanonicalMismatch`: a current row fails canonical byte/digest verification.
+- `ConfiguredValueValidationFailed`: a current row fails semantic validation.
+- `ConfiguredTargetMismatch`: the stored embedded id differs from the selected target.
 - `PortfolioSnapshotPlanFailed`: portfolio snapshot planning failed.
 - `EntryPointCertificationFailed`: the planned spec failed app-owned certification.
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production

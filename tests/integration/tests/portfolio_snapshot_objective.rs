@@ -52,7 +52,7 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
         drop(services);
         std::fs::remove_file(&runtime_path).expect("remove live runtime config after admission");
 
-        // This service intentionally has no runner registry, runtime config, provider, or catalog
+        // This service intentionally has no runner registry, runtime config, provider, or current-config
         // input. It can only verify the certified retained evidence committed by the exact root.
         let replay_services = mfm_app::make_run_read_services(
             store.clone(),

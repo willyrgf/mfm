@@ -10,7 +10,7 @@ use serde::Serialize;
 /// Public entry-point discovery commands.
 #[derive(Subcommand)]
 pub(crate) enum OpsCommand {
-    /// List the exact entry-point ids and request schemas in this binary.
+    /// List the exact entry-point ids in this binary.
     List,
 }
 
@@ -31,11 +31,7 @@ struct OpsOutput {
 impl fmt::Display for OpsOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for entry_point in &self.entry_points {
-            writeln!(
-                f,
-                "{} request_schema_id={}",
-                entry_point.entry_point_id, entry_point.request_schema_id
-            )?;
+            writeln!(f, "{}", entry_point.entry_point_id)?;
         }
         Ok(())
     }
@@ -43,6 +39,6 @@ impl fmt::Display for OpsOutput {
 
 async fn execute_list() -> CommandResult<OpsOutput> {
     Ok(CommandOutput::new(OpsOutput {
-        entry_points: mfm_app::entry_point_summaries()?,
+        entry_points: mfm_app::entry_point_summaries(),
     }))
 }

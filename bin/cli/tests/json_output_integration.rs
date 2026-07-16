@@ -50,7 +50,13 @@ fn test_ops_list_json_output() {
         entry_points[0]["entry_point_id"],
         "mfm.portfolio/snapshot@1"
     );
-    assert!(entry_points[0]["request_schema_id"].is_string());
+    assert_eq!(
+        entry_points[0]
+            .as_object()
+            .expect("entry-point summary object")
+            .len(),
+        1
+    );
 }
 
 fn json_cli_error_without_database(args: &[&str]) -> (Option<i32>, ErrorResponse) {
@@ -309,7 +315,7 @@ fn test_environment_variable_precedence() {
 }
 
 #[test]
-fn test_run_start_requires_entry_point_and_request_path() {
+fn test_run_start_requires_entry_point_and_target() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -321,16 +327,12 @@ fn test_run_start_requires_entry_point_and_request_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
     assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("--entry-point"));
-    assert!(parsed.error.message.contains("--request"));
+    assert!(parsed.error.message.contains("<ENTRY_POINT>"));
+    assert!(parsed.error.message.contains("<TARGET>"));
 }
 
 #[test]
 fn test_run_start_run_id_flag_is_not_a_start_option() {
-    let temp_dir = TempDir::new().unwrap();
-    let request_path = temp_dir.path().join("request.json");
-    std::fs::write(&request_path, "{}").expect("request fixture");
-
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -339,10 +341,8 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
             "json",
             "run",
             "start",
-            "--entry-point",
             "mfm.unknown/missing@1",
-            "--request",
-            request_path.to_str().unwrap(),
+            "acme/primary",
             "--run-id",
             "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
         ])
@@ -359,11 +359,14 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
 
 #[test]
 fn test_run_start_rejects_legacy_config_flags() {
-    let temp_dir = TempDir::new().unwrap();
-    let request_path = temp_dir.path().join("request.json");
-    std::fs::write(&request_path, "{}").expect("request fixture");
-
-    for flag in ["--op", "--op-version", "--config", "--config-format"] {
+    for flag in [
+        "--entry-point",
+        "--request",
+        "--op",
+        "--op-version",
+        "--config",
+        "--config-format",
+    ] {
         let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
         let output = cmd
             .env_remove("DATABASE_URL")
@@ -372,10 +375,8 @@ fn test_run_start_rejects_legacy_config_flags() {
                 "json",
                 "run",
                 "start",
-                "--entry-point",
                 "mfm.unknown/missing@1",
-                "--request",
-                request_path.to_str().unwrap(),
+                "acme/primary",
                 flag,
                 "legacy-value",
             ])
@@ -396,11 +397,6 @@ fn test_run_start_rejects_legacy_config_flags() {
 
 #[test]
 fn test_json_commands_reach_store_connection_after_local_validation() {
-    let temp_dir = TempDir::new().unwrap();
-    let request_path = temp_dir.path().join("request.json");
-    std::fs::write(&request_path, "{}").expect("request fixture");
-    let request_path = request_path.to_str().unwrap();
-
     struct Case<'a> {
         name: &'static str,
         args: Vec<&'a str>,
@@ -408,16 +404,14 @@ fn test_json_commands_reach_store_connection_after_local_validation() {
 
     for case in [
         Case {
-            name: "run start decodes valid launch input before store connection",
+            name: "run start decodes target ingress before store connection",
             args: vec![
                 "--output-format",
                 "json",
                 "run",
                 "start",
-                "--entry-point",
                 "mfm.unknown/missing@1",
-                "--request",
-                request_path,
+                "acme/primary",
             ],
         },
         Case {

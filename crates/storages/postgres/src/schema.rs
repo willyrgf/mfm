@@ -438,7 +438,6 @@ const REQUIRED_INDEXES: &[&str] = &[
     "fact_index_terms_decimal_idx",
     "fact_index_terms_timestamp_idx",
     "fact_index_terms_digest_idx",
-    "catalog_values_identity_idx",
 ];
 
 const REQUIRED_FUNCTIONS: &[&str] = &["mfm_reject_authority_mutation"];
@@ -452,7 +451,6 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "commit_artifact_evidence_no_update",
     "run_artifact_admissions_no_update",
     "run_observation_cursors_no_update",
-    "catalog_values_no_update",
 ];
 
 const REQUIRED_CONSTRAINTS: &[&str] = &[
@@ -509,7 +507,7 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "fact_projection_metadata_generation_positive",
     "run_observation_cursors_version_v3",
     "run_observation_cursors_store_commit_order_nonnegative",
-    "catalog_values_name_grammar",
+    "catalog_values_target_bounds",
     "catalog_values_schema_id_bounds",
     "catalog_values_digest_bounds",
     "catalog_values_canonical_json_bounds",
@@ -532,7 +530,6 @@ const IMMUTABLE_TABLES: &[&str] = &[
     "commit_artifact_evidence",
     "run_artifact_admissions",
     "run_observation_cursors",
-    "catalog_values",
 ];
 
 const TRIGGER_TYPE_ROW: i32 = 1;

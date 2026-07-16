@@ -20,9 +20,9 @@ transport-only surfaces.
 ```text
 setup TOML
   -> app strictly decodes, validates, canonicalizes, scans for prohibited fields
-  -> app atomically publishes complete typed values to the catalog
-exact entry-point JSON request
-  -> app resolves and verifies each catalog reference
+  -> app atomically upserts complete typed values by intrinsic stable target
+entry-point id plus target
+  -> app resolves and verifies the target's current configuration
   -> operation crate builds a concrete typed program draft
   -> mfm-certify lowers, validates, and emits certified typed execution spec
   -> app verifies persisted spec/certificate evidence and assembles launch material
@@ -43,9 +43,9 @@ live driver for a base work identity; resource lanes protect certified side effe
 stores, transports, signer providers, and driver loops cannot define run identity, side-effect
 authority, replay authority, public-output authority, or terminal status.
 
-Public run-start ingress uses the exact catalog-backed entry-point request contract described in
-`docs/design.md`. Catalog resolution is an app pre-admission concern; it is not runtime or replay
-authority.
+Public run-start ingress uses an exact entry-point id plus one stable target, as described in
+`docs/design.md`. Current-configuration resolution is an app pre-admission concern; it is not
+runtime or replay authority.
 
 The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
 normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
@@ -58,8 +58,8 @@ content-bound source receipts. The complete snapshot graph is the sole public ob
 `PortfolioConfig` through family collection, exact receipt assembly, receipt-pinned selection,
 snapshot assembly, and report projection. Its one production draft helper binds exactly one
 `PortfolioPublicOutputs` root. The app registers the needed runners and certification descriptors,
-strictly resolves one `CatalogRef<PortfolioConfig>` at admission, and exposes that exact graph only
-through `mfm.portfolio/snapshot@1`.
+strictly resolves one target-keyed `PortfolioConfig` at admission, and exposes that exact graph
+only through `mfm.portfolio/snapshot@1`.
 
 ## Authority Contract
 
@@ -125,23 +125,24 @@ capability, public type, CLI command, REST route, or test fixture.
 
 If a unit does not fit one category cleanly, the design is not ready.
 
-### Configuration Catalog And Runtime-Config Boundary
+### Current Configuration And Runtime-Config Boundary
 
 The semantic configuration path has one ownership split:
 
-- `bin/cli` and `bin/rest-api` decode transport arguments and request JSON only;
+- `bin/cli` and `bin/rest-api` decode an entry-point id and target only;
 - `mfm-app` owns the closed setup TOML document, typed validation, canonical JSON, prohibited-field
-  scanning, catalog persistence, and exact reference resolution;
-- operation crates may own typed pre-planning request references and deterministic joins, but their
-  completed configs and graphs contain concrete values rather than `CatalogRef<T>`;
-- catalog storage persists opaque canonical rows and knows neither domain config nor setup kinds;
-- kernel, state, adapter, transport, runtime, replay, and binaries do not depend on the catalog
-  model or catalog persistence.
+  scanning, target-keyed current-configuration persistence, and target resolution;
+- operation crates receive concrete typed values and deterministic joins; completed configs and
+  graphs do not contain target indirections;
+- configuration storage persists opaque canonical rows keyed by stable target and knows neither
+  domain config nor setup kinds;
+- kernel, state, adapter, transport, runtime, replay, and binaries do not depend on configuration
+  model types or configuration persistence.
 
-Catalog resolution ends before certification and `RunAdmitted`. Launch evidence records the exact
-entry-point id and sorted source identities so a run can be verified without consulting mutable
-catalog state. Resume, status, stream, public-output, and replay paths use retained certified
-artifacts and the append-only run stream only.
+Target resolution ends before certification and `RunAdmitted`. Launch evidence records the exact
+entry-point id plus target/schema/digest so a run can be verified without consulting mutable
+current configuration. Resume, status, stream, public-output, and replay paths use retained
+certified artifacts and the append-only run stream only.
 
 Two v1 decisions are deliberate:
 
@@ -154,8 +155,8 @@ Two v1 decisions are deliberate:
   the app's private portfolio snapshot replay binding recomputes this fan-in before delegating the
   receipt-pinned projection to the portfolio adapter; it adds no workflow topology or receipt
   semantics.
-- Runtime TOML remains a process-local routing and signer boundary rather than semantic catalog
-  data. The current loader may parse the whole file when a live capability family is requested, so
+- Runtime TOML remains a process-local routing and signer boundary rather than semantic
+  configuration data. The current loader may parse the whole file when a live capability family is requested, so
   malformed unrelated family data can reject that live request. Read-only paths do not load it, and
   it is never persisted or used by replay. Selective family loading is a future optimization, not a
   compatibility path or a hidden fallback.

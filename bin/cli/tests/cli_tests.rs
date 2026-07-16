@@ -49,7 +49,7 @@ fn test_ops_help_and_list() {
         .collect::<Vec<_>>();
     assert_eq!(entry_points.len(), 1, "public operation output: {rendered}");
     assert!(
-        entry_points[0].starts_with("mfm.portfolio/snapshot@1 request_schema_id=schema:"),
+        entry_points[0] == "mfm.portfolio/snapshot@1",
         "unexpected public operation: {rendered}"
     );
 }

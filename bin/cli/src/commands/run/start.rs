@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_services, RunStoresArgs};
@@ -12,12 +12,12 @@ use serde::Serialize;
 #[derive(Args)]
 pub(crate) struct StartArgs {
     /// Exact public entry-point id, including namespace and version.
-    #[arg(long = "entry-point", value_name = "ID")]
+    #[arg(value_name = "ENTRY_POINT")]
     pub entry_point: String,
 
-    /// Strict JSON request file containing exact catalog references.
-    #[arg(long, value_name = "PATH")]
-    pub request: PathBuf,
+    /// Stable configured target selected by the entry point.
+    #[arg(value_name = "TARGET")]
+    pub target: String,
 
     /// Caller-supplied key that forces a invocation of otherwise identical certified work.
     #[arg(long, value_name = "KEY")]
@@ -76,19 +76,13 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         .as_deref()
         .map(InvocationKey::new)
         .transpose()?;
-    let request_bytes = tokio::fs::read(&args.request).await.map_err(|_| {
-        CommandError::backend("EntryPointRequestReadFailed", "Failed to read request")
-    })?;
-    let request: serde_json::Value = serde_json::from_slice(&request_bytes).map_err(|_| {
-        CommandError::backend("EntryPointRequestInvalid", "Request must be valid JSON")
-    })?;
     let certification_registry = mfm_app::production_certification_registry()?;
     let services = connect_run_services(&args.stores, args.runtime_config.as_deref()).await?;
     let store_scope_id = services.load_store_scope_id().await?;
     let request = mfm_app::prepare_entry_point_run_launch(
         services.store(),
         &args.entry_point,
-        &request,
+        &args.target,
         &certification_registry,
         store_scope_id,
         invocation_key,
