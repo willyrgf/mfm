@@ -47,7 +47,6 @@ alloy-primitives = { workspace = true }
 hex = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-adapters-evm-contracts = { path = "../../crates/adapters/evm-contracts" }
-mfm-evm-signing = { path = "../../crates/evm-signing" }
 mfm-state-evm-contracts = { path = "../../crates/states/evm-contracts" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
 mfm-program-derive = { path = "../../crates/kernel/program-derive" }

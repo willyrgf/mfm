@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy_primitives::{keccak256, B256};
+use k256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
 use mfm_adapters_evm_contracts::{
     register_contract_state_runners_with_factory, verify_contract_state_replay,
     EvmContractProvider, EvmContractReadProvider, EvmContractReadRuntime, EvmContractRuntime,
@@ -29,7 +30,6 @@ use mfm_evm_contract_model::{
     EvmNetworkContext, EvmNetworkId, LifecycleArtifactEvidenceRef, LifecycleKey,
     ValidationCodeIdentityEvidence,
 };
-use mfm_evm_signing::{primitive_signature_from_bytes, recover_signing_address};
 use mfm_ids::ArtifactId;
 use mfm_program::{
     build_root_with_registries, PublicOutputKey, ScopeKey, SideEffectSagaPolicy,
@@ -54,8 +54,30 @@ use mfm_values::{MfmConfig, MfmValue};
 use serde_json::json;
 use tokio::sync::oneshot;
 
-const EXPECTED_SIGNER: &str = "0x5bb2b0ecce0dc85c2e21cf3747e6880074f738ec";
 const RUNTIME_CODE: &[u8] = &[0x60, 0x00];
+const DEPLOY_BLOCK_NUMBER: u64 = 42;
+const LAST_CONFIGURE_BLOCK_NUMBER: u64 = DEPLOY_BLOCK_NUMBER + 2;
+const LATEST_BLOCK_NUMBER: u64 = LAST_CONFIGURE_BLOCK_NUMBER + 1;
+
+fn direct_block_hash(block_number: u64) -> B256 {
+    let offset = u8::try_from(
+        block_number
+            .checked_sub(DEPLOY_BLOCK_NUMBER)
+            .expect("direct test block precedes deployment"),
+    )
+    .expect("direct test block range");
+    B256::repeat_byte(
+        0x42_u8
+            .checked_add(offset)
+            .expect("direct test block hash range"),
+    )
+}
+
+fn direct_signer_address(signing_key: &SigningKey) -> String {
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let hash = keccak256(&encoded.as_bytes()[1..]);
+    format!("0x{}", hex::encode(&hash.as_slice()[12..]))
+}
 
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.evm.contract.test.direct_state_graph_outputs")]
@@ -75,19 +97,30 @@ async fn direct_contract_states_certify_and_run_without_contract_entry_point_reg
         Some(expected_code_hash),
         "direct-contract-state-graph-with-code",
         false,
+        true,
     )
     .await;
+    assert_eq!(
+        provider.transaction_submission_hashes().len(),
+        3,
+        "the direct graph must submit deployment plus both configure calls"
+    );
     assert_eq!(provider.code_read_requests().len(), 1);
     assert_eq!(
         provider.code_read_requests()[0].block(),
-        &EvmBlockSelector::Hash(B256::repeat_byte(0x42))
+        &EvmBlockSelector::Hash(direct_block_hash(LAST_CONFIGURE_BLOCK_NUMBER)),
+        "the validation code read must use the last configure receipt anchor"
+    );
+    assert_eq!(
+        provider.call_read_requests().len(),
+        1,
+        "the configured assertion must execute through an EVM call"
     );
     assert!(
-        provider
-            .block_read_requests()
-            .iter()
-            .any(|request| request.block() == &EvmBlockSelector::Number(42)),
-        "finality must compare the receipt hash with the canonical block at its number"
+        provider.block_read_requests().iter().any(
+            |request| request.block() == &EvmBlockSelector::Number(LAST_CONFIGURE_BLOCK_NUMBER)
+        ),
+        "the last configure receipt anchor must be proven canonical before validation"
     );
     assert_eq!(
         stream
@@ -107,9 +140,13 @@ async fn direct_contract_states_certify_and_run_without_contract_entry_point_reg
 
 #[tokio::test]
 async fn direct_contract_validation_skips_code_reads_without_a_profile_hash() {
-    let (stream, provider) =
-        run_direct_contract_state_graph(None, "direct-contract-state-graph-without-code", false)
-            .await;
+    let (stream, provider) = run_direct_contract_state_graph(
+        None,
+        "direct-contract-state-graph-without-code",
+        false,
+        true,
+    )
+    .await;
     assert!(provider.code_read_requests().is_empty());
     assert!(stream.iter().all(|event| !matches!(
         event.payload(),
@@ -126,8 +163,25 @@ async fn direct_contract_replay_rejects_tampered_runtime_code_evidence() {
         Some(expected_runtime_code_hash()),
         "direct-contract-state-graph-tampered-code",
         true,
+        true,
     )
     .await;
+}
+
+#[tokio::test]
+async fn direct_contract_replays_terminal_failed_configured_assertion() {
+    let (_, provider) = run_direct_contract_state_graph(
+        Some(expected_runtime_code_hash()),
+        "direct-contract-state-graph-failed-configured-assertion",
+        false,
+        false,
+    )
+    .await;
+    assert_eq!(
+        provider.call_read_requests().len(),
+        1,
+        "the failed terminal report must retain an executed configured assertion"
+    );
 }
 
 /// The direct graph resumes both sides of the external side-effect boundary without an app
@@ -152,6 +206,7 @@ async fn direct_contract_states_resume_submission_and_confirmation_boundaries() 
             Some(expected_runtime_code_hash()),
             invocation_key,
             Some(interruption),
+            true,
         )
         .await;
         let run_id = harness.request.run_id.clone();
@@ -227,20 +282,34 @@ async fn run_direct_contract_state_graph(
     deployed_code_hash: Option<EvmCodeHash>,
     invocation_key: &str,
     tamper_code_evidence: bool,
+    configured_assertion_value: bool,
 ) -> (
     Vec<store::KernelEventEnvelope>,
     Arc<DirectContractStateProvider>,
 ) {
-    let harness =
-        direct_contract_state_graph_harness(deployed_code_hash, invocation_key, None).await;
+    let harness = direct_contract_state_graph_harness(
+        deployed_code_hash,
+        invocation_key,
+        None,
+        configured_assertion_value,
+    )
+    .await;
     let run_id = harness.request.run_id.clone();
-    let outcome = harness
+    let report = harness
         .services
-        .launch_run(harness.request.clone())
+        .launch_run_and_render(harness.request.clone())
         .await
         .expect("run direct state graph");
-    let (_, run, _) = outcome.into_response_parts();
-    let run = run.expect("run response");
+    let run = report.run.expect("run response");
+    let valid = report
+        .public_output
+        .and_then(|output| output.json)
+        .and_then(|output| {
+            output
+                .pointer("/validation/valid")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .expect("terminal validation output");
     let stream = harness
         .store
         .load_run_stream(&run_id)
@@ -250,6 +319,10 @@ async fn run_direct_contract_state_graph(
         run.run_mode,
         mfm_app::RunModeStatus::Completed,
         "direct contract-state graph failed: {run:?}"
+    );
+    assert_eq!(
+        valid, configured_assertion_value,
+        "the terminal report must preserve configured assertion validity"
     );
     assert!(
         stream
@@ -290,6 +363,7 @@ async fn direct_contract_state_graph_harness(
     deployed_code_hash: Option<EvmCodeHash>,
     invocation_key: &str,
     interruption: Option<Arc<DirectContractInterruption>>,
+    configured_assertion_value: bool,
 ) -> DirectContractStateGraphHarness {
     let (context, artifact) = direct_contract_context_and_artifact(deployed_code_hash);
     let profile_replay_artifact = replay_profile_artifact(&artifact);
@@ -298,6 +372,7 @@ async fn direct_contract_state_graph_harness(
     let factory = Arc::new(DirectContractStateRuntimeFactory::new(
         artifacts.clone(),
         interruption,
+        configured_assertion_value,
     ));
     let provider = Arc::clone(&factory.provider);
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
@@ -317,7 +392,8 @@ async fn direct_contract_state_graph_harness(
 
     let services =
         mfm_app::make_run_services(runners, store.clone(), artifacts.clone(), certification);
-    let draft = direct_contract_state_graph(context).expect("direct state graph");
+    let draft = direct_contract_state_graph(context, provider.expected_signer())
+        .expect("direct state graph");
     let request = mfm_app::prepare_typed_program_run_launch_for_test(
         draft,
         Default::default(),
@@ -412,8 +488,8 @@ fn assert_contract_resume_preserves_single_submission_and_nonce_lane(
     );
     assert_eq!(
         provider.transaction_submission_hashes().len(),
-        1,
-        "resume must not issue a duplicate live deployment transaction; configure has no calls"
+        3,
+        "resume must not issue duplicate live deployment or configure transactions"
     );
     let claims = stream
         .iter()
@@ -433,10 +509,10 @@ fn assert_contract_resume_preserves_single_submission_and_nonce_lane(
 fn assert_contract_finality_anchor_reads(provider: &DirectContractStateProvider) {
     let reads = provider.block_read_requests();
     assert!(
-        reads
-            .iter()
-            .any(|request| request.block() == &EvmBlockSelector::Number(42)),
-        "resume must preserve canonical block-number reads for the receipt anchor"
+        reads.iter().any(
+            |request| request.block() == &EvmBlockSelector::Number(LAST_CONFIGURE_BLOCK_NUMBER)
+        ),
+        "resume must preserve canonical reads for the last configure receipt anchor"
     );
     assert!(
         reads
@@ -448,6 +524,7 @@ fn assert_contract_finality_anchor_reads(provider: &DirectContractStateProvider)
 
 fn direct_contract_state_graph(
     context: EvmContractContext,
+    expected_signer: &str,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     let mut states = mfm_program::StateRegistryBuilder::new();
     states.register::<ContextBoundDeployContractState>()?;
@@ -466,7 +543,7 @@ fn direct_contract_state_graph(
                 .side_effect::<ContextBoundDeployContractState, _>(
                     StateKey::new("deploy")?,
                     &context,
-                    deploy_action(),
+                    deploy_action(expected_signer),
                     (),
                     account_nonce_resource_claim()?,
                     SideEffectVerificationSpec::Finalized { depth: 1 },
@@ -477,7 +554,7 @@ fn direct_contract_state_graph(
                 .side_effect::<ContextBoundConfigureContractState, _>(
                     StateKey::new("configure")?,
                     &context,
-                    configure_action(),
+                    configure_action(expected_signer),
                     ContextConfigureContractInputHandles { deployed },
                     account_nonce_resource_claim()?,
                     SideEffectVerificationSpec::Finalized { depth: 1 },
@@ -486,7 +563,7 @@ fn direct_contract_state_graph(
             let validation = root.scope().state::<ContextBoundValidateContractState, _>(
                 StateKey::new("validate")?,
                 &context,
-                ValidateAction::default(),
+                validate_action(),
                 ContextValidateContractInputHandles { configured },
             )?;
             root.bind_public_outputs(
@@ -497,27 +574,41 @@ fn direct_contract_state_graph(
     )
 }
 
-fn deploy_action() -> DeployAction {
+fn deploy_action(expected_signer: &str) -> DeployAction {
     serde_json::from_value(json!({
         "signer": {
             "signer_ref": "deployer",
-            "expected_signer_address": EXPECTED_SIGNER,
+            "expected_signer_address": expected_signer,
         },
         "receipt": {"poll_interval_ms": 1, "max_receipt_polls": 1},
     }))
     .expect("deploy action")
 }
 
-fn configure_action() -> ConfigureAction {
+fn configure_action(expected_signer: &str) -> ConfigureAction {
     serde_json::from_value(json!({
         "signer": {
             "signer_ref": "deployer",
-            "expected_signer_address": EXPECTED_SIGNER,
+            "expected_signer_address": expected_signer,
         },
-        "calls": [],
+        "calls": [
+            {"function": "configure", "args": []},
+            {"function": "configure", "args": []},
+        ],
         "receipt": {"poll_interval_ms": 1, "max_receipt_polls": 1},
     }))
     .expect("configure action")
+}
+
+fn validate_action() -> ValidateAction {
+    serde_json::from_value(json!({
+        "read_assertions": [{
+            "function": "configured",
+            "args": [],
+            "expected": {"json_text": "true"},
+        }],
+    }))
+    .expect("validate action")
 }
 
 fn direct_contract_context_and_artifact(
@@ -526,7 +617,21 @@ fn direct_contract_context_and_artifact(
     let profile: ContractArtifactConfig = serde_json::from_value(json!({
         "abi": {
             "json_text": serde_json::to_string(&json!([
-                {"type": "constructor", "inputs": []}
+                {"type": "constructor", "inputs": []},
+                {
+                    "type": "function",
+                    "name": "configure",
+                    "inputs": [],
+                    "outputs": [],
+                    "stateMutability": "nonpayable",
+                },
+                {
+                    "type": "function",
+                    "name": "configured",
+                    "inputs": [],
+                    "outputs": [{"name": "", "type": "bool"}],
+                    "stateMutability": "view",
+                },
             ]))
             .expect("ABI JSON")
         },
@@ -708,10 +813,14 @@ impl DirectContractStateRuntimeFactory {
     fn new(
         artifacts: ContractArtifactOverlay,
         interruption: Option<Arc<DirectContractInterruption>>,
+        configured_assertion_value: bool,
     ) -> Self {
         Self {
             artifacts,
-            provider: Arc::new(DirectContractStateProvider::new(interruption)),
+            provider: Arc::new(DirectContractStateProvider::new(
+                interruption,
+                configured_assertion_value,
+            )),
         }
     }
 }
@@ -788,14 +897,23 @@ impl DirectContractInterruption {
 
 struct DirectContractStateProvider {
     evidence: RedactedEvmSourceEvidence,
+    signing_key: SigningKey,
+    expected_signer: String,
     block_read_requests: Mutex<Vec<EvmBlockReadRequest>>,
     code_read_requests: Mutex<Vec<EvmCodeReadRequest>>,
+    call_read_requests: Mutex<Vec<EvmCallReadRequest>>,
     transaction_submission_hashes: Mutex<Vec<B256>>,
     interruption: Option<Arc<DirectContractInterruption>>,
+    configured_assertion_value: bool,
 }
 
 impl DirectContractStateProvider {
-    fn new(interruption: Option<Arc<DirectContractInterruption>>) -> Self {
+    fn new(
+        interruption: Option<Arc<DirectContractInterruption>>,
+        configured_assertion_value: bool,
+    ) -> Self {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let expected_signer = direct_signer_address(&signing_key);
         Self {
             evidence: RedactedEvmSourceEvidence {
                 network_id: CapabilityEvmNetworkId::new("ethereum-mainnet").expect("network id"),
@@ -804,11 +922,19 @@ impl DirectContractStateProvider {
                 source_ref: EvmSourceRef::new("direct-test").expect("source ref"),
                 policy_id: EvmSourcePolicyId::new("direct-test").expect("policy id"),
             },
+            signing_key,
+            expected_signer,
             block_read_requests: Mutex::new(Vec::new()),
             code_read_requests: Mutex::new(Vec::new()),
+            call_read_requests: Mutex::new(Vec::new()),
             transaction_submission_hashes: Mutex::new(Vec::new()),
             interruption,
+            configured_assertion_value,
         }
+    }
+
+    fn expected_signer(&self) -> &str {
+        &self.expected_signer
     }
 
     fn block_read_requests(&self) -> Vec<EvmBlockReadRequest> {
@@ -822,6 +948,13 @@ impl DirectContractStateProvider {
         self.code_read_requests
             .lock()
             .expect("code read requests")
+            .clone()
+    }
+
+    fn call_read_requests(&self) -> Vec<EvmCallReadRequest> {
+        self.call_read_requests
+            .lock()
+            .expect("call read requests")
             .clone()
     }
 
@@ -859,7 +992,17 @@ impl EvmBlockReadProvider for DirectContractStateProvider {
             .expect("block read requests")
             .push(request.clone());
         let evidence = self.evidence.clone();
-        let canonical_anchor_read = request.block() == &EvmBlockSelector::Number(42);
+        let canonical_anchor_read =
+            request.block() == &EvmBlockSelector::Number(DEPLOY_BLOCK_NUMBER);
+        let (block_number, block_hash) = match request.block() {
+            EvmBlockSelector::Number(number) => (*number, direct_block_hash(*number)),
+            EvmBlockSelector::Latest | EvmBlockSelector::Pending => {
+                (LATEST_BLOCK_NUMBER, direct_block_hash(LATEST_BLOCK_NUMBER))
+            }
+            EvmBlockSelector::Hash(_) => {
+                (LATEST_BLOCK_NUMBER, direct_block_hash(LATEST_BLOCK_NUMBER))
+            }
+        };
         let interruption = self.interruption.clone();
         Box::pin(async move {
             if canonical_anchor_read {
@@ -871,8 +1014,8 @@ impl EvmBlockReadProvider for DirectContractStateProvider {
             }
             Ok(EvmBlockReadResponse {
                 evidence,
-                block_number: 42,
-                block_hash: B256::repeat_byte(0x42),
+                block_number,
+                block_hash,
             })
         })
     }
@@ -954,18 +1097,24 @@ impl EvmReceiptReadProvider for DirectContractStateProvider {
     ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
         let evidence = self.evidence.clone();
         let transaction_hash = request.transaction_hash();
-        let submitted = self
+        let receipt = self
             .transaction_submission_hashes
             .lock()
             .expect("transaction submission hashes")
-            .contains(&transaction_hash);
+            .iter()
+            .position(|submitted| submitted == &transaction_hash)
+            .map(|index| {
+                let block_number = DEPLOY_BLOCK_NUMBER
+                    + u64::try_from(index).expect("direct test transaction index");
+                (block_number, direct_block_hash(block_number))
+            });
         Box::pin(async move {
-            if submitted {
+            if let Some((block_number, block_hash)) = receipt {
                 Ok(EvmReceiptReadResponse {
                     evidence,
                     transaction_hash,
-                    block_number: 42,
-                    block_hash: B256::repeat_byte(0x42),
+                    block_number,
+                    block_hash,
                     status: true,
                 })
             } else {
@@ -1014,13 +1163,20 @@ impl EvmCodeReadProvider for DirectContractStateProvider {
 impl EvmCallReadProvider for DirectContractStateProvider {
     fn read_call<'a>(
         &'a self,
-        _request: &'a EvmCallReadRequest,
+        request: &'a EvmCallReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
+        self.call_read_requests
+            .lock()
+            .expect("call read requests")
+            .push(request.clone());
         let evidence = self.evidence.clone();
+        let configured_assertion_value = self.configured_assertion_value;
         Box::pin(async move {
+            let mut return_data = vec![0_u8; 32];
+            return_data[31] = u8::from(configured_assertion_value);
             Ok(EvmCallReadResponse {
                 evidence,
-                return_data: Vec::new(),
+                return_data,
             })
         })
     }
@@ -1043,24 +1199,18 @@ impl EvmLogsReadProvider for DirectContractStateProvider {
 
 impl SigningProvider for DirectContractStateProvider {
     fn sign<'a>(&'a self, request: &'a SigningRequest) -> mfm_signing::SigningFuture<'a> {
-        let signature = SignatureBytes::new(
-            hex::decode(
-                "48b55bfa915ac795c431978d8a6a992b628d557da5ff759b307d495a36649353\
-                 efffd310ac743f371de3b9f7f9cb56c0b28ad43601b4ab949f53faa07bd2c8041b",
-            )
-            .expect("signature bytes"),
-        )
-        .expect("valid signature");
         let result = (|| {
-            let primitive = primitive_signature_from_bytes(&signature)
+            let (signature, recovery_id) = self
+                .signing_key
+                .sign_prehash_recoverable(request.digest().as_bytes())
                 .map_err(|_| SigningError::redacted_provider_failure("direct state signer"))?;
-            let recovered =
-                recover_signing_address(B256::from(*request.digest().as_bytes()), primitive)
-                    .map_err(|_| SigningError::redacted_provider_failure("direct state signer"))?;
+            let mut signature_bytes = signature.to_bytes().to_vec();
+            signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+            let signature = SignatureBytes::new(signature_bytes)?;
             let identity = PublicSigningIdentity::new(
                 request.algorithm().clone(),
                 None,
-                Some(format!("{recovered:?}")),
+                Some(self.expected_signer.clone()),
             )?;
             SigningResult::for_request(request, identity, signature)
         })();

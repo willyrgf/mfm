@@ -2489,7 +2489,6 @@ dependencies = [
  "mfm-events",
  "mfm-evm-capabilities",
  "mfm-evm-contract-model",
- "mfm-evm-signing",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
