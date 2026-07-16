@@ -71,18 +71,11 @@
           };
           devTools = mkDevTools system;
           projectApps = nixfied.lib.${system}.projectApps ./nixfied.nix;
-          dependencyArtifactPilot = import ./nix/dependency-artifact.nix {
-            lib = pkgs.lib;
-            inherit pkgs rustPlatform;
-            src = ./.;
-          };
         in
         {
           default = self.packages.${system}.model;
           model = nixfied.lib.${system}.compileModel ./nixfied.nix;
           sqlx-cli = mkSqlxCli system;
-          dependency-artifact = dependencyArtifactPilot.dependencyArtifact;
-          dependency-artifact-source-tests = dependencyArtifactPilot.sourceInputTests;
           quick = pkgs.writeShellApplication {
             name = "mfm-quick";
             runtimeInputs = devTools;
