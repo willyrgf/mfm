@@ -29,7 +29,7 @@ mod schema;
 
 pub use configured_values::{
     ConfiguredValuePublication, ConfiguredValuePublicationStatus, ConfiguredValueRow,
-    MAX_CONFIGURED_VALUE_BYTES,
+    MAX_CONFIGURED_VALUE_BYTES, MAX_CONFIGURED_VALUE_SCHEMA_ID_BYTES,
 };
 pub use run_store::{
     PostgresFactQueryResult, PostgresFactQueryRow, PostgresStore, PostgresStoreAuthority,

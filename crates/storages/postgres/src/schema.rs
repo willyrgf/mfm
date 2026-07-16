@@ -418,7 +418,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "admission_lane",
     "admission_waiter",
     "run_observation_cursors",
-    "catalog_values",
+    "configured_values",
 ];
 
 const REQUIRED_VIEWS: &[&str] = &[];
@@ -507,10 +507,10 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "fact_projection_metadata_generation_positive",
     "run_observation_cursors_version_v3",
     "run_observation_cursors_store_commit_order_nonnegative",
-    "catalog_values_target_bounds",
-    "catalog_values_schema_id_bounds",
-    "catalog_values_digest_bounds",
-    "catalog_values_canonical_json_bounds",
+    "configured_values_target_bounds",
+    "configured_values_schema_id_bounds",
+    "configured_values_digest_bounds",
+    "configured_values_canonical_json_bounds",
 ];
 
 const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
@@ -564,6 +564,7 @@ struct TriggerContract<'a> {
 const REQUIRED_TRIGGER_CONTRACTS: &[TriggerContract<'_>] = &[];
 
 const FORBIDDEN_TABLES: &[&str] = &[
+    "catalog_values",
     "typed_run_heads",
     "typed_run_events",
     "typed_commit_keys",

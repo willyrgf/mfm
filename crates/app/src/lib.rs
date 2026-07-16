@@ -89,7 +89,7 @@ pub use config_setup::{
     export_setup_target, import_setup_toml, list_setup_targets, SetupConfigPublication,
     SetupConfigPublicationStatus,
 };
-pub use entry_point::{entry_point_summaries, prepare_entry_point_run_launch, EntryPointSummary};
+pub use entry_point::{entry_point_ids, prepare_entry_point_run_launch};
 
 #[path = "errors.rs"]
 mod errors;

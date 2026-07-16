@@ -2,13 +2,14 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::path::Path;
+use std::sync::Arc;
 
 use assert_cmd::Command;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use mfm_app::{PostgresSchema, PostgresStore};
 use mfm_events::v1::KernelEventPayload;
-use mfm_store::v1::RunEventStore;
+use mfm_store::v1::{CommitOutcome, RunEventStore, StoreScopeStore};
 use serde_json::{json, Value};
 use sqlx::{AssertSqlSafe, PgPool};
 use tempfile::TempDir;
@@ -21,6 +22,8 @@ mod run_control_support;
 
 const SETUP_FIXTURE: &str = include_str!("../../../examples/setup/organization.toml");
 const TARGET: &str = "acme/primary";
+const STABLE_INVOCATION_KEY: &str = "postgres-cli-portfolio";
+const UNFINISHED_TARGET: &str = "acme/resume";
 
 fn unique_postgres_schema() -> String {
     format!("cli_setup_{}", uuid::Uuid::new_v4().simple())
@@ -119,10 +122,7 @@ fn start_args<'a>(
     ]
 }
 
-async fn admission_evidence(
-    store: &PostgresStore,
-    run_id: &mfm_ids::RunId,
-) -> (String, String, String) {
+async fn admission_evidence(store: &PostgresStore, run_id: &mfm_ids::RunId) -> AdmissionEvidence {
     let stream = store
         .load_run_stream(run_id)
         .await
@@ -140,11 +140,71 @@ async fn admission_evidence(
     );
     assert_eq!(admitted.entry_point.configured_targets.len(), 1);
     let source = &admitted.entry_point.configured_targets[0];
-    (
-        source.target.as_str().to_owned(),
-        source.schema_id.as_str().to_owned(),
-        source.digest.as_str().to_owned(),
+    AdmissionEvidence {
+        target: source.target.as_str().to_owned(),
+        schema_id: source.schema_id.as_str().to_owned(),
+        digest: source.digest.as_str().to_owned(),
+        certified_spec_hash: admitted
+            .identity_material
+            .certified_spec_hash
+            .as_str()
+            .to_owned(),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AdmissionEvidence {
+    target: String,
+    schema_id: String,
+    digest: String,
+    certified_spec_hash: String,
+}
+
+async fn admit_configured_target_without_driving(
+    store: &PostgresStore,
+    target: &str,
+    runtime_config_path: &Path,
+    invocation_key: &str,
+) -> mfm_ids::RunId {
+    let request = mfm_app::prepare_entry_point_run_launch(
+        store,
+        "mfm.portfolio/snapshot@1",
+        target,
+        &mfm_app::production_certification_registry().expect("production certification registry"),
+        store.load_store_scope_id().await.expect("store scope"),
+        Some(mfm_app::InvocationKey::new(invocation_key).expect("invocation key")),
     )
+    .await
+    .expect("prepare configured target launch");
+    let run_id = request.run_id.clone();
+    let runners = mfm_app::production_runner_registry(
+        Arc::new(store.clone()),
+        mfm_app::production_fact_index_read_provider(store.clone()),
+        Some(runtime_config_path),
+    )
+    .expect("production runners");
+    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
+    let runtime_spec =
+        mfm_runtime::CertifiedRuntimeSpec::new(request.certified_spec).expect("runtime spec");
+    let launch = scheduler
+        .prepare_run_launch(
+            &runtime_spec,
+            request.identity_material,
+            request.evidence,
+            store
+                .expected_next_seq(&run_id)
+                .await
+                .expect("expected next sequence"),
+        )
+        .expect("prepare admission");
+    assert!(matches!(
+        scheduler
+            .start_run(store, launch)
+            .await
+            .expect("admit configured target without driving"),
+        CommitOutcome::Appended(_)
+    ));
+    run_id
 }
 
 async fn response_json(response: axum::response::Response) -> Value {
@@ -155,7 +215,8 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
-async fn configured_target_cli_and_rest_replace_current_config_without_replay_dependency() {
+async fn configured_target_cli_and_rest_replace_current_config_with_stable_invocation_and_nonterminal_resume(
+) {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let schema = unique_postgres_schema();
     create_postgres_schema(&database_url, &schema).await;
@@ -171,10 +232,7 @@ async fn configured_target_cli_and_rest_replace_current_config_without_replay_de
     let entry_points = entry_points["data"]["entry_points"]
         .as_array()
         .expect("CLI entry-point list");
-    assert_eq!(
-        entry_points,
-        &[json!({"entry_point_id": "mfm.portfolio/snapshot@1"})]
-    );
+    assert_eq!(entry_points, &[json!("mfm.portfolio/snapshot@1")]);
 
     let directory = TempDir::new().expect("temporary setup directory");
     let setup_a_path = directory.path().join("organization-a.toml");
@@ -217,7 +275,7 @@ async fn configured_target_cli_and_rest_replace_current_config_without_replay_de
         run_control_support::write_collectors_runtime_config_for_test(directory.path(), &rpc_url);
     let started_a = json_output(run_cli(
         &scoped_url,
-        &start_args(TARGET, "postgres-cli-portfolio-a", &runtime_config_path),
+        &start_args(TARGET, STABLE_INVOCATION_KEY, &runtime_config_path),
     ));
     assert_eq!(started_a["data"]["outcome"], "admitted");
     assert_eq!(started_a["data"]["run"]["run_mode"], "completed");
@@ -229,10 +287,10 @@ async fn configured_target_cli_and_rest_replace_current_config_without_replay_de
     let store = PostgresStore::connect(&scoped_url)
         .await
         .expect("connect configured run store");
-    assert_eq!(
-        admission_evidence(&store, &run_a).await,
-        (TARGET.to_owned(), schema_id.clone(), digest_a.clone())
-    );
+    let evidence_a = admission_evidence(&store, &run_a).await;
+    assert_eq!(evidence_a.target, TARGET);
+    assert_eq!(evidence_a.schema_id, schema_id);
+    assert_eq!(evidence_a.digest, digest_a);
 
     let setup_b = SETUP_FIXTURE.replacen(
         "metadata = {}",
@@ -253,7 +311,7 @@ async fn configured_target_cli_and_rest_replace_current_config_without_replay_de
 
     let started_b = json_output(run_cli(
         &scoped_url,
-        &start_args(TARGET, "postgres-cli-portfolio-b", &runtime_config_path),
+        &start_args(TARGET, STABLE_INVOCATION_KEY, &runtime_config_path),
     ));
     assert_eq!(started_b["data"]["outcome"], "admitted");
     let run_b: mfm_ids::RunId = started_b["data"]["run"]["run_id"]
@@ -262,14 +320,19 @@ async fn configured_target_cli_and_rest_replace_current_config_without_replay_de
         .parse()
         .expect("typed B run id");
     let cli_evidence_b = admission_evidence(&store, &run_b).await;
-    assert_eq!(
-        cli_evidence_b,
-        (TARGET.to_owned(), schema_id.clone(), digest_b.clone())
+    assert_eq!(cli_evidence_b.target, TARGET);
+    assert_eq!(cli_evidence_b.schema_id, schema_id);
+    assert_eq!(cli_evidence_b.digest, digest_b);
+    assert_ne!(run_a, run_b);
+    assert_ne!(
+        evidence_a.certified_spec_hash,
+        cli_evidence_b.certified_spec_hash,
+        "replacing the current configuration must change the certified spec under one invocation key"
     );
 
     let attached_b = json_output(run_cli(
         &scoped_url,
-        &start_args(TARGET, "postgres-cli-portfolio-b", &runtime_config_path),
+        &start_args(TARGET, STABLE_INVOCATION_KEY, &runtime_config_path),
     ));
     assert_eq!(attached_b["data"]["outcome"], "attached");
     assert_eq!(attached_b["data"]["run"]["run_id"], run_b.as_str());
@@ -291,7 +354,7 @@ async fn configured_target_cli_and_rest_replace_current_config_without_replay_de
                     json!({
                         "entry_point": "mfm.portfolio/snapshot@1",
                         "target": TARGET,
-                        "invocation_key": "postgres-cli-portfolio-b",
+                        "invocation_key": STABLE_INVOCATION_KEY,
                     })
                     .to_string(),
                 ))
@@ -316,32 +379,81 @@ async fn configured_target_cli_and_rest_replace_current_config_without_replay_de
     let duplicate = json_error(run_cli(&scoped_url, &import_args(&duplicate_path)));
     assert_eq!(duplicate["error"]["code"], "SetupDuplicateTarget");
 
+    let setup_c = SETUP_FIXTURE.replacen(
+        "portfolio_id = \"acme/primary\"",
+        "portfolio_id = \"acme/resume\"",
+        1,
+    );
+    let setup_c_path = directory.path().join("organization-c.toml");
+    std::fs::write(&setup_c_path, setup_c).expect("write setup C");
+    let imported_c = json_output(run_cli(&scoped_url, &import_args(&setup_c_path)));
+    let config_c = imported_c["data"]["configs"]
+        .as_array()
+        .and_then(|configs| configs.first())
+        .expect("import C config");
+    assert_eq!(config_c["target"], UNFINISHED_TARGET);
+    assert_eq!(config_c["status"], "created");
+    let unfinished_run = admit_configured_target_without_driving(
+        &store,
+        UNFINISHED_TARGET,
+        &runtime_config_path,
+        "postgres-cli-portfolio-resume",
+    )
+    .await;
+    let admitted_stream = store
+        .load_run_stream(&unfinished_run)
+        .await
+        .expect("admitted unfinished run stream");
+    assert_eq!(admitted_stream.len(), 1);
+    assert!(matches!(
+        admitted_stream[0].payload(),
+        KernelEventPayload::RunAdmitted(_)
+    ));
+
     let configured_pool = PgPool::connect(&scoped_url)
         .await
         .expect("connect for current configuration removal");
-    sqlx::query("DELETE FROM catalog_values")
+    sqlx::query("DELETE FROM configured_values")
         .execute(&configured_pool)
         .await
         .expect("remove mutable current configuration");
     configured_pool.close().await;
-    let resumed_a = json_output(run_cli(
+    let resumed_unfinished = json_output(run_cli(
         &scoped_url,
         &[
             "--output-format",
             "json",
             "run",
             "resume",
-            run_a.as_str(),
+            unfinished_run.as_str(),
             "--runtime-config",
             runtime_config_path.to_str().expect("runtime config path"),
         ],
     ));
-    assert_eq!(resumed_a["data"]["run_id"], run_a.as_str());
+    assert_eq!(
+        resumed_unfinished["data"]["run_id"],
+        unfinished_run.as_str()
+    );
+    assert_eq!(resumed_unfinished["data"]["run_mode"], "completed");
+    let resumed_stream = store
+        .load_run_stream(&unfinished_run)
+        .await
+        .expect("resumed unfinished run stream");
+    assert!(resumed_stream.len() > 1);
+    assert!(resumed_stream
+        .iter()
+        .any(|event| matches!(event.payload(), KernelEventPayload::RunCompleted(_))));
 
     std::fs::remove_file(&runtime_config_path).expect("remove live runtime config");
     let replay = json_output(run_cli(
         &scoped_url,
-        &["--output-format", "json", "run", "replay", run_a.as_str()],
+        &[
+            "--output-format",
+            "json",
+            "run",
+            "replay",
+            unfinished_run.as_str(),
+        ],
     ));
     assert_eq!(replay["data"]["run_mode"], "completed");
 

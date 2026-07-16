@@ -1,10 +1,14 @@
+use std::sync::Arc;
+
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, SchemaId, StableAuthorKey};
 use sqlx::Row;
+use tokio::sync::Barrier;
 
 use super::support::{drop_schema, test_store};
 use crate::{
-    ConfiguredValuePublicationStatus, ConfiguredValueRow, PostgresStore, MAX_CONFIGURED_VALUE_BYTES,
+    ConfiguredValuePublicationStatus, ConfiguredValueRow, PostgresStore,
+    MAX_CONFIGURED_VALUE_BYTES, MAX_CONFIGURED_VALUE_SCHEMA_ID_BYTES,
 };
 
 fn schema_id(byte: u8) -> SchemaId {
@@ -41,7 +45,7 @@ async fn insert_raw(
     canonical_json: &[u8],
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO catalog_values (target, schema_id, digest, canonical_json) \
+        "INSERT INTO configured_values (target, schema_id, digest, canonical_json) \
          VALUES ($1, $2, $3, $4)",
     )
     .bind(target)
@@ -119,12 +123,145 @@ async fn configured_values_use_target_only_for_selection() {
         .expect("current row");
     assert_eq!(loaded, replacement);
 
-    let count: i64 = sqlx::query("SELECT COUNT(*) AS count FROM catalog_values")
+    let count: i64 = sqlx::query("SELECT COUNT(*) AS count FROM configured_values")
         .fetch_one(&store.pool)
         .await
         .expect("count current values")
         .get("count");
     assert_eq!(count, 1);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn configured_values_concurrent_same_target_and_overlapping_batches_are_serialized() {
+    let (store, schema) = test_store().await;
+    let same = row("acme/same", schema_id(20), 1);
+    let same_gate = Arc::new(Barrier::new(3));
+    let first_same = {
+        let store = store.clone();
+        let gate = Arc::clone(&same_gate);
+        let same = same.clone();
+        tokio::spawn(async move {
+            gate.wait().await;
+            store.publish_configured_values(&[same]).await
+        })
+    };
+    let second_same = {
+        let store = store.clone();
+        let gate = Arc::clone(&same_gate);
+        let same = same.clone();
+        tokio::spawn(async move {
+            gate.wait().await;
+            store.publish_configured_values(&[same]).await
+        })
+    };
+    same_gate.wait().await;
+    let first_same = first_same
+        .await
+        .expect("first same-target task")
+        .expect("first same-target publication");
+    let second_same = second_same
+        .await
+        .expect("second same-target task")
+        .expect("second same-target publication");
+    let same_statuses = [first_same[0].status, second_same[0].status];
+    assert!(same_statuses.contains(&ConfiguredValuePublicationStatus::Created));
+    assert!(same_statuses.contains(&ConfiguredValuePublicationStatus::Unchanged));
+    assert_eq!(
+        store
+            .load_configured_value(&same.target)
+            .await
+            .expect("load same target"),
+        Some(same)
+    );
+
+    let first_only = row("acme/first-only", schema_id(21), 1);
+    let shared_first = row("acme/shared", schema_id(22), 1);
+    let shared_second = row("acme/shared", schema_id(23), 2);
+    let second_only = row("acme/second-only", schema_id(24), 2);
+    let overlapping_gate = Arc::new(Barrier::new(3));
+    let first_batch = {
+        let store = store.clone();
+        let gate = Arc::clone(&overlapping_gate);
+        let rows = vec![shared_first.clone(), first_only.clone()];
+        tokio::spawn(async move {
+            gate.wait().await;
+            store.publish_configured_values(&rows).await
+        })
+    };
+    let second_batch = {
+        let store = store.clone();
+        let gate = Arc::clone(&overlapping_gate);
+        let rows = vec![second_only.clone(), shared_second.clone()];
+        tokio::spawn(async move {
+            gate.wait().await;
+            store.publish_configured_values(&rows).await
+        })
+    };
+    overlapping_gate.wait().await;
+    let first_batch = first_batch
+        .await
+        .expect("first overlapping task")
+        .expect("first overlapping publication");
+    let second_batch = second_batch
+        .await
+        .expect("second overlapping task")
+        .expect("second overlapping publication");
+
+    assert_eq!(first_batch.len(), 2);
+    assert_eq!(second_batch.len(), 2);
+    assert_eq!(
+        first_batch
+            .iter()
+            .find(|publication| publication.row.target == first_only.target)
+            .expect("first-only publication")
+            .status,
+        ConfiguredValuePublicationStatus::Created
+    );
+    assert_eq!(
+        second_batch
+            .iter()
+            .find(|publication| publication.row.target == second_only.target)
+            .expect("second-only publication")
+            .status,
+        ConfiguredValuePublicationStatus::Created
+    );
+    let shared_statuses = [
+        first_batch
+            .iter()
+            .find(|publication| publication.row.target == shared_first.target)
+            .expect("first shared publication")
+            .status,
+        second_batch
+            .iter()
+            .find(|publication| publication.row.target == shared_second.target)
+            .expect("second shared publication")
+            .status,
+    ];
+    assert!(shared_statuses.contains(&ConfiguredValuePublicationStatus::Created));
+    assert!(shared_statuses.contains(&ConfiguredValuePublicationStatus::Updated));
+    assert_eq!(
+        store
+            .load_configured_value(&first_only.target)
+            .await
+            .expect("load first-only target"),
+        Some(first_only)
+    );
+    assert_eq!(
+        store
+            .load_configured_value(&second_only.target)
+            .await
+            .expect("load second-only target"),
+        Some(second_only)
+    );
+    assert!(matches!(
+        store
+            .load_configured_value(&shared_first.target)
+            .await
+            .expect("load shared target"),
+        Some(value) if value == shared_first || value == shared_second
+    ));
 
     drop_schema(&store, &schema).await;
 }
@@ -166,7 +303,8 @@ async fn configured_value_invalid_or_duplicate_batch_leaves_every_target_unchang
 }
 
 #[tokio::test]
-async fn configured_value_load_rejects_noncanonical_bytes_digest_mismatches_and_invalid_targets() {
+async fn configured_value_load_and_list_reject_noncanonical_bytes_digest_mismatches_and_invalid_targets(
+) {
     let (store, schema) = test_store().await;
     let canonical =
         PlainCanonicalJsonBytes::from_json_str(r#"{"value":1}"#).expect("canonical bytes");
@@ -180,6 +318,22 @@ async fn configured_value_load_rejects_noncanonical_bytes_digest_mismatches_and_
     )
     .await
     .expect("insert noncanonical corruption");
+    let error = store
+        .load_configured_value(&target("acme/noncanonical"))
+        .await
+        .expect_err("noncanonical configured value must fail");
+    assert!(!error.to_string().contains("value"));
+    let list_error = store
+        .list_configured_targets()
+        .await
+        .expect_err("noncanonical current row must not be listed");
+    assert!(!list_error.to_string().contains("value"));
+    sqlx::query("DELETE FROM configured_values WHERE target = $1")
+        .bind("acme/noncanonical")
+        .execute(&store.pool)
+        .await
+        .expect("remove noncanonical corruption");
+
     insert_raw(
         &store,
         "acme/mismatched",
@@ -193,6 +347,22 @@ async fn configured_value_load_rejects_noncanonical_bytes_digest_mismatches_and_
     )
     .await
     .expect("insert digest corruption");
+    let error = store
+        .load_configured_value(&target("acme/mismatched"))
+        .await
+        .expect_err("digest-mismatched configured value must fail");
+    assert!(!error.to_string().contains("value"));
+    let list_error = store
+        .list_configured_targets()
+        .await
+        .expect_err("digest-mismatched current row must not be listed");
+    assert!(!list_error.to_string().contains("value"));
+    sqlx::query("DELETE FROM configured_values WHERE target = $1")
+        .bind("acme/mismatched")
+        .execute(&store.pool)
+        .await
+        .expect("remove digest corruption");
+
     insert_raw(
         &store,
         "mfm.reserved",
@@ -203,13 +373,6 @@ async fn configured_value_load_rejects_noncanonical_bytes_digest_mismatches_and_
     .await
     .expect("insert invalid target corruption");
 
-    for value in ["acme/noncanonical", "acme/mismatched"] {
-        let error = store
-            .load_configured_value(&target(value))
-            .await
-            .expect_err("corrupt configured value must fail");
-        assert!(!error.to_string().contains("value"));
-    }
     let list_error = store
         .list_configured_targets()
         .await
@@ -255,6 +418,23 @@ fn configured_value_rows_reject_invalid_canonical_bytes_and_digest_mismatches() 
         schema_id(13),
         digest,
         b"not-json".to_vec(),
+    )
+    .is_err());
+    let oversized_schema = SchemaId::new(
+        &"a".repeat(MAX_CONFIGURED_VALUE_SCHEMA_ID_BYTES),
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([14; 32]),
+    )
+    .expect("oversized serialized schema id is syntactically valid");
+    assert!(oversized_schema.as_str().len() > MAX_CONFIGURED_VALUE_SCHEMA_ID_BYTES);
+    let canonical = PlainCanonicalJsonBytes::from_json_str(r#"{"value":1}"#)
+        .expect("canonical configured value");
+    assert!(ConfiguredValueRow::new(
+        target("acme/value"),
+        oversized_schema,
+        canonical.content_digest(),
+        canonical.as_bytes().to_vec(),
     )
     .is_err());
 }

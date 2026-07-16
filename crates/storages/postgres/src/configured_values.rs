@@ -9,6 +9,9 @@ use crate::run_store::{PostgresStore, PostgresStoreError, Result};
 /// Maximum canonical configured-value payload size in bytes.
 pub const MAX_CONFIGURED_VALUE_BYTES: usize = 256 * 1024;
 
+/// Maximum serialized configured-value schema identity size in bytes.
+pub const MAX_CONFIGURED_VALUE_SCHEMA_ID_BYTES: usize = 1024;
+
 /// One current, target-keyed semantic configuration value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfiguredValueRow {
@@ -140,19 +143,15 @@ impl PostgresStore {
 
     /// Lists all current configured targets in stable target order.
     pub async fn list_configured_targets(&self) -> Result<Vec<StableAuthorKey>> {
-        let rows = sqlx::query("SELECT target FROM catalog_values ORDER BY target")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| PostgresStoreError::Database(database_context(error)))?;
+        let rows = sqlx::query(
+            "SELECT target, schema_id, digest, canonical_json FROM configured_values \
+             ORDER BY target",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PostgresStoreError::Database(database_context(error)))?;
         rows.into_iter()
-            .map(|row| {
-                let target = row.try_get::<String, _>("target").map_err(|_| {
-                    PostgresStoreError::Corruption("configured target is invalid".to_owned())
-                })?;
-                StableAuthorKey::new(&target).map_err(|_| {
-                    PostgresStoreError::Corruption("configured target is invalid".to_owned())
-                })
-            })
+            .map(|row| configured_value_row_from_sql_row(&row).map(|value| value.target))
             .collect()
     }
 }
@@ -162,7 +161,7 @@ async fn insert_or_update_configured_value_tx(
     row: &ConfiguredValueRow,
 ) -> Result<ConfiguredValuePublicationStatus> {
     let inserted = sqlx::query(
-        "INSERT INTO catalog_values (target, schema_id, digest, canonical_json) \
+        "INSERT INTO configured_values (target, schema_id, digest, canonical_json) \
          VALUES ($1, $2, $3, $4) ON CONFLICT (target) DO NOTHING RETURNING target",
     )
     .bind(row.target.as_str())
@@ -196,7 +195,7 @@ async fn update_configured_value_tx(
     row: &ConfiguredValueRow,
 ) -> Result<()> {
     let result = sqlx::query(
-        "UPDATE catalog_values SET schema_id = $2, digest = $3, canonical_json = $4 \
+        "UPDATE configured_values SET schema_id = $2, digest = $3, canonical_json = $4 \
          WHERE target = $1",
     )
     .bind(row.target.as_str())
@@ -220,10 +219,10 @@ async fn load_configured_value_tx(
     for_update: bool,
 ) -> Result<Option<ConfiguredValueRow>> {
     let query = if for_update {
-        "SELECT target, schema_id, digest, canonical_json FROM catalog_values \
+        "SELECT target, schema_id, digest, canonical_json FROM configured_values \
          WHERE target = $1 FOR UPDATE"
     } else {
-        "SELECT target, schema_id, digest, canonical_json FROM catalog_values WHERE target = $1"
+        "SELECT target, schema_id, digest, canonical_json FROM configured_values WHERE target = $1"
     };
     let Some(row) = sqlx::query(query)
         .bind(target.as_str())
@@ -281,6 +280,11 @@ fn validate_configured_value_batch(rows: &[ConfiguredValueRow]) -> Result<()> {
 }
 
 fn validate_configured_value_row(row: &ConfiguredValueRow) -> Result<()> {
+    if !(1..=MAX_CONFIGURED_VALUE_SCHEMA_ID_BYTES).contains(&row.schema_id.as_str().len()) {
+        return Err(PostgresStoreError::Corruption(
+            "configured schema id exceeds the permitted bound".to_owned(),
+        ));
+    }
     if !(1..=MAX_CONFIGURED_VALUE_BYTES).contains(&row.canonical_json.len()) {
         return Err(PostgresStoreError::Corruption(
             "configured canonical bytes exceed the permitted bound".to_owned(),

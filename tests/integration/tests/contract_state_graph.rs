@@ -278,13 +278,10 @@ async fn direct_contract_states_resume_submission_and_confirmation_boundaries() 
 }
 
 fn assert_contract_entry_points_are_absent() {
-    let entry_points = mfm_app::entry_point_summaries();
+    let entry_points = mfm_app::entry_point_ids();
     assert_eq!(
-        entry_points
-            .iter()
-            .map(|entry_point| entry_point.entry_point_id)
-            .collect::<Vec<_>>(),
-        vec!["mfm.portfolio/snapshot@1"],
+        entry_points,
+        &["mfm.portfolio/snapshot@1"],
         "the public portfolio objective must not register contract state graphs"
     );
     for id in [
@@ -294,9 +291,7 @@ fn assert_contract_entry_points_are_absent() {
         "mfm.evm.contract/lifecycle@1",
     ] {
         assert!(
-            entry_points
-                .iter()
-                .all(|entry_point| entry_point.entry_point_id != id),
+            !entry_points.contains(&id),
             "a reusable contract state must not be public: {id}"
         );
     }

@@ -150,7 +150,7 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
     let configured_pool = PgPool::connect(&scoped_database_url)
         .await
         .expect("connect for current configuration rejection checks");
-    sqlx::query("UPDATE catalog_values SET schema_id = $2 WHERE target = $1")
+    sqlx::query("UPDATE configured_values SET schema_id = $2 WHERE target = $1")
         .bind(&publication.target)
         .bind(
             "schema:mfm.test.wrong_current_config:1:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
@@ -183,7 +183,7 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
     );
 
     sqlx::query(
-        "INSERT INTO catalog_values (target, schema_id, digest, canonical_json) \
+        "INSERT INTO configured_values (target, schema_id, digest, canonical_json) \
          VALUES ($1, $2, $3, $4)",
     )
     .bind("acme/other")

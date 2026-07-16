@@ -393,7 +393,7 @@ mfm_cli ops list
 mfm_cli --output-format json ops list
 ```
 
-JSON output returns the descriptors under `entry_points`. The production surface contains exactly
+JSON output returns plain string ids under `entry_points`. The production surface contains exactly
 one entry point, `mfm.portfolio/snapshot@1`. Reusable deploy, configure, and validate states are
 library-only and cannot be started through this command. There is no latest-version selection,
 compatibility alias, collector root, report-only mode, or contract workflow entry point.
@@ -476,7 +476,7 @@ it does not create an independently startable collector or contract workflow.
 For example:
 
 ```sh
-mfm_cli run start mfm.portfolio/snapshot@1 acme/dual-mainnet
+mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
 ```
 
 The target selects only its current `PortfolioConfig`. Old `--entry-point` and `--request` flags,
@@ -496,7 +496,7 @@ contains only runner families with a current certified public graph consumer. Re
 contract-state runners are exercised from their library test graph, not registered speculatively
 by the CLI.
 
-JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
+JSON output exposes `outcome`; text output renders `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the
 execution lane for the same base work identity, start reports `already_active` with
 `active_run_id` and no `run` body.

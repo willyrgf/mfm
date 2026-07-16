@@ -13,19 +13,11 @@ use crate::{
 };
 
 const PORTFOLIO_SNAPSHOT_ID: &str = "mfm.portfolio/snapshot@1";
-
-/// One exact public entry-point summary.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct EntryPointSummary {
-    /// Exact entry-point id, including namespace and version.
-    pub entry_point_id: &'static str,
-}
+const ENTRY_POINT_IDS: &[&str] = &[PORTFOLIO_SNAPSHOT_ID];
 
 /// Returns the exact compiled entry-point discovery surface.
-pub fn entry_point_summaries() -> Vec<EntryPointSummary> {
-    vec![EntryPointSummary {
-        entry_point_id: PORTFOLIO_SNAPSHOT_ID,
-    }]
+pub fn entry_point_ids() -> &'static [&'static str] {
+    ENTRY_POINT_IDS
 }
 
 /// Prepares one configured-target-backed run launch at admission.
@@ -192,7 +184,7 @@ async fn resolve_portfolio_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{entry_point_summaries, PORTFOLIO_SNAPSHOT_ID};
+    use super::{entry_point_ids, PORTFOLIO_SNAPSHOT_ID};
     use mfm_portfolio_model::ids::PortfolioId;
 
     const DELETED_ENTRY_POINTS: [&str; 8] = [
@@ -208,9 +200,7 @@ mod tests {
 
     #[test]
     fn discovery_exposes_only_the_portfolio_snapshot_objective() {
-        let summaries = entry_point_summaries();
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].entry_point_id, PORTFOLIO_SNAPSHOT_ID);
+        assert_eq!(entry_point_ids(), &[PORTFOLIO_SNAPSHOT_ID]);
     }
 
     #[test]
@@ -225,10 +215,7 @@ mod tests {
 
     #[test]
     fn deleted_entry_points_are_not_discoverable() {
-        let discovered = entry_point_summaries()
-            .into_iter()
-            .map(|summary| summary.entry_point_id)
-            .collect::<Vec<_>>();
+        let discovered = entry_point_ids();
         for entry_point in DELETED_ENTRY_POINTS {
             assert!(!discovered.contains(&entry_point));
         }
