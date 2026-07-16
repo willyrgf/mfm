@@ -2165,7 +2165,6 @@ dependencies = [
  "mfm-artifact-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-certify",
  "mfm-events",
  "mfm-evm-capabilities",
  "mfm-evm-contract-model",

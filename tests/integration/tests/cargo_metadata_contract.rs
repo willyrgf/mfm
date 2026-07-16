@@ -45,7 +45,6 @@ enum CrateCategory {
     DomainConfig,
     State,
     Operation,
-    AdapterContract,
     Adapter,
     Transport,
     SignerContract,
@@ -66,7 +65,6 @@ impl CrateCategory {
             "domain-config" => Some(Self::DomainConfig),
             "state" => Some(Self::State),
             "operation" => Some(Self::Operation),
-            "adapter-contract" => Some(Self::AdapterContract),
             "adapter" => Some(Self::Adapter),
             "transport" => Some(Self::Transport),
             "signer-contract" => Some(Self::SignerContract),
@@ -88,7 +86,6 @@ impl CrateCategory {
             Self::DomainConfig => "domain-config",
             Self::State => "state",
             Self::Operation => "operation",
-            Self::AdapterContract => "adapter-contract",
             Self::Adapter => "adapter",
             Self::Transport => "transport",
             Self::SignerContract => "signer-contract",
@@ -891,7 +888,6 @@ fn validate_category_path(
         CrateCategory::DomainConfig => package.manifest_dir_rel.ends_with("-config"),
         CrateCategory::State => package.manifest_rel.starts_with("crates/states/"),
         CrateCategory::Operation => package.manifest_rel.starts_with("crates/ops/"),
-        CrateCategory::AdapterContract => package.manifest_dir_rel == "crates/adapter-contracts",
         CrateCategory::Adapter => package.manifest_rel.starts_with("crates/adapters/"),
         CrateCategory::Transport => package.manifest_rel.starts_with("crates/transports/"),
         CrateCategory::SignerContract => {
@@ -922,9 +918,8 @@ fn validate_category_path(
 
 fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory) -> bool {
     use CrateCategory::{
-        Adapter, AdapterContract, App, Binary, CapabilityContract, DomainConfig, DomainModel,
-        Kernel, Operation, RuntimeConfig, SignerContract, SignerProvider, State, Storage,
-        TestSupport, Transport,
+        Adapter, App, Binary, CapabilityContract, DomainConfig, DomainModel, Kernel, Operation,
+        RuntimeConfig, SignerContract, SignerProvider, State, Storage, TestSupport, Transport,
     };
 
     match source {
@@ -937,30 +932,22 @@ fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory)
         ),
         State => matches!(
             dependency,
-            Kernel
-                | CapabilityContract
-                | AdapterContract
-                | DomainModel
-                | DomainConfig
-                | SignerContract
+            Kernel | CapabilityContract | DomainModel | DomainConfig | SignerContract
         ),
         Operation => matches!(
             dependency,
             Kernel
                 | CapabilityContract
-                | AdapterContract
                 | DomainModel
                 | DomainConfig
                 | State
                 | Operation
                 | SignerContract
         ),
-        AdapterContract => matches!(dependency, Kernel | CapabilityContract | DomainModel),
         Adapter => matches!(
             dependency,
             Kernel
                 | CapabilityContract
-                | AdapterContract
                 | DomainModel
                 | DomainConfig
                 | State

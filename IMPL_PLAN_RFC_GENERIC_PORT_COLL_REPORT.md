@@ -483,7 +483,7 @@ Counts may be diagnostics only. They are never readiness authority.
 
 ### Receipt-constrained report selection
 
-The report operation consumes the PortfolioCollectionReceipt handle as a real typed graph
+`SelectHoldingsState` consumes the PortfolioCollectionReceipt handle as a real typed graph
 dependency. For each holding it queries exact source, fact descriptor, exact receipt anchor,
 state-owned coverage/status, certified store scope, and a fixed scan bound N.
 
@@ -1192,7 +1192,6 @@ Primary ownership:
 - crates/states/portfolio
 - crates/adapters/portfolio
 - family exact-anchor fact-query helpers
-- current internal tracker/report operation
 - crates/app/src/composition.rs removed or reduced to non-planning runner binding
 - docs/design.md, docs/architecture.md, docs/persisted-public-surfaces.md, RFC_CONFIG.md, and
   portfolio state/adapter rustdoc

@@ -121,7 +121,7 @@ observations.
 ### Historical fact selection is wider than a refresh-and-report goal
 
 The report-only path searches full historical candidate sets and chooses the latest common anchor
-per network. That is valid for a historical fact-backed report operation, but it is too broad for a
+per network. That is valid for a historical fact-backed reporting path, but it is too broad for a
 public workflow whose contract is to refresh this portfolio and report that collection.
 
 Without an anchor constraint, a concurrent run can write newer facts after this run collects and
@@ -696,7 +696,7 @@ canonical representation is the complete authority; count summaries are only dia
 
 ### Anchor-constrained fact selection
 
-The internal report operation consumes the receipt handle as a typed dependency. For every logical
+`SelectHoldingsState` consumes the receipt handle as a typed dependency. For every logical
 holding, it compiles a fact query using:
 
 - the exact source key derived from the portfolio;
@@ -883,7 +883,7 @@ capabilities; report states consume fact-index evidence and the typed collection
 | State intent -> capability/evidence binding | BTC/EVM adapter crates |
 | JSON-RPC implementation | reusable BTC/EVM transport crates |
 | Exact receipt assembly | portfolio operation-local pure state |
-| Fact selection, valuation, snapshot, report | portfolio states and internal report operation |
+| Fact selection, config-derived valuation, snapshot, report | portfolio states |
 | Exact catalog resolution and entry-point dispatch | `mfm-app` |
 | Runtime routes/signers/endpoints | runtime config and app live assembly |
 | CLI/REST request transport and rendering | thin binaries |
