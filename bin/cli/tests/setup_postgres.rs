@@ -235,6 +235,14 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
     assert_eq!(entry_points, &[json!("mfm.portfolio/snapshot@1")]);
 
     let directory = TempDir::new().expect("temporary setup directory");
+    let oversized_path = directory.path().join("oversized.toml");
+    let oversized_file = std::fs::File::create(&oversized_path).expect("create oversized setup");
+    oversized_file
+        .set_len((mfm_app::MAX_SETUP_FILE_BYTES + 1) as u64)
+        .expect("size oversized setup");
+    let oversized = json_error(run_cli(&scoped_url, &import_args(&oversized_path)));
+    assert_eq!(oversized["error"]["code"], "SetupFileTooLarge");
+
     let setup_a_path = directory.path().join("organization-a.toml");
     std::fs::write(&setup_a_path, SETUP_FIXTURE).expect("write setup A");
     let imported_a = json_output(run_cli(&scoped_url, &import_args(&setup_a_path)));

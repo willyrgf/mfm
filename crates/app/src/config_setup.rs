@@ -12,7 +12,8 @@ use serde_json::Value;
 
 use crate::{AppError, ErrorClass};
 
-const MAX_SETUP_FILE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum accepted encoded setup document size.
+pub const MAX_SETUP_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 /// The result of publishing one setup configuration without exposing its canonical payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

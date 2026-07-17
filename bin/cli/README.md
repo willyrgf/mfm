@@ -411,8 +411,10 @@ mfm_cli setup export acme/primary --output ./portfolio.json
 The import document is strict TOML with a closed `configs` list. Each configuration derives its
 target from its intrinsic domain id; a portfolio config with `portfolio_id = "acme/primary"`
 publishes target `acme/primary`. Import is atomic and reports `created`, `updated`, or `unchanged`
-for every target. `setup list` returns only current targets in stable order. `setup export` writes
-one target's verified canonical JSON to a new path and never overwrites an existing file.
+for every target. Documents larger than 4 MiB fail with `SetupFileTooLarge` without being read in
+full. `setup list` returns only current targets in stable order. `setup export` atomically publishes
+one target's verified canonical JSON to a new path and never overwrites an existing file; a failed
+write does not leave a partial final file.
 
 There is no setup name, catalog digest selector, revision/history lookup, cursor, or delete
 command. Importing a replacement configuration changes only that target's current row; already
