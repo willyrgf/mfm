@@ -2091,3 +2091,136 @@ measurement slot under cleanup id
 preserved. Public gates and the authoritative Cargo path were never changed.
 R2-09 may compare only candidates that passed screening and therefore has no
 `crate2nix` or `cargo2nix` qualification run to perform.
+
+## R2-09 follow-up: qualifying candidate comparison
+
+R2-09 was measured on 2026-07-17 from committed R2-08 revision
+`67f4d476d7ca76b04f32eccdbd7ddf17d6cf325d`. It retained the R2-01
+reference aarch64-linux guest, Rust/Cargo 1.96.0, compact verification
+profile, Nixfied model hash
+`d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84`,
+runtime ABI `nixfied-runtime-abi:1-5ff3aa14f2bf`, and Cargo-target digest
+`dd27515db6a0fc48aabe31c5e300af7325e3af24a98f0560364fa9c516971e03`.
+No candidate implementation or default architecture was added.
+
+Only the scoped Cargo target passed its standalone screening gate. R2-09
+therefore ran the required three-clean/five-warm qualification distribution
+only for that candidate. `sccache`, Crane, crate2nix, cargo2nix, and execution
+topology retain their independently measured screening evidence; rerunning a
+qualification distribution for any of them would violate the RFC's screening
+stop. No combined candidate was authorized, and neither component of a
+possible combination independently qualified.
+
+### Scoped Cargo-target qualification
+
+Three independent state roots supplied the clean observations. Five warm
+observations reused the same source path and each root's slot-scoped target.
+All eight runs passed the authoritative 13 leaves. No observation was
+discarded, including the slower first clean run.
+
+| State | Run | Full CI | Nextest | Compile/link | Execution | Doctest | Verification tail |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| clean A | `run-1396470-1784325967789774341` | 422.086s | 185.742s | 50.66s | 134.594s | 25.496s | 131.260s |
+| clean B | `run-1509760-1784326661941504559` | 359.204s | 167.630s | 59.43s | 107.625s | 16.246s | 112.606s |
+| clean C | `run-1567583-1784327274808964637` | 320.486s | 150.318s | 50.67s | 99.231s | 15.334s | 107.012s |
+| warm A | `run-1479997-1784326411189162122` | 244.187s | 118.620s | 32.94s | 85.204s | 15.884s | 102.202s |
+| warm B | `run-1549753-1784327027489871992` | 230.327s | 117.165s | 29.19s | 87.537s | 15.068s | 87.941s |
+| warm C1 | `run-1605668-1784327601521425968` | 197.644s | 93.515s | 21.24s | 71.882s | 14.253s | 83.105s |
+| warm C2 | `run-1619084-1784327808300874757` | 194.250s | 91.253s | 20.11s | 70.803s | 13.360s | 83.602s |
+| warm C3 | `run-1632318-1784328010349190567` | 195.875s | 87.726s | 16.68s | 70.714s | 18.326s | 83.941s |
+
+The clean median was 359.204s and the warm median was 197.644s. Reuse saved
+161.560s/45.0%, clearing both the 15% relative and 30-second absolute
+qualification thresholds. Outer-wall medians independently measured 359.38s
+clean and 198.06s warm. The current clean median was 8.4% slower than R2-01's
+331.422s, while the warm median was 7.7% faster than R2-01's 214.081s. This
+host/storage drift changes the absolute endpoints but not the qualification:
+R2-01, R2-04, and R2-09 each independently clear both thresholds.
+
+The median clean residual was 50.67s of Nextest compilation/linking, 107.625s
+of Nextest execution, 16.246s of doctests, and 112.606s in the keystore and
+database/parity tail. The warm medians were 21.24s, 71.882s, 15.068s, and
+83.941s respectively. Persistence removes meaningful compiler work, but
+execution, rustdoc/doctests, live services, and parity remain most of the warm
+gate. Maximum resident memory stayed between 957,788 and 958,108 KiB and no
+run swapped.
+
+The current changed-source and path observations used the already-warm target
+from clean root A and a disposable second worktree. Each mutation was staged
+only in that worktree, passed all 13 leaves, and was restored before the next
+case.
+
+| Case | Run | Full CI | Nextest | Compile/link | Execution | Doctest | Verification tail |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| documentation-only | `run-1681527-1784328763000097724` | 196.914s | 92.269s | 18.58s | 73.281s | 13.412s | 84.869s |
+| leaf `mfm-authored-config` | `run-1696888-1784328969282287031` | 211.876s | 97.885s | 25.70s | 71.783s | 13.410s | 89.768s |
+| shared `mfm-ids` | `run-1716194-1784329196847438403` | 265.513s | 124.707s | 52.07s | 72.125s | 13.872s | 92.093s |
+| exact commit, second worktree | `run-1656858-1784328401782937748` | 254.160s | 111.635s | 38.96s | 72.316s | 14.675s | 106.649s |
+
+Relative to the 197.644s warm median, the documentation probe was effectively
+unchanged, the leaf edit added 14.232s/7.2%, the shared edit added
+67.869s/34.3%, and changing only the worktree path added 56.516s/28.6%.
+Nextest execution remained within 1.5s across these four observations; the
+changed-source and path costs came principally from compilation, linking, and
+the serial verification tail rather than reduced coverage or test selection.
+
+Every qualification and invalidation run reported 974/974 Nextest tests,
+doctests, all nine Trybuild harnesses, offline and online SQLx, and keystore,
+CLI, REST, metadata, and Postgres parity. A post-matrix inventory regenerated
+99 test binaries and 974 identifiers. Sorting
+`<binary-id>::<test-name>` in byte order with a trailing newline retained the
+frozen SHA-256
+`e75d6ea039b5507c6f9b89bef89656e31073c02f8f17f74f680fc2bbf0d67f08`.
+
+An unchanged same-path target occupied approximately 10.49 GB with 17,790
+files and approximately 1.79 GB of Trybuild artifacts. The second-worktree
+run grew root A's target from 10,485,362,688 to 10,889,363,746 bytes and its
+file count from 17,790 to 19,789. After all probes, its Trybuild subtree was
+2,229,363,182 bytes. Thus an exact source revision at another path still
+accumulates path-specific variants even though most artifacts are reused.
+
+Three fresh roots are the supported cacheless observations. The local target
+has no remote backend, so backend-unavailable behavior is not applicable; it
+also has no explicit same-namespace bypass. R2-04's failure evidence remains
+applicable under the unchanged model, runtime ABI, and cache identity:
+active-process cleanup fails closed, cancellation leaves a recoverable Cargo
+target, same-target writers rely on Cargo locking rather than a Nixfied lease,
+and independently chosen state roots can still collide on slot-derived ports.
+R2-09 did not repeat those destructive probes merely to reproduce unchanged
+identity evidence.
+
+After evidence extraction, supported slot cleanup removed roots B, A, and C
+under cleanup IDs `cleanup-1681368-1784328743439736227`,
+`cleanup-1749539-1784329648543288621`, and
+`cleanup-1749800-1784329651071822662`. Filesystem availability rose from
+approximately 16 GB before cleanup to 39 GB, no experimental slot remained,
+and the disposable worktree was removed cleanly. As defined by the current
+coarse cleanup contract, the cited run logs were deleted with their slots.
+
+### Normalized candidate comparison
+
+Values below distinguish qualification distributions from screening-only
+observations. A dash means the candidate stopped before that measurement; it
+does not mean a passing result.
+
+| Candidate | Full-gate distribution | Leaf/shared edit | Local reuse/realization | Persistent bytes | Coverage | Operations | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Scoped Cargo target | qualified: clean 320.486-422.086s, median 359.204s (n=3); warm 194.250-244.187s, median 197.644s (n=5); saves 161.560s/45.0% | full CI 211.876s/265.513s; compile 25.70s/52.07s | native same-path Cargo reuse; clean root is the only bypass proxy; no backend | approximately 10.49 GB unchanged; exact second path added approximately 404 MB | exact 99 binaries/974 IDs and all public leaves | slot-wide cleanup only; no cache inspection, bounds, cache-only GC, explicit bypass, enforced worktree owner, or Nixfied writer lease | performance-qualified; operational hold for R2-10 |
+| `sccache` | screening only: empty-cache median 357.74s (n=2), warm median 217.72s (n=3 heterogeneous cases); clean regressed 17.4% | focused tests 85.13s/128.70s; 250/66 and 59/363 hits/misses | 100% same-path fresh-target hits, but second path fell to 81.2% and only 12.7% faster than control | 1.03-1.54 GB observed under 5 GiB bound; 32 MiB stress bound evicted useful entries | exact coverage and tested false-hit recovery passed | daemon and explicit wrapper bypass exist; cache remains outside Nixfied ownership, trust, inspection, and lifecycle | rejected at screening: clean regression and path-sensitive materiality failure |
+| Crane artifact | screening only: retained artifact/clean residual 271.36s outer; warm 188.81-195.74s, median 195.20s (n=3), only 4.4%/9.05s faster | archive rebuild 54.86s/52.58s; execution 103.18s/81.21s | exact Nix store hits; cold dependency, archive, and execution chain approximately 358s | approximately 442 MB dependency + 758 MB archive + 1.76 GB mutable Trybuild target per execution slot | exact 99/974 inventory; Trybuild remains nested Cargo; doctest and parity remain residual | strong Nix inspection/GC for immutable outputs; archive extraction and mutable residual need separate capacity/lifecycle | rejected at screening: misses full-gate materiality |
+| `crate2nix` artifacts | no full gate; hard coverage veto before timing qualification | shared edit changed 263/1,724 aggregate closure paths; leaf artifact reuse alone passed | exact Nix reuse for simple leaf; all-root build took 15:34.87 | leaf tests 15.0 MB output/74.3 MB closure; aggregate closure 733.0 MB plus unrealized full test surface | failed repository/sibling source inputs and supported reusable Trybuild artifact | committed 698 KB graph needs drift gate, or expensive IFD; private API would still not repair semantics | rejected at screening: no authoritative artifact or exact coverage |
+| `cargo2nix` artifacts | no full gate; dependency/feature and coverage vetoes before timing qualification | every tracked edit, including README, invalidated every reachable local MFM crate | exact Nix reuse for simple leaf; generator bootstrap 12:22.42 and 1.44 GB unique closure | leaf library/test closures 74.9/61.8 MB; partial all-test graph had 3,029 closure paths | failed Cargo dependency fidelity, 35 test crates, Trybuild, doctests, and parity | 488 KB generated graph has lock drift guard, but older generator/toolchain, overlay order, and overrides add maintenance | rejected at screening: incorrect graph and incomplete coverage |
+| Execution topology | no qualifying full-gate distribution; four workers saved 1.6%/1.264s, doctest overlap 4.9%/4.64s, execution-only parity overlap 18.0%/9.05s | n/a | n/a | duplicate execution target reached approximately 11 GB; shared target serializes Cargo writers | focused probes retained exact selected tests; public graph unchanged | true Cargo overlap requires separate targets; current shared target prevents nominal graph concurrency | rejected at screening: every end-to-end saving missed 15% and 30s |
+
+The scoped Cargo target is the sole performance-qualified candidate. It is not
+an operationally complete architecture: retaining it without the R2-04
+framework requirements would leave unbounded mutable storage and ambiguous
+ownership. Every alternative has an independent screening veto, so the
+evidence gives no approved additive hypothesis and no basis for a combined
+pilot.
+
+The comparison is decision-quality for R2-10. That phase can select the least
+complex long-term boundary, including no new compilation cache, while treating
+the scoped target's inspection, ownership, retention, cleanup, bypass, and
+writer-semantics gaps as explicit design requirements. R2-09 makes no
+architecture selection and requests no additional measurement.
