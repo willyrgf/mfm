@@ -276,7 +276,7 @@ pub(super) fn assert_node_failed_with_code_and_retryable(
         diagnostic
             .schema_id
             .as_str()
-            .contains("schema:mfm.runtime.redacted_attempt_failure_diagnostic:2:sha256-jcs-v1:"),
+            .contains("schema:mfm.runtime.redacted_attempt_failure_diagnostic:3:sha256-jcs-v1:"),
         "diagnostic schema id should identify the runtime redacted failure diagnostic schema"
     );
     let retained = store

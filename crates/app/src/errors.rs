@@ -109,7 +109,7 @@ impl From<mfm_runtime::RuntimeError> for AppError {
             | mfm_runtime::RuntimeError::ExecutionClaim(_)
             | mfm_runtime::RuntimeError::InputMaterialization(_)
             | mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
-            | mfm_runtime::RuntimeError::InvalidRunnerOutputFailure { .. }
+            | mfm_runtime::RuntimeError::Failure(_)
             | mfm_runtime::RuntimeError::RuntimeValidation(_)
             | mfm_runtime::RuntimeError::Identity(_)
             | mfm_runtime::RuntimeError::Canonical(_) => Self::backend(

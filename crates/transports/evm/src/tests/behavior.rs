@@ -39,7 +39,7 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
     };
     assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
     assert_eq!(
-        diagnostic.to_public_details_json()["fields"],
+        serde_json::to_value(&diagnostic).expect("serialize diagnostic")["fields"],
         serde_json::json!({
             "expected_chain_id": 1,
             "network_id": "mainnet",

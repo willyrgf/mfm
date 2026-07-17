@@ -9,17 +9,19 @@ use serde_json::Value;
 pub const REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA: &str =
     "mfm.runtime.redacted_attempt_failure_diagnostic";
 /// Schema version for retained runtime attempt-failure diagnostics.
-pub const REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION: &str = "2";
+pub const REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION: &str = "3";
 
 /// Validated public metadata supplied by a typed runner failure.
 ///
 /// Runtime owns retryability and attaches it when it creates the persisted event. A runner can
-/// select only the stable public code, category, and safe message represented here.
+/// select only the stable public code, category, safe message, and closed redaction-safe provider
+/// diagnostics represented here. Diagnostics are sorted and deduplicated at construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeFailure {
     code: events::ErrorCode,
     category: events::ErrorCategory,
     safe_message: String,
+    diagnostics: Vec<RedactedProviderDiagnostic>,
 }
 
 impl RuntimeFailure {
@@ -28,15 +30,19 @@ impl RuntimeFailure {
         code: events::ErrorCode,
         category: events::ErrorCategory,
         safe_message: impl Into<String>,
+        mut diagnostics: Vec<RedactedProviderDiagnostic>,
     ) -> crate::Result<Self> {
         let safe_message = safe_message.into();
         events::MfmErrorInfo::new(code.clone(), category, false, safe_message.clone()).map_err(
             |_| RuntimeError::InvalidRunnerOutput("invalid runner failure contract".into()),
         )?;
+        diagnostics.sort();
+        diagnostics.dedup();
         Ok(Self {
             code,
             category,
             safe_message,
+            diagnostics,
         })
     }
 
@@ -53,6 +59,11 @@ impl RuntimeFailure {
     /// Returns the validated public-safe message.
     pub fn safe_message(&self) -> &str {
         &self.safe_message
+    }
+
+    /// Returns deterministically ordered, deduplicated provider diagnostics.
+    pub fn diagnostics(&self) -> &[RedactedProviderDiagnostic] {
+        &self.diagnostics
     }
 
     pub(crate) fn public_error(&self, retryable: bool) -> crate::Result<events::MfmErrorInfo> {
@@ -72,91 +83,48 @@ impl fmt::Display for RuntimeFailure {
     }
 }
 
-/// Versioned, discriminated diagnostic evidence retained with a runtime failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeDiagnostic {
-    /// Closed provider diagnostic evidence.
-    Provider(RedactedProviderDiagnostic),
-}
-
-impl RuntimeDiagnostic {
-    /// Creates provider diagnostic evidence.
-    pub fn provider(diagnostic: RedactedProviderDiagnostic) -> Self {
-        Self::Provider(diagnostic)
+/// Parses the complete retained attempt-failure diagnostic artifact.
+pub fn attempt_failure_diagnostics_from_artifact_json(
+    value: &Value,
+) -> crate::Result<Vec<RedactedProviderDiagnostic>> {
+    let object = value.as_object().ok_or_else(invalid_diagnostic)?;
+    const FIELDS: [&str; 7] = [
+        "attempt_id",
+        "diagnostic_schema",
+        "diagnostic_schema_version",
+        "diagnostics",
+        "node_id",
+        "run_id",
+        "spec_hash",
+    ];
+    if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
+        return Err(invalid_diagnostic());
     }
-
-    /// Parses the versioned diagnostic envelope from retained evidence.
-    pub fn from_json(value: &Value) -> crate::Result<Self> {
-        let object = value.as_object().ok_or_else(invalid_diagnostic)?;
-        if object.len() != 3
-            || object
-                .keys()
-                .any(|key| !matches!(key.as_str(), "details" | "kind" | "version"))
-        {
+    if object.get("diagnostic_schema").and_then(Value::as_str)
+        != Some(REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA)
+        || object
+            .get("diagnostic_schema_version")
+            .and_then(Value::as_str)
+            != Some(REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION)
+    {
+        return Err(invalid_diagnostic());
+    }
+    for field in ["attempt_id", "node_id", "run_id", "spec_hash"] {
+        if !object.get(field).is_some_and(Value::is_string) {
             return Err(invalid_diagnostic());
         }
-        if object.get("kind").and_then(Value::as_str) != Some("provider")
-            || object.get("version").and_then(Value::as_u64) != Some(1)
-        {
-            return Err(invalid_diagnostic());
-        }
-        let diagnostic = RedactedProviderDiagnostic::from_public_details_json(
-            object.get("details").ok_or_else(invalid_diagnostic)?,
-        )
-        .ok_or_else(invalid_diagnostic)?;
-        Ok(Self::Provider(diagnostic))
     }
-
-    /// Parses the complete retained attempt-failure diagnostic artifact.
-    pub fn from_attempt_artifact_json(value: &Value) -> crate::Result<Option<Self>> {
-        let object = value.as_object().ok_or_else(invalid_diagnostic)?;
-        const FIELDS: [&str; 7] = [
-            "attempt_id",
-            "diagnostic",
-            "diagnostic_schema",
-            "diagnostic_schema_version",
-            "node_id",
-            "run_id",
-            "spec_hash",
-        ];
-        if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
-            return Err(invalid_diagnostic());
-        }
-        if object.get("diagnostic_schema").and_then(Value::as_str)
-            != Some(REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA)
-            || object
-                .get("diagnostic_schema_version")
-                .and_then(Value::as_str)
-                != Some(REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION)
-        {
-            return Err(invalid_diagnostic());
-        }
-        for field in ["attempt_id", "node_id", "run_id", "spec_hash"] {
-            if !object.get(field).is_some_and(Value::is_string) {
-                return Err(invalid_diagnostic());
-            }
-        }
-        match object.get("diagnostic").ok_or_else(invalid_diagnostic)? {
-            Value::Null => Ok(None),
-            diagnostic => Self::from_json(diagnostic).map(Some),
-        }
+    let diagnostics = serde_json::from_value::<Vec<RedactedProviderDiagnostic>>(
+        object
+            .get("diagnostics")
+            .cloned()
+            .ok_or_else(invalid_diagnostic)?,
+    )
+    .map_err(|_| invalid_diagnostic())?;
+    if diagnostics.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(invalid_diagnostic());
     }
-
-    /// Returns the canonical public JSON details represented by this diagnostic.
-    pub fn public_details_json(&self) -> Value {
-        match self {
-            Self::Provider(diagnostic) => diagnostic.to_public_details_json(),
-        }
-    }
-
-    /// Serializes the discriminated diagnostic envelope for retained evidence.
-    pub(crate) fn to_json(&self) -> Value {
-        serde_json::json!({
-            "details": self.public_details_json(),
-            "kind": "provider",
-            "version": 1,
-        })
-    }
+    Ok(diagnostics)
 }
 
 fn invalid_diagnostic() -> RuntimeError {
@@ -190,14 +158,9 @@ pub enum RuntimeError {
     /// Runner output violated certified node or capability authority.
     #[error("invalid runner output: {0}")]
     InvalidRunnerOutput(String),
-    /// Runner output failed with typed public metadata and optional diagnostic evidence.
-    #[error("invalid runner output: {failure}")]
-    InvalidRunnerOutputFailure {
-        /// Validated public failure metadata.
-        failure: RuntimeFailure,
-        /// Closed diagnostic evidence, when the runner produced it.
-        diagnostic: Option<Box<RuntimeDiagnostic>>,
-    },
+    /// Execution failed with typed public metadata and closed diagnostic evidence.
+    #[error("runtime failure: {0}")]
+    Failure(RuntimeFailure),
     /// Runtime validation failed inside a valid started attempt.
     #[error("runtime validation failed: {0}")]
     RuntimeValidation(String),
@@ -238,4 +201,79 @@ impl From<mfm_events::EventError> for RuntimeError {
 
 pub(crate) fn async_store_error(error: impl fmt::Display) -> RuntimeError {
     RuntimeError::Store(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mfm_capabilities::{ProviderDiagnosticCode, ProviderDiagnosticValue};
+    use mfm_ids::LocalPublicId;
+
+    fn id(value: &str) -> LocalPublicId {
+        LocalPublicId::new(value).expect("checked test id")
+    }
+
+    fn diagnostic(family: &str) -> RedactedProviderDiagnostic {
+        RedactedProviderDiagnostic::new(
+            id(family),
+            ProviderDiagnosticCode::ProviderConfigurationMissing,
+        )
+        .with_field(
+            id("network_id"),
+            ProviderDiagnosticValue::Id(id("test-network")),
+        )
+    }
+
+    #[test]
+    fn runtime_failure_sorts_and_deduplicates_diagnostics() {
+        let failure = RuntimeFailure::new(
+            events::ErrorCode::new("RuntimeConfigRequired").expect("error code"),
+            events::ErrorCategory::Capability,
+            "runtime configuration is required",
+            vec![diagnostic("evm"), diagnostic("bitcoin"), diagnostic("evm")],
+        )
+        .expect("runtime failure");
+
+        assert_eq!(
+            failure
+                .diagnostics()
+                .iter()
+                .map(|value| value.provider_family().as_str())
+                .collect::<Vec<_>>(),
+            vec!["bitcoin", "evm"]
+        );
+    }
+
+    #[test]
+    fn attempt_diagnostic_parser_accepts_only_the_direct_version_three_array() {
+        let current = serde_json::json!({
+            "attempt_id": "attempt:test",
+            "diagnostic_schema": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
+            "diagnostic_schema_version": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
+            "diagnostics": [diagnostic("evm")],
+            "node_id": "node:test",
+            "run_id": "run:test",
+            "spec_hash": "spec:test",
+        });
+        assert_eq!(
+            attempt_failure_diagnostics_from_artifact_json(&current)
+                .expect("current representation"),
+            vec![diagnostic("evm")]
+        );
+
+        let legacy = serde_json::json!({
+            "attempt_id": "attempt:test",
+            "diagnostic": {
+                "details": diagnostic("evm"),
+                "kind": "provider",
+                "version": 1,
+            },
+            "diagnostic_schema": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
+            "diagnostic_schema_version": "2",
+            "node_id": "node:test",
+            "run_id": "run:test",
+            "spec_hash": "spec:test",
+        });
+        assert!(attempt_failure_diagnostics_from_artifact_json(&legacy).is_err());
+    }
 }

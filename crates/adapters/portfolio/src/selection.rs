@@ -617,12 +617,10 @@ pub(crate) fn holding_runtime_error(
         events::ErrorCode::new(code).expect("portfolio error code is a checked public code"),
         events::ErrorCategory::Validation,
         format!("{code}: portfolio holding selection failed"),
+        Vec::new(),
     )
     .expect("portfolio failure metadata is a checked public contract");
-    mfm_runtime::RuntimeError::InvalidRunnerOutputFailure {
-        failure,
-        diagnostic: None,
-    }
+    mfm_runtime::RuntimeError::Failure(failure)
 }
 
 pub(crate) fn fact_index_runtime_error(

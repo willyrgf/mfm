@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::{ProviderDiagnosticCode, ProviderDiagnosticValue};
+use mfm_capabilities::{
+    ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
+};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
@@ -28,8 +30,8 @@ use mfm_ids::{
 use mfm_replay::v1::{ReplayBroker, ReplayReadAuthority, RetainedSourceFactReplayEvent};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
-    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RuntimeDiagnostic, SchedulerStatus,
-    SerialTypedScheduler, VerifiedRunHistoryView,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
+    VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -492,21 +494,23 @@ pub(crate) struct RunLaunchSeedArtifact {
 
 fn verify_replay_diagnostic(
     expected: Option<&events::RedactedJson>,
-    diagnostic: Option<&RuntimeDiagnostic>,
+    diagnostics: &[RedactedProviderDiagnostic],
 ) -> Result<(), AppError> {
-    match (expected, diagnostic) {
-        (Some(_), None) => Err(replay_diagnostic_error()),
-        (Some(expected), diagnostic) => {
-            let diagnostic = diagnostic.ok_or_else(replay_diagnostic_error)?;
-            let digest = canonical_value_digest(&diagnostic.public_details_json())?;
+    match (expected, diagnostics.is_empty()) {
+        (Some(_), true) => Err(replay_diagnostic_error()),
+        (Some(expected), false) => {
+            let value = serde_json::to_value(diagnostics).map_err(|_| replay_diagnostic_error())?;
+            let digest = canonical_value_digest(&value)?;
             if digest != expected.content_digest {
                 return Err(replay_diagnostic_error());
             }
-            validate_replay_diagnostic(diagnostic)?;
+            for diagnostic in diagnostics {
+                validate_replay_diagnostic(diagnostic)?;
+            }
             Ok(())
         }
-        (None, None) => Ok(()),
-        (None, Some(_)) => Err(replay_diagnostic_error()),
+        (None, true) => Ok(()),
+        (None, false) => Err(replay_diagnostic_error()),
     }
 }
 
@@ -515,15 +519,12 @@ fn verify_replay_diagnostic_json(
     expected: Option<&events::RedactedJson>,
     value: &Value,
 ) -> Result<(), AppError> {
-    let diagnostic = match value {
-        Value::Null => None,
-        value => Some(RuntimeDiagnostic::from_json(value).map_err(|_| replay_diagnostic_error())?),
-    };
-    verify_replay_diagnostic(expected, diagnostic.as_ref())
+    let diagnostics = serde_json::from_value::<Vec<RedactedProviderDiagnostic>>(value.clone())
+        .map_err(|_| replay_diagnostic_error())?;
+    verify_replay_diagnostic(expected, &diagnostics)
 }
 
-fn validate_replay_diagnostic(diagnostic: &RuntimeDiagnostic) -> Result<(), AppError> {
-    let RuntimeDiagnostic::Provider(diagnostic) = diagnostic;
+fn validate_replay_diagnostic(diagnostic: &RedactedProviderDiagnostic) -> Result<(), AppError> {
     if diagnostic.provider_family().as_str() == "evm"
         && diagnostic.code() == ProviderDiagnosticCode::SourceMismatch
     {

@@ -64,11 +64,11 @@ use mfm_runtime::{
     ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs,
     PreInvocationRunCtx, PreInvocationRunnerFuture, RunnerCapabilityBinding,
     RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerOutputBuilder,
-    RunnerRegistrationBuilder, RuntimeDiagnostic, RuntimeFailure, SideEffectDriver,
-    SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks,
-    SideEffectVerifyDriver, TypedContextOutputExtractor,
+    RunnerRegistrationBuilder, RuntimeFailure, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    TypedContextOutputExtractor,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;
@@ -1209,12 +1209,10 @@ impl From<EvmContractAdapterError> for mfm_runtime::RuntimeError {
                         .expect("EVM source mismatch code is a checked public code"),
                     events::ErrorCategory::Capability,
                     "EVM source evidence did not match provider binding",
+                    vec![diagnostic],
                 )
                 .expect("EVM source mismatch metadata is a checked public contract");
-                Self::InvalidRunnerOutputFailure {
-                    failure,
-                    diagnostic: Some(Box::new(RuntimeDiagnostic::provider(diagnostic))),
-                }
+                Self::Failure(failure)
             }
             error => Self::InvalidRunnerOutput(error.to_string()),
         }

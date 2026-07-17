@@ -46,8 +46,8 @@ pub use binding::{
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::{
-    RuntimeDiagnostic, RuntimeError, RuntimeFailure, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
-    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
+    attempt_failure_diagnostics_from_artifact_json, RuntimeError, RuntimeFailure,
+    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
 };
 pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistoryView};
 pub use invocation::{

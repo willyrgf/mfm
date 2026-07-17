@@ -544,9 +544,10 @@ pub(super) async fn verify_replay_diagnostics_from_recorded_artifacts(
             .map_err(async_app_store_error)?;
         let diagnostic_artifact = serde_json::from_slice::<serde_json::Value>(artifact.bytes())
             .map_err(|_| replay_diagnostic_error())?;
-        let diagnostic = RuntimeDiagnostic::from_attempt_artifact_json(&diagnostic_artifact)
-            .map_err(|_| replay_diagnostic_error())?;
-        verify_replay_diagnostic(payload.error.public_details.as_ref(), diagnostic.as_ref())?;
+        let diagnostics =
+            mfm_runtime::attempt_failure_diagnostics_from_artifact_json(&diagnostic_artifact)
+                .map_err(|_| replay_diagnostic_error())?;
+        verify_replay_diagnostic(payload.error.public_details.as_ref(), &diagnostics)?;
     }
     Ok(())
 }

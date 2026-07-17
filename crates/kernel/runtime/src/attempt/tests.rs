@@ -169,12 +169,10 @@ fn typed_runner_failure_metadata_controls_attempt_error() {
         events::ErrorCode::new("missing_fact").expect("code"),
         events::ErrorCategory::Validation,
         "missing_fact: no acceptable Platform fact",
+        Vec::new(),
     )
     .expect("typed failure");
-    let error = RuntimeError::InvalidRunnerOutputFailure {
-        failure,
-        diagnostic: None,
-    };
+    let error = RuntimeError::Failure(failure);
     let info = observed_attempt_failure_info(
         &error,
         ObservedFailureRetryabilityPolicy {
@@ -186,29 +184,25 @@ fn typed_runner_failure_metadata_controls_attempt_error() {
     assert_eq!(info.error.code.as_str(), "missing_fact");
     assert!(info.error.safe_message.contains("missing_fact"));
 
-    let arbitrary_diagnostic = RuntimeDiagnostic::provider(
-        mfm_capabilities::RedactedProviderDiagnostic::new(
-            mfm_ids::LocalPublicId::new("portfolio").expect("provider"),
-            mfm_capabilities::ProviderDiagnosticCode::ResponseInvalid,
-        )
-        .with_field(
-            mfm_ids::LocalPublicId::new("domain_code").expect("field"),
-            mfm_capabilities::ProviderDiagnosticValue::Id(
-                mfm_ids::LocalPublicId::new("different_code").expect("value"),
-            ),
+    let arbitrary_diagnostic = mfm_capabilities::RedactedProviderDiagnostic::new(
+        mfm_ids::LocalPublicId::new("portfolio").expect("provider"),
+        mfm_capabilities::ProviderDiagnosticCode::ResponseInvalid,
+    )
+    .with_field(
+        mfm_ids::LocalPublicId::new("domain_code").expect("field"),
+        mfm_capabilities::ProviderDiagnosticValue::Id(
+            mfm_ids::LocalPublicId::new("different_code").expect("value"),
         ),
     );
     let failure = crate::RuntimeFailure::new(
         events::ErrorCode::new("missing_fact").expect("code"),
         events::ErrorCategory::Validation,
         "missing_fact: no acceptable Platform fact",
+        vec![arbitrary_diagnostic],
     )
     .expect("typed failure");
     let info = observed_attempt_failure_info(
-        &RuntimeError::InvalidRunnerOutputFailure {
-            failure,
-            diagnostic: Some(Box::new(arbitrary_diagnostic)),
-        },
+        &RuntimeError::Failure(failure),
         ObservedFailureRetryabilityPolicy {
             input_materialization_retryable: false,
         },
