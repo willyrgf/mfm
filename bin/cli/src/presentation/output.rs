@@ -98,7 +98,7 @@ pub(crate) fn print_success<T: Serialize>(data: T, format: &OutputFormat) {
 /// Print an error response in the specified format  
 pub(crate) fn print_error(error: PublicError, format: &OutputFormat) {
     if !format.is_json() {
-        eprintln!("{}: {}", error.code, error.message);
+        eprintln!("{}", error_text(&error));
         return;
     }
 
@@ -109,6 +109,14 @@ pub(crate) fn print_error(error: PublicError, format: &OutputFormat) {
         eprintln!(
             r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize error response"}}}}"#
         );
+    }
+}
+
+fn error_text(error: &PublicError) -> String {
+    if error.code == "RuntimeConfigRequired" {
+        format!("{}: {}; pass --runtime-config", error.code, error.message)
+    } else {
+        format!("{}: {}", error.code, error.message)
     }
 }
 
@@ -261,5 +269,30 @@ where
             print_error(error, format);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_config_text_adds_cli_remediation() {
+        let error = PublicError::new(
+            mfm_app::ErrorClass::ServiceUnavailable,
+            "RuntimeConfigRequired",
+            "test/primary requires EVM and Bitcoin runtime routes",
+        );
+
+        assert_eq!(
+            error_text(&error),
+            "RuntimeConfigRequired: test/primary requires EVM and Bitcoin runtime routes; pass --runtime-config"
+        );
+    }
+
+    #[test]
+    fn other_error_text_has_no_runtime_config_remediation() {
+        let error = PublicError::bad_request("InvalidInput", "input is invalid");
+        assert_eq!(error_text(&error), "InvalidInput: input is invalid");
     }
 }

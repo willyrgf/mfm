@@ -88,6 +88,16 @@ impl From<mfm_runtime::RuntimeError> for PublicError {
                 "LaunchRunnerUnavailable",
                 "A required typed runner is unavailable",
             ),
+            mfm_runtime::RuntimeError::Failure(failure) => {
+                let class = match failure.code().as_str() {
+                    "RuntimeConfigRequired" | "RuntimeConfigInvalid" => {
+                        ErrorClass::ServiceUnavailable
+                    }
+                    _ => ErrorClass::Internal,
+                };
+                Self::new(class, failure.code().as_str(), failure.safe_message())
+                    .with_diagnostics(failure.diagnostics().to_vec())
+            }
             mfm_runtime::RuntimeError::SpecHash(_)
             | mfm_runtime::RuntimeError::InvalidSpec(_)
             | mfm_runtime::RuntimeError::InvalidRunStream(_)
@@ -95,7 +105,6 @@ impl From<mfm_runtime::RuntimeError> for PublicError {
             | mfm_runtime::RuntimeError::ExecutionClaim(_)
             | mfm_runtime::RuntimeError::InputMaterialization(_)
             | mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
-            | mfm_runtime::RuntimeError::Failure(_)
             | mfm_runtime::RuntimeError::RuntimeValidation(_)
             | mfm_runtime::RuntimeError::Identity(_)
             | mfm_runtime::RuntimeError::Canonical(_) => Self::backend(
@@ -103,6 +112,55 @@ impl From<mfm_runtime::RuntimeError> for PublicError {
                 "LaunchRuntimeError",
                 "Typed runtime rejected the requested operation",
             ),
+        }
+    }
+}
+
+pub(crate) fn runtime_error_with_launch_context(
+    error: mfm_runtime::RuntimeError,
+    entry_point: &mfm_events::v1::EntryPointLaunchEvidence,
+) -> PublicError {
+    let mut public = PublicError::from(error);
+    if public.code != "RuntimeConfigRequired" {
+        return public;
+    }
+
+    let targets = entry_point
+        .configured_targets
+        .iter()
+        .map(|configured| configured.target.as_str())
+        .collect::<Vec<_>>();
+    let target_summary = joined_public_names(&targets);
+    if target_summary.is_empty() {
+        return public;
+    }
+
+    let requires_evm = public
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.provider_family().as_str() == "evm");
+    let requires_bitcoin = public
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.provider_family().as_str() == "bitcoin");
+    let family_summary = match (requires_evm, requires_bitcoin) {
+        (true, true) => "EVM and Bitcoin",
+        (true, false) => "EVM",
+        (false, true) => "Bitcoin",
+        (false, false) => return public,
+    };
+    public.message = format!("{target_summary} requires {family_summary} runtime routes");
+    public
+}
+
+fn joined_public_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [name] => (*name).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        _ => {
+            let (last, rest) = names.split_last().expect("non-empty names were checked");
+            format!("{}, and {last}", rest.join(", "))
         }
     }
 }
@@ -247,5 +305,50 @@ mod tests {
             "provider_configuration_missing"
         );
         assert!(value.get("class").is_none());
+    }
+
+    #[test]
+    fn launch_context_summarizes_mixed_families_in_presentation_order() {
+        let diagnostic = |family| {
+            RedactedProviderDiagnostic::new(
+                id(family),
+                ProviderDiagnosticCode::ProviderConfigurationMissing,
+            )
+        };
+        let failure = mfm_runtime::RuntimeFailure::new(
+            mfm_events::v1::ErrorCode::new("RuntimeConfigRequired").expect("code"),
+            mfm_events::v1::ErrorCategory::Capability,
+            "runtime configuration is required",
+            vec![diagnostic("bitcoin"), diagnostic("evm")],
+        )
+        .expect("failure");
+        let entry_point = mfm_events::v1::EntryPointLaunchEvidence::new(
+            "mfm.portfolio/snapshot@1",
+            vec![mfm_events::v1::ConfiguredTargetEvidence::new(
+                mfm_ids::StableAuthorKey::new("test/primary").expect("target"),
+                mfm_ids::SchemaId::new(
+                    "mfm.test.schema",
+                    "1",
+                    mfm_ids::DigestAlgorithm::Sha256JcsV1,
+                    mfm_canonical::sha256_digest_bytes(b"mfm.test.schema"),
+                )
+                .expect("schema"),
+                mfm_ids::ContentDigest::from_digest(
+                    mfm_ids::DigestAlgorithm::Sha256JcsV1,
+                    mfm_canonical::sha256_digest_bytes(b"test target"),
+                ),
+            )],
+        )
+        .expect("entry point");
+
+        let error = runtime_error_with_launch_context(
+            mfm_runtime::RuntimeError::Failure(failure),
+            &entry_point,
+        );
+
+        assert_eq!(
+            error.message,
+            "test/primary requires EVM and Bitcoin runtime routes"
+        );
     }
 }

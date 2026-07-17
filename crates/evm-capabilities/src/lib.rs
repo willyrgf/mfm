@@ -28,9 +28,10 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
 use mfm_canonical::sha256_digest_bytes;
+pub use mfm_capabilities::ProviderDiagnosticCode;
 use mfm_capabilities::{
-    CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ProviderDiagnosticCode,
-    ProviderDiagnosticValue, ReadExternalRole, RedactedProviderDiagnostic,
+    CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ProviderDiagnosticValue,
+    ReadExternalRole, RedactedProviderDiagnostic,
 };
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
 

@@ -102,6 +102,14 @@ mismatches are classified as redacted provider diagnostics. Diagnostics may carr
 operation id and numeric status/error code, but never endpoint URLs, authorization headers, provider
 messages, response bodies, or runtime config paths.
 
+Ingress distinguishes absence from invalid input. No runtime file, no `evm` family, or no selected
+semantic route yields `RuntimeConfigRequired` with a `provider_configuration_missing` or
+`route_unavailable` diagnostic. The diagnostic retains only the certified `network_id` and
+`expected_chain_id`. An unreadable, malformed, or semantically invalid supplied file yields
+`RuntimeConfigInvalid`; it is never presented as a missing route. Admission aggregates and
+deduplicates all missing EVM and Bitcoin routes before any `RunAdmitted` event is appended. Resume
+performs the same check only for nonterminal live-source nodes.
+
 ## Signing
 
 Contract-state configs carry only signer intent: non-secret `signer_ref` and expected signer

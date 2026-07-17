@@ -274,6 +274,14 @@ Stable launch error codes:
 - `ConfiguredTargetMismatch`: the stored embedded id differs from the selected target.
 - `PortfolioSnapshotPlanFailed`: portfolio snapshot planning failed.
 - `EntryPointCertificationFailed`: the planned spec failed app-owned certification.
+- `RuntimeConfigRequired`: one or more certified live-source routes are absent. The response message
+  identifies the configured target and required provider families, while diagnostics retain only
+  semantic network bindings.
+- `RuntimeConfigInvalid`: a supplied runtime config is unreadable, malformed, or semantically
+  invalid.
+
+Both runtime-config failures use HTTP 503. REST preserves the shared neutral app message and never
+adds CLI syntax such as `--runtime-config`.
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.
 

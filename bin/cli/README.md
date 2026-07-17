@@ -525,6 +525,11 @@ Stable launch errors include:
 - `EntryPointCertificationFailed`: app assembly could not certify the planned typed spec.
 - `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.
+- `RuntimeConfigRequired`: one or more certified live-source routes are absent. The neutral shared
+  message identifies the configured target and required provider families; structured diagnostics
+  retain only semantic network bindings. Text output appends `; pass --runtime-config`.
+- `RuntimeConfigInvalid`: a supplied runtime config is unreadable, malformed, or semantically
+  invalid. It is not downgraded to a missing-route error.
 
 ### `run resume`
 

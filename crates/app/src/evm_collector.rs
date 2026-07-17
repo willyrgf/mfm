@@ -24,16 +24,13 @@ impl mfm_adapters_evm::EvmProviderFactory for LiveTransportRuntime {
         binding: &EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<()> {
         self.validate_evm_network_binding(binding)
-            .map_err(runtime_config_evm_capability_error)
     }
 
     fn bind_network(
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_adapters_evm::EvmBoundProvider>> {
-        let provider = self
-            .evm_provider(binding)
-            .map_err(runtime_config_evm_capability_error)?;
+        let provider = self.evm_provider(binding)?;
         Ok(Arc::new(BoundLiveEvmProvider { provider }))
     }
 }
@@ -70,14 +67,4 @@ impl EvmCallReadProvider for BoundLiveEvmProvider {
     {
         self.provider.read_call(request)
     }
-}
-
-fn runtime_config_evm_capability_error(
-    _error: mfm_runtime::RuntimeError,
-) -> mfm_evm_capabilities::EvmCapabilityError {
-    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-        mfm_evm_capabilities::evm_diagnostic(
-            mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
-        ),
-    )
 }

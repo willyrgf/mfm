@@ -201,12 +201,16 @@ impl BoundRuntimeContext {
         runtime_spec: &CertifiedRuntimeSpec,
         launch: &RunLaunchEvidence,
     ) -> Result<()> {
+        let mut required = Vec::new();
         for node in runtime_spec.executable_nodes() {
             if node.framework.is_none() {
-                self.validate_node_ingress(runtime_spec, node, launch)?;
+                collect_runtime_config_requirement(
+                    self.validate_node_ingress(runtime_spec, node, launch),
+                    &mut required,
+                )?;
             }
         }
-        Ok(())
+        runtime_config_requirement_result(required)
     }
 
     /// Validates process-local ingress only for domain nodes that may still execute.
@@ -222,16 +226,20 @@ impl BoundRuntimeContext {
         projection: &mfm_store::v1::ProjectionSnapshot,
         launch: &RunLaunchEvidence,
     ) -> Result<()> {
+        let mut required = Vec::new();
         for node in runtime_spec.executable_nodes() {
             if node.framework.is_none()
                 && projection
                     .cell_terminal_for_run(run_id, &node.output_cell)
                     .is_none()
             {
-                self.validate_node_ingress(runtime_spec, node, launch)?;
+                collect_runtime_config_requirement(
+                    self.validate_node_ingress(runtime_spec, node, launch),
+                    &mut required,
+                )?;
             }
         }
-        Ok(())
+        runtime_config_requirement_result(required)
     }
 
     fn require_node_authority(&self, node: &spec::NodeSpec) -> Result<()> {
@@ -294,6 +302,113 @@ impl BoundRuntimeContext {
         binding
             .runner
             .validate_ingress(RunnerIngressContext::new(runtime_spec, node, launch))
+    }
+}
+
+fn collect_runtime_config_requirement(
+    result: Result<()>,
+    required: &mut Vec<mfm_capabilities::RedactedProviderDiagnostic>,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(RuntimeError::Failure(failure))
+            if failure.code().as_str() == "RuntimeConfigRequired" =>
+        {
+            required.extend_from_slice(failure.diagnostics());
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn runtime_config_requirement_result(
+    required: Vec<mfm_capabilities::RedactedProviderDiagnostic>,
+) -> Result<()> {
+    if required.is_empty() {
+        return Ok(());
+    }
+    let failure = crate::RuntimeFailure::new(
+        events::ErrorCode::new("RuntimeConfigRequired")?,
+        events::ErrorCategory::Capability,
+        "runtime configuration is required",
+        required,
+    )?;
+    Err(RuntimeError::Failure(failure))
+}
+
+#[cfg(test)]
+mod runtime_config_requirement_tests {
+    use super::*;
+    use mfm_capabilities::{ProviderDiagnosticCode, ProviderDiagnosticValue};
+    use mfm_ids::LocalPublicId;
+
+    fn id(value: &str) -> LocalPublicId {
+        LocalPublicId::new(value).expect("checked test id")
+    }
+
+    fn diagnostic(family: &str, network: &str) -> mfm_capabilities::RedactedProviderDiagnostic {
+        mfm_capabilities::RedactedProviderDiagnostic::new(
+            id(family),
+            ProviderDiagnosticCode::ProviderConfigurationMissing,
+        )
+        .with_field(id("network_id"), ProviderDiagnosticValue::Id(id(network)))
+    }
+
+    fn failure(
+        code: &str,
+        diagnostics: Vec<mfm_capabilities::RedactedProviderDiagnostic>,
+    ) -> RuntimeError {
+        RuntimeError::Failure(
+            crate::RuntimeFailure::new(
+                events::ErrorCode::new(code).expect("error code"),
+                events::ErrorCategory::Capability,
+                "reviewed failure",
+                diagnostics,
+            )
+            .expect("runtime failure"),
+        )
+    }
+
+    #[test]
+    fn mixed_requirements_are_sorted_and_deduplicated() {
+        let evm = diagnostic("evm", "test-evm");
+        let bitcoin = diagnostic("bitcoin", "test-btc");
+        let mut required = Vec::new();
+
+        collect_runtime_config_requirement(
+            Err(failure("RuntimeConfigRequired", vec![evm.clone(), evm])),
+            &mut required,
+        )
+        .expect("EVM requirement");
+        collect_runtime_config_requirement(
+            Err(failure("RuntimeConfigRequired", vec![bitcoin])),
+            &mut required,
+        )
+        .expect("Bitcoin requirement");
+
+        let RuntimeError::Failure(failure) =
+            runtime_config_requirement_result(required).expect_err("requirements reject admission")
+        else {
+            panic!("expected structured failure");
+        };
+        assert_eq!(failure.code().as_str(), "RuntimeConfigRequired");
+        assert_eq!(failure.diagnostics().len(), 2);
+        assert_eq!(
+            failure.diagnostics()[0].provider_family().as_str(),
+            "bitcoin"
+        );
+        assert_eq!(failure.diagnostics()[1].provider_family().as_str(), "evm");
+    }
+
+    #[test]
+    fn invalid_configuration_remains_fail_fast() {
+        let invalid = failure("RuntimeConfigInvalid", vec![diagnostic("evm", "test-evm")]);
+        let error = collect_runtime_config_requirement(Err(invalid), &mut Vec::new())
+            .expect_err("invalid configuration is not a missing requirement");
+        let RuntimeError::Failure(failure) = error else {
+            panic!("expected structured failure");
+        };
+        assert_eq!(failure.code().as_str(), "RuntimeConfigInvalid");
     }
 }
 

@@ -683,7 +683,9 @@ async fn btc_collector_launch_defers_runtime_config_to_ingress() {
         .await
         .expect_err("missing BTC runtime config rejects at ingress before admission");
 
-    assert_eq!(error.code, "LaunchRuntimeError");
+    assert_eq!(error.code, "RuntimeConfigRequired");
+    assert_eq!(error.diagnostics.len(), 1);
+    assert_eq!(error.diagnostics[0].provider_family().as_str(), "bitcoin");
     assert!(store
         .load_run_stream(&run_id)
         .await

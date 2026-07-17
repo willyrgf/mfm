@@ -1,6 +1,7 @@
 use super::*;
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request};
+use axum::response::IntoResponse;
 use tower::ServiceExt;
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -39,6 +40,36 @@ fn invalid_run_id_has_domain_error() {
 
     assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     assert_eq!(err.public_error().code, "InvalidRunId");
+}
+
+#[tokio::test]
+async fn runtime_config_error_keeps_shared_payload_without_cli_syntax() {
+    let mut public: PublicError = serde_json::from_value(json!({
+        "code": "RuntimeConfigRequired",
+        "message": "test/primary requires EVM runtime routes",
+        "diagnostics": [{
+            "provider_family": "evm",
+            "code": "provider_configuration_missing",
+            "operation": null,
+            "fields": {}
+        }]
+    }))
+    .expect("shared public error JSON");
+    public.class = ErrorClass::ServiceUnavailable;
+
+    let response = ApiError::from(public).into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let value = response_json(response).await;
+    assert_eq!(value["error"]["code"], "RuntimeConfigRequired");
+    assert_eq!(
+        value["error"]["message"],
+        "test/primary requires EVM runtime routes"
+    );
+    assert_eq!(value["error"]["diagnostics"][0]["provider_family"], "evm");
+    assert!(!value["error"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("--runtime-config"));
 }
 
 #[tokio::test]

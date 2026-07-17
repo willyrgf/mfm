@@ -18,8 +18,8 @@ use mfm_evm_capabilities::{
     EvmBalanceReadCapability, EvmBalanceReadProvider, EvmBalanceReadRequest,
     EvmBlockReadCapability, EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector,
     EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse,
-    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId, RedactedEvmSourceEvidence,
-    EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
+    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId, ProviderDiagnosticCode,
+    RedactedEvmSourceEvidence, EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec};
@@ -926,7 +926,31 @@ fn fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBindi
 }
 
 fn evm_capability_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+    let Some(diagnostic) = error.redacted_diagnostic().cloned() else {
+        return mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "EVM capability request failed without provider diagnostics".to_owned(),
+        );
+    };
+    let (code, message) = match diagnostic.code() {
+        ProviderDiagnosticCode::ProviderConfigurationMissing
+        | ProviderDiagnosticCode::RouteUnavailable => (
+            "RuntimeConfigRequired",
+            "EVM runtime configuration is required",
+        ),
+        ProviderDiagnosticCode::ProviderConfigurationInvalid => (
+            "RuntimeConfigInvalid",
+            "EVM runtime configuration is invalid",
+        ),
+        _ => ("EvmProviderFailure", "EVM provider capability failed"),
+    };
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("EVM runtime failure code is checked public text"),
+        events::ErrorCategory::Capability,
+        message,
+        vec![diagnostic],
+    )
+    .expect("EVM runtime failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::Failure(failure)
 }
 
 fn evm_state_runtime_error(error: mfm_states_evm::EvmStateError) -> mfm_runtime::RuntimeError {

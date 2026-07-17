@@ -1,4 +1,5 @@
 use super::*;
+use crate::errors::runtime_error_with_launch_context;
 
 impl<S, A> RunServices<S, A>
 where
@@ -83,12 +84,17 @@ where
                     .attach_to_existing_run(&run_id, &identity_material)
                     .await;
             }
-            let launch = self.scheduler.prepare_run_launch(
-                &runtime_spec,
-                identity_material.clone(),
-                req.evidence.clone(),
-                expected_next_seq,
-            )?;
+            let launch = self
+                .scheduler
+                .prepare_run_launch(
+                    &runtime_spec,
+                    identity_material.clone(),
+                    req.evidence.clone(),
+                    expected_next_seq,
+                )
+                .map_err(|error| {
+                    runtime_error_with_launch_context(error, &req.evidence.entry_point)
+                })?;
             let execution_claim_token = new_execution_claim_token()?;
             let execution_claim = store::PreparedExecutionClaim::new(
                 execution_scope.clone(),
@@ -278,7 +284,10 @@ where
                 run_id,
                 context.read.view().projection_snapshot(),
                 &launch_evidence,
-            )?;
+            )
+            .map_err(|error| {
+                runtime_error_with_launch_context(error, &launch_evidence.entry_point)
+            })?;
         let mut lease = match self
             .acquire_execution_claim_for_drive(&execution_scope, run_id)
             .await?

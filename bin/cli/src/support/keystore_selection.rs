@@ -72,7 +72,9 @@ fn resolve_runtime_config_keystore(
         &runtime_config,
         mfm_runtime_config::RuntimeConfigRequirement::keystores(),
     )
-    .map_err(|error| PublicError::bad_request("runtime_config_error", error.to_string()))?;
+    .map_err(|_| {
+        PublicError::bad_request("RuntimeConfigInvalid", "Runtime configuration is invalid")
+    })?;
     let profile = config.keystores().get(&keystore_ref).ok_or_else(|| {
         PublicError::bad_request(
             "keystore_profile_not_found",

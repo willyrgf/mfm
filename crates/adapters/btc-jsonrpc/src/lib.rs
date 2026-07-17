@@ -21,7 +21,7 @@ use mfm_btc_capabilities::{
     BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash, BtcCapabilityError,
     BtcCapabilityFuture, BtcChainHeadReadCapability, BtcChainHeadReadProvider, BtcChainHeadRequest,
     BtcChainHeadResponse, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity, BtcSourceStatus,
-    RedactedBtcSourceEvidence,
+    ProviderDiagnosticCode, RedactedBtcSourceEvidence,
 };
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
@@ -821,7 +821,34 @@ fn runtime_artifact_read_error(error: store::StoreError) -> mfm_runtime::Runtime
 }
 
 fn btc_capability_runtime_error(error: BtcCapabilityError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+    let Some(diagnostic) = error.redacted_diagnostic().cloned() else {
+        return mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "Bitcoin capability request failed without provider diagnostics".to_owned(),
+        );
+    };
+    let (code, message) = match diagnostic.code() {
+        ProviderDiagnosticCode::ProviderConfigurationMissing
+        | ProviderDiagnosticCode::RouteUnavailable => (
+            "RuntimeConfigRequired",
+            "Bitcoin runtime configuration is required",
+        ),
+        ProviderDiagnosticCode::ProviderConfigurationInvalid => (
+            "RuntimeConfigInvalid",
+            "Bitcoin runtime configuration is invalid",
+        ),
+        _ => (
+            "BitcoinProviderFailure",
+            "Bitcoin provider capability failed",
+        ),
+    };
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("Bitcoin runtime failure code is checked public text"),
+        events::ErrorCategory::Capability,
+        message,
+        vec![diagnostic],
+    )
+    .expect("Bitcoin runtime failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::Failure(failure)
 }
 
 fn fact_index_runtime_error(
