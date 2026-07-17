@@ -1483,3 +1483,185 @@ retention, lifecycle evidence, explicit bypass, enforced worktree namespace
 ownership, documented same-cache writer semantics, and globally actionable
 slot/port collision diagnostics. R2-04 adds no implementation workaround;
 these capabilities are the stop decision carried forward.
+
+## R2-05 follow-up: bounded `sccache` experiment
+
+R2-05 tested `sccache` only in two disposable detached worktrees at source
+`7eef087c9c549070f117b0320fb50ee8f6814186`. No wrapper, cache path, task, or
+dependency was added to the repository. The isolated Nixfied variant added the
+root flake's pinned `sccache` package, set a 5 GiB local cache and
+`RUSTC_WRAPPER=sccache`, retained the nonincremental compact verification
+profile, and overrode the online SQLx task with `RUSTC_WRAPPER=""`. Its
+`nixfied.nix` SHA-256 was
+`ac18f0cbd98d1704e94fcc451af86cd44578abe0eb619d7db74a96077c83387e`;
+model admission passed with model hash
+`3cad9a5ef677170b5422e1a272afa209688ac409648d12dec129f496b4009696`
+and the unchanged runtime ABI.
+
+The candidate used the root flake's pinned `sccache 0.15.0` at
+`/nix/store/r1l6d3lw9qairswn87dizzc4ar7jykbs-sccache-0.15.0`, not the
+newer package visible through the host's flake registry. Rust, Cargo, Nextest,
+SQLx, Nix, Nixpkgs, Nixfied, target, host, and workload identities remained the
+R2-01 reference identities. The cache lived outside the Nixfied state root at
+`/tmp/mfm-r2-05-cache`; all timed full gates used slot 5 and ran serially.
+Remote backends, exported archives, hosted persistence, and macOS performance
+were outside the phase.
+
+### Screening timings and cache statistics
+
+The RFC requires at least two cacheless samples and three warm samples before
+qualification. Both empty-cache runs deleted the Cargo target and the isolated
+object cache. The retained-cache fresh-target runs deleted only the Cargo
+target. Every full run passed all 13 CI leaves.
+
+| State | Run | Full CI | Outer wall | Rust hits | Rust misses | Rust hit rate |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| empty cache A | `run-3927599-1784311312746378410` | 370.02s | 371.07s | 42 | 2,150 | 1.9% |
+| empty cache B | `run-4028587-1784311700371396178` | 344.28s | 344.40s | 42 | 2,150 | 1.9% |
+| exact same target | `run-4115596-1784312057775096187` | 170.03s | 170.29s | 281 | 30 | 90.4% |
+| fresh target, same path | `run-4142338-1784312243024384030` | 217.62s | 217.72s | 2,192 | 0 | 100.0% |
+| fresh target, second worktree | `run-21759-1784312512252792565` | 265.83s | 265.93s | 1,779 | 413 | 81.2% |
+
+The empty-cache median was 357.74s. It regressed 53.02s/17.4% against the
+R2-04 304.72s outer clean control, and each individual empty-cache sample was
+more than 10% slower than that control. The warm median was 217.72s. A
+same-path fresh target backed by the cache saved 87.00s/28.5% against the clean
+control, but moving identical source to the second worktree reduced that
+saving to 38.79s/12.7%. The exact same-target observation saved 33.96s/16.6%
+against R2-04's 204.25s target-only warm control, but a single observation is
+not a qualification median.
+
+The two empty runs each issued 3,399 compiler requests. Of those, 555 were
+not cacheable: 358 `crate-type`, 164 multiple-input, 23 stdin-like `-`, four
+missing-input, three explicit-output, two missing-output-directory, and one
+argument-parse request. This captures final binaries, proc-macro/final crate
+types, and link-like work that the object cache cannot serve. Rustdoc remained
+outside the wrapper, and doctest execution remained residual work. Trybuild
+continued to run inside Nextest; its final test executables were likewise not
+cacheable.
+
+The same-path fresh-target run served 2,816 Rust/C/assembler hits with 6.69s
+of aggregate cache-read-hit time, about 2.4ms per hit, while still spending
+217.62s end to end. Cache hits therefore removed compiler work but did not
+remove Cargo planning, final linking, rustdoc, test execution, database
+startup, or parity execution.
+
+### Coverage, edits, paths, and bypass
+
+Every full-CI sample passed 974/974 Nextest tests, 53 doctest binaries with 42
+tests, nine Trybuild harnesses with 80 UI sources and 71 checked stderr
+baselines, offline and online SQLx, and the keystore, CLI, REST, and Postgres
+parity leaves. Regenerating the exact Nextest list from the candidate target
+produced 974 identifiers across 99 binaries. Sorting
+`<binary-id>::<test-name>` in byte order with a trailing newline produced the
+frozen SHA-256
+`e75d6ea039b5507c6f9b89bef89656e31073c02f8f17f74f680fc2bbf0d67f08`.
+
+The screening edit and recovery observations were:
+
+| Case | Disposable change | Result | Rust hits/misses | Outer wall |
+| --- | --- | --- | ---: | ---: |
+| leaf crate | authored-config maximum `256 * 1024` to `256 * 1024 + 1` | 974/974 plus doctests passed | 250/66 | 85.13s |
+| shared crate | add `#[inline]` to `mfm-ids::IdentityError::message` | 974/974 plus doctests passed | 59/363 | 128.70s |
+| explicit bypass | identical model with `RUSTC_WRAPPER=""` | 974/974 plus doctests passed; zero wrapper requests | 0/0 | 123.70s |
+| reuse after bypass | restore the wrapper and original sources | 974/974 plus doctests passed | 290/11 | 76.30s |
+
+The original/variant SHA-256 pairs were
+`e0ccfcd31b1f8ea91948f1805e67f647fd4b8d3081dfe94eee00a84367abe1e0`/
+`4ce8a3a1f5c7d5c5cc47ca0777dc870095e1564f1c4e0e38146db0adf8d79cfb`
+for the leaf source and
+`c29ae93aa1b09a45d80a38eae5af521257534dba9386f066b0e1f4802bfc0510`/
+`e75f7baf4bb76c46f66d6af17939d5471dc3ad9e9a39234781e6ce568a5d1627`
+for `mfm-ids`. The bypass model variant had SHA-256
+`ca02814b2c24f144416b9b783858b574269e50f4d44569d36c4967704ba3f5e8`.
+All mutations were restored.
+
+The second worktree used the same candidate-file digest and the same Cargo
+target path after that target was cleaned. Its 413 Rust misses show that
+source-path normalization is incomplete for this workload. Two simultaneous
+`mfm-ids` builds from the two worktrees, with separate Cargo targets and one
+64 MiB cache/server, both exited successfully. The server reported 16 misses,
+16 writes, no write errors, and no corruption. A local daemon serializes cache
+access adequately for that observed case, but the repository still has no
+declared cross-user trust or ownership policy for such a mutable cache.
+
+The compiled model records `RUSTC_WRAPPER=""` and `SQLX_OFFLINE=false` on
+`postgres-sqlx-check`, while offline SQLx and the remaining Cargo tasks use the
+wrapper. The online disposable-schema mutation and recovery check passed in
+all five full-CI samples. Thus online preparation did not trust object-cache
+reuse.
+
+### Filesystem inputs and false-hit probes
+
+Two probes changed only files read during compilation while leaving their
+Rust callers byte-identical:
+
+- `runtime-config`'s `include_str!` input changed from SHA-256
+  `339cb41a8d0d8ac680d8a728829cbf00aa9a1fc95150f31234a9ba98075bdabe`
+  to `961087d43358feecbb4a41ab6fd019c3a9a7269171b67f9d84b0b38f8bea74ba`.
+  The affected final test crate was classified non-cacheable, all 19 focused
+  tests passed, and its binary contained the new marker. No stale object was
+  eligible for a hit.
+- migration `0002` changed from SHA-256
+  `0c5a4ca0ac25cc220c95e97e45e2886cb4feec4cb08963be44abe716a53315ea`
+  to `63e6bd31d534639577b2ba29a6eec01dbad716706f8657ab7e85c53111e2adab`.
+  After deleting and recreating the same Cargo target against the retained
+  cache, 170 Rust requests hit and exactly one missed. The rebuilt
+  `mfm-stream-store-postgres` rlib contained the new migration marker. This
+  observed SQLx filesystem-reading macro invalidated correctly.
+
+Both probes used the pinned wrapper and the compact nonincremental profile;
+both changes were restored. These observations reject a false hit for the
+tested include and migration paths, but they are not a general proof for every
+third-party filesystem-reading proc macro.
+
+### Bounds, eviction, corruption, and cleanup
+
+The 5 GiB screening cache occupied 1,027,230,637 bytes after either empty
+full-CI run, 1,294,661,446 bytes after the second-worktree run, and
+1,539,002,021 bytes after the edit/bypass recovery cycle. It stayed within its
+configured bound without reaching eviction.
+
+A separate 32 MiB stress cache reached 32,722,469 bytes after a focused
+Postgres-store seed and 32,831,690 bytes after an immediate clean-target
+rebuild, both below the 33,554,432-byte logical bound before small directory
+overhead. The rebuild had zero hits and repeated all 171 Rust misses, proving
+that eviction enforced the bound but could eliminate all useful reuse when
+undersized. Version 0.15.0 exposed hit/miss and current/max size statistics but
+no eviction counter, so the repeated misses plus bounded size are the observed
+eviction evidence.
+
+For corruption recovery, a separate 64 MiB cache seeded eight `mfm-ids` Rust
+objects. With the daemon stopped, every object was deliberately truncated;
+the same-path Cargo target was then recreated. The next build succeeded,
+reported eight Rust cache errors and eight misses, recompiled all eight
+objects, and rewrote a healthy 6,665,254-byte cache. Corrupt entries were not
+returned as successes.
+
+The daemon has an explicit stop operation, while cache removal is ordinary
+filesystem deletion outside Nixfied's cache-family model. R2-05 used only
+exact, experiment-owned directories and stopped each daemon before deletion.
+This is technically cleanable but does not supply the inspection, lease,
+trust, retention, or cache-only lifecycle contract required from Nixfied in
+R2-04.
+
+### R2-05 decision
+
+`sccache` is rejected as a standalone environment-specific candidate at
+screening. It preserved coverage, handled the tested invalidations and
+corruption safely, supplied an explicit bypass, and materially accelerated a
+same-path fresh target. However, both empty-cache samples exceeded the
+target-only clean control by more than the RFC's allowed 10% regression, the
+empty-cache median regressed 17.4%, and identical-source reuse fell below the
+15% materiality threshold after changing worktree path. Final links, test
+binaries, proc-macro/final crate types, rustdoc, and residual execution remain
+outside its useful cache surface.
+
+Per the screening contract, R2-05 did not expand to the three-clean/five-warm
+qualification matrix or spend additional runs on documentation-only,
+manifest/lockfile, verification-profile, alternate-toolchain, explicit-target,
+and every build-script/trybuild-baseline variant. Those are qualification-only
+cases after the screening veto, not silently verified surfaces. No remote,
+archive, hosted, or macOS claim is made. The failed candidate is not combined
+with Crane or another Nix-native compilation mechanism, and no pilot code is
+retained.
