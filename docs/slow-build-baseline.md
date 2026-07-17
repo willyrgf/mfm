@@ -1665,3 +1665,166 @@ cases after the screening veto, not silently verified surfaces. No remote,
 archive, hosted, or macOS claim is made. The failed candidate is not combined
 with Crane or another Nix-native compilation mechanism, and no pilot code is
 retained.
+
+## R2-06 follow-up: consumed Crane verification artifact
+
+R2-06 tested Crane only in a disposable detached worktree at source
+`75e2210d`. The pilot pinned Crane 0.23.3 at revision
+`db220b8709cea4bd43c9adcd4192f212fb6768d1` with NAR hash
+`sha256-K0i9GoNk2To1RQkW348EY4c7RYf3mD74hWlGSc/9sk0=`. It used the exact
+R2-01 Rust, Cargo, Nextest, Nixpkgs, Nixfied, feature, compact profile, and
+Linux host identities. No generated or repository-owned stand-in Rust source
+was used.
+
+The pilot constructed a `buildDepsOnly` dependency output and passed it as
+`cargoArtifacts` to a final `mkCargoDerivation`. The final derivation built a
+Nextest archive from the immutable, content-addressed workspace source while
+using only the sandbox target as mutable build state. Its derivation inputs
+contained the exact dependency derivation, its environment named the
+dependency output, and its log reported decompression of that output before
+compilation. The final output contains the compressed archive and a symlink to
+the immutable source; it contains no copied mutable Cargo target.
+
+An initial archive built from the sandbox checkout preserved
+`CARGO_MANIFEST_DIR=/build/source` in binaries and could not execute after the
+sandbox disappeared. A supported `--remap-path-prefix` probe did not change
+the compile-time `env!` value. Building from the immutable source store path
+fixed the underlying relocation boundary. The corrected archive contained no
+`/build` reference, executed successfully, and retained actionable immutable
+source paths.
+
+The opt-in Nixfied model consumed a verification bundle in the
+`crane-verification` task closure and ran pinned Nextest directly against the
+archive with its immutable workspace remap. Model admission passed. An
+opt-in `crane-ci` composite replaced only the public Nextest leaf; check,
+doctests, keystore, offline and online SQLx, and the CLI, REST, metadata, and
+Postgres parity leaves remained the public definitions. The checked-in model,
+public apps, and public gates were not changed. Evaluating the archive took
+0.94s; evaluating an unrelated public quick task took 1.04s and did not
+realize or reference the Crane closure.
+
+### Artifact construction, consumption, and size
+
+The first dependency realization built 829 derivations in 197.94s wall with
+2,799,180 KiB maximum RSS. Most were locked registry-source and package
+realizations. The dependency target was 1.85 GiB before compression; its
+single `target.tar.zst` was 441,757,979 bytes, its NAR was 441,758,272 bytes,
+and its closure was 972,405,248 bytes across 458 paths. An exact local-store
+hit took 0.15s.
+
+The corrected final archive rebuilt the workspace in 52.41s wall. It archived
+100 binaries, including 99 test binaries and one CLI binary, plus one build
+script output directory, one linked path, and one standard library. The
+compressed archive is 757,966,616 bytes; the output is 757,966,666 bytes, its
+NAR is 757,967,488 bytes, and its closure is 766,343,584 bytes across two
+paths. The 242-byte symlink bundle has a 1,440-byte NAR and an 855,667,112-byte
+execution closure across 12 paths.
+
+The immutable execution extracted 100 binaries, discovered exactly 974 tests
+across the expected 99 test binaries, and passed all 974. Sorting
+`<binary-id>::<test-name>` in byte order with a trailing newline produced the
+frozen SHA-256
+`e75d6ea039b5507c6f9b89bef89656e31073c02f8f17f74f680fc2bbf0d67f08`.
+All nine Trybuild harnesses passed. Trybuild necessarily remained a nested
+Cargo consumer: one execution produced 1,762,101,961 bytes of mutable residual
+target data, entirely below `tests/trybuild`. The archive therefore removes
+the primary Nextest compilation lane but not nested UI-test compilation.
+Doctests, online SQLx, and live Postgres parity likewise remained explicit
+Cargo/service leaves in the full composite rather than being claimed as
+archive coverage.
+
+### Screening timings
+
+The first corrected immutable execution took 106.63s outer wall. Two exact
+artifact reruns took 81.81s and 81.48s outer wall. The full equivalent
+composite passed all 13 leaves in every observation:
+
+| State | Full composite task | Outer wall | Comparison with R2-04 |
+| --- | ---: | ---: | ---: |
+| retained artifact, clean residual target | 274.94s | 271.36s | 33.36s/10.9% faster than 304.72s clean |
+| warm A | 199.60s | 195.74s | 8.51s/4.2% faster than 204.25s warm |
+| warm B | 198.97s | 195.20s | 9.05s/4.4% faster |
+| warm C | 190.75s | 188.81s | 15.44s/7.6% faster |
+
+The warm outer median was 195.20s, only 9.05s/4.4% faster than the R2-04
+204.25s warm control. The retained-artifact clean-residual observation saved
+10.9%. Both miss the RFC's simultaneous 15% and 30-second materiality gate.
+Moreover, a truly absent-artifact first use must realize the 197.94s
+dependency output and build the approximately 52-second archive before the
+approximately 107-second execution; that cold chain is roughly 358 seconds
+before small model/launcher overhead and is slower than the target-only clean
+control.
+
+Per the screening contract, these results stop qualification. R2-06 did not
+spend additional runs on a three-clean/five-warm distribution. The matrix
+below completes invalidation and correctness screening without presenting
+those probes as timing qualification.
+
+### Source, cache, relocation, and concurrency matrix
+
+The base dependency and archive derivations were respectively
+`rjyb99dga0sfars58yf85d9mv3n5ajjp` and
+`l9ccmwzfinq0qqgw9ycpssy4m3z0wlc7`:
+
+| Case | Dependency artifact | Final archive | Execution observation |
+| --- | --- | --- | --- |
+| absent artifact cache | built | built | 974/974 passed |
+| exact unchanged rerun | exact store hit | exact store hit | 974/974 passed |
+| tracked README edit | same derivation | same derivation | non-source input excluded |
+| leaf authored-config edit | same derivation | changed and rebuilt in 54.86s | 974/974 passed in 103.18s task wall |
+| shared `mfm-ids` edit | same derivation | changed and rebuilt in 52.58s | 974/974 passed in 81.21s task wall |
+| manifest description edit | same derivation | changed | derivation-boundary probe after screening stop |
+| `Cargo.lock` edit | changed | changed | derivation-boundary probe after screening stop |
+| verification-profile edit | changed | changed | derivation-boundary probe after screening stop |
+| migration SQL edit | same derivation | changed and rebuilt in 47.35s | 974/974 passed in 103.11s task wall |
+| identical second worktree | exact same derivations | exact same store output | 974/974 passed in 104.02s task wall |
+| Linux target configuration edit | changed | changed | derivation-boundary probe after screening stop |
+| outputs absent, then normal reuse | recovered six derivations | rebuilt, then exact hit | 974/974 passed in 175.41s outer wall |
+
+The leaf mutation changed authored-config's maximum from `256 * 1024` to
+`256 * 1024 + 1`; its variant SHA-256 was
+`4ce8a3a1f5c7d5c5cc47ca0777dc870095e1564f1c4e0e38146db0adf8d79cfb`.
+The shared mutation added `#[inline]` to
+`mfm-ids::IdentityError::message`; its variant SHA-256 was
+`e75f7baf4bb76c46f66d6af17939d5471dc3ad9e9a39234781e6ce568a5d1627`.
+The migration probe changed SQL SHA-256 from
+`0c5a4ca0ac25cc220c95e97e45e2886cb4feec4cb08963be44abe716a53315ea`
+to `4d17822130e9d00f038baa30938d352db8a29a987115b7b56579f1238fb12e17`.
+All source, manifest, lockfile, profile, and target mutations were restored.
+
+Two simultaneous executions from separate worktrees and state roots initially
+failed closed while extracting the archive because only 5.1 GiB remained on
+the filesystem. After supported cleanup of prior experiment slots restored
+11 GiB free, the same bounded two-slot probe passed 974/974 in both slots in
+148.43s and 148.44s outer wall. There was no shared mutable compiler state or
+corruption, but concurrency needs roughly twice the archive extraction and
+Trybuild residual space; the first failure is an important capacity cost, not
+a correctness success hidden by a retry.
+
+### Retention, deletion, recovery, and decision
+
+The dependency, archive, bundle, model, and launcher outputs are ordinary Nix
+store objects. Exact output deletion after removing their referrers reclaimed
+1.1 GiB. Locked registry/vendor store paths remained reusable normal Nix store
+objects rather than a private MFM cache. With the pilot outputs absent, one
+opt-in command rebuilt the six missing pilot derivations and passed all 974
+tests in 175.41s outer wall. A subsequent exact invocation reused the restored
+outputs. Nix store validity, referrer, path-info, closure-size, NAR-size, and
+garbage-collection dry-run inspection all worked; mutable Trybuild residuals
+remained owned by the Nixfied slot and required its supported slot cleanup.
+
+Coarse Crane verification is rejected at screening. It satisfied the hard
+artifact contract: the dependency output was genuinely consumed, the final
+artifact was immutable and relocatable, exact coverage matched, non-Rust and
+Rust invalidation behaved correctly, all nine nested-Cargo harnesses passed,
+the Nixfied task consumed the closure directly, and public gates remained
+authoritative. It nevertheless saved only 4.4%/9.05s at the warm full-gate
+median and 10.9%/33.36s with a retained artifact and clean residual target,
+while adding roughly 442 MB of dependency output, 758 MB of final archive,
+large first-realization cost, extraction I/O, and approximately 1.76 GB of
+mutable Trybuild state per execution slot.
+
+No Crane input, package, task, model, generated source, cache, or workflow is
+retained in the main worktree. R2-07 should compare this coarse baseline with
+real granular `crate2nix` derivations; it must not treat Crane's correctness as
+evidence that a per-crate graph will qualify.
