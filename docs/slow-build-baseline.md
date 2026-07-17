@@ -1,7 +1,7 @@
 # Controlled slow-build baseline
 
-Status: Phase 01 baseline, Phase 02--07 follow-up, and Revision 2 R2-01 refresh
-for RFC_SLOW_BUILDS.md
+Status: Phase 01 baseline, Phase 02--07 follow-up, and Revision 2 R2-01/R2-02
+experiments for RFC_SLOW_BUILDS.md
 
 This report measures the clean Phase 00 RFC commit
 `51a5f9a07808cd9a92b218a028dd2424c04ac76d` (`docs: rfc builds tt3`). The
@@ -974,3 +974,136 @@ full wall time but is not independently timestamped by the current runtime;
 the task-level compilation, execution, doctest, and verification-tail
 decomposition is the available evidence. No R2-01 implementation behavior is
 left unverified because the phase is report-only.
+
+## R2-02: developer build-boundary experiment
+
+R2-02 was measured on the R2-01 reference host on 2026-07-17 from committed
+revision `a4db7d98892a7bf2e2fdef44a014cf4b266b606c` (`docs: refresh build
+workload baseline`). All probes used the pinned Rust/Cargo 1.96.0 development
+shell. The only source mutations were comment-only edits in detached
+disposable worktrees; their original SHA-256 digest was restored before
+repository verification. No Cargo configuration, flake, Nixfied model,
+public gate, or `.#quick` behavior changed.
+
+### Direct Cargo and `.#quick`
+
+Detached worktree A began with no `target` directory. One persistent
+`nix develop` command reported an empty `CARGO_TARGET_DIR` and ran the focused,
+reverse-dependent, broad, and quick checks serially:
+
+| Developer feedback surface | Clean/first | Warm |
+| --- | ---: | ---: |
+| `cargo check -p mfm-program` | 3.81s | 0.09s |
+| `cargo test -p mfm-program --lib` | 6.25s | 0.09s |
+| `cargo check -p mfm-certify` | 0.73s | 0.06s |
+| `cargo check --workspace --lib --bins` | 17.04s | 1.08s |
+| warm `nix run .#quick` | not applicable | 2.37s |
+
+The focused test passed 34/34. The warm quick interval includes Nix app
+startup, format verification, and the same broad Cargo check. It is useful as
+a preflight convenience, but invoking it for every edit is slower than direct
+focused Cargo because its contract is deliberately broader.
+
+A comment-only edit to `mfm-program` changed the source digest from
+`9a83e399172bb8a3457b36414ffd5079ff1455f47669e50e1c1295d7f0844446` to
+`d833dfaafc99a764f2b0e05c7aa7151aee449ba3edbe9b15cd1504532f9723a6`.
+The edited focused check took 0.26s, the reverse-dependent check 0.20s, and
+`.#quick` 3.52s. Restoring the original digest took 0.24s focused and 2.89s
+through quick. Cargo retained both variants without stale success.
+
+The worktree-local target grew from 1.6 GiB/7,279 files after the initial
+matrix to 1.8 GiB/7,432 files after the edit cycle. It contained normal
+developer incremental and split-debug artifacts. Detached worktree B still
+had no target at that point; its first identical focused check independently
+took 3.48s, its warm repeat took 0.07s, and its new target occupied 131 MiB
+and 358 files. The targets resolved to distinct paths under their respective
+worktrees and shared no mutable artifact state.
+
+### Stable `build-dir` separation
+
+The stable Cargo `CARGO_BUILD_BUILD_DIR` surface was tested with one shared
+build directory and distinct target directories. This is a compatibility
+probe, not an endorsed cross-workspace configuration.
+
+| Probe | Wall time | Observation |
+| --- | ---: | --- |
+| Seed focused check | 3.88s | populated the shared build directory |
+| Same target, warm | 0.10s | normal fingerprint reuse |
+| Distinct target, same worktree | 0.07s | reused shared intermediates |
+| Identical relocated worktree | 0.07s | reused across source paths |
+| Relocated comment edit | 0.59s | rebuilt the changed leaf |
+| Original source after edited variant | 0.07s | both variants coexisted |
+
+After the focused relocation matrix, the shared directory occupied 142 MiB
+and 361 files while each target directory occupied only 8 KiB. Two new
+comment variants then wrote concurrently from the two worktrees. Both checks
+passed in 0.40s/0.39s; Cargo logged waits on its package-cache locks and one
+wait on the build-directory lock. The shared directory did not corrupt, but
+the writers serialized rather than providing independent progress.
+
+The `mfm-program` trybuild harness also passed through the separated layout:
+all 26 UI cases passed, including 21 checked compile-fail expectations. The
+outer test binary and most intermediates landed in the shared build directory,
+which grew to 1.2 GiB, while trybuild still created its nested target structure
+under the caller's target directory. The complete harness took 21.60s.
+
+### Rust-analyzer and nightly observations
+
+Direct Cargo and rust-analyzer were launched concurrently after another
+comment-only edit. Cargo passed in 0.32s without target corruption. The shell,
+however, contains neither a pinned rust-analyzer executable nor `rust-src`.
+The `rust-analyzer` selected from the ambient rustup proxy matched version
+1.96.0 but failed to execute the Nix-store rustc after sanitizing its child
+environment (`libz.so.1` was unavailable). It returned status zero only after
+falling back to incomplete metadata: zero dependency lines and 414/414 failed
+constant evaluations.
+
+Invoking the underlying rustup rust-analyzer binary directly avoided that
+proxy failure and loaded 2,645,743 dependency lines, but it still reported
+missing standard-library sources and 1,190 failed target data-layout queries
+(74%). That diagnostic run took 21.21s. Process coexistence therefore did
+not damage Cargo state, but the current development shell does not provide a
+complete, pinned IDE contract. Ambient tooling is not accepted as a hidden
+developer-lane dependency.
+
+Pinned stable Cargo lists `-Z build-dir-new-layout` in its unstable options but
+rejects the flag because it is not a nightly channel. No nightly toolchain was
+installed on the reference guest. R2-02 records the new layout only as an
+upstream compatibility observation and does not bypass the channel check or
+introduce an unpinned toolchain.
+
+### Cleanup ownership
+
+Normal worktree-local cleanup was correctly scoped. `cargo clean` in worktree
+A removed 8,091 files and its 2,137,414,680-byte target while leaving
+worktree B's 135,197,890-byte target unchanged.
+
+Shared-build cleanup had a materially different ownership boundary. Running
+`cargo clean` as one client removed 4,313 files and the entire
+1,216,114,352-byte shared build directory. Other clients' 8 KiB target
+directories remained but no longer had reusable intermediates; the relocated
+client recovered correctly with a 3.95s cold rebuild. Any sharer can therefore
+invalidate every other sharer, and there is no supported repository/worktree
+owner, retention rule, or stale-unit lifecycle for this arrangement.
+
+### R2-02 decision
+
+The current two-lane artifact boundary is confirmed for the architecture
+comparison: persistent `nix develop` plus direct, worktree-local Cargo is the
+primary edit loop; `.#quick` remains a broader convenience; and mutable
+developer targets remain separate from verification state and from other
+worktrees.
+
+Cross-workspace `build-dir` sharing is rejected for adoption despite its
+strong focused reuse. It may be retested only after Cargo officially supports
+cross-workspace sharing with the new content-scoped layout, granular
+concurrency, automatic stale-unit cleanup, and a documented ownership and
+compatibility contract. MFM must not grow a project-local manager around an
+unsupported Cargo cache.
+
+The final architecture comparison also carries one project-local developer
+tooling prerequisite: the pinned development environment must provide a
+compatible rust-analyzer and `rust-src` before IDE coexistence can be claimed
+as supported. That follow-up is distinct from changing the artifact boundary
+and is not implemented in this report-only phase. Linux/aarch64 is the only
+measured platform; no hosted or macOS performance sample was used.
