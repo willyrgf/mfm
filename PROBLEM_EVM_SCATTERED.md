@@ -1,4 +1,4 @@
-# Problem: EVM is scattered across speculative and duplicated layers
+# Problem: EVM is scattered across duplicated and overbuilt layers
 
 Status: architecture investigation and refactor charter for `refac-evm`.
 
@@ -30,25 +30,29 @@ the active product needs a broad EVM platform. It is large because it combines:
 
 - one production run use: native and ERC-20 balances for `mfm.portfolio/snapshot@1`;
 - one separate offline CLI transaction-signing path; and
-- a speculative contract deploy/configure/validate platform with no production operation, setup
-  kind, app registration, CLI route, or REST route.
+- an overbuilt contract deploy/configure/validate platform with no current production operation,
+  setup kind, app registration, CLI route, or REST route, despite contract lifecycle primitives now
+  having explicit future owners in token, smart-wallet, flash-loan, and other wallet operations.
 
 The contract model, contract states, and contract adapter form an 11,393-line island with no
 production root. With the 1,407-line contract integration graph, that island accounts for 12,800
 lines of direct crate and integration-test code. It contains 10,317 non-test-named lines and 109
-lexical top-level public declarations. This is not reusable infrastructure waiting for a caller. It
-is an unowned deploy/configure/validate product vertical slice whose abstractions, lifecycle
-schemas, prepared models, replay branches, documentation, and tests impose costs on the real
-portfolio path.
+lexical top-level public declarations. Future contract work does not justify this island. What is
+owned is a small protocol substrate: create a contract, call a contract, and validate exact
+contract properties at an exact chain anchor. The current code instead hard-codes an uncalled
+three-stage product workflow whose abstractions, lifecycle schemas, prepared models, replay
+branches, documentation, and tests make those primitives harder to reuse.
 
 Generic runtime EVM mutation and the `mfm-signers-keystore` provider are different. They have no
 production run caller today, although the CLI independently signs transactions through direct
 keystore/core code. Future portfolio rebalancing gives the reusable transaction substrate an
-explicit product owner. That ownership does not justify retaining the current contract workflow or
-its duplicated transaction implementations. It requires replacing them with one small end-to-end
-transaction path: one transaction per side-effect node, one canonical unsigned envelope, one
-deterministic keystore signing contract, one transient signed envelope, one submission authority,
-and one recovery/replay model.
+explicit product owner. Deploying, configuring, validating, and managing tokens or wallet-scoped
+contracts gives its contract `Create`/`Call`/validation composition another explicit owner. Those
+owners do not justify retaining the current fixed lifecycle or duplicated transaction
+implementations. They require one small end-to-end transaction path: one transaction per
+side-effect node, one canonical unsigned envelope, one deterministic keystore signing contract,
+one transient signed envelope, one submission authority, one recovery/replay model, and one
+separate exact-anchor validation state.
 
 The active collector is also over-modeled. One EVM network expands into nine state kinds, three
 internal operations, method-specific capability traits, method-specific evidence mirrors, custom
@@ -57,7 +61,8 @@ families, and a fact-index query that reads facts the same run just wrote.
 
 The architectural outcome should be:
 
-- delete the contract lifecycle vertical slice;
+- delete the current fixed contract lifecycle implementation, while retaining contract creation,
+  calls, and exact-anchor validation as minimal composable primitives;
 - delete the grab-bag EVM core and use canonical Alloy primitives or small private codecs;
 - retain one small EVM read/transaction capability contract and one source-bound JSON-RPC
   transport;
@@ -65,7 +70,10 @@ The architectural outcome should be:
   where their actual domain ownership already lies;
 - reduce each EVM network to one read state and one atomic fact-publication state;
 - make live and replay use one state-owned deterministic reducer;
-- replace all current mutation machinery with one reusable single-transaction state and adapter;
+- replace all current mutation machinery, including deploy and configure mutations, with one
+  reusable single-transaction state and adapter;
+- retain one contract validation state that checks runtime code and exact call results at one
+  canonical anchor through the shared read session and reducer;
 - retain and decouple the generic signing contract, keystore provider, and selective runtime signer
   binding;
 - replace custom EVM transaction/RLP/signing code with one narrow Alloy-backed EIP-1559 primitive;
@@ -74,8 +82,10 @@ The architectural outcome should be:
 
 This reduces the current ten EVM crates to five intentionally narrow EVM-specific packages:
 `mfm-evm-capabilities`, a rewritten `mfm-evm-signing`, a rewritten `mfm-states-evm`, a rewritten
-`mfm-adapters-evm`, and `mfm-transports-evm`. The state and adapter packages retain only the generic
-one-transaction side-effect path; portfolio reads move out. Generic `mfm-signing` and
+`mfm-adapters-evm`, and `mfm-transports-evm`. The state package retains exactly two state kinds: the
+generic one-transaction side-effect state, with `Create` and `Call` actions, and exact-anchor
+contract validation. The adapter package retains their one transaction binding and one validation
+read binding; portfolio reads move out. Generic `mfm-signing` and
 `mfm-signers-keystore` remain reusable platform packages rather than EVM workflow layers.
 
 ## Investigation method and metric caveats
@@ -103,13 +113,13 @@ and therefore undercount derive- and macro-generated APIs.
 | Crate | Non-test-named LOC | Test-named LOC | Total | Current reality | Disposition |
 |---|---:|---:|---:|---|---|
 | `crates/evm-core` | 1,457 | 369 | 1,826 | Mixed ABI, ERC-20, hex, RLP, quantity, address, and transaction utility bag | Delete |
-| `crates/evm-capabilities` | 1,137 | 156 | 1,293 | Twelve RPC capability families; current production uses three, future rebalancing owns the transaction family | Retain read and transaction authority, radically shrink |
-| `crates/evm-contract-model` | 2,068 | 171 | 2,239 | Contract lifecycle model with no production root | Delete wholesale |
+| `crates/evm-capabilities` | 1,137 | 156 | 1,293 | Twelve RPC capability families; portfolio, future writes, and minimal contract validation need only two coherent views | Retain read and transaction authority, including code read, radically shrink |
+| `crates/evm-contract-model` | 2,068 | 171 | 2,239 | Fixed lifecycle and general ABI model far broader than the owned contract primitives | Delete wholesale; do not recreate a model crate |
 | `crates/evm-signing` | 318 | 207 | 525 | Useful responsibility coupled to custom transaction/RLP types | Replace API wholesale with one narrow Alloy-backed EIP-1559 primitive |
-| `crates/states/evm` | 4,048 | 1,112 | 5,160 | Portfolio-specific balance states and receipt hierarchy | Move reads to portfolio; rewrite package to one generic transaction state |
-| `crates/states/evm-contracts` | 2,275 | 282 | 2,557 | Contract deploy/configure/validate states with no production root | Delete wholesale |
-| `crates/adapters/evm` | 1,661 | 0 | 1,661 | Portfolio collector live/replay runners | Move reads to portfolio; rewrite package to one transaction adapter |
-| `crates/adapters/evm-contracts` | 5,974 | 623 | 6,597 | Contract mutation/validation live/replay runtime | Delete wholesale |
+| `crates/states/evm` | 4,048 | 1,112 | 5,160 | Portfolio-specific balance states and receipt hierarchy | Move reads to portfolio; rewrite package to transaction plus contract-validation states |
+| `crates/states/evm-contracts` | 2,275 | 282 | 2,557 | Fixed deploy/configure/validate workflow over duplicated transaction semantics | Delete wholesale; replace with `Create`/`Call` plus minimal validation in `states/evm` |
+| `crates/adapters/evm` | 1,661 | 0 | 1,661 | Portfolio collector live/replay runners | Move reads to portfolio; rewrite package to transaction and validation bindings |
+| `crates/adapters/evm-contracts` | 5,974 | 623 | 6,597 | Contract mutation/validation live/replay runtime | Delete wholesale; replace with shared transaction and validation bindings only |
 | `crates/transports/evm` | 1,324 | 1,055 | 2,379 | Hand-built JSON-RPC plus duplicated routing and twelve providers | Retain read and transaction RPC, radically shrink and harden |
 | `crates/ops/evm-collectors-op` | 576 | 300 | 876 | Public facade for a graph used only by portfolio snapshot | Inline privately, then delete |
 | **Total** | **20,838** | **4,275** | **25,113** |  |  |
@@ -166,7 +176,7 @@ Production certification registers only collector state descriptors and two EVM 
 (`crates/app/src/lib.rs:335-349`). App entry-point discovery has no contract entry point. The CLI and
 REST API likewise expose none.
 
-The disconnected contract workflow is:
+The current disconnected contract implementation is:
 
 ```text
 tests/integration/tests/contract_state_graph.rs
@@ -179,8 +189,10 @@ tests/integration/tests/contract_state_graph.rs
 
 `docs/design.md:269-283` currently enshrines these contract states as direct library graph
 primitives while simultaneously stating that they have no public operation, setup kind, or app
-registration. That design text does not create ownership. It documents speculative code. It must be
-removed in the same commit as the code.
+registration. Future token, smart-wallet, flash-loan, and wallet-operation requirements establish
+ownership of minimal contract primitives; they do not establish ownership of this fixed graph or
+its schemas. The current design text must be replaced in the same commit as the code, not treated as
+authority for preserving it.
 
 The reverse dependency facts are also revealing:
 
@@ -202,25 +214,28 @@ The reverse dependency facts are also revealing:
 `CoverageStatus`, and `HoldingSourceStatus`. The honest boundary is portfolio-owned EVM collection,
 not a public generic collector framework without a second consumer.
 
-Reverse dependencies describe current reachability, not product intent. Although the signer and
-write surfaces are not assembled by the app today, planned portfolio rebalancing explicitly owns
-them. The absence of a current caller is therefore an incomplete vertical path to repair, not a
-reason to erase the reusable mutation foundation. The deletion boundary is the contract lifecycle;
-the retained boundary is a protocol-level single-transaction path with no deploy/configure/validate
-vocabulary. This also matches the repository taxonomy: signers are reusable platform primitives
-(`docs/architecture.md:305-321`), while transaction submission and signing are explicit capability
-families (`docs/architecture.md:435-445`).
+Reverse dependencies describe current reachability, not product intent. Although the signer, write,
+and contract surfaces are not assembled by the app today, planned portfolio rebalancing and future
+token/contract management explicitly own their minimal primitives. The absence of a current caller
+is therefore an incomplete vertical path to repair, not a reason to erase reusable mutation or
+contract capability. The deletion boundary is the current fixed lifecycle and general contract
+language. The retained boundary is one protocol-level single-transaction path with `Create` and
+`Call` actions, plus one exact-anchor contract-validation state. This also matches the repository
+taxonomy: operations own domain topology and encoded contract meaning, states own reusable
+semantics, signers are reusable platform primitives (`docs/architecture.md:305-321`), and
+transaction submission/signing are explicit capability families
+(`docs/architecture.md:435-445`).
 
 ## Root causes
 
-### 1. Speculative generality became permanent surface
+### 1. Premature generality became permanent surface
 
-Contract deploy/configure/validate lifecycle, general ABI assertions, historical log scanning, and
+A fixed deploy/configure/validate lifecycle, general ABI assertions, historical log scanning, and
 contract-specific mutation/replay machinery were built without a product entry point. Tests then
-made the speculative shapes feel mandatory. Generic transaction submission and keystore signing do
-have a planned owner, but they were entangled with that speculative workflow instead of being a
-small independent substrate. This created public types and design commitments before the real write
-caller could establish the minimal useful abstraction.
+made those shapes feel mandatory. Generic transaction submission, keystore signing, contract
+creation/calls, and exact validation do have planned owners, but they were entangled with a broad
+workflow instead of being a small independent substrate. This created public types and design
+commitments before real write callers could establish the minimal useful abstraction.
 
 ### 2. State execution is nominal while adapters own the real behavior
 
@@ -262,17 +277,18 @@ Runtime config and transport model sources, policies, preferred sources, ordered
 and registries. Each method nevertheless reselects and reprobes a source, while downstream state
 rejects any change in source identity. This produces complexity without coherent failover.
 
-## Delete the contract lifecycle vertical slice
+## Delete the current contract lifecycle implementation
 
-This is the highest-confidence removal. Delete, together:
+This is the highest-confidence replacement boundary. Delete, together:
 
 - `crates/evm-contract-model/`;
 - `crates/states/evm-contracts/`;
 - `crates/adapters/evm-contracts/`;
 - `tests/integration/tests/contract_state_graph.rs`;
-- `docs/evm-contract-states.md`;
-- contract lifecycle sections in `docs/evm-rpc-routing.md`,
-  `docs/persisted-public-surfaces.md`, CLI/REST/app docs, and design/architecture docs;
+- the current `docs/evm-contract-states.md` lifecycle contract, replacing it with documentation for
+  the minimal `Create`/`Call`/validate composition when those states land;
+- old lifecycle sections in `docs/evm-rpc-routing.md`, `docs/persisted-public-surfaces.md`,
+  CLI/REST/app docs, and design/architecture docs;
 - contract model/state/adapter dependencies from the workspace and integration-test manifest;
 - contract typestate compile-fail tests and contract adapter fixtures;
 - historical contract setup-kind tombstone assertions in
@@ -280,37 +296,40 @@ This is the highest-confidence removal. Delete, together:
 - historical missing-package assertions for old contract config/op crates once the generic metadata
   contract is sufficient;
 - contract-only capability types and implementations, excluding the retained generic transaction
-  authority;
-- contract-only transport methods, excluding the retained generic transaction RPC set;
+  authority plus exact-block `eth_getCode` and `eth_call` on the shared read session;
+- contract-only transport methods, excluding the retained generic transaction RPC set and strict
+  exact-block `eth_getCode`/`eth_call`;
 - contract-specific signer policy and runtime wiring, while retaining the generic signer binding;
   and
 - all contract schema descriptors, adapter identities, replay registrations, examples, and
   re-exports.
 
-No contract facade, “experimental” feature, deprecated module, or disabled registration remains.
-If a certified contract objective is approved later, it starts from its actual requirements and the
-kernel side-effect contract. Git history can supply useful algorithms, but not architectural
-authority.
+No facade, “experimental” feature, deprecated module, or disabled registration preserves this
+implementation. The replacement is written directly in the retained EVM state and adapter crates;
+none of the three old packages becomes a wrapper or alias. Git history can supply useful
+algorithms, but not architectural authority.
 
-### Defects inside the contract island reinforce deletion
+### Defects inside the contract island reinforce replacement
 
-These are not a retention checklist. They explain why moving or renaming the current code is unsafe.
+These are not a retention checklist. They explain why moving or renaming the current code is unsafe
+even though the smaller contract capability is owned.
 
 1. **General ABI claims are false.** The ABI model drops tuple components and event indexing,
    lacks tuple/array support, and then adds another contract-model facade.
-2. **Integer decode is wrong.** `evm-core/src/abi.rs:690-695` decodes every signed/unsigned integer
+2. **Integer decode is wrong.** `crates/evm-core/src/abi.rs:690-695` decodes every signed/unsigned integer
    from only the low 64 bits and ignores signed two's-complement semantics, while the contract model
-   claims `uint256` support (`evm-contract-model/src/abi.rs:109-129`).
+   claims `uint256` support (`crates/evm-contract-model/src/abi.rs:109-129`).
 3. **ABI canonicality is not enforced.** Boolean `2` becomes false, address left padding is not
    validated, extra trailing static bytes can be accepted, decimal integer inputs are host-width,
    and event overload lookup takes the first matching name.
 4. **Validation reads are unanchored.** Contract call assertions use `Latest`
-   (`adapters/evm-contracts/src/read_validation.rs:181-211`) even though configured instances carry
+   (`crates/adapters/evm-contracts/src/read_validation.rs:181-211`) even though configured instances carry
    a confirmed anchor.
 5. **Advertised selectors are unsupported.** The public contract model accepts safe/finalized tags,
-   but adapter conversion rejects them (`mutation_support.rs:748-770`).
+   but adapter conversion rejects them
+   (`crates/adapters/evm-contracts/src/mutation_support.rs:748-770`).
 6. **Signing happens twice.** Preparation signs to obtain an expected transaction hash and
-   submission signs again (`adapters/evm-contracts/src/lib.rs:585-631,913-969`). The generic signer
+   submission signs again (`crates/adapters/evm-contracts/src/lib.rs:585-631,913-969`). The generic signer
    contract does not guarantee deterministic signatures; remote or hardware signers can prompt
    twice or produce a different valid signature.
 7. **One side-effect node can submit multiple transactions.** Configure loops over prepared
@@ -324,13 +343,19 @@ These are not a retention checklist. They explain why moving or renaming the cur
     checked against one binding and their raw evidence is lost.
 11. **The source validator does not validate one source.** It checks network/chain and non-empty
     source strings rather than source coherence.
-12. **Receipt evidence is dropped.** The adapter constructs receipts with `receipt_evidence: None`.
+12. **Receipt evidence is lossy and attached late.** The adapter first constructs receipts with
+    `receipt_evidence: None`; confirmation later attaches an artifact reference, but the provider
+    observation has already collapsed away contract address, complete logs, and strict raw receipt
+    authority (`crates/adapters/evm-contracts/src/lib.rs:654-664`;
+    `crates/adapters/evm-contracts/src/runner_bindings/verify.rs:371-379`).
 13. **Finality is not replay-provable.** Live canonical/latest reads collapse into a confirmation
     count; replay only checks that the stored number exceeds the depth.
 14. **Call and log evidence is derived duplication, not replay authority.** Raw return bytes/logs
-    needed to recompute validation are not retained consistently.
+    needed to recompute validation are not retained consistently. Current log entries also omit
+    block hash and removed status, so they cannot independently prove canonical history
+    (`crates/evm-capabilities/src/lib.rs:766-790`).
 15. **Nonce occupancy cannot prove non-submission.** It scans only latest and pending full blocks,
-    usually yielding `Unknown` (`transports/evm/src/lib.rs:450-500`).
+    usually yielding `Unknown` (`crates/transports/evm/src/lib.rs:450-500`).
 16. **Polling mechanics leak into semantic prepared authority.** `poll_interval_ms` and
     `max_receipt_polls` are operational scheduling details, not mutation identity.
 17. **Provider layering is excessive.** Eleven provider traits, eight-plus-four trait-object bundles,
@@ -351,6 +376,125 @@ These are not a retention checklist. They explain why moving or renaming the cur
 23. **Documentation overstates the implementation.** `docs/evm-contract-states.md` and
     `docs/persisted-public-surfaces.md` claim replayable finality, receipt, call/log, and
     not-submitted proof authority that the retained evidence does not provide.
+24. **Idempotency omits authored transaction meaning.** Deploy intent retains constructor argument
+    count rather than values, while configure intent retains a function name rather than exact
+    arguments/calldata; the idempotency key then hashes that incomplete intent
+    (`crates/states/evm-contracts/src/lib.rs:206-252,596-613,690-700`).
+25. **Empty validation succeeds.** Assertions default empty, code identity is optional, and `all()`
+    over empty results reports success (`crates/states/evm-contracts/src/config.rs:535-560`;
+    `crates/states/evm-contracts/src/validation.rs:101-126`). A reusable validator must require at
+    least runtime-code identity.
+26. **ABI use is coupled to bytecode artifacts.** Configuration and validation parse an artifact's
+    ABI and bytecode together even when only call encoding is needed
+    (`crates/evm-contract-model/src/abi.rs:45-49`).
+27. **Reverted receipts are rejected before durable classification.** The current mutation support
+    turns a revert into an adapter error before it can become terminal side-effect evidence
+    (`crates/adapters/evm-contracts/src/mutation_support.rs:518-528`).
+28. **Every contract runner receives excessive authority.** The aggregate provider contract
+    requires the complete read and mutation method set, forcing unrelated capabilities and dummy
+    implementations (`crates/adapters/evm-contracts/src/lib.rs:998-1036`).
+
+## Retain contract creation, calls, and exact-anchor validation
+
+Contract deployment, configuration, validation, and management are real reusable requirements.
+They do not require three mutation state kinds or a universal contract lifecycle. At the EVM
+protocol boundary, deployment and configuration reduce to only two transaction actions:
+
+- `Create { init_code, value }` for direct EOA contract creation; and
+- `Call { to, calldata, value }` for configuration, token management, smart-wallet execution,
+  factory/CREATE2 deployment, flash-loan execution, and every other contract invocation.
+
+Both actions use the same `SubmitEvmTransactionState`, adapter, nonce/fee/gas preparation, signing,
+submission, observation, recovery, replay, and sender lane. One state node still means exactly one
+EVM transaction. A configuration sequence is a dependency-ordered series of `Call` nodes. An
+on-chain multicall, smart-wallet batch, or flash-loan executor is one `Call` node when it is one
+atomic chain transaction. There is no `DeployContractState`, `ConfigureContractState`, configure
+loop, or empty configure side effect.
+
+The final surface therefore has two reusable EVM state kinds, not three contract mutation paths:
+`SubmitEvmTransactionState(Create | Call)` and `ValidateEvmContractState`. Deployment and
+configuration responsibilities are retained as executable state actions; only their redundant
+public state types and adapter paths are removed.
+
+This primitive deliberately means a signed EVM transaction. ERC-4337 user operations or another
+account-abstraction submission protocol are a different mutation authority, not another `Call`
+variant. Add a separate state/capability only when a concrete operation owns that protocol; ordinary
+calls to a smart wallet continue to use `Call`.
+
+The minimal public transaction model has one representation per concept:
+
+- `EvmTransactionAction::{Create, Call}`;
+- one `EvmTransactionIntent` containing ledger, sender, signer, action, access list, and checked
+  gas/fee policy;
+- one `EvmTransactionOutcome` containing expected transaction hash, typed receipt/status/logs,
+  confirmation anchor, and an explicit terminal result:
+  `Succeeded(Created(address) | Called(address))` or `Reverted(Create | Call)`; and
+- bounded canonical init code/calldata bytes directly in the typed intent, never an alternative
+  artifact-lookup path or ABI JSON nested inside JSON strings.
+
+If contract bytes originate in a content-addressed artifact, an upstream typed materialization node
+must produce the exact bounded bytes before this state is authored. The transaction intent binds
+those bytes directly; preparation and replay never resolve a mutable artifact reference or perform
+ambient filesystem access.
+
+For a direct `Create`, preparation derives the expected CREATE address from the fixed sender and
+nonce. A successful receipt must report that same address before the outcome can be `Created`. A
+successful `Create` receipt missing the address is malformed. A reverted creation remains a
+terminal external effect, must have no receipt contract address, and yields no usable contract
+address. Every `Call` receipt must likewise have no contract address. A
+factory or CREATE2 deployment is a `Call`; the owning operation derives the expected address from
+known factory/salt/init-code inputs or checks typed receipt logs. The generic transaction state does
+not grow a second factory-deployment protocol.
+
+Configuration has no independent EVM mutation semantics. Operation crates for token deployment,
+token management, rebalancing, smart wallets, flash loans, or other on-chain objectives own the
+graph and encode constructor/call data through generated Alloy bindings. They also own pure domain
+interpretation of typed receipt logs. The EVM state layer receives already-encoded bytes and does
+not compile contracts, discover ABIs, choose functions by name, parse arbitrary ABI JSON, implement
+a selector/event assertion language, or define a universal `Deployed -> Configured -> Validated`
+typestate. A domain operation may define its own pure typed projections when those stages are
+meaningful; they are not platform lifecycle types.
+
+Validation is different because it is a read effect. Retain one `ValidateEvmContractState` that can
+validate a newly created, newly configured, or already-existing address. Its minimal authored plan
+contains:
+
+- semantic network and non-zero chain identity;
+- contract address and one concrete number/hash anchor;
+- one required non-empty expected runtime-code keccak; and
+- zero or more bounded checked calls, each retaining explicit caller, target, value, calldata, gas
+  bound/access list, and exact expected return bytes.
+
+The expected runtime-code hash is mandatory and the plan rejects the keccak of empty bytes; the
+reducer also rejects empty observed code before comparing hashes. There is no weaker `CodePresent`
+fallback and an EOA, absent address, or destroyed contract cannot become `VerifiedEvmContract`.
+The anchor normally comes from the terminal transaction output. A caller validating an existing
+deployment must first supply an explicit concrete anchor; the validator never silently substitutes
+`latest`. The state uses one source-bound `EvmReadSession` to plan, in deterministic order:
+
+1. `eth_getCode(address, blockHash, requireCanonical = true)`;
+2. each fully specified `eth_call(from, to, value, calldata, gas/access-list,
+   blockHash, requireCanonical = true)`; and
+3. one final block-by-number read whose hash must still equal the authored anchor hash.
+
+One state-owned reducer is used by live execution and replay. It checks evidence completeness and
+order, source/network/chain/anchor coherence, non-empty runtime-code hash, full call context, exact
+return bytes, and final canonicality. The compact output is one `VerifiedEvmContract` containing
+the address, anchor, observed code hash, and validation-plan digest; it does not duplicate every
+derived boolean and report entry. Retained evidence contains the bounded raw code and call-return
+bytes needed to run the reducer again, not provider prose or endpoints.
+
+Validation proves only the declared checks at that exact anchor. It does not prove general contract
+correctness, upgrade safety, or business invariants, and it never participates in transaction
+submission recovery. Code present at a predicted address cannot prove that MFM submitted a
+transaction. Receipt logs from a known transaction remain part of `EvmTransactionOutcome` and can
+be checked by the owning operation's pure reducer; the minimal platform does not retain historical
+`eth_getLogs` scanning or a general event-query language.
+
+This replacement keeps the future capability while deleting the current lifecycle concepts:
+`ContractProfile`, `ContractArtifact`, ABI/bytecode JSON wrappers, lifecycle-stage references,
+deployed/configured instance copies, configure vectors, dynamic assertions, event policies,
+contract-specific finality/polling policy, and contract-specific prepared/replay models.
 
 ## Delete the mixed `evm-core` abstraction
 
@@ -500,14 +644,14 @@ traits, followed by twelve request/response families:
 
 Current portfolio collection uses block, balance, and call. Future rebalancing owns pending nonce,
 fee inputs, gas estimation, transaction submission, transaction lookup, receipt lookup, and shared
-block reads for confirmation. Chain identity remains a transport session-binding check rather than
-a state-facing method. General code reads, historical log scanning, client version, and nonce
-occupancy have no retained owner and are deleted; receipt-contained logs are part of typed receipt
-evidence, not a separate general log capability.
+block reads for confirmation. Minimal contract validation owns strict runtime-code reads. Chain
+identity remains a transport session-binding check rather than a state-facing method. Historical
+log scanning, client version, and nonce occupancy have no retained owner and are deleted;
+receipt-contained logs are part of typed receipt evidence, not a separate general log capability.
 
 The retained crate has exactly two EVM capability markers and two provider views:
 
-- `EvmReadCapability` / `EvmReadSession`: block/head lookup, balance, and call; and
+- `EvmReadCapability` / `EvmReadSession`: block/head lookup, balance, code, and call; and
 - `EvmTransactionCapability` / `EvmTransactionSession`: pending nonce, fee inputs, gas estimate,
   raw submission, transaction-by-hash, receipt-by-hash, and the minimal head/block-by-number reads
   needed for confirmation. The transport can share their private block implementation with the read
@@ -526,15 +670,19 @@ network/source concept.
 ## Retain one single-transaction side-effect path
 
 Rewrite `mfm-states-evm` and `mfm-adapters-evm` after moving their read semantics into portfolio.
-Their only retained EVM responsibility is one reusable `SubmitEvmTransactionState` and one adapter
+Their retained mutation responsibility is one reusable `SubmitEvmTransactionState` and one adapter
 that binds it to `EvmTransactionSession` plus a `SigningProvider` checked against the state's
-certified deterministic EVM signing profile. The state owns the deterministic transaction intent,
-pure preparation reducer, and terminal domain contract; the adapter owns live
-prepare/sign/submit/observe work and produces evidence for the kernel side-effect lifecycle.
+certified deterministic EVM signing profile. Its closed `EvmTransactionAction` is either
+`Create { init_code, value }` or `Call { to, calldata, value }`; native transfer is a `Call` with
+empty calldata. The state owns the deterministic transaction intent, pure preparation reducer, and
+terminal domain contract; the adapter owns live prepare/sign/submit/observe work and produces
+evidence for the kernel side-effect lifecycle. Contract validation is the package's one separate
+read responsibility and does not create another mutation path.
 
 Keep two identities separate. Kernel idempotency input derives only from immutable authored intent:
 semantic network/chain, sender, signer ref/profile, destination, value, calldata, access list, and
-checked gas/fee policy. A concrete invocation identity is the later prepared unsigned envelope plus
+checked gas/fee policy. For creation, `init_code` replaces destination/calldata in that same closed
+intent. A concrete invocation identity is the later prepared unsigned envelope plus
 its expected signed hash. Before `SideEffectInvocationPrepared`, an attempt may retry live
 preparation under the lane. At and after
 `SideEffectInvocationPrepared`/`SideEffectInvocationStarted`, recovery
@@ -543,23 +691,27 @@ cannot prepare a replacement transaction under the same idempotency key.
 
 The path has these non-negotiable semantics:
 
-1. One side-effect node represents exactly one transaction. Approval, swap, transfer, and
-   compensation are separate dependent nodes; no adapter loop broadcasts a vector of transactions.
+1. One side-effect node represents exactly one transaction. Deployment, approval, configuration,
+   swap, transfer, and compensation are separate dependent nodes; no adapter loop broadcasts a
+   vector of transactions.
 2. The exclusive resource lane is `(network_id, chain_id, expected_sender)` (or one equivalent
    certified ledger identity). Under that held lane, preparation reads the pending nonce, fee
    inputs, and estimate and fixes one unsigned transaction containing chain, nonce, gas, fees,
-   destination, value, calldata, and access list. The lane serializes MFM invocations only; it does
-   not reserve a nonce against a wallet, operator, or other process using the same account. After
-   `SideEffectInvocationStarted`, a nonce conflict without expected-hash evidence is
+   action-derived destination/input/value, and access list. The lane serializes MFM invocations
+   only; it does not reserve a nonce against a wallet, operator, or other process using the same
+   account. After `SideEffectInvocationStarted`, a nonce conflict without expected-hash evidence is
    `SubmissionUnknown`, not permission to select a fresh nonce.
 3. Prepared authority retains typed pending-nonce, fee-input, and gas-estimate observations
    sufficient for the same pure reducer to recompute the unsigned plan, plus signer ref, expected
-   sender, signing digest, expected transaction hash, and redacted source binding. It never retains
-   a signature, raw signed envelope, endpoint, or provider body.
+   sender, signing digest, expected transaction hash, and redacted preparation-session audit
+   evidence. The source reference is not part of transaction identity. Prepared authority never
+   retains a signature, raw signed envelope, endpoint, or provider body.
 4. `eth_sendRawTransaction` is observed only when the returned hash equals the locally computed
    hash. Provider text such as “already known” is not evidence. Transaction and receipt lookup must
    match the expected hash and prepared public fields. Retained transaction observation excludes
-   signature scalars (`v`/`r`/`s`) and raw bytes.
+   signature scalars (`v`/`r`/`s`) and raw bytes. Only a successful `Create` may carry a receipt
+   contract address, and it must equal the sender/nonce-derived address; reverted creation and every
+   `Call` must carry none.
 5. Standard JSON-RPC cannot prove that a sender nonce was never submitted. When expected-hash
    lookup is empty, recovery may regenerate and rebroadcast only the identical envelope. If the
    result remains inconclusive, record `SubmissionUnknown` and block or require certified manual
@@ -571,11 +723,17 @@ The path has these non-negotiable semantics:
    relations from retained typed preparation, transaction, receipt/log, block, and head evidence. It
    never calls a signer, keystore, or network and does not claim an offline proof of an omitted
    signature.
-7. A reverted receipt is a confirmed external effect that consumed nonce and gas, not a malformed or
-   absent receipt. A later domain state or saga policy decides the business failure/remediation.
+7. Every retained receipt log carries address/topics/data, block number/hash, transaction
+   hash/index, log index, and removed status. Its block/transaction identity must agree with the
+   enclosing receipt, and removed or inconsistent logs fail closed before operation-owned
+   interpretation.
+8. A reverted receipt is a confirmed external effect that consumed nonce and gas, not a malformed
+   or absent receipt. Its terminal result is explicit and cannot expose a created-contract handle. A
+   later domain state or saga policy decides the business failure/remediation.
 
-This is the reusable write foundation for rebalancing without prematurely implementing a rebalance
-operation, exchange router, allowance policy, slippage policy, or compensation graph.
+This is the reusable write foundation for rebalancing and contract operations without prematurely
+implementing a rebalance operation, exchange router, allowance policy, token workflow, smart-wallet
+graph, flash-loan executor, slippage policy, or compensation graph.
 
 ## Replace routing with one source-bound session
 
@@ -610,14 +768,15 @@ async bind(network, expected_chain)
 ```
 
 Every read attempt uses one exact bound session. Every mutation live or recovery attempt constructs
-a new checked process-local session bound to the prepared semantic network, chain, and retained
-source ref; no session object is assumed to survive process loss. Recovery verifies that binding
-before expected-hash lookup or identical rebroadcast, while the prepared transaction itself never
-changes. Delete source policies, policy ids, preferred-source rotation, synthesized policies,
-fallback candidates, public transport registries, per-method source verification, and app
-model-to-model mapping. If source failover is designed later, it must retry a whole logical read or
-be explicit certified recovery authority; it must not drift sources inside one observation or
-silently switch mutation authority.
+a new checked process-local session for the prepared semantic network and chain through the one
+currently configured route; no session object is assumed to survive process loss. Recovery verifies
+network, chain, and certified transport/provider implementation identity before expected-hash
+lookup or identical rebroadcast, while the prepared transaction itself never changes. A new source
+reference across attempts is fresh redacted audit evidence, not a transaction-identity mismatch.
+Delete source policies, policy ids, preferred-source rotation, synthesized policies, fallback
+candidates, public transport registries, per-method source verification, and app model-to-model
+mapping. A future failover policy must retry a whole logical read or recovery attempt; it must not
+drift sources inside one observation batch.
 
 Runtime-local source identity is audit provenance, not holding domain equality. Retain it once in
 the collection evidence, not in joint tip, metadata, each read response, each fact, each receipt
@@ -631,13 +790,15 @@ malformed unrelated signer or keystore sections must not block either run.
 
 ## Shrink and harden the JSON-RPC transport
 
-After contract deletion, retain/rebuild only the RPC methods required by portfolio balances and the
-owned single-transaction substrate, adding the currently missing typed transaction lookup:
+After deleting the current contract implementation, retain/rebuild only the RPC methods required by
+portfolio balances, minimal exact-anchor contract validation, and the owned single-transaction
+substrate, adding the currently missing typed transaction lookup:
 
 - `eth_chainId` during session binding;
 - `eth_getBlockByNumber` / `eth_getBlockByHash` for anchor resolution and identity reads;
 - `eth_getBalance`;
 - `eth_call` for typed ERC-20 `decimals()` and `balanceOf(address)`;
+- `eth_getCode` for mandatory exact-anchor runtime-code-hash validation;
 - `eth_getTransactionCount` at `pending` for nonce preparation;
 - the narrow fee-input calls selected by one checked EIP-1559 fee policy;
 - `eth_estimateGas`;
@@ -648,8 +809,8 @@ owned single-transaction substrate, adding the currently missing typed transacti
 `eth_getTransactionByHash` is a new required observation method; the current capability/transport
 surface has receipt lookup and nonce occupancy but no transaction-by-hash provider path.
 
-Delete `web3_clientVersion`, code reads, general log scans, and nonce-occupancy implementations and
-their tests. Client version is best-effort and non-authoritative
+Delete `web3_clientVersion`, general log scans, and nonce-occupancy implementations and their tests.
+Client version is best-effort and non-authoritative
 (`transports/evm/src/lib.rs:116-131`); it should not be persisted or replaced with `"unknown"`.
 
 For retained RPC calls:
@@ -666,9 +827,12 @@ For retained RPC calls:
 - combine transaction-by-hash and receipt observations: a null receipt alone cannot distinguish a
   pending transaction from an absent one, and any missing/inconsistent combination remains
   inconclusive; distinguish successful and reverted receipts without boolean coercion and retain
-  complete typed receipt logs needed by the owning transaction state;
+  complete typed receipt logs—address, topics, data, block/transaction identities, log index, and
+  removed status—needed by the owning transaction state; reject removed or anchor-inconsistent
+  logs;
 - preserve only reviewed, redacted diagnostics;
-- issue exact EIP-1898 hash selectors with `requireCanonical` for anchored state reads; and
+- issue exact EIP-1898 hash selectors with `requireCanonical` for anchored balance, code, and call
+  reads; and
 - after all balance calls, read the anchor **by number** and require its returned canonical hash to
   equal the original anchor hash before publication.
 
@@ -850,15 +1014,16 @@ Then delete:
 - app lists that manually enumerate the nine old read-state keys.
 
 Rewrite the now-small `mfm-states-evm` and `mfm-adapters-evm` packages around the independently
-owned single-transaction state/adapter only. Do not leave portfolio read modules beside it.
+owned single-transaction and exact-anchor contract-validation state/bindings only. Do not leave
+portfolio read modules beside them.
 
 This is not “put EVM everywhere in portfolio”. Reusable protocol authority remains in
 `mfm-evm-capabilities`, reusable transaction construction remains in `mfm-evm-signing`, reusable
-single-transaction semantics remain in the rewritten EVM state/adapter pair, and reusable live
-protocol implementation remains in `mfm-transports-evm`. The current read domain action—collect the
-portfolio's configured holdings—is owned by portfolio. A future second read consumer can justify a
-reusable collector state family based on two concrete uses rather than preserving today's
-portfolio-coupled read crate surface under a generic name.
+single-transaction and contract-validation semantics remain in the rewritten EVM state/adapter
+pair, and reusable live protocol implementation remains in `mfm-transports-evm`. The current read
+domain action—collect the portfolio's configured holdings—is owned by portfolio. A future second
+balance-collection consumer can justify a reusable collector state family based on two concrete
+uses rather than preserving today's portfolio-coupled read crate surface under a generic name.
 
 Do not merge adapter and transport merely to reduce crate count. The adapter binds state intent,
 evidence, and replay; the transport owns HTTP/JSON-RPC. That is a real architecture boundary with
@@ -876,17 +1041,17 @@ Delete the forwarding provider, aggregate supertrait, and duplicate factories. A
 1. load only the runtime config required by the requested read or mutation;
 2. construct the shared transport resource and, for mutation only, the exact generic signer
    provider binding;
-3. register one portfolio EVM collection runner and one reusable single-transaction EVM adapter;
-   and
+3. register one portfolio EVM collection runner, one reusable single-transaction EVM adapter, and
+   one exact-anchor contract-validation binding; and
 4. bind one checked source session for each read attempt and each transaction live/recovery attempt.
 
 Transport/backend implementation identity belongs to the provider implementation, not to each
 consumer adapter. Delete contract-vs-collector special cases that assign different implementation
 ids to the same RPC authority.
 
-App certification should call one portfolio-read registration and one EVM-transaction registration
-rather than separately enumerate EVM collector op descriptors, nine read state descriptors, two
-fact families, replay state-key lists, and forwarding providers.
+App certification should call one portfolio-read registration plus the two reusable EVM state
+registrations rather than separately enumerate EVM collector op descriptors, nine read state
+descriptors, two fact families, replay state-key lists, and forwarding providers.
 
 ## Make live and replay one semantic path
 
@@ -941,11 +1106,17 @@ The retained design needs one representation per concept:
 - block selector: one capability-owned selector, including exact hash + `requireCanonical`;
 - provenance: one serializable redacted session-evidence value;
 - asset source: one `Native | Erc20 { contract }` algebra;
+- transaction action: one closed `Create { init_code, value } | Call { to, calldata, value }`
+  algebra;
 - transaction plan: one canonical EIP-1559 value containing chain, sender, nonce, gas, fees,
-  destination, value, calldata, and access list;
+  action-derived destination/input/value, and access list;
 - signing identity: one generic signer ref plus the expected Alloy sender address;
 - transaction identity: one signing digest and one signed-envelope hash, both `B256`; and
-- transaction observation: one typed transaction/receipt/log/confirmation evidence algebra.
+- transaction observation: one typed transaction/receipt/log/confirmation evidence algebra with an
+  explicit successful-created/successful-called/reverted terminal result;
+- contract validation: one anchored address, mandatory non-empty runtime-code hash, and ordered
+  fully specified call-context/exact-return expectation list; and
+- verified contract: one address/anchor/code-hash/plan-digest output, not lifecycle stage copies.
 
 Delete duplicate `EvmNetworkId`, `ContractAddress`, `EvmBlockHash`, `EvmCodeHash`, source binding,
 validation source, transaction style, selector, quantity, and artifact-identity wrappers rather than
@@ -983,8 +1154,9 @@ Alloy transaction primitive are replacements by owner, not surviving `evm-core` 
 
 Delete:
 
-- `ChainIdentity`, `CodeRead`, `LogsRead`, and `NonceOccupancyRead` markers and their complete
-  request/response/provider families;
+- `ChainIdentity`, `CodeRead`, `LogsRead`, and `NonceOccupancyRead` as separate markers/provider
+  families; fold one exact-block code request/result into `EvmReadSession` and delete the other
+  three state-facing method families;
 - separate `BlockRead`, `BalanceRead`, `CallRead`, `NonceRead`, `FeeRead`, `GasEstimate`,
   `TransactionSubmit`, and `ReceiptRead` provider traits, markers, implementation ids, and aggregate
   supertraits after their useful DTOs are consolidated behind the two retained sessions;
@@ -1014,8 +1186,10 @@ Delete the entire public model:
   code hash, and block hash; and
 - the contract ABI facade functions and broad re-exports.
 
-No subset moves into the retained read capability because portfolio balances do not need a general
-contract artifact/assertion language.
+No old type moves or becomes an alias. The few replacement values—transaction action/outcome,
+exact-call expectation, validation plan, and verified contract—are re-authored beside the retained
+states from canonical Alloy/kernel primitives. They do not recreate a general contract model or
+artifact/assertion language.
 
 ### `mfm-evm-signing`
 
@@ -1070,9 +1244,16 @@ Delete the current portfolio-read public surface after the portfolio cutover:
 
 The semantic source algebra, one fact, one batch, one snapshot, and two read/publication states are
 redesigned in `mfm-state-portfolio`; old facts and receipts do not become aliases. Rewrite the
-retained `mfm-states-evm` package around exactly one generic `SubmitEvmTransactionState`, its public
-intent/idempotency/receipt/confirmation/output values, certified deterministic signing profile, and
-its capability/resource-lane declaration. It owns no contract or portfolio policy.
+retained `mfm-states-evm` package around exactly two reusable state kinds:
+
+- `SubmitEvmTransactionState`, its closed `Create`/`Call` action, public
+  intent/idempotency/receipt/confirmation/outcome values, certified deterministic signing profile,
+  and capability/resource-lane declaration; and
+- `ValidateEvmContractState`, its mandatory code hash and exact-call plan, one anchored evidence
+  batch/shared reducer, and compact verified-contract output.
+
+It owns no portfolio policy, general ABI model, deploy/configure workflow, or historical-event
+query language.
 
 ### `mfm-op-evm-collectors`
 
@@ -1103,10 +1284,13 @@ Delete:
 - inline tests that assert these implementation types rather than retained behavior.
 
 The portfolio adapter receives one read runner using the retained session contract and shared
-reducer. Rewrite the retained `mfm-adapters-evm` package around one side-effect adapter for the
-single transaction state. It owns preparation, deterministic signing, submit, expected-hash
-observation, checked session reconstruction for recovery, receipt/confirmation evidence, and replay
-verification without contract lifecycle callbacks or multi-transaction loops.
+reducer. Rewrite the retained `mfm-adapters-evm` package around exactly two bindings: one side-effect
+adapter for the single transaction state and one external-read adapter for contract validation. The
+first owns preparation, deterministic signing, submit, expected-hash observation, checked session
+reconstruction for recovery, receipt/confirmation evidence, and replay verification. The second
+executes the state-authored code/call plan and invokes the same validation reducer for live and
+replay. Neither has deploy/configure callbacks, dynamic ABI logic, historical log scans, or
+multi-transaction loops.
 
 ### `mfm-transports-evm`
 
@@ -1118,7 +1302,7 @@ Delete from the retained crate:
 - non-fallible client construction and per-method `verified_source` calls;
 - state-facing chain-identity response and all client-version behavior, while retaining one private
   bind-time `eth_chainId` check;
-- code, general log-scan, and nonce-occupancy RPC paths;
+- general log-scan and nonce-occupancy RPC paths;
 - the provider-implementation macro over twelve traits;
 - old nonce/fee/gas/submit/receipt parsing and helpers as the retained transaction methods are
   rewritten with Alloy/U256, checked fee arithmetic, strict envelopes, expected-hash equality, and
@@ -1127,25 +1311,28 @@ Delete from the retained crate:
 - routing and behavior tests for deleted choices.
 
 Retain private endpoint storage, strict bounded JSON-RPC exchange, async source binding, and typed
-block/balance/call plus pending-nonce/fee-input/estimate/submit/transaction/receipt methods behind
-the two session views. Transaction-by-hash is added as part of this replacement; it is not an
-existing provider implementation being preserved. The transaction view also exposes only the
+block/balance/code/call plus pending-nonce/fee-input/estimate/submit/transaction/receipt methods
+behind the two session views. Code and call both support the exact EIP-1898 hash selector required
+by validation. Transaction-by-hash is added as part of this replacement; it is not an existing
+provider implementation being preserved. The transaction view also exposes only the
 head/block-by-number reads needed to verify certified confirmation depth.
 
 ### `mfm-state-evm-contracts`
 
-Delete all public config, input, intent, evidence, handle, identity, signer policy, transaction
-style, receipt, deploy, configure, validation, anchor, state, and certification-registry surfaces.
-Delete the fake mutation/validation execution methods and typestate UI tests rather than preserving
-their compile-time graph protocol.
+Delete all current public config, input, intent, evidence, handle, identity, signer policy,
+transaction style, receipt, deploy, configure, validation, anchor, state, and
+certification-registry surfaces. Delete the fake mutation/validation execution methods and
+typestate UI tests rather than preserving their compile-time graph protocol. Re-author the two
+minimal state contracts in `mfm-states-evm`; do not move or alias an old state.
 
 ### `mfm-adapters-evm-contracts`
 
 Delete all provider bundles/factories, prepared invocation/phase/style/evidence types, deploy and
-configure runners, validation reads, runner binding plans, callbacks, registration, replay adapter,
-replay preparation/recovery, adapter errors, and tests. The generic requirements—one transaction,
-exclusive sender lane, expected-hash recovery, receipt, and confirmation—are reimplemented once in
-`mfm-adapters-evm`; no contract adapter type or code is moved or aliased.
+configure runners, current validation reads, runner binding plans, callbacks, registration, replay
+adapter, replay preparation/recovery, adapter errors, and tests. The generic requirements—one
+transaction, exclusive sender lane, expected-hash recovery, receipt, confirmation, and exact-anchor
+validation—are reimplemented once in `mfm-adapters-evm`; no contract adapter type or code is moved
+or aliased.
 
 ### Adjacent runtime, portfolio, app, CLI, test, and documentation surfaces
 
@@ -1168,8 +1355,9 @@ Refactor or delete:
   and update parity tests/docs;
 - integration manifest edges, contract graph, old EVM replay fixtures, operation-count assertions,
   and source-text boundary assertions;
-- `docs/evm-contract-states.md` and the current routing document's contract/fallback model; rewrite
-  signer routing around the one retained generic binding;
+- the current `docs/evm-contract-states.md` lifecycle model and routing document's
+  contract/fallback model; document the replacement `Create`/`Call` transaction composition,
+  exact-anchor validation, and one retained generic signer binding;
 - stale EVM rows in persisted-public-surfaces, CLI, REST, app, architecture, and design docs; and
 - Cargo workspace/metadata, Nix/CI metadata expectations, rustdoc examples, and diagrams referring
   to deleted packages or schemas.
@@ -1205,6 +1393,15 @@ Replace them with behavior-boundary tests for:
 - canonical address/hash/U256 serialization;
 - endpoint/credential/signer/raw-transaction redaction;
 - exactly one transaction per side-effect node and one `(network_id, chain_id, sender)` lane;
+- direct `Create` deriving the expected address from sender/nonce and rejecting a successful
+  receipt with a missing/mismatched contract address, a reverted creation with an address, or any
+  `Call` receipt with an address;
+- configuration as sequential `Call` nodes, including partial failure that preserves earlier
+  terminal outcomes without broadcasting later calls;
+- factory/CREATE2 deployment remaining an ordinary `Call`, with address/log interpretation owned by
+  the consuming operation;
+- one complete `Create -> Call -> Call -> Validate` graph carrying the created address and final
+  successful call anchor, including evidence-only replay of the same composition;
 - stable authored-intent idempotency across pre-boundary preparation retries and immutable concrete
   envelope identity after the prepared boundary;
 - pending-nonce preparation and immutable prepared nonce/fee/gas fields;
@@ -1218,6 +1415,12 @@ Replace them with behavior-boundary tests for:
 - successful and reverted receipt handling, receipt-log retention, unchanged receipt block
   identity, block-by-number canonicality, certified head depth, and moved/disappeared receipt
   ambiguity;
+- exact-anchor contract code-hash and call-return validation, including rejection of empty code and
+  the empty-code hash, explicit caller/target/value/gas/access-list context, deterministic batch
+  order, final anchor canonicality, and validation of an existing address without a
+  deploy/configure producer restriction;
+- validation live/replay reducer parity and rejection of latest reads, historical log scans,
+  malformed code/call evidence, or code-at-address as transaction-submission proof;
 - recovery regeneration of the identical expected hash and safe identical rebroadcast;
 - absent/inconclusive expected-hash lookup producing `SubmissionUnknown`, never nonce-occupancy
   pseudo-proof;
@@ -1228,14 +1431,16 @@ Replace them with behavior-boundary tests for:
 
 Documentation changes are part of each behavior commit, not follow-up work. In particular:
 
-- remove direct contract primitives from `docs/design.md:269-283`;
+- replace the fixed deploy/configure/validate graph in `docs/design.md:269-283` with the two generic
+  EVM states and operation-owned contract composition;
 - replace receipt-as-authority text in `docs/design.md:193-201`;
 - update `docs/architecture.md:50-62,147-162` to the two-state direct snapshot flow;
 - rewrite `docs/evm-rpc-routing.md` to show one source-bound session plus selective generic signer
   routing for mutation, with no source policy/fallback graph;
 - remove `docs/evm-rpc-routing.md:141`'s claim that adapters construct workflow operations, which
   contradicts the repository rule that operation crates own topology;
-- delete contract rows and repeated source-policy claims in `docs/persisted-public-surfaces.md`;
+- replace old contract lifecycle rows and repeated source-policy claims in
+  `docs/persisted-public-surfaces.md` with only the new transaction and validation surfaces;
 - remove CLI/REST/app claims about uncallable contract runs;
 - update `bin/cli/README.md` for the canonical `keystore tx-sign` service and explicit bearer-output
   boundary; and
@@ -1277,12 +1482,12 @@ PublishEvmHoldingsState
 portfolio pure assembly -> snapshot -> report
 ```
 
-The retained transaction path, ready for an owned portfolio-rebalancing graph without embedding
-that future graph now, is:
+The retained transaction path, ready for owned portfolio-rebalancing and contract-operation graphs
+without embedding those future product graphs now, is:
 
 ```text
-future portfolio rebalance operation
-  one domain action -> one SubmitEvmTransactionState
+future rebalance / token / wallet operation
+  one Create or Call -> one SubmitEvmTransactionState
                            |
                            | deterministic intent + (network, chain, sender) lane
                            v
@@ -1303,26 +1508,64 @@ future portfolio rebalance operation
 
 Normal execution signs once and submits those same transient bytes. Recovery can reconstruct only
 the byte-identical expected envelope and otherwise blocks on uncertainty. Each live or recovery
-attempt binds a fresh checked session to the prepared network/chain/source authority; the
-process-local session is not durable state. Replay uses retained public evidence and never touches
-the lower live resources.
+attempt binds a fresh checked session to the prepared network/chain and certified provider
+authority; its current redacted source reference is audit evidence and the process-local session is
+not durable state. Replay uses retained public evidence and never touches the lower live resources.
+
+Contract workflows compose that transaction primitive with one separate validation primitive:
+
+```text
+operation-owned Alloy encoding and graph
+          |
+          +-- Create -----------------------+
+          |                                 |
+          +-- Call -> Call -> ... ----------+  one transaction per node
+                                            |
+                                            v
+                                EvmTransactionOutcome
+                         explicit success/revert + receipt/logs + exact anchor
+                              created address only on successful Create
+                                            |
+                                            v
+                              ValidateEvmContractState
+                                required code hash + exact calls
+                                            |
+                               plan / shared reducer
+                                            |
+                                            v
+                                    mfm-adapters-evm
+                                      validation binding
+                                            |
+                                            v
+                       EvmReadSession: code + call + anchor recheck
+                                            |
+                                            v
+                                  VerifiedEvmContract
+```
+
+The validation state can also accept an explicitly anchored existing contract. It does not require
+a deploy or configure predecessor. Receipt-log interpretation stays pure and operation-owned;
+validation performs no historical log search.
 
 ### Retained EVM-specific crates
 
-`mfm-evm-capabilities` owns exactly two transport-neutral authorities: checked read and checked
-single-transaction sessions, their request/results, session evidence, and redacted errors.
+`mfm-evm-capabilities` owns exactly two transport-neutral authorities: checked read (including
+code/call) and checked single-transaction sessions, their request/results, session evidence, and
+redacted errors.
 
 `mfm-evm-signing` owns only Alloy EIP-1559 envelope construction, signing digest/request conversion,
 signature/sender verification, transient finalization, and transaction hashing.
 
-`mfm-states-evm` owns one reusable transaction state, one transaction per node, and its deterministic
-intent/idempotency/preparation/output contract plus resource/capability/signing-profile declaration.
+`mfm-states-evm` owns exactly two reusable state kinds: one `Create`/`Call` transaction state, one
+transaction per node, and one exact-anchor code/call validation state. It owns their deterministic
+intent/plan, reducers, outcomes, and resource/capability/signing-profile declarations, not a
+contract workflow.
 
-`mfm-adapters-evm` owns the one live/recovery/replay binding from that state to transaction and
-signing capabilities.
+`mfm-adapters-evm` owns one live/recovery/replay binding from the transaction state to transaction
+and signing capabilities and one live/replay binding from contract validation to the read session.
 
 `mfm-transports-evm` owns bounded HTTP/JSON-RPC, private endpoint resolution, async bind/probe,
-block/balance/call, and the minimal transaction preparation/submission/observation methods.
+block/balance/code/call, and the minimal transaction preparation/submission/observation methods.
 
 These are five EVM-specific packages with five distinct reasons to change. They replace ten broad
 or overlapping packages; they are not facades over deleted APIs.
@@ -1356,8 +1599,12 @@ The intended final tree has no:
 - `crates/states/evm-contracts`;
 - `crates/adapters/evm-contracts`;
 - `crates/ops/evm-collectors-op`;
-- contract lifecycle integration graph or docs;
-- contract-specific signer policy, prepared transaction, receipt, validation, or replay surface;
+- old fixed contract lifecycle integration graph, schemas, or docs;
+- deploy/configure-specific mutation state or adapter paths, multi-stage contract typestate, or
+  producer restrictions;
+- contract-specific signer policy, prepared transaction, receipt, finality, or replay surface—the
+  generic transaction path owns each once;
+- general ABI/bytecode JSON wrappers, dynamic assertion language, or historical event scanner;
 - custom general ABI/RLP/transaction implementation;
 - legacy-transaction fallback or parallel transaction-style enums;
 - serializable signatures or raw signed transaction DTOs;
@@ -1394,19 +1641,20 @@ callable.
   and commit charter.
 - No production behavior changes.
 
-### 2. `delete unused evm contract workflow stack`
+### 2. `delete overbuilt evm contract workflow stack`
 
-- Delete contract model, state, adapter, integration graph, compile-fail suites, documentation,
-  workspace edges, schema registrations, and tombstone tests.
-- Delete contract-specific artifact, ABI assertion, deploy/configure/validate, prepared, replay,
-  saga, signer-policy, and multi-transaction machinery; do not relocate it.
-- Delete general code and historical-log capabilities and their transport methods, but keep the
-  existing nonce, fee, estimate, submit, and receipt foundations plus generic signing, keystore, and
-  runtime signer support compiling for the owned transaction rewrite. Receipt-contained logs remain
-  part of typed receipt evidence; transaction-by-hash observation is introduced in commit 4.
+- Delete the current contract model, state, adapter, integration graph, compile-fail suites,
+  documentation, workspace edges, schema registrations, and tombstone tests.
+- Delete contract-specific artifact/ABI assertion, fixed deploy/configure/validate topology,
+  prepared/replay/saga, signer-policy, and multi-transaction machinery; relocate none of it.
+- Delete historical-log capabilities and their transport methods, but retain strict code read,
+  pending nonce, fee, estimate, submit, and receipt-lookup foundations plus generic signing,
+  keystore, and runtime signer support for the owned rewrite. Transaction-by-hash observation and
+  the new typed receipt contract-address/log model are introduced atomically in commit 4.
 - In this same commit, update `docs/design.md`, `docs/architecture.md`, routing, persisted surfaces,
-  app/CLI/REST docs, metadata contracts, and tests to withdraw the contract lifecycle authority.
-  Normative docs must not describe the deleted code before or after this commit.
+  app/CLI/REST docs, metadata contracts, and tests to withdraw the old lifecycle authority. Docs may
+  identify `Create`/`Call`/exact validation as the planned replacement, but must not claim those new
+  states are registered before commits 5 and 6.
 
 ### 3. `replace evm transaction and keystore signing`
 
@@ -1440,11 +1688,12 @@ callable.
   `mfm-adapters-evm` runner bindings, app capability certification/assembly, integration fixtures,
   UI/metadata/source-boundary tests, and the transport. Delete the old markers and traits in this
   same commit.
-- Retain block/balance/call and existing pending-nonce/fee-input/estimate/submit/receipt methods; add
-  typed transaction-by-hash observation. Delete client version, code, general logs, and nonce
+- Retain block/balance/code/call and existing pending-nonce/fee-input/estimate/submit/receipt
+  methods; add typed transaction-by-hash observation. Delete client version, general logs, and nonce
   occupancy.
 - Add time/body bounds, fallible construction, strict JSON-RPC id/version/shape validation, U256
-  quantities, checked fee arithmetic, expected submit-hash equality, and typed receipt/log parsing.
+  quantities, checked fee arithmetic, expected submit-hash equality, and a new typed receipt model
+  with required status, optional contract address, and complete internally coherent logs.
 - Load only a route for read execution and the route plus exact referenced signer/keystore for
   mutation; unrelated malformed signer config is ignored.
 - Delete per-method chain probes, provider supertraits/factories, and the app forwarding proxy.
@@ -1458,21 +1707,30 @@ callable.
   and fixture—including `ProofApplySideEffectState`, kernel program/certify/runtime fixtures, and UI
   support types—and delete the old contract in this same commit.
 - Add exactly one generic `SubmitEvmTransactionState` to `mfm-states-evm` and one matching adapter to
-  `mfm-adapters-evm`; do not resurrect any contract lifecycle type.
+  `mfm-adapters-evm`. Its only action variants are `Create { init_code, value }` and
+  `Call { to, calldata, value }`; do not resurrect deploy/configure mutation states.
 - Implement one transaction per node, the `(network_id, chain_id, sender)` exclusive lane,
   pending-nonce preparation, separate authored-intent idempotency and concrete prepared identity,
   immutable unsigned plan, a certified deterministic signing profile, one normal-path
   signature/envelope, matching-hash submit, checked session reconstruction, typed
   transaction/receipt/confirmation observation, deterministic recovery regeneration, and replay
-  without live resources. Document that the lane cannot exclude external nonce writers.
-- Delete the old contract transaction/preparation/recovery assumptions from docs and schemas. Add
-  fail-closed tests for hash mismatch, field mismatch, reverted/moved/disappeared receipts,
-  canonical block/depth mismatch, external nonce conflict, inconclusive submission, identical
-  rebroadcast, secret exclusion, and compensation as another node.
+  without live resources. Document that the lane cannot exclude external nonce writers. Retain
+  strict status, optional receipt contract address, full canonical logs, and the confirmed anchor in
+  one outcome.
+- For direct `Create`, derive the expected address from fixed sender/nonce and require a successful
+  receipt to contain that address; require it to be absent for reverts and every `Call`. Treat
+  factory/CREATE2 deployment as `Call`. Test configuration as separate dependent calls and a
+  contract-side multicall as one node when it is one transaction; test missing/mismatched creation
+  addresses and forbidden addresses on reverted-creation and `Call` receipts.
+- Publish the replacement transaction/preparation/recovery docs and schemas and verify the old
+  contract assumptions removed in commit 2 remain absent. Add fail-closed tests for hash mismatch,
+  field mismatch, reverted/moved/disappeared receipts, canonical block/depth mismatch, external
+  nonce conflict, inconclusive submission, identical rebroadcast, secret exclusion, and
+  compensation as another node.
 - Assemble the generic signing and keystore providers for mutation runs while keeping read assembly
   signer-free.
 
-### 6. `replace external read execution and the portfolio evm graph`
+### 6. `replace external read execution and add evm contract validation`
 
 - Replace the kernel's impossible marker-tuple read execution with state-owned plan/reduce and one
   generic live/replay external-read runner contract. Migrate every surviving `ReadState`
@@ -1480,7 +1738,29 @@ callable.
   selection, `ProofReadFactState`, runtime state fixtures, and app fact fixtures—and delete the old
   read contract in this same commit.
 - Use the already-collapsed `EvmReadSession`, bind asynchronously, and probe the configured source
-  once per network attempt.
+  once per attempt.
+- Add exactly one `ValidateEvmContractState` and its one read binding. Its plan accepts any concrete
+  anchored contract, requires non-empty observed runtime code and an expected hash other than the
+  empty-code digest, and permits only bounded fully specified call-context/exact-return checks.
+- Execute code and calls with the same EIP-1898 block-hash selector and
+  `requireCanonical = true`, then re-read the anchor by number and require the same hash. Use one
+  state-owned reducer for live and replay and emit one compact `VerifiedEvmContract`.
+- Verify that latest validation calls, optional/empty code validation, historical log queries,
+  dynamic ABI/assertion parsing, deploy/configure producer restrictions, result/evidence
+  duplication, and contract-specific replay logic deleted in commit 2 remain absent. Receipt-log
+  interpretation remains operation-owned pure logic.
+- Add direct-create-to-validation, call-to-validation, pre-existing anchored-contract, failed code
+  hash/call result, reorg, evidence tamper/reorder, live/replay parity, and no-network-on-replay
+  tests. Include a complete `Create -> Call -> Call -> Validate` graph that propagates the created
+  address and final call anchor through evidence-only replay. Update validation, state-execution,
+  routing, and persisted-surface docs in this commit.
+
+No old read execution contract remains after this commit. The current portfolio graph is migrated
+to the new runner contract but is otherwise left intact until commit 7, avoiding a parallel kernel
+read path while keeping the portfolio topology change independently reviewable.
+
+### 7. `collapse the portfolio evm graph`
+
 - Add the unified source algebra, fact, collection batch, and network snapshot in portfolio state.
 - Add `CollectEvmNetworkState` and `PublishEvmHoldingsState` with one live/replay reducer.
 - Use the one source-bound session, exact EIP-1898 hash reads, deduplicated metadata, and one final
@@ -1488,20 +1768,21 @@ callable.
 - Record all facts atomically and feed the direct snapshot handle into portfolio assembly.
 - Inline private EVM planning in portfolio snapshot.
 - In this same commit, delete all portfolio read code from `mfm-states-evm` and
-  `mfm-adapters-evm` while retaining their one transaction state/adapter; delete
+  `mfm-adapters-evm` while retaining their transaction and validation states/bindings; delete
   `mfm-op-evm-collectors`, the remaining `mfm-evm-core`, nine old read states, three collector
   operations, evidence mirrors, receipt pyramid, same-run fact selection/hydration, old app
   registrations, and broad re-exports.
 - Update the receipt authority, source binding, state execution, portfolio topology, replay,
   persisted-surface, rustdoc, and architecture tests in this same commit. No normative document may
-  claim the two-state design before this commit or the old graph after it.
+  claim the simplified portfolio design before this commit or the old graph after it.
 
-This is intentionally one major read vertical-slice commit. Splitting the kernel read contract, new
-graph, and legacy read deletion would either leave parallel execution paths or force a second
-temporary graph. Transaction state/adapter packages remain, but no old collector item remains in
-them.
+Commit 6 intentionally performs the compile-wide execution-contract migration before this topology
+change, so the old portfolio graph is mechanically migrated once and then deleted here. That small
+amount of temporary migration work keeps kernel execution semantics and portfolio ownership/topology
+as separate reviewable commits without introducing a parallel read path. Transaction/validation
+state and adapter packages remain, but no old collector item remains in them.
 
-### 7. `docs: audit the simplified evm architecture`
+### 8. `docs: audit the simplified evm architecture`
 
 - Perform a final stale-name/schema/dependency audit.
 - Remove any stale diagrams, examples, comments, or source-text expectations missed by the owning
@@ -1523,27 +1804,43 @@ Run `nix run .#ci` after the major vertical-slice replacement and for final merg
 
 The refactor is complete only when all of the following are true:
 
-- exactly five narrow EVM-specific packages remain: capabilities, signing/envelope, one transaction
-  state, one transaction adapter, and transport;
+- exactly five narrow EVM-specific packages remain: capabilities, signing/envelope, EVM states, EVM
+  adapters, and transport;
 - Cargo metadata contains no `mfm-evm-core`, contract model/state/adapter, or EVM collector-op
   package;
-- the contract lifecycle graph, schemas, docs, setup tombstones, and contract-specific signer
-  policy are gone;
+- the old fixed contract lifecycle graph, schemas, docs, setup tombstones, and contract-specific
+  signer policy are gone; minimal `Create`/`Call`/validate docs and schemas replace them;
 - exactly `EvmReadCapability` / `EvmReadSession` and `EvmTransactionCapability` /
   `EvmTransactionSession` remain as EVM state-facing authority;
 - one async bind creates one checked source-stable session per read attempt and per transaction
-  live/recovery attempt; recovery sessions must match prepared network/chain/source authority;
+  live/recovery attempt; recovery sessions must match prepared network/chain and certified provider
+  identity, while source references may differ across attempts as redacted audit evidence;
 - no per-method `eth_chainId` probe, source policy, fallback rotation, or client-version call remains;
 - every anchored state read uses EIP-1898 `requireCanonical`, followed by one anchor-number read
   whose returned canonical hash must equal the original anchor hash;
 - one canonical address/hash/U256/anchor/provenance vocabulary is used;
 - one unified EVM balance fact covers native and ERC-20 holdings;
-- the EVM network graph has exactly one external-read state and one managed-write state;
+- each portfolio EVM network collection subgraph has exactly one external-read state and one
+  managed-write state;
 - the managed-write attempt publishes the complete fact batch atomically;
-- `mfm-states-evm` contains exactly one generic single-transaction side-effect state and no
-  portfolio collector or contract-lifecycle state;
+- `mfm-states-evm` contains exactly two state kinds: one generic single-transaction state with only
+  `Create`/`Call` actions and one exact-anchor contract-validation state; it contains no portfolio
+  collector, distinct deploy/configure mutation state, or fixed lifecycle topology;
 - `mfm-adapters-evm` contains exactly one corresponding prepare/sign/submit/observe/recover/replay
-  path and no multi-transaction loop;
+  path and one code/call validation binding, with no deploy/configure path or multi-transaction loop;
+- direct `Create` derives and checks the expected address from fixed sender/nonce; only a successful
+  creation yields that address, reverted creation is an explicit terminal outcome, and receipt
+  contract address is absent for reverts and all `Call` actions; configuration, token management,
+  smart-wallet, flash-loan, factory, and CREATE2 behavior composes ordinary one-transaction `Call`
+  nodes;
+- contract validation accepts any explicitly anchored address, rejects empty observed code and the
+  empty-code digest, checks only bounded calls with explicit caller/target/value/gas/access-list
+  context and exact returns at that same hash, rechecks anchor canonicality, and uses the same
+  reducer for live and replay;
+- receipt-contained logs carry address/topics/data, full block/transaction identity and indexes,
+  and removed status as canonical typed transaction evidence interpreted by owning operations;
+  every identity must agree with the enclosing receipt, removed or anchor-inconsistent logs fail
+  closed, and no historical-log capability or general ABI/event assertion language remains;
 - kernel idempotency derives from immutable authored transaction intent, while concrete prepared
   envelope/hash identity is separate and immutable after `SideEffectInvocationPrepared`;
 - nonce preparation uses `pending` under one `(network_id, chain_id, sender)` exclusive lane, and
@@ -1567,10 +1864,11 @@ The refactor is complete only when all of the following are true:
 - `keystore tx-sign` calls the canonical transaction/signing service and contains no direct
   transaction construction or private-key signing logic;
 - portfolio assembly consumes a direct typed network snapshot, not a same-run fact query;
-- live and replay invoke the same deterministic reducer over the same canonical evidence;
+- live and replay invoke the same deterministic reducer for each retained state over the same
+  canonical evidence;
 - no required state method unconditionally returns an adapter-required error;
-- app wiring constructs resources and registers one portfolio EVM runner family without a forwarding
-  provider;
+- app wiring constructs resources and registers one portfolio EVM runner family plus the reusable
+  transaction/validation bindings without a forwarding provider;
 - no old alias, reader, migration, fallback, deprecated module, or feature-gated implementation
   remains;
 - no endpoint, credential, signer material, signature, raw transaction, or provider message is
@@ -1595,7 +1893,9 @@ Deletion is aggressive; correctness boundaries remain strict:
 - atomic fact/output publication;
 - deterministic ordering and exact coverage of configured holdings;
 - explicit collection bounds and bounded concurrency;
-- secret and bearer-material exclusion from events, facts, artifacts, errors, CLI, and REST;
+- secret and bearer-material exclusion from events, facts, artifacts, errors, logs, and CLI/REST
+  rendering; the explicit user-selected `tx-sign` bearer-output file is the only raw-transaction
+  exception;
 - adapter/transport separation; and
 - kernel side-effect ledger/saga/idempotency semantics for the retained EVM transaction path.
 
