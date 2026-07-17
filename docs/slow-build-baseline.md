@@ -1828,3 +1828,128 @@ No Crane input, package, task, model, generated source, cache, or workflow is
 retained in the main worktree. R2-07 should compare this coarse baseline with
 real granular `crate2nix` derivations; it must not treat Crane's correctness as
 evidence that a per-crate graph will qualify.
+
+## R2-07 follow-up: granular `crate2nix` artifacts
+
+R2-07 tested crate2nix only in a disposable detached worktree at source
+`b2b5778a`. The pilot pinned crate2nix 0.15.0 at revision
+`7c33e664668faecf7655fa53861d7a80c9e464a2` with NAR hash
+`sha256-SUuruvw1/moNzCZosHaa60QMTL+L9huWdsCBN6XZIic=`. It retained the R2-01
+Nixpkgs, Nixfied, Rust 1.96.0, Cargo, and aarch64-linux identities. The only
+build-policy adapter selected the MFM Rust toolchain, development mode, 256
+codegen units, and debuginfo level 1. No native-dependency or platform crate
+override was required.
+
+Manual generation produced a 20,579-line, 697,704-byte `Cargo.nix` with
+SHA-256 `1b78d5052fe1b1634e07303eecbad793242c5dd77eda8df7daafc39f47abeaf0`.
+Regenerating at the same repository path was byte-identical. The first
+standalone generator realization took approximately 2 minutes 41 seconds;
+warm generation took 0.37-0.59s with about 105 MiB maximum RSS. Generation to
+a different output path was not byte-identical because the generated header
+and relative source paths encode that path, so the deterministic workflow must
+regenerate the committed path.
+
+The generated graph contained exactly the same 504 unique package name/version
+pairs as `Cargo.lock`: neither side had an unmatched pair. Cargo metadata
+reported 53 workspace members, 504 total packages, 2,043 targets, 71 build
+scripts, 33 proc macros, and five packages with native `links`; the generated
+graph represented all 33 proc macros and all five `links` packages. The MFM
+workspace itself contributed 100 targets and one build script. Target
+predicates, host/build dependency separation, feature edges, build scripts,
+proc macros, and native link names were present in the generated graph. This
+establishes structural lockfile fidelity, but not Cargo-equivalent verification
+behavior.
+
+Committed generation has no intrinsic stale-file guard. Changing one locked
+checksum left `Cargo.nix` and the evaluated `mfm-ids` derivation unchanged;
+regeneration failed through Cargo metadata with the corrupt-lock diagnostic.
+A repository-owned regeneration comparison would therefore be mandatory on
+every dependency or feature change. In contrast, crate2nix's IFD helper kept
+the generated graph coupled to the source but required 998 first-realization
+derivations and 5:44.83 wall, 3,579,124 KiB maximum RSS, and 6,146,184 KiB of
+filesystem output on this host. Importing the realized generated graph and
+evaluating one leaf then took 0.97s. The IFD path also requires
+`allow-import-from-derivation`; the manual path avoids that evaluator policy at
+the cost of committed generated-file maintenance.
+
+### Build graph, invalidation, and storage
+
+Building all 53 workspace member roots as real crate2nix derivations succeeded
+for the non-test graph. It required 1,091 derivations and 15:34.87 wall, with
+1,540,184 KiB maximum RSS and 34,298,120 KiB of filesystem output. The aggregate
+output was only a link farm: its NAR was 800 bytes, while its 18-path runtime
+closure was 732,961,096 bytes. Evaluating that aggregate derivation took 3.51s
+and 486,552 KiB maximum RSS; a single `mfm-ids` derivation took 0.42s and
+135,364 KiB.
+
+The graph did provide genuine granular reuse for a simple leaf. Two immutable
+`mfm-ids` test executables occupied 15,022,456 bytes, had a 15,023,176-byte NAR
+and a 74,280,064-byte seven-path closure, and all eight tests passed when run
+directly from the store. Exact deletion reclaimed 14.3 MiB; rebuilding the one
+missing derivation restored the identical output in 1.19s, after which store
+verification passed.
+
+Granularity was much weaker across all workspace roots. A tracked README edit
+changed neither the leaf nor aggregate derivation. A one-line `mfm-ids` source
+edit changed 263 of 1,724 aggregate derivation-closure paths, including 261 MFM
+crate variants. Each workspace member root resolves its own feature graph, so
+widely shared crates are rebuilt in many feature combinations rather than once
+for the workspace. Lockfile changes do not invalidate a committed generated
+graph until regeneration occurs. Crate-local migrations and `.sqlx` metadata
+are included by the broad per-crate source filter, as are crate-local Trybuild
+sources and stderr files. Repository-level examples and sources belonging to
+sibling workspace crates are outside each crate source and are neither build
+inputs nor invalidation inputs for that crate.
+
+### Verification artifact veto
+
+The pilot failed the RFC's hard coverage screen before performance
+qualification. A real `mfm-portfolio-config` test target failed to compile in
+2.40s because crate2nix supplied only `crates/portfolio-config`; the test's
+`include_str!("../../../examples/configs/portfolio-dual-mainnet.toml")` could
+not read the repository-level example. The same unsupported source shape is
+used by runtime-config, app tests, and integration tests, while app and
+integration tests also read sibling workspace sources. Fixing this would
+require widening or fabricating crate sources and maintaining semantic source
+overrides, which R2-07 explicitly forbids and crate2nix documents as a known
+workspace-source restriction.
+
+The public crate2nix `runTests` interface is also not a reusable verification
+artifact. It copies test executables into a derivation-private mutable target,
+runs them while the sandbox source exists, records their combined output, and
+returns the linked normal crate. The compiled harnesses are not exposed for
+authoritative repeated Nixfied execution. A private internal graph function
+could expose binaries, but that API is explicitly unstable and did not repair
+runtime semantics: the 40,063,312-byte `mfm-program` test output had a
+375,807,120-byte 16-path closure, yet its Trybuild harness failed immediately
+outside the build sandbox. Tracing showed that it derived an empty project name
+from the unavailable compile-time manifest location and invoked Cargo with
+`--bin -tests`. Trybuild remains a nested Cargo consumer and needs the real
+workspace source, lockfile, toolchain, registry inputs, and writable target at
+execution time.
+
+Consequently the pilot could not produce the frozen 99-test-binary, 974-test
+identifier inventory, exercise all nine Trybuild harnesses, or compare final
+binary identities with the authoritative Cargo/Nextest path. Doctests, online
+SQLx checks, and live Postgres parity likewise remained separate Cargo/service
+work. No Nixfied task was added: wiring a convenient eight-test subset or a
+cached build-time success would violate the requirement that a verification
+task directly consume a complete immutable artifact. There was therefore no
+full-gate timing distribution, concurrency qualification, or platform claim
+beyond the reference aarch64-linux host.
+
+Granular crate2nix artifacts are rejected at screening. The experiment proved
+that crate2nix can generate an exact package/version graph, build MFM's
+non-test crates, cache simple leaf test binaries, recover ordinary Nix store
+outputs, and preserve coarse source locality. It cannot represent MFM's actual
+cross-workspace verification sources or expose a supported complete artifact
+for authoritative repeated execution. Its full-root graph also cost over 15
+minutes locally, multiplied a shared edit into 261 MFM derivation variants,
+and added a large generated-file/IFD and private-API maintenance surface.
+
+No crate2nix input, lock entry, `Cargo.nix`, package, override, task, model,
+generated source, cache root, or workflow is retained in the main worktree.
+Public gates and the authoritative Cargo path were never changed. R2-08 should
+test `cargo2nix` independently against the same hard source and consumption
+contract; it must not inherit either this rejection or any favorable
+crate2nix result.
