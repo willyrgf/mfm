@@ -1,8 +1,0 @@
-error[E0308]: mismatched types
- --> tests/ui/fail/context_validate_requires_configured_instance_handle.rs
-  |
-  |         configured: deployed,
-  |                     ^^^^^^^^ expected `Handle<'_, '_, ...>`, found `Handle<'_, '_, DeployedContractInstance>`
-  |
-  = note: expected struct `Handle<'_, '_, ConfiguredContractInstance>`
-             found struct `Handle<'program, 'scope, DeployedContractInstance>`

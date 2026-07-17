@@ -399,9 +399,9 @@ mfm_cli --output-format json ops list
 ```
 
 JSON output returns plain string ids under `entry_points`. The production surface contains exactly
-one entry point, `mfm.portfolio/snapshot@1`. Reusable deploy, configure, and validate states are
-library-only and cannot be started through this command. There is no latest-version selection,
-compatibility alias, collector root, report-only mode, or contract workflow entry point.
+one entry point, `mfm.portfolio/snapshot@1`. The deleted fixed contract lifecycle has no library or
+command surface. There is no latest-version selection, compatibility alias, collector root,
+report-only mode, or contract workflow entry point.
 
 ### `setup import`, `setup list`, and `setup export`
 
@@ -502,9 +502,8 @@ decimals, runtime routes, or a collect/reuse/report-only mode.
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
-contains only runner families with a current certified public graph consumer. Reusable EVM
-contract-state runners are exercised from their library test graph, not registered speculatively
-by the CLI.
+contains only runner families with a current certified public graph consumer. The deleted EVM
+contract lifecycle has no runner family or hidden library test graph.
 
 JSON output exposes `outcome`; text output renders `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the
@@ -727,16 +726,11 @@ The CLI's process-level configuration is intentionally narrow.
   or a runtime-config keystore profile selected by `--runtime-config <PATH>` or
   `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to `default` for runtime-config
   selection.
-- Typed EVM contract runs bind certified network context to a live provider before issuing
-  operation-only requests. The bound provider resolves runtime routes and verifies the observed
-  chain id for each live call.
 - Live BTC/EVM provider failures are reported with redacted diagnostic codes such as
   `bitcoin_rpc_http_status`, `bitcoin_rpc_json_error`, `evm_rpc_http_status`, or
   `evm_source_mismatch`. Diagnostics may include closed operation ids and numeric status/error
   codes, but never RPC URLs, authorization headers, provider messages, request/response bodies, or
   runtime config paths.
-- Typed EVM contract requests use non-secret `signer_ref`; app assembly resolves it against the
-  runtime config signer registry when mutation workflows require signing.
 - Bitcoin portfolio configs use non-secret `source_identity` to select the semantic runtime route.
 
 - Typed EVM RPC note: per-request `rpc_url` override is not supported.

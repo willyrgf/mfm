@@ -228,9 +228,8 @@ only accepted entry point is `mfm.portfolio/snapshot@1`:
 }
 ```
 
-Reusable contract states are library-only and have no REST request schema. Standalone collector,
-report-only, collect/reuse, alias, unversioned, latest-like, and contract-workflow entry points are
-rejected.
+The deleted fixed contract lifecycle has no REST request schema. Standalone collector, report-only,
+collect/reuse, alias, unversioned, latest-like, and contract-workflow entry points are rejected.
 
 Request notes:
 
@@ -254,11 +253,8 @@ execution lane for the same base work identity, start reports `already_active` w
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
-Reusable EVM contract states carry certified context, action specs, retained side-effect evidence,
-and non-secret signer intent. They are described in
-[`../../docs/evm-contract-states.md`](../../docs/evm-contract-states.md), not exposed as REST
-operations. RPC endpoints, auth headers, keystore paths, unlock files, and private material remain
-runtime-only.
+No EVM contract lifecycle is exposed as a REST operation. RPC endpoints, auth headers, keystore
+paths, unlock files, and private material remain runtime-only.
 
 Stable launch error codes:
 

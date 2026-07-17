@@ -14,13 +14,11 @@ fn capability_names_are_authority_names_not_workflow_names() {
             "mfm.evm.balance.read",
             "mfm.evm.call.read",
             "mfm.evm.code.read",
-            "mfm.evm.logs.read",
             "mfm.evm.nonce.read",
             "mfm.evm.fee.read",
             "mfm.evm.gas_estimate.read",
             "mfm.evm.transaction.submit",
             "mfm.evm.receipt.read",
-            "mfm.evm.nonce_occupancy.read",
         ]
     );
     for name in names {
@@ -73,19 +71,17 @@ fn signed_payload_debug_redacts_bytes() {
     assert!(!rendered.contains("1, 2, 3"));
 }
 
-fn capability_names() -> [&'static str; 12] {
+fn capability_names() -> [&'static str; 10] {
     [
         EvmChainIdentityCapability::name(),
         EvmBlockReadCapability::name(),
         EvmBalanceReadCapability::name(),
         EvmCallReadCapability::name(),
         EvmCodeReadCapability::name(),
-        EvmLogsReadCapability::name(),
         EvmNonceReadCapability::name(),
         EvmFeeReadCapability::name(),
         EvmGasEstimateCapability::name(),
         EvmTransactionSubmitCapability::name(),
         EvmReceiptReadCapability::name(),
-        EvmNonceOccupancyReadCapability::name(),
     ]
 }

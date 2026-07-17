@@ -304,18 +304,15 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
     let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
     assert_eq!(
         packages.len(),
-        48,
-        "the configured-target portfolio snapshot workspace has 48 packages"
+        45,
+        "the configured-target portfolio snapshot workspace has 45 packages"
     );
 
     for removed in [
         "mfm-authored-config",
         "mfm-portfolio-config",
-        "mfm-evm-contract-config",
         "mfm-stream-store-postgres",
         "mfm-op-portfolio-tracker",
-        "mfm-op-evm-contract-lifecycle",
-        "mfm-adapter-contracts",
         "mfm-catalog-model",
     ] {
         assert!(

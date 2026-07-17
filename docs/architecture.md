@@ -430,15 +430,13 @@ Workflow topology names must not appear in:
 
 Capability names must describe the authority being granted, not the workflow requesting it.
 
-Allowed:
+Current authority names include:
 
 - `mfm.evm.chain_identity.read`
 - `mfm.evm.block.read`
 - `mfm.evm.call.read`
 - `mfm.evm.code.read`
-- `mfm.evm.logs.read`
 - `mfm.evm.nonce.read`
-- `mfm.evm.nonce_occupancy.read`
 - `mfm.evm.transaction.submit`
 - `mfm.evm.receipt.read`
 - `mfm.signing.sign`
@@ -459,9 +457,9 @@ Public names should describe what the user means, not how the implementation was
 
 Allowed domain terms in public documentation:
 
-- contract deployment state
-- contract configuration state
-- contract validation state
+- EVM transaction creation action
+- EVM transaction call action
+- exact-anchor contract validation state
 - EVM transaction intent
 - EVM RPC source
 - signer reference
@@ -474,10 +472,11 @@ Disallowed public names:
 - implementation recipe names
 - transport crate names exposed as route or command names
 
-Reusable contract-state descriptors may use deployment, configuration, and validation language,
-but they do not imply a public operation or setup surface. The app publishes only certified
-objectives with a current consumer; a reusable state graph is tested through its state and adapter
-libraries instead.
+The deleted fixed deploy/configure/validate lifecycle is not public domain language or a reusable
+library graph. Direct creation and ordinary calls share one transaction state; operation crates own
+any domain-specific deployment or configuration topology. A reusable descriptor still does not
+imply a public operation or setup surface, and the app publishes only certified objectives with a
+current consumer.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 

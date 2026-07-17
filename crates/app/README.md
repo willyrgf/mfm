@@ -34,9 +34,9 @@ once at admission, records its target/schema/digest in `RunAdmitted`, and passes
 the complete snapshot operation. Resume, replay, status, stream, and public-output reads never
 consult current configuration.
 
-Domain runner behavior lives in adapter crates. Reusable EVM contract states are exercised by
-their library-level adapter test graph; `mfm-app` does not register speculative contract runners
-without a current certified public graph consumer.
+Domain runner behavior lives in adapter crates. The former library-only EVM contract lifecycle was
+deleted; `mfm-app` does not register speculative mutation or validation runners without an owned
+certified graph consumer.
 
 After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
 reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They

@@ -42,9 +42,7 @@ use mfm_evm_capabilities::{
     EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
     EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
     EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
-    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
-    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
+    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmNetworkBinding, EvmNetworkId,
     EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
     EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
     EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
@@ -237,52 +235,6 @@ impl EvmJsonRpcClient {
         })
     }
 
-    async fn logs_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmLogsReadRequest,
-    ) -> TransportResult<EvmLogsReadResponse> {
-        let mut filter = serde_json::Map::new();
-        filter.insert(
-            "fromBlock".to_owned(),
-            json!(block_selector_tag(request.from_block())?),
-        );
-        filter.insert(
-            "toBlock".to_owned(),
-            json!(block_selector_tag(request.to_block())?),
-        );
-        if let Some(address) = request.address() {
-            filter.insert("address".to_owned(), json!(format!("{address:?}")));
-        }
-        if !request.topics().is_empty() {
-            filter.insert(
-                "topics".to_owned(),
-                json!(request
-                    .topics()
-                    .iter()
-                    .map(|topic| format!("{topic:?}"))
-                    .collect::<Vec<_>>()),
-            );
-        }
-        let result = self
-            .verified_rpc_call(selected, "eth_getLogs", json!([Value::Object(filter)]))
-            .await?;
-        let values = result
-            .as_array()
-            .ok_or(EvmTransportError::InvalidResponse)?;
-        let logs = values
-            .iter()
-            .map(parse_log_entry)
-            .collect::<TransportResult<Vec<_>>>()?;
-        for log in &logs {
-            validate_log_matches_request(request, log)?;
-        }
-        Ok(EvmLogsReadResponse {
-            evidence: selected.evidence.clone(),
-            logs,
-        })
-    }
-
     async fn nonce_read_impl(
         &self,
         selected: &VerifiedEvmCall<'_>,
@@ -444,59 +396,6 @@ impl EvmJsonRpcClient {
             block_number,
             block_hash,
             status,
-        })
-    }
-
-    async fn nonce_occupancy_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmNonceOccupancyReadRequest,
-    ) -> TransportResult<EvmNonceOccupancyReadResponse> {
-        let account = format!("{:?}", request.account()).to_ascii_lowercase();
-        for block_tag in ["latest", "pending"] {
-            let result = self
-                .verified_rpc_call(selected, "eth_getBlockByNumber", json!([block_tag, true]))
-                .await?;
-            let Some(transactions) = result.get("transactions").and_then(Value::as_array) else {
-                continue;
-            };
-            for transaction in transactions {
-                let Some(from) = transaction.get("from").and_then(Value::as_str) else {
-                    continue;
-                };
-                if from.to_ascii_lowercase() != account {
-                    continue;
-                }
-                let Some(raw_nonce) = transaction.get("nonce").and_then(Value::as_str) else {
-                    continue;
-                };
-                if parse_u64(raw_nonce)? != request.nonce() {
-                    continue;
-                }
-                let hash = parse_b256_field(transaction, "hash")?;
-                if hash == request.excluded_transaction_hash() {
-                    return Ok(EvmNonceOccupancyReadResponse {
-                        evidence: selected.evidence.clone(),
-                        outcome: EvmNonceOccupancy::Unknown,
-                    });
-                }
-                let block_number = transaction
-                    .get("blockNumber")
-                    .and_then(Value::as_str)
-                    .map(parse_u64)
-                    .transpose()?;
-                return Ok(EvmNonceOccupancyReadResponse {
-                    evidence: selected.evidence.clone(),
-                    outcome: EvmNonceOccupancy::Occupied {
-                        transaction_hash: hash,
-                        block_number,
-                    },
-                });
-            }
-        }
-        Ok(EvmNonceOccupancyReadResponse {
-            evidence: selected.evidence.clone(),
-            outcome: EvmNonceOccupancy::Unknown,
         })
     }
 
@@ -720,7 +619,6 @@ fn operation_id(method: &'static str) -> LocalPublicId {
         "eth_gasPrice" => diagnostic_id("eth_gas_price"),
         "eth_maxPriorityFeePerGas" => diagnostic_id("eth_max_priority_fee_per_gas"),
         "eth_estimateGas" => diagnostic_id("eth_estimate_gas"),
-        "eth_getLogs" => diagnostic_id("eth_get_logs"),
         "eth_sendRawTransaction" => diagnostic_id("eth_send_raw_transaction"),
         "eth_getTransactionReceipt" => diagnostic_id("eth_get_transaction_receipt"),
         "eth_getTransactionByHash" => diagnostic_id("eth_get_transaction_by_hash"),
@@ -819,13 +717,6 @@ impl_network_provider!(
     code_read_impl
 );
 impl_network_provider!(
-    EvmLogsReadProvider,
-    read_logs,
-    EvmLogsReadRequest,
-    EvmLogsReadResponse,
-    logs_read_impl
-);
-impl_network_provider!(
     EvmNonceReadProvider,
     read_nonce,
     EvmNonceReadRequest,
@@ -859,13 +750,6 @@ impl_network_provider!(
     EvmReceiptReadRequest,
     EvmReceiptReadResponse,
     receipt_read_impl
-);
-impl_network_provider!(
-    EvmNonceOccupancyReadProvider,
-    read_nonce_occupancy,
-    EvmNonceOccupancyReadRequest,
-    EvmNonceOccupancyReadResponse,
-    nonce_occupancy_read_impl
 );
 
 fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityError {
@@ -931,52 +815,6 @@ fn parse_b256_str(value: &str) -> TransportResult<B256> {
         .map_err(|_| EvmTransportError::InvalidResponse)
 }
 
-fn parse_log_entry(value: &Value) -> TransportResult<EvmLogEntry> {
-    let address = value
-        .get("address")
-        .and_then(Value::as_str)
-        .ok_or(EvmTransportError::InvalidResponse)?
-        .parse()
-        .map_err(|_| EvmTransportError::InvalidResponse)?;
-    let topics = value
-        .get("topics")
-        .and_then(Value::as_array)
-        .ok_or(EvmTransportError::InvalidResponse)?
-        .iter()
-        .map(|topic| parse_b256_str(topic.as_str().ok_or(EvmTransportError::InvalidResponse)?))
-        .collect::<TransportResult<Vec<_>>>()?;
-    let data = hex_to_bytes(
-        value
-            .get("data")
-            .and_then(Value::as_str)
-            .ok_or(EvmTransportError::InvalidResponse)?,
-    )
-    .map_err(|_| EvmTransportError::InvalidResponse)?;
-    let block_number = value
-        .get("blockNumber")
-        .and_then(Value::as_str)
-        .map(parse_u64)
-        .transpose()?;
-    let transaction_hash = value
-        .get("transactionHash")
-        .and_then(Value::as_str)
-        .map(parse_b256_str)
-        .transpose()?;
-    let log_index = value
-        .get("logIndex")
-        .and_then(Value::as_str)
-        .map(parse_u64)
-        .transpose()?;
-    Ok(EvmLogEntry {
-        address,
-        topics,
-        data,
-        block_number,
-        transaction_hash,
-        log_index,
-    })
-}
-
 fn validate_block_identity(
     selector: &EvmBlockSelector,
     block_number: u64,
@@ -991,43 +829,6 @@ fn validate_block_identity(
         }
         _ => Ok(()),
     }
-}
-
-fn validate_log_matches_request(
-    request: &EvmLogsReadRequest,
-    log: &EvmLogEntry,
-) -> TransportResult<()> {
-    if let Some(expected_address) = request.address() {
-        if expected_address != log.address {
-            return Err(EvmTransportError::InvalidResponse);
-        }
-    }
-    for (expected, observed) in request.topics().iter().zip(log.topics.iter()) {
-        if expected != observed {
-            return Err(EvmTransportError::InvalidResponse);
-        }
-    }
-    if log.topics.len() < request.topics().len() {
-        return Err(EvmTransportError::InvalidResponse);
-    }
-    let requires_block_number = matches!(request.from_block(), EvmBlockSelector::Number(_))
-        || matches!(request.to_block(), EvmBlockSelector::Number(_));
-    if requires_block_number && log.block_number.is_none() {
-        return Err(EvmTransportError::InvalidResponse);
-    }
-    if let Some(block_number) = log.block_number {
-        if let EvmBlockSelector::Number(from_block) = request.from_block() {
-            if block_number < *from_block {
-                return Err(EvmTransportError::InvalidResponse);
-            }
-        }
-        if let EvmBlockSelector::Number(to_block) = request.to_block() {
-            if block_number > *to_block {
-                return Err(EvmTransportError::InvalidResponse);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Redaction-safe EVM transport setup/runtime error.

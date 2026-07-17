@@ -80,10 +80,6 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
             include_str!("../../adapters/btc-jsonrpc/src/lib.rs"),
         ),
         (
-            "evm-contract-adapter",
-            include_str!("../../adapters/evm-contracts/src/lib.rs"),
-        ),
-        (
             "portfolio-adapter",
             include_str!("../../adapters/portfolio/src/lib.rs"),
         ),
@@ -128,13 +124,11 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
                 "EvmBalanceReadRequest",
                 "EvmCallReadRequest",
                 "EvmCodeReadRequest",
-                "EvmLogsReadRequest",
                 "EvmNonceReadRequest",
                 "EvmFeeReadRequest",
                 "EvmGasEstimateRequest",
                 "EvmTransactionSubmitRequest",
                 "EvmReceiptReadRequest",
-                "EvmNonceOccupancyReadRequest",
             ],
             &["network_id", "expected_chain_id"],
         );
@@ -171,13 +165,11 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
         "EvmBalanceReadProvider",
         "EvmCallReadProvider",
         "EvmCodeReadProvider",
-        "EvmLogsReadProvider",
         "EvmNonceReadProvider",
         "EvmFeeReadProvider",
         "EvmGasEstimateProvider",
         "EvmTransactionSubmitProvider",
         "EvmReceiptReadProvider",
-        "EvmNonceOccupancyReadProvider",
     ] {
         assert!(
             !evm_transport.contains(&format!("impl {provider_trait} for EvmJsonRpcClient")),

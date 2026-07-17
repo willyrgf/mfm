@@ -63,7 +63,6 @@ User-facing docs:
 - CLI docs + output contract: [`bin/cli/README.md`](bin/cli/README.md)
 - REST API docs: [`bin/rest-api/README.md`](bin/rest-api/README.md)
 - Portfolio snapshot workflow: [`docs/portfolio-snapshot.md`](docs/portfolio-snapshot.md)
-- EVM contract state contract: [`docs/evm-contract-states.md`](docs/evm-contract-states.md)
 - EVM runtime routing runbook: [`docs/evm-rpc-routing.md`](docs/evm-rpc-routing.md)
 
 Crate docs:

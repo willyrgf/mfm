@@ -1,6 +1,6 @@
 # Typed EVM Runtime Config
 
-Status: typed transport runbook for EVM-backed portfolio and reusable contract-state workflows.
+Status: typed transport runbook for EVM-backed portfolio reads and generic signing resources.
 
 EVM RPC endpoints and signer provider bindings are live runtime inputs. They are not semantic run
 authority and must not be persisted in manifests, events, artifacts, public outputs, fixtures, or
@@ -10,7 +10,6 @@ Normative architecture references:
 
 - `docs/design.md`
 - `docs/architecture.md`
-- `docs/evm-contract-states.md`
 
 ## Runtime Config File
 
@@ -51,8 +50,7 @@ entry_id = "00000000-0000-0000-0000-000000000000"
 JSON with the same shape is also accepted by `mfm-runtime-config`.
 
 Runtime config validation rejects source-level chain ids. Expected chain id comes from workflow
-semantics: portfolio `NetworkConfig.chain_id` or reusable contract-state
-`EvmContractContext.network.expected_chain_id`.
+semantics, currently portfolio `NetworkConfig.chain_id`.
 
 ## Provider-Bound Requests
 
@@ -62,7 +60,7 @@ workflow semantics, validate that binding without network IO, and bind it to an
 `EvmJsonRpcNetworkProvider` before any live call.
 
 EVM capability requests are operation-only. They carry operation parameters such as block selectors,
-accounts, calldata, log filters, signed payloads, or transaction hashes. They do not carry
+accounts, calldata, signed payloads, or transaction hashes. They do not carry
 `network_id`, expected chain id, source refs, policy ids, endpoints, or credentials.
 
 The bound provider owns route and source resolution. It resolves the bound `network_id` through
@@ -82,20 +80,11 @@ capability only: `decimals()` and `balanceOf(address)` retain the destination, e
 canonical hash selector, raw return bytes, and redacted certified-source identity as external-read
 evidence. Each call is followed by an exact hash block re-verification before a fact is recorded.
 
-Reusable contract-state receipt reads retain both `blockNumber` and `blockHash`; a receipt without
-the hash is malformed. Configure selects a `ConfiguredContractAnchor` from the last successful
-configuration receipt in certified transaction order, or from the deployment receipt when no
-configuration transaction is submitted. Before confirmation, the adapter reads the canonical block
-at that number, compares its hash to the retained anchor, and proves its finality depth against the
-bound source.
-
-When a certified contract profile supplies `deployed_code_hash`, validation uses the generic
-`eth_getCode` capability at the configured anchor's EIP-1898 selector
-`{ blockHash, requireCanonical: true }`. The retained external-read evidence contains raw runtime
-bytecode, the exact address/hash selector, redacted source evidence, byte length, and recomputed
-Keccak-256 hash. Empty or different authenticated code is a successful `valid: false` report;
-malformed, unbound, or internally inconsistent evidence fails the attempt. Without a profile hash,
-validation makes no code RPC call and records no code-identity evidence.
+The fixed deploy/configure/validate lifecycle, historical log scans, and nonce-occupancy
+investigation RPC were deleted. Generic transaction submission foundations and exact code/call
+reads remain transport capabilities for the narrower `Create`/`Call` and exact-anchor validation
+state contracts that will replace it. Until those states land, those capabilities are not an
+executable lifecycle or app route.
 
 Transport failures, HTTP status failures, JSON-RPC error objects, malformed responses, and source
 mismatches are classified as redacted provider diagnostics. Diagnostics may carry the stable EVM
@@ -112,9 +101,8 @@ performs the same check only for nonterminal live-source nodes.
 
 ## Signing
 
-Contract-state configs carry only signer intent: non-secret `signer_ref` and expected signer
-address. A reusable adapter resolves `signer_ref` through a runtime signer registry when a
-mutation state needs signing. Read-only validation does not require signer bindings.
+Runtime config retains generic non-secret signer and keystore references for explicit signing
+consumers. No contract-specific signer policy or lifecycle binding remains.
 
 Keystore paths, unlock files, passwords, private keys, mnemonics, signed material, and raw
 transactions remain runtime-only and must be redacted from diagnostics.
@@ -126,19 +114,15 @@ must not open live RPC connections or consult runtime config.
 
 EVM collector replay recomputes native and ERC-20 reads from retained evidence without a live
 provider: it validates the destination, calldata, canonical hash selector, raw return bytes,
-source binding, re-verified anchor, decoded output, and recorded fact evidence. EVM contract-state
-replay recomputes the certified semantic binding from the contract context and context-bound
-artifacts, then checks stored side-effect evidence, validation evidence, and terminal output
-artifacts against that expected authority. For optional contract code identity it verifies the
-external artifact's retained identity and bytes, recomputes byte length and Keccak-256, and checks
-the address, source, canonical selector, profile hash, and projected report value without live RPC.
+source binding, re-verified anchor, decoded output, and recorded fact evidence. There is no retained
+contract-lifecycle replay path.
 
 ## Contributor Guidance
 
 - Keep runtime config parsing in `mfm-runtime-config`.
 - Keep live EVM source and route resolution in `mfm-transports-evm`.
 - Bind live providers from certified semantic source intent before issuing operation-only requests.
-- Keep workflow-specific operation construction in adapters.
+- Keep workflow topology in operation crates and runner binding in adapters.
 - Keep binaries limited to parsing and passing runtime config paths.
 - Add tests that prove replay uses recorded evidence and fails closed on missing or mismatched
-  facts, receipts, confirmations, artifacts, or verifier identities.
+  facts, artifacts, or verifier identities.

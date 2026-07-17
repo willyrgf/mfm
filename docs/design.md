@@ -266,20 +266,18 @@ supplies replay implementations backed only by recorded facts, typed artifacts, 
 evidence. Adapters translate state-owned intent into capability calls and evidence phases without
 moving protocol IO or signer material into state code.
 
-The reusable EVM contract deploy, configure, and validate states are direct graph primitives.
-They have no public operation id, setup kind, continuation import, external-adoption authority, or
-app runner registration. Certification accepts configure only after the deploy descriptor and
-validate only after the configure descriptor; adapter-library factories bind their live providers
-for a graph that explicitly uses those states.
+The former fixed EVM deploy/configure/validate lifecycle is not a runtime or authoring surface. Its
+three state packages, lifecycle schemas, adapter graph, and historical-log and nonce-occupancy
+authorities were deleted because no operation or application entry point owned them. There is no
+compatibility facade or library-only lifecycle graph.
 
-Direct contract receipt lineage is hash-bound. Every successful receipt retains its block number
-and block hash. Configure carries a `ConfiguredContractAnchor` selected from the last successful
-configure receipt in certified transaction order, or from the deployment receipt when no configure
-transaction was submitted. Confirmation proves that exact hash canonical and final before it can
-anchor validation. When a contract profile supplies `deployed_code_hash`, validation uses generic
-EVM code-read authority at that exact EIP-1898 hash selector and retains raw runtime bytecode as
-external-read evidence. Replay rechecks the artifact identity and bytes, selector/source binding,
-length, and Keccak-256. A missing profile hash means no code-read authority is exercised.
+The owned replacement is intentionally narrower and lands as reusable state contracts, not as a
+restored lifecycle: one EIP-1559 transaction state whose closed action is direct `Create` or
+ordinary `Call`, plus one independent exact-anchor code/call validation state. One side-effect node
+will represent one transaction. Operation crates will own constructor/call encoding and any
+dependency-ordered contract workflow. Until those state contracts and adapters are registered,
+generic transaction/signing and exact code/call capability foundations do not by themselves create
+executable state authority.
 
 App assembly keeps evidence-only services separate from live driver services. Status, stream
 inspection, list/watch, replay, and public-output rendering construct only store, artifact, and

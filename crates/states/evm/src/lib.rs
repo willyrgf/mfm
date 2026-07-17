@@ -5,7 +5,8 @@
 //! collectors and report selection, plus source-near observe/record states. It defines no
 //! JSON-RPC transport, runtime source routing, workflow topology, CLI, REST, or app registration.
 //!
-//! Contract lifecycle states live in `mfm-state-evm-contracts`, not here.
+//! Generic EVM transaction and exact-anchor validation states will replace the
+//! deleted fixed contract lifecycle in this crate.
 //!
 //! # Examples
 //!

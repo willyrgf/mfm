@@ -140,17 +140,6 @@ async fn supports_core_evm_json_rpc_calls() {
     assert_eq!(code.code, vec![0xde, 0xad, 0xbe, 0xef]);
     assert_eq!(code.code_hash, alloy_primitives::keccak256(&code.code));
 
-    let logs = client
-        .read_logs(&EvmLogsReadRequest::new(
-            EvmBlockSelector::Latest,
-            EvmBlockSelector::Latest,
-            Some(address),
-            vec![hash],
-        ))
-        .await
-        .expect("logs");
-    assert_eq!(logs.logs.len(), 1);
-
     let nonce = client
         .read_nonce(&EvmNonceReadRequest::new(address, EvmBlockSelector::Latest))
         .await
@@ -204,8 +193,6 @@ async fn supports_core_evm_json_rpc_calls() {
             "eth_call",
             "eth_chainId",
             "eth_getCode",
-            "eth_chainId",
-            "eth_getLogs",
             "eth_chainId",
             "eth_getTransactionCount",
             "eth_chainId",
@@ -317,41 +304,6 @@ async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
 }
 
 #[tokio::test]
-async fn nonce_occupancy_read_classifies_anchor_and_non_anchor_transactions() {
-    for (name, excluded_transaction_hash, expected) in [
-        (
-            "non-anchor transaction",
-            HASH_HEX,
-            EvmNonceOccupancy::Occupied {
-                transaction_hash: OCCUPYING_HASH_HEX.parse::<B256>().expect("occupying hash"),
-                block_number: Some(42),
-            },
-        ),
-        (
-            "recorded anchor",
-            OCCUPYING_HASH_HEX,
-            EvmNonceOccupancy::Unknown,
-        ),
-    ] {
-        let server = TestRpcServer::spawn_nonce_occupancy("0x1").await;
-        let client = client_for(&server.url, "primary", "mainnet");
-        let response = client
-            .read_nonce_occupancy(&EvmNonceOccupancyReadRequest::new(
-                address!("0x1111111111111111111111111111111111111111"),
-                7,
-                excluded_transaction_hash
-                    .parse::<B256>()
-                    .expect("excluded hash"),
-            ))
-            .await
-            .expect("nonce occupancy");
-
-        assert_eq!(response.evidence.observed_chain_id, 1, "{name}");
-        assert_eq!(response.outcome, expected, "{name}");
-    }
-}
-
-#[tokio::test]
 async fn supports_legacy_fee_source_without_eip1559_methods() {
     let server = TestRpcServer::spawn_legacy_fee("0x1").await;
     let client = client_for(&server.url, "primary", "mainnet");
@@ -412,42 +364,6 @@ async fn rejects_receipt_transaction_hash_mismatch() {
         ))
         .await
         .expect_err("receipt hash mismatch");
-
-    assert_eq!(error, evm_response_invalid_error());
-}
-
-#[tokio::test]
-async fn rejects_log_entries_that_contradict_filter() {
-    let server = TestRpcServer::spawn_log_filter_mismatch("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
-
-    let error = client
-        .read_logs(&EvmLogsReadRequest::new(
-            EvmBlockSelector::Number(42),
-            EvmBlockSelector::Number(42),
-            Some(address!("0x1111111111111111111111111111111111111111")),
-            vec![HASH_HEX.parse::<B256>().expect("hash")],
-        ))
-        .await
-        .expect_err("log filter mismatch");
-
-    assert_eq!(error, evm_response_invalid_error());
-}
-
-#[tokio::test]
-async fn rejects_numeric_log_range_when_log_omits_block_number() {
-    let server = TestRpcServer::spawn_log_missing_block_number("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
-
-    let error = client
-        .read_logs(&EvmLogsReadRequest::new(
-            EvmBlockSelector::Number(42),
-            EvmBlockSelector::Number(42),
-            Some(address!("0x1111111111111111111111111111111111111111")),
-            vec![HASH_HEX.parse::<B256>().expect("hash")],
-        ))
-        .await
-        .expect_err("missing block number cannot prove numeric range");
 
     assert_eq!(error, evm_response_invalid_error());
 }

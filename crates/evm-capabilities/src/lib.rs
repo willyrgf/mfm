@@ -103,12 +103,6 @@ evm_capability!(
     "code.read"
 );
 evm_capability!(
-    /// EVM log read authority.
-    EvmLogsReadCapability,
-    ReadExternalRole,
-    "logs.read"
-);
-evm_capability!(
     /// EVM account nonce read authority.
     EvmNonceReadCapability,
     ReadExternalRole,
@@ -137,12 +131,6 @@ evm_capability!(
     EvmReceiptReadCapability,
     ReadExternalRole,
     "receipt.read"
-);
-evm_capability!(
-    /// EVM account nonce occupancy investigation authority.
-    EvmNonceOccupancyReadCapability,
-    ReadExternalRole,
-    "nonce_occupancy.read"
 );
 
 fn evm_capability_kind(name: &'static str) -> mfm_capabilities::Result<CapabilityKind> {
@@ -220,18 +208,6 @@ pub trait EvmCodeReadProvider: Send + Sync {
     ) -> EvmCapabilityFuture<'a, EvmCodeReadResponse>;
 }
 
-/// Provider interface for EVM log reads.
-pub trait EvmLogsReadProvider: Send + Sync {
-    /// Reads EVM logs matching a filter.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_logs<'a>(
-        &'a self,
-        request: &'a EvmLogsReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse>;
-}
-
 /// Provider interface for EVM nonce reads.
 pub trait EvmNonceReadProvider: Send + Sync {
     /// Reads the account transaction count.
@@ -291,18 +267,6 @@ pub trait EvmReceiptReadProvider: Send + Sync {
         &'a self,
         request: &'a EvmReceiptReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse>;
-}
-
-/// Provider interface for EVM nonce occupancy investigations.
-pub trait EvmNonceOccupancyReadProvider: Send + Sync {
-    /// Reads explicit evidence for whether a concrete sender nonce is occupied by a non-anchor tx.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_nonce_occupancy<'a>(
-        &'a self,
-        request: &'a EvmNonceOccupancyReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmNonceOccupancyReadResponse>;
 }
 
 /// Process-local EVM source reference.
@@ -717,78 +681,6 @@ pub struct EvmCodeReadResponse {
     pub code_hash: B256,
 }
 
-/// Request for EVM logs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmLogsReadRequest {
-    from_block: EvmBlockSelector,
-    to_block: EvmBlockSelector,
-    address: Option<Address>,
-    topics: Vec<B256>,
-}
-
-impl EvmLogsReadRequest {
-    /// Creates an EVM logs read request.
-    pub fn new(
-        from_block: EvmBlockSelector,
-        to_block: EvmBlockSelector,
-        address: Option<Address>,
-        topics: Vec<B256>,
-    ) -> Self {
-        Self {
-            from_block,
-            to_block,
-            address,
-            topics,
-        }
-    }
-
-    /// Returns the start block selector.
-    pub const fn from_block(&self) -> &EvmBlockSelector {
-        &self.from_block
-    }
-
-    /// Returns the end block selector.
-    pub const fn to_block(&self) -> &EvmBlockSelector {
-        &self.to_block
-    }
-
-    /// Returns the optional emitting contract address.
-    pub const fn address(&self) -> Option<Address> {
-        self.address
-    }
-
-    /// Returns topic filters.
-    pub fn topics(&self) -> &[B256] {
-        &self.topics
-    }
-}
-
-/// One EVM log entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmLogEntry {
-    /// Emitting contract address.
-    pub address: Address,
-    /// Log topics.
-    pub topics: Vec<B256>,
-    /// Log data bytes.
-    pub data: Vec<u8>,
-    /// Block number, when known.
-    pub block_number: Option<u64>,
-    /// Transaction hash, when known.
-    pub transaction_hash: Option<B256>,
-    /// Log index, when known.
-    pub log_index: Option<u64>,
-}
-
-/// Response for EVM logs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmLogsReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Matching log entries.
-    pub logs: Vec<EvmLogEntry>,
-}
-
 /// Request for an account nonce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmNonceReadRequest {
@@ -1006,63 +898,6 @@ pub struct EvmReceiptReadResponse {
     pub block_hash: B256,
     /// Receipt status success flag.
     pub status: bool,
-}
-
-/// Request for account nonce occupancy investigation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmNonceOccupancyReadRequest {
-    account: Address,
-    nonce: u64,
-    excluded_transaction_hash: B256,
-}
-
-impl EvmNonceOccupancyReadRequest {
-    /// Creates an EVM nonce occupancy read request.
-    pub fn new(account: Address, nonce: u64, excluded_transaction_hash: B256) -> Self {
-        Self {
-            account,
-            nonce,
-            excluded_transaction_hash,
-        }
-    }
-
-    /// Returns the sender account whose nonce is being investigated.
-    pub const fn account(&self) -> Address {
-        self.account
-    }
-
-    /// Returns the sender nonce being investigated.
-    pub const fn nonce(&self) -> u64 {
-        self.nonce
-    }
-
-    /// Returns the MFM recorded submission anchor that must not match an occupied transaction.
-    pub const fn excluded_transaction_hash(&self) -> B256 {
-        self.excluded_transaction_hash
-    }
-}
-
-/// Response for account nonce occupancy investigation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmNonceOccupancyReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Occupancy outcome.
-    pub outcome: EvmNonceOccupancy,
-}
-
-/// Explicit nonce occupancy outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvmNonceOccupancy {
-    /// No defensible occupancy proof was available from this read.
-    Unknown,
-    /// A non-anchor transaction was observed occupying the sender nonce.
-    Occupied {
-        /// Occupying transaction hash.
-        transaction_hash: B256,
-        /// Block number when the occupying transaction is mined.
-        block_number: Option<u64>,
-    },
 }
 
 /// Closed invalid-request reasons.

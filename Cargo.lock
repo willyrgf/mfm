@@ -2158,35 +2158,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-adapters-evm-contracts"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-artifact-capabilities",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-events",
- "mfm-evm-capabilities",
- "mfm-evm-contract-model",
- "mfm-evm-core",
- "mfm-evm-signing",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-replay",
- "mfm-runtime",
- "mfm-signing",
- "mfm-spec",
- "mfm-state-evm-contracts",
- "mfm-store",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "mfm-adapters-portfolio"
 version = "0.1.0"
 dependencies = [
@@ -2383,23 +2354,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-evm-contract-model"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-canonical",
- "mfm-evm-core",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-spec",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "mfm-evm-core"
 version = "0.1.0"
 dependencies = [
@@ -2467,7 +2421,6 @@ dependencies = [
  "k256",
  "mfm-adapters-btc-jsonrpc",
  "mfm-adapters-evm",
- "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
  "mfm-app",
  "mfm-btc-capabilities",
@@ -2475,7 +2428,6 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-evm-capabilities",
- "mfm-evm-contract-model",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
@@ -2490,7 +2442,6 @@ dependencies = [
  "mfm-runtime",
  "mfm-signing",
  "mfm-spec",
- "mfm-state-evm-contracts",
  "mfm-states-btc",
  "mfm-states-evm",
  "mfm-storage-postgres",
@@ -2758,28 +2709,6 @@ dependencies = [
  "mfm-ids",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "mfm-state-evm-contracts"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-certify",
- "mfm-effects",
- "mfm-evm-capabilities",
- "mfm-evm-contract-model",
- "mfm-evm-core",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-signing",
- "mfm-values",
- "serde",
- "serde_json",
- "trybuild",
 ]
 
 [[package]]
