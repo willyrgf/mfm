@@ -1,11 +1,13 @@
 #![allow(clippy::disallowed_methods)]
 #![cfg(feature = "parity-tests")]
 
+use alloy_primitives::{keccak256, Address, Bytes, TxKind, U256};
 use assert_cmd::Command;
 use mfm_core::keystore::{Keystore, KeystoreConfig};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::str::FromStr;
 use tempfile::TempDir;
 
 #[path = "support/mod.rs"]
@@ -15,9 +17,10 @@ mod support;
 use std::os::unix::fs::PermissionsExt;
 
 const TEST_PASSWORD: &str = "parity-test-password";
+const SIGNER_REF: &str = "parity-sender";
 
 #[test]
-fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
+fn parity_keystore_cli_uses_canonical_eip1559_signing_service() {
     let temp = TempDir::new().expect("temp dir");
     let keystore_path = temp.path().join("parity.keystore");
     let password_file = write_password_file(temp.path(), TEST_PASSWORD);
@@ -25,43 +28,31 @@ fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
     let recipient = "0x1111111111111111111111111111111111111111";
     let private_key = random_private_key_hex();
 
-    let import_output = run_import_private_key(
+    let (key_id, sender) = import_sender(
         &keystore_path,
         &password_file,
         "parity-cli-sender",
         &private_key,
     );
-    assert!(
-        import_output.status.success(),
-        "{}",
-        stderr_string(&import_output)
-    );
-    let import_json = support::parse_success_json(&import_output.stdout);
-    let key_id = import_json["id"].as_str().expect("import id").to_string();
-    let sender = import_json["address"]
-        .as_str()
-        .map(normalize_address)
-        .expect("imported address");
-
-    let sign_output = run_tx_sign(
-        &keystore_path,
-        &password_file,
-        TxSignArgs {
-            id: Some(&key_id),
-            to: recipient,
-            value_wei: "1000000000000000",
-            chain_id: "31337",
-            nonce: "0",
-            max_fee_per_gas: "2000000000",
-            max_priority_fee_per_gas: "1000000000",
-            ..TxSignArgs::new(&signed_tx_path)
-        },
-    );
+    let args = TxSignArgs {
+        signer_ref: SIGNER_REF,
+        expected_from: &sender,
+        to: recipient,
+        value_wei: "1000000000000000",
+        chain_id: "31337",
+        nonce: "0",
+        max_fee_per_gas: "2000000000",
+        max_priority_fee_per_gas: "1000000000",
+        gas_limit: "21000",
+        out: &signed_tx_path,
+    };
+    let sign_output = run_tx_sign(&keystore_path, &password_file, SIGNER_REF, &key_id, args);
     assert!(
         sign_output.status.success(),
         "{}",
         stderr_string(&sign_output)
     );
+
     let sign_json = support::parse_success_json(&sign_output.stdout);
     assert_eq!(
         normalize_address(sign_json["from"].as_str().expect("from")),
@@ -71,25 +62,41 @@ fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
         normalize_address(sign_json["to"].as_str().expect("to")),
         normalize_address(recipient)
     );
-    assert_eq!(sign_json["tx_type"].as_str(), Some("0x2"));
-    assert_eq!(sign_json["chain_id"].as_u64(), Some(31_337));
-    assert_eq!(sign_json["nonce"].as_u64(), Some(0));
-    assert!(sign_json["payload_hash"]
+    assert_eq!(sign_json["chain_id"].as_str(), Some("31337"));
+    assert_eq!(sign_json["nonce"].as_str(), Some("0"));
+    assert!(sign_json.get("tx_type").is_none());
+    assert!(sign_json.get("payload_hash").is_none());
+    let signing_digest = sign_json["signing_digest"]
         .as_str()
-        .is_some_and(|v| v.starts_with("0x")));
-    assert!(
-        sign_json.get("out_path").is_none(),
-        "local output paths must not be emitted"
-    );
-    assert!(!stdout_string(&sign_output).contains("raw_tx_hex"));
+        .expect("signing digest");
+    let transaction_hash = sign_json["transaction_hash"]
+        .as_str()
+        .expect("transaction hash");
+    assert_ne!(signing_digest, transaction_hash);
+    assert!(sign_json.get("out_path").is_none());
+
+    let unsigned = mfm_app::UnsignedEip1559Envelope::new(
+        U256::from(31_337),
+        U256::ZERO,
+        U256::from(1_000_000_000_u64),
+        U256::from(2_000_000_000_u64),
+        U256::from(21_000),
+        TxKind::Call(Address::from_str(recipient).expect("recipient")),
+        U256::from(1_000_000_000_000_000_u64),
+        Default::default(),
+        Bytes::new(),
+    )
+    .expect("canonical unsigned envelope");
+    assert_eq!(signing_digest, format!("{:?}", unsigned.signing_digest()));
+
+    let raw_tx_hex = std::fs::read_to_string(&signed_tx_path).expect("signed tx file");
+    let raw_tx = hex::decode(raw_tx_hex.strip_prefix("0x").expect("hex prefix")).expect("raw tx");
+    assert!(raw_tx.starts_with(&[0x02]));
+    assert_eq!(transaction_hash, format!("{:?}", keccak256(&raw_tx)));
+    assert!(!stdout_string(&sign_output).contains(&raw_tx_hex));
     assert!(!stdout_string(&sign_output).contains(&signed_tx_path.display().to_string()));
     assert!(!stdout_string(&sign_output).contains(&private_key));
     assert!(!stderr_string(&sign_output).contains(&private_key));
-
-    let raw_tx = std::fs::read_to_string(&signed_tx_path).expect("read signed tx file");
-    assert!(raw_tx.starts_with("0x02"));
-    assert!(raw_tx.len() > 10);
-    assert!(!raw_tx.contains(&sender));
 
     #[cfg(unix)]
     {
@@ -103,114 +110,113 @@ fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
 }
 
 #[test]
-fn parity_keystore_tx_sign_fails_with_wrong_password() {
+fn parity_keystore_tx_sign_fails_closed_with_wrong_password() {
     let temp = TempDir::new().expect("temp dir");
     let keystore_path = temp.path().join("wrong-credential.keystore");
     let good_password_file = write_password_file(temp.path(), TEST_PASSWORD);
     let wrong_password_file = write_password_file(temp.path(), "definitely-wrong-password");
     let out_path = temp.path().join("signed.tx");
     let private_key = random_private_key_hex();
-
-    let import_output = run_import_private_key(
+    let (key_id, sender) = import_sender(
         &keystore_path,
         &good_password_file,
         "wrong-credential-label",
         &private_key,
     );
-    assert!(
-        import_output.status.success(),
-        "{}",
-        stderr_string(&import_output)
-    );
 
     let output = run_tx_sign(
         &keystore_path,
         &wrong_password_file,
-        TxSignArgs {
-            by_label: Some("wrong-credential-label"),
-            ..TxSignArgs::new(&out_path)
-        },
+        SIGNER_REF,
+        &key_id,
+        TxSignArgs::new(&out_path, SIGNER_REF, &sender),
     );
 
-    assert!(
-        !output.status.success(),
-        "tx-sign should fail with wrong password"
-    );
-    let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("keystore_error"));
-    let stderr = stderr_string(&output);
-    assert!(!stderr.contains(&private_key));
-    assert!(!stderr.contains("definitely-wrong-password"));
-}
-
-#[test]
-fn parity_keystore_tx_sign_fails_with_missing_selector() {
-    let temp = TempDir::new().expect("temp dir");
-    let keystore_path = temp.path().join("missing-selector.keystore");
-    let password_file = write_password_file(temp.path(), TEST_PASSWORD);
-    let out_path = temp.path().join("signed.tx");
-    let private_key = random_private_key_hex();
-
-    let import_output = run_import_private_key(
-        &keystore_path,
-        &password_file,
-        "missing-selector-label",
-        &private_key,
-    );
-    assert!(
-        import_output.status.success(),
-        "{}",
-        stderr_string(&import_output)
-    );
-
-    let output = run_tx_sign(&keystore_path, &password_file, TxSignArgs::new(&out_path));
     assert!(!output.status.success());
-    let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("missing_argument"));
+    let error = parse_error_json(&output.stderr);
+    assert_eq!(error["code"].as_str(), Some("SignerUnavailable"));
+    let rendered = stderr_string(&output);
+    assert!(!rendered.contains(&private_key));
+    assert!(!rendered.contains("definitely-wrong-password"));
+    assert!(!rendered.contains(&wrong_password_file.display().to_string()));
+    assert!(!out_path.exists());
 }
 
 #[test]
-fn parity_keystore_tx_sign_fails_with_ambiguous_label() {
+fn parity_keystore_tx_sign_resolves_only_the_requested_signer_ref() {
     let temp = TempDir::new().expect("temp dir");
-    let keystore_path = temp.path().join("ambiguous-label.keystore");
+    let keystore_path = temp.path().join("missing-signer.keystore");
     let password_file = write_password_file(temp.path(), TEST_PASSWORD);
     let out_path = temp.path().join("signed.tx");
-
-    let first_import = run_import_private_key(
+    let (key_id, sender) = import_sender(
         &keystore_path,
         &password_file,
-        "duplicate-label",
+        "configured-sender",
         &random_private_key_hex(),
-    );
-    assert!(
-        first_import.status.success(),
-        "{}",
-        stderr_string(&first_import)
-    );
-
-    let second_import = run_import_private_key(
-        &keystore_path,
-        &password_file,
-        "duplicate-label",
-        &random_private_key_hex(),
-    );
-    assert!(
-        second_import.status.success(),
-        "{}",
-        stderr_string(&second_import)
     );
 
     let output = run_tx_sign(
         &keystore_path,
         &password_file,
-        TxSignArgs {
-            by_label: Some("duplicate-label"),
-            ..TxSignArgs::new(&out_path)
-        },
+        SIGNER_REF,
+        &key_id,
+        TxSignArgs::new(&out_path, "missing-signer", &sender),
     );
+
     assert!(!output.status.success());
-    let err = parse_error_json(&output.stderr);
-    assert_eq!(err["code"].as_str(), Some("ambiguous_label"));
+    assert_eq!(
+        parse_error_json(&output.stderr)["code"].as_str(),
+        Some("SignerNotConfigured")
+    );
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn parity_keystore_tx_sign_rejects_sender_binding_mismatch() {
+    let temp = TempDir::new().expect("temp dir");
+    let keystore_path = temp.path().join("wrong-sender.keystore");
+    let password_file = write_password_file(temp.path(), TEST_PASSWORD);
+    let out_path = temp.path().join("signed.tx");
+    let (key_id, _) = import_sender(
+        &keystore_path,
+        &password_file,
+        "configured-sender",
+        &random_private_key_hex(),
+    );
+
+    let output = run_tx_sign(
+        &keystore_path,
+        &password_file,
+        SIGNER_REF,
+        &key_id,
+        TxSignArgs::new(
+            &out_path,
+            SIGNER_REF,
+            "0x2222222222222222222222222222222222222222",
+        ),
+    );
+
+    assert!(!output.status.success());
+    assert_eq!(
+        parse_error_json(&output.stderr)["code"].as_str(),
+        Some("SignerIdentityMismatch")
+    );
+    assert!(!out_path.exists());
+}
+
+fn import_sender(
+    keystore_path: &Path,
+    password_file: &Path,
+    label: &str,
+    private_key_hex: &str,
+) -> (String, String) {
+    let output = run_import_private_key(keystore_path, password_file, label, private_key_hex);
+    assert!(output.status.success(), "{}", stderr_string(&output));
+    let json = support::parse_success_json(&output.stdout);
+    (
+        json["id"].as_str().expect("import id").to_owned(),
+        normalize_address(json["address"].as_str().expect("address")),
+    )
 }
 
 fn run_import_private_key(
@@ -221,9 +227,9 @@ fn run_import_private_key(
 ) -> Output {
     let artifact_root = test_artifact_root(keystore_path);
     ensure_fast_keystore_exists(keystore_path, password_file);
-    let runtime_config = write_runtime_config(keystore_path, password_file);
-    let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    support::sanitize_machine_readable_cli_env(&mut cmd)
+    let runtime_config = write_runtime_config(keystore_path, password_file, None);
+    let mut command = Command::cargo_bin("mfm_cli").expect("binary exists");
+    support::sanitize_machine_readable_cli_env(&mut command)
         .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
@@ -243,8 +249,8 @@ fn run_import_private_key(
 }
 
 struct TxSignArgs<'a> {
-    by_label: Option<&'a str>,
-    id: Option<&'a str>,
+    signer_ref: &'a str,
+    expected_from: &'a str,
     to: &'a str,
     value_wei: &'a str,
     chain_id: &'a str,
@@ -256,10 +262,10 @@ struct TxSignArgs<'a> {
 }
 
 impl<'a> TxSignArgs<'a> {
-    fn new(out: &'a Path) -> Self {
+    fn new(out: &'a Path, signer_ref: &'a str, expected_from: &'a str) -> Self {
         Self {
-            by_label: None,
-            id: None,
+            signer_ref,
+            expected_from,
             to: "0x1111111111111111111111111111111111111111",
             value_wei: "1",
             chain_id: "1",
@@ -272,11 +278,21 @@ impl<'a> TxSignArgs<'a> {
     }
 }
 
-fn run_tx_sign(keystore_path: &Path, password_file: &Path, args: TxSignArgs<'_>) -> Output {
+fn run_tx_sign(
+    keystore_path: &Path,
+    password_file: &Path,
+    configured_signer_ref: &str,
+    entry_id: &str,
+    args: TxSignArgs<'_>,
+) -> Output {
     let artifact_root = test_artifact_root(keystore_path);
-    let runtime_config = write_runtime_config(keystore_path, password_file);
-    let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    support::sanitize_machine_readable_cli_env(&mut cmd)
+    let runtime_config = write_runtime_config(
+        keystore_path,
+        password_file,
+        Some((configured_signer_ref, entry_id)),
+    );
+    let mut command = Command::cargo_bin("mfm_cli").expect("binary exists");
+    support::sanitize_machine_readable_cli_env(&mut command)
         .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
@@ -284,6 +300,10 @@ fn run_tx_sign(keystore_path: &Path, password_file: &Path, args: TxSignArgs<'_>)
             "json",
             "keystore",
             "tx-sign",
+            "--signer-ref",
+            args.signer_ref,
+            "--from",
+            args.expected_from,
             "--to",
             args.to,
             "--value-wei",
@@ -300,19 +320,14 @@ fn run_tx_sign(keystore_path: &Path, password_file: &Path, args: TxSignArgs<'_>)
             args.gas_limit,
             "--out",
             args.out.to_str().expect("path"),
-        ]);
-    if let Some(label) = args.by_label {
-        cmd.args(["--by-label", label]);
-    }
-    if let Some(id) = args.id {
-        cmd.args(["--id", id]);
-    }
-    cmd.output().expect("execute tx-sign")
+        ])
+        .output()
+        .expect("execute tx-sign")
 }
 
-fn write_password_file(dir: &Path, password: &str) -> PathBuf {
-    let path = dir.join(format!("password-{}.txt", uuid::Uuid::new_v4()));
-    std::fs::write(&path, password).expect("write password file");
+fn write_password_file(directory: &Path, password: &str) -> PathBuf {
+    let path = directory.join(format!("password-{}.txt", uuid::Uuid::new_v4()));
+    std::fs::write(&path, password).expect("password file");
     path
 }
 
@@ -320,26 +335,42 @@ fn ensure_fast_keystore_exists(path: &Path, password_file: &Path) {
     if path.exists() {
         return;
     }
-    let password = std::fs::read_to_string(password_file).expect("read password file");
+    let password = std::fs::read_to_string(password_file).expect("password file");
     let mut keystore = Keystore::new_with_config(path, KeystoreConfig::insecure_integration_test())
-        .expect("create fast keystore");
-    keystore
-        .unlock(password.trim_end())
-        .expect("unlock keystore");
+        .expect("fast keystore");
+    keystore.unlock(password.trim_end()).expect("unlock");
 }
 
-fn write_runtime_config(keystore_path: &Path, password_file: &Path) -> PathBuf {
+fn write_runtime_config(
+    keystore_path: &Path,
+    password_file: &Path,
+    signer: Option<(&str, &str)>,
+) -> PathBuf {
     let runtime_config = keystore_path.with_extension("runtime.toml");
+    let signer = signer
+        .map(|(signer_ref, entry_id)| {
+            format!(
+                r#"
+[signers.{signer_ref}]
+provider = "keystore"
+keystore_ref = "default"
+entry_id = {entry_id}
+"#,
+                entry_id = toml_string(entry_id),
+            )
+        })
+        .unwrap_or_default();
     let config = format!(
         r#"
 [keystores.default]
 keystore_path = {keystore_path}
 unlock_file = {password_file}
+{signer}
 "#,
         keystore_path = toml_string(&keystore_path.display().to_string()),
         password_file = toml_string(&password_file.display().to_string()),
     );
-    std::fs::write(&runtime_config, config).expect("write runtime config");
+    std::fs::write(&runtime_config, config).expect("runtime config");
     runtime_config
 }
 
@@ -349,7 +380,7 @@ fn toml_string(value: &str) -> String {
 
 fn random_private_key_hex() -> String {
     let mut bytes: [u8; 32] = rand::random();
-    if bytes.iter().all(|b| *b == 0) {
+    if bytes.iter().all(|byte| *byte == 0) {
         bytes[31] = 1;
     }
     hex::encode(bytes)
@@ -392,9 +423,9 @@ fn normalize_address(address: &str) -> String {
     let rest = trimmed
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
-        .expect("0x-prefixed address");
-    assert_eq!(rest.len(), 40, "address must be 20-byte hex");
-    assert!(rest.chars().all(|c| c.is_ascii_hexdigit()));
+        .expect("0x address");
+    assert_eq!(rest.len(), 40);
+    assert!(rest.chars().all(|character| character.is_ascii_hexdigit()));
     format!("0x{}", rest.to_ascii_lowercase())
 }
 

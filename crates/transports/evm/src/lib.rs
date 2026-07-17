@@ -31,7 +31,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use alloy_primitives::{keccak256, B256};
+use alloy_primitives::{keccak256, B256, U256};
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
@@ -48,9 +48,6 @@ use mfm_evm_capabilities::{
     EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
     RedactedEvmSourceEvidence,
 };
-use mfm_evm_core::encoding::parse_u256_hex;
-use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
-use mfm_evm_core::tx::{parse_u128_quantity, parse_u64_quantity};
 use mfm_ids::LocalPublicId;
 use serde_json::{json, Value};
 use tracing::debug;
@@ -177,14 +174,14 @@ impl EvmJsonRpcClient {
                 "eth_call",
                 json!([{
                     "to": format!("{:?}", request.to()),
-                    "data": bytes_to_hex_prefixed(request.calldata()),
+                    "data": encode_hex_bytes(request.calldata()),
                 }, block_selector_param(request.block())]),
             )
             .await?;
         let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
         Ok(EvmCallReadResponse {
             evidence: selected.evidence.clone(),
-            return_data: hex_to_bytes(raw).map_err(|_| EvmTransportError::InvalidResponse)?,
+            return_data: decode_hex_bytes(raw)?,
         })
     }
 
@@ -204,7 +201,7 @@ impl EvmJsonRpcClient {
             )
             .await?;
         let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
-        let code = hex_to_bytes(raw).map_err(|_| EvmTransportError::InvalidResponse)?;
+        let code = decode_hex_bytes(raw)?;
         let code_hash = keccak256(&code);
         Ok(EvmCodeReadResponse {
             evidence: selected.evidence.clone(),
@@ -231,7 +228,7 @@ impl EvmJsonRpcClient {
         let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
         Ok(EvmBalanceReadResponse {
             evidence: selected.evidence.clone(),
-            balance_wei: parse_u256_hex(raw).map_err(|_| EvmTransportError::InvalidResponse)?,
+            balance_wei: parse_u256(raw)?,
         })
     }
 
@@ -324,10 +321,7 @@ impl EvmJsonRpcClient {
             "value".to_owned(),
             json!(format!("0x{:x}", request.value_wei())),
         );
-        call.insert(
-            "data".to_owned(),
-            json!(bytes_to_hex_prefixed(request.data())),
-        );
+        call.insert("data".to_owned(), json!(encode_hex_bytes(request.data())));
         let result = self
             .verified_rpc_call(selected, "eth_estimateGas", json!([Value::Object(call)]))
             .await?;
@@ -347,7 +341,7 @@ impl EvmJsonRpcClient {
             .verified_rpc_call(
                 selected,
                 "eth_sendRawTransaction",
-                json!([bytes_to_hex_prefixed(request.signed_payload().bytes())]),
+                json!([encode_hex_bytes(request.signed_payload().bytes())]),
             )
             .await?;
         let hash = parse_b256_str(result.as_str().ok_or(EvmTransportError::InvalidResponse)?)?;
@@ -793,11 +787,43 @@ fn block_selector_param(selector: &EvmBlockSelector) -> Value {
 }
 
 fn parse_u64(raw: &str) -> TransportResult<u64> {
-    parse_u64_quantity(raw, "evm_quantity").map_err(|_| EvmTransportError::InvalidResponse)
+    parse_u256(raw)?
+        .try_into()
+        .map_err(|_| EvmTransportError::InvalidResponse)
 }
 
 fn parse_u128(raw: &str) -> TransportResult<u128> {
-    parse_u128_quantity(raw, "evm_quantity").map_err(|_| EvmTransportError::InvalidResponse)
+    parse_u256(raw)?
+        .try_into()
+        .map_err(|_| EvmTransportError::InvalidResponse)
+}
+
+fn parse_u256(raw: &str) -> TransportResult<U256> {
+    let digits = raw
+        .strip_prefix("0x")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if digits.is_empty()
+        || digits.len() > 64
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || !digits.as_bytes().iter().all(u8::is_ascii_hexdigit)
+    {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    U256::from_str_radix(digits, 16).map_err(|_| EvmTransportError::InvalidResponse)
+}
+
+fn encode_hex_bytes(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn decode_hex_bytes(raw: &str) -> TransportResult<Vec<u8>> {
+    let digits = raw
+        .strip_prefix("0x")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if !digits.len().is_multiple_of(2) || !digits.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    hex::decode(digits).map_err(|_| EvmTransportError::InvalidResponse)
 }
 
 fn parse_b256_field(value: &Value, field: &'static str) -> TransportResult<B256> {

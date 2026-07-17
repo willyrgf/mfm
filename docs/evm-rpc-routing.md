@@ -102,10 +102,24 @@ performs the same check only for nonterminal live-source nodes.
 ## Signing
 
 Runtime config retains generic non-secret signer and keystore references for explicit signing
-consumers. No contract-specific signer policy or lifecycle binding remains.
+consumers. `keystore tx-sign` requires one exact `--signer-ref` and `--from`; app assembly admits
+the `[signers]` and `[keystores]` support families without requiring or validating the EVM route
+family, then selects the requested signer and its referenced profile. The signer entry resolves
+exactly one keystore entry id. UUID/label lookup and direct keystore selection are not
+transaction-signing surfaces.
+
+The app calls the same `mfm-evm-signing` service used by the reusable mutation substrate. That
+service admits only an Alloy EIP-1559 envelope, uses the explicit deterministic RFC 6979
+recoverable low-s profile, calls the provider once, verifies the expected sender, and computes a
+local hash from the exact signed EIP-2718 bytes. There is no legacy envelope, custom RLP, provider
+fallback, or CLI-local signing implementation. File reads, unlock/KDF, key access, and signing run
+on a blocking worker.
 
 Keystore paths, unlock files, passwords, private keys, mnemonics, signed material, and raw
-transactions remain runtime-only and must be redacted from diagnostics.
+transactions remain runtime-only and must be redacted from diagnostics. The explicit `tx-sign
+--out` path is a user-selected bearer boundary: it receives a mode-0600 raw-transaction hex file,
+while stdout/stderr expose only sender, destination, canonical decimal chain/nonce, signing digest,
+and transaction hash.
 
 ## Replay
 

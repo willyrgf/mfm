@@ -1,16 +1,11 @@
-use mfm_evm_signing::TransientRawTransaction;
-use mfm_program_derive::MfmValue;
-use serde::{Deserialize, Serialize};
+use mfm_evm_signing::TransientSignedEip1559Envelope;
+use mfm_values::MfmValue;
+use serde::Serialize;
 
-#[derive(Clone, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.trybuild",
-    name = "bad_signed_payload_value",
-    version = "1",
-    schema = "mfm.trybuild.bad_signed_payload_value"
-)]
-struct BadSignedPayloadValue {
-    signed_payload: TransientRawTransaction,
+fn require_serialize<T: Serialize>() {}
+fn require_mfm_value<T: MfmValue>() {}
+
+fn main() {
+    require_serialize::<TransientSignedEip1559Envelope>();
+    require_mfm_value::<TransientSignedEip1559Envelope>();
 }
-
-fn main() {}

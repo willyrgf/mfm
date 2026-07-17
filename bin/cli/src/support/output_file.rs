@@ -22,19 +22,29 @@ pub(crate) enum CreateNewFileError {
 /// Writes complete bytes through a same-directory temporary file and installs them without
 /// replacing an existing target.
 pub(crate) fn create_new_atomic(path: &Path, bytes: &[u8]) -> Result<(), CreateNewFileError> {
-    create_new_atomic_with(path, |file| file.write_all(bytes))
+    publish_atomic_with(path, false, |file| file.write_all(bytes))
 }
 
-fn create_new_atomic_with(
+/// Atomically publishes bearer bytes, optionally replacing an existing regular file.
+pub(crate) fn publish_bearer_atomic(
     path: &Path,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<(), CreateNewFileError> {
+    publish_atomic_with(path, overwrite, |file| file.write_all(bytes))
+}
+
+fn publish_atomic_with(
+    path: &Path,
+    overwrite: bool,
     write: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> Result<(), CreateNewFileError> {
     let parent = validated_parent(path)?;
-    reject_existing_target(path)?;
+    validate_target(path, overwrite)?;
     let temp_path = temporary_path(path, &parent)?;
 
     let result = write_temporary_file(&temp_path, write)
-        .and_then(|()| install_without_replacement(&temp_path, path))
+        .and_then(|()| install(&temp_path, path, overwrite))
         .and_then(|()| sync_parent_directory(&parent));
 
     if result.is_err() {
@@ -64,8 +74,10 @@ fn validated_parent(path: &Path) -> Result<PathBuf, CreateNewFileError> {
     Ok(parent.to_path_buf())
 }
 
-fn reject_existing_target(path: &Path) -> Result<(), CreateNewFileError> {
+fn validate_target(path: &Path, overwrite: bool) -> Result<(), CreateNewFileError> {
     match fs::symlink_metadata(path) {
+        Ok(metadata) if overwrite && metadata.file_type().is_file() => Ok(()),
+        Ok(_) if overwrite => Err(CreateNewFileError::InvalidPath),
         Ok(_) => Err(CreateNewFileError::TargetExists),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(CreateNewFileError::InvalidPath),
@@ -97,7 +109,10 @@ fn write_temporary_file(
     file.sync_all().map_err(|_| CreateNewFileError::WriteFailed)
 }
 
-fn install_without_replacement(temp_path: &Path, path: &Path) -> Result<(), CreateNewFileError> {
+fn install(temp_path: &Path, path: &Path, overwrite: bool) -> Result<(), CreateNewFileError> {
+    if overwrite {
+        return fs::rename(temp_path, path).map_err(|_| CreateNewFileError::WriteFailed);
+    }
     fs::hard_link(temp_path, path).map_err(|error| {
         if error.kind() == io::ErrorKind::AlreadyExists {
             CreateNewFileError::TargetExists
@@ -124,14 +139,16 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{create_new_atomic, create_new_atomic_with, CreateNewFileError};
+    use super::{
+        create_new_atomic, publish_atomic_with, publish_bearer_atomic, CreateNewFileError,
+    };
 
     #[test]
     fn partial_temporary_write_failure_never_publishes_final_path() {
         let directory = TempDir::new().expect("temporary output directory");
         let path = directory.path().join("configuration.json");
 
-        let result = create_new_atomic_with(&path, |file| {
+        let result = publish_atomic_with(&path, false, |file| {
             file.write_all(b"partial")?;
             Err(io::Error::other("injected write failure"))
         });
@@ -144,6 +161,25 @@ mod tests {
                 .count(),
             0,
             "failed publication must remove its temporary file"
+        );
+    }
+
+    #[test]
+    fn bearer_publication_replaces_only_regular_files() {
+        let directory = TempDir::new().expect("temporary output directory");
+        let path = directory.path().join("signed-transaction.txt");
+        create_new_atomic(&path, b"first").expect("first output");
+
+        publish_bearer_atomic(&path, b"second", true).expect("replace output");
+        assert_eq!(std::fs::read(&path).expect("read output"), b"second");
+
+        let symlink = directory.path().join("signed-transaction-link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&path, &symlink).expect("symlink");
+        #[cfg(unix)]
+        assert_eq!(
+            publish_bearer_atomic(&symlink, b"third", true),
+            Err(CreateNewFileError::InvalidPath)
         );
     }
 

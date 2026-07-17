@@ -10,6 +10,10 @@ fn algorithm() -> SigningAlgorithmId {
     SigningAlgorithmId::new("mfm.signing.test").expect("algorithm")
 }
 
+fn profile() -> SigningProfileId {
+    SigningProfileId::new("mfm.signing.test.deterministic.v1").expect("profile")
+}
+
 fn domain() -> SigningDomainId {
     SigningDomainId::new("mfm.test").expect("domain")
 }
@@ -23,12 +27,19 @@ fn digest() -> DigestBytes {
 }
 
 fn request() -> SigningRequest {
-    SigningRequest::from_digest(signer_ref(), algorithm(), domain(), purpose(), digest())
+    SigningRequest::from_digest(
+        signer_ref(),
+        algorithm(),
+        profile(),
+        domain(),
+        purpose(),
+        digest(),
+    )
 }
 
 #[test]
 fn manual_resolution_signing_request_is_digest_only_and_domain_separated() {
-    let request = manual_resolution_signing_request(signer_ref(), algorithm(), digest())
+    let request = manual_resolution_signing_request(signer_ref(), algorithm(), profile(), digest())
         .expect("manual request");
 
     assert_eq!(
@@ -40,6 +51,7 @@ fn manual_resolution_signing_request_is_digest_only_and_domain_separated() {
         MANUAL_RESOLUTION_SIGNING_PURPOSE_ID
     );
     assert_eq!(request.digest(), &digest());
+    assert_eq!(request.profile(), &profile());
 }
 
 #[test]
@@ -64,6 +76,9 @@ fn signing_result_enforces_expected_public_identity() {
         SigningResult::for_request(&request, identity, signature.clone()).expect("signing result");
 
     assert_eq!(result.signer_ref(), request.signer_ref());
+    assert_eq!(result.profile(), request.profile());
+    assert!(!format!("{result:?}").contains("[4, 5, 6]"));
+    assert!(!format!("{signature:?}").contains("[4, 5, 6]"));
 
     let actual = PublicKeyBytes::new(vec![9, 9, 9]).expect("actual public key");
     let identity =

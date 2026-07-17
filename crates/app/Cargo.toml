@@ -10,6 +10,7 @@ category = "app"
 test-support = ["mfm-store/test-support"]
 
 [dependencies]
+alloy-primitives = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -28,6 +29,7 @@ mfm-certify = { path = "../kernel/certify" }
 mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
+mfm-evm-signing = { path = "../evm-signing" }
 mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
@@ -44,6 +46,7 @@ mfm-state-portfolio = { path = "../states/portfolio" }
 mfm-states-btc = { path = "../states/btc" }
 mfm-states-evm = { path = "../states/evm" }
 mfm-signing = { path = "../signing" }
+mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
 mfm-storage-postgres = { path = "../storages/postgres" }

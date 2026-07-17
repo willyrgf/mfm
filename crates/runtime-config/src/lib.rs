@@ -139,6 +139,17 @@ impl RuntimeConfigRequirement {
         }
     }
 
+    /// Creates a requirement for signer bindings and their referenced keystores.
+    pub const fn signers() -> Self {
+        Self {
+            evm: false,
+            btc: false,
+            keystores: true,
+            signers: true,
+            parse_all: false,
+        }
+    }
+
     /// Creates a requirement for keystore profiles.
     pub const fn keystores() -> Self {
         Self {

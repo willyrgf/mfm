@@ -10,13 +10,13 @@ category = "binary"
 parity-tests = ["mfm-app/test-support"]
 
 [dependencies]
+alloy-primitives = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 mfm-app = { path = "../../crates/app" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-store = { path = "../../crates/kernel/store" }
-mfm-evm-core = { path = "../../crates/evm-core" }
 mfm-runtime-config = { path = "../../crates/runtime-config" }
 mfm_core = { path = "../../crates/core" }
 clap = { version = "4.4", features = ["derive", "env"] }

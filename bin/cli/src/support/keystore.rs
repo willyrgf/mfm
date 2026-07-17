@@ -3,13 +3,7 @@
 use crate::commands::result::PublicError;
 use chrono::Utc;
 use mfm_core::keystore::{KeyType, Keystore, KeystoreConfig, KeystoreError};
-use mfm_evm_core::tx::{
-    eip1559_signing_hash, encode_signed_eip1559_tx_hex, parse_address, parse_data_hex,
-    parse_u128_quantity, Eip1559TxToSign,
-};
 use std::io::{self, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -33,16 +27,6 @@ pub(crate) enum Bip39ExtraSource {
     Prompt,
     /// Read from a local file or FIFO.
     FilePath(PathBuf),
-}
-
-/// Local output write policy for `keystore tx-sign`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum OutputWriteMode {
-    /// Create a new output and fail if the target exists.
-    #[default]
-    CreateNew,
-    /// Replace an existing regular output file.
-    Overwrite,
 }
 
 /// Resolved keystore access for direct CLI commands.
@@ -172,52 +156,6 @@ pub(crate) struct DeletedKey {
     pub(crate) id: String,
     /// Deleted key label.
     pub(crate) label: String,
-}
-
-/// Keystore transaction signing request.
-pub(crate) struct TxSignRequest {
-    /// Optional exact id.
-    pub(crate) id: Option<String>,
-    /// Optional exact label.
-    pub(crate) by_label: Option<String>,
-    /// Recipient.
-    pub(crate) to: String,
-    /// Transfer value in wei.
-    pub(crate) value_wei: String,
-    /// Chain id.
-    pub(crate) chain_id: u64,
-    /// Nonce.
-    pub(crate) nonce: u64,
-    /// Max fee per gas in wei.
-    pub(crate) max_fee_per_gas: String,
-    /// Max priority fee per gas in wei.
-    pub(crate) max_priority_fee_per_gas: String,
-    /// Gas limit.
-    pub(crate) gas_limit: u64,
-    /// Output file.
-    pub(crate) out_path: PathBuf,
-    /// Output write policy.
-    pub(crate) out_write_mode: OutputWriteMode,
-    /// Calldata hex.
-    pub(crate) data: String,
-    /// Keystore access.
-    pub(crate) access: KeystoreAccess,
-}
-
-/// Keystore transaction signing response.
-pub(crate) struct SignedTx {
-    /// Sender address.
-    pub(crate) from: String,
-    /// Recipient address.
-    pub(crate) to: String,
-    /// Nonce.
-    pub(crate) nonce: u64,
-    /// Chain id.
-    pub(crate) chain_id: u64,
-    /// EVM transaction type.
-    pub(crate) tx_type: String,
-    /// Signing payload hash.
-    pub(crate) payload_hash: String,
 }
 
 struct ProcessSecretInput;
@@ -365,63 +303,6 @@ pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, PublicErro
     Ok(DeletedKey {
         id: key_to_delete.id.to_string(),
         label: key_to_delete.alias.unwrap_or_default(),
-    })
-}
-
-/// Signs an EIP-1559 transaction and writes the raw signed transaction locally.
-pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, PublicError> {
-    let mut keystore = load_unlocked_keystore(&req.access)?;
-    let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
-    let tx = Eip1559TxToSign {
-        to: Some(parse_address(&req.to, "to").map_err(public_util_error)?),
-        value_wei: parse_u128_quantity(&req.value_wei, "value-wei").map_err(public_util_error)?,
-        chain_id: req.chain_id,
-        nonce: req.nonce,
-        max_fee_per_gas: parse_u128_quantity(&req.max_fee_per_gas, "max-fee-per-gas")
-            .map_err(public_util_error)?,
-        max_priority_fee_per_gas: parse_u128_quantity(
-            &req.max_priority_fee_per_gas,
-            "max-priority-fee-per-gas",
-        )
-        .map_err(public_util_error)?,
-        gas_limit: req.gas_limit,
-        data: parse_data_hex(&req.data).map_err(public_util_error)?,
-    };
-
-    if tx.max_priority_fee_per_gas > tx.max_fee_per_gas {
-        return Err(PublicError::bad_request(
-            "invalid_fee_config",
-            "max-priority-fee-per-gas must be <= max-fee-per-gas",
-        ));
-    }
-
-    let secure_key = keystore
-        .get_private_key(key_id)
-        .map_err(|_| PublicError::internal("keystore_error", "Failed to load key material"))?;
-    let from_address = secure_key
-        .ethereum_address()
-        .map_err(|_| PublicError::internal("signing_error", "Failed to derive signer address"))?;
-    let to_address = tx
-        .to
-        .map(|address| format!("{address:?}"))
-        .unwrap_or_default();
-
-    let hash = eip1559_signing_hash(&tx);
-    let mut hash_bytes = [0u8; 32];
-    hash_bytes.copy_from_slice(hash.as_slice());
-    let signature = secure_key
-        .sign_hash_recoverable(&hash_bytes)
-        .map_err(|_| PublicError::internal("signing_error", "Failed to sign transaction"))?;
-    let raw_tx_hex = encode_signed_eip1559_tx_hex(&tx, signature);
-    write_raw_transaction_file(&req.out_path, &raw_tx_hex, req.out_write_mode)?;
-
-    Ok(SignedTx {
-        from: format!("{from_address:?}"),
-        to: to_address,
-        nonce: tx.nonce,
-        chain_id: tx.chain_id,
-        tx_type: "0x2".to_string(),
-        payload_hash: format!("0x{}", hex::encode(hash.as_slice())),
     })
 }
 
@@ -705,175 +586,6 @@ fn resolve_key_id(
     }
 }
 
-fn write_raw_transaction_file(
-    path: &Path,
-    raw_tx_hex: &str,
-    mode: OutputWriteMode,
-) -> Result<(), PublicError> {
-    let parent = validate_output_parent(path)?;
-    validate_output_target(path, mode)?;
-    let temp_path = temp_output_path(path, &parent)?;
-
-    let write_result = write_temp_output_file(&temp_path, raw_tx_hex)
-        .and_then(|()| install_temp_output_file(&temp_path, path, mode))
-        .and_then(|()| sync_parent_directory(&parent));
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-
-    write_result
-}
-
-fn validate_output_parent(path: &Path) -> Result<PathBuf, PublicError> {
-    let parent = path
-        .parent()
-        .filter(|candidate| !candidate.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let metadata = std::fs::symlink_metadata(parent).map_err(|_| {
-        PublicError::internal(
-            "file_write_error",
-            "Failed to inspect output parent directory",
-        )
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(PublicError::bad_request(
-            "file_write_error",
-            "Refusing symlinked output parent directory",
-        ));
-    }
-    if !metadata.file_type().is_dir() {
-        return Err(PublicError::bad_request(
-            "file_write_error",
-            "Output parent path is not a directory",
-        ));
-    }
-
-    #[cfg(unix)]
-    {
-        let mode = metadata.permissions().mode();
-        let world_writable = (mode & 0o002) != 0;
-        let sticky = (mode & 0o1000) != 0;
-        if world_writable && !sticky {
-            return Err(PublicError::bad_request(
-                "file_write_error",
-                "Refusing unsafe output parent directory permissions",
-            ));
-        }
-    }
-
-    Ok(parent.to_path_buf())
-}
-
-fn validate_output_target(path: &Path, mode: OutputWriteMode) -> Result<(), PublicError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(PublicError::bad_request(
-                    "file_write_error",
-                    "Refusing symlinked output file",
-                ));
-            }
-            if !metadata.file_type().is_file() {
-                return Err(PublicError::bad_request(
-                    "file_write_error",
-                    "Output path is not a regular file",
-                ));
-            }
-            if matches!(mode, OutputWriteMode::CreateNew) {
-                return Err(PublicError::bad_request(
-                    "file_write_error",
-                    "Output file already exists; pass --overwrite to replace it",
-                ));
-            }
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => {
-            return Err(PublicError::internal(
-                "file_write_error",
-                "Failed to inspect output file",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn temp_output_path(path: &Path, parent: &Path) -> Result<PathBuf, PublicError> {
-    let file_name = path.file_name().ok_or_else(|| {
-        PublicError::bad_request("file_write_error", "Output path must include a file name")
-    })?;
-    Ok(parent.join(format!(
-        ".{}.tmp-{}",
-        file_name.to_string_lossy(),
-        Uuid::new_v4()
-    )))
-}
-
-fn write_temp_output_file(path: &Path, raw_tx_hex: &str) -> Result<(), PublicError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-
-    let mut file = options.open(path).map_err(|_| {
-        PublicError::internal("file_write_error", "Failed to create temporary output file")
-    })?;
-
-    file.write_all(raw_tx_hex.as_bytes()).map_err(|_| {
-        PublicError::internal(
-            "file_write_error",
-            "Failed to write signed transaction file",
-        )
-    })?;
-    file.sync_all().map_err(|_| {
-        PublicError::internal("file_write_error", "Failed to sync temporary output file")
-    })?;
-
-    Ok(())
-}
-
-fn install_temp_output_file(
-    temp_path: &Path,
-    path: &Path,
-    mode: OutputWriteMode,
-) -> Result<(), PublicError> {
-    match mode {
-        OutputWriteMode::CreateNew => {
-            std::fs::hard_link(temp_path, path).map_err(|_| {
-                PublicError::internal("file_write_error", "Failed to install new output file")
-            })?;
-            std::fs::remove_file(temp_path).map_err(|_| {
-                PublicError::internal("file_write_error", "Failed to remove temporary output file")
-            })?;
-        }
-        OutputWriteMode::Overwrite => {
-            std::fs::rename(temp_path, path).map_err(|_| {
-                PublicError::internal("file_write_error", "Failed to replace output file")
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-fn sync_parent_directory(parent: &Path) -> Result<(), PublicError> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(parent)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|_| {
-                PublicError::internal("file_write_error", "Failed to sync output parent directory")
-            })?;
-    }
-
-    let _ = parent;
-    Ok(())
-}
-
 fn admin_error_from_keystore(err: KeystoreError) -> PublicError {
     match err {
         KeystoreError::InvalidPrivateKey => {
@@ -890,10 +602,6 @@ fn admin_error_from_keystore(err: KeystoreError) -> PublicError {
         }
         _ => PublicError::internal("keystore_error", "Keystore operation failed"),
     }
-}
-
-fn public_util_error(error: mfm_evm_core::util_error::UtilError) -> PublicError {
-    PublicError::bad_request(error.code, error.message)
 }
 
 fn key_type_code(key_type: &KeyType) -> &'static str {

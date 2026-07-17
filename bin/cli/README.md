@@ -6,7 +6,7 @@ The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a u
 
 Run the packaged CLI with `nix run .#mfm -- <ARGS>`, for example:
 - `nix run .#mfm -- keystore list`
-- `nix run .#mfm -- keystore tx-sign --to ...`
+- `nix run .#mfm -- keystore tx-sign --signer-ref deployer --from 0x... --to 0x...`
 - `nix run .#mfm -- facts kinds`
 - `nix run .#mfm -- ops list`
 - `nix run .#mfm -- run status <RUN_ID>`
@@ -343,13 +343,24 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
 
 ### `keystore tx-sign`
 
-Signs an EIP-1559 transaction payload using a key already stored in the keystore and writes the signed raw transaction to a file.
+Signs one checked EIP-1559 transaction through the canonical app/library signing service and writes
+the signed raw transaction hex to an explicit bearer-output file. The command resolves exactly one
+`[signers.<REF>]` runtime binding and its referenced `[keystores.<REF>]` profile. It has no direct
+keystore/key selector, label lookup, private-key access, custom encoder, legacy transaction mode, or
+provider fallback.
 
-Implementation note: this command is a direct CLI helper over the keystore and EVM libraries. It
-does not start, resume, or certify a typed run.
+The unsigned envelope uses Alloy as its only signing-hash and encoding implementation. CLI
+quantities accept canonical unsigned decimal or lowercase `0x`-prefixed input as `U256`; values
+outside Alloy's exact EIP-1559 field representation fail closed. The keystore provider enforces the
+deterministic RFC 6979 recoverable low-s profile and expected sender, and blocking file/unlock/KDF/key
+work runs outside async runtime workers.
 
-The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`) and intentionally excludes local output paths, raw tx hex, and signature bytes.
-The output file is created with restrictive permissions and must not already exist unless `--overwrite` is supplied. Symlink outputs and unsafe parent directories are rejected.
+Command output contains metadata only: `from`, `to`, canonical decimal-string `nonce` and
+`chain_id`, `signing_digest`, and `transaction_hash`. The two hashes are intentionally distinct.
+Output excludes local paths, raw transaction hex, signature bytes, keystore entry ids, and runtime
+configuration. The `--out` file is the only bearer boundary, is created with mode 0600, and must not
+already exist unless `--overwrite` is supplied. Symlink outputs and unsafe parent directories are
+rejected. This command does not start, resume, submit, or certify a typed run.
 
 **Usage:**
 ```sh
@@ -357,25 +368,27 @@ mfm_cli keystore tx-sign [OPTIONS]
 ```
 
 **Required options:**
-- Key selector: `--id <UUID>` or `--by-label <LABEL>`
+- `--signer-ref <REF>`: Exact signer binding under `[signers]`
+- `--from <ADDRESS>`: Expected sender; signing fails if the bound key differs
 - `--to <ADDRESS>`
 - `--value-wei <DEC_OR_0X_HEX>`
-- `--chain-id <U64>`
-- `--nonce <U64>`
+- `--chain-id <DEC_OR_0X_HEX>`
+- `--nonce <DEC_OR_0X_HEX>`
 - `--max-fee-per-gas <DEC_OR_0X_HEX>`
 - `--max-priority-fee-per-gas <DEC_OR_0X_HEX>`
-- `--gas-limit <U64>`
+- `--gas-limit <DEC_OR_0X_HEX>`
 - `--out <PATH>`
 
 **Optional options:**
 - `--data <0xHEX>` (default: `0x`)
-- `--keystore <PATH>`
+- `--runtime-config <PATH>` (default: `MFM_RUNTIME_CONFIG_FILE`)
 - `--overwrite`: Replace an existing regular output file. Without this flag, `--out` must be a new path.
 
 **Example:**
 ```sh
 mfm_cli --output-format json keystore tx-sign \
-  --by-label "my-main-wallet" \
+  --signer-ref deployer \
+  --from 0x2222222222222222222222222222222222222222 \
   --to 0x1111111111111111111111111111111111111111 \
   --value-wei 1000000000000000 \
   --chain-id 31337 \
@@ -456,8 +469,8 @@ mints a fresh opaque key before deriving the digest.
 The CLI starts only through registered entry-point ops that app assembly plans and certifies into
 typed execution specs, and it resumes/replays only from stored typed run streams.
 
-Keystore tx commands are direct CLI helpers over the keystore and EVM libraries. They do not submit
-or resume certified typed runs.
+`keystore tx-sign` is a thin client of the app-assembled canonical signing service. It does not
+submit or resume certified typed runs and is not an alternate transaction implementation.
 
 ### `run start`
 
@@ -722,10 +735,11 @@ The CLI's process-level configuration is intentionally narrow.
   entry_id = "<uuid>"
   ```
 
-- Direct keystore commands use either `--keystore <PATH>`, which prompts locally for credentials,
-  or a runtime-config keystore profile selected by `--runtime-config <PATH>` or
-  `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to `default` for runtime-config
-  selection.
+- Keystore administration commands (`import`, `list`, and `delete`) use either `--keystore <PATH>`,
+  which prompts locally for credentials, or a runtime-config keystore profile selected by
+  `--runtime-config <PATH>` or `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to
+  `default` for those administration commands. `tx-sign` instead requires `--signer-ref` and loads
+  that exact signer-to-keystore binding; it does not accept direct keystore or key selectors.
 - Live BTC/EVM provider failures are reported with redacted diagnostic codes such as
   `bitcoin_rpc_http_status`, `bitcoin_rpc_json_error`, `evm_rpc_http_status`, or
   `evm_source_mismatch`. Diagnostics may include closed operation ids and numeric status/error
@@ -738,10 +752,12 @@ The CLI's process-level configuration is intentionally narrow.
 
 ## Best Practices
 
-- **For interactive use**, pass `--keystore <PATH>` and rely on the built-in prompts for passwords
-  and confirmations.
+- **For interactive keystore administration**, pass `--keystore <PATH>` and rely on the built-in
+  prompts for passwords and confirmations.
 - **For scripting and automation**, use runtime-config keystore profiles with unlock files, the
-  `--stdin` flag for import material, and `--yes` to bypass confirmations where supported.
+  `--stdin` flag for import material, and `--yes` to bypass confirmations where supported. For
+  transaction signing, configure one exact `[signers]` binding and pass its `--signer-ref` plus the
+  expected `--from` address.
 - **For AI agents and programmatic use**, use `--output-format json` to get structured, machine-readable responses with predictable error codes.
 - **Secure your environment**: When using environment variables, ensure the security of your shell history and environment.
 - **Backup your keystore file**: The CLI manages keys, but you are responsible for securely backing up the keystore file itself.

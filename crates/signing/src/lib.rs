@@ -5,6 +5,25 @@
 //! providers. Providers accept typed signing requests and return signatures
 //! plus public metadata. Private keys, passwords, endpoint paths, and provider
 //! runtime resolution remain outside persisted workflow config and values.
+//!
+//! ```rust
+//! use mfm_ids::DigestBytes;
+//! use mfm_signing::{
+//!     SignerRef, SigningAlgorithmId, SigningDomainId, SigningProfileId, SigningPurposeId,
+//!     SigningRequest,
+//! };
+//!
+//! let request = SigningRequest::from_digest(
+//!     SignerRef::new("deployer")?,
+//!     SigningAlgorithmId::new("secp256k1.keccak256.recoverable")?,
+//!     SigningProfileId::new("secp256k1.rfc6979.recoverable.low_s.v1")?,
+//!     SigningDomainId::new("example.transaction")?,
+//!     SigningPurposeId::new("example.transaction.submit")?,
+//!     DigestBytes::from_array([0x42; 32]),
+//! );
+//! assert_eq!(request.signer_ref().as_str(), "deployer");
+//! # Ok::<(), mfm_signing::SigningError>(())
+//! ```
 
 use std::fmt;
 use std::future::Future;
@@ -26,6 +45,11 @@ pub type SigningFuture<'a> = Pin<Box<dyn Future<Output = Result<SigningResult>> 
 
 const MAX_PUBLIC_KEY_LEN: usize = 4096;
 const MAX_SIGNATURE_LEN: usize = 4096;
+
+/// Recoverable secp256k1 signature over a Keccak-256 digest.
+pub const SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID: &str = "secp256k1.keccak256.recoverable";
+/// Deterministic RFC 6979, recoverable, low-s secp256k1 signing profile.
+pub const SECP256K1_RFC6979_LOW_S_PROFILE_ID: &str = "secp256k1.rfc6979.recoverable.low_s.v1";
 
 /// Manual-resolution signing domain id.
 pub const MANUAL_RESOLUTION_SIGNING_DOMAIN_ID: &str = "mfm.manual_resolution";
@@ -156,6 +180,52 @@ impl From<SigningAlgorithmId> for String {
     }
 }
 
+/// Signing-profile identifier that makes provider behavior an explicit contract.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SigningProfileId(LocalPublicId);
+
+impl SigningProfileId {
+    /// Creates a checked signing-profile identifier.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        let value = checked_local_public_id(SigningIdentifierKind::Profile, value)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the canonical identifier string.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Display for SigningProfileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SigningProfileId {
+    type Err = SigningError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for SigningProfileId {
+    type Error = SigningError;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SigningProfileId> for String {
+    fn from(value: SigningProfileId) -> Self {
+        value.0.into_string()
+    }
+}
+
 /// Signing domain identifier that scopes signed bytes to a protocol/domain.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -262,11 +332,13 @@ pub fn manual_resolution_signing_purpose_id() -> Result<SigningPurposeId> {
 pub fn manual_resolution_signing_request(
     signer_ref: SignerRef,
     algorithm: SigningAlgorithmId,
+    profile: SigningProfileId,
     digest: DigestBytes,
 ) -> Result<SigningRequest> {
     Ok(SigningRequest::from_digest(
         signer_ref,
         algorithm,
+        profile,
         manual_resolution_signing_domain_id()?,
         manual_resolution_signing_purpose_id()?,
         digest,
@@ -274,9 +346,11 @@ pub fn manual_resolution_signing_request(
 }
 
 /// Transient signing request. This type is intentionally not serializable.
+#[derive(Clone, PartialEq, Eq)]
 pub struct SigningRequest {
     signer_ref: SignerRef,
     algorithm: SigningAlgorithmId,
+    profile: SigningProfileId,
     domain: SigningDomainId,
     purpose: SigningPurposeId,
     digest: DigestBytes,
@@ -288,6 +362,7 @@ impl SigningRequest {
     pub fn from_digest(
         signer_ref: SignerRef,
         algorithm: SigningAlgorithmId,
+        profile: SigningProfileId,
         domain: SigningDomainId,
         purpose: SigningPurposeId,
         digest: DigestBytes,
@@ -295,6 +370,7 @@ impl SigningRequest {
         Self {
             signer_ref,
             algorithm,
+            profile,
             domain,
             purpose,
             digest,
@@ -316,6 +392,11 @@ impl SigningRequest {
     /// Returns the signing algorithm.
     pub fn algorithm(&self) -> &SigningAlgorithmId {
         &self.algorithm
+    }
+
+    /// Returns the required signing behavior profile.
+    pub fn profile(&self) -> &SigningProfileId {
+        &self.profile
     }
 
     /// Returns the signing domain.
@@ -344,6 +425,7 @@ impl fmt::Debug for SigningRequest {
         f.debug_struct("SigningRequest")
             .field("signer_ref", &self.signer_ref)
             .field("algorithm", &self.algorithm)
+            .field("profile", &self.profile)
             .field("domain", &self.domain)
             .field("purpose", &self.purpose)
             .field("digest", &"digest")
@@ -479,7 +561,7 @@ impl PublicKeyBytes {
 }
 
 /// Signature bytes returned by a signer provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignatureBytes(Vec<u8>);
 
 impl SignatureBytes {
@@ -499,11 +581,18 @@ impl SignatureBytes {
     }
 }
 
+impl fmt::Debug for SignatureBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SignatureBytes(<redacted>)")
+    }
+}
+
 /// Signing result returned by a provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SigningResult {
     signer_ref: SignerRef,
     algorithm: SigningAlgorithmId,
+    profile: SigningProfileId,
     public_identity: PublicSigningIdentity,
     signature: SignatureBytes,
 }
@@ -527,6 +616,7 @@ impl SigningResult {
         Ok(Self {
             signer_ref: request.signer_ref().clone(),
             algorithm: request.algorithm().clone(),
+            profile: request.profile().clone(),
             public_identity,
             signature,
         })
@@ -542,6 +632,11 @@ impl SigningResult {
         &self.algorithm
     }
 
+    /// Returns the signing behavior profile.
+    pub fn profile(&self) -> &SigningProfileId {
+        &self.profile
+    }
+
     /// Returns public signer metadata.
     pub fn public_identity(&self) -> &PublicSigningIdentity {
         &self.public_identity
@@ -553,6 +648,18 @@ impl SigningResult {
     }
 }
 
+impl fmt::Debug for SigningResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SigningResult")
+            .field("signer_ref", &self.signer_ref)
+            .field("algorithm", &self.algorithm)
+            .field("profile", &self.profile)
+            .field("public_identity", &self.public_identity)
+            .field("signature", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Closed identifier categories for signing errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SigningIdentifierKind {
@@ -560,6 +667,8 @@ pub enum SigningIdentifierKind {
     SignerRef,
     /// Signing algorithm id.
     Algorithm,
+    /// Signing behavior profile id.
+    Profile,
     /// Signing domain id.
     Domain,
     /// Signing purpose id.
@@ -573,6 +682,7 @@ impl SigningIdentifierKind {
         match self {
             Self::SignerRef => "signer_ref",
             Self::Algorithm => "algorithm",
+            Self::Profile => "profile",
             Self::Domain => "domain",
             Self::Purpose => "purpose",
             Self::Account => "account",

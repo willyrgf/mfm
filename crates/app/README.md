@@ -10,6 +10,7 @@ authority. It provides:
 - current-target integrity/type/semantic verification at launch;
 - entry-point operation planning and typed certification;
 - production store, artifact, runner, and capability wiring;
+- exact runtime signer/keystore assembly for canonical EIP-1559 signing;
 - typed start/resume/replay dispatch and public-output read authority.
 
 Current configuration is a pre-admission surface. A setup document is a closed set of supported
@@ -37,6 +38,13 @@ consult current configuration.
 Domain runner behavior lives in adapter crates. The former library-only EVM contract lifecycle was
 deleted; `mfm-app` does not register speculative mutation or validation runners without an owned
 certified graph consumer.
+
+The standalone signing facade is not a second mutation workflow. It accepts an already checked
+unsigned envelope, resolves exactly the requested generic runtime signer and its referenced
+keystore, and invokes `mfm-evm-signing`. The returned signed envelope is transient bearer material;
+the app does not serialize, persist, clone, submit, or render its bytes. The CLI uses this facade
+for its explicit local bearer-output command, and the owned transaction adapter reuses the same
+canonical function when its state contract lands.
 
 After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
 reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They

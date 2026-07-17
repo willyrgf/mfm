@@ -562,6 +562,32 @@ fn signer_requirement_rejects_malformed_signers() {
 }
 
 #[test]
+fn signer_only_requirement_loads_exact_support_without_evm_routes() {
+    let runtime = RuntimeConfig::from_str_with_requirements(
+        r#"
+        [keystores.default]
+        keystore_path = "/run/mfm/wallet.keystore"
+        unlock_file = "/run/mfm/wallet.password"
+
+        [signers.deployer]
+        provider = "keystore"
+        keystore_ref = "default"
+        entry_id = "67e55044-10b1-426f-9247-bb680e5fe0c8"
+
+        [evm]
+        malformed = true
+        "#,
+        RuntimeConfigFormat::Toml,
+        RuntimeConfigRequirement::signers(),
+    )
+    .expect("signer-only runtime config");
+
+    assert!(runtime.evm().is_none());
+    assert_eq!(runtime.signers().len(), 1);
+    assert_eq!(runtime.keystores().len(), 1);
+}
+
+#[test]
 fn secret_material_fields_are_rejected() {
     for field in [
         "password",

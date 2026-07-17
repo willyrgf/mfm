@@ -309,11 +309,12 @@ Signers provide generic key material and signature capabilities.
 Signer crates may:
 
 - define signer references
-- define signing algorithm and domain identifiers
+- define protocol-neutral signing algorithm, profile, domain, and purpose identifier types
 - define signing request/result traits
 - implement MFM keystore-backed signing
 - map runtime signer refs to keystore entries, hardware signers, remote signers, or future wallets
 - verify expected public identities
+- enforce an explicitly requested deterministic/canonical provider profile
 - redact all secret-bearing details from errors
 
 Signer crates must not:
@@ -325,7 +326,15 @@ Signer crates must not:
   raw signed transaction bytes in typed semantic surfaces
 
 Raw signed transactions are bearer mutation material. They remain transient submit-time bytes below
-the typed semantic boundary.
+the typed semantic boundary. `mfm-evm-signing` owns the sole domain-specific EIP-1559 envelope
+conversion/finalization path: Alloy supplies the signing digest, signed encoding, and transaction
+hash; MFM verifies the generic result profile, canonical low-s/parity, and recovered sender. The
+keystore provider is protocol-neutral and must not import EVM domain or purpose constants.
+
+The app layer may resolve one exact runtime signer binding and referenced keystore profile, build
+the generic provider, and call the canonical EVM signing function. Binaries may parse typed input,
+invoke that app service, and publish the returned bearer only to an explicit user-selected file;
+they must not open a signing key, construct a second signing path, or retain the bearer.
 
 ### Configuration
 
@@ -644,6 +653,8 @@ Before merging a change, verify:
 - new public values/configs use typed descriptors and no floats/secrets
 - side effects have typed intent, idempotency, receipt/recovery, one mutation authority, and no
   retained signed raw transactions
+- deterministic signing requirements are explicit profile ids checked by callers and providers,
+  with no unconstrained or fallback signer binding
 - certified saga and side-effect verification policy are hash-defining spec data, not policy
   resolved by a registry at admission, and compensation/manual outcomes are derived from certified
   policy plus stream evidence

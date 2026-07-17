@@ -279,6 +279,29 @@ dependency-ordered contract workflow. Until those state contracts and adapters a
 generic transaction/signing and exact code/call capability foundations do not by themselves create
 executable state authority.
 
+The retained transaction-signing foundation is one canonical path in `mfm-evm-signing`. It admits
+one opaque Alloy `TxEip1559`, obtains its signing digest from Alloy, builds one generic digest-sign
+request, verifies the exact deterministic profile, low-s signature, recoverable parity, public
+identity, and expected sender, then asks Alloy to finalize and EIP-2718 encode the envelope. The
+signed transaction hash is Keccak-256 of those exact transient bytes and is cross-checked against
+Alloy's hash. There is no legacy/style enum, custom RLP, alternate encoder, normalization fallback,
+or second normal-path signing call.
+
+Transaction quantity ingress uses `U256`. Alloy 0.8 represents chain id, nonce, and gas limit as
+`u64` and fee fields as `u128`, so envelope admission checked-converts those fields and rejects
+unrepresentable values without truncation, clamping, or fallback; transaction value remains full
+`U256`. This fail-closed representability boundary is the only production path. Supporting wider
+fee fields would require upstream Alloy support, not a parallel MFM envelope implementation.
+
+`mfm-signing` carries the protocol-neutral algorithm and explicit signing-profile ids on every
+transient request/result. The admitted EVM profile is deterministic RFC 6979 recoverable
+secp256k1 with canonical low-s output. `mfm-signers-keystore` binds exactly one runtime signer ref
+to one keystore entry, enforces that generic algorithm/profile and expected identity, and leaves
+domain/purpose authorization to the caller. It performs file access, password resolution,
+unlock/KDF, key access, and signing on a blocking worker with one-request unlock scope. App
+assembly admits the signer/keystore support families without loading EVM routes, then selects the
+requested `[signers]` entry and its referenced `[keystores]` profile.
+
 App assembly keeps evidence-only services separate from live driver services. Status, stream
 inspection, list/watch, replay, and public-output rendering construct only store, artifact, and
 certification/replay authority; they do not parse live runtime config, construct live EVM transports,
@@ -711,7 +734,10 @@ evidence-backed terminal side-effect outcome, or reports an operational block.
 
 Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
 signer references. Signed raw transactions are bearer mutation material and remain transient
-submit-time bytes inside the mutation adapter.
+submit-time bytes inside the mutation adapter. They are neither serializable typed values nor
+cloneable service results. The explicit user-selected `keystore tx-sign --out` file is the only
+non-run bearer-output boundary; CLI output reports distinct `signing_digest` and
+`transaction_hash` metadata and never the raw bytes, signature, or local path.
 
 Submission observed, submission unknown, and not-submitted-proven evidence share one logical
 submission-result slot for an invocation epoch. Unknown submission can be superseded only by the
