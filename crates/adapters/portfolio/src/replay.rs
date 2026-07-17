@@ -1,5 +1,6 @@
 use super::*;
 
+use mfm_portfolio_model::portfolio::PortfolioSnapshot;
 use mfm_replay::v1::{self as replay, load_node_config as replay_node_config};
 
 use super::selection::{
@@ -8,17 +9,36 @@ use super::selection::{
     store_commit_order_from_row,
 };
 
-/// Verifies receipt-pinned portfolio selection and report projection from retained evidence only.
+/// Verifies the produced receipt-pinned portfolio projection prefix from retained evidence only.
 ///
 /// The operation owner reconstructs `receipt` from family receipts before calling this adapter
-/// verifier. This adapter then proves that selection and snapshot assembly consumed exactly that
-/// value before replaying every bounded query, hydration, identity comparison, post-identity
-/// ordering, config-derived public projection, and totals calculation.
+/// verifier. This adapter accepts only the strict output prefixes from selection through report,
+/// verifies every produced stage, and proves that each stage consumed the exact preceding value.
 pub fn verify_portfolio_replay(
     broker: &replay::ReplayBroker,
     receipt: &PortfolioCollectionReceipt,
 ) -> replay::Result<()> {
-    let select_frame = replay_single_state_frame::<SelectHoldingsState>(broker, "SelectHoldings")?;
+    let select_frame =
+        optional_replay_single_state_frame::<SelectHoldingsState>(broker, "SelectHoldings")?;
+    let snapshot_frame =
+        optional_replay_single_state_frame::<AssembleSnapshotState>(broker, "assembled snapshot")?;
+    let report_frame =
+        optional_replay_single_state_frame::<ProjectReportState>(broker, "projected report")?;
+
+    if snapshot_frame.is_some() && select_frame.is_none() {
+        return Err(replay_portfolio_mismatch(
+            "AssembleSnapshot output was produced without a SelectHoldings predecessor",
+        ));
+    }
+    if report_frame.is_some() && snapshot_frame.is_none() {
+        return Err(replay_portfolio_mismatch(
+            "ProjectReport output was produced without an AssembleSnapshot predecessor",
+        ));
+    }
+    let Some(select_frame) = select_frame else {
+        return Ok(());
+    };
+
     let config: SelectHoldingsConfig = replay_node_config(broker, &select_frame.node)?;
     if config.selection_policy_id()
         != mfm_state_portfolio::PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID
@@ -124,8 +144,9 @@ pub fn verify_portfolio_replay(
     let selected_output = SelectedHoldings { observations };
     verify_replay_output_bytes(&select_frame, &selected_output, "selected holdings")?;
 
-    let snapshot_frame =
-        replay_single_state_frame::<AssembleSnapshotState>(broker, "assembled snapshot")?;
+    let Some(snapshot_frame) = snapshot_frame else {
+        return Ok(());
+    };
     let snapshot_config: AssembleSnapshotConfig = replay_node_config(broker, &snapshot_frame.node)?;
     if snapshot_config.portfolio() != config.portfolio() {
         return Err(replay_portfolio_mismatch(
@@ -139,19 +160,35 @@ pub fn verify_portfolio_replay(
             "AssembleSnapshot did not consume the exact assembled portfolio collection receipt",
         ));
     }
+    let snapshot_holdings =
+        replay_single_input_value::<SelectedHoldings>(broker, &snapshot_frame.node)?;
+    if snapshot_holdings != selected_output {
+        return Err(replay_portfolio_mismatch(
+            "AssembleSnapshot did not consume the exact selected holdings output",
+        ));
+    }
     let snapshot = assemble_snapshot(
         &snapshot_config,
         AssembleSnapshotInput {
-            holdings: selected_output.clone(),
-            receipt: receipt.clone(),
+            holdings: snapshot_holdings,
+            receipt: snapshot_receipt,
         },
     )
     .map_err(replay_adapter_error)?;
     verify_replay_output_bytes(&snapshot_frame, &snapshot, "assembled snapshot")?;
 
-    let report_frame = replay_single_state_frame::<ProjectReportState>(broker, "projected report")?;
+    let Some(report_frame) = report_frame else {
+        return Ok(());
+    };
     let _: ProjectReportConfig = replay_node_config(broker, &report_frame.node)?;
-    let report = mfm_state_portfolio::project_report_from_snapshot(snapshot)
+    let report_snapshot =
+        replay_single_input_value::<PortfolioSnapshot>(broker, &report_frame.node)?;
+    if report_snapshot != snapshot {
+        return Err(replay_portfolio_mismatch(
+            "ProjectReport did not consume the exact assembled snapshot output",
+        ));
+    }
+    let report = mfm_state_portfolio::project_report_from_snapshot(report_snapshot)
         .map_err(replay_adapter_error)?;
     verify_replay_output_bytes(&report_frame, &report, "project report")
 }
@@ -255,16 +292,24 @@ fn require_replay_exact_bounded_cardinality(
     Ok(())
 }
 
-fn replay_single_state_frame<S>(
+fn optional_replay_single_state_frame<S>(
     broker: &replay::ReplayBroker,
     label: &'static str,
-) -> replay::Result<replay::ProducedCellReplayFrame>
+) -> replay::Result<Option<replay::ProducedCellReplayFrame>>
 where
     S: StateSpec,
 {
     let kind = S::kind().map_err(replay_adapter_error)?;
     let version = S::version().map_err(replay_adapter_error)?;
-    replay::single_state_output_frame(broker, &kind, &version, label)
+    let mut frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == kind && node.state_version == version)
+    })?;
+    if frames.len() > 1 {
+        return Err(replay_portfolio_mismatch(format!(
+            "replay found more than one {label} output"
+        )));
+    }
+    Ok(frames.pop())
 }
 
 fn replay_input_values<T>(

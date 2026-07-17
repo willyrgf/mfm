@@ -2,6 +2,7 @@ use std::future;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::{Json, Router};
@@ -467,6 +468,17 @@ async fn snapshot_root_resumes_and_replays_after_live_inputs_disappear() {
     drop(initial_services);
     std::fs::remove_file(&runtime_path).expect("remove runtime config before resume");
 
+    let prefix_replay_services = mfm_app::make_run_read_services(
+        store.clone(),
+        store.clone(),
+        mfm_app::production_certification_registry().expect("snapshot certification registry"),
+    );
+    let prefix_replay = prefix_replay_services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect("evidence-only collection-receipt prefix replay");
+    assert_eq!(prefix_replay.run_mode, mfm_app::RunModeStatus::Forward);
+
     let resumed_services = snapshot_services(
         &store,
         Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone())),
@@ -495,6 +507,82 @@ async fn snapshot_root_resumes_and_replays_after_live_inputs_disappear() {
         .expect("evidence-only snapshot replay");
     assert_eq!(replay.run_mode, mfm_app::RunModeStatus::Completed);
     assert_eq!(server.calls(), source_calls_before_resume);
+}
+
+/// Replay verifies every completed portfolio projection stage while accepting an interrupted
+/// strict prefix whose remaining downstream stages have not produced outputs.
+#[tokio::test]
+async fn snapshot_root_replay_verifies_each_downstream_output_prefix() {
+    for (label, blocked_input_schema) in [
+        ("selected", "mfm.portfolio.selected_holdings"),
+        ("snapshot", "mfm.portfolio.snapshot"),
+    ] {
+        let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+        let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+        let runtime_path =
+            write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+        let store = store::AsyncInMemoryRunStore::default();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let artifacts =
+            BlockingPortfolioOutputArtifacts::new(store.clone(), blocked_input_schema, entered_tx);
+        let runners = mfm_app::production_runner_registry(
+            Arc::new(artifacts.clone()),
+            Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone())),
+            Some(&runtime_path),
+        )
+        .expect("production snapshot runners");
+        let services = mfm_app::make_run_services(
+            runners,
+            store.clone(),
+            artifacts,
+            mfm_app::production_certification_registry().expect("snapshot certification registry"),
+        );
+        let draft = portfolio_snapshot_program_draft(snapshot_config(SnapshotDemand::EvmNative))
+            .expect("prefix snapshot draft");
+        let request = mfm_app::prepare_typed_program_run_launch_for_test(
+            draft,
+            Default::default(),
+            services.certification_registry(),
+            services.load_store_scope_id().await.expect("store scope"),
+            Some(
+                mfm_app::InvocationKey::new(format!("prefix-{label}"))
+                    .expect("prefix invocation key"),
+            ),
+        )
+        .expect("prefix snapshot launch request");
+        let run_id = request.run_id.clone();
+        let launch_services = services.clone();
+        let launch = tokio::spawn(async move { launch_services.launch_run(request).await });
+
+        tokio::time::timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .unwrap_or_else(|_| panic!("{label} prefix was not reached"))
+            .unwrap_or_else(|_| panic!("{label} prefix signal was dropped"));
+        let source_calls_before_replay = server.calls();
+        launch.abort();
+        let _ = launch.await;
+        assert!(store
+            .expire_execution_claim_for_test(&run_id)
+            .expect("expire interrupted execution claim"));
+        drop(services);
+        std::fs::remove_file(&runtime_path).expect("remove runtime config before prefix replay");
+
+        let replay_services = mfm_app::make_run_read_services(
+            store.clone(),
+            store.clone(),
+            mfm_app::production_certification_registry().expect("snapshot certification registry"),
+        );
+        let replay = replay_services
+            .verify_replay_for_run(&run_id)
+            .await
+            .unwrap_or_else(|error| panic!("{label} output prefix replay: {error:?}"));
+        assert_eq!(replay.run_mode, mfm_app::RunModeStatus::Forward, "{label}");
+        assert_eq!(
+            server.calls(),
+            source_calls_before_replay,
+            "{label} prefix replay must not reopen a live provider"
+        );
+    }
 }
 
 /// A live source failure never produces a successful complete snapshot output.
@@ -844,6 +932,56 @@ impl FactIndexReadProvider for BlockingSnapshotFactIndex {
                 let _ = entered.send(());
             }
             future::pending().await
+        })
+    }
+}
+
+#[derive(Clone)]
+struct BlockingPortfolioOutputArtifacts {
+    inner: store::AsyncInMemoryRunStore,
+    blocked_schema: &'static str,
+    entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl BlockingPortfolioOutputArtifacts {
+    fn new(
+        inner: store::AsyncInMemoryRunStore,
+        blocked_schema: &'static str,
+        entered: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            inner,
+            blocked_schema,
+            entered: Arc::new(Mutex::new(Some(entered))),
+        }
+    }
+}
+
+impl store::RetainedArtifactReadProvider for BlockingPortfolioOutputArtifacts {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let blocks_output = requirement.artifact_role
+                == Some(mfm_events::v1::ArtifactRole::StateOutput)
+                && requirement
+                    .schema_id
+                    .as_ref()
+                    .and_then(|schema| schema.canonical_name())
+                    == Some(self.blocked_schema);
+            if blocks_output {
+                let entered = self
+                    .entered
+                    .lock()
+                    .expect("blocking portfolio output state")
+                    .take();
+                if let Some(entered) = entered {
+                    let _ = entered.send(());
+                    future::pending().await
+                }
+            }
+            self.inner.read_retained_artifact(requirement).await
         })
     }
 }

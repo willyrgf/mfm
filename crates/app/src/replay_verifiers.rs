@@ -33,7 +33,14 @@ impl ReplayVerifierRegistry {
         Self {
             registrations: &[
                 ReplayVerifierRegistration {
-                    state_keys: &[state_key::<mfm_state_portfolio::SelectHoldingsState>],
+                    state_keys: &[
+                        state_key::<
+                            mfm_op_portfolio_snapshot::AssemblePortfolioCollectionReceiptState,
+                        >,
+                        state_key::<mfm_state_portfolio::SelectHoldingsState>,
+                        state_key::<mfm_state_portfolio::AssembleSnapshotState>,
+                        state_key::<mfm_state_portfolio::ProjectReportState>,
+                    ],
                     intent_matcher: None,
                     verifier: verify_portfolio,
                 },

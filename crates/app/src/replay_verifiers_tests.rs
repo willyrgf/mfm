@@ -12,4 +12,14 @@ fn production_dispatch_scopes_are_explicit_and_unique() {
             assert!(state_keys.insert((key.kind, key.version)));
         }
     }
+
+    for expected in [
+        state_key::<mfm_op_portfolio_snapshot::AssemblePortfolioCollectionReceiptState>(),
+        state_key::<mfm_state_portfolio::SelectHoldingsState>(),
+        state_key::<mfm_state_portfolio::AssembleSnapshotState>(),
+        state_key::<mfm_state_portfolio::ProjectReportState>(),
+    ] {
+        let expected = expected.expect("portfolio replay state key");
+        assert!(state_keys.contains(&(expected.kind, expected.version)));
+    }
 }
