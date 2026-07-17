@@ -1266,3 +1266,220 @@ R2-01, the warm median logged Nextest compile/link interval is 20.62s, only
 test and parity execution floor. R2-04 should therefore characterize the
 durable Cargo verification target without assuming execution-topology changes
 will amplify its result.
+
+## R2-04: persistent local Cargo verification experiment
+
+R2-04 was measured on 2026-07-17 from committed R2-03 revision
+`6507999cfad64c4b953184cb2998db4074f04452`. It retained the authoritative
+compact verification profile, Rust/Cargo 1.96.0, Nixfied model hash
+`d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84`,
+runtime ABI `nixfied-runtime-abi:1-5ff3aa14f2bf`, and cache digest
+`dd27515db6a0fc48aabe31c5e300af7325e3af24a98f0560364fa9c516971e03`.
+No compiler wrapper or Nix-built Rust artifact was added.
+
+The primary experimental state root was
+`/tmp/mfm-r2-04-main-state`. A detached worktree at
+`/tmp/mfm-r2-04-wt` contained every tracked-file mutation. The authoritative
+worktree remained unchanged until this report was written. Each mutation's
+original digest was restored and the detached worktree returned clean before
+the next case.
+
+### Clean and unchanged control
+
+The new clean and warm pair supplements, rather than replaces, R2-01's three
+clean and five warm full-CI samples. Both R2-04 runs passed all 13 leaves,
+974/974 Nextest tests, 53 doctest binaries with 42 tests, nine Trybuild
+harnesses, online/offline SQLx, keystore, CLI, REST, and Postgres parity.
+
+| State | Run | Full CI | Outer wall | Nextest task | Compile/link | Execution |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| clean target | `run-3492136-1784300829850094755` | 304.51s | 304.72s | 137.602s | 40.67s | 96.569s |
+| exact unchanged | `run-3528870-1784301171449762270` | 204.01s | 204.25s | 94.211s | 19.09s | 74.735s |
+
+The unchanged durable target saved 100.50s and 33.0%. R2-01's larger matrix
+reported a 117.341s/35.4% clean-to-warm median improvement. Both independently
+clear the RFC's 15% and 30-second performance thresholds. The clean run used
+459% CPU on average and 958,028 KiB maximum resident memory; the warm run used
+330% CPU and 958,040 KiB maximum resident memory. Neither run swapped.
+
+The target occupied 10,488,172,544 bytes, 17,790 files, and 20,931 entries
+after clean CI, including 1,792,479,232 bytes of Trybuild artifacts. The
+unchanged rerun ended at 10,487,967,744 bytes with the same file and entry
+counts. Normal unchanged reuse therefore showed no target growth beyond small
+ephemeral cleanup variance.
+
+### Common source and cache matrix
+
+The table below contains single screening observations for invalidation and
+ownership behavior. They are not presented as qualification medians. Full CI
+was used where service ports were available; focused public composites were
+used where a case concerned only binary tests or database inputs.
+
+| Case | Surface | Result | Wall/task observation |
+| --- | --- | --- | --- |
+| no MFM cache | fresh root, full CI | 13/13 passed | 304.51s |
+| exact unchanged | same root and path, full CI | 13/13 passed | 204.01s |
+| documentation-only | README digest changed and restored, full CI | 13/13 passed | 189.67s; Nextest compile 16.06s |
+| leaf crate | `mfm-authored-config` source changed and restored, full CI | 13/13 passed | 261.04s; Nextest compile 30.68s |
+| shared crate | `mfm-ids` source changed and restored, full CI | 13/13 passed | 255.02s; Nextest compile 36.86s |
+| manifest | authored-config package description changed; lock unchanged | 2/2 test leaves passed | 131.85s; Nextest compile 34.17s |
+| verification profile | test codegen units changed to 255 and restored | 2/2 test leaves passed | 150.17s; Nextest compile 49.12s |
+| non-Rust input | migration SQL comment changed and restored | 6/6 database leaves passed | 91.05s; online SQLx 6.08s |
+| identical second path | same commit and state root from detached worktree | 13/13 passed | 230.17s; Nextest compile 31.35s |
+| explicit Linux target configuration | focused `mfm-ids` check with explicit host triple | passed twice | 2.49s first, 0.06s warm |
+| cacheless/bypass proxy | fresh isolated state root followed by normal reuse | passed | represented by the clean/warm pair |
+
+The tracked mutation digests were:
+
+| Input | Original | Disposable variant |
+| --- | --- | --- |
+| `README.md` | `29e3d87ae4bf3fb36ef639f4375fcec1f80b8dc5e748c4445b80df4410447f5c` | `176232b15219158ff28e68c93c91cec76c14733a1d2126cae9801cda14d8077a` |
+| authored-config source | `e0ccfcd31b1f8ea91948f1805e67f647fd4b8d3081dfe94eee00a84367abe1e0` | `2d56d9ca7f19abb9de057f31649bd22ecead0b7edd086165c87e2858fd3d0494` |
+| `mfm-ids` source | `c29ae93aa1b09a45d80a38eae5af521257534dba9386f066b0e1f4802bfc0510` | `933820e24980f6e575072c043658beb45ee8f38202f1bed9e1dfca2345e3a5a7` |
+| authored-config manifest | `047dc4fdf9e34315c800e60d833a59385b8ae725307f6b5265fb5707636122a1` | `1c3bb7d886a19a8ddeb5d28bad98dbe1a9d3a707cf909f9e945cb99a559af17a` |
+| migration `0002` | `0c5a4ca0ac25cc220c95e97e45e2886cb4feec4cb08963be44abe716a53315ea` | `cf72eda580584982a6a2f78389def51f84218e43fedba5b5c7dff4f9c9722022` |
+| `nixfied.nix` profile | `5424200b21aacc28a881dff8e60142fc6bbc2012f7e92c95f4dc65a9a311c556` | `ef8f502496aa88d2e4c3eb2817307fd90ab988033147e07aee9800c762ccec72` |
+
+`Cargo.lock` remained at
+`e92a0a82bbaf96a522cc2eb3d1f669f7af6b0607cffc01d7682f96a6d8925e7c`
+during the manifest probe. The profile variant changed the model hash to
+`72cbd34cf1073968c64fe4b59779173951c63f04f77ab3ad2a37e1dce5e8db3c`
+but intentionally retained the same cache digest. Cargo fingerprints safely
+rebuilt the affected test units. Restoring the model and completing the later
+recovery run proved normal default-profile reuse still passed.
+
+The explicit target probe used the exact pinned compiler
+`rustc 1.96.0 (ac68faa20 2026-05-25)`, host
+`aarch64-unknown-linux-gnu`, and created a target-triple subtree rather than
+reusing implicit-host artifacts. No second pinned toolchain was installed, so
+cross-version compiler behavior was not timed. The cache key already includes
+the declared toolchain and target identities; a real toolchain change remains
+an identity-contract obligation rather than a measured alternate compiler in
+R2-04.
+
+There is no explicit cache-bypass control in the pinned runtime. A fresh
+isolated state root is the only supported cacheless proxy, and it cannot prove
+bypass behavior while preserving the same cache namespace. An explicit,
+audited bypass remains a framework requirement.
+
+### Worktree, slot, process, and port isolation
+
+The identical second worktree reused the exact primary cache path because
+scope is `slot`, not worktree. Cargo reused most artifacts, but source-path
+sensitivity increased full CI by 26.16s relative to the unchanged run. The
+target grew from 10,487,967,744 to 10,963,066,880 bytes; all 475,099,136 added
+bytes were reflected in the Trybuild subtree, which grew to 2,267,697,152
+bytes. Same-state/same-slot worktrees therefore share ownership and accumulate
+path variants. MFM's current contract requiring separate state roots per
+worktree is necessary but not runtime-enforced.
+
+Two focused metadata-contract builds then ran concurrently from the primary
+and detached worktrees in slots 1 and 2. Both passed in 30.28s/28.33s and used
+distinct target paths of 1,235,656,704/1,235,374,080 bytes. A third focused
+build in a separate worktree state root passed in 18.80s and used another
+distinct 1,235,021,824-byte target. The digest remained identical in all
+three locations; state-root and slot placement, not the digest string,
+provided isolation.
+
+Persistent Postgres instances also ran concurrently in slots 1 and 2 on
+`127.0.0.1:28180` and `127.0.0.1:28280`, then stopped cleanly. In contrast,
+two attempted full-CI probes failed before Cargo when an independent state
+root used slot 0 on `127.0.0.1:28080`. Both failures reported
+`PROC_ESCAPE`, PostgreSQL's address-in-use diagnostic, state-root, registry,
+logs, and run summary. State roots do not namespace TCP ports; independent
+processes must coordinate globally distinct slots.
+
+### Same-slot concurrency, cancellation, and recovery
+
+Two `.#test` processes started against the same state root, slot, source, and
+target. Nixfied allowed both Nextest processes to run. Cargo's build lock
+serialized planning/compilation where necessary, but test execution could
+overlap; this is not a framework cache lease or exclusive-writer policy.
+
+The first run was interrupted after its Nextest leaf had run 624/974 tests.
+Its summary recorded `canceled: true`, null exit code, 41.566s task duration,
+and eight SIGTERM-aborted tests; the log identified all aborted tests and the
+350 tests not started. No child process survived. The concurrent second run
+then passed 974/974 plus doctests in 103.61s. Its Nextest compile interval was
+2.29s and execution was 83.106s. This proves cancellation propagation and
+Cargo-target recovery for the observed case, but it also confirms that the
+runtime does not itself prevent concurrent same-cache writers.
+
+### Growth, inspection, retention, and garbage collection
+
+The durable target retained every changed-source/profile variant:
+
+| Point | Target bytes | Files | Entries | Trybuild bytes |
+| --- | ---: | ---: | ---: | ---: |
+| clean full CI | 10,488,172,544 | 17,790 | 20,931 | 1,792,479,232 |
+| unchanged full CI | 10,487,967,744 | 17,790 | 20,931 | 1,792,299,008 |
+| identical second worktree | 10,963,066,880 | 19,789 | 23,298 | 2,267,697,152 |
+| after profile variant | 16,868,171,776 | 23,879 | 27,987 | 2,267,574,272 |
+| after explicit-target probe | 16,924,336,128 | not recounted | not recounted | unchanged |
+
+The accumulated leaf, shared-crate, manifest, and profile variants added
+5,905,104,896 bytes after the cross-worktree sample while keeping the same
+cache identity. The experiment did not capture a size boundary between every
+one of those mutations, so that growth is not attributed to the profile alone.
+No automatic age, size, profile-variant, or stale-unit pruning occurred. The
+primary slot retained 13 run directories, but their logs and summaries
+occupied only 2,813,952 bytes; compiler artifacts, not diagnostics, caused the
+material growth.
+
+Task summaries expose cache family, digest, mode, scope, and exact path. The
+`ps` control exposes registered processes and reconciliation state. Neither
+surface reports cache size, age, last use, owners, retained variants, or a
+safe prune plan; those observations required direct filesystem traversal.
+
+The only supported cleanup is slot-wide. On a disposable isolated root,
+`nix run .#clean -- --slot 0` reclaimed a 1,236,123,648-byte slot in 0.85s.
+It deleted the Cargo cache and the complete run directory together while
+preserving the 98,304-byte process registry. A cleanup attempt with a live
+persistent Postgres process correctly failed closed with `CLEANUP_REFUSED`
+because active run leases existed; after `.#down`, the service stopped
+cleanly. Active-process refusal is sound, but successful cleanup is too broad
+for Cargo-cache retention because it also removes service state and run
+diagnostics.
+
+After all evidence had been extracted, supported broad cleanup removed the
+three primary experimental slots in 2.24s/0.31s/0.39s. Available filesystem
+space rose from 17,057,996,800 to 36,581,367,808 bytes, and no experiment
+process or slot directory remained. This recovered the space safely but also
+removed the runtime-owned run logs cited above, as the broad contract defines.
+
+The Nix store grew from 26,642,591,744 to 26,756,800,512 bytes during model
+and app realization, an increase of 114,208,768 bytes. The current CI and
+model closures each remained approximately 1.5 GiB. Nix identified dead store
+paths through its normal dry-run inspection, but Nix garbage collection cannot
+see or reclaim mutable Cargo targets below `NIXFIED_STATE_DIR`.
+
+### Ownership cost and R2-04 decision
+
+Fresh isolation has simple ownership but high duplication: one complete
+verification target costs approximately 10.49 GB and 304.51s clean, while
+even focused metadata-only targets cost approximately 1.24 GB per slot or
+state root. Persistence materially improves unchanged and many changed-source
+workloads, but the operator must currently:
+
+- allocate unique state roots per worktree and globally distinct slots for
+  concurrent services;
+- discover cache paths from task summaries and calculate size/age manually;
+- monitor unbounded variant growth;
+- choose between retaining all compiler variants or deleting the entire slot,
+  including run and service evidence; and
+- rely on Cargo's internal locking for same-target concurrency.
+
+The persistent local Cargo target therefore performance-qualifies as the
+control candidate: both R2-01 and R2-04 exceed the required clean-to-warm
+threshold. It does not operationally qualify as the final durable architecture
+because safe ownership, inspection, bounded retention, cache-family garbage
+collection, and explicit bypass are missing. The target-only control remains
+in the candidate comparison, but final selection requires framework support
+rather than an MFM shell cleaner.
+
+The final Nixfied handoff must include at least cache-family inspection and
+accounting, cache-only cleanup with active-lease refusal, bounded age/size
+retention, lifecycle evidence, explicit bypass, enforced worktree namespace
+ownership, documented same-cache writer semantics, and globally actionable
+slot/port collision diagnostics. R2-04 adds no implementation workaround;
+these capabilities are the stop decision carried forward.
