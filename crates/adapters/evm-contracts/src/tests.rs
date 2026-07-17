@@ -7,8 +7,8 @@ use mfm_evm_capabilities::{
 };
 use mfm_evm_contract_model::{
     BlockSelector, BlockTag, ConfiguredContractAnchor, ConfiguredContractInstance, ConfiguredFrom,
-    ContractAddress, EvmBlockHash, EvmCodeHash, EvmContractContext, ValidationCodeIdentityEvidence,
-    ValidationCodeIdentitySelector,
+    ContractAddress, DeployedContractInstance, EvmBlockHash, EvmCodeHash, EvmContractContext,
+    ValidationCodeIdentityEvidence, ValidationCodeIdentitySelector,
 };
 use mfm_evm_signing::{
     primitive_signature_from_bytes, recover_signing_address,
@@ -261,6 +261,127 @@ fn prepared_invocation_guard_rejects_malformed_public_contract() {
         .expect("object")
         .insert("secret".to_owned(), json!("never"));
     assert!(serde_json::from_value::<PreparedContractInvocation>(unknown).is_err());
+}
+
+fn empty_configure_replay_fixture() -> (
+    PreparedContractInvocation,
+    ContextContractConfigureIntent,
+    ContextContractConfigureReceipt,
+    ContextContractConfigureConfirmation,
+) {
+    let mut prepared = prepared_invocation_fixture();
+    prepared.phase = ContractMutationPhase::Configure;
+    prepared.resource_stage = ContractLifecycleStage::Configured;
+    prepared.transactions.clear();
+
+    let deployed_block_hash =
+        EvmBlockHash::new(format!("0x{}", "42".repeat(32))).expect("deployment block hash");
+    let deployed = DeployedContractInstance {
+        lifecycle_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        address: ContractAddress::new("0x000000000000000000000000000000000000beef")
+            .expect("deployed address"),
+        deployed_block_number: 42,
+        deployed_block_hash: deployed_block_hash.clone(),
+    };
+    let intent = ContextContractConfigureIntent {
+        intent_version: 1,
+        deployed,
+        transactions: Vec::new(),
+    };
+    let anchor = ConfiguredContractAnchor {
+        block_number: 42,
+        block_hash: deployed_block_hash,
+    };
+    let receipt = ContextContractConfigureReceipt {
+        receipt_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+        resource_stage: ContractLifecycleStage::Configured,
+        receipts: Vec::new(),
+        anchor: anchor.clone(),
+    };
+    let confirmation = ContextContractConfigureConfirmation {
+        confirmation_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+        resource_stage: ContractLifecycleStage::Configured,
+        confirmations: 2,
+        receipts: Vec::new(),
+        anchor,
+    };
+    (prepared, intent, receipt, confirmation)
+}
+
+#[test]
+fn empty_configure_replay_binds_receipt_and_confirmation_to_deployment_anchor() {
+    let (prepared, intent, receipt, confirmation) = empty_configure_replay_fixture();
+    let intent =
+        super::replay_adapter::VerifiedContractSideEffectIntent::Configure(Box::new(intent));
+    let receipt_schema = ContextContractConfigureReceipt::schema_id().expect("receipt schema");
+    let confirmation_schema =
+        ContextContractConfigureConfirmation::schema_id().expect("confirmation schema");
+
+    super::replay_adapter::verify_contract_receipt_artifact(
+        &receipt_schema,
+        &serde_json::to_vec(&receipt).expect("receipt JSON"),
+        &prepared,
+        &intent,
+    )
+    .expect("empty configure receipt carries deployment anchor");
+    super::replay_adapter::verify_contract_confirmation_artifact(
+        &confirmation_schema,
+        &serde_json::to_vec(&confirmation).expect("confirmation JSON"),
+        &prepared,
+        &intent,
+    )
+    .expect("empty configure confirmation carries deployment anchor");
+
+    let mut tampered_receipt = receipt;
+    tampered_receipt.anchor.block_number += 1;
+    assert!(super::replay_adapter::verify_contract_receipt_artifact(
+        &receipt_schema,
+        &serde_json::to_vec(&tampered_receipt).expect("tampered receipt JSON"),
+        &prepared,
+        &intent,
+    )
+    .is_err());
+
+    let mut tampered_confirmation = confirmation;
+    tampered_confirmation.anchor.block_hash =
+        EvmBlockHash::new(format!("0x{}", "43".repeat(32))).expect("tampered block hash");
+    assert!(
+        super::replay_adapter::verify_contract_confirmation_artifact(
+            &confirmation_schema,
+            &serde_json::to_vec(&tampered_confirmation).expect("tampered confirmation JSON"),
+            &prepared,
+            &intent,
+        )
+        .is_err()
+    );
+
+    let error = super::replay_adapter::verify_contract_receipt_artifact(
+        &ContractDeployReceipt::schema_id().expect("deploy receipt schema"),
+        b"{}",
+        &prepared,
+        &intent,
+    )
+    .expect_err("configure intent must reject deploy receipt schema");
+    assert_eq!(
+        error.message,
+        "deploy receipt schema does not match verified side-effect intent"
+    );
+    let error = super::replay_adapter::verify_contract_confirmation_artifact(
+        &ContractDeployConfirmation::schema_id().expect("deploy confirmation schema"),
+        b"{}",
+        &prepared,
+        &intent,
+    )
+    .expect_err("configure intent must reject deploy confirmation schema");
+    assert_eq!(
+        error.message,
+        "deploy confirmation schema does not match verified side-effect intent"
+    );
 }
 
 #[test]

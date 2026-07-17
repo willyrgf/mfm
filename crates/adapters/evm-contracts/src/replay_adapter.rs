@@ -71,7 +71,7 @@ impl replay::SideEffectReplayVerifier for EvmContractStateReplayVerifier {
         self.verify_adapter_binding(&input.intent)?;
         let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
         verify_prepared_matches_certified_side_effect_context(&input.certified_context, &prepared)?;
-        verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
+        let intent = verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
         if let Some(submission) = &input.submission {
             let submissions: ContractTransactionSubmissions =
                 serde_json::from_slice(&submission.artifact_bytes).map_err(replay_json_error)?;
@@ -82,6 +82,7 @@ impl replay::SideEffectReplayVerifier for EvmContractStateReplayVerifier {
             &input.receipt.receipt.receipt_schema_id,
             &input.receipt.artifact_bytes,
             &prepared,
+            &intent,
         )
     }
 
@@ -101,7 +102,7 @@ impl replay::SideEffectReplayVerifier for EvmContractStateReplayVerifier {
         };
         let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
         verify_prepared_matches_certified_side_effect_context(&input.certified_context, &prepared)?;
-        verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
+        let intent = verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
         if let Some(submission) = &input.submission {
             let submissions: ContractTransactionSubmissions =
                 serde_json::from_slice(&submission.artifact_bytes).map_err(replay_json_error)?;
@@ -112,6 +113,7 @@ impl replay::SideEffectReplayVerifier for EvmContractStateReplayVerifier {
                 &receipt.receipt.receipt_schema_id,
                 &receipt.artifact_bytes,
                 &prepared,
+                &intent,
             )?;
         }
         verify_contract_confirmation_schema(
@@ -123,6 +125,7 @@ impl replay::SideEffectReplayVerifier for EvmContractStateReplayVerifier {
             &input.confirmation.confirmation.confirmation_schema_id,
             &input.confirmation.artifact_bytes,
             &prepared,
+            &intent,
         )
     }
 }

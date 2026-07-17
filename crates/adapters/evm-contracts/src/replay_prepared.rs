@@ -348,18 +348,29 @@ pub(crate) fn verify_contract_receipt_artifact(
     schema: &SchemaId,
     artifact_bytes: &[u8],
     prepared: &PreparedContractInvocation,
+    intent: &VerifiedContractSideEffectIntent,
 ) -> replay::Result<()> {
     let deploy = ContractDeployReceipt::schema_id().map_err(replay_value_error)?;
     let context_configure =
         ContextContractConfigureReceipt::schema_id().map_err(replay_value_error)?;
     if schema == &deploy {
+        let VerifiedContractSideEffectIntent::Deploy(_) = intent else {
+            return Err(replay_contract_mismatch(
+                "deploy receipt schema does not match verified side-effect intent",
+            ));
+        };
         let receipt: ContractDeployReceipt =
             serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
         verify_contract_deploy_receipt_matches_prepared(&receipt, prepared)
     } else if schema == &context_configure {
+        let VerifiedContractSideEffectIntent::Configure(intent) = intent else {
+            return Err(replay_contract_mismatch(
+                "configure receipt schema does not match verified side-effect intent",
+            ));
+        };
         let receipt: ContextContractConfigureReceipt =
             serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
-        verify_contract_configure_receipt_matches_prepared(&receipt, prepared)
+        verify_contract_configure_receipt_matches_prepared(&receipt, prepared, intent)
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
@@ -396,18 +407,29 @@ pub(crate) fn verify_contract_confirmation_artifact(
     schema: &SchemaId,
     artifact_bytes: &[u8],
     prepared: &PreparedContractInvocation,
+    intent: &VerifiedContractSideEffectIntent,
 ) -> replay::Result<()> {
     let deploy = ContractDeployConfirmation::schema_id().map_err(replay_value_error)?;
     let context_configure =
         ContextContractConfigureConfirmation::schema_id().map_err(replay_value_error)?;
     if schema == &deploy {
+        let VerifiedContractSideEffectIntent::Deploy(_) = intent else {
+            return Err(replay_contract_mismatch(
+                "deploy confirmation schema does not match verified side-effect intent",
+            ));
+        };
         let confirmation: ContractDeployConfirmation =
             serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
         verify_contract_deploy_confirmation_matches_prepared(&confirmation, prepared)
     } else if schema == &context_configure {
+        let VerifiedContractSideEffectIntent::Configure(intent) = intent else {
+            return Err(replay_contract_mismatch(
+                "configure confirmation schema does not match verified side-effect intent",
+            ));
+        };
         let confirmation: ContextContractConfigureConfirmation =
             serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
-        verify_contract_configure_confirmation_matches_prepared(&confirmation, prepared)
+        verify_contract_configure_confirmation_matches_prepared(&confirmation, prepared, intent)
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
@@ -435,6 +457,7 @@ pub(crate) fn verify_contract_deploy_receipt_matches_prepared(
 pub(crate) fn verify_contract_configure_receipt_matches_prepared(
     receipt: &ContextContractConfigureReceipt,
     prepared: &PreparedContractInvocation,
+    intent: &ContextContractConfigureIntent,
 ) -> replay::Result<()> {
     verify_prepared_context(
         prepared,
@@ -446,7 +469,7 @@ pub(crate) fn verify_contract_configure_receipt_matches_prepared(
         "configure receipt context does not match prepared invocation",
     )?;
     verify_transaction_receipts_match_prepared(prepared, &receipt.receipts)?;
-    verify_configure_anchor_matches_receipts(&receipt.anchor, &receipt.receipts)
+    verify_configure_anchor_matches_intent_and_receipts(&receipt.anchor, &receipt.receipts, intent)
 }
 
 pub(crate) fn verify_contract_deploy_confirmation_matches_prepared(
@@ -471,6 +494,7 @@ pub(crate) fn verify_contract_deploy_confirmation_matches_prepared(
 pub(crate) fn verify_contract_configure_confirmation_matches_prepared(
     confirmation: &ContextContractConfigureConfirmation,
     prepared: &PreparedContractInvocation,
+    intent: &ContextContractConfigureIntent,
 ) -> replay::Result<()> {
     verify_prepared_context(
         prepared,
@@ -482,24 +506,27 @@ pub(crate) fn verify_contract_configure_confirmation_matches_prepared(
         "configure confirmation context does not match prepared invocation",
     )?;
     verify_transaction_receipts_match_prepared(prepared, &confirmation.receipts)?;
-    verify_configure_anchor_matches_receipts(&confirmation.anchor, &confirmation.receipts)
+    verify_configure_anchor_matches_intent_and_receipts(
+        &confirmation.anchor,
+        &confirmation.receipts,
+        intent,
+    )
 }
 
-fn verify_configure_anchor_matches_receipts(
+fn verify_configure_anchor_matches_intent_and_receipts(
     anchor: &ConfiguredContractAnchor,
     receipts: &[ContractTransactionReceipt],
+    intent: &ContextContractConfigureIntent,
 ) -> replay::Result<()> {
-    let Some(receipt) = receipts.iter().rev().find(|receipt| receipt.status) else {
-        if receipts.is_empty() {
-            return Ok(());
-        }
-        return Err(replay_contract_mismatch(
-            "configure receipt evidence has no successful transaction",
-        ));
+    let input = ContextConfigureContractInput {
+        deployed: intent.deployed.clone(),
     };
-    if anchor.block_number != receipt.block_number || anchor.block_hash != receipt.block_hash {
+    let expected =
+        mfm_state_evm_contracts::configured_contract_anchor_from_receipts(&input, receipts)
+            .map_err(replay_adapter_error)?;
+    if anchor != &expected {
         return Err(replay_contract_mismatch(
-            "configured anchor does not match the last successful configuration receipt",
+            "configured anchor does not match verified configure intent and receipts",
         ));
     }
     Ok(())

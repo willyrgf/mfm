@@ -26,9 +26,9 @@ use mfm_evm_capabilities::{
     EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
 };
 use mfm_evm_contract_model::{
-    ContractArtifactConfig, ContractProfile, ContractProfileId, EvmCodeHash, EvmContractContext,
-    EvmNetworkContext, EvmNetworkId, LifecycleArtifactEvidenceRef, LifecycleKey,
-    ValidationCodeIdentityEvidence,
+    ConfiguredContractInstance, ContractArtifactConfig, ContractProfile, ContractProfileId,
+    EvmCodeHash, EvmContractContext, EvmNetworkContext, EvmNetworkId, LifecycleArtifactEvidenceRef,
+    LifecycleKey, ValidationCodeIdentityEvidence,
 };
 use mfm_ids::ArtifactId;
 use mfm_program::{
@@ -202,6 +202,77 @@ async fn direct_contract_uses_deploy_anchor_without_configure_calls() {
         "the deploy-anchor validation still executes the configured read assertion"
     );
     assert_eq!(provider.log_read_requests(), 0);
+}
+
+#[tokio::test]
+async fn direct_contract_replay_verifies_empty_configure_confirmation_before_output() {
+    let harness = direct_contract_state_graph_harness(
+        Some(expected_runtime_code_hash()),
+        "direct-contract-state-graph-empty-configure-prefix",
+        None,
+        0,
+        true,
+    )
+    .await;
+    let report = harness
+        .services
+        .launch_run_and_render(harness.request.clone())
+        .await
+        .expect("run empty-configure direct state graph");
+    assert_eq!(
+        report.run.expect("run response").run_mode,
+        mfm_app::RunModeStatus::Completed
+    );
+
+    let committed = harness
+        .store
+        .load_committed_run_stream(&harness.request.run_id)
+        .await
+        .expect("completed committed run stream");
+    let configure_node_id = configure_node_id(committed.events());
+    let configure_pair_id = committed
+        .events()
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::SideEffectInvocationStarted(payload)
+                if payload.node_id == configure_node_id =>
+            {
+                Some(payload.pair_id.clone())
+            }
+            _ => None,
+        })
+        .expect("empty configure side effect must start");
+    let confirmation_seq = committed
+        .events()
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload)
+                if payload.pair_id == configure_pair_id =>
+            {
+                Some(event.seq())
+            }
+            _ => None,
+        })
+        .expect("empty configure confirmation must be durable");
+    let prefix = store::CommittedRunStream::from_events(
+        harness.request.run_id.clone(),
+        committed
+            .events()
+            .iter()
+            .take_while(|event| event.seq() <= confirmation_seq)
+            .cloned()
+            .collect(),
+    )
+    .expect("post-confirmation committed prefix");
+    let configured_schema =
+        ConfiguredContractInstance::schema_id().expect("configured contract schema");
+    assert!(prefix.events().iter().all(|event| !matches!(
+        event.payload(),
+        events::KernelEventPayload::CellProduced(payload)
+            if payload.schema_id == configured_schema
+    )));
+
+    verify_direct_contract_state_replay_from_committed(&harness, prefix).await;
 }
 
 /// The direct graph resumes both sides of the external side-effect boundary without an app
@@ -444,6 +515,13 @@ async fn verify_direct_contract_state_replay(harness: &DirectContractStateGraphH
         .load_committed_run_stream(&harness.request.run_id)
         .await
         .expect("committed run stream");
+    verify_direct_contract_state_replay_from_committed(harness, committed).await;
+}
+
+async fn verify_direct_contract_state_replay_from_committed(
+    harness: &DirectContractStateGraphHarness,
+    committed: store::CommittedRunStream,
+) {
     let retained =
         store::VerifiedRunArtifactStore::from_committed_stream(&committed, &harness.artifacts)
             .await
