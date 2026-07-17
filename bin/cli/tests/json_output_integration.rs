@@ -554,7 +554,10 @@ fn test_json_response_structure_consistency() {
     assert_eq!(success_json["status"], expected_success_structure["status"]);
     assert!(success_json.get("data").is_some());
 
-    let error_response = ErrorResponse::new("ErrorCode", "Error message");
+    let error_response = ErrorResponse::new(mfm_app::PublicError::bad_request(
+        "ErrorCode",
+        "Error message",
+    ));
     let error_json = serde_json::to_value(error_response).unwrap();
     assert_eq!(error_json["status"], expected_error_structure["status"]);
     assert_eq!(error_json["error"]["code"], "ErrorCode");

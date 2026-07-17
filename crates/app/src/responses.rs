@@ -528,7 +528,7 @@ pub(super) async fn verify_replay_diagnostics_from_recorded_artifacts(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     let _ = run_admitted_payload(run_id, stream)?;
     for event in stream {
         let events::KernelEventPayload::StateAttemptFailed(payload) = event.payload() else {

@@ -60,7 +60,11 @@ config is reported only when a live start/resume request needs the affected capa
 All responses are JSON envelopes:
 
 - success: `{"status":"success","data": ...}`
-- error: `{"status":"error","error":{"code":"...","message":"..."}}`
+- error: `{"status":"error","error":{"code":"...","message":"...","diagnostics":[...]}}`
+
+REST error envelopes contain the same shared app `PublicError` payload used by CLI JSON. The
+`diagnostics` member is omitted when empty and, when present, contains only closed redaction-safe
+provider diagnostics. HTTP status is derived from the non-serialized public error classification.
 
 Endpoints:
 

@@ -6,7 +6,7 @@ where
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Resumes a certified typed run from its stored spec artifact.
-    pub async fn resume_stored_run(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
+    pub async fn resume_stored_run(&self, run_id: &RunId) -> Result<RunResponse, PublicError> {
         let runtime_spec = self
             .trusted_run_reader()
             .load_run_context(run_id)
@@ -21,7 +21,7 @@ where
     pub async fn record_manual_resolution(
         &self,
         req: ManualResolutionRecordRequest,
-    ) -> Result<RunResponse, AppError> {
+    ) -> Result<RunResponse, PublicError> {
         let run_id = req.run_id.clone();
         let runtime_spec = self
             .trusted_run_reader()
@@ -39,7 +39,7 @@ where
     }
 
     /// Starts a certified typed run against a durable async typed store.
-    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
+    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, PublicError> {
         self.trusted_run_reader()
             .validate_identity_material_store_scope(&req.identity_material)
             .await?;
@@ -47,7 +47,7 @@ where
             return Err(run_identity_material_mismatch());
         }
         let run_id = req.identity_material.derive_run_id().map_err(|_| {
-            AppError::backend(
+            PublicError::backend(
                 ErrorClass::Internal,
                 "RunIdentityMaterialInvalid",
                 "Run identity material is invalid",
@@ -147,7 +147,7 @@ where
                     }
                 }
                 Ok(store::CommitOutcome::AdmissionBlocked(_)) => {
-                    return Err(AppError::backend(
+                    return Err(PublicError::backend(
                         ErrorClass::Internal,
                         "RunAdmissionBlockedUnexpectedly",
                         "run admission was blocked by a resource lane",
@@ -175,7 +175,7 @@ where
     pub async fn launch_run_and_render(
         &self,
         request: RunLaunchRequest,
-    ) -> Result<RunStartReport, AppError> {
+    ) -> Result<RunStartReport, PublicError> {
         let run_id = request.run_id.clone();
         let public_output_schema_id = request
             .certified_spec
@@ -209,7 +209,7 @@ where
         &self,
         run_id: &RunId,
         identity_material: &events::RunIdentityMaterialV1,
-    ) -> Result<RunLaunchOutcome, AppError> {
+    ) -> Result<RunLaunchOutcome, PublicError> {
         let context = self
             .trusted_run_reader()
             .load_status_context(run_id)
@@ -248,7 +248,7 @@ where
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-    ) -> Result<DriveStatus, AppError> {
+    ) -> Result<DriveStatus, PublicError> {
         let context = self
             .trusted_run_reader()
             .load_status_context(run_id)
@@ -296,7 +296,7 @@ where
         run_id: &RunId,
         execution_scope: &store::ExecutionClaimScope,
         token: &store::AdmissionToken,
-    ) -> Result<DriveStatus, AppError> {
+    ) -> Result<DriveStatus, PublicError> {
         let mut lease = match self
             .read
             .store()
@@ -323,7 +323,7 @@ where
         run_id: &RunId,
         execution_scope: &store::ExecutionClaimScope,
         lease: &mut store::AdmissionLease,
-    ) -> Result<DriveStatus, AppError> {
+    ) -> Result<DriveStatus, PublicError> {
         loop {
             if !self
                 .renew_execution_claim_or_lost(execution_scope, run_id, lease)
@@ -363,7 +363,7 @@ where
         &self,
         execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
-    ) -> Result<ExecutionClaimAcquire, AppError> {
+    ) -> Result<ExecutionClaimAcquire, PublicError> {
         loop {
             match self
                 .read
@@ -407,7 +407,7 @@ where
         &self,
         execution_scope: &store::ExecutionClaimScope,
         _run_id: &RunId,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), PublicError> {
         if let store::ExecutionClaimStatus::Expired(lease) = self
             .read
             .store()
@@ -430,7 +430,7 @@ where
         run_id: &RunId,
         execution_scope: &store::ExecutionClaimScope,
         lease: &mut store::AdmissionLease,
-    ) -> Result<ClaimedDriveStep, AppError> {
+    ) -> Result<ClaimedDriveStep, PublicError> {
         let scheduler = self.scheduler.clone();
         let step = scheduler.drive_once(
             self.read.store(),
@@ -476,7 +476,7 @@ where
         execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
         lease: &mut store::AdmissionLease,
-    ) -> Result<bool, AppError> {
+    ) -> Result<bool, PublicError> {
         match self
             .read
             .store()
@@ -497,7 +497,7 @@ where
         execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
         lease: &store::AdmissionLease,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), PublicError> {
         self.read
             .store()
             .release_execution_claim(execution_scope, run_id, &lease.token)
@@ -511,7 +511,7 @@ fn run_projection_has_terminal_completion(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
     projection: &store::ProjectionSnapshot,
-) -> Result<bool, AppError> {
+) -> Result<bool, PublicError> {
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     let saga =
         projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;

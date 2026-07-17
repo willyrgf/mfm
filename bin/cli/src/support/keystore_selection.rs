@@ -3,7 +3,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use crate::commands::result::CommandError;
+use crate::commands::result::PublicError;
 use crate::support::keystore::KeystoreAccess;
 
 const DEFAULT_KEYSTORE_REF: &str = "default";
@@ -21,16 +21,16 @@ pub(crate) struct KeystoreSelectionArgs<'a> {
 /// Resolves direct keystore command access from explicit args or runtime config.
 pub(crate) fn resolve_keystore_access(
     args: KeystoreSelectionArgs<'_>,
-) -> Result<KeystoreAccess, CommandError> {
+) -> Result<KeystoreAccess, PublicError> {
     if let Some(path) = args.keystore {
         if args.runtime_config.is_some() || args.keystore_ref.is_some() {
-            return Err(CommandError::new(
+            return Err(PublicError::bad_request(
                 "invalid_argument",
                 "--keystore cannot be combined with --runtime-config or --keystore-ref",
             ));
         }
         if path.as_os_str().is_empty() {
-            return Err(CommandError::new(
+            return Err(PublicError::bad_request(
                 "invalid_argument",
                 "--keystore path cannot be empty",
             ));
@@ -43,7 +43,7 @@ pub(crate) fn resolve_keystore_access(
         .cloned()
         .or_else(|| env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from));
     let Some(runtime_config) = runtime_config else {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "missing_keystore_selection",
             "provide --keystore or --runtime-config",
         ));
@@ -55,15 +55,15 @@ pub(crate) fn resolve_keystore_access(
 fn resolve_runtime_config_keystore(
     runtime_config: PathBuf,
     keystore_ref: &str,
-) -> Result<KeystoreAccess, CommandError> {
+) -> Result<KeystoreAccess, PublicError> {
     if runtime_config.as_os_str().is_empty() {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "invalid_argument",
             "--runtime-config path cannot be empty",
         ));
     }
     let keystore_ref = mfm_runtime_config::KeystoreRef::new(keystore_ref).map_err(|_| {
-        CommandError::new(
+        PublicError::bad_request(
             "invalid_argument",
             "--keystore-ref is not a valid profile ref",
         )
@@ -72,9 +72,9 @@ fn resolve_runtime_config_keystore(
         &runtime_config,
         mfm_runtime_config::RuntimeConfigRequirement::keystores(),
     )
-    .map_err(|error| CommandError::new("runtime_config_error", error.to_string()))?;
+    .map_err(|error| PublicError::bad_request("runtime_config_error", error.to_string()))?;
     let profile = config.keystores().get(&keystore_ref).ok_or_else(|| {
-        CommandError::new(
+        PublicError::bad_request(
             "keystore_profile_not_found",
             "runtime config keystore profile was not found",
         )

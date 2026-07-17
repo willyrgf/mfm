@@ -25,17 +25,20 @@ fn serialize_response_returns_api_error_instead_of_panicking() {
     let err = serialize_response(FailingSerialize)
         .expect_err("serialization failures should be returned as api errors");
 
-    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(err.code, "SerializationError");
-    assert_eq!(err.message, "Failed to serialize response payload");
+    assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.public_error().code, "SerializationError");
+    assert_eq!(
+        err.public_error().message,
+        "Failed to serialize response payload"
+    );
 }
 
 #[test]
 fn invalid_run_id_has_domain_error() {
     let err = parse_run_id("not-a-uuid").expect_err("dynamic ids are rejected");
 
-    assert_eq!(err.status, StatusCode::BAD_REQUEST);
-    assert_eq!(err.code, "InvalidRunId");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(err.public_error().code, "InvalidRunId");
 }
 
 #[tokio::test]

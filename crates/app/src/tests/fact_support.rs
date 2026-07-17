@@ -319,11 +319,12 @@ pub(super) fn app_fact_runner_registry(
 
 pub(super) fn prepare_app_fact_launch(
     include_fact_descriptor: bool,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     prepare_app_fact_launch_with_invocation_key(include_fact_descriptor, None)
 }
 
-pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppError> {
+pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, PublicError>
+{
     let draft = mfm_op_btc_collectors::btc_chain_head_collector_cycle_program_draft(
         mfm_op_btc_collectors::BtcChainHeadCollectorConfig::default(),
     )
@@ -366,7 +367,7 @@ pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRe
 pub(super) fn prepare_app_fact_launch_with_invocation_key(
     include_fact_descriptor: bool,
     invocation_key_digest: Option<ContentDigest>,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     prepare_app_fact_launch_with_invocation_key_and_state_key(
         include_fact_descriptor,
         invocation_key_digest,
@@ -378,7 +379,7 @@ pub(super) fn prepare_app_fact_launch_with_invocation_key_and_state_key(
     include_fact_descriptor: bool,
     invocation_key_digest: Option<ContentDigest>,
     state_key: &str,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     let plan = app_fact_launch_plan_with_state_key(state_key);
     let registry = app_fact_certification_registry(include_fact_descriptor);
     let (certified_spec, scoped, config_inputs, seed_inputs) =

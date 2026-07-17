@@ -5,7 +5,7 @@ pub(super) fn run_status_from_projection(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
-) -> Result<RunResponse, AppError> {
+) -> Result<RunResponse, PublicError> {
     let spec_hash = run_admitted_spec_hash(stream)?;
     run_response_from_projection_with_spec_hash(
         run_id,
@@ -24,7 +24,7 @@ fn run_response_from_projection_with_spec_hash(
     projection: &store::ProjectionSnapshot,
     spec_hash: &SpecHash,
     scheduler_status: &str,
-) -> Result<RunResponse, AppError> {
+) -> Result<RunResponse, PublicError> {
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     let saga =
         projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;
@@ -57,9 +57,9 @@ pub async fn public_output_read_authority_for_run(
     runtime_spec: &CertifiedRuntimeSpec,
     verified_view: &VerifiedRunHistoryView,
     public_schema_id: &SchemaId,
-) -> Result<PublicOutputReadAuthority, AppError> {
+) -> Result<PublicOutputReadAuthority, PublicError> {
     if runtime_spec.spec_hash() != verified_view.spec_hash() {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::Internal,
             "PublicOutputAuthorityMismatch",
             "verified history spec hash does not match certified runtime authority",
@@ -69,7 +69,7 @@ pub async fn public_output_read_authority_for_run(
     let public_output = projection
         .public_output(verified_view.run_id(), public_schema_id)
         .ok_or_else(|| {
-            AppError::not_found(
+            PublicError::not_found(
                 "PublicOutputNotFound",
                 "typed public output was not found for the requested schema",
             )
@@ -80,7 +80,7 @@ pub async fn public_output_read_authority_for_run(
         rendered_artifact_id,
     } = public_output
     else {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::Conflict,
             "PublicOutputRenderFailed",
             "typed public output render failed",
@@ -93,7 +93,7 @@ pub async fn public_output_read_authority_for_run(
         || &payload.public_schema_id != public_schema_id
         || public_schema_id != &runtime_spec.spec().public_outputs.public_schema_id
     {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::Internal,
             "PublicOutputAuthorityMismatch",
             "typed public-output evidence does not match certified runtime authority",
@@ -122,7 +122,7 @@ pub(super) async fn verify_public_output_authority_artifacts(
     payload: &events::PublicOutputProduced,
     rendered_artifact_id: Option<&ArtifactId>,
     rendered_digest: &ContentDigest,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     for cell in &payload.cells {
         let artifact = artifacts
             .read_retained_artifact(&public_output_cell_artifact_requirement(cell))
@@ -154,7 +154,7 @@ pub(super) async fn verify_public_output_authority_artifacts(
 pub async fn render_public_output(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     authority: &PublicOutputReadAuthority,
-) -> Result<PublicOutputResponse, AppError> {
+) -> Result<PublicOutputResponse, PublicError> {
     let json = match authority.rendered_artifact_id() {
         Some(artifact_id) => Some(
             load_public_output_json(
@@ -183,7 +183,7 @@ pub(super) fn public_output_payload_from_stream<'a>(
     stream: &'a [store::KernelEventEnvelope],
     event_id: &EventId,
     public_schema_id: &SchemaId,
-) -> Result<&'a events::PublicOutputProduced, AppError> {
+) -> Result<&'a events::PublicOutputProduced, PublicError> {
     stream
         .iter()
         .find_map(|event| {
@@ -200,7 +200,7 @@ pub(super) fn public_output_payload_from_stream<'a>(
             }
         })
         .ok_or_else(|| {
-            AppError::new(
+            PublicError::new(
                 ErrorClass::Internal,
                 "PublicOutputProjectionMismatch",
                 "typed public-output projection does not match the authoritative run stream",
@@ -211,7 +211,7 @@ pub(super) fn public_output_payload_from_stream<'a>(
 pub(super) async fn render_public_output_json_from_authority(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     authority: &PublicOutputReadAuthority,
-) -> Result<Value, AppError> {
+) -> Result<Value, PublicError> {
     let mut root = Map::new();
     for cell in &authority.payload.cells {
         let artifact = artifacts
@@ -222,7 +222,7 @@ pub(super) async fn render_public_output_json_from_authority(
         let bytes = artifact.into_bytes();
         let value = serde_json::from_slice(&bytes).map_err(|error| {
             let _ = error;
-            AppError::backend(
+            PublicError::backend(
                 ErrorClass::Internal,
                 "PublicOutputDecodeFailed",
                 "Typed public-output cell artifact was not JSON",
@@ -236,7 +236,7 @@ pub(super) async fn render_public_output_json_from_authority(
 pub(super) fn verify_public_output_cell_evidence(
     cell: &events::NamedTypedCellRef,
     evidence: &store::ArtifactEvidenceRef,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     validate_artifact_requirement_for_app(
         public_output_cell_artifact_requirement(cell),
         evidence,
@@ -250,7 +250,7 @@ pub(super) fn insert_public_output_value(
     root: &mut Map<String, Value>,
     path: &str,
     value: Value,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     let mut parts = path.split('.').peekable();
     let mut current = root;
     let mut value = Some(value);
@@ -291,7 +291,7 @@ pub(super) async fn load_public_output_json(
     artifact_id: &ArtifactId,
     rendered_digest: &mfm_ids::ContentDigest,
     payload: &events::PublicOutputProduced,
-) -> Result<serde_json::Value, AppError> {
+) -> Result<serde_json::Value, PublicError> {
     let json_media_type = public_output_json_media_type()?;
     let requirement = public_output_rendered_artifact_requirement(
         payload,
@@ -310,7 +310,7 @@ pub(super) async fn load_public_output_json(
     let bytes = artifact.into_bytes();
     serde_json::from_slice(&bytes).map_err(|error| {
         let _ = error;
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "PublicOutputDecodeFailed",
             "Typed public-output artifact was not JSON",
@@ -323,7 +323,7 @@ pub(super) fn verify_public_output_rendered_artifact_evidence(
     artifact_id: &ArtifactId,
     rendered_digest: &ContentDigest,
     payload: &events::PublicOutputProduced,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     let json_media_type = public_output_json_media_type()?;
     validate_artifact_requirement_for_app(
         public_output_rendered_artifact_requirement(
@@ -339,9 +339,9 @@ pub(super) fn verify_public_output_rendered_artifact_evidence(
     )
 }
 
-fn public_output_json_media_type() -> Result<spec::MediaType, AppError> {
+fn public_output_json_media_type() -> Result<spec::MediaType, PublicError> {
     spec::MediaType::new("application/json").map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "PublicOutputMediaTypeInvalid",
             "Public-output JSON media type is invalid",
@@ -349,8 +349,8 @@ fn public_output_json_media_type() -> Result<spec::MediaType, AppError> {
     })
 }
 
-pub(super) fn public_output_artifact_mismatch(message: &'static str) -> AppError {
-    AppError::new(
+pub(super) fn public_output_artifact_mismatch(message: &'static str) -> PublicError {
+    PublicError::new(
         ErrorClass::Internal,
         "PublicOutputArtifactMismatch",
         message,
@@ -360,7 +360,7 @@ pub(super) fn public_output_artifact_mismatch(message: &'static str) -> AppError
 pub(super) fn run_admitted_payload<'a>(
     run_id: &RunId,
     stream: &'a [store::KernelEventEnvelope],
-) -> Result<&'a events::RunAdmitted, AppError> {
+) -> Result<&'a events::RunAdmitted, PublicError> {
     stream
         .iter()
         .find_map(|event| match event.payload() {
@@ -368,7 +368,7 @@ pub(super) fn run_admitted_payload<'a>(
             _ => None,
         })
         .ok_or_else(|| {
-            AppError::new(
+            PublicError::new(
                 ErrorClass::Internal,
                 "RunAdmittedMissing",
                 "typed run stream is missing RunAdmitted evidence",
@@ -378,7 +378,7 @@ pub(super) fn run_admitted_payload<'a>(
             if &run_admitted.run_id == run_id {
                 Ok(run_admitted)
             } else {
-                Err(AppError::new(
+                Err(PublicError::new(
                     ErrorClass::Internal,
                     "RunAdmittedMismatch",
                     "typed run stream RunAdmitted evidence is bound to a different run id",
@@ -390,9 +390,9 @@ pub(super) fn run_admitted_payload<'a>(
 pub(super) fn validate_spec_artifact_evidence(
     run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     if run_admitted.spec_artifact.role != events::ArtifactRole::TypedExecutionSpec {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::Internal,
             "CertifiedSpecArtifactMismatch",
             "typed execution spec artifact metadata does not match RunAdmitted evidence",
@@ -412,7 +412,7 @@ pub(super) fn validate_spec_artifact_evidence(
     let expected_spec_hash =
         SpecHash::from_digest(evidence.digest.algorithm(), *evidence.digest.digest());
     if expected_spec_hash != run_admitted.spec_hash {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::Internal,
             "CertifiedSpecArtifactMismatch",
             "typed execution spec artifact metadata does not match RunAdmitted evidence",
@@ -424,9 +424,9 @@ pub(super) fn validate_spec_artifact_evidence(
 pub(super) fn validate_certificate_artifact_evidence(
     run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     if run_admitted.certificate_artifact.role != events::ArtifactRole::TypedSpecCertificate {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::Internal,
             "CertifiedCertificateArtifactMismatch",
             "typed spec certificate artifact metadata does not match RunAdmitted evidence",
@@ -449,7 +449,7 @@ pub(super) fn validate_certificate_artifact_evidence(
 pub(super) fn validate_run_admitted_matches_spec(
     run_admitted: &events::RunAdmitted,
     envelope: &spec::HashedSpecEnvelope,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     if envelope.spec_hash != run_admitted.spec_hash
         || envelope.spec.media_type != run_admitted.spec_artifact.media_type
         || envelope.spec.spec_version != run_admitted.spec_version
@@ -463,7 +463,7 @@ pub(super) fn validate_run_admitted_matches_spec(
             .canonicalizer_identity
             != run_admitted.canonicalizer_identity
     {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::Internal,
             "RunAdmittedSpecMismatch",
             "RunAdmitted evidence does not match the stored certified spec artifact",
@@ -478,7 +478,7 @@ pub(super) fn run_response_from_projection(
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
     status: DriveStatus,
-) -> Result<RunResponse, AppError> {
+) -> Result<RunResponse, PublicError> {
     run_response_from_projection_with_spec_hash(
         run_id,
         runtime_spec,
@@ -1007,7 +1007,7 @@ pub(super) fn side_effect_phase_str(phase: &store::SideEffectPhase) -> String {
 
 pub(super) fn run_admitted_spec_hash(
     stream: &[store::KernelEventEnvelope],
-) -> Result<SpecHash, AppError> {
+) -> Result<SpecHash, PublicError> {
     stream
         .iter()
         .find_map(|event| match event.payload() {
@@ -1015,7 +1015,7 @@ pub(super) fn run_admitted_spec_hash(
             _ => None,
         })
         .ok_or_else(|| {
-            AppError::new(
+            PublicError::new(
                 ErrorClass::Internal,
                 "RunAdmittedMissing",
                 "typed run stream is missing RunAdmitted evidence",

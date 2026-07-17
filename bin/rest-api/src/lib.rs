@@ -29,10 +29,9 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, ErrorClass, InvocationKey, ManualResolutionDecision, ManualResolutionRecordRequest,
-    PostgresStore, PublicFactQueryRequest, PublicFactRefId, PublicOutputResponse,
-    PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices,
-    RunStreamResponse,
+    ErrorClass, InvocationKey, ManualResolutionDecision, ManualResolutionRecordRequest,
+    PostgresStore, PublicError, PublicFactQueryRequest, PublicFactRefId, PublicOutputResponse,
+    RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices, RunStreamResponse,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{RunId, SchemaId};
@@ -50,20 +49,10 @@ fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
 }
 
-fn err(code: impl Into<String>, message: impl Into<String>) -> serde_json::Value {
-    json!({
-        "status": "error",
-        "error": {
-            "code": code.into(),
-            "message": message.into(),
-        }
-    })
-}
-
 fn serialize_response<T: Serialize>(data: T) -> Result<serde_json::Value, ApiError> {
     serde_json::to_value(data).map_err(|_| {
         ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorClass::Internal,
             "SerializationError",
             "Failed to serialize response payload",
         )
@@ -74,57 +63,51 @@ fn json_ok<T: Serialize>(data: T) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(ok(serialize_response(data)?)))
 }
 
-/// Error payload mapped onto HTTP responses.
+/// Thin HTTP adapter around the shared public application error.
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct ApiError {
-    /// HTTP status to return.
-    pub status: StatusCode,
-    /// Stable machine-readable error code.
-    pub code: String,
-    /// Human-readable error message.
-    pub message: String,
-}
+#[error("{0}")]
+pub struct ApiError(PublicError);
 
 impl ApiError {
     /// Creates an API error with an explicit HTTP status, code, and message.
-    pub fn new(
-        status: StatusCode,
-        code: impl Into<String>,
-        message: impl Into<PublicSafeMessage>,
-    ) -> Self {
-        Self {
-            status,
-            code: code.into(),
-            message: message.into().into_string(),
-        }
+    pub fn new(class: ErrorClass, code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self(PublicError::new(class, code, message))
     }
 
     /// Creates an API error for a lower-level failure without exposing backend details.
-    pub fn backend(status: StatusCode, code: impl Into<String>, message: &'static str) -> Self {
-        Self::new(status, code, PublicSafeMessage::backend(message))
+    pub fn backend(class: ErrorClass, code: impl Into<String>, message: &'static str) -> Self {
+        Self(PublicError::backend(class, code, message))
     }
 
     /// Returns the standard invalid-JSON error.
     pub fn invalid_json() -> Self {
         Self::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidJson",
             "Failed to parse request body as JSON",
         )
     }
-}
 
-impl From<AppError> for ApiError {
-    fn from(value: AppError) -> Self {
-        let status = match value.class {
+    /// Returns the shared public error payload.
+    pub const fn public_error(&self) -> &PublicError {
+        &self.0
+    }
+
+    /// Derives the HTTP status from the shared error classification.
+    pub const fn status(&self) -> StatusCode {
+        match self.0.class {
             ErrorClass::BadRequest => StatusCode::BAD_REQUEST,
             ErrorClass::NotFound => StatusCode::NOT_FOUND,
             ErrorClass::Conflict => StatusCode::CONFLICT,
             ErrorClass::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        };
+            ErrorClass::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
 
-        Self::new(status, value.code, value.message)
+impl From<PublicError> for ApiError {
+    fn from(value: PublicError) -> Self {
+        Self(value)
     }
 }
 
@@ -136,7 +119,8 @@ impl From<JsonRejection> for ApiError {
 
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        (self.status, Json(err(self.code, self.message))).into_response()
+        let status = self.status();
+        (status, Json(json!({ "status": "error", "error": self.0 }))).into_response()
     }
 }
 
@@ -164,13 +148,13 @@ impl RestProcessRole {
                 "live" => Ok(Self::Live),
                 "read" => Ok(Self::Read),
                 _ => Err(ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorClass::Internal,
                     "InvalidRestRole",
                     format!("{MFM_REST_ROLE} must be \"live\" or \"read\""),
                 )),
             },
             Err(std::env::VarError::NotUnicode(_)) => Err(ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorClass::Internal,
                 "InvalidRestRole",
                 format!("{MFM_REST_ROLE} must be valid UTF-8"),
             )),
@@ -245,7 +229,7 @@ where
     fn require_live_role(&self) -> Result<(), ApiError> {
         if self.app.role != RestProcessRole::Live {
             return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorClass::ServiceUnavailable,
                 "RestRoleReadOnly",
                 "this REST process is read-only; live start/resume requires MFM_REST_ROLE=live",
             ));
@@ -402,7 +386,7 @@ where
 {
     state.app.store.load_store_scope_id().await.map_err(|_| {
         ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorClass::ServiceUnavailable,
             "NotReady",
             "run store is not ready",
         )
@@ -416,8 +400,8 @@ where
     }))))
 }
 
-async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::NOT_FOUND, Json(err("not_found", "not found")))
+async fn not_found() -> ApiError {
+    ApiError::new(ErrorClass::NotFound, "not_found", "not found")
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -618,10 +602,10 @@ fn public_fact_query_request(
         .map_err(fact_query_params_api_error)
 }
 
-fn fact_query_params_api_error(error: AppError) -> ApiError {
+fn fact_query_params_api_error(error: PublicError) -> ApiError {
     if mfm_app::is_public_fact_query_parameter_error(&error) {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidQuery",
             "Failed to parse fact query parameters",
         )
@@ -648,7 +632,7 @@ where
 {
     let Query(query) = query.map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidQuery",
             "Failed to parse run list query",
         )
@@ -678,7 +662,7 @@ where
     let invocation_key = req.invocation_key.map(InvocationKey::new).transpose()?;
     let configured_store = state.configured_store.as_ref().ok_or_else(|| {
         ApiError::backend(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorClass::Internal,
             "ConfiguredStoreUnavailable",
             "Configured-value authority is unavailable for run preparation",
         )
@@ -780,7 +764,7 @@ where
 {
     let Query(query) = query.map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidQuery",
             "Failed to parse stream query",
         )
@@ -850,7 +834,7 @@ where
 fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
     RunId::parse(value).map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidRunId",
             "Run id must use the typed run identity format `run:<algorithm>:<digest>`",
         )
@@ -860,7 +844,7 @@ fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
 fn parse_schema_id(value: &str) -> Result<SchemaId, ApiError> {
     SchemaId::parse(value).map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidSchemaId",
             "Schema id must use the typed schema identity format",
         )
@@ -883,7 +867,7 @@ fn canonical_json_value_bytes(
 ) -> Result<Vec<u8>, ApiError> {
     let json = serde_json::to_string(value).map_err(|_| {
         ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorClass::Internal,
             "SerializationError",
             "Failed to serialize request JSON",
         )
@@ -892,7 +876,7 @@ fn canonical_json_value_bytes(
         .map(|canonical| canonical.to_vec())
         .map_err(|_| {
             ApiError::backend(
-                StatusCode::BAD_REQUEST,
+                ErrorClass::BadRequest,
                 error_code,
                 "Request JSON is not canonical JSON",
             )
@@ -902,7 +886,7 @@ fn canonical_json_value_bytes(
 fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), ApiError> {
     if from_seq == 0 {
         return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidSequenceRange",
             "from_seq must be greater than zero",
         ));
@@ -910,7 +894,7 @@ fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), Api
     if let Some(to_seq) = to_seq {
         if to_seq < from_seq {
             return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
+                ErrorClass::BadRequest,
                 "InvalidSequenceRange",
                 "to_seq must be greater than or equal to from_seq",
             ));

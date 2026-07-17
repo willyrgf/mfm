@@ -8,7 +8,7 @@ use mfm_values::{MfmConfig, ValidatedConfig};
 
 use crate::{
     certify_launch_plan, entry_point_launch_internal_error, invocation_key_digest_or_mint,
-    prepare_certified_run_launch, AppError, CertifiedRunLaunchInput, ErrorClass, InvocationKey,
+    prepare_certified_run_launch, CertifiedRunLaunchInput, ErrorClass, InvocationKey, PublicError,
     RunLaunchRequest,
 };
 
@@ -32,7 +32,7 @@ pub async fn prepare_entry_point_run_launch(
     certification_registry: &CertificationRegistry,
     store_scope_id: StoreScopeId,
     invocation_key: Option<InvocationKey>,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     match entry_point_id {
         PORTFOLIO_SNAPSHOT_ID => {
             prepare_portfolio_snapshot_run_launch(
@@ -54,10 +54,10 @@ async fn prepare_portfolio_snapshot_run_launch(
     certification_registry: &CertificationRegistry,
     store_scope_id: StoreScopeId,
     invocation_key: Option<InvocationKey>,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     let (portfolio, source) = resolve_portfolio_target(store, target).await?;
     let plan = portfolio_snapshot_program_launch_plan(portfolio).map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::BadRequest,
             "PortfolioSnapshotPlanFailed",
             "Entry-point planning failed",
@@ -87,8 +87,8 @@ async fn prepare_portfolio_snapshot_run_launch(
     )
 }
 
-fn entry_point_not_found() -> AppError {
-    AppError::new(
+fn entry_point_not_found() -> PublicError {
+    PublicError::new(
         ErrorClass::BadRequest,
         "EntryPointNotFound",
         "The exact entry-point id is not registered",
@@ -98,16 +98,16 @@ fn entry_point_not_found() -> AppError {
 async fn resolve_portfolio_target(
     store: &PostgresStore,
     target: &str,
-) -> Result<(PortfolioConfig, mfm_events::v1::ConfiguredTargetEvidence), AppError> {
+) -> Result<(PortfolioConfig, mfm_events::v1::ConfiguredTargetEvidence), PublicError> {
     let portfolio_id = PortfolioId::new(target.to_owned()).map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "ConfiguredTargetInvalid",
             "The portfolio target is invalid",
         )
     })?;
     let stable_target = StableAuthorKey::new(portfolio_id.as_str()).map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "ConfiguredTargetInvalid",
             "The portfolio target cannot be represented as a stable target",
@@ -116,50 +116,50 @@ async fn resolve_portfolio_target(
     let row = store
         .load_configured_value(&stable_target)
         .await
-        .map_err(AppError::from)?
+        .map_err(PublicError::from)?
         .ok_or_else(|| {
-            AppError::not_found(
+            PublicError::not_found(
                 "ConfiguredValueNotFound",
                 "The current configuration target was not found",
             )
         })?;
     let expected_schema_id = PortfolioConfig::schema_id().map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "ConfiguredValueSchemaInvalid",
             "The portfolio configuration schema is invalid",
         )
     })?;
     if row.schema_id != expected_schema_id {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::BadRequest,
             "ConfiguredValueSchemaInvalid",
             "The current configuration target has the wrong schema",
         ));
     }
     let config: PortfolioConfig = serde_json::from_slice(&row.canonical_json).map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "ConfiguredValueTypeInvalid",
             "The current configuration does not match the expected type",
         )
     })?;
     let validated = ValidatedConfig::new(config.normalized()).map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "ConfiguredValueValidationFailed",
             "The current configuration failed semantic validation",
         )
     })?;
     if validated.as_ref().portfolio_id != portfolio_id {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::BadRequest,
             "ConfiguredTargetMismatch",
             "The configured portfolio id does not match the selected target",
         ));
     }
     let canonical = validated.canonical_json().map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "ConfiguredValueCanonicalizationFailed",
             "The current configuration could not be canonicalized",
@@ -168,7 +168,7 @@ async fn resolve_portfolio_target(
     if canonical.as_bytes() != row.canonical_json.as_slice()
         || canonical.content_digest() != row.digest
     {
-        return Err(AppError::backend(
+        return Err(PublicError::backend(
             ErrorClass::Internal,
             "ConfiguredValueCanonicalMismatch",
             "The current configuration failed canonical integrity verification",

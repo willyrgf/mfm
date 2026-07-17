@@ -86,10 +86,15 @@ failures return structured JSON responses. Parser failures use the stable error 
   "status": "error",
   "error": {
     "code": "ErrorCode",
-    "message": "Human-readable error message"
+    "message": "Human-readable error message",
+    "diagnostics": [ /* optional closed provider diagnostics */ ]
   }
 }
 ```
+
+CLI errors serialize the shared app `PublicError` payload. `diagnostics` is omitted when empty;
+when present it contains only closed redaction-safe provider-family diagnostics. Text mode renders
+`<code>: <message>` and may add command-specific remediation without changing the JSON payload.
 
 **Common Error Codes:**
 - `InvalidKeyMaterial`: Key material format is invalid

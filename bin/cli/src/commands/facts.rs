@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
@@ -367,8 +367,8 @@ fn public_fact_query_request(
     kind: &str,
     query: &FactQuerySelectorArgs,
     limit: Option<u64>,
-) -> Result<PublicFactQueryRequest, CommandError> {
-    Ok(PublicFactQueryRequest::from_selector(
+) -> Result<PublicFactQueryRequest, PublicError> {
+    PublicFactQueryRequest::from_selector(
         kind,
         PublicFactQuerySelector {
             shape: query.shape.clone(),
@@ -379,7 +379,7 @@ fn public_fact_query_request(
             ordering: Some(query.order.clone()),
             limit,
         },
-    )?)
+    )
 }
 
 fn write_descriptor(

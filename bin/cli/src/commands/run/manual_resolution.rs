@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_services, parse_run_id, RunStoresArgs};
@@ -66,7 +66,7 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ManualResolutionArgs) -
 async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<RunResponse> {
     let run_id = parse_run_id(&args.run_id)?;
     let evidence_bytes = tokio::fs::read(&args.evidence).await.map_err(|_| {
-        CommandError::backend(
+        PublicError::internal(
             "ManualResolutionEvidenceReadFailed",
             "Failed to read manual resolution evidence file",
         )
@@ -86,9 +86,9 @@ async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<RunRespo
     Ok(CommandOutput::new(response))
 }
 
-async fn read_canonical_proof_json(path: &PathBuf) -> Result<Vec<u8>, CommandError> {
+async fn read_canonical_proof_json(path: &PathBuf) -> Result<Vec<u8>, PublicError> {
     let raw = tokio::fs::read_to_string(path).await.map_err(|_| {
-        CommandError::backend(
+        PublicError::internal(
             "ManualResolutionProofReadFailed",
             "Failed to read manual authorization proof file",
         )
@@ -96,7 +96,7 @@ async fn read_canonical_proof_json(path: &PathBuf) -> Result<Vec<u8>, CommandErr
     PlainCanonicalJsonBytes::from_json_str(&raw)
         .map(|canonical| canonical.to_vec())
         .map_err(|_| {
-            CommandError::backend(
+            PublicError::internal(
                 "ManualResolutionProofInvalid",
                 "Manual authorization proof file is not canonical JSON",
             )

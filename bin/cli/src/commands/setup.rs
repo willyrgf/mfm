@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::output_file::{self, CreateNewFileError};
@@ -161,7 +161,7 @@ async fn import(args: &ImportArgs) -> CommandResult<SetupImportOutput> {
     Ok(CommandOutput::new(SetupImportOutput { configs }))
 }
 
-async fn read_setup_file(path: &Path) -> Result<Vec<u8>, CommandError> {
+async fn read_setup_file(path: &Path) -> Result<Vec<u8>, PublicError> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|_| setup_file_read_error())?;
@@ -188,7 +188,7 @@ async fn read_setup_file(path: &Path) -> Result<Vec<u8>, CommandError> {
         .map_err(|_| setup_file_read_error())?
         != 0
     {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "SetupFileTooLarge",
             "The setup file exceeds the permitted size",
         ));
@@ -196,8 +196,8 @@ async fn read_setup_file(path: &Path) -> Result<Vec<u8>, CommandError> {
     Ok(bytes)
 }
 
-fn setup_file_read_error() -> CommandError {
-    CommandError::backend("SetupFileReadFailed", "Failed to read setup file")
+fn setup_file_read_error() -> PublicError {
+    PublicError::internal("SetupFileReadFailed", "Failed to read setup file")
 }
 
 async fn list(args: &ListArgs) -> CommandResult<SetupListOutput> {
@@ -219,12 +219,12 @@ async fn export(args: &ExportArgs) -> CommandResult<SetupExportOutput> {
     }))
 }
 
-fn map_setup_export_error(error: CreateNewFileError) -> CommandError {
+fn map_setup_export_error(error: CreateNewFileError) -> PublicError {
     match error {
         CreateNewFileError::TargetExists => {
-            CommandError::new("SetupExportPathExists", "Export output path already exists")
+            PublicError::bad_request("SetupExportPathExists", "Export output path already exists")
         }
-        CreateNewFileError::InvalidPath => CommandError::backend(
+        CreateNewFileError::InvalidPath => PublicError::internal(
             "SetupExportPathInvalid",
             "Export output path could not be opened",
         ),
@@ -232,8 +232,8 @@ fn map_setup_export_error(error: CreateNewFileError) -> CommandError {
     }
 }
 
-fn setup_export_write_error() -> CommandError {
-    CommandError::backend("SetupExportWriteFailed", "Export could not be written")
+fn setup_export_write_error() -> PublicError {
+    PublicError::internal("SetupExportWriteFailed", "Export could not be written")
 }
 
 #[cfg(test)]

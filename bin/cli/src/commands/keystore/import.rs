@@ -1,4 +1,4 @@
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::{keystore, keystore_selection};
@@ -125,13 +125,13 @@ fn import_display_key_type(key_type: &str) -> &str {
     }
 }
 
-fn resolve_bip39_extra(args: &ImportArgs) -> Result<keystore::Bip39ExtraSource, CommandError> {
+fn resolve_bip39_extra(args: &ImportArgs) -> Result<keystore::Bip39ExtraSource, PublicError> {
     let source = match (args.passphrase_prompt, args.passphrase_file.as_ref()) {
         (true, None) => keystore::Bip39ExtraSource::Prompt,
         (false, Some(path)) => keystore::Bip39ExtraSource::FilePath(path.clone()),
         (false, None) => keystore::Bip39ExtraSource::None,
         (true, Some(_)) => {
-            return Err(CommandError::new(
+            return Err(PublicError::bad_request(
                 "InvalidArgument",
                 "choose only one BIP-39 extra input source",
             ));
@@ -141,14 +141,14 @@ fn resolve_bip39_extra(args: &ImportArgs) -> Result<keystore::Bip39ExtraSource, 
     if !matches!(source, keystore::Bip39ExtraSource::None)
         && !matches!(args.import_type, ImportType::Mnemonic)
     {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "InvalidArgument",
             "BIP-39 extra input is only valid for mnemonic imports",
         ));
     }
 
     if args.stdin && matches!(source, keystore::Bip39ExtraSource::Prompt) {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "InvalidArgument",
             "BIP-39 prompt input cannot be combined with stdin material",
         ));

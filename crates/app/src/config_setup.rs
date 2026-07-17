@@ -10,7 +10,7 @@ use mfm_values::{MfmConfig, ValidatedConfig};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{AppError, ErrorClass};
+use crate::{ErrorClass, PublicError};
 
 /// Maximum accepted encoded setup document size.
 pub const MAX_SETUP_FILE_BYTES: usize = 4 * 1024 * 1024;
@@ -61,7 +61,7 @@ enum SetupConfig {
 pub async fn import_setup_toml(
     store: &PostgresStore,
     bytes: &[u8],
-) -> Result<Vec<SetupConfigPublication>, AppError> {
+) -> Result<Vec<SetupConfigPublication>, PublicError> {
     let document = parse_setup_document(bytes)?;
     let mut prepared = BTreeMap::<StableAuthorKey, ConfiguredValueRow>::new();
     for config in document.configs {
@@ -70,7 +70,7 @@ pub async fn import_setup_toml(
             .insert(prepared_value.target.clone(), prepared_value)
             .is_some()
         {
-            return Err(AppError::new(
+            return Err(PublicError::new(
                 ErrorClass::Conflict,
                 "SetupDuplicateTarget",
                 "The setup document contains a duplicate configuration target",
@@ -80,27 +80,27 @@ pub async fn import_setup_toml(
     let publications = store
         .publish_configured_values(&prepared.into_values().collect::<Vec<_>>())
         .await
-        .map_err(AppError::from)?;
+        .map_err(PublicError::from)?;
     Ok(publications.into_iter().map(Into::into).collect())
 }
 
-fn parse_setup_document(bytes: &[u8]) -> Result<SetupDocument, AppError> {
+fn parse_setup_document(bytes: &[u8]) -> Result<SetupDocument, PublicError> {
     if bytes.len() > MAX_SETUP_FILE_BYTES {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::BadRequest,
             "SetupFileTooLarge",
             "The setup file exceeds the permitted size",
         ));
     }
     let text = std::str::from_utf8(bytes).map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "SetupDocumentInvalid",
             "The setup document is not valid UTF-8",
         )
     })?;
     toml::from_str(text).map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "SetupDocumentInvalid",
             "The setup document is invalid TOML",
@@ -109,11 +109,11 @@ fn parse_setup_document(bytes: &[u8]) -> Result<SetupDocument, AppError> {
 }
 
 /// Lists current configured targets in stable target order.
-pub async fn list_setup_targets(store: &PostgresStore) -> Result<Vec<String>, AppError> {
+pub async fn list_setup_targets(store: &PostgresStore) -> Result<Vec<String>, PublicError> {
     store
         .list_configured_targets()
         .await
-        .map_err(AppError::from)
+        .map_err(PublicError::from)
         .map(|targets| {
             targets
                 .into_iter()
@@ -123,9 +123,12 @@ pub async fn list_setup_targets(store: &PostgresStore) -> Result<Vec<String>, Ap
 }
 
 /// Exports the current configuration for one target after storage integrity verification.
-pub async fn export_setup_target(store: &PostgresStore, target: &str) -> Result<Vec<u8>, AppError> {
+pub async fn export_setup_target(
+    store: &PostgresStore,
+    target: &str,
+) -> Result<Vec<u8>, PublicError> {
     let target = StableAuthorKey::new(target).map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "ConfiguredTargetInvalid",
             "The configuration target is invalid",
@@ -134,29 +137,29 @@ pub async fn export_setup_target(store: &PostgresStore, target: &str) -> Result<
     store
         .load_configured_value(&target)
         .await
-        .map_err(AppError::from)?
+        .map_err(PublicError::from)?
         .map(|row| row.canonical_json)
         .ok_or_else(|| {
-            AppError::not_found(
+            PublicError::not_found(
                 "ConfiguredValueNotFound",
                 "The current configuration target was not found",
             )
         })
 }
 
-fn prepare_setup_config(value: SetupConfig) -> Result<ConfiguredValueRow, AppError> {
+fn prepare_setup_config(value: SetupConfig) -> Result<ConfiguredValueRow, PublicError> {
     let target = target_for_setup_config(&value)?;
     match value {
         SetupConfig::Portfolio(config) => prepare_config(target, config.normalized()),
     }
 }
 
-fn target_for_setup_config(value: &SetupConfig) -> Result<StableAuthorKey, AppError> {
+fn target_for_setup_config(value: &SetupConfig) -> Result<StableAuthorKey, PublicError> {
     let target = match value {
         SetupConfig::Portfolio(config) => config.portfolio_id.as_str(),
     };
     StableAuthorKey::new(target).map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "SetupTargetInvalid",
             "A typed setup configuration has an invalid target",
@@ -167,44 +170,44 @@ fn target_for_setup_config(value: &SetupConfig) -> Result<StableAuthorKey, AppEr
 fn prepare_config<T: MfmConfig>(
     target: StableAuthorKey,
     config: T,
-) -> Result<ConfiguredValueRow, AppError> {
+) -> Result<ConfiguredValueRow, PublicError> {
     let validated = ValidatedConfig::new(config).map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "SetupValueValidationFailed",
             "A setup value failed semantic validation",
         )
     })?;
     let canonical = validated.canonical_json().map_err(|_| {
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "SetupValueCanonicalizationFailed",
             "A setup value could not be canonicalized",
         )
     })?;
     if canonical.as_bytes().len() > MAX_CONFIGURED_VALUE_BYTES {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::BadRequest,
             "SetupValueTooLarge",
             "A setup value exceeds the permitted size",
         ));
     }
     let value: Value = serde_json::from_slice(canonical.as_bytes()).map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "SetupValueCanonicalJsonInvalid",
             "A canonical setup value could not be inspected",
         )
     })?;
     if let Some(path) = secret_field_path(&value, "$", None) {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::BadRequest,
             "SetupSecretFieldRejected",
             format!("Setup value contains a prohibited field at {path}"),
         ));
     }
     let schema_id = T::schema_id().map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "SetupValueSchemaInvalid",
             "A setup value schema is invalid",
@@ -217,7 +220,7 @@ fn prepare_config<T: MfmConfig>(
         canonical.as_bytes().to_vec(),
     )
     .map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "SetupValueStorageInvalid",
             "A prepared setup value is invalid for configuration storage",

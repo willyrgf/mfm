@@ -449,8 +449,8 @@ fn returned_fields_for_entry(
 
 fn internal_fact_ref_for_entry(
     entry: &store::FactIndexProjection,
-) -> Result<mfm_facts::InternalFactRef, AppError> {
-    entry.internal_ref().map_err(AppError::from)
+) -> Result<mfm_facts::InternalFactRef, PublicError> {
+    entry.internal_ref().map_err(PublicError::from)
 }
 
 #[test]

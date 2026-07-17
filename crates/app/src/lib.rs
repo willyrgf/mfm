@@ -95,7 +95,7 @@ pub use entry_point::{entry_point_ids, prepare_entry_point_run_launch};
 
 #[path = "errors.rs"]
 mod errors;
-pub use self::errors::{AppError, ErrorClass, PublicSafeMessage};
+pub use self::errors::{ErrorClass, PublicError};
 
 /// Environment variable that selects the live runtime config file.
 pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
@@ -150,7 +150,7 @@ pub type ProductionFactPublicQueryService = FactPublicQueryService<PostgresStore
 /// Connects and validates the production Postgres run store.
 pub async fn connect_production_store(
     database_url: Option<&str>,
-) -> Result<PostgresStore, AppError> {
+) -> Result<PostgresStore, PublicError> {
     let database_url = production_database_url(database_url)?;
     Ok(PostgresStore::connect(&database_url).await?)
 }
@@ -158,7 +158,7 @@ pub async fn connect_production_store(
 /// Connects the production store-backed public-fact query service.
 pub async fn connect_production_fact_public_query_service(
     database_url: Option<&str>,
-) -> Result<ProductionFactPublicQueryService, AppError> {
+) -> Result<ProductionFactPublicQueryService, PublicError> {
     let store = connect_production_store(database_url).await?;
     let projection = store
         .fact_projection_snapshot()
@@ -168,11 +168,11 @@ pub async fn connect_production_fact_public_query_service(
     FactPublicQueryService::new(catalog, store)
 }
 
-fn production_database_url(database_url: Option<&str>) -> Result<String, AppError> {
+fn production_database_url(database_url: Option<&str>) -> Result<String, PublicError> {
     match database_url {
         Some(database_url) => Ok(database_url.to_owned()),
         None => std::env::var("DATABASE_URL").map_err(|_| {
-            AppError::new(
+            PublicError::new(
                 ErrorClass::BadRequest,
                 "MissingDatabaseUrl",
                 "Missing DATABASE_URL (or pass --database-url)",
@@ -185,7 +185,7 @@ fn production_database_url(database_url: Option<&str>) -> Result<String, AppErro
 pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
-) -> Result<ProductionRunServices, AppError> {
+) -> Result<ProductionRunServices, PublicError> {
     let store = connect_production_store(database_url).await?;
     // Portfolio SelectHoldings and BTC collectors require the Postgres fact-index provider.
     let fact_index = production_fact_index_read_provider(store.clone());
@@ -203,7 +203,7 @@ pub async fn connect_production_run_services(
 /// Builds production evidence-only run services backed by the Postgres run store.
 pub async fn connect_production_run_read_services(
     database_url: Option<&str>,
-) -> Result<ProductionRunReadServices, AppError> {
+) -> Result<ProductionRunReadServices, PublicError> {
     let store = connect_production_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
     Ok(make_run_read_services(
@@ -223,7 +223,7 @@ pub fn production_runner_registry(
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
     runtime_config_path: Option<&Path>,
-) -> Result<ErasedRunnerRegistry, AppError> {
+) -> Result<ErasedRunnerRegistry, PublicError> {
     let runtime_config = Arc::new(LiveTransportRuntime::new(
         RuntimeConfigLoader::from_path_or_env(runtime_config_path),
     ));
@@ -333,7 +333,7 @@ fn capability_artifact_error_from_store(
 }
 
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
-pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
+pub fn production_certification_registry() -> Result<CertificationRegistry, PublicError> {
     let mut registry = CertificationRegistry::new();
     mfm_op_btc_collectors::register_btc_collectors_certification_descriptors(&mut registry)?;
     registry.register_fact_type::<mfm_op_btc_collectors::BtcChainHeadFact>()?;
@@ -408,20 +408,20 @@ pub struct InvocationKey(String);
 
 impl InvocationKey {
     /// Creates a checked invocation key from the exact caller-supplied UTF-8 string.
-    pub fn new(value: impl Into<String>) -> Result<Self, AppError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, PublicError> {
         let value = value.into();
         events::InvocationKeyMaterialV1::new(&value).map_err(invocation_key_error)?;
         Ok(Self(value))
     }
 
     /// Returns the domain-separated digest used by `RunIdentityMaterialV1`.
-    pub fn digest(&self) -> Result<ContentDigest, AppError> {
+    pub fn digest(&self) -> Result<ContentDigest, PublicError> {
         events::InvocationKeyMaterialV1::new(&self.0)
             .and_then(|material| material.digest())
             .map_err(invocation_key_error)
     }
 
-    fn mint() -> Result<Self, AppError> {
+    fn mint() -> Result<Self, PublicError> {
         Self::new(format!("mfm.invocation_key.v1:{}", uuid::Uuid::new_v4()))
     }
 }
@@ -432,8 +432,8 @@ impl fmt::Debug for InvocationKey {
     }
 }
 
-fn invocation_key_error(_error: mfm_events::EventError) -> AppError {
-    AppError::new(
+fn invocation_key_error(_error: mfm_events::EventError) -> PublicError {
+    PublicError::new(
         ErrorClass::BadRequest,
         "InvocationKeyInvalid",
         "Invocation key must be non-empty and at most 1024 bytes",
@@ -495,7 +495,7 @@ pub(crate) struct RunLaunchSeedArtifact {
 fn verify_replay_diagnostic(
     expected: Option<&events::RedactedJson>,
     diagnostics: &[RedactedProviderDiagnostic],
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     match (expected, diagnostics.is_empty()) {
         (Some(_), true) => Err(replay_diagnostic_error()),
         (Some(expected), false) => {
@@ -518,13 +518,13 @@ fn verify_replay_diagnostic(
 fn verify_replay_diagnostic_json(
     expected: Option<&events::RedactedJson>,
     value: &Value,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     let diagnostics = serde_json::from_value::<Vec<RedactedProviderDiagnostic>>(value.clone())
         .map_err(|_| replay_diagnostic_error())?;
     verify_replay_diagnostic(expected, &diagnostics)
 }
 
-fn validate_replay_diagnostic(diagnostic: &RedactedProviderDiagnostic) -> Result<(), AppError> {
+fn validate_replay_diagnostic(diagnostic: &RedactedProviderDiagnostic) -> Result<(), PublicError> {
     if diagnostic.provider_family().as_str() == "evm"
         && diagnostic.code() == ProviderDiagnosticCode::SourceMismatch
     {
@@ -553,7 +553,7 @@ fn diagnostic_artifact_requirement(
 
 fn validate_evm_source_mismatch_diagnostic(
     diagnostic: &mfm_capabilities::RedactedProviderDiagnostic,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     const FIELDS: [&str; 5] = [
         "network_id",
         "expected_chain_id",
@@ -605,15 +605,15 @@ fn validate_evm_source_mismatch_diagnostic(
     Ok(())
 }
 
-fn canonical_value_digest(value: &serde_json::Value) -> Result<ContentDigest, AppError> {
+fn canonical_value_digest(value: &serde_json::Value) -> Result<ContentDigest, PublicError> {
     let json = serde_json::to_string(value).map_err(|_| replay_diagnostic_error())?;
     let canonical =
         PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| replay_diagnostic_error())?;
     Ok(canonical.content_digest())
 }
 
-fn replay_diagnostic_error() -> AppError {
-    AppError::backend(
+fn replay_diagnostic_error() -> PublicError {
+    PublicError::backend(
         ErrorClass::Internal,
         "ReplayDiagnosticInvalid",
         "Replay diagnostic evidence failed verification",
@@ -626,7 +626,7 @@ pub async fn load_certified_spec_for_run(
     registry: &CertificationRegistry,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
-) -> Result<CertifiedTypedSpec, AppError> {
+) -> Result<CertifiedTypedSpec, PublicError> {
     let run_admitted = run_admitted_payload(run_id, stream)?;
     let spec_artifact = artifacts
         .read_retained_artifact(&run_artifact_requirement(
@@ -660,7 +660,7 @@ pub async fn load_certified_spec_for_run(
 async fn stored_launch_evidence_from_run_admitted(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     run_admitted: &events::RunAdmitted,
-) -> Result<RunLaunchEvidence, AppError> {
+) -> Result<RunLaunchEvidence, PublicError> {
     let spec_artifact = stored_run_launch_artifact(
         artifacts,
         run_artifact_requirement(
@@ -743,8 +743,8 @@ async fn stored_launch_evidence_from_run_admitted(
 async fn stored_run_launch_artifact(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     requirement: store::EventArtifactRequirement,
-    validate: impl FnOnce(&store::ArtifactEvidenceRef) -> Result<(), AppError>,
-) -> Result<RunLaunchArtifact, AppError> {
+    validate: impl FnOnce(&store::ArtifactEvidenceRef) -> Result<(), PublicError>,
+) -> Result<RunLaunchArtifact, PublicError> {
     let artifact = artifacts.read_retained_artifact(&requirement).await?;
     let evidence = artifact.evidence().clone();
     validate_artifact_requirement_for_app(
@@ -766,7 +766,7 @@ async fn load_runtime_spec_for_run(
     registry: &CertificationRegistry,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
-) -> Result<CertifiedRuntimeSpec, AppError> {
+) -> Result<CertifiedRuntimeSpec, PublicError> {
     let certified = load_certified_spec_for_run(artifacts, registry, run_id, stream).await?;
     Ok(CertifiedRuntimeSpec::new(certified)?)
 }
@@ -776,7 +776,7 @@ async fn replay_read_authority_for_run_with_retained_source_facts<S, A>(
     artifacts: &A,
     runtime_spec: &CertifiedRuntimeSpec,
     verified_view: &VerifiedRunHistoryView,
-) -> Result<ReplayReadAuthority, AppError>
+) -> Result<ReplayReadAuthority, PublicError>
 where
     S: store::RunEventStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + ?Sized,
@@ -795,10 +795,10 @@ where
 }
 
 /// Returns the default JSON media type used by typed CLI seed inputs.
-pub fn json_media_type() -> Result<spec::MediaType, AppError> {
+pub fn json_media_type() -> Result<spec::MediaType, PublicError> {
     spec::MediaType::new("application/json").map_err(|error| {
         let _ = error;
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "JsonMediaTypeInvalid",
             "JSON media type is invalid",
@@ -818,11 +818,11 @@ pub fn prepare_typed_program_run_launch_for_test(
     certification_registry: &CertificationRegistry,
     store_scope_id: StoreScopeId,
     invocation_key: Option<InvocationKey>,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     let plan =
         mfm_program::TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
             .map_err(|_| {
-                AppError::backend(
+                PublicError::backend(
                     ErrorClass::BadRequest,
                     "TypedProgramLaunchPlanInvalid",
                     "typed program launch material is invalid",
@@ -863,7 +863,7 @@ fn certify_launch_plan(
         Vec<RunLaunchConfigArtifact>,
         Vec<RunLaunchSeedArtifact>,
     ),
-    AppError,
+    PublicError,
 > {
     let mut config_inputs = plan
         .config_material
@@ -896,16 +896,16 @@ fn certify_launch_plan(
     Ok((certified_spec, scoped_registry, config_inputs, seed_inputs))
 }
 
-fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {
-    AppError::backend(
+fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> PublicError {
+    PublicError::backend(
         ErrorClass::BadRequest,
         "EntryPointCertificationFailed",
         "Entry-point planned spec failed certification",
     )
 }
 
-fn entry_point_launch_internal_error(code: &'static str, message: &'static str) -> AppError {
-    AppError::backend(ErrorClass::Internal, code, message)
+fn entry_point_launch_internal_error(code: &'static str, message: &'static str) -> PublicError {
+    PublicError::backend(ErrorClass::Internal, code, message)
 }
 
 /// Certifier-backed typed spec authority plus launch metadata for a typed run start.
@@ -927,7 +927,7 @@ fn prepare_certified_run_launch(
     input: CertifiedRunLaunchInput<'_>,
     config_inputs: Vec<RunLaunchConfigArtifact>,
     seed_inputs: Vec<RunLaunchSeedArtifact>,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     let runtime_spec = CertifiedRuntimeSpec::new(input.certified_spec.clone())?;
     let spec_artifact = certified_spec_launch_artifact(&runtime_spec)?;
     let certificate_artifact = certified_spec_certificate_launch_artifact(&runtime_spec)?;
@@ -942,7 +942,7 @@ fn prepare_certified_run_launch(
         invocation_key_digest: input.invocation_key_digest,
     };
     let run_id = identity_material.derive_run_id().map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "RunIdentityMaterialInvalid",
             "Run identity material is invalid",
@@ -963,59 +963,61 @@ fn prepare_certified_run_launch(
     })
 }
 
-fn invocation_key_digest_or_mint(key: Option<&InvocationKey>) -> Result<ContentDigest, AppError> {
+fn invocation_key_digest_or_mint(
+    key: Option<&InvocationKey>,
+) -> Result<ContentDigest, PublicError> {
     match key {
         Some(key) => key.digest(),
         None => InvocationKey::mint()?.digest(),
     }
 }
 
-fn run_identity_material_mismatch() -> AppError {
-    AppError::backend(
+fn run_identity_material_mismatch() -> PublicError {
+    PublicError::backend(
         ErrorClass::Internal,
         "RunIdentityMaterialMismatch",
         "Run identity material does not match the store or certified spec",
     )
 }
 
-fn new_execution_claim_token() -> Result<store::AdmissionToken, AppError> {
+fn new_execution_claim_token() -> Result<store::AdmissionToken, PublicError> {
     store::AdmissionToken::new(format!("mfm.execution_claim.v1:{}", uuid::Uuid::new_v4()))
-        .map_err(AppError::from)
+        .map_err(PublicError::from)
 }
 
 fn default_execution_claim_heartbeat_interval() -> Duration {
     Duration::from_secs(store::EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS)
 }
 
-fn async_app_store_error(_error: impl fmt::Display) -> AppError {
-    AppError::backend(
+fn async_app_store_error(_error: impl fmt::Display) -> PublicError {
+    PublicError::backend(
         ErrorClass::Conflict,
         "RunStoreRejected",
         "Run store rejected the requested operation",
     )
 }
 
-fn observation_app_store_error<E>(error: E) -> AppError
+fn observation_app_store_error<E>(error: E) -> PublicError
 where
     E: store::StoreErrorInspection + fmt::Display,
 {
     match error.as_store_error() {
-        Some(store::StoreError::InvalidCursor { .. }) => AppError::new(
+        Some(store::StoreError::InvalidCursor { .. }) => PublicError::new(
             ErrorClass::BadRequest,
             "InvalidCursor",
             "Run observation cursor is invalid",
         ),
-        Some(store::StoreError::CursorExpired) => AppError::new(
+        Some(store::StoreError::CursorExpired) => PublicError::new(
             ErrorClass::BadRequest,
             "CursorExpired",
             "Run observation cursor has expired",
         ),
-        Some(store::StoreError::LimitOutOfRange { .. }) => AppError::new(
+        Some(store::StoreError::LimitOutOfRange { .. }) => PublicError::new(
             ErrorClass::BadRequest,
             "LimitOutOfRange",
             "Run observation limit is out of range",
         ),
-        Some(store::StoreError::ObservationUnavailable { .. }) => AppError::backend(
+        Some(store::StoreError::ObservationUnavailable { .. }) => PublicError::backend(
             ErrorClass::Internal,
             "ObservationUnavailable",
             "Run observations are unavailable",
@@ -1026,10 +1028,10 @@ where
 
 fn manual_resolution_runtime_request(
     req: ManualResolutionRecordRequest,
-) -> Result<ManualResolutionRequest, AppError> {
+) -> Result<ManualResolutionRequest, PublicError> {
     let media_type = spec::MediaType::new(&req.evidence_media_type).map_err(|error| {
         let _ = error;
-        AppError::new(
+        PublicError::new(
             ErrorClass::BadRequest,
             "ManualResolutionEvidenceMediaTypeInvalid",
             "Manual resolution evidence media type is invalid",
@@ -1041,7 +1043,7 @@ fn manual_resolution_runtime_request(
         .transpose()
         .map_err(|error| {
             let _ = error;
-            AppError::new(
+            PublicError::new(
                 ErrorClass::BadRequest,
                 "ManualResolutionNoteInvalid",
                 "Manual resolution note is invalid",
