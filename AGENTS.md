@@ -113,7 +113,8 @@ cargo test --workspace
 
 Nixfied v2 is consumed as a flake input, not vendored as a framework tree.
 
-- `flake.nix`: pins the `nixfied` input, compiles `nixfied.nix`, and exposes `.#check`, `.#test`, `.#test-db`, `.#ci`, and `.#mfm`.
+- `flake.nix`: pins the `nixfied` input, compiles `nixfied.nix`, and exposes `.#check`,
+  `.#test`, `.#test-db`, `.#ci`, and the managed local `.#mfm` app.
 - `flake.lock`: records the exact Nixfied/nixpkgs/Rust overlay inputs; the root
   nixpkgs pin supplies the SQLx CLI used by `.#test-db`.
 - `nixfied.nix`: project-owned model for MFM tasks, composites, services, slots, and ports.
@@ -128,7 +129,9 @@ Current Nixfied command contract:
 - `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
 - `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
 - `nix run .#ci`: full CI by definition; starts the managed services required by parity tests.
-- `nix run .#mfm -- <ARGS>`: runs the packaged MFM CLI built with the Nixfied-pinned Rust toolchain.
+- `nix run .#mfm -- <ARGS>`: runs the packaged MFM CLI with persistent slot-9
+  managed Postgres for local development.
+- `nix build .#mfm`: builds the raw MFM CLI with the Nixfied-pinned Rust toolchain.
 
 Environment variables you should expect:
 

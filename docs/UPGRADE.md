@@ -52,7 +52,7 @@ Use this sequence before changing the project model:
    Adjust this path if `NIXFIED_STATE_DIR` or `XDG_STATE_HOME` is set.
    Move the per-slot registry directory aside, preserving it for inspection:
    ```bash
-   backup_root="$HOME/.local/state/nixfied/registry-backups/mfm-dev-0-$(date +%Y%m%d%H%M%S)"
+   backup_root="$HOME/.local/state/nixfied/registry-backups/mfm-environment-dev-0-$(date +%Y%m%d%H%M%S)"
    mkdir -p "$backup_root"
    mv "$HOME/.local/state/nixfied/registry/mfm/dev/0" "$backup_root/0"
    ```

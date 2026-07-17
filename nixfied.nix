@@ -234,7 +234,7 @@ in
       env = postgresSqlxEnv;
       requires = [ "postgres" ];
     };
-    mfm-start-store = {
+    mfm-store = {
       serviceLifetime = "persistent-until-down";
       invocation = {
         tools = [ sqlxCli ];

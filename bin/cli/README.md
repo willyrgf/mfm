@@ -403,10 +403,18 @@ compatibility alias, collector root, report-only mode, or contract workflow entr
 Setup owns the current target-keyed configuration before admission:
 
 ```sh
-mfm_cli setup import ./organization.toml
-mfm_cli setup list
-mfm_cli setup export acme/primary --output ./portfolio.json
+nix run .#mfm -- setup import ./organization.toml
+nix run .#mfm -- setup list
+nix run .#mfm -- setup export acme/primary --output ./portfolio.json
 ```
+
+For local development, the `.#mfm` app starts Nixfied-managed PostgreSQL in slot
+9, applies the typed store migrations, sets `DATABASE_URL`, delegates all
+arguments to the packaged CLI, and stops PostgreSQL afterward without removing
+its data. Separate invocations share setup and run state under the Nixfied state
+root for `mfm/dev/9`. When supplying an external `DATABASE_URL` or
+`--database-url`, use `mfm_cli`, `cargo run -p mfm -- <ARGS>`, or the raw binary
+produced by `nix build .#mfm`.
 
 The import document is strict TOML with a closed `configs` list. Each configuration derives its
 target from its intrinsic domain id; a portfolio config with `portfolio_id = "acme/primary"`
@@ -485,11 +493,6 @@ The target selects only its current `PortfolioConfig`. Old `--entry-point` and `
 JSON request files, catalog `{name,digest}` objects, old entry-point ids, unversioned ids, and
 latest-like forms are rejected. The target cannot select collector policies, child configs, native
 decimals, runtime routes, or a collect/reuse/report-only mode.
-
-`.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
-command, keeps the data directory under the Nixfied state root for `mfm/dev/9`,
-runs the typed store migrations, sets `DATABASE_URL`, and then delegates to
-`mfm run start`. It does not change the raw packaged CLI exposed by `.#mfm`.
 
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with

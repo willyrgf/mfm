@@ -54,7 +54,6 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
-          projectApps = nixfied.lib.${system}.projectApps ./nixfied.nix;
         in
         {
           default = self.packages.${system}.model;
@@ -80,42 +79,24 @@
               ln -s "$out/bin/mfm_cli" "$out/bin/mfm"
             '';
           };
-          mfm-start = pkgs.writeShellApplication {
-            name = "mfm-start";
+        }
+      );
+
+      apps = forAllSystems (
+        system:
+        let
+          pkgs = mkPkgs system;
+          projectApps = nixfied.lib.${system}.projectApps ./nixfied.nix;
+          managedMfm = pkgs.writeShellApplication {
+            name = "mfm";
             runtimeInputs = [
               self.packages.${system}.mfm
               pkgs.jq
             ];
             text = ''
-              if [[ $# -eq 0 ]]; then
-                exec mfm run start --help
-              fi
-              case "''${1:-}" in
-                -h|--help)
-                  exec mfm run start "$@"
-                  ;;
-              esac
-
               slot=9
               nixfied_run="${projectApps.run.program}"
               nixfied_down="${projectApps.down.program}"
-
-              store_output="$("$nixfied_run" --task mfm-start-store --slot "$slot" --json)"
-              host="$(
-                jq -r '.services[] | select(.serviceId == "postgres") | .selectedEndpoint.host' \
-                  <<<"$store_output" \
-                  | tail -n 1
-              )"
-              port="$(
-                jq -r '.services[] | select(.serviceId == "postgres") | .selectedEndpoint.port' \
-                  <<<"$store_output" \
-                  | tail -n 1
-              )"
-              if [[ -z "$host" || -z "$port" || "$host" == "null" || "$port" == "null" ]]; then
-                printf '%s\n' "mfm-start could not resolve the managed Postgres endpoint" >&2
-                printf '%s\n' "$store_output" >&2
-                exit 1
-              fi
 
               # shellcheck disable=SC2329
               cleanup() {
@@ -123,32 +104,33 @@
               }
               trap cleanup EXIT
 
-              export DATABASE_URL="postgresql://postgres@$host:$port/postgres"
+              store_output="$("$nixfied_run" --task mfm-store --slot "$slot" --json)"
+              endpoint="$(
+                jq -r \
+                  '[.services[] | select(.serviceId == "postgres")][-1].selectedEndpoint | [.host, .port] | @tsv' \
+                  <<<"$store_output"
+              )"
+              IFS=$'\t' read -r host port <<<"$endpoint"
+              if [[ -z "$host" || -z "$port" || "$host" == "null" || "$port" == "null" ]]; then
+                printf '%s\n' "mfm could not resolve the managed Postgres endpoint" >&2
+                printf '%s\n' "$store_output" >&2
+                exit 1
+              fi
 
-              set +e
-              mfm run start "$@"
-              status=$?
-              set -e
-              exit "$status"
+              export DATABASE_URL="postgresql://postgres@$host:$port/postgres"
+              mfm "$@"
             '';
           };
-        }
-      );
-
-      apps = forAllSystems (
-        system:
+        in
         # The verification surface is generated: MFM's own task names become
         # the verbs (`.#check`/`.#test`/`.#ci` via nixfied.surface.verbs),
-        # model admission lives at `.#model-check`. The only override is MFM's own binary.
-        (nixfied.lib.${system}.projectApps ./nixfied.nix)
+        # model admission lives at `.#model-check`. The only override is the
+        # managed local MFM app; the package remains the raw binary.
+        projectApps
         // {
           mfm = {
             type = "app";
-            program = "${self.packages.${system}.mfm}/bin/mfm";
-          };
-          mfm-start = {
-            type = "app";
-            program = "${self.packages.${system}.mfm-start}/bin/mfm-start";
+            program = "${managedMfm}/bin/mfm";
           };
         }
       );
