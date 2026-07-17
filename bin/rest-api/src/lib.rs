@@ -176,14 +176,6 @@ impl RestProcessRole {
             )),
         }
     }
-
-    /// Returns the stable role tag used in errors and docs.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Live => "live",
-        }
-    }
 }
 
 /// Default production REST API state.

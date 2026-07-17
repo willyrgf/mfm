@@ -770,17 +770,6 @@ async fn load_runtime_spec_for_run(
     Ok(CertifiedRuntimeSpec::new(certified)?)
 }
 
-/// Builds sealed replay read authority from a verified run-history view.
-pub fn replay_read_authority_for_run(
-    runtime_spec: &CertifiedRuntimeSpec,
-    verified_view: &VerifiedRunHistoryView,
-) -> Result<ReplayReadAuthority, AppError> {
-    Ok(ReplayReadAuthority::from_verified_run_history_view(
-        runtime_spec,
-        verified_view,
-    )?)
-}
-
 async fn replay_read_authority_for_run_with_retained_source_facts<S, A>(
     store: &S,
     artifacts: &A,
