@@ -1,6 +1,7 @@
 # Controlled slow-build baseline
 
-Status: Phase 01 baseline and Phase 02/03/04/05 follow-up for RFC_SLOW_BUILDS.md
+Status: Phase 01 baseline, Phase 02--07 follow-up, and Revision 2 R2-01 refresh
+for RFC_SLOW_BUILDS.md
 
 This report measures the clean Phase 00 RFC commit
 `51a5f9a07808cd9a92b218a028dd2424c04ac76d` (`docs: rfc builds tt3`). The
@@ -780,3 +781,196 @@ passed 974/974 Nextest tests. The committed cache after the pair was
 10,421,992,215 bytes, 20,930 entries, 17,790 files, zero `.dwo` files, and
 1,761,915,884 bytes in trybuild artifacts. This confirms that the report-only
 commit did not alter the frozen verification profile or task graph.
+
+## R2-01: refreshed workload and gate baseline
+
+R2-01 was measured locally on 2026-07-17 at exact clean revision
+`6f7146e449f5a5d26f5666db264cd91593d7b2ba` (`docs: rfc builds tt6`). This
+report edit was not present in the measured tree. No cache technology, task,
+feature, profile, service, workflow, or test selection changed during the
+measurements.
+
+### Reference host and virtualization manifest
+
+- Guest OS: Ubuntu 24.04.4 LTS, Linux `6.8.0-124-generic`, `aarch64`.
+- Virtualization: a Lima guest on Apple's Virtualization framework. The guest
+  reports `systemd-detect-virt=apple`, DMI product `Apple Virtualization
+  Generic Platform`, vendor `Apple Inc.`, and hostname `lima-devvm`.
+- CPU: 8 online aarch64 CPUs, one thread per core and one 8-core cluster. The
+  guest exposes Apple as the CPU vendor but no model identifier or frequency
+  governor.
+- Memory: 16,732,610,560 bytes of guest RAM and 8,589,930,496 bytes of swap.
+- Storage: a 200 GiB virtio disk with a 199 GiB ext4 root partition mounted
+  read-write with `relatime`, `discard`, `errors=remount-ro`, and `commit=30`.
+  The workspace and all measurement roots were on that filesystem. It had
+  193 GiB formatted capacity and 86 GiB available before the full-CI matrix.
+- Load controls: all timed gates ran serially, with no intentional competing
+  build, no compiler wrapper, empty `RUSTC_WRAPPER`, and no `sccache` binary
+  on `PATH`. No sample was discarded. The VM remained subject to normal host
+  scheduling, and the warm results retain one visible scheduling outlier.
+- Scope: all performance evidence came from this local Linux guest. No hosted
+  workflow was dispatched and no macOS timing was collected. The existing
+  hosted Linux/macOS workflow was inspected only as a correctness and
+  portability contract.
+
+The pinned identities were:
+
+- Rust `1.96.0` (`ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96`) and Cargo
+  `1.96.0` (`30a34c6821b57de0aaec83a901aca39f88f6778c`), target
+  `aarch64-unknown-linux-gnu`, LLVM 22.1.2;
+- Cargo Nextest 0.9.137 and SQLx CLI 0.9.0;
+- Nix 2.34.7 and nixpkgs revision
+  `3e41b24abd260e8f71dbe2f5737d24122f972158`;
+- Nixfied revision `b0681e45ab76d5023d9c5e033087d34adf98e90b`, runtime ABI
+  `nixfied-runtime-abi:1-5ff3aa14f2bf`, and model hash
+  `d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84`;
+  and
+- Rust overlay revision `fe64e6b409dc513274d2941f8da13bbd0fdcf44e`.
+
+### Frozen workload inventory
+
+Cargo metadata reported 53 workspace packages and 100 targets. The admitted
+verification surface was:
+
+- 974 Nextest identifiers across 99 binaries. Every measured full gate passed
+  974/974. Sorting identifiers as `<binary-id>::<test-name>`, one per line in
+  byte order with a trailing newline, produced SHA-256
+  `e75d6ea039b5507c6f9b89bef89656e31073c02f8f17f74f680fc2bbf0d67f08`.
+- 53 doctest binaries and 42 passing doctests.
+- Nine trybuild harnesses, 80 Rust UI sources, and 71 checked `.stderr`
+  baselines. Trybuild remains inside the Nextest surface rather than being a
+  separate Nixfied leaf.
+- Two SQLx query-macro sites and two checked `.sqlx` metadata files. The
+  offline SQLx leaf and the online disposable-schema mutation/recovery leaf
+  both passed in every applicable gate.
+- Nine tests in the Cargo metadata and architecture contract binary.
+- Six `test-db` leaves: online SQLx, CLI build, state-event parity,
+  collect/report parity, REST parity, and CLI/Postgres status parity. The five
+  direct parity test leaves outside Nextest passed 4, 1, 3, 1, and 1 tests
+  respectively when including the separate keystore leaf.
+- Thirteen expanded CI leaves: four `check`, two `test`, one keystore parity,
+  and six `test-db` leaves.
+
+Declared features remained exactly:
+
+| Package | Declared features |
+| --- | --- |
+| `mfm` | `parity-tests` |
+| `mfm-app` | `test-support` |
+| `mfm-integration-tests` | `parity-tests` |
+| `mfm-rest-api` | `parity-tests` |
+| `mfm-store` | `test-support` |
+| `mfm-stream-store-postgres` | `parity-tests` |
+| `mfm_core` | `default`, `dangerous-secret-export` |
+
+The active gate selections also remained frozen: Clippy uses `--all-features`,
+workspace Nextest enables `mfm-app/test-support`, and SQLx/parity leaves enable
+their package's `parity-tests` feature. Exact identifiers and selections, not
+only aggregate counts, are the comparison contract for later experiments.
+
+### Developer and flake observations
+
+One persistent `nix develop` command exposed the pinned tools, an empty
+`CARGO_TARGET_DIR`, and Cargo's worktree-owned developer target. On the
+initial state encountered for this revision, `cargo check -p mfm-program`
+took 3.56s and `cargo test -p mfm-program --lib` took 5.99s and passed 34
+tests. These are named developer observations, not a clean/warm matrix.
+
+`nix run .#quick` passed its format and broad workspace-check contract in
+19.42s, including a 17.11s Cargo check. `nix flake check -L` passed in 2.13s.
+It evaluated the `mfm` Rust package derivation and every other package,
+development-shell, and app output, but did not realize the `mfm` derivation or
+run Rust compilation. It is therefore flake/schema admission, not a duplicate
+Rust test gate in the current flake.
+
+### Admitted task graph and public-gate equivalence
+
+Model admission reported 21 total task definitions. The public composites
+expand as follows:
+
+| Public verb | Admitted leaves | Ordering |
+| --- | --- | --- |
+| `.#check` | format, Clippy, Cargo metadata contract, offline SQLx | serial in that order |
+| `.#test` | Nextest, doctests | serial in that order |
+| `.#test-db` | online SQLx, CLI build, four Postgres parity leaves | SQLx first; build and state-event parity may follow; remaining parity chain is ordered |
+| `.#ci` | the same `check`, `test`, and `test-db` composites plus keystore parity | `check -> test -> keystore parity -> test-db` |
+
+The nested composites use the same task definitions, arguments, environments,
+features, services, cache identity, and ordering semantics as the component
+verbs. Run-once behavior applies inside one composite invocation only; it does
+not reuse a success from a previous public-gate invocation.
+
+### Full-gate matrix
+
+Three fresh `NIXFIED_STATE_DIR` roots supplied independent clean Cargo target
+caches. Each root used slot 0 and the runtime-reported cache digest
+`dd27515db6a0fc48aabe31c5e300af7325e3af24a98f0560364fa9c516971e03`.
+The five warm runs reused those exact roots and digests; three reused root C.
+All runs were serial and passed 13/13.
+
+`Nextest compile` is Cargo's logged `Finished` interval and includes linking.
+`Nextest execution` is Nextest's summary interval. `Verification tail` is the
+sum of the seven post-test leaves from keystore parity through the database
+chain; because this graph is serial, it is also their contribution to the
+critical path, apart from service preparation and task-launch overhead.
+
+| State | Run | Full CI | Nextest task | Compile | Execution | Doctests | Verification tail |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Clean A | `run-2935615-1784289015199459752` | 331.422s | 150.059s | 48.38s | 101.273s | 16.728s | 111.501s |
+| Clean B | `run-2984572-1784289578082224200` | 328.831s | 153.259s | 47.07s | 105.797s | 18.300s | 108.551s |
+| Clean C | `run-3039714-1784290140624314687` | 337.111s | 150.248s | 48.05s | 101.740s | 16.620s | 119.514s |
+| Warm A1 | `run-2971979-1784289351883826711` | 218.067s | 103.845s | 25.47s | 77.947s | 14.640s | 91.960s |
+| Warm B1 | `run-3027085-1784289917897436715` | 214.081s | 100.855s | 18.51s | 81.971s | 16.320s | 90.064s |
+| Warm C1 | `run-3084720-1784290493881589189` | 258.147s | 138.390s | 41.19s | 96.427s | 15.320s | 90.627s |
+| Warm C2 | `run-3099679-1784290762518379370` | 211.892s | 99.213s | 20.62s | 78.137s | 15.250s | 89.713s |
+| Warm C3 | `run-3112269-1784290979166705531` | 203.752s | 95.661s | 20.22s | 75.094s | 14.380s | 87.106s |
+
+The clean median was 331.422s and the warm median was 214.081s. The 117.341s
+clean-to-warm difference is 35.4% of the clean median. The clean Nextest
+median decomposed into 48.05s of compile/link and 101.740s of execution; the
+warm medians were 20.62s and 78.137s. Warm C1 is retained as an uncontended
+host-scheduling outlier rather than discarded. Even outside that outlier,
+execution and the service/parity tail dominate the residual warm gate.
+
+Each untouched full-CI cache occupied 10,421,922,551 bytes (9.8 GiB), 17,790
+files and 20,931 total entries, including 1,761,885,682 bytes of nested
+trybuild artifacts. There were no `.dwo` files or incremental artifacts. No
+compiler-object cache was enabled.
+
+### Local contribution-workflow cost
+
+The component gates and an immediate CI rerun used the same revision, slot,
+state root, cache digest, and serial host controls:
+
+| Invocation | Gate result | Gate time | Outer wall time |
+| --- | --- | ---: | ---: |
+| `nix run .#check` | 4/4 | 10.73s | 11.77s |
+| `nix run .#test` | 2/2 | 118.23s | 118.95s |
+| `nix run .#test-db` | 6/6 | 92.62s | 93.92s |
+| immediate `nix run .#ci` | 13/13 | 254.22s | 254.45s |
+
+The component sequence cost 224.64s of outer wall time. CI then reran every
+component leaf and added 254.45s, making the observed contribution workflow
+479.09s. The only coverage added by CI beyond those three component verbs was
+keystore parity, which took 1.34s in the CI rerun. The rerun is 53.1% of the
+total observed workflow. This is evidence that gate governance is eligible
+for a later, separately approved policy proposal; R2-01 changes no gate or
+required contributor policy.
+
+### R2-01 decision and limitations
+
+The canonical workloads are frozen at the exact identifiers, feature
+selections, task graph, and service semantics above. The target-only design
+remains the control for later candidates. Gate-governance evaluation is
+eligible because sequential component gates followed by CI repeat nearly the
+entire assurance surface at material cost, but the keystore-only CI coverage
+must be preserved by any later proposal.
+
+The measurements are Linux/aarch64 observations from one Lima VM. They do not
+claim measured macOS or hosted-runner performance. The guest does not expose
+the physical Apple CPU model or a guest frequency governor, and normal host
+scheduling produced one retained warm outlier. Service startup is included in
+full wall time but is not independently timestamped by the current runtime;
+the task-level compilation, execution, doctest, and verification-tail
+decomposition is the available evidence. No R2-01 implementation behavior is
+left unverified because the phase is report-only.
