@@ -1107,3 +1107,162 @@ compatible rust-analyzer and `rust-src` before IDE coexistence can be claimed
 as supported. That follow-up is distinct from changing the artifact boundary
 and is not implemented in this report-only phase. Linux/aarch64 is the only
 measured platform; no hosted or macOS performance sample was used.
+
+## R2-03: verification execution-topology experiment
+
+R2-03 was measured on 2026-07-17 from committed R2-02 revision
+`449b828e9c8a2945cf139a65d2daa6407ad8494b`. It used the R2-01 reference host,
+the pinned Rust/Cargo 1.96.0 shell, slot 1 under the isolated
+`/tmp/mfm-r2-01-b` state root, and the existing verification cache identities.
+The accepted samples were precompiled or immediately prewarmed; prewarm time
+is reported separately and is not counted as an execution improvement.
+
+One disposable `r2-03-test-db` composite was admitted only for the database
+topology probe. It was never added to the public verbs and was removed after
+the run. No authoritative task, dependency, feature selection, partition,
+worker count, service, or gate changed.
+
+### Nextest worker screening
+
+Each accepted run used the authoritative
+`cargo nextest run --workspace --features mfm-app/test-support` selection and
+passed the exact 974-test, 99-binary inventory. The host exposes eight logical
+CPUs. An immediate `--no-run` invocation normalized the selected artifacts
+before each timed execution.
+
+| Workers | Prewarm | Nextest execution | Outer wall | Result |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 20.06s | 195.512s | 196.16s | 974/974 passed |
+| 4 | 21.08s | 77.498s | 78.35s | 974/974 passed |
+| 8 | 0.57s | 78.762s | 79.26s | 974/974 passed |
+| 16 | 1.01s | 91.415s | 92.21s | 974/974 passed |
+
+Four workers were the screening minimum, but only by 1.264s, or 1.6%, against
+eight workers. Sixteen workers oversubscribed the guest and regressed 16.1%
+against eight. The 4/8-worker result also agrees with R2-01's 78.137s warm
+execution median; it does not justify freezing a host-specific worker count.
+One earlier one-worker observation was discarded because another full CI run
+was active. A malformed `--all-features` probe was also discarded immediately:
+it selected 1,018 rather than 974 tests and encountered an invalid temporary
+directory. Neither discarded interval appears in the table.
+
+Count partitions were not run after worker screening. They would start
+multiple Cargo/Nextest processes against the same target lock, or require
+separate targets and duplicated compilation. Nextest already distributes the
+99 binaries while the checked-in test group applies the narrower constraint
+that matters: one Trybuild UI harness at a time.
+
+### Trybuild and Cargo-lock boundary
+
+The nine UI harnesses remain in the `trybuild-ui` group with `max-threads=1`.
+The shared nested Trybuild target occupies 1.7 GiB. It contains shared
+`debug/deps` state and one generated project per harness, so concurrently
+running the harnesses in separate processes against that directory would
+still contend on one Cargo lock.
+
+Per-harness target isolation was screened as the safe alternative. The guest
+filesystem does not support copy-on-write reflinks: an attempted disposable
+clone failed closed with `Operation not supported` and created no copied
+files. Nine physical copies would require approximately 15.3 GiB before any
+relocation-triggered rebuild, on a filesystem that had approximately 33 GiB
+available at the end of the experiment. Such copies would make apparent
+execution overlap by duplicating compilation and cache ownership. The probe
+therefore stopped rather than presenting that setup cost as a test-execution
+gain, and its empty disposable directories were removed.
+
+The current serialized group is consequently the only validated single-target
+policy. The 8- and 16-worker tails show that more outer concurrency does not
+accelerate these nested-Cargo suites. A future proposal would need a first-class
+precompiled UI artifact or independently owned nested targets with measured
+build and retention cost; removing the group or launching partitions against
+the shared target is not safe.
+
+### Doctest overlap
+
+A standalone doctest command passed all 53 doctest binaries and 42 discovered
+tests. Its first direct interval was 32.49s because it changed Cargo
+fingerprints; the warm concurrent interval was 15.42s. That first interval is
+setup evidence, not part of the overlap comparison.
+
+After a 0.57s Nextest prewarm, four-worker Nextest and warm doctests ran
+concurrently against the same target and both passed. Their joint wall time
+was 89.131s. Nextest itself grew from 78.35s to 89.12s, while the comparable
+warm serial sum is 93.77s. The overlap therefore saved only 4.64s, or 4.9%,
+and delayed the binary-test result by 10.77s. Doctest overlap is rejected.
+
+### Postgres and parity topology
+
+Managed Postgres selected `127.0.0.1:28180` in slot 1. A warm persistent start
+plus readiness and migration took 0.698s end to end; the migration task itself
+took 0.031s. The online SQLx task already creates a process-unique schema,
+migrates it, deliberately corrupts it, proves rejection, recreates it, proves
+acceptance, and drops it. Each state-store, collect/report, REST, and CLI
+status test also creates a unique schema and drops it. The four parity test
+binaries are therefore database-isolated from one another; they share only
+the managed server, service port, and prebuilt CLI artifact where applicable.
+
+The warm authoritative CI run
+`run-3295302-1784294297744517743` showed the current database chain:
+
+| Leaf | Duration |
+| --- | ---: |
+| online SQLx | 4.631s |
+| CLI build | 7.323s |
+| state/store events | 6.719s |
+| collect then report | 47.685s |
+| REST smoke | 4.568s |
+| CLI status | 12.372s |
+
+These leaves contribute approximately 83.30s serially. Although the admitted
+graph can express independent branches, every Cargo leaf leases the same
+slot-scoped `CARGO_TARGET_DIR`. The runtime correctly prevents concurrent
+writers, so graph edges alone cannot produce Cargo execution overlap.
+
+The disposable graph proved that constraint. It kept online SQLx first, made
+CLI build and schema-isolated parity branches eligible as soon as their true
+inputs existed, and passed all six leaves under
+`run-3442964-1784296496893010769`. It nevertheless took 106.428s. Completion
+timestamps were serial, and its leaf durations were 7.659 / 14.891 / 17.747 /
+51.625 / 5.059 / 8.531s for SQLx, build, status, collect/report, REST, and
+state/store respectively. The shared cache lease preserved correctness but
+made the nominal parallel graph 27.8% slower than the warm authoritative
+chain.
+
+To separate compilation and cache locking from true test execution, the four
+already-built parity binaries were then run against the managed server. The
+serial execution-only durations were 3.11s state/store, 0.24s REST, 6.12s CLI
+status, and 40.69s collect/report: 50.16s total. Bounded concurrent execution
+passed the same 43 tests in 41.109s wall time; the leaves took 3.77 / 0.51 /
+6.84 / 41.10s. This is a 9.05s, 18.0% execution-only reduction, but it is less
+than the RFC's required 30-second end-to-end materiality floor and is not
+implementable merely by removing graph dependencies. A later execution-runner
+design could reconsider precompiled parity binaries, but R2-03 creates no
+implementation proposal.
+
+### Resources, diagnostics, and decision
+
+The reference guest had eight logical CPUs, 15.6 GiB RAM with approximately
+14.4 GiB available after the probes, and 8 GiB swap with 0.55 GiB in use. The
+filesystem had 35.4 GB available at the final sample. The normal database
+target remained 9.8 GiB; repeated feature-screening artifacts grew the
+disposable Nextest target to 11 GiB, reinforcing why duplicate targets are
+not a free execution mechanism. Slot-derived port 28180 and unique schemas
+provided service isolation. Every accepted sample retained ordinary per-task
+stdout/stderr, exit status, exact test counts, and source-line backtraces.
+Coverage drift, a missing temporary directory, unsupported reflinks, and the
+shared-cache lease all produced explicit diagnostics rather than silent
+fallbacks.
+
+No R2-03 topology qualifies: four workers save only 1.6%/1.264s versus eight,
+doctest overlap saves 4.9%/4.64s, and parity execution overlap saves
+18.0%/9.05s only after excluding Cargo/setup. Each misses the requirement to
+improve an end-to-end target by both 15% and 30 seconds. The current serial
+authoritative graph and default Nextest scheduling remain unchanged.
+
+Compilation also remains a bounded residual rather than the whole gate. From
+R2-01, the warm median logged Nextest compile/link interval is 20.62s, only
+9.6% of the 214.081s full-CI median; the clean interval is 48.05s, 14.5% of
+331.422s. Eliminating either interval entirely would still leave the dominant
+test and parity execution floor. R2-04 should therefore characterize the
+durable Cargo verification target without assuming execution-topology changes
+will amplify its result.
