@@ -27,9 +27,7 @@ use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use mfm_values::NonEmpty;
 use serde::{de, Deserialize, Serialize};
 
-use crate::native_balance_collect::{
-    adapter_binding, adapter_required_error, state_kind, state_version,
-};
+use crate::identity::{adapter_binding, adapter_required_error, state_kind, state_version};
 use crate::{
     address_erc20_balance_fact_visibility, canonical_evm_block_hash,
     validate_canonical_erc20_contract_address, EvmAddressErc20BalanceObservation,

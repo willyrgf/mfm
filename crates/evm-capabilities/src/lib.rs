@@ -471,7 +471,7 @@ pub trait EvmTransactionSession: Send + Sync {
         request: &'a EvmTransactionEstimate,
     ) -> EvmSessionFuture<'a, U256>;
 
-    /// Submits exact signed bytes and requires the returned hash to match.
+    /// Submits exact signed bytes and returns the provider-reported hash for caller validation.
     fn submit_raw_transaction<'a>(
         &'a self,
         signed_bytes: &'a [u8],

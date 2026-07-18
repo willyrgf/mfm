@@ -1,7 +1,8 @@
 use super::*;
 
 impl ReplayBroker {
-    pub(super) fn side_effect_intent_evidence(
+    /// Returns retained side-effect intent evidence from replay records only.
+    pub fn side_effect_intent_evidence(
         &self,
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<SideEffectIntentReplayEvidence> {

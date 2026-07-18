@@ -11,7 +11,7 @@ use mfm_program::{NoContext, PureState, StateError, StateResult, StateSpec, Vali
 use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use serde::{de, Deserialize, Serialize};
 
-use crate::native_balance_collect::{state_kind, state_version};
+use crate::identity::{state_kind, state_version};
 use crate::{
     canonical_evm_block_hash, EvmErc20BalanceBatchReceipt, EvmJointTip,
     EvmNativeBalanceBatchReceipt, EvmStateError, RedactedEvmSessionEvidence,

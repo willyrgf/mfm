@@ -21,6 +21,7 @@ enum Mode {
     BadVersion,
     BadId,
     FeeMissing,
+    WrongSubmitHash,
     ReceiptNull,
     ReceiptRemoved,
     HttpFailure,
@@ -184,6 +185,22 @@ async fn transaction_view_uses_u256_checked_fees_and_strict_observations() {
     assert_eq!(receipt.status, EvmReceiptStatus::Success);
     assert_eq!(receipt.logs.len(), 1);
     receipt.validate().expect("coherent receipt");
+}
+
+#[tokio::test]
+async fn transaction_submit_preserves_a_wrong_provider_hash_for_adapter_ambiguity() {
+    let server = TestServer::spawn(Mode::WrongSubmitHash).await;
+    let session = session(&server).await;
+    let signed_bytes = [0x01, 0x02, 0x03];
+    let expected_hash = keccak256(signed_bytes);
+
+    let returned_hash = session
+        .submit_raw_transaction(&signed_bytes, expected_hash)
+        .await
+        .expect("well-formed provider hash");
+
+    assert_eq!(returned_hash, OTHER_HASH.parse::<B256>().expect("hash"));
+    assert_ne!(returned_hash, expected_hash);
 }
 
 #[tokio::test]
@@ -354,6 +371,7 @@ fn rpc_result(mode: Mode, request: &Value, method: &str) -> Value {
         "eth_getTransactionCount" => json!("0x7"),
         "eth_maxPriorityFeePerGas" => json!("0x2"),
         "eth_estimateGas" => json!("0x5208"),
+        "eth_sendRawTransaction" if matches!(mode, Mode::WrongSubmitHash) => json!(OTHER_HASH),
         "eth_sendRawTransaction" => {
             let bytes =
                 parse_bytes(request["params"][0].as_str().expect("raw bytes")).expect("bytes");

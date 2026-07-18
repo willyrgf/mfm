@@ -203,6 +203,64 @@ async fn runner_block_leaves_started_attempt_open_without_failure() {
 }
 
 #[tokio::test]
+async fn side_effect_verify_block_leaves_framework_attempt_open_without_failure() {
+    let fixture = fixture_with_first_side_effect_state();
+    let verify_node = fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+            )
+        })
+        .expect("side-effect verify node")
+        .clone();
+    let scheduler = test_scheduler(registered_first_side_effect_and_verify_runners_with(
+        &fixture,
+        DriverSideEffectRunner::new(&fixture),
+        BlockingRunner,
+    ));
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+
+    let mut blocked = false;
+    for _ in 0..12 {
+        match drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("drive side-effect pair")
+        {
+            SchedulerStatus::Advanced => {}
+            SchedulerStatus::Blocked => {
+                blocked = true;
+                break;
+            }
+            SchedulerStatus::PublicOutputProjected => {
+                panic!("verify runner blocked before public output")
+            }
+        }
+    }
+    assert!(blocked, "verify runner must report an operational block");
+    let stream = store.load_run_stream(&fixture.run_id);
+    assert!(stream.iter().any(|event| matches!(
+        event.payload(),
+        events::KernelEventPayload::StateAttemptStarted(payload)
+            if payload.node_id == verify_node.node_id
+    )));
+    assert!(stream.iter().all(|event| !matches!(
+        event.payload(),
+        events::KernelEventPayload::StateAttemptFailed(payload)
+            if payload.node_id == verify_node.node_id
+    )));
+}
+
+#[tokio::test]
 async fn side_effect_driver_submits_from_started_projection() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let (_, mut store) = started_side_effect_fixture_run(&fixture).await;

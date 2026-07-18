@@ -10,9 +10,9 @@ pub(crate) fn register_evm_collector_runners(
     runtime_config: Arc<LiveTransportRuntime>,
 ) -> Result<(), PublicError> {
     let validate_runtime = Arc::clone(&runtime_config);
-    let bind_runtime = runtime_config;
+    let bind_runtime = Arc::clone(&runtime_config);
     let capabilities = mfm_adapters_evm::EvmRunnerCapabilities::new(
-        artifacts,
+        artifacts.clone(),
         move |binding| validate_runtime.validate_evm_network_binding(binding),
         move |binding| {
             let runtime = Arc::clone(&bind_runtime);
@@ -20,5 +20,26 @@ pub(crate) fn register_evm_collector_runners(
         },
     );
     mfm_adapters_evm::register_evm_collectors_runners(registry, capabilities)?;
+    let validate_runtime = Arc::clone(&runtime_config);
+    let bind_transaction_runtime = Arc::clone(&runtime_config);
+    let bind_signer_runtime = runtime_config;
+    let transaction_capabilities = mfm_adapters_evm::EvmTransactionRunnerCapabilities::new(
+        artifacts,
+        mfm_runtime::CapabilityImplementationId::new(
+            mfm_signers_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID,
+        )?,
+        move |binding, signer_ref| {
+            validate_runtime.validate_evm_mutation_binding(binding, signer_ref)
+        },
+        move |binding| {
+            let runtime = Arc::clone(&bind_transaction_runtime);
+            Box::pin(async move { runtime.bind_evm_transaction_session(binding).await })
+        },
+        move |signer_ref| {
+            let runtime = Arc::clone(&bind_signer_runtime);
+            Box::pin(async move { runtime.bind_evm_signer(signer_ref).await })
+        },
+    );
+    mfm_adapters_evm::register_evm_transaction_runner(registry, transaction_capabilities)?;
     Ok(())
 }

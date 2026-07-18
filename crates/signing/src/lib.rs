@@ -88,6 +88,17 @@ pub trait SigningProvider: Send + Sync {
     fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a>;
 }
 
+/// Provider contract for profiles whose repeated signing result is byte-identical.
+///
+/// Implementors certify that the same signer identity, algorithm, profile, and digest always
+/// produce the same canonical signature bytes, including after provider reconstruction. This
+/// stronger contract is required when recovery must regenerate bearer material that is purposely
+/// not persisted.
+pub trait DeterministicSigningProvider: SigningProvider {
+    /// Returns the one deterministic profile certified by this provider binding.
+    fn deterministic_profile_id(&self) -> &'static str;
+}
+
 /// Process-local signer reference used by workflow config and runtime binding.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

@@ -7,14 +7,11 @@ use std::future;
 use std::num::NonZeroU64;
 use std::str::FromStr;
 
-use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
 use mfm_evm_capabilities::{EvmBlock, EvmReadCapability, EvmSessionEvidence};
 use mfm_fact_capabilities::FactRecordCapability;
-use mfm_ids::{
-    AdapterKind, AdapterVersion, DigestAlgorithm, LocalPublicId, StateKind, StateVersion,
-};
+use mfm_ids::{LocalPublicId, StateKind, StateVersion};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_program::{
@@ -25,15 +22,12 @@ use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use mfm_values::NonEmpty;
 use serde::{de, Deserialize, Serialize};
 
+use crate::identity::{adapter_binding, adapter_required_error, state_kind, state_version};
 use crate::{
     address_native_balance_fact_visibility, validate_canonical_evm_account,
     EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact,
     EvmAddressNativeBalanceSubject, EvmStateError, RedactedEvmSessionEvidence,
 };
-
-pub(crate) const NAMESPACE: &str = "mfm.evm";
-const EVM_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
-const EVM_JSONRPC_ADAPTER_VERSION: &str = "mfm.evm.jsonrpc.adapter.v1";
 /// Exact number of source reads required by one hash-pinned native-balance observation.
 pub const EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS: u64 = 2;
 /// Exact number of source reads required to resolve an EVM network collection joint tip.
@@ -42,51 +36,6 @@ pub const EVM_JOINT_TIP_SOURCE_READS: u64 = 1;
 pub const EVM_NATIVE_BALANCE_COVERAGE: &str = "configured_only";
 /// Closed source-status claim for a successful EVM native source observation.
 pub const EVM_NATIVE_BALANCE_SOURCE_STATUS: &str = "ok";
-
-/// Returns the stable EVM JSON-RPC adapter kind for native collectors.
-pub fn evm_jsonrpc_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
-    AdapterKind::new(
-        NAMESPACE,
-        EVM_JSONRPC_ADAPTER_NAME,
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"mfm.evm.adapter:jsonrpc"),
-    )
-}
-
-/// Returns the stable EVM JSON-RPC adapter version for native collectors.
-pub fn evm_jsonrpc_adapter_version() -> Result<AdapterVersion, mfm_ids::IdentityError> {
-    AdapterVersion::new(EVM_JSONRPC_ADAPTER_VERSION)
-}
-
-pub(crate) fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
-    Ok(vec![AdapterBindingSpec {
-        adapter_kind: evm_jsonrpc_adapter_kind().map_err(|error| {
-            mfm_program::PlanError::Key(format!("EVM JSON-RPC adapter kind invalid: {error}"))
-        })?,
-        adapter_version: evm_jsonrpc_adapter_version().map_err(|error| {
-            mfm_program::PlanError::Key(format!("EVM JSON-RPC adapter version invalid: {error}"))
-        })?,
-    }])
-}
-
-pub(crate) fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
-    StateKind::new(
-        NAMESPACE,
-        name,
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("mfm.evm.state:{name}").as_bytes()),
-    )
-    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-}
-
-pub(crate) fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
-    StateVersion::new(format!("mfm.evm.state.{name}.v1"))
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-}
-
-pub(crate) fn adapter_required_error(state_name: &'static str) -> StateError {
-    StateError::Message(format!("{state_name} requires an EVM adapter runner"))
-}
 
 /// Shared joint tip resolved once for a same-network multi-subject batch.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmValue)]

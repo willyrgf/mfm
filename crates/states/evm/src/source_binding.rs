@@ -7,7 +7,7 @@ use serde::{de, Deserialize, Serialize};
 
 use crate::EvmStateError;
 
-/// Persisted redacted session evidence used by the pre-collapse collector graph.
+/// Persisted redacted evidence for one checked EVM session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm",

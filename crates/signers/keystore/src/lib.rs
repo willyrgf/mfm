@@ -29,12 +29,15 @@ use std::path::{Path, PathBuf};
 
 use mfm_core::keystore::{Keystore, KeystoreConfig, KeystoreError};
 use mfm_signing::{
-    PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture, SigningProvider,
-    SigningRequest, SigningResult, SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID,
-    SECP256K1_RFC6979_LOW_S_PROFILE_ID,
+    DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SignerRef, SigningError,
+    SigningFuture, SigningProvider, SigningRequest, SigningResult,
+    SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
+
+/// Runtime implementation identity for the deterministic local-keystore signer.
+pub const KEYSTORE_SIGNING_IMPLEMENTATION_ID: &str = "mfm.signing.keystore.rfc6979.v1";
 
 /// One-binding MFM keystore signing provider.
 #[derive(Clone)]
@@ -166,6 +169,12 @@ impl SigningProvider for KeystoreSignerProvider {
                 .map_err(SigningError::redacted_provider_failure)?
                 .map_err(signing_error_from_provider)
         })
+    }
+}
+
+impl DeterministicSigningProvider for KeystoreSignerProvider {
+    fn deterministic_profile_id(&self) -> &'static str {
+        SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }
 }
 

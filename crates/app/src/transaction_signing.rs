@@ -47,7 +47,7 @@ pub async fn sign_eip1559_transaction(
         .map_err(public_signing_error)
 }
 
-fn assemble_keystore_signer(
+pub(crate) fn assemble_keystore_signer(
     runtime_config_path: PathBuf,
     signer_ref: SignerRef,
 ) -> Result<KeystoreSignerProvider, PublicError> {
@@ -94,6 +94,7 @@ fn public_signing_error(error: EvmSigningError) -> PublicError {
             "EIP-1559 transaction inputs are invalid",
         ),
         EvmSigningError::Signing(_)
+        | EvmSigningError::DeterministicProfileMismatch
         | EvmSigningError::SigningResultMismatch { .. }
         | EvmSigningError::InvalidSignature { .. }
         | EvmSigningError::SignedHashMismatch => PublicError::backend(

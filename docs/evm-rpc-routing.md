@@ -98,6 +98,9 @@ numeric codes, but never endpoints, authorization, provider messages, response b
 Replay uses the certified spec, append-only stream, retained typed artifacts, and replay verifiers.
 It must not open an RPC connection, resolve a current route, or construct a signer.
 
+For the complete transaction state, lane, preparation, recovery, receipt, and finality contract,
+see [EVM Transactions](evm-transactions.md).
+
 Contributor ownership:
 
 - `mfm-runtime-config` parses and selectively resolves routes and signers;

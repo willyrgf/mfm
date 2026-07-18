@@ -108,11 +108,18 @@ fn evm_request(address: Address) -> SigningRequest {
 async fn signatures_are_byte_identical_across_provider_and_keystore_reopen() {
     let keystore = test_keystore();
     let request = evm_request(keystore.address);
+    let first_provider = provider(&keystore, keystore.entry_id);
+    let second_provider = provider(&keystore, keystore.entry_id);
 
-    let first = SigningProvider::sign(&provider(&keystore, keystore.entry_id), &request)
+    assert_eq!(
+        DeterministicSigningProvider::deterministic_profile_id(&first_provider),
+        SECP256K1_RFC6979_LOW_S_PROFILE_ID
+    );
+
+    let first = SigningProvider::sign(&first_provider, &request)
         .await
         .expect("first sign");
-    let second = SigningProvider::sign(&provider(&keystore, keystore.entry_id), &request)
+    let second = SigningProvider::sign(&second_provider, &request)
         .await
         .expect("second sign");
 

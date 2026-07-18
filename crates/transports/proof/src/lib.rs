@@ -20,12 +20,12 @@ use mfm_ids::ContentDigest;
 use mfm_program::{SideEffectState, StateSpec};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    load_materialized_struct_input, load_runner_config_for_node,
-    load_side_effect_artifact_for_node, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
-    MaterializedInputNode, MaterializedInputs, RunnerArtifactBuilder, RunnerCapabilityBinding,
-    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectAdapter,
-    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
+    load_materialized_struct_input, load_runner_config_for_node, load_side_effect_artifact,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    MaterializedInputs, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectAdapter, SideEffectDriver,
+    SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
     SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
@@ -235,13 +235,13 @@ async fn proof_state_material(
 async fn load_proof_side_effect_artifact<T>(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
-    producer_node: &spec::NodeSpec,
+    _producer_node: &spec::NodeSpec,
     artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<T>
 where
     T: mfm_values::MfmValue + serde::de::DeserializeOwned,
 {
-    load_side_effect_artifact_for_node::<T>(artifact, role, &producer_node.node_id, artifacts)
+    load_side_effect_artifact::<T>(artifact, role, artifacts)
         .await
         .map(|(value, _)| value)
 }

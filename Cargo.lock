@@ -2270,11 +2270,14 @@ dependencies = [
 name = "mfm-adapters-evm"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
  "hex",
  "mfm-canonical",
+ "mfm-capabilities",
  "mfm-events",
  "mfm-evm-capabilities",
+ "mfm-evm-signing",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
@@ -2282,6 +2285,7 @@ dependencies = [
  "mfm-program-derive",
  "mfm-replay",
  "mfm-runtime",
+ "mfm-signing",
  "mfm-spec",
  "mfm-states-evm",
  "mfm-store",
@@ -2289,6 +2293,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2896,18 +2901,22 @@ dependencies = [
 name = "mfm-states-evm"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
+ "hex",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-effects",
  "mfm-evm-capabilities",
  "mfm-evm-core",
+ "mfm-evm-signing",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
+ "mfm-signing",
  "mfm-values",
  "serde",
  "serde_json",

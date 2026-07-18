@@ -225,11 +225,7 @@ impl EvmJsonRpcSession {
                 json!([encode_bytes(signed_bytes)]),
             )
             .await?;
-        let returned = parse_hash(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)?;
-        if returned != expected_hash {
-            return Err(EvmTransportError::InvalidResponse);
-        }
-        Ok(returned)
+        parse_hash(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
     }
 
     async fn transaction(

@@ -2,7 +2,10 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alloy_primitives::{address, b256, hex, PrimitiveSignature};
-use mfm_signing::{PublicSigningIdentity, SignatureBytes, SigningFuture, SigningProfileId};
+use mfm_signing::{
+    DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
+    SigningProfileId, SigningProvider,
+};
 
 const EXPECTED_SENDER: Address = address!("dd6b8b3dc6b7ad97db52f08a275ff4483e024cea");
 
@@ -63,6 +66,26 @@ impl SigningProvider for FixedProvider {
             self.signature.clone(),
         );
         Box::pin(async move { result })
+    }
+}
+
+impl DeterministicSigningProvider for FixedProvider {
+    fn deterministic_profile_id(&self) -> &'static str {
+        SECP256K1_RFC6979_LOW_S_PROFILE_ID
+    }
+}
+
+struct WrongProfileProvider(FixedProvider);
+
+impl SigningProvider for WrongProfileProvider {
+    fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a> {
+        self.0.sign(request)
+    }
+}
+
+impl DeterministicSigningProvider for WrongProfileProvider {
+    fn deterministic_profile_id(&self) -> &'static str {
+        "secp256k1.other.deterministic.v1"
     }
 }
 
@@ -232,6 +255,22 @@ async fn canonical_service_calls_provider_exactly_once() {
 
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(keccak256(signed.bytes()), signed.transaction_hash());
+}
+
+#[tokio::test]
+async fn canonical_service_rejects_the_wrong_deterministic_provider_before_signing() {
+    let provider = WrongProfileProvider(FixedProvider::alloy_vector());
+    let error = sign_eip1559(
+        &alloy_vector_envelope(),
+        signer_ref(),
+        EXPECTED_SENDER,
+        &provider,
+    )
+    .await
+    .expect_err("wrong deterministic provider profile");
+
+    assert_eq!(error, EvmSigningError::DeterministicProfileMismatch);
+    assert_eq!(provider.0.calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

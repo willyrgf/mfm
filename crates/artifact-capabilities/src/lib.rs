@@ -310,7 +310,6 @@ impl ArtifactReadRequest {
     pub fn from_side_effect_projection(
         artifact: &store::SideEffectArtifactProjection,
         artifact_role: ArtifactRole,
-        producer_node_id: NodeId,
     ) -> Self {
         Self::from_expectation(ArtifactEvidenceExpectation {
             artifact_id: artifact.artifact_id.clone(),
@@ -323,7 +322,7 @@ impl ArtifactReadRequest {
                 None => OptionalEvidence::Any,
             },
             semantic_type_id: OptionalEvidence::Any,
-            producer_node_id: OptionalEvidence::Present(producer_node_id),
+            producer_node_id: OptionalEvidence::Present(artifact.producer_node_id.clone()),
             producer_seed_id: OptionalEvidence::Absent,
             artifact_role: Some(artifact_role),
         })

@@ -347,6 +347,7 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, Publ
     registry.register_fact_type::<mfm_op_btc_collectors::CollectorCheckpointFact>()?;
     registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
     mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut registry)?;
+    registry.register_state::<mfm_states_evm::SubmitEvmTransactionState>()?;
     registry.register_fact_type::<mfm_op_evm_collectors::EvmAddressNativeBalanceSnapshotFact>()?;
     registry.register_fact_type::<mfm_op_evm_collectors::EvmAddressErc20BalanceSnapshotFact>()?;
     mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(

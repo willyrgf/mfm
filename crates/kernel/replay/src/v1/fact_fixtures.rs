@@ -33,6 +33,7 @@ pub(super) fn replay_broker_with_facts(
         intents: BTreeMap::new(),
         prepared_invocations: BTreeMap::new(),
         submissions: BTreeMap::new(),
+        submission_unknown: BTreeMap::new(),
         not_submitted: BTreeMap::new(),
         receipts: BTreeMap::new(),
         confirmations: BTreeMap::new(),

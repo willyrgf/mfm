@@ -1,32 +1,42 @@
 #![warn(missing_docs)]
-//! Reusable EVM holding fact state contracts.
+//! Reusable EVM transaction and holding fact state contracts.
 //!
 //! This crate owns typed EVM native and ERC-20 balance snapshot facts used by portfolio
 //! collectors and report selection, plus source-near observe/record states. It defines no
 //! JSON-RPC transport, runtime source routing, workflow topology, CLI, REST, or app registration.
 //!
-//! Generic EVM transaction and exact-anchor validation states will replace the
-//! deleted fixed contract lifecycle in this crate.
+//! [`SubmitEvmTransactionState`] is the sole generic mutation state. Exact-anchor
+//! validation will join it when external-read execution is replaced; the temporary
+//! portfolio collectors move to their owning vertical slice afterward.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mfm_states_evm::EvmAddressErc20BalanceSubject;
+//! use alloy_primitives::{Address, U256};
+//! use mfm_signing::SignerRef;
+//! use mfm_states_evm::{EvmTransactionAction, EvmTransactionActionKind, EvmTransactionConfig};
 //!
-//! let subject = EvmAddressErc20BalanceSubject::new(
+//! let sender = Address::from([0x11; 20]);
+//! let destination = Address::from([0x22; 20]);
+//! let config = EvmTransactionConfig::new(
 //!     "ethereum-mainnet",
 //!     1,
-//!     "0x0000000000000000000000000000000000000001",
-//!     "0x0000000000000000000000000000000000000002",
+//!     sender,
+//!     SignerRef::new("treasury").expect("signer reference"),
+//!     Vec::new(),
 //! )?;
-//! assert_eq!(subject.contract_address(), "0x0000000000000000000000000000000000000001");
+//! let action = EvmTransactionAction::call(destination, [], U256::from(1))?;
+//! assert_eq!(config.chain_id(), 1);
+//! assert_eq!(action.action_kind(), EvmTransactionActionKind::Call);
 //! # Ok::<(), mfm_states_evm::EvmStateError>(())
 //! ```
 
 mod erc20_balance_collect;
+mod identity;
 mod native_balance_collect;
 mod network_collection_receipt;
 mod source_binding;
+mod transaction;
 
 pub use erc20_balance_collect::{
     assemble_evm_erc20_balance_batch_receipt, erc20_balance_call_request,
@@ -46,22 +56,23 @@ pub use erc20_balance_collect::{
 };
 
 pub use native_balance_collect::{
-    assemble_evm_native_balance_batch_receipt, evm_jsonrpc_adapter_kind,
-    evm_jsonrpc_adapter_version, materialize_evm_joint_tip, native_balance_record_visibility,
-    normalize_evm_native_balance_from_capability, normalize_evm_native_balance_observation,
-    validate_observe_evm_native_balance_config, validate_resolve_evm_joint_tip_config,
-    AssembleEvmNativeBalanceBatchReceiptConfig, AssembleEvmNativeBalanceBatchReceiptInput,
-    AssembleEvmNativeBalanceBatchReceiptInputHandles, AssembleEvmNativeBalanceBatchReceiptState,
-    EvmAddressNativeBalanceObservation, EvmJointTip, EvmNativeBalanceBatchReceipt,
-    EvmNativeBalanceReceiptEntry, EvmNativeBalanceSourceKey, ObserveEvmNativeBalanceConfig,
-    ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceInputHandles,
-    ObserveEvmNativeBalanceState, RecordEvmNativeBalanceFactConfig,
-    RecordEvmNativeBalanceFactInput, RecordEvmNativeBalanceFactInputHandles,
-    RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
-    ResolveEvmJointTipInputHandles, ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS,
-    EVM_NATIVE_BALANCE_COVERAGE, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
-    EVM_NATIVE_BALANCE_SOURCE_STATUS,
+    assemble_evm_native_balance_batch_receipt, materialize_evm_joint_tip,
+    native_balance_record_visibility, normalize_evm_native_balance_from_capability,
+    normalize_evm_native_balance_observation, validate_observe_evm_native_balance_config,
+    validate_resolve_evm_joint_tip_config, AssembleEvmNativeBalanceBatchReceiptConfig,
+    AssembleEvmNativeBalanceBatchReceiptInput, AssembleEvmNativeBalanceBatchReceiptInputHandles,
+    AssembleEvmNativeBalanceBatchReceiptState, EvmAddressNativeBalanceObservation, EvmJointTip,
+    EvmNativeBalanceBatchReceipt, EvmNativeBalanceReceiptEntry, EvmNativeBalanceSourceKey,
+    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
+    ObserveEvmNativeBalanceInputHandles, ObserveEvmNativeBalanceState,
+    RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
+    RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
+    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
+    ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS, EVM_NATIVE_BALANCE_COVERAGE,
+    EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS, EVM_NATIVE_BALANCE_SOURCE_STATUS,
 };
+
+pub use identity::{evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version};
 
 pub use network_collection_receipt::{
     assemble_evm_network_collection_receipt,
@@ -72,6 +83,15 @@ pub use network_collection_receipt::{
 };
 
 pub use source_binding::RedactedEvmSessionEvidence;
+pub use transaction::{
+    evm_sender_lane_resource_claim, EvmAccessListEntry, EvmBlockAnchor, EvmExecutionStatus,
+    EvmPreparedTransaction, EvmSenderLane, EvmTransactionAction, EvmTransactionActionKind,
+    EvmTransactionConfig, EvmTransactionConfirmation, EvmTransactionIntent, EvmTransactionLog,
+    EvmTransactionOutcome, EvmTransactionReceipt, EvmTransactionRecoveryEvidence,
+    EvmTransactionResult, EvmTransactionSubmission, EvmTransactionSuccess, EvmUnsignedTransaction,
+    SubmitEvmTransactionState, EVM_GAS_POLICY, EVM_SENDER_LANE_NAMESPACE,
+    EVM_TRANSACTION_DATA_MAX_BYTES, EVM_TRANSACTION_FEE_POLICY,
+};
 
 use std::str::FromStr;
 

@@ -116,6 +116,9 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             .await
         {
             Ok(output) => output,
+            Err(RuntimeError::Blocked(_)) => {
+                return Ok(AttemptRunStatus::OperationalBlock);
+            }
             Err(error) => {
                 return terminalize_observed_failure(store, failure_context, error).await;
             }

@@ -482,6 +482,13 @@ any domain-specific deployment or configuration topology. A reusable descriptor 
 imply a public operation or setup surface, and the app publishes only certified objectives with a
 current consumer.
 
+`SubmitEvmTransactionState` is registered by app certification and runner assembly as reusable
+substrate. Its runner preclaims the exact `mfm.evm.sender_nonce` lane, prepares one immutable
+EIP-1559 envelope, and delegates submission/observation to one adapter contract. Read-only services
+and existing portfolio execution do not resolve signer material merely because this descriptor is
+registered; the exact signer and referenced keystore are loaded only when a live transaction node
+is admitted or executed.
+
 ### Rule 5: Runtime Routing Is Not Semantic Config
 
 Semantic config describes domain intent. Runtime process config chooses concrete local resources.

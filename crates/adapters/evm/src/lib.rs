@@ -1,10 +1,11 @@
 #![warn(missing_docs)]
-//! EVM collector adapter runners.
+//! EVM transaction and collector adapter runners.
 //!
 //! Binds reusable EVM native-balance and ERC-20 state contracts to block, balance, and generic
 //! call-read capabilities. Protocol IO stays in the transport crate; this crate owns request
 //! mapping, redacted evidence recording, replay recomputation, runner registration, and managed
-//! fact recording.
+//! fact recording. The transaction binding owns one-transaction prepare, sign,
+//! submit, recovery, receipt/finality observation, and evidence-only replay.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -60,6 +61,14 @@ use mfm_states_evm::{
 use mfm_store::v1 as store;
 use mfm_values::{MfmValue, NonEmpty};
 use serde::{Deserialize, Serialize};
+
+mod transaction;
+
+pub use transaction::{
+    is_evm_transaction_replay_intent, register_evm_transaction_runner,
+    verify_evm_transaction_replay, EvmSigningProviderBindFuture, EvmTransactionRunnerCapabilities,
+    EvmTransactionSessionBindFuture,
+};
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";

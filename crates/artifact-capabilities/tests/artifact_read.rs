@@ -230,11 +230,11 @@ fn side_effect_projection_request_accepts_unprojected_schema_and_semantic_identi
             .evidence_hash()
             .expect("prepared evidence hash"),
         schema_id: None,
+        producer_node_id: node_id("producer"),
     };
     let request = ArtifactReadRequest::from_side_effect_projection(
         &projection,
         ArtifactRole::PreparedInvocation,
-        node_id("producer"),
     );
 
     VerifiedArtifactBytes::new(bytes, evidence, &request)

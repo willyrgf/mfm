@@ -7,7 +7,7 @@ use mfm_capabilities::{CapabilitySetFor, CapabilitySpec};
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    DescriptorId, DigestAlgorithm, NodeId, SchemaId,
+    DescriptorId, DigestAlgorithm, SchemaId,
 };
 use mfm_program::{EffectRunner, MfmFactType, StateSpec};
 use mfm_spec::v1 as spec;

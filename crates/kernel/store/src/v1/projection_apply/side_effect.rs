@@ -209,6 +209,7 @@ pub(super) fn apply_side_effect_invocation_prepared(
         &payload.prepared_hash,
         &payload.prepared_artifact_evidence_hash,
         &payload.prepared_schema_id,
+        &payload.node_id,
     );
     let resource_key = match (&previous.resource_key, &payload.resource_key) {
         (Some(held), Some(prepared)) if held == prepared => Some(held.clone()),

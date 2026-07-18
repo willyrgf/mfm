@@ -271,13 +271,43 @@ three state packages, lifecycle schemas, adapter graph, and historical-log and n
 authorities were deleted because no operation or application entry point owned them. There is no
 compatibility facade or library-only lifecycle graph.
 
-The owned replacement is intentionally narrower and lands as reusable state contracts, not as a
-restored lifecycle: one EIP-1559 transaction state whose closed action is direct `Create` or
-ordinary `Call`, plus one independent exact-anchor code/call validation state. One side-effect node
-will represent one transaction. Operation crates will own constructor/call encoding and any
-dependency-ordered contract workflow. Until those state contracts and adapters are registered,
-generic transaction/signing and exact code/call capability foundations do not by themselves create
-executable state authority.
+The owned replacement is intentionally narrower and is registered as reusable state authority, not
+as a restored lifecycle. `SubmitEvmTransactionState` is the sole EIP-1559 mutation state and its
+closed action is direct `Create` or ordinary `Call`; one side-effect node always represents one
+transaction. Operation crates own constructor/call encoding and any dependency-ordered contract
+workflow. The independent exact-anchor code/call validation state lands with the external-read
+execution contract; neither primitive creates a public operation or application entry point by
+itself.
+
+Transaction idempotency is the full schema- and semantic-bound immutable authored intent: semantic
+network and chain, expected sender, signer ref, deterministic signing profile, action bytes/value,
+access list, and the one checked gas/fee policy. The later prepared invocation is separate authority.
+Under the exclusive `(network_id, chain_id, expected_sender)` lane, it fixes the pending nonce, fee
+observations, gas estimate, unsigned envelope, signing digest, expected signed hash, derived CREATE
+address when applicable, and redacted checked-session evidence. Preparation contains no signature,
+raw signed envelope, endpoint, credential, keystore path, or provider body.
+
+The adapter signs once during an ordinary preparation and holds the resulting bearer envelope only
+in a bounded process-local one-shot cache. Submission consumes those exact bytes. After process loss,
+recovery reconstructs the retained unsigned envelope, requests the certified deterministic signature
+again, requires the same expected hash, and may rebroadcast only the byte-identical envelope. An
+empty exact-hash lookup remains `SubmissionUnknown`; EVM nonce observations never mint a
+non-submission proof. The sender lane serializes MFM attempts only and cannot reserve a nonce against
+another wallet, operator, or process.
+
+The mutation runner binds a `DeterministicSigningProvider` and records the concrete signing
+capability implementation independently from the transaction-session implementation. The keystore
+provider identity is `mfm.signing.keystore.rfc6979.v1`; the EVM signing boundary rejects a provider
+whose deterministic profile is not `secp256k1.rfc6979.recoverable.low_s.v1` before requesting a
+signature. Implementing only the unconstrained generic signing-provider contract is insufficient.
+
+Transaction lookup must match every prepared public field. Receipts retain strict status, optional
+contract address, and complete coherent logs. Only a successful direct `Create` may carry a contract
+address, and it must be the sender/nonce-derived address; reverted creation and every `Call` forbid
+one. Revert is a terminal external effect. Finalized evidence re-reads the unchanged receipt, checks
+its number/hash against a block-by-number result, and proves the certified depth against a fresh
+head. Replay decodes the same typed intent, preparation, transaction, receipt, and confirmation
+artifacts and recomputes their relations without network, signer, keystore, or current runtime config.
 
 The retained transaction-signing foundation is one canonical path in `mfm-evm-signing`. It admits
 one opaque Alloy `TxEip1559`, obtains its signing digest from Alloy, builds one generic digest-sign

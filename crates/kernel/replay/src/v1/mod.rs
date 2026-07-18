@@ -42,6 +42,7 @@ pub use self::evidence::{
     SideEffectConfirmationReplayInput, SideEffectEvidenceReplayRequest,
     SideEffectIntentReplayEvidence, SideEffectReceiptReplayInput, SideEffectReplayFrame,
     SideEffectReplayVerifier, SideEffectSubmissionReplayInput, SubmissionReplayEvidence,
+    SubmissionUnknownReplayEvidence,
 };
 
 /// Result type for replay broker operations.
@@ -302,6 +303,36 @@ impl SideEffectReplayArtifact for side_effect::SubmissionObserved {
     }
 }
 
+impl SideEffectReplayArtifact for side_effect::SubmissionUnknown {
+    fn artifact_id(&self) -> &ArtifactId {
+        &self.evidence_artifact_id
+    }
+
+    fn evidence_hash(&self) -> &ContentDigest {
+        &self.evidence_hash
+    }
+
+    fn artifact_evidence_hash(&self) -> &ContentDigest {
+        &self.evidence_artifact_evidence_hash
+    }
+
+    fn evidence_schema_id(&self) -> &SchemaId {
+        &self.evidence_schema_id
+    }
+
+    fn artifact_role(&self) -> ArtifactRole {
+        ArtifactRole::SubmissionUnknownEvidence
+    }
+
+    fn producer_node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    fn mismatch_message(&self) -> &'static str {
+        "submission-unknown evidence mismatch"
+    }
+}
+
 impl SideEffectReplayArtifact for side_effect::NotSubmittedProven {
     fn artifact_id(&self) -> &ArtifactId {
         &self.proof_artifact_id
@@ -446,6 +477,7 @@ pub struct ReplayBroker {
     intents: BTreeMap<SideEffectPairId, side_effect::IntentPersisted>,
     prepared_invocations: BTreeMap<SideEffectKey, side_effect::InvocationPrepared>,
     submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
+    submission_unknown: BTreeMap<SideEffectKey, side_effect::SubmissionUnknown>,
     not_submitted: BTreeMap<SideEffectKey, side_effect::NotSubmittedProven>,
     receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
     confirmations: BTreeMap<SideEffectKey, side_effect::ConfirmationObserved>,

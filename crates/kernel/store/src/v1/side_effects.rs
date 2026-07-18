@@ -261,12 +261,14 @@ pub(super) fn prepared_invocation_projection(
     content_digest: &ContentDigest,
     evidence_hash: &ContentDigest,
     schema_id: &SchemaId,
+    producer_node_id: &NodeId,
 ) -> SideEffectArtifactProjection {
     SideEffectArtifactProjection {
         artifact_id: artifact_id.clone(),
         content_digest: content_digest.clone(),
         evidence_hash: evidence_hash.clone(),
         schema_id: Some(schema_id.clone()),
+        producer_node_id: producer_node_id.clone(),
     }
 }
 
@@ -598,6 +600,8 @@ pub struct SideEffectArtifactProjection {
     pub evidence_hash: ContentDigest,
     /// Schema id, when the artifact is a typed value.
     pub schema_id: Option<SchemaId>,
+    /// Certified node that produced the retained artifact.
+    pub producer_node_id: NodeId,
 }
 
 /// Side-effect intent evidence projected from the authoritative run stream.

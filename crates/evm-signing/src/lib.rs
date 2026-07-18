@@ -33,9 +33,10 @@ use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B256, U256};
 use mfm_signing::{
-    ExpectedSignerIdentity, SignerRef, SigningAlgorithmId, SigningDomainId, SigningError,
-    SigningProfileId, SigningProvider, SigningPurposeId, SigningRequest, SigningResult,
-    SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
+    DeterministicSigningProvider, ExpectedSignerIdentity, SignerRef, SigningAlgorithmId,
+    SigningDomainId, SigningError, SigningProfileId, SigningPurposeId, SigningRequest,
+    SigningResult, SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID,
+    SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
 
 /// Result type for canonical EVM signing operations.
@@ -255,8 +256,11 @@ pub async fn sign_eip1559(
     envelope: &UnsignedEip1559Envelope,
     signer_ref: SignerRef,
     expected_sender: Address,
-    provider: &dyn SigningProvider,
+    provider: &dyn DeterministicSigningProvider,
 ) -> Result<TransientSignedEip1559Envelope> {
+    if provider.deterministic_profile_id() != SECP256K1_RFC6979_LOW_S_PROFILE_ID {
+        return Err(EvmSigningError::DeterministicProfileMismatch);
+    }
     let request = envelope.signing_request(signer_ref, expected_sender)?;
     let result = provider.sign(&request).await?;
     envelope.finalize_signed(&request, expected_sender, &result)
@@ -367,6 +371,9 @@ pub enum EvmSigningError {
     /// Generic signing contract failed.
     #[error("EVM signing request failed: {0}")]
     Signing(#[from] SigningError),
+    /// Bound provider did not certify the required deterministic profile.
+    #[error("EVM signer did not certify the required deterministic profile")]
+    DeterministicProfileMismatch,
     /// Provider result did not match the exact request.
     #[error("EVM signing result mismatch for {field}")]
     SigningResultMismatch {

@@ -72,6 +72,11 @@ impl ReplayVerifierRegistry {
                 },
                 ReplayVerifierRegistration {
                     state_keys: &[],
+                    intent_matcher: Some(mfm_adapters_evm::is_evm_transaction_replay_intent),
+                    verifier: verify_evm_transaction,
+                },
+                ReplayVerifierRegistration {
+                    state_keys: &[],
                     intent_matcher: Some(
                         mfm_transports_proof::is_deterministic_proof_replay_intent,
                     ),
@@ -140,6 +145,10 @@ fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Resul
 
 fn verify_evm(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
     mfm_adapters_evm::verify_evm_collector_replay(broker)
+}
+
+fn verify_evm_transaction(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
+    mfm_adapters_evm::verify_evm_transaction_replay(broker)
 }
 
 fn verify_proof(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {

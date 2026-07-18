@@ -2,7 +2,7 @@
 name = "mfm-adapters-evm"
 version = "0.1.0"
 edition = "2021"
-description = "EVM collector adapter runners for typed workflow execution"
+description = "EVM transaction and temporary collector adapter runners for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -10,14 +10,17 @@ license = "MIT"
 category = "adapter"
 
 [dependencies]
+alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
+mfm-evm-signing = { path = "../../evm-signing" }
 mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
@@ -26,6 +29,7 @@ mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-spec = { path = "../../kernel/spec" }
+mfm-signing = { path = "../../signing" }
 mfm-states-evm = { path = "../../states/evm" }
 mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
@@ -33,3 +37,4 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tokio = { workspace = true }
