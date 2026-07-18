@@ -243,7 +243,7 @@ fn call_request_requires_an_explicit_nonzero_gas_bound() {
 }
 
 #[test]
-fn receipt_rejects_removed_or_incoherent_logs() {
+fn receipt_rejects_removed_incoherent_or_reverted_logs() {
     let transaction_hash = B256::from([1; 32]);
     let block_hash = B256::from([2; 32]);
     let mut receipt = EvmReceipt {
@@ -274,6 +274,30 @@ fn receipt_rejects_removed_or_incoherent_logs() {
         }],
     };
     receipt.validate().expect("coherent receipt");
+    receipt.status = EvmReceiptStatus::Reverted;
+    assert_eq!(
+        receipt.validate(),
+        Err(EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::IncoherentReceipt,
+        })
+    );
+    receipt.logs.clear();
+    receipt.validate().expect("empty reverted receipt");
+
+    receipt.status = EvmReceiptStatus::Success;
+    receipt.logs.push(EvmReceiptLog {
+        address: Address::ZERO,
+        topics: vec![],
+        data: Bytes::new(),
+        block: EvmBlock {
+            number: U256::from(4),
+            hash: block_hash,
+        },
+        transaction_hash,
+        transaction_index: U256::from(3),
+        log_index: U256::ZERO,
+        removed: false,
+    });
     receipt.logs[0].removed = true;
     assert_eq!(
         receipt.validate(),

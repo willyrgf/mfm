@@ -986,7 +986,47 @@ pub enum EvmExecutionStatus {
     Reverted,
 }
 
-/// Complete canonical receipt log.
+/// Complete canonical receipt log with lossless read-only access for operation consumers.
+///
+/// Deterministic event identification does not require serializing internal
+/// evidence or knowing its private field layout:
+///
+/// ```rust
+/// use mfm_states_evm::{EvmTransactionLog, EvmTransactionReceipt};
+///
+/// fn matching_event<'a>(
+///     receipt: &'a EvmTransactionReceipt,
+///     emitting_address: &str,
+///     signature_topic: &str,
+/// ) -> Option<&'a EvmTransactionLog> {
+///     receipt.logs().iter().find(|log| {
+///         let complete_identity = (
+///             log.address(),
+///             log.topics(),
+///             log.data(),
+///             log.block_anchor().number(),
+///             log.block_anchor().hash(),
+///             log.transaction_hash(),
+///             log.transaction_index(),
+///             log.log_index(),
+///             log.removed(),
+///         );
+///         let _ = complete_identity;
+///         log.address() == emitting_address
+///             && log.topics().first().is_some_and(|topic| topic == signature_topic)
+///     })
+/// }
+/// ```
+///
+/// The read surface cannot mutate retained evidence:
+///
+/// ```compile_fail
+/// use mfm_states_evm::EvmTransactionLog;
+///
+/// fn mark_removed(log: &mut EvmTransactionLog) {
+///     log.removed = true;
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -1078,6 +1118,21 @@ impl EvmTransactionReceipt {
         &self.transaction_hash
     }
 
+    /// Returns the canonical transaction index within the block.
+    pub fn transaction_index(&self) -> &str {
+        &self.transaction_index
+    }
+
+    /// Returns the canonical sender address.
+    pub fn sender(&self) -> &str {
+        &self.from
+    }
+
+    /// Returns the canonical destination address, or none for direct creation.
+    pub fn destination(&self) -> Option<&str> {
+        self.to.as_deref()
+    }
+
     /// Returns the strict execution status.
     pub const fn status(&self) -> EvmExecutionStatus {
         self.status
@@ -1086,6 +1141,16 @@ impl EvmTransactionReceipt {
     /// Returns the created contract address, when valid for a successful direct creation.
     pub fn contract_address(&self) -> Option<&str> {
         self.contract_address.as_deref()
+    }
+
+    /// Returns the canonical gas used by this transaction.
+    pub fn gas_used(&self) -> &str {
+        &self.gas_used
+    }
+
+    /// Returns the canonical cumulative gas used in the block.
+    pub fn cumulative_gas_used(&self) -> &str {
+        &self.cumulative_gas_used
     }
 
     /// Returns complete canonical logs.
@@ -1106,6 +1171,11 @@ impl EvmTransactionReceipt {
     /// Returns the inclusion block hash.
     pub fn block_hash_value(&self) -> Result<B256, EvmStateError> {
         block_anchor_hash(&self.block)
+    }
+
+    /// Returns the checked source-bound session provenance for this observation.
+    pub const fn session_evidence(&self) -> &EvmSessionEvidence {
+        &self.session
     }
 
     /// Returns whether another observation has identical on-chain receipt fields.
@@ -1166,6 +1236,9 @@ impl EvmTransactionReceipt {
             }
             _ => {}
         }
+        if matches!(self.status, EvmExecutionStatus::Reverted) && !self.logs.is_empty() {
+            return Err(invalid("reverted receipt contained logs"));
+        }
         if self.logs.len() > MAX_RECEIPT_LOGS {
             return Err(invalid("receipt contained too many logs"));
         }
@@ -1220,6 +1293,46 @@ impl EvmTransactionReceipt {
 }
 
 impl EvmTransactionLog {
+    /// Returns the canonical emitting address.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// Returns ordered canonical topics without permitting mutation.
+    pub fn topics(&self) -> &[String] {
+        &self.topics
+    }
+
+    /// Returns canonical hexadecimal encoding of the arbitrary log-data bytes.
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+
+    /// Returns the exact inclusion block anchor.
+    pub const fn block_anchor(&self) -> &EvmBlockAnchor {
+        &self.block
+    }
+
+    /// Returns the canonical enclosing transaction hash.
+    pub fn transaction_hash(&self) -> &str {
+        &self.transaction_hash
+    }
+
+    /// Returns the canonical transaction index within the block.
+    pub fn transaction_index(&self) -> &str {
+        &self.transaction_index
+    }
+
+    /// Returns the canonical log index within the block.
+    pub fn log_index(&self) -> &str {
+        &self.log_index
+    }
+
+    /// Returns whether the provider marked this log removed.
+    pub const fn removed(&self) -> bool {
+        self.removed
+    }
+
     fn validate_against(&self, receipt: &EvmTransactionReceipt) -> Result<(), EvmStateError> {
         parse_address(&self.address)?;
         if self.topics.len() > MAX_LOG_TOPICS {

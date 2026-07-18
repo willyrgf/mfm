@@ -337,9 +337,12 @@ whose deterministic profile is not `secp256k1.rfc6979.recoverable.low_s.v1` befo
 signature. Implementing only the unconstrained generic signing-provider contract is insufficient.
 
 Transaction lookup must match every prepared public field. Receipts retain strict status, optional
-contract address, and complete coherent logs. Only a successful direct `Create` may carry a contract
-address, and it must be the sender/nonce-derived address; reverted creation and every `Call` forbid
-one. Revert is a terminal external effect. Finalized evidence re-reads the unchanged receipt, checks
+contract address, and complete coherent successful-execution logs with a lossless immutable read
+surface for downstream operations. Only a successful direct `Create` may carry a contract address,
+and it must be the sender/nonce-derived address; reverted creation and every `Call` forbid one.
+Because top-level revert rolls logs back, reverted receipts must have no logs at capability and
+persisted/replay boundaries. Revert is a terminal external effect. Finalized evidence re-reads the
+unchanged receipt, checks
 its number/hash against a block-by-number result, and proves the certified depth against a fresh
 head. Provider, route, transport, HTTP/RPC, response, and source-binding failures after submission
 block the open attempt and resume observation from durable ledger evidence; they never terminalize

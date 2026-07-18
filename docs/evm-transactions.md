@@ -111,14 +111,19 @@ envelope, signature, endpoint, or credential.
 
 ## Receipt and finality
 
-Receipts require explicit success or revert status and complete logs. Every log retains address,
-topics, data, block number/hash, transaction hash/index, log index, and `removed`; removed or
-identity-incoherent logs fail closed.
+Receipts require explicit success or revert status. Every successful-receipt log retains address,
+ordered topics, data, block number/hash, transaction hash/index, log index, and `removed`; removed or
+identity-incoherent logs fail closed. Operations inspect every field through immutable typed
+accessors and can identify/decode events with Alloy without serializing or reparsing the receipt.
+Receipt transaction index, sender, destination, gas quantities, and session provenance are exposed
+through the same read-only surface. A reverted top-level transaction cannot emit durable logs, so a
+reverted receipt containing any log is rejected at live capability conversion and independently by
+persisted/replay validation; logs are never stripped or normalized away.
 
 Only successful direct `Create` may carry `contract_address`, and it must equal the address derived
 from fixed sender and nonce. Successful or reverted `Call`, plus reverted `Create`, must carry none.
-A reverted receipt is a terminal external effect that consumed nonce and gas; the outcome reports
-`Reverted(Create | Call)` and never exposes a created-contract handle.
+A reverted receipt with no logs is a terminal external effect that consumed nonce and gas; the
+outcome reports `Reverted(Create | Call)` and never exposes a created-contract handle.
 
 For `Finalized { depth }`, verification fetches a fresh unchanged receipt, reads its block by number
 and requires the exact retained hash, then reads a fresh head and checks `head - receipt + 1 >= depth`.

@@ -589,8 +589,13 @@ pub struct EvmReceipt {
 }
 
 impl EvmReceipt {
-    /// Validates log identity and removal status.
+    /// Validates execution status, log identity, and removal status.
     pub fn validate(&self) -> Result<()> {
+        if matches!(self.status, EvmReceiptStatus::Reverted) && !self.logs.is_empty() {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::IncoherentReceipt,
+            });
+        }
         for log in &self.logs {
             if log.removed
                 || log.transaction_hash != self.transaction_hash
@@ -664,7 +669,8 @@ pub enum EvmInvalidRequest {
     ZeroCallGasLimit,
     /// Signed transaction bytes were empty.
     EmptySignedTransaction,
-    /// Receipt/log identities were inconsistent or a log was removed.
+    /// Receipt/log identities were inconsistent, a log was removed, or a reverted receipt had
+    /// logs.
     IncoherentReceipt,
     /// A persisted block anchor was malformed or non-canonical.
     InvalidBlockAnchor,

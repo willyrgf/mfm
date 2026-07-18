@@ -92,6 +92,23 @@ fn capability_receipt(
     status: CapabilityReceiptStatus,
     contract_address: Option<Address>,
 ) -> EvmReceipt {
+    let logs = if matches!(status, CapabilityReceiptStatus::Success) {
+        vec![EvmReceiptLog {
+            address: destination(),
+            topics: vec![B256::from([0x66; 32])],
+            data: vec![0xaa, 0xbb].into(),
+            block: EvmBlock {
+                number: U256::from(100),
+                hash: B256::from([0x55; 32]),
+            },
+            transaction_hash: prepared.expected_hash().expect("hash"),
+            transaction_index: U256::from(3),
+            log_index: U256::from(7),
+            removed: false,
+        }]
+    } else {
+        Vec::new()
+    };
     EvmReceipt {
         transaction_hash: prepared.expected_hash().expect("hash"),
         transaction_index: U256::from(3),
@@ -105,19 +122,7 @@ fn capability_receipt(
         status,
         gas_used: U256::from(50_000),
         cumulative_gas_used: U256::from(75_000),
-        logs: vec![EvmReceiptLog {
-            address: destination(),
-            topics: vec![B256::from([0x66; 32])],
-            data: vec![0xaa, 0xbb].into(),
-            block: EvmBlock {
-                number: U256::from(100),
-                hash: B256::from([0x55; 32]),
-            },
-            transaction_hash: prepared.expected_hash().expect("hash"),
-            transaction_index: U256::from(3),
-            log_index: U256::from(7),
-            removed: false,
-        }],
+        logs,
     }
 }
 
@@ -349,6 +354,82 @@ fn receipt_logs_fail_closed_on_removed_or_moved_identity() {
     assert!(
         EvmTransactionReceipt::from_observation(&prepared, &moved, &session("receipt")).is_err()
     );
+}
+
+#[test]
+fn receipt_log_accessors_preserve_complete_lossless_evidence() {
+    let prepared = prepared(
+        EvmTransactionAction::call(destination(), [0x12, 0x36], U256::ZERO).expect("call"),
+        11,
+    );
+    let mut observation = capability_receipt(&prepared, CapabilityReceiptStatus::Success, None);
+    let data = (0..EVM_TRANSACTION_DATA_MAX_BYTES)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    observation.transaction_index = U256::MAX;
+    observation.block.number = U256::MAX;
+    observation.logs[0].data = data.clone().into();
+    observation.logs[0].block = observation.block.clone();
+    observation.logs[0].transaction_index = U256::MAX;
+    observation.logs[0].log_index = U256::MAX;
+    let receipt_session = session("receipt");
+    let receipt =
+        EvmTransactionReceipt::from_observation(&prepared, &observation, &receipt_session)
+            .expect("receipt");
+    let log = &receipt.logs()[0];
+
+    assert_eq!(receipt.transaction_index(), U256::MAX.to_string());
+    assert_eq!(receipt.sender(), canonical_address(sender()));
+    assert_eq!(
+        receipt.destination(),
+        Some(canonical_address(destination()).as_str())
+    );
+    assert_eq!(receipt.gas_used(), "50000");
+    assert_eq!(receipt.cumulative_gas_used(), "75000");
+    assert_eq!(receipt.session_evidence(), &receipt_session);
+    assert_eq!(log.address(), canonical_address(destination()));
+    assert_eq!(log.topics(), &[canonical_hash(B256::from([0x66; 32]))]);
+    assert_eq!(log.data(), canonical_bytes(&data));
+    assert_eq!(
+        log.block_anchor().number_quantity().expect("block number"),
+        U256::MAX
+    );
+    assert_eq!(log.transaction_hash(), receipt.transaction_hash());
+    assert_eq!(log.transaction_index(), U256::MAX.to_string());
+    assert_eq!(log.log_index(), U256::MAX.to_string());
+    assert!(!log.removed());
+}
+
+#[test]
+fn reverted_receipt_logs_fail_at_capability_and_replay_boundaries() {
+    let prepared = prepared(
+        EvmTransactionAction::call(destination(), [0x12, 0x37], U256::ZERO).expect("call"),
+        11,
+    );
+    let submission = submission(&prepared);
+    let mut capability = capability_receipt(&prepared, CapabilityReceiptStatus::Success, None);
+    capability.status = CapabilityReceiptStatus::Reverted;
+    assert!(capability.validate().is_err());
+    assert!(
+        EvmTransactionReceipt::from_observation(&prepared, &capability, &session("receipt"))
+            .is_err()
+    );
+
+    capability.status = CapabilityReceiptStatus::Success;
+    let mut forged =
+        EvmTransactionReceipt::from_observation(&prepared, &capability, &session("receipt"))
+            .expect("successful receipt");
+    forged.status = EvmExecutionStatus::Reverted;
+    let replayed: EvmTransactionReceipt =
+        serde_json::from_slice(&serde_json::to_vec(&forged).expect("forged receipt bytes"))
+            .expect("replay decode");
+    assert!(replayed
+        .validate_with_submission(&prepared, &submission)
+        .is_err());
+
+    let empty_revert = capability_receipt(&prepared, CapabilityReceiptStatus::Reverted, None);
+    EvmTransactionReceipt::from_observation(&prepared, &empty_revert, &session("receipt"))
+        .expect("empty reverted receipt remains valid");
 }
 
 #[test]
