@@ -237,7 +237,7 @@ pub(super) fn test_spec() -> TypedExecutionSpec {
                 capabilities: no_caps.clone(),
                 emitted_fact_descriptors: Vec::new(),
                 runner: "pure".to_owned(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             })),
             DescriptorIdentity::State(Box::new(StateDescriptorIdentity {
                 descriptor_id: bridge_state_descriptor.clone(),
@@ -271,7 +271,7 @@ pub(super) fn test_spec() -> TypedExecutionSpec {
                 capabilities: no_caps.clone(),
                 emitted_fact_descriptors: Vec::new(),
                 runner: "pure".to_owned(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             })),
             DescriptorIdentity::State(Box::new(StateDescriptorIdentity {
                 descriptor_id: render_state_descriptor.clone(),
@@ -305,7 +305,7 @@ pub(super) fn test_spec() -> TypedExecutionSpec {
                 capabilities: no_caps.clone(),
                 emitted_fact_descriptors: Vec::new(),
                 runner: "managed_platform_write".to_owned(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             })),
             DescriptorIdentity::Operation(Box::new(OperationDescriptorIdentity {
                 descriptor_id: operation_descriptor_id.clone(),

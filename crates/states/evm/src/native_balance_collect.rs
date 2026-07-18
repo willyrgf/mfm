@@ -7,26 +7,31 @@ use std::future;
 use std::num::NonZeroU64;
 use std::str::FromStr;
 
+use alloy_primitives::{Address, U256};
 use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
-use mfm_evm_capabilities::{EvmBlock, EvmReadCapability, EvmSessionEvidence};
+use mfm_evm_capabilities::{
+    EvmBlock, EvmBlockSelector, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
+};
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_ids::{LocalPublicId, StateKind, StateVersion};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, MfmFactType,
-    NoContext, PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, ExternalReadEvidenceSet, FactDescriptorRef,
+    ManagedWriteState, MfmFactType, NoContext, PureState, ReadState, StateError, StateResult,
+    StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use mfm_values::NonEmpty;
 use serde::{de, Deserialize, Serialize};
 
-use crate::identity::{adapter_binding, adapter_required_error, state_kind, state_version};
+use crate::canonical::{canonical_address, parse_address, parse_quantity, validate_session};
+use crate::identity::{adapter_binding, state_kind, state_version};
 use crate::{
     address_native_balance_fact_visibility, validate_canonical_evm_account,
     EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact,
-    EvmAddressNativeBalanceSubject, EvmStateError, RedactedEvmSessionEvidence,
+    EvmAddressNativeBalanceSubject, EvmBlockAnchor, EvmStateError, RedactedEvmSessionEvidence,
 };
 /// Exact number of source reads required by one hash-pinned native-balance observation.
 pub const EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS: u64 = 2;
@@ -221,6 +226,67 @@ pub fn validate_resolve_evm_joint_tip_config(
 #[mfm(schema = "mfm.evm.state.input.resolve_joint_tip")]
 pub struct ResolveEvmJointTipInput {}
 
+/// State-owned plan for resolving one EVM joint tip.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "joint_tip_read_plan",
+    version = "1",
+    schema = "mfm.evm.read.joint_tip.plan"
+)]
+pub struct EvmJointTipReadPlan {
+    network: String,
+    chain_id: u64,
+}
+
+impl EvmJointTipReadPlan {
+    /// Returns the checked semantic network binding.
+    pub fn binding(&self) -> Result<EvmNetworkBinding, EvmStateError> {
+        EvmNetworkBinding::new(
+            LocalPublicId::new(&self.network).map_err(|_| EvmStateError::InvalidInput {
+                reason: "EVM joint-tip plan network was invalid".to_owned(),
+            })?,
+            self.chain_id,
+        )
+        .map_err(|_| EvmStateError::InvalidInput {
+            reason: "EVM joint-tip plan binding was invalid".to_owned(),
+        })
+    }
+
+    /// Returns the only permitted block selector.
+    pub const fn selector(&self) -> EvmBlockSelector {
+        EvmBlockSelector::Latest
+    }
+}
+
+/// Canonical retained response for one EVM joint-tip read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "joint_tip_read_evidence",
+    version = "1",
+    schema = "mfm.evm.read.joint_tip.evidence"
+)]
+pub struct EvmJointTipReadEvidence {
+    block: EvmBlockAnchor,
+    session: RedactedEvmSessionEvidence,
+}
+
+impl EvmJointTipReadEvidence {
+    /// Builds retained evidence from one bound live response.
+    pub fn from_response(
+        block: &EvmBlock,
+        session: &EvmSessionEvidence,
+    ) -> Result<Self, EvmStateError> {
+        Ok(Self {
+            block: EvmBlockAnchor::from_block(block),
+            session: RedactedEvmSessionEvidence::from_session(session)?,
+        })
+    }
+}
+
 /// Materializes and admits a joint tip from a verified block response.
 pub fn materialize_evm_joint_tip(
     config: &ResolveEvmJointTipConfig,
@@ -291,20 +357,39 @@ impl StateSpec for ResolveEvmJointTipState {
 }
 
 impl ReadState for ResolveEvmJointTipState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = EvmJointTipReadPlan;
+    type Evidence = EvmJointTipReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        _input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        if let Err(error) = validate_resolve_evm_joint_tip_config(&self.config) {
-            return future::ready(Err(StateError::from(EvmStateError::InvalidInput {
-                reason: error,
-            })));
-        }
-        future::ready(Err(adapter_required_error(Self::name())))
+    fn plan(
+        &self,
+        _input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        validate_resolve_evm_joint_tip_config(&self.config)
+            .map_err(|reason| StateError::from(EvmStateError::InvalidInput { reason }))?;
+        Ok(EvmJointTipReadPlan {
+            network: self.config.network.clone(),
+            chain_id: self.config.chain_id,
+        })
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        reject_fact_queries(evidence)?;
+        let plan = self.plan(input, context)?;
+        let observed = evidence.primary_evidence();
+        validate_session(&observed.session, &plan.network, plan.chain_id)
+            .map_err(StateError::from)?;
+        let session = observed.session.to_session().map_err(StateError::from)?;
+        self.materialize_response(
+            &observed.block.to_block().map_err(StateError::from)?,
+            &session,
+        )
+        .map_err(StateError::from)
     }
 }
 
@@ -389,6 +474,82 @@ impl ObserveEvmNativeBalanceConfig {
 pub struct ObserveEvmNativeBalanceInput {
     /// Joint tip resolved once for this same-network batch.
     pub joint_tip: EvmJointTip,
+}
+
+/// State-owned exact-anchor native-balance read plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "native_balance_read_plan",
+    version = "1",
+    schema = "mfm.evm.read.native_balance.plan"
+)]
+pub struct EvmNativeBalanceReadPlan {
+    network: String,
+    chain_id: u64,
+    account: String,
+    anchor: EvmBlockAnchor,
+}
+
+impl EvmNativeBalanceReadPlan {
+    /// Returns the checked semantic network binding.
+    pub fn binding(&self) -> Result<EvmNetworkBinding, EvmStateError> {
+        EvmNetworkBinding::new(
+            LocalPublicId::new(&self.network).map_err(|_| EvmStateError::InvalidInput {
+                reason: "EVM native-balance plan network was invalid".to_owned(),
+            })?,
+            self.chain_id,
+        )
+        .map_err(|_| EvmStateError::InvalidInput {
+            reason: "EVM native-balance plan binding was invalid".to_owned(),
+        })
+    }
+
+    /// Returns the account address.
+    pub fn account_address(&self) -> Result<Address, EvmStateError> {
+        parse_address(&self.account)
+    }
+
+    /// Returns the exact hash selector used for the balance read.
+    pub fn balance_selector(&self) -> Result<EvmBlockSelector, EvmStateError> {
+        Ok(EvmBlockSelector::ExactHash(self.anchor.hash_value()?))
+    }
+
+    /// Returns the final block-number selector used to detect reorgs.
+    pub fn canonicality_selector(&self) -> Result<EvmBlockSelector, EvmStateError> {
+        Ok(EvmBlockSelector::Number(self.anchor.number_quantity()?))
+    }
+}
+
+/// Canonical retained response for one exact-anchor native-balance read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "native_balance_read_evidence",
+    version = "1",
+    schema = "mfm.evm.read.native_balance.evidence"
+)]
+pub struct EvmNativeBalanceReadEvidence {
+    balance_wei: String,
+    canonical_block: EvmBlockAnchor,
+    session: RedactedEvmSessionEvidence,
+}
+
+impl EvmNativeBalanceReadEvidence {
+    /// Builds retained evidence from bound live responses.
+    pub fn from_responses(
+        balance_wei: U256,
+        canonical_block: &EvmBlock,
+        session: &EvmSessionEvidence,
+    ) -> Result<Self, EvmStateError> {
+        Ok(Self {
+            balance_wei: balance_wei.to_string(),
+            canonical_block: EvmBlockAnchor::from_block(canonical_block),
+            session: RedactedEvmSessionEvidence::from_session(session)?,
+        })
+    }
 }
 
 /// Normalized native-balance observation state output.
@@ -587,25 +748,79 @@ impl StateSpec for ObserveEvmNativeBalanceState {
 }
 
 impl ReadState for ObserveEvmNativeBalanceState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = EvmNativeBalanceReadPlan;
+    type Evidence = EvmNativeBalanceReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        if let Err(error) = validate_observe_evm_native_balance_config(&self.config) {
-            return future::ready(Err(StateError::from(EvmStateError::InvalidInput {
-                reason: error,
-            })));
-        }
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        validate_observe_evm_native_balance_config(&self.config)
+            .map_err(|reason| StateError::from(EvmStateError::InvalidInput { reason }))?;
         if !input.joint_tip.is_admissible_for_balance_write() {
-            return future::ready(Err(StateError::from(EvmStateError::InvalidInput {
+            return Err(StateError::from(EvmStateError::InvalidInput {
                 reason: "joint tip is not admissible for balance write".to_owned(),
-            })));
+            }));
         }
-        future::ready(Err(adapter_required_error(Self::name())))
+        let (network, chain_id, _) = self
+            .config
+            .evm_network_parts()
+            .map_err(|reason| StateError::from(EvmStateError::InvalidInput { reason }))?;
+        if input.joint_tip.network() != network || input.joint_tip.chain_id() != chain_id {
+            return Err(StateError::from(EvmStateError::InvalidInput {
+                reason: "joint tip did not match native-balance config".to_owned(),
+            }));
+        }
+        Ok(EvmNativeBalanceReadPlan {
+            network: network.to_owned(),
+            chain_id,
+            account: canonical_address(
+                parse_address(&self.config.account).map_err(StateError::from)?,
+            ),
+            anchor: EvmBlockAnchor::new(
+                U256::from(input.joint_tip.block_number()),
+                crate::canonical::parse_hash(input.joint_tip.block_hash())
+                    .map_err(StateError::from)?,
+            ),
+        })
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        reject_fact_queries(evidence)?;
+        let plan = self.plan(input, context)?;
+        let observed = evidence.primary_evidence();
+        validate_session(&observed.session, &plan.network, plan.chain_id)
+            .map_err(StateError::from)?;
+        let session = observed.session.to_session().map_err(StateError::from)?;
+        let verified_tip = EvmJointTip::from_session_block(
+            &plan.network,
+            plan.chain_id,
+            &observed
+                .canonical_block
+                .to_block()
+                .map_err(StateError::from)?,
+            &session,
+        )
+        .map_err(StateError::from)?;
+        let balance = parse_quantity(&observed.balance_wei).map_err(StateError::from)?;
+        self.materialize_response(input, &verified_tip, &balance, &session)
+            .map_err(StateError::from)
+    }
+}
+
+fn reject_fact_queries<E>(evidence: &ExternalReadEvidenceSet<E>) -> StateResult<()> {
+    if evidence.fact_query_evidence().is_empty() {
+        Ok(())
+    } else {
+        Err(StateError::Message(
+            "EVM collector read carried unexpected fact-query evidence".to_owned(),
+        ))
     }
 }
 

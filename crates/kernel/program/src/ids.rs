@@ -381,7 +381,7 @@ pub(super) struct StateDescriptorIdParts<'a> {
     pub(super) effect: &'a EffectDescriptor,
     pub(super) capabilities: &'a CapabilitySetDescriptor,
     pub(super) emitted_fact_descriptors: &'a [FactDescriptorRef],
-    pub(super) side_effect_contract_digest: Option<&'a ContentDigest>,
+    pub(super) effect_contract_digest: Option<&'a ContentDigest>,
     pub(super) runner: RunnerKind,
 }
 
@@ -515,8 +515,8 @@ pub(super) fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<D
         "output_schema_id": parts.output_schema_id.as_str(),
         "output_semantic_type_id": parts.output_semantic_type_id.as_str(),
         "runner": parts.runner.as_str(),
-        "side_effect_contract_digest": parts
-            .side_effect_contract_digest
+        "effect_contract_digest": parts
+            .effect_contract_digest
             .map(ContentDigest::as_str),
         "version": parts.version.as_str(),
     });

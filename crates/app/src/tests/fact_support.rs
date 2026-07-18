@@ -146,17 +146,33 @@ impl StateSpec for AppFactState {
 }
 
 impl ReadState for AppFactState {
-    type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
+    type Plan = AppFactValue;
+    type Evidence = AppFactValue;
 
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        std::future::ready(Ok(AppFactValue {
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        Ok(AppFactValue {
             amount: input.amount * self.config.multiplier,
-        }))
+        })
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &mfm_program::ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        if !evidence.fact_query_evidence().is_empty()
+            || evidence.primary_evidence() != &self.plan(input, context)?
+        {
+            return Err(mfm_program::StateError::Message(
+                "app fact fixture evidence did not match its plan".to_owned(),
+            ));
+        }
+        Ok(evidence.primary_evidence().clone())
     }
 }
 
@@ -226,6 +242,7 @@ impl mfm_runtime::ErasedNodeRunner for AppFactRecordingRunner {
             let output_artifact = artifacts.state_output(&value)?;
             let output_payload = payloads.cell_produced(&output_artifact)?;
             let mut output = mfm_runtime::RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&value)?;
             output.stage_attempt_artifact(&output_artifact)?;
             output.record_fact(
                 mfm_runtime::FactRecordInput::new(

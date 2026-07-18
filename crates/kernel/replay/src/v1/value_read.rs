@@ -123,8 +123,7 @@ where
                 if reference.node_id.as_ref() == Some(&frame.produced.node_id)
                     && reference.attempt_id.as_ref() == Some(&frame.produced.attempt_id)
                     && reference.artifact_ref.role
-                        == events::ArtifactRole::ExternalReadEvidence
-                    && reference.artifact_ref.schema_id == schema_id =>
+                        == events::ArtifactRole::ExternalReadEvidence =>
             {
                 Some(reference)
             }
@@ -137,6 +136,11 @@ where
         ));
     }
     let reference = references[0];
+    if reference.artifact_ref.schema_id != schema_id {
+        return Err(mismatch(
+            "replay external read evidence schema did not match the state contract",
+        ));
+    }
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id: reference.artifact_ref.artifact_id.clone(),
@@ -152,6 +156,223 @@ where
     };
     let artifact = broker.retained_artifact(&requirement)?;
     serde_json::from_slice(&artifact.artifact_bytes).map_err(json_error)
+}
+
+/// Loads and decodes the complete certified input tree for one replayed node.
+pub fn load_node_input<T>(broker: &ReplayBroker, node: &spec::NodeSpec) -> Result<T>
+where
+    T: mfm_values::StateInput + DeserializeOwned,
+{
+    let expected = T::input_schema_id().map_err(|error| mismatch(error.to_string()))?;
+    if node.input_bindings.input_schema_id != expected {
+        return Err(mismatch(format!(
+            "replay input schema {} did not match state input schema {}",
+            node.input_bindings.input_schema_id, expected
+        )));
+    }
+    let value = replay_input_node_json(broker, node, &node.input_bindings.root)?;
+    serde_json::from_value(value).map_err(json_error)
+}
+
+/// Materializes typed certified context authority for one replayed node.
+pub fn load_node_context<C>(
+    broker: &ReplayBroker,
+    node: &spec::NodeSpec,
+) -> Result<mfm_program::CertifiedContext<C>>
+where
+    C: mfm_program::StateContext,
+{
+    let context = match &node.context {
+        spec::NodeContextSpec::NoContext => None,
+        spec::NodeContextSpec::Required { context_ref } => Some(
+            broker
+                .certified_spec()
+                .spec
+                .contexts
+                .iter()
+                .find(|context| &context.context_ref == context_ref)
+                .ok_or_else(|| mismatch("replay node referenced missing certified context"))?,
+        ),
+    };
+    C::materialize_certified(context).map_err(|error| mismatch(error.to_string()))
+}
+
+/// Replays every produced output for one exact typed external-read descriptor.
+///
+/// This helper reconstructs config, arbitrary certified input trees, typed context, one primary
+/// evidence artifact, and any auxiliary fact-query evidence before invoking the same state reducer
+/// used by live execution.
+pub fn verify_external_read_state<S>(broker: &ReplayBroker) -> Result<()>
+where
+    S: mfm_program::ReadState,
+    S::Config: DeserializeOwned,
+    S::Input: DeserializeOwned,
+    S::Evidence: DeserializeOwned,
+    S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
+{
+    let descriptor =
+        mfm_program::state_descriptor::<S>().map_err(|error| mismatch(error.to_string()))?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.descriptor_id == *descriptor.descriptor_id())
+    })?;
+    for frame in &frames {
+        let config: S::Config = load_node_config(broker, &frame.node)?;
+        let validated =
+            ValidatedConfig::new(config).map_err(|error| mismatch(error.to_string()))?;
+        let state = S::new(validated).map_err(|error| mismatch(error.to_string()))?;
+        let input = load_node_input::<S::Input>(broker, &frame.node)?;
+        let context = load_node_context::<S::Context>(broker, &frame.node)?;
+        state
+            .plan(&input, &context)
+            .map_err(|error| mismatch(error.to_string()))?;
+        let primary = external_read_evidence::<S::Evidence>(broker, frame)?;
+        let fact_queries = fact_query_evidence_for_attempt(
+            broker,
+            &frame.produced.node_id,
+            &frame.produced.attempt_id,
+        )?;
+        let evidence = mfm_program::ExternalReadEvidenceSet::new(primary, fact_queries);
+        let expected = state
+            .reduce(&input, &evidence, &context)
+            .map_err(|error| mismatch(error.to_string()))?;
+        let expected_bytes = canonical_value_bytes(&expected)?;
+        if frame.artifact_bytes != expected_bytes.as_bytes() {
+            return Err(mismatch(
+                "replayed external-read output did not match its retained evidence",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn replay_input_node_json(
+    broker: &ReplayBroker,
+    consuming_node: &spec::NodeSpec,
+    input: &spec::InputBindingNodeSpec,
+) -> Result<serde_json::Value> {
+    match input {
+        spec::InputBindingNodeSpec::Unit => Ok(serde_json::Value::Null),
+        spec::InputBindingNodeSpec::Cell(cell) => {
+            replay_input_cell_json(broker, consuming_node, cell)
+        }
+        spec::InputBindingNodeSpec::Tuple(elements)
+        | spec::InputBindingNodeSpec::Vec { elements, .. }
+        | spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => elements
+            .iter()
+            .map(|element| replay_input_node_json(broker, consuming_node, element))
+            .collect::<Result<Vec<_>>>()
+            .map(serde_json::Value::Array),
+        spec::InputBindingNodeSpec::Struct(fields) => {
+            let mut object = serde_json::Map::new();
+            for field in fields {
+                object.insert(
+                    field.field_path.as_str().to_owned(),
+                    replay_input_node_json(broker, consuming_node, &field.node)?,
+                );
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+    }
+}
+
+fn replay_input_cell_json(
+    broker: &ReplayBroker,
+    consuming_node: &spec::NodeSpec,
+    input: &spec::InputBindingCellSpec,
+) -> Result<serde_json::Value> {
+    let certified = broker
+        .certified_spec()
+        .spec
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == input.cell_id)
+        .ok_or_else(|| mismatch("replay input cell was absent from the certified spec"))?;
+    if certified.schema_id != input.schema_id
+        || certified.semantic_type_id != input.semantic_type_id
+        || certified.value_lineage != input.value_lineage
+        || !replay_input_context_matches(&input.context, &certified.context)
+    {
+        return Err(mismatch(
+            "replay input cell metadata did not match the certified cell",
+        ));
+    }
+    if let spec::InputContextSpec::Required { context_ref, .. } = &input.context {
+        if !matches!(
+            &consuming_node.context,
+            spec::NodeContextSpec::Required { context_ref: node_context } if node_context == context_ref
+        ) {
+            return Err(mismatch(
+                "replay input context did not match the consuming node context",
+            ));
+        }
+    }
+
+    match &certified.producer {
+        spec::CellProducer::Seed(seed_id) => {
+            let seed = broker
+                .run_admitted()
+                .seed_cells
+                .iter()
+                .find(|seed| &seed.seed_id == seed_id && seed.cell_id == input.cell_id)
+                .ok_or_else(|| mismatch("replay seed input evidence was missing"))?;
+            let requirement = store::EventArtifactRequirement {
+                source: store::EventArtifactReferenceSource::SeedCell,
+                artifact_id: seed.seed_artifact.artifact_id.clone(),
+                evidence_hash: seed.seed_artifact.evidence_hash.clone(),
+                digest: Some(seed.digest.clone()),
+                byte_len: Some(seed.seed_artifact.byte_len),
+                media_type: Some(seed.seed_artifact.media_type.clone()),
+                schema_id: Some(seed.schema_id.clone()),
+                semantic_type_id: Some(seed.semantic_type_id.clone()),
+                producer_node_id: None,
+                producer_seed_id: Some(seed.seed_id.clone()),
+                artifact_role: Some(events::ArtifactRole::SeedInput),
+            };
+            let artifact = broker.retained_artifact(&requirement)?;
+            serde_json::from_slice(&artifact.artifact_bytes).map_err(json_error)
+        }
+        spec::CellProducer::Node(producer_node_id) => {
+            let frames = broker.produced_cell_frames_matching(|node, cell, _produced| {
+                Ok(node.node_id == *producer_node_id && cell.cell_id == input.cell_id)
+            })?;
+            if frames.len() != 1 {
+                return Err(mismatch(
+                    "replay input cell did not have exactly one produced value",
+                ));
+            }
+            let frame = frames.into_iter().next().expect("one frame was checked");
+            serde_json::from_slice(&frame.artifact_bytes).map_err(json_error)
+        }
+    }
+}
+
+fn replay_input_context_matches(
+    input: &spec::InputContextSpec,
+    cell: &spec::CellContextSpec,
+) -> bool {
+    match (input, cell) {
+        (spec::InputContextSpec::NoContext, spec::CellContextSpec::NoContext) => true,
+        (
+            spec::InputContextSpec::Required {
+                context_ref,
+                resource_kind,
+                stage,
+                producer,
+            },
+            spec::CellContextSpec::Bound {
+                context_ref: cell_context_ref,
+                resource_kind: cell_resource_kind,
+                stage: cell_stage,
+                producer: cell_producer,
+            },
+        ) => {
+            context_ref == cell_context_ref
+                && resource_kind == cell_resource_kind
+                && stage == cell_stage
+                && producer == cell_producer
+        }
+        _ => false,
+    }
 }
 
 /// Loads retained fact-query evidence recorded for one state attempt.

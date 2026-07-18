@@ -48,3 +48,16 @@ mod support;
 use self::support::*;
 #[path = "tests/behavior.rs"]
 mod behavior;
+
+fn select_holdings_config(portfolio: PortfolioConfig) -> SelectHoldingsConfig {
+    SelectHoldingsConfig::new(
+        portfolio,
+        mfm_state_portfolio::SelectHoldingsFactDescriptors::new(
+            &BtcAddressBalanceSnapshotFact::descriptor().expect("Bitcoin descriptor"),
+            &EvmAddressNativeBalanceSnapshotFact::descriptor().expect("EVM native descriptor"),
+            &EvmAddressErc20BalanceSnapshotFact::descriptor().expect("ERC-20 descriptor"),
+        )
+        .expect("holding descriptors"),
+    )
+    .expect("selection config")
+}

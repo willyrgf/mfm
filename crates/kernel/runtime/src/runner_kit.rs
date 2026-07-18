@@ -9,10 +9,10 @@ use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
     DescriptorId, DigestAlgorithm, SchemaId,
 };
-use mfm_program::{EffectRunner, MfmFactType, StateSpec};
+use mfm_program::{EffectRunner, MfmFactType, ReadState, StateSpec};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_values::{ContextBoundOutput, MfmConfig, MfmValue, NonEmpty, ValidatedConfig};
+use mfm_values::{ContextBoundOutput, MfmConfig, MfmValue, NonEmpty, StateInput, ValidatedConfig};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
@@ -26,6 +26,10 @@ use crate::{
 #[path = "runner_kit/registration.rs"]
 mod registration;
 pub use registration::RunnerRegistrationBuilder;
+
+#[path = "runner_kit/external_read.rs"]
+mod external_read;
+pub use external_read::*;
 
 #[path = "runner_kit/artifacts.rs"]
 mod artifacts;

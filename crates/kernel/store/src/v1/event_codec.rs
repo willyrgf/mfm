@@ -715,7 +715,7 @@ fn descriptor_identity_json(identity: &DescriptorIdentity) -> serde_json::Value 
             "output_schema_id": identity.output_schema_id.as_str(),
             "output_semantic_type_id": identity.output_semantic_type_id.as_str(),
             "runner": identity.runner.as_str(),
-            "side_effect_contract_digest": identity.side_effect_contract_digest.as_ref().map(ContentDigest::as_str),
+            "effect_contract_digest": identity.effect_contract_digest.as_ref().map(ContentDigest::as_str),
             "state_kind": identity.state_kind.as_str(),
             "state_version": identity.state_version.as_str(),
         }),

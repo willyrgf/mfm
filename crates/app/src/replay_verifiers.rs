@@ -66,6 +66,7 @@ impl ReplayVerifierRegistry {
                         state_key::<mfm_states_evm::RecordErc20BalanceFactState>,
                         state_key::<mfm_states_evm::AssembleEvmErc20BalanceBatchReceiptState>,
                         state_key::<mfm_states_evm::AssembleEvmNetworkCollectionReceiptState>,
+                        state_key::<mfm_states_evm::ValidateEvmContractState>,
                     ],
                     intent_matcher: None,
                     verifier: verify_evm,

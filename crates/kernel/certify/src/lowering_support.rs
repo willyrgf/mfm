@@ -360,7 +360,7 @@ pub(super) fn state_descriptor_identity_from_program(
         capabilities: node.capability_bindings.clone(),
         emitted_fact_descriptors: node.fact_descriptor_allowlist.clone(),
         runner: runner_kind_name(node.runner).to_owned(),
-        side_effect_contract_digest: node.side_effect_contract_digest.clone(),
+        effect_contract_digest: node.effect_contract_digest.clone(),
     })
 }
 
@@ -387,7 +387,7 @@ pub(super) fn state_descriptor_identity_from_descriptor(
         capabilities: descriptor.capabilities().clone(),
         emitted_fact_descriptors: descriptor.emitted_fact_descriptors().to_vec(),
         runner: runner_kind_name(descriptor.runner()).to_owned(),
-        side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
+        effect_contract_digest: descriptor.effect_contract_digest().cloned(),
     })
 }
 

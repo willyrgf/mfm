@@ -35,9 +35,9 @@ use mfm_portfolio_model::portfolio::{
 };
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
-    build_root_with_registries, BridgeKey, BridgePolicy, NoContext, Operation, OperationExpansion,
-    OperationKey, PublicOutputKey, PureState, RootBuilder, ScopeKey, StateError, StateResult,
-    StateSpec, TypedProgramLaunchPlan, ValidatedConfig,
+    build_root_with_registries, BridgeKey, BridgePolicy, MfmFactType, NoContext, Operation,
+    OperationExpansion, OperationKey, PublicOutputKey, PureState, RootBuilder, ScopeKey,
+    StateError, StateResult, StateSpec, TypedProgramLaunchPlan, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, StateInput};
 use mfm_state_portfolio::{
@@ -45,8 +45,11 @@ use mfm_state_portfolio::{
     CollectedHoldingReceipt, HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey,
     PortfolioCollectionReceipt, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
     PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
-    SelectHoldingsConfig, SelectHoldingsInputHandles, SelectHoldingsState,
+    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInputHandles,
+    SelectHoldingsState,
 };
+use mfm_states_btc::BtcAddressBalanceSnapshotFact;
+use mfm_states_evm::{EvmAddressErc20BalanceSnapshotFact, EvmAddressNativeBalanceSnapshotFact};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -501,7 +504,7 @@ fn expand_receipt_pinned_report<'program, 'scope>(
     let holdings = builder.state_with_domain_keys::<SelectHoldingsState, _, _>(
         mfm_program::StateKey::new("select_holdings")?,
         NoContext,
-        SelectHoldingsConfig::new(portfolio.clone())
+        SelectHoldingsConfig::new(portfolio.clone(), holding_fact_descriptors()?)
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
         SelectHoldingsInputHandles {
             receipt: receipt.clone(),
@@ -526,6 +529,18 @@ fn expand_receipt_pinned_report<'program, 'scope>(
     )?;
 
     Ok(PortfolioSnapshotOperationOutputs { snapshot, report })
+}
+
+fn holding_fact_descriptors() -> mfm_program::Result<SelectHoldingsFactDescriptors> {
+    SelectHoldingsFactDescriptors::new(
+        &BtcAddressBalanceSnapshotFact::descriptor()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        &EvmAddressNativeBalanceSnapshotFact::descriptor()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        &EvmAddressErc20BalanceSnapshotFact::descriptor()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+    )
+    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
 /// Builds one complete typed portfolio snapshot program draft.

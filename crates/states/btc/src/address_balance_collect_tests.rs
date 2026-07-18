@@ -259,6 +259,53 @@ fn balance_states_require_exact_state_owned_read_budgets() {
 }
 
 #[test]
+fn balance_external_read_reducer_binds_address_source_and_anchor() {
+    let context = mfm_program::CertifiedContext::no_context();
+    let joint_tip = materialize_btc_joint_tip(
+        &tip_config(),
+        &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
+    )
+    .expect("joint tip");
+    let input = ObserveBtcAddressBalanceInput {
+        joint_tip: joint_tip.clone(),
+    };
+    let state = ObserveBtcAddressBalanceState::new(
+        ValidatedConfig::new(observe_config(ADDR_A)).expect("config"),
+    )
+    .expect("state");
+    let plan = state.plan(&input, &context).expect("balance plan");
+    assert_eq!(
+        plan.request()
+            .expect("balance request")
+            .block_hash()
+            .as_str(),
+        HASH_A
+    );
+
+    let primary =
+        BtcAddressBalanceReadEvidence::from_response(&balance_response(ADDR_A, 100, HASH_A, 42));
+    let output = state
+        .reduce(
+            &input,
+            &ExternalReadEvidenceSet::new(primary.clone(), Vec::new()),
+            &context,
+        )
+        .expect("balance reduction");
+    assert_eq!(output.response().balance_sats(), 42);
+
+    let mut wrong_anchor = serde_json::to_value(primary).expect("evidence JSON");
+    wrong_anchor["block_hash"] = serde_json::json!(HASH_B);
+    let wrong_anchor = serde_json::from_value(wrong_anchor).expect("typed evidence");
+    assert!(state
+        .reduce(
+            &input,
+            &ExternalReadEvidenceSet::new(wrong_anchor, Vec::new()),
+            &context,
+        )
+        .is_err());
+}
+
+#[test]
 fn record_state_advertises_address_balance_fact_descriptor() {
     let descriptors =
         RecordBtcAddressBalanceFactState::emitted_fact_descriptors().expect("descriptors");

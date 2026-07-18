@@ -164,8 +164,12 @@ impl EvmJsonRpcSession {
             .rpc_call(
                 "eth_call",
                 json!([{
+                    "from": format!("{:#x}", request.from()),
                     "to": format!("{:#x}", request.to()),
+                    "value": encode_quantity(request.value()),
                     "data": encode_bytes(request.input()),
+                    "gas": encode_quantity(request.gas_limit()),
+                    "accessList": encode_access_list(request.access_list()),
                 }, selector_param(request.block())]),
             )
             .await?;

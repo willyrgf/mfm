@@ -1,6 +1,7 @@
 use super::*;
 use mfm_evm_capabilities::{
     EvmReceipt, EvmReceiptLog, EvmTransactionPlacement as CapabilityPlacement,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 
 const NETWORK: &str = "ethereum-mainnet";

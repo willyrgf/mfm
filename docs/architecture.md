@@ -203,7 +203,7 @@ States may:
 - define config, input, output, public-output, and artifact value types
 - declare effect class and required capabilities
 - depend on capability contract crates that define typed authority contracts
-- define side-effect contract when applicable
+- define hash-bound external-read plans/evidence or side-effect contracts when applicable
 - validate domain config shape
 - construct deterministic domain intent
 - own deterministic transformation and validation semantics
@@ -223,8 +223,9 @@ States must not:
   implementations
 
 Side-effecting or external observation behavior is reached through typed capabilities supplied by
-runtime/app assembly. State code must not create its own live network, filesystem, clock, process,
-or signer access when that access is part of semantic execution.
+runtime/app assembly. External-read states own a deterministic plan and reducer; adapters execute
+the plan but do not own replay semantics. State code must not create its own live network,
+filesystem, clock, process, or signer access when that access is part of semantic execution.
 
 ### State Capability Boundary
 
@@ -232,7 +233,9 @@ States declare authority. Transports implement authority. Adapters bind the two 
 
 States may depend on capability contract crates because those crates define typed authority
 contracts. States must not depend on live transport implementation crates. Adapters translate
-state-owned intent into capability calls and recorded evidence. Transports perform protocol IO and
+state-owned plans or mutation intent into capability calls and recorded evidence. The generic
+runtime runner owns materialization, reduction, and evidence staging; the generic replay driver
+loads the same typed evidence and calls the same reducer. Transports perform protocol IO and
 implement capability contracts.
 
 For replay/resume semantics, including pure/read/side-effect behavior, see the authoritative
@@ -246,6 +249,7 @@ Adapters may:
 
 - bind certified state descriptors to executable runners
 - materialize typed inputs through runtime-provided surfaces
+- execute state-authored external-read plans without redefining their reducers
 - call generic transports
 - call generic signer providers
 - encode submit-time raw transaction bytes transiently
@@ -488,6 +492,12 @@ EIP-1559 envelope, and delegates submission/observation to one adapter contract.
 and existing portfolio execution do not resolve signer material merely because this descriptor is
 registered; the exact signer and referenced keystore are loaded only when a live transaction node
 is admitted or executed.
+
+`ValidateEvmContractState` is independently registered as signer-free reusable read substrate. Its
+plan fixes one address/number/hash anchor, mandatory non-empty runtime-code hash, and bounded ordered
+full-context calls. Its adapter binds one checked read session, executes code and calls at the exact
+hash, and finishes with a number-to-hash canonicality read. Live execution and evidence-only replay
+both use the state reducer; replay never binds a route or session.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 

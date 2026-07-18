@@ -468,23 +468,23 @@ fn validate_state_descriptor_identity(descriptor: &spec::StateDescriptorIdentity
         &descriptor.emitted_fact_descriptors,
         "state descriptor emitted fact descriptors",
     )?;
-    match (effect.class, &descriptor.side_effect_contract_digest) {
-        (EffectClass::ApplySideEffect, Some(_)) => {}
-        (EffectClass::ApplySideEffect, None) => {
+    match (effect.class, &descriptor.effect_contract_digest) {
+        (EffectClass::ReadExternal | EffectClass::ApplySideEffect, Some(_)) => {}
+        (EffectClass::ReadExternal | EffectClass::ApplySideEffect, None) => {
             return Err(problem(
                 ProblemClass::InvalidSemanticTransition,
                 format!(
-                    "side-effect state descriptor {} is missing contract digest",
+                    "effectful state descriptor {} is missing contract digest",
                     descriptor.descriptor_id
                 ),
             ));
         }
-        (_, None) => {}
-        (_, Some(_)) => {
+        (EffectClass::Pure | EffectClass::ManagedPlatformWrite, None) => {}
+        (EffectClass::Pure | EffectClass::ManagedPlatformWrite, Some(_)) => {
             return Err(problem(
                 ProblemClass::InvalidSemanticTransition,
                 format!(
-                    "non-side-effect state descriptor {} carries contract digest",
+                    "state descriptor {} carries an effect contract for an unsupported effect class",
                     descriptor.descriptor_id
                 ),
             ));

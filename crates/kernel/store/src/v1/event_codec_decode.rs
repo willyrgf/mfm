@@ -630,7 +630,7 @@ fn parse_descriptor_identity(json: &serde_json::Value) -> Result<DescriptorIdent
                     parse_fact_descriptor_ref,
                 )?,
                 runner: required_str(json, "runner")?.to_owned(),
-                side_effect_contract_digest: optional_str(json, "side_effect_contract_digest")?
+                effect_contract_digest: optional_str(json, "effect_contract_digest")?
                     .map(parse_identity)
                     .transpose()?,
             },

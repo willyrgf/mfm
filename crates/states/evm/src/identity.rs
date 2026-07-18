@@ -2,7 +2,7 @@
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
-use mfm_program::{AdapterBindingSpec, StateError};
+use mfm_program::AdapterBindingSpec;
 
 const NAMESPACE: &str = "mfm.evm";
 const EVM_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
@@ -47,8 +47,4 @@ pub(crate) fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
 pub(crate) fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
     StateVersion::new(format!("mfm.evm.state.{name}.v1"))
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-}
-
-pub(crate) fn adapter_required_error(state_name: &'static str) -> StateError {
-    StateError::Message(format!("{state_name} requires an EVM adapter runner"))
 }

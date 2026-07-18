@@ -15,6 +15,7 @@
 //! ```
 
 mod collection_receipt;
+mod holding_read;
 mod selection;
 
 #[path = "decimal.rs"]
@@ -26,6 +27,9 @@ pub use collection_receipt::{
     HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey, PortfolioCollectionReceipt,
     SelectHoldingsInput, SelectHoldingsInputHandles,
 };
+pub use holding_read::{
+    PortfolioHoldingFactResponse, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
+};
 pub use selection::{
     holding_candidate_from_normalized, portfolio_holding_select_scope_decision_hash,
     portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
@@ -35,14 +39,13 @@ pub use selection::{
 };
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future;
 use std::num::NonZeroU64;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_effects::{Pure, ReadExternal};
 use mfm_fact_capabilities::FactIndexReadCapability;
-use mfm_facts::{FactSelectionEvidence, StoreScopeRef};
+use mfm_facts::StoreScopeRef;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
 use mfm_portfolio_model::portfolio::{
     PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
@@ -53,7 +56,8 @@ use mfm_portfolio_model::symbol::{
     QuoteCode, SymbolConfig,
 };
 use mfm_program::{
-    AdapterBindingSpec, NoContext, PureState, ReadState, StateError, StateResult, StateSpec,
+    AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, PureState, ReadState, StateError,
+    StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs, StateInput};
 use mfm_values::ConfigError;

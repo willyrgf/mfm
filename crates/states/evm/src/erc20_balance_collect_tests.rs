@@ -295,10 +295,15 @@ fn balance_request_has_exact_padding_and_binding() {
     ));
 
     let wrong_token = EvmCall::new(
+        request.from(),
         Address::from_str(TOKEN_B).expect("token"),
+        request.value(),
         request.input().clone(),
+        request.gas_limit(),
+        request.access_list().clone(),
         request.block().clone(),
-    );
+    )
+    .expect("wrong-token call");
     let mut zero = [0u8; 32];
     assert!(normalize_erc20_balance_from_capability(
         &config,
@@ -316,10 +321,15 @@ fn balance_request_has_exact_padding_and_binding() {
         ))
         .expect("calldata");
     let wrong_account = EvmCall::new(
+        request.from(),
         request.to(),
+        request.value(),
         wrong_account_calldata.into(),
+        request.gas_limit(),
+        request.access_list().clone(),
         request.block().clone(),
-    );
+    )
+    .expect("wrong-account call");
     zero[31] = 1;
     assert!(normalize_erc20_balance_from_capability(
         &config,

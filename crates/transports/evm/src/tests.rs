@@ -111,11 +111,18 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
         .expect("balance");
     let code = session.read_code(ACCOUNT, &selector).await.expect("code");
     let call = session
-        .call(&EvmCall::new(
-            ACCOUNT,
-            Bytes::from_static(&[0xab]),
-            selector,
-        ))
+        .call(
+            &EvmCall::new(
+                ACCOUNT,
+                Address::from([2; 20]),
+                U256::from(7),
+                Bytes::from_static(&[0xab]),
+                U256::from(50_000),
+                Default::default(),
+                selector,
+            )
+            .expect("call request"),
+        )
         .await
         .expect("call");
 
@@ -148,6 +155,21 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
             .find(|request| request["method"] == "eth_getBalance")
             .expect("balance request")["params"][1],
         json!({"blockHash": BLOCK_HASH, "requireCanonical": true})
+    );
+    let call_request = requests
+        .iter()
+        .find(|request| request["method"] == "eth_call")
+        .expect("call request");
+    assert_eq!(
+        call_request["params"],
+        json!([{
+            "from": format!("{ACCOUNT:#x}"),
+            "to": format!("{:#x}", Address::from([2; 20])),
+            "value": "0x7",
+            "data": "0xab",
+            "gas": "0xc350",
+            "accessList": [],
+        }, {"blockHash": BLOCK_HASH, "requireCanonical": true}])
     );
 }
 

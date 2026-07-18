@@ -19,8 +19,9 @@ use mfm_fact_capabilities::FactRecordCapability;
 use mfm_ids::{StateKind, StateVersion};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, MfmFactType,
-    NoContext, PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, ExternalReadEvidenceSet, FactDescriptorRef,
+    ManagedWriteState, MfmFactType, NoContext, PureState, ReadState, StateError, StateResult,
+    StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use mfm_values::NonEmpty;
@@ -31,8 +32,9 @@ use crate::address_balance::{
     BtcAddressBalanceSubject,
 };
 use crate::{
-    adapter_binding, adapter_required_error, state_kind, state_version, validate_bitcoin_network,
-    BtcStateError,
+    adapter_binding, state_kind, state_version, validate_bitcoin_network,
+    BtcAddressBalanceReadEvidence, BtcAddressBalanceReadPlan, BtcChainHeadReadEvidence,
+    BtcChainHeadReadPlan, BtcStateError,
 };
 
 /// Exact number of source reads required to resolve a Bitcoin network collection joint tip.
@@ -224,6 +226,11 @@ impl ResolveBtcJointTipState {
     ) -> Result<BtcJointTip, BtcStateError> {
         materialize_btc_joint_tip(&self.config, response)
     }
+
+    /// Returns the certified state config.
+    pub const fn config(&self) -> &ResolveBtcJointTipConfig {
+        &self.config
+    }
 }
 
 /// Materializes and admits a joint tip from a verified chain-head response.
@@ -281,15 +288,39 @@ impl StateSpec for ResolveBtcJointTipState {
 }
 
 impl ReadState for ResolveBtcJointTipState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = BtcChainHeadReadPlan;
+    type Evidence = BtcChainHeadReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        _input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        future::ready(Err(adapter_required_error(Self::name())))
+    fn plan(
+        &self,
+        _input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        BtcChainHeadReadPlan::new(
+            &self.config.network,
+            &self.config.bitcoin_network,
+            &self.config.semantic_source_identity,
+            self.config.selection(),
+        )
+        .map_err(StateError::from)
+    }
+
+    fn reduce(
+        &self,
+        _input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        reject_fact_query_evidence(evidence)?;
+        let plan = BtcChainHeadReadPlan::new(
+            &self.config.network,
+            &self.config.bitcoin_network,
+            &self.config.semantic_source_identity,
+            self.config.selection(),
+        )?;
+        let response = evidence.primary_evidence().response(&plan)?;
+        self.materialize_response(&response)
+            .map_err(StateError::from)
     }
 }
 
@@ -536,25 +567,53 @@ impl StateSpec for ObserveBtcAddressBalanceState {
 }
 
 impl ReadState for ObserveBtcAddressBalanceState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = BtcAddressBalanceReadPlan;
+    type Evidence = BtcAddressBalanceReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        if let Err(error) = validate_observe_btc_address_balance_config(&self.config) {
-            return future::ready(Err(StateError::from(BtcStateError::InvalidInput {
-                reason: error,
-            })));
-        }
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        validate_observe_btc_address_balance_config(&self.config)
+            .map_err(|reason| StateError::from(BtcStateError::InvalidInput { reason }))?;
         if !input.joint_tip.is_admissible_for_balance_write() {
-            return future::ready(Err(StateError::from(BtcStateError::InvalidInput {
+            return Err(StateError::from(BtcStateError::InvalidInput {
                 reason: "joint tip is not admissible for balance write".to_owned(),
-            })));
+            }));
         }
-        future::ready(Err(adapter_required_error(Self::name())))
+        BtcAddressBalanceReadPlan::new(
+            &self.config.network,
+            &self.config.bitcoin_network,
+            &self.config.semantic_source_identity,
+            &self.config.address,
+            input.joint_tip.block_height(),
+            input.joint_tip.block_hash(),
+        )
+        .map_err(StateError::from)
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        reject_fact_query_evidence(evidence)?;
+        let plan = self.plan(input, _context)?;
+        let response = evidence.primary_evidence().response(&plan)?;
+        self.materialize_response(input, &response)
+            .map_err(StateError::from)
+    }
+}
+
+fn reject_fact_query_evidence<E>(evidence: &ExternalReadEvidenceSet<E>) -> StateResult<()> {
+    if evidence.fact_query_evidence().is_empty() {
+        Ok(())
+    } else {
+        Err(StateError::Message(
+            "Bitcoin source read received unexpected fact-query evidence".to_owned(),
+        ))
     }
 }
 

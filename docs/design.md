@@ -227,7 +227,7 @@ A state type is executable only after framework registration validates:
 - config, input, output, and public descriptor identities
 - effect class
 - capability set
-- side-effect contract when applicable
+- hash-defining effect contract for every external read and side effect
 - runner kind and executable identity
 
 Planning requires state and operation membership in the builder registry. Runtime requires the
@@ -247,6 +247,18 @@ own live network, filesystem, clock, process, or signer access when that access 
 execution. Domain helpers may compute deterministic values, parse data, or validate typed inputs,
 but side effects and replayable observations must pass through typed capabilities.
 
+Every `ReadExternal` state owns canonical `Plan` and `Evidence` value contracts plus a pure reducer.
+The plan is derived only from certified config, input, and context; the reducer consumes the same
+input/context, one primary evidence value, and any kernel-owned fact-query evidence. Plan and
+evidence schema and semantic identities are included in the state descriptor's effect-contract
+digest, so either identity changing produces different descriptor authority.
+
+Runtime uses one generic external-read runner to load arbitrary certified input trees and context,
+invoke the state planner, let an adapter execute only the resulting plan, retain exactly one primary
+external-read evidence artifact plus any fact-query evidence, and invoke the reducer. Replay loads
+the same config/input/context and retained evidence and calls the same reducer. It constructs no
+live capability implementation and rejects missing, duplicate, or wrong-schema primary evidence.
+
 ## State Capability Boundary
 
 States declare authority. Transports implement authority. Adapters bind the two at runtime.
@@ -262,9 +274,10 @@ implementation crates. For example, a contract validation state may depend on th
 transport that chooses an endpoint, attaches authorization, or uses a concrete client library.
 
 Runtime/app assembly supplies concrete capability implementations for live execution. Replay
-supplies replay implementations backed only by recorded facts, typed artifacts, and side-effect
-evidence. Adapters translate state-owned intent into capability calls and evidence phases without
-moving protocol IO or signer material into state code.
+reconstructs state input and context from certified authority and consumes only recorded facts,
+typed artifacts, and side-effect evidence. Adapters translate state-owned plans or mutation intent
+into capability calls and evidence phases without moving protocol IO or signer material into state
+code.
 
 The former fixed EVM deploy/configure/validate lifecycle is not a runtime or authoring surface. Its
 three state packages, lifecycle schemas, adapter graph, and historical-log and nonce-occupancy
@@ -275,9 +288,18 @@ The owned replacement is intentionally narrower and is registered as reusable st
 as a restored lifecycle. `SubmitEvmTransactionState` is the sole EIP-1559 mutation state and its
 closed action is direct `Create` or ordinary `Call`; one side-effect node always represents one
 transaction. Operation crates own constructor/call encoding and any dependency-ordered contract
-workflow. The independent exact-anchor code/call validation state lands with the external-read
-execution contract; neither primitive creates a public operation or application entry point by
-itself.
+workflow. The independent `ValidateEvmContractState` is the one exact-anchor code/call validation
+read state; neither primitive creates a public operation or application entry point by itself.
+
+Contract validation accepts an explicitly anchored address and a mandatory expected runtime-code
+hash other than the empty-code digest. Its bounded ordered checks retain full caller, target, value,
+calldata, gas, access-list, and exact-return context. One bound `EvmReadSession` performs code and
+calls at the same EIP-1898 hash selector with `requireCanonical = true`, then re-reads the authored
+number and requires the same hash. The state-owned reducer rejects empty code, code-hash drift,
+call-context/result drift, source/network/chain drift, evidence omission/reordering, and reorgs.
+The compact output contains only the address, anchor, observed code hash, and validation-plan
+digest. Evidence-only replay invokes that reducer without a route, transport, signer, or runtime
+configuration.
 
 Transaction idempotency is the full schema- and semantic-bound immutable authored intent: semantic
 network and chain, expected sender, signer ref, deterministic signing profile, action bytes/value,
@@ -414,7 +436,7 @@ independently proved external domain truth.
 - scopes, seeds, configs, nodes, cells, bridge nodes, and public outputs
 - input binding trees and value lineage
 - effect and capability evidence
-- side-effect contracts
+- hash-defining external-read and side-effect contracts
 - retained config and seed artifact refs
 - public-output render nodes and output evidence
 
@@ -634,6 +656,10 @@ sealed handles but cannot append to the run stream. Context-bound output artifac
 when the runner's registered extractor can recover the certified context metadata from the staged
 bytes and it matches the output cell's certified context binding.
 
+For `ReadExternal`, the shared runner performs config, arbitrary input-tree, and context
+materialization; state planning; adapter plan execution; state reduction; and typed output/evidence
+staging in that order. Adapters do not own a second reducer or recorded-provider implementation.
+
 The commit planner owns all production execution appends. `RunAdmissionLifecycle` verifies and
 stages launch material, then commits exactly one `RunAdmitted` root event with certified spec,
 certificate, config, seed, executable, binding-digest, framework, source, and caller launch-time
@@ -683,8 +709,10 @@ stream, verifies completed cell and side-effect evidence against the spec, then 
 type-valid frontier.
 
 Replay loads the stored certified spec and certificate artifacts, verifies them against the compiled
-certification registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses
-replay adapters only. Live capability construction during replay is a contract violation.
+certification registry, compares the hashes to `RunAdmitted`, and rebuilds stream evidence.
+External reads are recomputed by the generic replay driver through the state-owned reducer;
+side-effect protocols use their evidence-only domain verifier. Live capability construction during
+replay is a contract violation.
 Replay service construction itself is evidence-only app assembly: it must not construct the live
 runner registry, live transports, signer providers, keystores, or live capability runtime config.
 

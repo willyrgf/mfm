@@ -263,7 +263,7 @@ pub(super) fn saga_authority_spec_with_verification(
                 capabilities: capability_bindings.clone(),
                 emitted_fact_descriptors: Vec::new(),
                 runner: "mfm.test.runner".to_owned(),
-                side_effect_contract_digest: Some(contract.contract_digest.clone()),
+                effect_contract_digest: Some(contract.contract_digest.clone()),
             })),
             spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
         ],

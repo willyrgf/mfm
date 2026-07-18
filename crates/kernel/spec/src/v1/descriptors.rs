@@ -196,8 +196,8 @@ pub struct StateDescriptorIdentity {
     pub emitted_fact_descriptors: Vec<FactDescriptorRef>,
     /// Runner kind recorded by the registered state.
     pub runner: String,
-    /// Side-effect contract digest for external mutations.
-    pub side_effect_contract_digest: Option<ContentDigest>,
+    /// Optional hash-defining effect contract.
+    pub effect_contract_digest: Option<ContentDigest>,
 }
 
 impl StateDescriptorIdentity {
@@ -222,7 +222,7 @@ impl StateDescriptorIdentity {
             "output_schema_id": self.output_schema_id.as_str(),
             "output_semantic_type_id": self.output_semantic_type_id.as_str(),
             "runner": self.runner.as_str(),
-            "side_effect_contract_digest": self.side_effect_contract_digest.as_ref().map(ContentDigest::as_str),
+            "effect_contract_digest": self.effect_contract_digest.as_ref().map(ContentDigest::as_str),
             "state_kind": self.state_kind.as_str(),
             "state_version": self.state_version.as_str(),
         })

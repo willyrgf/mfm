@@ -123,7 +123,7 @@ pub(super) fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutio
                     .expect("effect version"),
                 capabilities: capability_bindings.clone(),
                 runner: "mfm.test.runner".to_owned(),
-                side_effect_contract_digest: Some(contract.contract_digest.clone()),
+                effect_contract_digest: Some(contract.contract_digest.clone()),
                 emitted_fact_descriptors: Vec::new(),
             })),
             spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
@@ -201,7 +201,7 @@ pub(super) fn fact_authority_spec() -> spec::TypedExecutionSpec {
                 capabilities: capability_bindings.clone(),
                 emitted_fact_descriptors: vec![fact_descriptor_ref.clone()],
                 runner: "mfm.test.runner".to_owned(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             },
         )));
     authority.config_refs.push(config_ref.clone());

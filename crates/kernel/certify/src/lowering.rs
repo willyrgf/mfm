@@ -261,28 +261,32 @@ impl<'a> DraftLowerer<'a> {
             state_descriptor_identity_from_program(node)?,
         )))?;
         let side_effect = match (
-            node.side_effect_contract_digest.as_ref(),
+            node.runner,
+            node.effect_contract_digest.as_ref(),
             node.side_effect_resource_claim.as_ref(),
             node.side_effect_verification.as_ref(),
         ) {
-            (Some(digest), Some(resource_claim), Some(verification)) => {
-                Some(spec::SideEffectContractSpec {
-                    contract_digest: digest.clone(),
-                    resource_claim: resource_claim.clone(),
-                    verification: verification.clone(),
-                })
-            }
-            (None, None, None) => None,
-            (Some(_), None, _) | (Some(_), _, None) => {
+            (
+                program::RunnerKind::ApplySideEffect,
+                Some(digest),
+                Some(resource_claim),
+                Some(verification),
+            ) => Some(spec::SideEffectContractSpec {
+                contract_digest: digest.clone(),
+                resource_claim: resource_claim.clone(),
+                verification: verification.clone(),
+            }),
+            (program::RunnerKind::ApplySideEffect, _, _, _) => {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(
-                        "side-effect node {} is missing resource claim or verification policy",
+                        "side-effect node {} is missing its effect contract, resource claim, or verification policy",
                         node.node_id
                     ),
                 ));
             }
-            (None, Some(_), _) | (None, _, Some(_)) => {
+            (_, _, None, None) => None,
+            (_, _, Some(_), _) | (_, _, _, Some(_)) => {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(

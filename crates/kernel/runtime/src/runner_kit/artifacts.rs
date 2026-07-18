@@ -234,6 +234,27 @@ where
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
+/// Loads the complete materialized input tree as its certified state-input type.
+pub async fn load_materialized_input<T>(
+    inputs: &MaterializedInputs,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> Result<T>
+where
+    T: StateInput + DeserializeOwned,
+{
+    let expected_schema = T::input_schema_id()
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    if inputs.input_schema_id != expected_schema {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "materialized input schema {} did not match state input schema {}",
+            inputs.input_schema_id, expected_schema
+        )));
+    }
+    let value = materialized_input_node_json(&inputs.root, artifacts).await?;
+    serde_json::from_value(value)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
 /// Loads one field from a struct-shaped materialized input as a typed value.
 pub async fn load_materialized_struct_field_value<T>(
     inputs: &MaterializedInputs,

@@ -361,7 +361,9 @@ impl store::RetainedArtifactReadProvider for TamperedErc20CallEvidenceProvider {
                 == mfm_events::v1::ArtifactRole::ExternalReadEvidence
                 && serde_json::from_slice::<serde_json::Value>(artifact.bytes())
                     .ok()
-                    .is_some_and(|value| value.get("destination").is_some());
+                    .is_some_and(|value| {
+                        value.get("return_data").is_some() && value.get("canonical_block").is_some()
+                    });
             if !is_erc20_call_evidence {
                 return Ok(artifact);
             }

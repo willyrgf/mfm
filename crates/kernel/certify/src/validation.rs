@@ -669,8 +669,7 @@ fn validate_side_effect_contract(
     let (class, _) = effect_class_for_kind(&node.effect_kind)?;
     match (class, &node.side_effect) {
         (EffectClass::ApplySideEffect, Some(contract))
-            if descriptor.side_effect_contract_digest.as_ref()
-                == Some(&contract.contract_digest) =>
+            if descriptor.effect_contract_digest.as_ref() == Some(&contract.contract_digest) =>
         {
             Ok(())
         }

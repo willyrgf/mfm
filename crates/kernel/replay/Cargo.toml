@@ -22,6 +22,7 @@ mfm-events = { path = "../events" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
+mfm-program = { path = "../program" }
 mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }

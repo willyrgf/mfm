@@ -137,6 +137,63 @@ struct LaunchValue {
     label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "external_read_plan_v2",
+    version = "1",
+    schema = "mfm.program.test.external_read_plan_v2"
+)]
+struct AlternateReadPlan {
+    amount: u64,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "external_read_evidence",
+    version = "1",
+    schema = "mfm.program.test.external_read_evidence"
+)]
+struct ReadEvidenceValue {
+    amount: u64,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "external_read_evidence_v2",
+    version = "1",
+    schema = "mfm.program.test.external_read_evidence_v2"
+)]
+struct AlternateReadEvidence {
+    amount: u64,
+    label: String,
+}
+
+#[test]
+fn external_read_contract_digest_binds_plan_and_evidence_identities() {
+    let original =
+        external_read_contract_digest::<LaunchValue, ReadEvidenceValue>().expect("read contract");
+    assert_eq!(
+        original,
+        external_read_contract_digest::<LaunchValue, ReadEvidenceValue>()
+            .expect("stable read contract")
+    );
+    assert_ne!(
+        original,
+        external_read_contract_digest::<AlternateReadPlan, ReadEvidenceValue>()
+            .expect("changed plan contract")
+    );
+    assert_ne!(
+        original,
+        external_read_contract_digest::<LaunchValue, AlternateReadEvidence>()
+            .expect("changed evidence contract")
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.program.test",

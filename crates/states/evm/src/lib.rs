@@ -5,8 +5,8 @@
 //! collectors and report selection, plus source-near observe/record states. It defines no
 //! JSON-RPC transport, runtime source routing, workflow topology, CLI, REST, or app registration.
 //!
-//! [`SubmitEvmTransactionState`] is the sole generic mutation state. Exact-anchor
-//! validation will join it when external-read execution is replaced; the temporary
+//! [`SubmitEvmTransactionState`] is the sole generic mutation state, and
+//! [`ValidateEvmContractState`] owns exact-anchor code and call validation. The temporary
 //! portfolio collectors move to their owning vertical slice afterward.
 //!
 //! # Examples
@@ -31,6 +31,8 @@
 //! # Ok::<(), mfm_states_evm::EvmStateError>(())
 //! ```
 
+mod canonical;
+mod contract_validation;
 mod erc20_balance_collect;
 mod identity;
 mod native_balance_collect;
@@ -45,14 +47,23 @@ pub use erc20_balance_collect::{
     validate_observe_erc20_balance_config, validate_observe_erc20_token_metadata_config,
     AssembleEvmErc20BalanceBatchReceiptConfig, AssembleEvmErc20BalanceBatchReceiptInput,
     AssembleEvmErc20BalanceBatchReceiptInputHandles, AssembleEvmErc20BalanceBatchReceiptState,
-    EvmErc20BalanceBatchReceipt, EvmErc20BalanceReceiptEntry, EvmErc20BalanceSourceKey,
-    EvmErc20TokenMetadata, ObserveErc20BalanceConfig, ObserveErc20BalanceInput,
-    ObserveErc20BalanceInputHandles, ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig,
-    ObserveErc20TokenMetadataInput, ObserveErc20TokenMetadataInputHandles,
-    ObserveErc20TokenMetadataState, RecordErc20BalanceFactConfig, RecordErc20BalanceFactInput,
-    RecordErc20BalanceFactInputHandles, RecordErc20BalanceFactState, EVM_ERC20_BALANCE_COVERAGE,
+    EvmCollectorCallReadEvidence, EvmCollectorCallReadPlan, EvmErc20BalanceBatchReceipt,
+    EvmErc20BalanceReceiptEntry, EvmErc20BalanceSourceKey, EvmErc20TokenMetadata,
+    ObserveErc20BalanceConfig, ObserveErc20BalanceInput, ObserveErc20BalanceInputHandles,
+    ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
+    ObserveErc20TokenMetadataInputHandles, ObserveErc20TokenMetadataState,
+    RecordErc20BalanceFactConfig, RecordErc20BalanceFactInput, RecordErc20BalanceFactInputHandles,
+    RecordErc20BalanceFactState, EVM_ERC20_BALANCE_COVERAGE,
     EVM_ERC20_BALANCE_OBSERVE_SOURCE_READS, EVM_ERC20_BALANCE_SOURCE_STATUS,
     EVM_ERC20_METADATA_OBSERVE_SOURCE_READS,
+};
+
+pub use contract_validation::{
+    validate_evm_contract, validate_evm_contract_validation_config, EvmContractCallCheck,
+    EvmContractCallContext, EvmContractValidationConfig, EvmContractValidationEvidence,
+    EvmContractValidationObservation, EvmContractValidationPlan, EvmContractValidationTarget,
+    ValidateEvmContractState, VerifiedEvmContract, EVM_CONTRACT_CODE_MAX_BYTES,
+    EVM_CONTRACT_VALIDATION_MAX_CALLS, EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES,
 };
 
 pub use native_balance_collect::{
@@ -62,8 +73,9 @@ pub use native_balance_collect::{
     validate_resolve_evm_joint_tip_config, AssembleEvmNativeBalanceBatchReceiptConfig,
     AssembleEvmNativeBalanceBatchReceiptInput, AssembleEvmNativeBalanceBatchReceiptInputHandles,
     AssembleEvmNativeBalanceBatchReceiptState, EvmAddressNativeBalanceObservation, EvmJointTip,
-    EvmNativeBalanceBatchReceipt, EvmNativeBalanceReceiptEntry, EvmNativeBalanceSourceKey,
-    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
+    EvmJointTipReadEvidence, EvmJointTipReadPlan, EvmNativeBalanceBatchReceipt,
+    EvmNativeBalanceReadEvidence, EvmNativeBalanceReadPlan, EvmNativeBalanceReceiptEntry,
+    EvmNativeBalanceSourceKey, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
     ObserveEvmNativeBalanceInputHandles, ObserveEvmNativeBalanceState,
     RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
     RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
@@ -116,6 +128,12 @@ pub enum EvmStateError {
         /// Stable redacted reason.
         reason: String,
     },
+}
+
+impl EvmStateError {
+    fn invalid(reason: String) -> Self {
+        Self::InvalidInput { reason }
+    }
 }
 
 impl From<EvmStateError> for StateError {

@@ -1,4 +1,7 @@
 use super::*;
+use mfm_program::MfmFactType;
+use mfm_states_btc::BtcAddressBalanceSnapshotFact;
+use mfm_states_evm::{EvmAddressErc20BalanceSnapshotFact, EvmAddressNativeBalanceSnapshotFact};
 use std::collections::BTreeMap;
 
 use mfm_facts::FactContentIdentityEvidence;
@@ -383,7 +386,16 @@ fn collection_receipt_decode_rejects_manifest_identity_tampering() {
 
 #[test]
 fn selection_config_closes_receipt_policy_and_candidate_bound() {
-    let config = SelectHoldingsConfig::new(sample_portfolio()).expect("config");
+    let config = SelectHoldingsConfig::new(
+        sample_portfolio(),
+        SelectHoldingsFactDescriptors::new(
+            &BtcAddressBalanceSnapshotFact::descriptor().expect("Bitcoin descriptor"),
+            &EvmAddressNativeBalanceSnapshotFact::descriptor().expect("EVM native descriptor"),
+            &EvmAddressErc20BalanceSnapshotFact::descriptor().expect("ERC-20 descriptor"),
+        )
+        .expect("holding descriptors"),
+    )
+    .expect("config");
     assert_eq!(
         config.selection_policy_id(),
         PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID

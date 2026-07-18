@@ -504,19 +504,35 @@ macro_rules! impl_runtime_read_state {
         }
 
         impl ReadState for $state {
-            type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
+            type Plan = FixtureOutputValue;
+            type Evidence = FixtureOutputValue;
 
-            fn run<'a>(
-                &'a self,
-                _input: Self::Input,
-                _caps: &'a Self::Caps,
-                _context: &'a mfm_program::CertifiedContext<Self::Context>,
-            ) -> Self::RunFuture<'a> {
-                std::future::ready(Ok(fixture_output_value(
+            fn plan(
+                &self,
+                _input: &Self::Input,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
+            ) -> StateResult<Self::Plan> {
+                Ok(fixture_output_value(
                     self.config.multiplier,
                     $name,
                     "typed-read",
-                )))
+                ))
+            }
+
+            fn reduce(
+                &self,
+                input: &Self::Input,
+                evidence: &mfm_program::ExternalReadEvidenceSet<Self::Evidence>,
+                context: &mfm_program::CertifiedContext<Self::Context>,
+            ) -> StateResult<Self::Output> {
+                if !evidence.fact_query_evidence().is_empty()
+                    || evidence.primary_evidence() != &self.plan(input, context)?
+                {
+                    return Err(mfm_program::StateError::Message(
+                        "runtime fixture read evidence did not match its plan".to_owned(),
+                    ));
+                }
+                Ok(evidence.primary_evidence().clone())
             }
         }
     };

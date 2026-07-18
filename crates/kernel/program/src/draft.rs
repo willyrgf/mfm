@@ -63,8 +63,8 @@ pub struct StateNodeSpec {
     pub adapter_bindings: Vec<AdapterBindingSpec>,
     /// Fact descriptors this producing node may emit.
     pub fact_descriptor_allowlist: Vec<FactDescriptorRef>,
-    /// Side-effect contract digest when this node mutates an external system.
-    pub side_effect_contract_digest: Option<ContentDigest>,
+    /// Optional hash-defining effect contract from the registered descriptor.
+    pub effect_contract_digest: Option<ContentDigest>,
     /// Cross-run resource claim when this node mutates an external system.
     pub side_effect_resource_claim: Option<ResourceClaimSpec>,
     /// Terminal verification policy when this node mutates an external system.

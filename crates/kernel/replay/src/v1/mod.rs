@@ -27,8 +27,9 @@ use self::verification_helpers::*;
 mod value_read;
 pub use self::value_read::{
     canonical_value_bytes, decode_produced_value, external_read_evidence,
-    fact_query_evidence_for_attempt, load_node_config, produced_input_frames,
-    single_state_output_frame, verify_recorded_fact_evidence,
+    fact_query_evidence_for_attempt, load_node_config, load_node_context, load_node_input,
+    produced_input_frames, single_state_output_frame, verify_external_read_state,
+    verify_recorded_fact_evidence,
 };
 #[path = "broker.rs"]
 mod broker;

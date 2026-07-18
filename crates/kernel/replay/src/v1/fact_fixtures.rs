@@ -128,7 +128,7 @@ pub(super) fn fact_replay_spec() -> HashedSpecEnvelope {
         capabilities: node.capability_bindings.clone(),
         emitted_fact_descriptors: vec![descriptor_ref],
         runner: "mfm.replay.test.runner".to_owned(),
-        side_effect_contract_digest: None,
+        effect_contract_digest: None,
     }));
     let spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
         authoring: spec::AuthoringProvenance::StateComposition {

@@ -94,7 +94,7 @@ pub(in crate::tests::support) fn state_descriptor(
         capabilities,
         runner: runner.to_owned(),
         emitted_fact_descriptors: Vec::new(),
-        side_effect_contract_digest: None,
+        effect_contract_digest: None,
     }
 }
 

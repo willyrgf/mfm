@@ -189,15 +189,45 @@ pub struct EvmBlock {
 /// Checked call request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmCall {
+    from: Address,
     to: Address,
+    value: U256,
     input: Bytes,
+    gas_limit: U256,
+    access_list: AccessList,
     block: EvmBlockSelector,
 }
 
 impl EvmCall {
-    /// Creates a call request.
-    pub const fn new(to: Address, input: Bytes, block: EvmBlockSelector) -> Self {
-        Self { to, input, block }
+    /// Creates a fully specified call request. A zero gas limit is rejected.
+    pub fn new(
+        from: Address,
+        to: Address,
+        value: U256,
+        input: Bytes,
+        gas_limit: U256,
+        access_list: AccessList,
+        block: EvmBlockSelector,
+    ) -> Result<Self> {
+        if gas_limit.is_zero() {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ZeroCallGasLimit,
+            });
+        }
+        Ok(Self {
+            from,
+            to,
+            value,
+            input,
+            gas_limit,
+            access_list,
+            block,
+        })
+    }
+
+    /// Returns the explicit caller.
+    pub const fn from(&self) -> Address {
+        self.from
     }
 
     /// Returns the destination.
@@ -208,6 +238,21 @@ impl EvmCall {
     /// Returns the input bytes.
     pub const fn input(&self) -> &Bytes {
         &self.input
+    }
+
+    /// Returns the transferred wei value.
+    pub const fn value(&self) -> U256 {
+        self.value
+    }
+
+    /// Returns the call gas bound.
+    pub const fn gas_limit(&self) -> U256 {
+        self.gas_limit
+    }
+
+    /// Returns the EIP-2930 access list.
+    pub const fn access_list(&self) -> &AccessList {
+        &self.access_list
     }
 
     /// Returns the block selector.
@@ -498,6 +543,8 @@ pub enum EvmInvalidRequest {
     ZeroExpectedChainId,
     /// Checked EIP-1559 fee arithmetic overflowed U256.
     FeeOverflow,
+    /// A read-only call supplied a zero gas limit.
+    ZeroCallGasLimit,
     /// Signed transaction bytes were empty.
     EmptySignedTransaction,
     /// Receipt/log identities were inconsistent or a log was removed.

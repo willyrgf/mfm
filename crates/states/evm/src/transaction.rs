@@ -1,14 +1,12 @@
 //! One-transaction EVM side-effect state and deterministic evidence reducers.
 
-use std::str::FromStr;
-
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_effects::ApplySideEffect;
 use mfm_evm_capabilities::{
     EvmBlock, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction as CapabilityTransaction,
     EvmReceipt as CapabilityReceipt, EvmReceiptStatus as CapabilityReceiptStatus,
-    EvmSessionEvidence, EvmTransactionEstimate, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmSessionEvidence, EvmTransactionEstimate,
 };
 use mfm_ids::LocalPublicId;
 use mfm_program::{
@@ -20,6 +18,10 @@ use mfm_signing::{SignerRef, SigningCapability, SECP256K1_RFC6979_LOW_S_PROFILE_
 use mfm_values::MfmValue as _;
 use serde::{Deserialize, Serialize};
 
+use crate::canonical::{
+    canonical_address, canonical_bytes, canonical_hash, invalid, parse_address, parse_bytes,
+    parse_hash, parse_quantity, validate_session,
+};
 use crate::identity::{adapter_binding, state_kind, state_version};
 use crate::{EvmStateError, RedactedEvmSessionEvidence};
 
@@ -71,7 +73,7 @@ impl EvmAccessListEntry {
         &self.storage_keys
     }
 
-    fn validate(&self) -> Result<(), EvmStateError> {
+    pub(crate) fn validate(&self) -> Result<(), EvmStateError> {
         parse_address(&self.address)?;
         for key in &self.storage_keys {
             parse_hash(key)?;
@@ -79,7 +81,7 @@ impl EvmAccessListEntry {
         Ok(())
     }
 
-    fn to_alloy(&self) -> Result<AccessListItem, EvmStateError> {
+    pub(crate) fn to_alloy(&self) -> Result<AccessListItem, EvmStateError> {
         Ok(AccessListItem {
             address: parse_address(&self.address)?,
             storage_keys: self
@@ -1235,12 +1237,17 @@ pub struct EvmBlockAnchor {
 }
 
 impl EvmBlockAnchor {
+    /// Creates one canonical concrete block anchor.
+    pub fn new(number: U256, hash: B256) -> Self {
+        Self {
+            number: number.to_string(),
+            hash: canonical_hash(hash),
+        }
+    }
+
     /// Converts a checked capability block.
     pub fn from_block(block: &EvmBlock) -> Self {
-        Self {
-            number: block.number.to_string(),
-            hash: canonical_hash(block.hash),
-        }
+        Self::new(block.number, block.hash)
     }
 
     /// Returns the canonical block number.
@@ -1253,7 +1260,26 @@ impl EvmBlockAnchor {
         &self.hash
     }
 
-    fn validate(&self) -> Result<(), EvmStateError> {
+    /// Returns the anchor number as an Alloy quantity.
+    pub fn number_quantity(&self) -> Result<U256, EvmStateError> {
+        parse_quantity(&self.number)
+    }
+
+    /// Returns the anchor hash as an Alloy primitive.
+    pub fn hash_value(&self) -> Result<B256, EvmStateError> {
+        parse_hash(&self.hash)
+    }
+
+    /// Converts this canonical persisted anchor into a capability block value.
+    pub fn to_block(&self) -> Result<EvmBlock, EvmStateError> {
+        self.validate()?;
+        Ok(EvmBlock {
+            number: self.number_quantity()?,
+            hash: self.hash_value()?,
+        })
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), EvmStateError> {
         parse_quantity(&self.number)?;
         parse_hash(&self.hash)?;
         Ok(())
@@ -1601,86 +1627,6 @@ fn access_list_from_alloy(access_list: &AccessList) -> Vec<EvmAccessListEntry> {
         .iter()
         .map(|entry| EvmAccessListEntry::new(entry.address, entry.storage_keys.clone()))
         .collect()
-}
-
-fn validate_session(
-    session: &RedactedEvmSessionEvidence,
-    network_id: &str,
-    chain_id: u64,
-) -> Result<(), EvmStateError> {
-    if !session.is_bound_to(network_id, chain_id)
-        || session.implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
-    {
-        return Err(invalid(
-            "EVM session did not match prepared semantic authority",
-        ));
-    }
-    session.to_session().map(|_| ())
-}
-
-fn parse_address(value: &str) -> Result<Address, EvmStateError> {
-    let address = Address::from_str(value).map_err(|_| invalid("EVM address was invalid"))?;
-    if canonical_address(address) != value {
-        return Err(invalid("EVM address was not canonical"));
-    }
-    Ok(address)
-}
-
-fn parse_hash(value: &str) -> Result<B256, EvmStateError> {
-    let hash = B256::from_str(value).map_err(|_| invalid("EVM hash was invalid"))?;
-    if canonical_hash(hash) != value {
-        return Err(invalid("EVM hash was not canonical"));
-    }
-    Ok(hash)
-}
-
-fn parse_quantity(value: &str) -> Result<U256, EvmStateError> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(invalid("EVM quantity was not canonical decimal"));
-    }
-    let quantity = U256::from_str(value).map_err(|_| invalid("EVM quantity exceeded U256"))?;
-    if quantity.to_string() != value {
-        return Err(invalid("EVM quantity was not canonical decimal"));
-    }
-    Ok(quantity)
-}
-
-fn parse_bytes(value: &str, maximum: usize) -> Result<Vec<u8>, EvmStateError> {
-    let body = value
-        .strip_prefix("0x")
-        .ok_or_else(|| invalid("EVM bytes lacked canonical prefix"))?;
-    if body.len() % 2 != 0 || body.len() / 2 > maximum {
-        return Err(invalid("EVM bytes had invalid or excessive length"));
-    }
-    let bytes = hex::decode(body).map_err(|_| invalid("EVM bytes were invalid hex"))?;
-    if canonical_bytes(&bytes) != value {
-        return Err(invalid("EVM bytes were not canonical"));
-    }
-    Ok(bytes)
-}
-
-fn canonical_address(value: Address) -> String {
-    format!("{value:#x}")
-}
-
-fn canonical_hash(value: B256) -> String {
-    format!("{value:#x}")
-}
-
-fn canonical_bytes(value: &[u8]) -> String {
-    format!("0x{}", hex::encode(value))
-}
-
-fn invalid(reason: impl Into<String>) -> EvmStateError {
-    EvmStateError::InvalidInput {
-        reason: reason.into(),
-    }
-}
-
-impl EvmStateError {
-    fn invalid(reason: String) -> Self {
-        Self::InvalidInput { reason }
-    }
 }
 
 #[cfg(test)]

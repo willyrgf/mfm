@@ -10,34 +10,6 @@ impl SelectHoldingsState {
     pub const fn config(&self) -> &SelectHoldingsConfig {
         &self.config
     }
-
-    /// Builds receipt-pinned selection evidence for one identity-matching claim row.
-    pub fn selection_evidence_for_index(
-        &self,
-        selected_index: usize,
-    ) -> Result<FactSelectionEvidence, PortfolioHoldingSelectionError> {
-        let selected_index = u64::try_from(selected_index).map_err(|_| {
-            PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::AmbiguousFacts,
-                "selected fact query row index overflowed u64",
-                None,
-                None,
-            )
-        })?;
-        FactSelectionEvidence::new(
-            portfolio_holding_selection_policy_digest(),
-            vec![selected_index],
-            None,
-        )
-        .map_err(|error| {
-            PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::AmbiguousFacts,
-                error.to_string(),
-                None,
-                None,
-            )
-        })
-    }
 }
 
 impl StateSpec for SelectHoldingsState {
@@ -72,18 +44,31 @@ impl StateSpec for SelectHoldingsState {
 }
 
 impl ReadState for SelectHoldingsState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = SelectHoldingsReadPlan;
+    type Evidence = SelectHoldingsReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        _input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        future::ready(Err(StateError::Message(format!(
-            "{} requires adapter-bound Platform fact-index execution",
-            Self::name()
-        ))))
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        SelectHoldingsReadPlan::new(&self.config, input)
+            .map_err(|error| StateError::Message(error.to_string()))
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        let plan = self.plan(input, context)?;
+        holding_read::reduce_select_holdings(
+            &plan,
+            evidence.primary_evidence(),
+            evidence.fact_query_evidence(),
+        )
+        .map_err(|error| StateError::Message(error.to_string()))
     }
 }
 

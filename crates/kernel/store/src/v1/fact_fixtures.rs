@@ -769,7 +769,7 @@ fn fact_source_spec_for_test(
                 capabilities,
                 emitted_fact_descriptors: Vec::new(),
                 runner: "mfm.test.fact_fixture_runner".to_owned(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             })),
             DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
         ],

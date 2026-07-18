@@ -16,3 +16,9 @@ State transition contexts are explicit typed values. Domain crates opt in with `
 `NoContext` or `&DeclaredContext<C>` to every state-planning API. Declared contexts lower into the
 certified context table and context-bound cell metadata; ordinary state authoring must pass
 `NoContext` explicitly.
+
+`ReadState` separates deterministic semantics from live authority. Each read state defines a typed
+`Plan`, typed primary `Evidence`, a planner over certified input/context, and a pure reducer over the
+same input/context plus retained evidence. Plan and evidence schema and semantic identities are
+hashed into the descriptor effect contract. Fact-query reads receive kernel-owned query evidence
+alongside one state-owned primary evidence value; other reads reject auxiliary query evidence.

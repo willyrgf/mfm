@@ -11,28 +11,33 @@ use std::future;
 use std::num::NonZeroU64;
 use std::str::FromStr;
 
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
 use mfm_evm_capabilities::{
-    EvmBlock, EvmBlockSelector, EvmCall, EvmReadCapability, EvmSessionEvidence,
+    EvmBlock, EvmBlockSelector, EvmCall, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, MfmFactType,
-    NoContext, PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, ExternalReadEvidenceSet, FactDescriptorRef,
+    ManagedWriteState, MfmFactType, NoContext, PureState, ReadState, StateError, StateResult,
+    StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use mfm_values::NonEmpty;
 use serde::{de, Deserialize, Serialize};
 
-use crate::identity::{adapter_binding, adapter_required_error, state_kind, state_version};
+const ERC20_READ_GAS_LIMIT: u64 = 100_000;
+
+use crate::canonical::{canonical_bytes, parse_bytes, validate_session};
+use crate::identity::{adapter_binding, state_kind, state_version};
 use crate::{
     address_erc20_balance_fact_visibility, canonical_evm_block_hash,
     validate_canonical_erc20_contract_address, EvmAddressErc20BalanceObservation,
     EvmAddressErc20BalanceResponse, EvmAddressErc20BalanceSnapshotFact,
-    EvmAddressErc20BalanceSubject, EvmJointTip, EvmStateError, RedactedEvmSessionEvidence,
+    EvmAddressErc20BalanceSubject, EvmBlockAnchor, EvmContractCallContext, EvmJointTip,
+    EvmStateError, RedactedEvmSessionEvidence, EVM_TRANSACTION_DATA_MAX_BYTES,
 };
 
 /// Exact number of source reads for one anchored ERC-20 `decimals()` observation.
@@ -101,6 +106,103 @@ impl ObserveErc20TokenMetadataConfig {
 pub struct ObserveErc20TokenMetadataInput {
     /// Joint tip resolved once for this EVM network batch.
     pub joint_tip: EvmJointTip,
+}
+
+/// State-owned exact-anchor plan for one legacy portfolio ERC-20 call read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "collector_call_read_plan",
+    version = "1",
+    schema = "mfm.evm.read.collector_call.plan"
+)]
+pub struct EvmCollectorCallReadPlan {
+    network: String,
+    chain_id: u64,
+    context: EvmContractCallContext,
+    anchor: EvmBlockAnchor,
+}
+
+impl EvmCollectorCallReadPlan {
+    fn from_request(
+        network: &str,
+        chain_id: u64,
+        joint_tip: &EvmJointTip,
+        request: &EvmCall,
+    ) -> Result<Self, EvmStateError> {
+        let (context, request_hash) = EvmContractCallContext::from_capability_request(request)?;
+        let anchor = EvmBlockAnchor::new(
+            U256::from(joint_tip.block_number()),
+            parse_joint_tip_hash(joint_tip)?,
+        );
+        if request_hash != anchor.hash_value()? {
+            return Err(EvmStateError::InvalidInput {
+                reason: "EVM collector call plan did not use the joint-tip hash".to_owned(),
+            });
+        }
+        Ok(Self {
+            network: network.to_owned(),
+            chain_id,
+            context,
+            anchor,
+        })
+    }
+
+    /// Returns the checked semantic network binding.
+    pub fn binding(&self) -> Result<EvmNetworkBinding, EvmStateError> {
+        EvmNetworkBinding::new(
+            mfm_ids::LocalPublicId::new(&self.network).map_err(|_| {
+                EvmStateError::InvalidInput {
+                    reason: "EVM collector call plan network was invalid".to_owned(),
+                }
+            })?,
+            self.chain_id,
+        )
+        .map_err(|_| EvmStateError::InvalidInput {
+            reason: "EVM collector call plan binding was invalid".to_owned(),
+        })
+    }
+
+    /// Returns the complete exact-hash call request.
+    pub fn request(&self) -> Result<EvmCall, EvmStateError> {
+        self.context.capability_request(&self.anchor)
+    }
+
+    /// Returns the final block-number selector used to detect reorgs.
+    pub fn canonicality_selector(&self) -> Result<EvmBlockSelector, EvmStateError> {
+        Ok(EvmBlockSelector::Number(self.anchor.number_quantity()?))
+    }
+}
+
+/// Canonical retained response for one legacy portfolio ERC-20 call read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "collector_call_read_evidence",
+    version = "1",
+    schema = "mfm.evm.read.collector_call.evidence"
+)]
+pub struct EvmCollectorCallReadEvidence {
+    return_data: String,
+    canonical_block: EvmBlockAnchor,
+    session: RedactedEvmSessionEvidence,
+}
+
+impl EvmCollectorCallReadEvidence {
+    /// Builds retained evidence from bound live responses.
+    pub fn from_responses(
+        return_data: &Bytes,
+        canonical_block: &EvmBlock,
+        session: &EvmSessionEvidence,
+    ) -> Result<Self, EvmStateError> {
+        Ok(Self {
+            return_data: canonical_bytes(return_data),
+            canonical_block: EvmBlockAnchor::from_block(canonical_block),
+            session: RedactedEvmSessionEvidence::from_session(session)?,
+        })
+    }
 }
 
 /// Exact observed ERC-20 token metadata at a shared EVM anchor.
@@ -264,11 +366,18 @@ pub fn erc20_metadata_call_request(
             },
         )?;
     let block_hash = parse_joint_tip_hash(joint_tip)?;
-    Ok(EvmCall::new(
+    EvmCall::new(
+        Address::ZERO,
         contract_address,
+        U256::ZERO,
         calldata.into(),
+        U256::from(ERC20_READ_GAS_LIMIT),
+        Default::default(),
         EvmBlockSelector::ExactHash(block_hash),
-    ))
+    )
+    .map_err(|_| EvmStateError::InvalidInput {
+        reason: "erc20 metadata call context was invalid".to_owned(),
+    })
 }
 
 /// Normalizes an exact ERC-20 metadata capability response after anchor re-verification.
@@ -386,18 +495,38 @@ impl StateSpec for ObserveErc20TokenMetadataState {
 }
 
 impl ReadState for ObserveErc20TokenMetadataState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = EvmCollectorCallReadPlan;
+    type Evidence = EvmCollectorCallReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        if let Err(error) = self.call_request(&input) {
-            return future::ready(Err(StateError::from(error)));
-        }
-        future::ready(Err(adapter_required_error(Self::name())))
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        let request = self.call_request(input).map_err(StateError::from)?;
+        let (network, chain_id) = self
+            .config
+            .evm_network_parts()
+            .map_err(|reason| StateError::from(EvmStateError::InvalidInput { reason }))?;
+        EvmCollectorCallReadPlan::from_request(network, chain_id, &input.joint_tip, &request)
+            .map_err(StateError::from)
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        reject_fact_queries(evidence)?;
+        let plan = self.plan(input, context)?;
+        reduce_collector_call_evidence(
+            &plan,
+            evidence.primary_evidence(),
+            |request, data, block, session| {
+                self.materialize_response(input, request, data, block, session)
+            },
+        )
     }
 }
 
@@ -480,11 +609,18 @@ pub fn erc20_balance_call_request(
                 reason: "erc20 balance calldata could not be encoded".to_owned(),
             })?;
     let block_hash = parse_joint_tip_hash(&input.joint_tip)?;
-    Ok(EvmCall::new(
+    EvmCall::new(
+        Address::ZERO,
         contract_address,
+        U256::ZERO,
         calldata.into(),
+        U256::from(ERC20_READ_GAS_LIMIT),
+        Default::default(),
         EvmBlockSelector::ExactHash(block_hash),
-    ))
+    )
+    .map_err(|_| EvmStateError::InvalidInput {
+        reason: "erc20 balance call context was invalid".to_owned(),
+    })
 }
 
 /// Normalizes an exact ERC-20 balance capability response after anchor re-verification.
@@ -602,18 +738,67 @@ impl StateSpec for ObserveErc20BalanceState {
 }
 
 impl ReadState for ObserveErc20BalanceState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = EvmCollectorCallReadPlan;
+    type Evidence = EvmCollectorCallReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        if let Err(error) = self.call_request(&input) {
-            return future::ready(Err(StateError::from(error)));
-        }
-        future::ready(Err(adapter_required_error(Self::name())))
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        let request = self.call_request(input).map_err(StateError::from)?;
+        let (network, chain_id) = self
+            .config
+            .evm_network_parts()
+            .map_err(|reason| StateError::from(EvmStateError::InvalidInput { reason }))?;
+        EvmCollectorCallReadPlan::from_request(network, chain_id, &input.joint_tip, &request)
+            .map_err(StateError::from)
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        reject_fact_queries(evidence)?;
+        let plan = self.plan(input, context)?;
+        reduce_collector_call_evidence(
+            &plan,
+            evidence.primary_evidence(),
+            |request, data, block, session| {
+                self.materialize_response(input, request, data, block, session)
+            },
+        )
+    }
+}
+
+fn reduce_collector_call_evidence<T>(
+    plan: &EvmCollectorCallReadPlan,
+    evidence: &EvmCollectorCallReadEvidence,
+    reduce: impl FnOnce(&EvmCall, &Bytes, &EvmBlock, &EvmSessionEvidence) -> Result<T, EvmStateError>,
+) -> StateResult<T> {
+    validate_session(&evidence.session, &plan.network, plan.chain_id).map_err(StateError::from)?;
+    let session = evidence.session.to_session().map_err(StateError::from)?;
+    let request = plan.request().map_err(StateError::from)?;
+    let return_data = Bytes::from(
+        parse_bytes(&evidence.return_data, EVM_TRANSACTION_DATA_MAX_BYTES)
+            .map_err(StateError::from)?,
+    );
+    let canonical_block = evidence
+        .canonical_block
+        .to_block()
+        .map_err(StateError::from)?;
+    reduce(&request, &return_data, &canonical_block, &session).map_err(StateError::from)
+}
+
+fn reject_fact_queries<E>(evidence: &ExternalReadEvidenceSet<E>) -> StateResult<()> {
+    if evidence.fact_query_evidence().is_empty() {
+        Ok(())
+    } else {
+        Err(StateError::Message(
+            "EVM collector read carried unexpected fact-query evidence".to_owned(),
+        ))
     }
 }
 

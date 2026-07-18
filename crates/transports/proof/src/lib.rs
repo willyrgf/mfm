@@ -11,9 +11,9 @@ use mfm_capabilities::CapabilitySpec;
 use mfm_collectors_proof::{
     proof_adapter_kind, proof_adapter_version, ProofApplyConfig, ProofApplySideEffectState,
     ProofAssembleConfig, ProofAssembleOutputState, ProofConfirmation, ProofFact,
-    ProofIdempotencyInput, ProofIntent, ProofMutationCapability, ProofOutput, ProofReadConfig,
-    ProofReadFactState, ProofReceipt, ProofReplayError, ProofReplayVerifier, ProofSideEffectResult,
-    ProofSubmission, RecordedProofFacts, MANUAL_RESOLUTION_PROOF_ACTION,
+    ProofIdempotencyInput, ProofIntent, ProofMutationCapability, ProofOutput, ProofReadEvidence,
+    ProofReadFactState, ProofReadPlan, ProofReceipt, ProofReplayError, ProofReplayVerifier,
+    ProofSideEffectResult, ProofSubmission, RecordedProofFacts, MANUAL_RESOLUTION_PROOF_ACTION,
 };
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::ContentDigest;
@@ -22,7 +22,8 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_materialized_struct_input, load_runner_config_for_node, load_side_effect_artifact,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    ErasedRunnerOutput, ErasedRunnerRegistry, ExternalReadExecution, ExternalReadExecutionFuture,
+    ExternalReadPlanExecutor, ExternalReadRunner, MaterializedCellTerminal, MaterializedInputNode,
     MaterializedInputs, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
     RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectAdapter, SideEffectDriver,
     SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
@@ -68,7 +69,10 @@ pub fn register_deterministic_proof_runners(
         read.descriptor_id().clone(),
         read_factory.clone(),
         executable(read_factory.clone())?,
-        Arc::new(ProofReadRunner),
+        Arc::new(ExternalReadRunner::<ProofReadFactState, _>::new(
+            artifacts.clone(),
+            ProofReadExecutor,
+        )),
     )?;
     let side_effect_factory = events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?;
     registrations.register_runner(
@@ -114,11 +118,19 @@ fn executable(
     })
 }
 
-struct ProofReadRunner;
+struct ProofReadExecutor;
 
-impl ErasedNodeRunner for ProofReadRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move { run_read(ctx).await })
+impl ExternalReadPlanExecutor<ProofReadFactState> for ProofReadExecutor {
+    fn execute<'a>(
+        &'a self,
+        plan: &'a ProofReadPlan,
+        _ctx: &'a ErasedRunCtx<'_>,
+    ) -> ExternalReadExecutionFuture<'a, ProofReadEvidence> {
+        Box::pin(async move {
+            Ok(ExternalReadExecution::primary(ProofReadEvidence {
+                fact_n: plan.fact_n,
+            }))
+        })
     }
 }
 
@@ -138,19 +150,6 @@ impl ErasedNodeRunner for ProofAssembleRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_assemble(ctx).await })
     }
-}
-
-async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    ensure_config::<ProofReadConfig>(&ctx.node().config_ref, &ProofReadConfig { fact_n: 1 })?;
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let fact = ProofFact { n: 1 };
-    let output_artifact = artifacts.state_output(&fact)?;
-    let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_attempt_artifact(&output_artifact)?;
-    output.retain_runtime_evidence(&output_artifact)?;
-    output.payload(payloads.cell_produced(&output_artifact)?);
-    Ok(output.finish())
 }
 
 async fn run_side_effect(
@@ -1006,6 +1005,7 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
 ///
 /// The application dispatches this verifier only for proof-owned side-effect intents.
 pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    replay::verify_external_read_state::<ProofReadFactState>(broker)?;
     let frames = broker.side_effect_replay_frames_matching(is_deterministic_proof_replay_intent)?;
     if frames.is_empty() {
         return Ok(());

@@ -1,5 +1,113 @@
 use super::*;
 
+/// Certified descriptors for the three legacy holding fact families consumed by selection.
+///
+/// Descriptors are carried as canonical JSON so the portfolio state can own query planning and
+/// descriptor-checked hydration without depending on another state crate. The portfolio operation
+/// supplies the concrete registered descriptors when it authors the state config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "select_holdings_fact_descriptors",
+    schema = "mfm.portfolio.config.select_holdings_fact_descriptors"
+)]
+pub struct SelectHoldingsFactDescriptors {
+    bitcoin_native: String,
+    evm_native: String,
+    evm_erc20: String,
+}
+
+impl SelectHoldingsFactDescriptors {
+    /// Canonicalizes and admits the registered descriptors used by the portfolio operation.
+    pub fn new(
+        bitcoin_native: &mfm_facts::FactDescriptor,
+        evm_native: &mfm_facts::FactDescriptor,
+        evm_erc20: &mfm_facts::FactDescriptor,
+    ) -> Result<Self, ConfigError> {
+        let descriptors = Self {
+            bitcoin_native: canonical_descriptor_json(bitcoin_native)?,
+            evm_native: canonical_descriptor_json(evm_native)?,
+            evm_erc20: canonical_descriptor_json(evm_erc20)?,
+        };
+        descriptors.validate().map_err(ConfigError::new)?;
+        Ok(descriptors)
+    }
+
+    pub(crate) fn descriptor_for_source(
+        &self,
+        source: &HoldingSourceKey,
+    ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
+        let (canonical, expected_kind) = match source {
+            HoldingSourceKey::BitcoinNative { .. } => (
+                self.bitcoin_native.as_str(),
+                "bitcoin.address_balance_snapshot",
+            ),
+            HoldingSourceKey::EvmNative { .. } => (
+                self.evm_native.as_str(),
+                "evm.address_native_balance_snapshot",
+            ),
+            HoldingSourceKey::EvmErc20 { .. } => (
+                self.evm_erc20.as_str(),
+                "evm.address_erc20_balance_snapshot",
+            ),
+        };
+        let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(canonical.as_bytes())
+            .map_err(|error| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::ReceiptMismatch,
+                    error.to_string(),
+                    None,
+                    Some(source.network_id().to_owned()),
+                )
+            })?;
+        if descriptor.fact_kind().as_str() != expected_kind {
+            return Err(PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::ReceiptMismatch,
+                "holding fact descriptor kind did not match its configured source family",
+                None,
+                Some(source.network_id().to_owned()),
+            ));
+        }
+        Ok(descriptor)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for source in [
+            HoldingSourceKey::BitcoinNative {
+                network_id: "descriptor-validation".to_owned(),
+                bitcoin_network: "main".to_owned(),
+                semantic_source_identity: "descriptor-validation".to_owned(),
+                address: "descriptor-validation".to_owned(),
+            },
+            HoldingSourceKey::EvmNative {
+                network_id: "descriptor-validation".to_owned(),
+                chain_id: 1,
+                account: "0x0000000000000000000000000000000000000001".to_owned(),
+            },
+            HoldingSourceKey::EvmErc20 {
+                network_id: "descriptor-validation".to_owned(),
+                chain_id: 1,
+                contract_address: "0x0000000000000000000000000000000000000001".to_owned(),
+                account: "0x0000000000000000000000000000000000000002".to_owned(),
+            },
+        ] {
+            self.descriptor_for_source(&source)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+fn canonical_descriptor_json(
+    descriptor: &mfm_facts::FactDescriptor,
+) -> Result<String, ConfigError> {
+    let bytes = mfm_facts::canonical_fact_descriptor_bytes(descriptor)
+        .map_err(|error| ConfigError::new(error.to_string()))?;
+    String::from_utf8(bytes.as_bytes().to_vec())
+        .map_err(|error| ConfigError::new(error.to_string()))
+}
+
 /// Config for Platform fact-backed holding selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[mfm(
@@ -15,17 +123,23 @@ pub struct SelectHoldingsConfig {
     pub(super) selection_policy_id: String,
     /// Fixed N + 1 scan limit used to prove candidate exhaustion.
     pub(super) candidate_scan_limit: NonZeroU64,
+    /// Registered fact descriptors that define query and hydration authority.
+    pub(super) fact_descriptors: SelectHoldingsFactDescriptors,
 }
 
 impl SelectHoldingsConfig {
     /// Creates validated receipt-pinned selection config with closed version-1 policy values.
-    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
+    pub fn new(
+        portfolio: PortfolioConfig,
+        fact_descriptors: SelectHoldingsFactDescriptors,
+    ) -> Result<Self, ConfigError> {
         let config = Self {
             portfolio,
             store_scope: PORTFOLIO_STORE_SCOPE.to_owned(),
             selection_policy_id: PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID.to_owned(),
             candidate_scan_limit: NonZeroU64::new(PORTFOLIO_FACT_SCAN_LIMIT)
                 .expect("portfolio receipt scan limit is non-zero"),
+            fact_descriptors,
         };
         validate_select_holdings_config(&config).map_err(ConfigError::new)?;
         Ok(config)
@@ -54,6 +168,11 @@ impl SelectHoldingsConfig {
     /// Returns the fixed number of candidates permitted before exhaustion proof fails.
     pub const fn candidate_bound(&self) -> u64 {
         PORTFOLIO_FACT_CANDIDATE_BOUND
+    }
+
+    /// Returns the certified holding fact descriptor set.
+    pub const fn fact_descriptors(&self) -> &SelectHoldingsFactDescriptors {
+        &self.fact_descriptors
     }
 }
 
@@ -106,6 +225,7 @@ fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), 
             "portfolio candidate scan limit did not match the closed version-1 policy".to_owned(),
         );
     }
+    config.fact_descriptors.validate()?;
     Ok(())
 }
 

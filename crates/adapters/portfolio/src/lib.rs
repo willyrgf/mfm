@@ -5,49 +5,26 @@
 //! and Platform fact-index capability contracts. Live chain transports are not used by the report
 //! graph after the collectors cutover.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
 use mfm_events::v1 as events;
-use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
-use mfm_facts::{
-    fact_query_result_rows_from_receipt, CanonicalFactQueryPlan, FactCanonicalScalar,
-    FactQueryEvidence, QueryResultCardinality, ScopeDecisionEvidence, StoreReadFrontier,
-    StoreReadFrontierType, StoreScopeRef,
-};
-use mfm_portfolio_model::symbol::{HoldingSourceConfig, ObservationAnchor};
-use mfm_program::{MfmFactType, StateSpec, ValidatedConfig};
+use mfm_fact_capabilities::FactIndexReadProvider;
+use mfm_program::StateSpec;
 use mfm_runtime::{
     load_materialized_struct_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, RunnerExecutableIdentityTemplate,
-    RunnerOutputBuilder, RunnerRegistrationBuilder,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, ExternalReadExecution,
+    ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
+    RunnerExecutableIdentityTemplate, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    assemble_snapshot, holding_candidate_from_normalized, observations_from_selected_holdings,
-    portfolio_adapter_kind, portfolio_adapter_version,
-    portfolio_holding_select_scope_decision_hash, project_network_pins_from_observations,
-    symbols_by_id_map, validate_receipt_against_portfolio, AssembleSnapshotConfig,
-    AssembleSnapshotInput, AssembleSnapshotState, CollectedHoldingReceipt, HoldingCandidate,
-    HoldingRequirementKey, HoldingSourceKey, NormalizedHoldingFields, PortfolioCollectionReceipt,
-    PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, ProjectReportConfig,
-    ProjectReportInput, ProjectReportState, SelectHoldingsConfig, SelectHoldingsInput,
-    SelectHoldingsState, SelectedHolding, SelectedHoldings,
-};
-use mfm_states_btc::{
-    normalize_btc_address_balance, platform_address_balance_at_anchor_plan,
-    BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact, BtcAddressBalanceSubject,
-};
-use mfm_states_evm::{
-    normalize_evm_address_native_balance, platform_erc20_balance_at_anchor_plan,
-    platform_native_balance_at_anchor_plan, EvmAddressErc20BalanceResponse,
-    EvmAddressErc20BalanceSnapshotFact, EvmAddressErc20BalanceSubject,
-    EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact,
-    EvmAddressNativeBalanceSubject,
+    assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version,
+    validate_receipt_against_portfolio, AssembleSnapshotConfig, AssembleSnapshotInput,
+    AssembleSnapshotState, PortfolioCollectionReceipt, ProjectReportConfig, ProjectReportInput,
+    ProjectReportState, SelectHoldingsConfig, SelectHoldingsInput, SelectHoldingsReadEvidence,
+    SelectHoldingsReadPlan, SelectHoldingsState, SelectedHoldings,
 };
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
-use serde::de::DeserializeOwned;
 
 #[path = "replay.rs"]
 mod replay;
@@ -55,7 +32,14 @@ mod replay;
 mod selection;
 pub use self::replay::verify_portfolio_replay;
 #[cfg(test)]
-pub(crate) use self::selection::{holding_fact_index_request, select_holdings};
+pub(crate) use self::selection::select_holdings;
+
+#[cfg(test)]
+use mfm_fact_capabilities::FactIndexReadRequest;
+#[cfg(test)]
+use mfm_facts::FactCanonicalScalar;
+#[cfg(test)]
+use mfm_state_portfolio::project_network_pins_from_observations;
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
@@ -115,10 +99,13 @@ pub fn register_portfolio_runners(
     )?;
     registrations.register_state_runner_with_factory::<SelectHoldingsState>(
         &read_factory,
-        Arc::new(SelectHoldingsRunner {
-            artifacts: artifacts.clone(),
-            fact_index,
-        }),
+        Arc::new(ExternalReadRunner::<SelectHoldingsState, _>::new(
+            artifacts.clone(),
+            SelectHoldingsExecutor {
+                artifacts: artifacts.clone(),
+                fact_index,
+            },
+        )),
     )?;
     registrations.register_state_runner_with_factory::<AssembleSnapshotState>(
         &pure_factory,
@@ -133,32 +120,35 @@ pub fn register_portfolio_runners(
     Ok(())
 }
 
-struct SelectHoldingsRunner {
+struct SelectHoldingsExecutor {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn FactIndexReadProvider>,
 }
 
-impl ErasedNodeRunner for SelectHoldingsRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+impl ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor {
+    fn execute<'a>(
+        &'a self,
+        plan: &'a SelectHoldingsReadPlan,
+        _ctx: &'a ErasedRunCtx<'_>,
+    ) -> ExternalReadExecutionFuture<'a, SelectHoldingsReadEvidence> {
         Box::pin(async move {
-            let config = load_runner_config_for_node::<SelectHoldingsConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let input = load_materialized_struct_input::<SelectHoldingsInput>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let (selected, evidences) = selection::select_holdings(
-                config,
-                input,
-                self.artifacts.as_ref(),
-                self.fact_index.as_ref(),
-            )
-            .await?;
-            selection::select_holdings_output(ctx, &selected, &evidences)
+            let requests = plan.requests().map_err(portfolio_state_runtime_error)?;
+            let responses = self
+                .fact_index
+                .read_fact_index_batch(&requests)
+                .await
+                .map_err(fact_index_runtime_error)?;
+            plan.validate_query_results(&responses)
+                .map_err(portfolio_state_runtime_error)?;
+            let hydrated =
+                selection::hydrate_holding_responses(plan, &responses, self.artifacts.as_ref())
+                    .await?;
+            let queries = plan
+                .query_evidence(&responses, &hydrated)
+                .map_err(portfolio_state_runtime_error)?;
+            let primary = SelectHoldingsReadEvidence::new(&queries, hydrated)
+                .map_err(portfolio_state_runtime_error)?;
+            Ok(ExternalReadExecution::new(primary, queries))
         })
     }
 }
@@ -219,6 +209,26 @@ where
     T: MfmValue,
 {
     ErasedRunnerOutput::state_output(&ctx, value)
+}
+
+fn fact_index_runtime_error(
+    error: mfm_fact_capabilities::FactIndexReadError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+fn portfolio_state_runtime_error(
+    error: mfm_state_portfolio::PortfolioHoldingSelectionError,
+) -> mfm_runtime::RuntimeError {
+    let code = error.code.as_str();
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("portfolio error code is a checked public code"),
+        events::ErrorCategory::Validation,
+        format!("{code}: portfolio holding selection failed"),
+        Vec::new(),
+    )
+    .expect("portfolio failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::Failure(failure)
 }
 
 #[cfg(test)]

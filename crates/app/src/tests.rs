@@ -24,5 +24,9 @@ use self::artifact_overrides::*;
 mod behavior;
 #[path = "tests/erc20_replay.rs"]
 mod erc20_replay;
+#[path = "tests/evm_contract_workflow.rs"]
+mod evm_contract_workflow;
 #[path = "tests/evm_transaction.rs"]
 mod evm_transaction;
+#[path = "tests/evm_validation.rs"]
+mod evm_validation;

@@ -62,6 +62,27 @@ fn fee_policy_uses_checked_u256_arithmetic() {
 }
 
 #[test]
+fn call_request_requires_an_explicit_nonzero_gas_bound() {
+    let selector = EvmBlockSelector::ExactHash(B256::from([3; 32]));
+    let error = EvmCall::new(
+        Address::ZERO,
+        Address::from([4; 20]),
+        U256::ZERO,
+        Bytes::new(),
+        U256::ZERO,
+        AccessList::default(),
+        selector,
+    )
+    .expect_err("zero gas bound");
+    assert_eq!(
+        error,
+        EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::ZeroCallGasLimit,
+        }
+    );
+}
+
+#[test]
 fn receipt_rejects_removed_or_incoherent_logs() {
     let transaction_hash = B256::from([1; 32]);
     let block_hash = B256::from([2; 32]);

@@ -600,7 +600,7 @@ pub struct StateDescriptorIdentity {
     effect: EffectDescriptor,
     capabilities: CapabilitySetDescriptor,
     emitted_fact_descriptors: Vec<FactDescriptorRef>,
-    side_effect_contract_digest: Option<ContentDigest>,
+    effect_contract_digest: Option<ContentDigest>,
     runner: RunnerKind,
 }
 
@@ -627,8 +627,7 @@ impl StateDescriptorIdentity {
             .validate_for_effect::<S::Effect>()
             .map_err(|error| PlanError::Registry(error.to_string()))?;
         let runner = <S::Effect as EffectRunner<S>>::runner_kind();
-        let side_effect_contract_digest =
-            <S::Effect as EffectRunner<S>>::side_effect_contract_digest()?;
+        let effect_contract_digest = <S::Effect as EffectRunner<S>>::effect_contract_digest()?;
         let emitted_fact_descriptors =
             canonical_fact_descriptor_refs(S::emitted_fact_descriptors()?)?;
         let context = S::Context::descriptor()?;
@@ -648,7 +647,7 @@ impl StateDescriptorIdentity {
             effect: &effect,
             capabilities: &capabilities,
             emitted_fact_descriptors: &emitted_fact_descriptors,
-            side_effect_contract_digest: side_effect_contract_digest.as_ref(),
+            effect_contract_digest: effect_contract_digest.as_ref(),
             runner,
         })?;
         Ok(Self {
@@ -666,7 +665,7 @@ impl StateDescriptorIdentity {
             effect,
             capabilities,
             emitted_fact_descriptors,
-            side_effect_contract_digest,
+            effect_contract_digest,
             runner,
         })
     }
@@ -741,9 +740,9 @@ impl StateDescriptorIdentity {
         &self.emitted_fact_descriptors
     }
 
-    /// Returns the side-effect contract digest when this descriptor mutates an external system.
-    pub fn side_effect_contract_digest(&self) -> Option<&ContentDigest> {
-        self.side_effect_contract_digest.as_ref()
+    /// Returns the hash-defining effect contract, when the effect declares one.
+    pub fn effect_contract_digest(&self) -> Option<&ContentDigest> {
+        self.effect_contract_digest.as_ref()
     }
 
     /// Returns the registered runner kind.
@@ -844,8 +843,8 @@ pub trait EffectRunner<S: StateSpec>: private::EffectRunnerSealed<S> {
     /// Returns the runner kind for this effect/state pair.
     fn runner_kind() -> RunnerKind;
 
-    /// Returns the side-effect contract digest for external mutation states.
-    fn side_effect_contract_digest() -> Result<Option<ContentDigest>> {
+    /// Returns an optional hash-defining effect contract for this state.
+    fn effect_contract_digest() -> Result<Option<ContentDigest>> {
         Ok(None)
     }
 }
@@ -862,18 +861,91 @@ pub trait PureState: StateSpec<Effect = Pure, Caps = NoCaps> {
 
 /// External read state runner.
 pub trait ReadState: StateSpec<Effect = ReadExternal> {
-    /// Future returned by [`ReadState::run`].
-    type RunFuture<'a>: Future<Output = StateResult<Self::Output>> + Send + 'a
-    where
-        Self: 'a;
+    /// Deterministic, capability-independent plan executed by an adapter.
+    type Plan: MfmValue;
+    /// Canonical primary evidence returned by the adapter and consumed by the reducer.
+    type Evidence: MfmValue;
 
-    /// Executes this read state through declared capabilities.
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        caps: &'a Self::Caps,
-        context: &'a CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a>;
+    /// Builds the complete deterministic external-read plan.
+    fn plan(
+        &self,
+        input: &Self::Input,
+        context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan>;
+
+    /// Reduces retained evidence into the state output without ambient IO.
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output>;
+}
+
+/// Complete retained evidence supplied to an external-read state reducer.
+///
+/// Every read attempt has exactly one state-owned primary evidence value. Fact-query states may
+/// additionally receive kernel-owned query receipts whose referenced fact artifacts remain under
+/// their existing retention authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalReadEvidenceSet<E> {
+    primary: E,
+    fact_queries: Vec<facts::FactQueryEvidence>,
+}
+
+impl<E> ExternalReadEvidenceSet<E> {
+    /// Creates an evidence set from one primary value and optional fact-query evidence.
+    pub fn new(primary: E, fact_queries: Vec<facts::FactQueryEvidence>) -> Self {
+        Self {
+            primary,
+            fact_queries,
+        }
+    }
+
+    /// Creates an evidence set with no auxiliary fact queries.
+    pub fn primary(primary: E) -> Self {
+        Self::new(primary, Vec::new())
+    }
+
+    /// Returns the one state-owned primary evidence value.
+    pub const fn primary_evidence(&self) -> &E {
+        &self.primary
+    }
+
+    /// Returns kernel-owned auxiliary fact-query evidence in execution order.
+    pub fn fact_query_evidence(&self) -> &[facts::FactQueryEvidence] {
+        &self.fact_queries
+    }
+
+    /// Splits this set into its primary and auxiliary evidence.
+    pub fn into_parts(self) -> (E, Vec<facts::FactQueryEvidence>) {
+        (self.primary, self.fact_queries)
+    }
+}
+
+/// Derives a hash-defining contract for one external-read plan/evidence pair.
+pub fn external_read_contract_digest<Plan, Evidence>() -> Result<ContentDigest>
+where
+    Plan: MfmValue,
+    Evidence: MfmValue,
+{
+    canonical_digest(serde_json::json!({
+        "contract_domain": "mfm.external_read",
+        "contract_version": 1,
+        "effect_class": "read_external",
+        "evidence_schema_id": Evidence::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "evidence_semantic_type_id": Evidence::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "plan_schema_id": Plan::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "plan_semantic_type_id": Plan::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+    }))
 }
 
 /// MFM-managed platform write state runner.
@@ -985,6 +1057,10 @@ where
     fn runner_kind() -> RunnerKind {
         RunnerKind::ReadExternal
     }
+
+    fn effect_contract_digest() -> Result<Option<ContentDigest>> {
+        external_read_contract_digest::<S::Plan, S::Evidence>().map(Some)
+    }
 }
 
 impl<S> EffectRunner<S> for ManagedPlatformWrite
@@ -1004,8 +1080,9 @@ where
         RunnerKind::ApplySideEffect
     }
 
-    fn side_effect_contract_digest() -> Result<Option<ContentDigest>> {
+    fn effect_contract_digest() -> Result<Option<ContentDigest>> {
         let digest = canonical_digest(serde_json::json!({
+            "effect_class": "apply_side_effect",
             "confirmation_schema_id": S::Confirmation::schema_id()
                 .map_err(|error| PlanError::Value(error.to_string()))?
                 .as_str(),

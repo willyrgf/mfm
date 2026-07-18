@@ -233,6 +233,21 @@ fn framework_state_descriptor(
         capabilities,
     } = parts;
     let effect = effect_descriptor_for_kind(&effect_kind)?;
+    let effect_contract_digest = match effect.class {
+        EffectClass::ReadExternal => Some(content_digest_json(serde_json::json!({
+            "config_schema_id": config_schema_id.as_str(),
+            "context": state_context_descriptor_json(&context),
+            "contract_domain": "mfm.framework.side_effect_verify",
+            "contract_version": 1,
+            "effect_class": effect.class.as_str(),
+            "input_schema_id": input_schema_id.as_str(),
+            "output_schema_id": output_schema_id.as_str(),
+            "output_semantic_type_id": output_semantic_type_id.as_str(),
+        }))?),
+        EffectClass::Pure | EffectClass::ManagedPlatformWrite | EffectClass::ApplySideEffect => {
+            None
+        }
+    };
     let descriptor_id = descriptor_id_json(serde_json::json!({
         "capabilities": capabilities.capabilities.iter().map(|capability| {
             serde_json::json!({
@@ -259,7 +274,7 @@ fn framework_state_descriptor(
         "output_schema_id": output_schema_id.as_str(),
         "output_semantic_type_id": output_semantic_type_id.as_str(),
         "runner": runner,
-        "side_effect_contract_digest": null,
+        "effect_contract_digest": effect_contract_digest.as_ref().map(ContentDigest::as_str),
         "version": state_version.as_str(),
     }))?;
     Ok(spec::StateDescriptorIdentity {
@@ -281,7 +296,7 @@ fn framework_state_descriptor(
         capabilities,
         emitted_fact_descriptors: Vec::new(),
         runner: runner.to_owned(),
-        side_effect_contract_digest: None,
+        effect_contract_digest,
     })
 }
 

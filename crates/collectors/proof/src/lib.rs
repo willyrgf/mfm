@@ -4,7 +4,7 @@
 //! This crate owns the proof value, capability, state, and replay-verifier contracts used by the
 //! typed proof operation.
 
-use std::{fmt, future, ops::Deref, str::FromStr};
+use std::{fmt, ops::Deref, str::FromStr};
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
@@ -16,8 +16,8 @@ use mfm_ids::{
     StateKind, StateVersion,
 };
 use mfm_program::{
-    AdapterBindingSpec, NoContext, PureState, ReadState, SideEffectIntent, SideEffectState,
-    StateResult, StateSpec,
+    AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, PureState, ReadState, SideEffectIntent,
+    SideEffectState, StateError, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use serde::{Deserialize, Serialize};
@@ -129,6 +129,34 @@ impl CapabilitySpec for ProofMutationCapability {
 )]
 pub struct ProofReadConfig {
     /// Deterministic fact value returned by the enabled proof implementation.
+    pub fact_n: u64,
+}
+
+/// Deterministic plan for the proof external read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "read-plan",
+    version = "1",
+    schema = "mfm.proof.read.plan"
+)]
+pub struct ProofReadPlan {
+    /// Fact value requested from the proof capability.
+    pub fact_n: u64,
+}
+
+/// Canonical evidence returned by the proof external read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "read-evidence",
+    version = "1",
+    schema = "mfm.proof.read.evidence"
+)]
+pub struct ProofReadEvidence {
+    /// Fact value observed by the proof capability.
     pub fact_n: u64,
 }
 
@@ -504,17 +532,37 @@ impl StateSpec for ProofReadFactState {
 }
 
 impl ReadState for ProofReadFactState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = ProofReadPlan;
+    type Evidence = ProofReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        _input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        future::ready(Ok(ProofFact {
-            n: self.config.fact_n,
-        }))
+    fn plan(
+        &self,
+        _input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        Ok(ProofReadPlan {
+            fact_n: self.config.fact_n,
+        })
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        if !evidence.fact_query_evidence().is_empty() {
+            return Err(StateError::Message(
+                "proof read carried unexpected fact-query evidence".to_owned(),
+            ));
+        }
+        let plan = self.plan(input, context)?;
+        if evidence.primary_evidence().fact_n != plan.fact_n {
+            return Err(StateError::Message(
+                "proof read evidence did not match its authored plan".to_owned(),
+            ));
+        }
+        Ok(ProofFact { n: plan.fact_n })
     }
 }
 

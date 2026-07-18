@@ -48,8 +48,7 @@ async fn selects_exact_receipt_facts_and_projects_receipt_pins() {
     ]));
 
     let (selected, evidences) = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(portfolio.clone()).expect("config"))
-            .expect("validated config"),
+        ValidatedConfig::new(select_holdings_config(portfolio.clone())).expect("validated config"),
         input.clone(),
         &artifacts,
         &fact_index,
@@ -100,7 +99,7 @@ async fn identity_filtering_precedes_order_for_same_anchor_conflicts() {
     )]));
 
     let (selected, evidence) = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+        ValidatedConfig::new(select_holdings_config(evm_native_portfolio()))
             .expect("validated config"),
         input,
         &artifacts,
@@ -125,7 +124,7 @@ async fn identical_content_claims_are_ordered_only_after_identity_filtering() {
     )]));
 
     let (_, evidence) = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+        ValidatedConfig::new(select_holdings_config(evm_native_portfolio()))
             .expect("validated config"),
         input,
         &artifacts,
@@ -161,7 +160,7 @@ async fn newer_fact_at_another_anchor_cannot_replace_the_receipt_anchor() {
     )]));
 
     let error = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+        ValidatedConfig::new(select_holdings_config(evm_native_portfolio()))
             .expect("validated config"),
         input,
         &artifacts,
@@ -183,7 +182,7 @@ async fn saturation_fails_before_any_candidate_hydration() {
     )]));
 
     let error = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+        ValidatedConfig::new(select_holdings_config(evm_native_portfolio()))
             .expect("validated config"),
         input,
         &artifacts,
@@ -227,7 +226,7 @@ async fn any_saturated_receipt_query_blocks_hydration_for_every_holding() {
     ]));
 
     let error = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(dual_mainnet_portfolio()).expect("config"))
+        ValidatedConfig::new(select_holdings_config(dual_mainnet_portfolio()))
             .expect("validated config"),
         input,
         &artifacts,
@@ -266,10 +265,8 @@ async fn zero_native_and_token_facts_remain_zero_observations() {
     ]));
 
     let (selected, _) = select_holdings(
-        ValidatedConfig::new(
-            SelectHoldingsConfig::new(evm_native_and_erc20_portfolio()).expect("config"),
-        )
-        .expect("validated config"),
+        ValidatedConfig::new(select_holdings_config(evm_native_and_erc20_portfolio()))
+            .expect("validated config"),
         input,
         &artifacts,
         &fact_index,
@@ -294,7 +291,7 @@ async fn missing_identity_and_tampered_reference_components_hard_fail() {
         vec![(different_content.fact_ref.clone(), 1)],
     )]));
     let error = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+        ValidatedConfig::new(select_holdings_config(evm_native_portfolio()))
             .expect("validated config"),
         input.clone(),
         &no_match_artifacts,
@@ -330,10 +327,8 @@ async fn missing_identity_and_tampered_reference_components_hard_fail() {
             vec![(forged, 1)],
         )]));
         let error = select_holdings(
-            ValidatedConfig::new(
-                SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"),
-            )
-            .expect("validated config"),
+            ValidatedConfig::new(select_holdings_config(evm_native_portfolio()))
+                .expect("validated config"),
             input.clone(),
             &artifacts,
             &fact_index,
@@ -372,7 +367,7 @@ async fn mixed_fact_index_frontiers_hard_fail() {
     ]));
 
     let error = select_holdings(
-        ValidatedConfig::new(SelectHoldingsConfig::new(dual_mainnet_portfolio()).expect("config"))
+        ValidatedConfig::new(select_holdings_config(dual_mainnet_portfolio()))
             .expect("validated config"),
         input,
         &artifacts,
@@ -387,9 +382,12 @@ async fn mixed_fact_index_frontiers_hard_fail() {
 fn receipt_constrained_requests_bind_anchor_status_scope_and_limit() {
     let target = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 90);
     let input = select_input_for_evm_native(&target, 42, EVM_HASH);
-    let config = SelectHoldingsConfig::new(evm_native_portfolio()).expect("config");
-    let request =
-        holding_fact_index_request(&config, &input.receipt.holdings()[0]).expect("request");
+    let config = select_holdings_config(evm_native_portfolio());
+    let request = SelectHoldingsReadPlan::new(&config, &input)
+        .expect("plan")
+        .requests()
+        .expect("requests")
+        .remove(0);
     let plan = request.plan();
     assert_eq!(plan.limit(), Some(11));
     assert_eq!(plan.store_scope().as_str(), "mfm.store.default");

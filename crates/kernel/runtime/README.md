@@ -15,6 +15,12 @@ erased runner plans for execution. The runner plan is not authority by itself. R
 remain runtime-owned: runner availability, capability availability, seed/config evidence, stream
 drift, context materialization, and execution contract validation.
 
+External reads use one generic runner contract. Runtime loads the typed config, arbitrary certified
+input tree, and certified context; asks the state for its immutable plan; lets the adapter execute
+only that plan; invokes the state reducer; and stages exactly one typed primary read-evidence
+artifact plus any kernel-owned fact-query evidence and the canonical output. Replay performs the
+same materialization and reduction from retained evidence without constructing live capabilities.
+
 The visible runtime model is:
 
 ```text
