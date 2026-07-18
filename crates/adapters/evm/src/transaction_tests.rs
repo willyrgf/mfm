@@ -31,8 +31,10 @@ struct MockSession {
     evidence: EvmSessionEvidence,
     lookup_mode: AtomicU8,
     return_wrong_hash: AtomicBool,
+    submit_response_unavailable: AtomicBool,
     pending_nonce: AtomicU64,
     pending_nonce_calls: AtomicUsize,
+    lookup_calls: AtomicUsize,
     lookup_unavailable: AtomicBool,
     submitted: Mutex<Vec<Vec<u8>>>,
 }
@@ -56,8 +58,10 @@ impl MockSession {
             ),
             lookup_mode: AtomicU8::new(mode as u8),
             return_wrong_hash: AtomicBool::new(false),
+            submit_response_unavailable: AtomicBool::new(false),
             pending_nonce: AtomicU64::new(0x42),
             pending_nonce_calls: AtomicUsize::new(0),
+            lookup_calls: AtomicUsize::new(0),
             lookup_unavailable: AtomicBool::new(false),
             submitted: Mutex::new(Vec::new()),
         }
@@ -67,12 +71,13 @@ impl MockSession {
         self.lookup_mode.store(mode as u8, Ordering::SeqCst);
     }
 
-    fn set_pending_nonce(&self, nonce: u64) {
-        self.pending_nonce.store(nonce, Ordering::SeqCst);
-    }
-
     fn set_lookup_unavailable(&self, unavailable: bool) {
         self.lookup_unavailable.store(unavailable, Ordering::SeqCst);
+    }
+
+    fn fail_next_submit_response(&self) {
+        self.submit_response_unavailable
+            .store(true, Ordering::SeqCst);
     }
 
     fn observation(&self) -> EvmObservedTransaction {
@@ -148,6 +153,18 @@ impl EvmTransactionSession for MockSession {
             .lock()
             .expect("submitted lock")
             .push(signed_bytes.to_vec());
+        if self
+            .submit_response_unavailable
+            .swap(false, Ordering::SeqCst)
+        {
+            return Box::pin(async {
+                Err(EvmCapabilityError::provider_failure(
+                    mfm_evm_capabilities::evm_diagnostic(
+                        mfm_capabilities::ProviderDiagnosticCode::RpcJsonError,
+                    ),
+                ))
+            });
+        }
         let returned = if self.return_wrong_hash.load(Ordering::SeqCst) {
             B256::from([0xee; 32])
         } else {
@@ -160,6 +177,7 @@ impl EvmTransactionSession for MockSession {
         &self,
         _transaction_hash: B256,
     ) -> EvmSessionFuture<'_, Option<EvmObservedTransaction>> {
+        self.lookup_calls.fetch_add(1, Ordering::SeqCst);
         if self.lookup_unavailable.load(Ordering::SeqCst) {
             return Box::pin(async {
                 Err(EvmCapabilityError::provider_failure(
@@ -348,11 +366,13 @@ async fn normal_path_signs_once_and_submits_cached_exact_bytes() {
     ));
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
     assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
+    assert_eq!(session.lookup_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn external_nonce_conflict_stays_unknown_and_rebroadcasts_only_the_prepared_envelope() {
+async fn lost_submit_response_stays_unknown_without_rebroadcast() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
+    session.fail_next_submit_response();
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
     let prepared = prepare_and_commit(&adapter).await;
@@ -360,7 +380,6 @@ async fn external_nonce_conflict_stays_unknown_and_rebroadcasts_only_the_prepare
 
     let decision = adapter.submit_transaction(prepared).await.expect("submit");
     assert!(matches!(decision, SideEffectSubmissionDecision::Unknown(_)));
-    session.set_pending_nonce(0x43);
     let recovery = adapter
         .recover_transaction(recovery_prepared)
         .await
@@ -373,8 +392,7 @@ async fn external_nonce_conflict_stays_unknown_and_rebroadcasts_only_the_prepare
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
     assert_eq!(session.pending_nonce_calls.load(Ordering::SeqCst), 1);
     let submissions = session.submitted.lock().expect("submitted");
-    assert_eq!(submissions.len(), 2);
-    assert_eq!(submissions[0], submissions[1]);
+    assert_eq!(submissions.len(), 1);
 }
 
 #[tokio::test]
@@ -427,8 +445,9 @@ async fn discarded_preparation_settlements_release_signed_envelope_capacity() {
 }
 
 #[tokio::test]
-async fn recovery_observes_expected_hash_before_any_rebroadcast() {
+async fn recovery_observes_expected_hash_without_rebroadcast() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
+    session.fail_next_submit_response();
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
     let prepared = prepare_and_commit(&adapter).await;
@@ -453,8 +472,10 @@ async fn recovery_observes_expected_hash_before_any_rebroadcast() {
 }
 
 #[tokio::test]
-async fn unavailable_recovery_lookup_blocks_before_rebroadcast() {
+async fn unavailable_recovery_lookup_blocks_without_rebroadcast() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
+    session.fail_next_submit_response();
+    session.set_lookup_unavailable(true);
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
     let prepared = prepare_and_commit(&adapter).await;
@@ -465,7 +486,6 @@ async fn unavailable_recovery_lookup_blocks_before_rebroadcast() {
     ));
     assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
 
-    session.set_lookup_unavailable(true);
     let error = match adapter.recover_transaction(recovery_prepared.clone()).await {
         Ok(_) => panic!("unavailable lookup must block recovery"),
         Err(error) => error,
@@ -487,8 +507,9 @@ async fn unavailable_recovery_lookup_blocks_before_rebroadcast() {
 }
 
 #[tokio::test]
-async fn same_process_retry_looks_up_uncertain_envelope_before_rebroadcasting() {
+async fn same_process_retry_does_not_rebroadcast_uncertain_envelope() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
+    session.fail_next_submit_response();
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
     let prepared = prepare_and_commit(&adapter).await;
@@ -659,6 +680,7 @@ async fn provider_hash_or_transaction_field_mismatch_becomes_ambiguity() {
     ));
 
     let session = Arc::new(MockSession::new(LookupMode::Mismatched));
+    session.fail_next_submit_response();
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(session, signer);
     let prepared = prepare_and_commit(&adapter).await;

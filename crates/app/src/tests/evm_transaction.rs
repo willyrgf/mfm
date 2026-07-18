@@ -268,9 +268,10 @@ fn compensation_is_a_structurally_separate_transaction_node() {
 }
 
 #[tokio::test]
-async fn certified_transaction_resumes_unknown_submission_and_replays_without_live_authority() {
+async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast() {
     let store = store::AsyncInMemoryRunStore::default();
     let session = Arc::new(TransactionSession::new());
+    session.fail_next_submit_response();
     let signer_calls = Arc::new(AtomicUsize::new(0));
     let certification = transaction_certification_registry();
     let launch_services = make_run_services(
@@ -307,24 +308,23 @@ async fn certified_transaction_resumes_unknown_submission_and_replays_without_li
     let launched = launched.expect("admitted transaction run");
     assert_eq!(launched.run_mode, RunModeStatus::Forward);
     assert_eq!(launched.scheduler_status, "blocked");
-    assert!(store
-        .load_run_stream(&run_id)
-        .await
-        .expect("run stream")
+    let blocked_stream = store.load_run_stream(&run_id).await.expect("run stream");
+    assert!(blocked_stream.iter().any(|event| matches!(
+        event.payload(),
+        KernelEventPayload::SideEffectSubmissionUnknown(_)
+    )));
+    assert!(!blocked_stream
         .iter()
-        .any(|event| matches!(
-            event.payload(),
-            KernelEventPayload::SideEffectSubmissionUnknown(_)
-        )));
+        .any(|event| matches!(event.payload(), KernelEventPayload::StateAttemptFailed(_))));
     assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
     drop(launch_services);
     assert!(store
         .expire_execution_claim_for_test(&run_id)
         .expect("expire abandoned execution claim"));
 
-    // A new runner has an empty signed-envelope cache. Recovery must regenerate the exact
-    // deterministic envelope, rebroadcast only those bytes, then finish receipt/finality.
-    session.make_visible_on_submit.store(true, Ordering::SeqCst);
+    // Recovery observes the already accepted transaction and never reconstructs a signer or
+    // invokes the mutation capability again.
+    session.make_transaction_visible();
     let resume_services = make_run_services(
         transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
         store.clone(),
@@ -336,11 +336,10 @@ async fn certified_transaction_resumes_unknown_submission_and_replays_without_li
         .await
         .expect("resume unknown transaction");
     assert_eq!(resumed.run_mode, RunModeStatus::Completed);
-    assert_eq!(signer_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
     {
         let submissions = session.submitted.lock().expect("submitted bytes");
-        assert_eq!(submissions.len(), 3);
-        assert!(submissions.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(submissions.len(), 1);
     }
     drop(resume_services);
 
@@ -557,6 +556,7 @@ struct TransactionSession {
     evidence: EvmSessionEvidence,
     visible: AtomicBool,
     make_visible_on_submit: AtomicBool,
+    submit_response_unavailable: AtomicBool,
     observation_outage: AtomicU8,
     submitted: Mutex<Vec<Vec<u8>>>,
 }
@@ -577,6 +577,7 @@ impl TransactionSession {
             ),
             visible: AtomicBool::new(false),
             make_visible_on_submit: AtomicBool::new(false),
+            submit_response_unavailable: AtomicBool::new(false),
             observation_outage: AtomicU8::new(0),
             submitted: Mutex::new(Vec::new()),
         }
@@ -585,6 +586,15 @@ impl TransactionSession {
     fn fail_once(&self, outage: ObservationOutage) {
         self.observation_outage
             .store(outage as u8, Ordering::SeqCst);
+    }
+
+    fn fail_next_submit_response(&self) {
+        self.submit_response_unavailable
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn make_transaction_visible(&self) {
+        self.visible.store(true, Ordering::SeqCst);
     }
 
     fn take_outage(&self, outage: ObservationOutage) -> bool {
@@ -668,6 +678,12 @@ impl EvmTransactionSession for TransactionSession {
             .push(signed_bytes.to_vec());
         if self.make_visible_on_submit.load(Ordering::SeqCst) {
             self.visible.store(true, Ordering::SeqCst);
+        }
+        if self
+            .submit_response_unavailable
+            .swap(false, Ordering::SeqCst)
+        {
+            return Box::pin(async { Err(observation_provider_failure()) });
         }
         Box::pin(async move { Ok(expected_hash) })
     }

@@ -322,14 +322,15 @@ observations, gas estimate, unsigned envelope, signing digest, expected signed h
 address when applicable, and redacted checked-session evidence. Preparation contains no signature,
 raw signed envelope, endpoint, credential, keystore path, or provider body.
 
-The adapter signs once during an ordinary preparation and holds the resulting bearer envelope only
-in a bounded process-local one-shot cache. Submission consumes those exact bytes. After process loss,
-recovery reconstructs the retained unsigned envelope, requests the certified deterministic signature
-again, requires the same expected hash, and may rebroadcast only the byte-identical envelope after
-an explicit successful exact-hash lookup returned no transaction. Provider unavailability blocks
-before rebroadcast; it is never treated as absence. An empty exact-hash lookup remains
-`SubmissionUnknown`; EVM nonce observations never mint a non-submission proof. The sender lane
-serializes MFM attempts only and cannot reserve a nonce against another wallet, operator, or process.
+The adapter signs once during ordinary preparation and holds the resulting bearer envelope only in
+a bounded process-local one-shot cache. Submission consumes those exact bytes. A provider
+acknowledgement is accepted only when its hash equals the locally computed prepared hash; that
+acknowledgement immediately becomes submission evidence without a visibility lookup. If the submit
+exchange does not return a trusted acknowledgement, the adapter performs exact-hash lookup once and
+persists `SubmissionUnknown` when the lookup is absent or unavailable. Recovery of that durable
+uncertainty is observation-only: it never reconstructs a signature or invokes submission again.
+EVM nonce observations never mint a non-submission proof. The sender lane serializes MFM attempts
+only and cannot reserve a nonce against another wallet, operator, or process.
 
 The mutation runner binds a `DeterministicSigningProvider` and records the concrete signing
 capability implementation independently from the transaction-session implementation. The keystore

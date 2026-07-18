@@ -80,29 +80,27 @@ access. Preparation captures that reservation and the signed bearer in a non-clo
 settlement. Only a durable `SideEffectInvocationPrepared` append promotes it to a fresh cache entry;
 idempotent, admission-blocked, stale, failed, or dropped outputs destroy it. Saturation blocks the
 attempt without evicting or deduplicating an active envelope. Submission leases those exact bytes
-and marks them uncertain before broadcast. A same-process retry of an uncertain lease performs
-exact-hash lookup before any rebroadcast; observation or ambiguity destroys the lease, while an
-inconclusive result retains only uncertain transient state. If the process is lost, recovery
-reconstructs the retained envelope and asks the certified deterministic signer to regenerate it;
-the resulting hash must equal prepared authority before any rebroadcast. Runtime route reads,
-keystore reads, unlock/KDF work, and signer validation execute on a blocking worker rather than an
-async runtime worker.
+and marks them uncertain before the submission call. An uncertain lease is never submitted again:
+the adapter performs exact-hash lookup and either records observation/ambiguity or retains only
+uncertainty. Once durable `SubmissionUnknown` exists, recovery discards any remaining transient
+envelope and is lookup-only. Runtime route reads, keystore reads, unlock/KDF work, and signer
+validation execute on a blocking worker rather than an async runtime worker.
 
 ## Submission and recovery
 
-`eth_sendRawTransaction` is accepted only when its returned hash equals the local hash. An exact-hash
-transaction lookup must then match chain id, nonce, sender, destination/creation kind, value, input,
-gas, fees, and access list. Persisted observation omits signatures and raw bytes.
+`eth_sendRawTransaction` is accepted only when its returned hash equals the local prepared hash.
+That acknowledgement and immutable prepared authority produce the persisted public submission
+evidence directly; no immediate visibility lookup is required. If the call returns an error, the
+adapter performs exact-hash lookup. A matching transaction must agree on chain id, nonce, sender,
+destination/creation kind, value, input, gas, fees, and access list. A mismatched transaction or
+wrong submit hash becomes ambiguous. Missing or unavailable lookup after the call becomes
+`SubmissionUnknown`, never a terminal pre-submission failure.
 
-Recovery first performs exact-hash lookup, including when a restarted process resumes an invocation
-already recorded as started. Only an explicit, successful lookup returning no transaction permits
-one recovery invocation to regenerate and rebroadcast the identical prepared envelope, then look up
-the same hash again. Provider, route, transport, HTTP/RPC, response, or source-binding failure
-blocks recovery before any broadcast. An unavailable lookup is not absence evidence. Empty lookup,
-transport uncertainty during an explicit broadcast, an external writer occupying the nonce, or an
-inconclusive rebroadcast remains `SubmissionUnknown`. Standard JSON-RPC cannot prove that a
-transaction was never submitted, so this path never emits `NotSubmittedProven` and never chooses a
-replacement nonce under the same prepared invocation.
+Recovery of `SubmissionUnknown` performs exact-hash lookup only. Matching observation completes the
+submission boundary, mismatch becomes ambiguity, missing remains unknown, and provider failure
+blocks. Recovery never signs, submits, chooses another nonce, or treats unavailable lookup as
+absence evidence. Standard JSON-RPC cannot prove that a transaction was never submitted, so this
+path never emits `NotSubmittedProven`.
 
 `SubmissionUnknown` retains only the prepared transaction hash and redacted checked-session
 identity. A wrong provider submit hash or an exact-hash lookup whose public fields differ from the

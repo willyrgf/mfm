@@ -862,6 +862,26 @@ pub struct EvmTransactionSubmission {
 }
 
 impl EvmTransactionSubmission {
+    /// Converts a checked provider acknowledgement into submission evidence.
+    ///
+    /// The submitted bytes are already bound to [`EvmPreparedTransaction`] by their locally
+    /// computed hash. A provider acknowledgement of that exact hash therefore proves the public
+    /// transaction fields without requiring a second RPC observation.
+    pub fn from_acknowledgement(
+        prepared: &EvmPreparedTransaction,
+        acknowledged_hash: B256,
+        session: &EvmSessionEvidence,
+    ) -> Result<Self, EvmStateError> {
+        let submission = Self {
+            transaction_hash: canonical_hash(acknowledged_hash),
+            from: prepared.intent.expected_sender.clone(),
+            unsigned: prepared.unsigned.clone(),
+            session: session.clone(),
+        };
+        submission.validate_against(prepared)?;
+        Ok(submission)
+    }
+
     /// Converts and validates a transaction lookup against prepared authority.
     pub fn from_observation(
         prepared: &EvmPreparedTransaction,

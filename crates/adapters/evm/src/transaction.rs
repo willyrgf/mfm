@@ -10,9 +10,8 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
-    EvmBlockSelector, EvmCapabilityError, EvmCapabilityFailureDisposition, EvmCapabilityPhase,
-    EvmNetworkBinding, EvmTransactionCapability, EvmTransactionSession,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmBlockSelector, EvmCapabilityError, EvmCapabilityPhase, EvmNetworkBinding,
+    EvmTransactionCapability, EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_evm_signing::TransientSignedEip1559Envelope;
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
@@ -448,7 +447,12 @@ impl EvmTransactionAdapter {
                         evidence,
                     });
                 }
-                LookupSubmission::Missing => {}
+                LookupSubmission::Missing => {
+                    return Ok(SideEffectSubmissionDecision::Unknown(recovery_evidence(
+                        &prepared,
+                        session.as_ref(),
+                    )?));
+                }
             }
         }
         signed.mark_uncertain()?;
@@ -483,6 +487,8 @@ impl EvmTransactionAdapter {
         >,
     > {
         prepared.validate().map_err(state_error)?;
+        self.signed_envelopes
+            .discard_one(prepared.expected_transaction_hash())?;
         let session = self
             .session_for(&prepared, EvmCapabilityPhase::AfterSubmission)
             .await?;
@@ -491,43 +497,12 @@ impl EvmTransactionAdapter {
             .map_err(post_submission_capability_error)?
         {
             LookupSubmission::Observed(submission) => {
-                self.signed_envelopes
-                    .discard_one(prepared.expected_transaction_hash())?;
-                return Ok(SideEffectUnknownSubmissionDecision::Observed(*submission));
-            }
-            LookupSubmission::Mismatched => {
-                self.signed_envelopes
-                    .discard_one(prepared.expected_transaction_hash())?;
-                return Ok(SideEffectUnknownSubmissionDecision::Ambiguous {
-                    ambiguity_code: transaction_mismatch_code()?,
-                    evidence: recovery_evidence(&prepared, session.as_ref())?,
-                });
-            }
-            LookupSubmission::Missing => {}
-        }
-        let mut signed = match self
-            .signed_envelopes
-            .take(prepared.expected_transaction_hash())?
-        {
-            Some(signed) => signed,
-            None => self.sign_prepared_transaction(&prepared).await?,
-        };
-        signed.mark_uncertain()?;
-        let signed_envelope = signed.envelope()?;
-        ensure_signed_hash(&prepared, signed_envelope)?;
-        match broadcast_and_lookup(session.as_ref(), &prepared, signed_envelope).await? {
-            LookupSubmission::Observed(submission) => {
-                signed.discard()?;
                 Ok(SideEffectUnknownSubmissionDecision::Observed(*submission))
             }
-            LookupSubmission::Mismatched => {
-                let evidence = recovery_evidence(&prepared, session.as_ref())?;
-                signed.discard()?;
-                Ok(SideEffectUnknownSubmissionDecision::Ambiguous {
-                    ambiguity_code: transaction_mismatch_code()?,
-                    evidence,
-                })
-            }
+            LookupSubmission::Mismatched => Ok(SideEffectUnknownSubmissionDecision::Ambiguous {
+                ambiguity_code: transaction_mismatch_code()?,
+                evidence: recovery_evidence(&prepared, session.as_ref())?,
+            }),
             LookupSubmission::Missing => Ok(SideEffectUnknownSubmissionDecision::StillUnknown),
         }
     }
@@ -1087,28 +1062,28 @@ async fn broadcast_and_lookup(
     let Ok(expected_hash) = prepared.expected_hash() else {
         return Ok(LookupSubmission::Mismatched);
     };
-    let submission_error = match session
+    match session
         .submit_raw_transaction(signed.bytes(), expected_hash)
         .await
     {
         Ok(returned_hash) if returned_hash != expected_hash => {
             return Ok(LookupSubmission::Mismatched);
         }
-        Ok(_) => None,
-        Err(error) => Some(error),
-    };
+        Ok(returned_hash) => {
+            let submission = EvmTransactionSubmission::from_acknowledgement(
+                prepared,
+                returned_hash,
+                session.evidence(),
+            )
+            .map_err(state_error)?;
+            return Ok(LookupSubmission::Observed(Box::new(submission)));
+        }
+        Err(_) => {}
+    }
     match lookup_submission(session, prepared).await {
         Ok(LookupSubmission::Observed(submission)) => Ok(LookupSubmission::Observed(submission)),
         Ok(LookupSubmission::Mismatched) => Ok(LookupSubmission::Mismatched),
-        Ok(LookupSubmission::Missing) | Err(_) => {
-            if let Some(error) = submission_error.filter(|error| {
-                error.failure_disposition(EvmCapabilityPhase::BeforeSubmission)
-                    == EvmCapabilityFailureDisposition::TerminalValidation
-            }) {
-                return Err(pre_submission_capability_error(error));
-            }
-            Ok(LookupSubmission::Missing)
-        }
+        Ok(LookupSubmission::Missing) | Err(_) => Ok(LookupSubmission::Missing),
     }
 }
 
