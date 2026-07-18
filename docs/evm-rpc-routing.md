@@ -91,12 +91,13 @@ both live execution and replay.
 `RecordEvmBalanceFactsState` then records one `evm.balance_snapshot` fact per source and a checked
 `EvmBalanceCollectionReceipt` in one atomic managed-write attempt. The receipt carries the exact
 anchor, sorted sources, and verified content identities without copying balance response material.
-The live runner, atomic publication, and evidence-only replay live in `mfm-adapters-evm`. Portfolio
-selection consumes the typed EVM receipt vector directly, queries the same-run facts
-through the shared BTC/EVM fact-index snapshot, rehydrates response artifacts, and rederives exact
-content identity before assembly. All-EVM portfolios use this same store path. EVM replay
-reconstructs collection and publication in the EVM adapter; portfolio replay reconstructs only the
-receipt-pinned selection and report path. Neither requires runtime config or network access.
+The live runner, atomic publication, and evidence-only replay live in `mfm-adapters-evm`.
+`PortfolioReportOperation` receives the typed family receipt vectors and passes the same structured
+binding to selection, which queries same-run facts through the shared BTC/EVM fact-index snapshot,
+rehydrates response artifacts, and rederives exact content identity before assembly. All-EVM
+portfolios use this same store path. EVM replay reconstructs collection and publication in the EVM
+adapter; portfolio replay reconstructs only receipt-pinned selection and report projection. Neither
+requires runtime config or network access.
 
 ## Signing
 
@@ -139,3 +140,6 @@ Contributor ownership:
   bindings only;
 - portfolio and reusable EVM states own their deterministic validation/reduction semantics;
   binaries only pass paths and render results.
+
+The exact package, state-kind, and app-entry-point inventory is recorded in
+[Current EVM Inventory](architecture.md#current-evm-inventory).

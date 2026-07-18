@@ -3,7 +3,9 @@
 MFM has one reusable EVM mutation state: `SubmitEvmTransactionState`. It is EIP-1559-only and one
 state node always means one signed chain transaction. The state is registered for certification,
 live execution, resume, and replay, but there is no standalone transaction operation, setup kind,
-CLI route, or REST route.
+CLI route, or REST route. It is one of the four state kinds in the
+[current EVM inventory](architecture.md#current-evm-inventory); registration does not add app
+discovery.
 
 ## Actions and composition
 

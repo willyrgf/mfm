@@ -48,6 +48,15 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 - Security-hardened Ethereum keystore (tamper checks + signing utilities).
 - Typed storage backends for run events and artifacts.
 
+## Current workflow surface
+
+The compiled application exposes exactly one public run objective:
+`mfm.portfolio/snapshot@1`. Its root composes reusable Bitcoin and EVM collector operations, then
+passes their typed receipts to one store-backed portfolio report operation. The internal EVM
+collector cycle, transaction state, and contract-validation state are reusable certified
+substrate; none is a second app entry point. See the
+[exact EVM package/state/entry-point inventory](docs/architecture.md#current-evm-inventory).
+
 ## Documentation
 
 Start here:
@@ -64,6 +73,8 @@ User-facing docs:
 - REST API docs: [`bin/rest-api/README.md`](bin/rest-api/README.md)
 - Portfolio snapshot workflow: [`docs/portfolio-snapshot.md`](docs/portfolio-snapshot.md)
 - EVM runtime routing runbook: [`docs/evm-rpc-routing.md`](docs/evm-rpc-routing.md)
+- EVM transaction contract: [`docs/evm-transactions.md`](docs/evm-transactions.md)
+- Persisted/public surface inventory: [`docs/persisted-public-surfaces.md`](docs/persisted-public-surfaces.md)
 
 Crate docs:
 
@@ -72,6 +83,10 @@ Crate docs:
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
+- EVM collector operation: [`crates/ops/evm-collectors-op/README.md`](crates/ops/evm-collectors-op/README.md)
+- Portfolio snapshot/report operations: [`crates/ops/portfolio-snapshot-op/README.md`](crates/ops/portfolio-snapshot-op/README.md)
+- Reusable EVM states: [`crates/states/evm/README.md`](crates/states/evm/README.md)
+- EVM runtime/replay adapters: [`crates/adapters/evm/README.md`](crates/adapters/evm/README.md)
 - Storage (typed run events and current configuration, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
 
 Design notes / planning:

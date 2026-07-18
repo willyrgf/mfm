@@ -1,6 +1,8 @@
 # mfm-adapters-evm
 
-Runtime and replay bindings for the four reusable EVM state kinds.
+Runtime and replay bindings for exactly four reusable EVM state kinds:
+`CollectEvmBalancesState`, `RecordEvmBalanceFactsState`, `SubmitEvmTransactionState`, and
+`ValidateEvmContractState`.
 
 `EvmReadRunnerCapabilities` is the single source-bound read assembly used by balance collection and
 exact-anchor validation. Both families await its one asynchronous route validator before admission;

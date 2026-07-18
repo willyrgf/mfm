@@ -380,10 +380,24 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
 
     let evm_state_dependencies = path_dependencies(&metadata, "mfm-states-evm", &by_name);
     assert!(
-        evm_state_dependencies
+        evm_state_dependencies.iter().all(|dependency| {
+            !matches!(
+                dependency.name,
+                "mfm-portfolio-model"
+                    | "mfm-app"
+                    | "mfm-runtime"
+                    | "mfm-transports-evm"
+                    | "mfm-signers-keystore"
+                    | "mfm-storage-postgres"
+            )
+        }),
+        "the EVM state package must remain independent of portfolio, app, runtime, transport, signer implementations, and storage"
+    );
+    assert!(
+        path_dependencies(&metadata, "mfm-adapters-evm", &by_name)
             .iter()
-            .all(|dependency| dependency.name != "mfm-portfolio-model"),
-        "the EVM state package must not depend on the portfolio model"
+            .all(|dependency| dependency.category != CrateCategory::Operation),
+        "the EVM adapter package must not own operation topology"
     );
     let evm_operation_dependencies =
         path_dependencies(&metadata, "mfm-op-evm-collectors", &by_name);
@@ -537,20 +551,37 @@ fn configured_target_source_boundaries_are_enforced() {
         "portfolio composition must take the aggregate PortfolioConfig as its only authority"
     );
     assert!(
-        composed_source.contains("SelectHoldingsInputHandles")
-            && composed_source.contains("bitcoin_receipts,")
-            && composed_source.contains("evm_receipts,"),
-        "portfolio selection must consume the typed family receipt vectors directly"
+        composed_source.contains("struct PortfolioSnapshotOperation")
+            && composed_source.contains("struct PortfolioReportOperation"),
+        "portfolio composition must expose separate snapshot and report operations"
     );
+    let snapshot_impl_start = composed_source
+        .find("impl Operation for PortfolioSnapshotOperation")
+        .expect("snapshot operation implementation");
+    let report_type_start = composed_source
+        .find("pub struct PortfolioReportOperation;")
+        .expect("report operation type");
+    let snapshot_impl_source = &composed_source[snapshot_impl_start..report_type_start];
     assert!(
-        composed_source.contains("struct PortfolioSnapshotOperation"),
-        "one operation must own the complete portfolio snapshot objective"
+        snapshot_impl_source.contains("call::<BtcNetworkCollectionOperation")
+            && snapshot_impl_source.contains("call::<EvmBalanceCollectionOperation")
+            && snapshot_impl_source.contains("call::<PortfolioReportOperation")
+            && !snapshot_impl_source.contains("builder.state"),
+        "the snapshot operation must contain only family and report operation composition"
     );
+    let report_impl_start = composed_source
+        .find("impl Operation for PortfolioReportOperation")
+        .expect("report operation implementation");
+    let report_helper_start = composed_source
+        .find("fn holding_fact_descriptors")
+        .expect("report operation helper");
+    let report_impl_source = &composed_source[report_impl_start..report_helper_start];
     assert!(
-        composed_source.contains("call::<EvmBalanceCollectionOperation")
-            && !composed_source.contains("state::<CollectEvmBalancesState")
-            && !composed_source.contains("state::<RecordEvmBalanceFactsState"),
-        "portfolio composition must call the reusable EVM operation instead of constructing its states"
+        report_impl_source.contains("state_with_domain_keys::<SelectHoldingsState")
+            && report_impl_source.contains("state::<AssembleSnapshotState")
+            && report_impl_source.contains("state_with_domain_keys::<ProjectReportState")
+            && report_impl_source.contains("input.into_handles()"),
+        "the report operation must pass receipt handles directly into the exact three-state report topology"
     );
     assert!(
         composed_source.contains("portfolio_snapshot_program_draft"),
@@ -584,35 +615,23 @@ fn configured_target_source_boundaries_are_enforced() {
         "app replay dispatch must call the portfolio adapter verifier directly"
     );
     let portfolio_state_root = root.join("crates/states/portfolio/src");
+    assert!(
+        !portfolio_state_root.join("evm_collection.rs").exists(),
+        "portfolio states must not retain an EVM collection implementation module"
+    );
     for path in sources
         .iter()
         .filter(|path| path.starts_with(&portfolio_state_root))
     {
         let source = fs::read_to_string(path).expect("read portfolio state source");
-        for forbidden in [
-            "AssemblePortfolioCollectionReceiptState",
-            "PortfolioCollectionReceipt",
-            "CollectedHoldingReceipt",
-            "EvmNetworkSnapshot",
-            "struct EvmBalanceSnapshotFact",
-            "struct EvmBalanceCollectionReceipt",
-            "struct EvmBalanceSource",
-            "CollectEvmBalancesState",
-            "RecordEvmBalanceFactsState",
-        ] {
+        for forbidden in ["EvmReadSession", "record_evm_balance_facts(", "#[mfm_fact"] {
             assert!(
                 !source.contains(forbidden),
-                "portfolio state source {} retains deleted fan-in/direct material: {forbidden}",
+                "portfolio state source {} retains EVM collection ownership: {forbidden}",
                 path.display()
             );
         }
     }
-    assert!(
-        !composed_source.contains("AssemblePortfolioCollectionReceiptState")
-            && !composed_source.contains("PortfolioCollectionReceipt")
-            && !composed_source.contains("EvmNetworkSnapshot"),
-        "portfolio composition must not retain a generic receipt fan-in or direct EVM path"
-    );
 
     let portfolio_adapter_root = root.join("crates/adapters/portfolio/src");
     for path in sources
@@ -644,6 +663,39 @@ fn configured_target_source_boundaries_are_enforced() {
             && evm_operation_source.contains("state::<RecordEvmBalanceFactsState")
             && evm_operation_source.contains("EvmBalanceCollectionOperation"),
         "the EVM collector operation must own exactly the reusable read-to-record topology"
+    );
+
+    let evm_state_root = root.join("crates/states/evm/src");
+    let evm_state_source = sources
+        .iter()
+        .filter(|path| path.starts_with(&evm_state_root))
+        .map(|path| fs::read_to_string(path).expect("read EVM state source"))
+        .collect::<String>();
+    assert_eq!(
+        evm_state_source.matches("impl StateSpec for ").count(),
+        4,
+        "the EVM state package must define exactly four state kinds"
+    );
+    for state in [
+        "impl StateSpec for CollectEvmBalancesState",
+        "impl StateSpec for RecordEvmBalanceFactsState",
+        "impl StateSpec for SubmitEvmTransactionState",
+        "impl StateSpec for ValidateEvmContractState",
+    ] {
+        assert!(
+            evm_state_source.contains(state),
+            "the exact EVM state inventory is missing {state}"
+        );
+    }
+
+    let entry_point_source = fs::read_to_string(root.join("crates/app/src/entry_point.rs"))
+        .expect("read app entry-point source");
+    assert!(
+        entry_point_source
+            .contains("const PORTFOLIO_SNAPSHOT_ID: &str = \"mfm.portfolio/snapshot@1\";")
+            && entry_point_source
+                .contains("const ENTRY_POINT_IDS: &[&str] = &[PORTFOLIO_SNAPSHOT_ID];"),
+        "app discovery must expose exactly the portfolio snapshot objective"
     );
 }
 

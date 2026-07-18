@@ -426,17 +426,19 @@ shared EVM block anchor persists the full U256 number as canonical decimal plus 
 receipt retains only network/chain, anchor, sorted sources, and verified content identities; it
 does not duplicate response material.
 
-Portfolio selection receives the typed Bitcoin and EVM receipt vectors directly and compiles one
-exact query per demanded holding. The fact-index provider evaluates the complete batch over one
-store snapshot. Selection rehydrates every returned response, rederives full descriptor/subject/
-response identity and fact refs, filters different-content same-subject history, and only then
-applies deterministic last-write ordering. Content identity intentionally treats byte-identical
-append occurrences as equivalent. Missing receipt content, mixed frontiers, non-exact cardinality,
-tampering, unexpected receipts, or incomplete coverage fail closed. Portfolio assembly consumes
-only the selected store material and rechecks exact config-derived coverage. EVM collection replay
-belongs only to `mfm-adapters-evm`; portfolio replay verifies selection, snapshot, and report. Both
-use retained evidence without a live route. Public-facts CLI/REST is not portfolio selection
-authority.
+`PortfolioSnapshotOperation` constructs collector operation calls and one
+`PortfolioReportOperation` call; it constructs no state directly. The report operation receives
+the typed Bitcoin and EVM receipt vectors and passes the same structured binding to selection,
+which compiles one exact query per demanded holding. The fact-index provider evaluates the complete
+batch over one store snapshot. Selection rehydrates every returned response, rederives full
+descriptor/subject/response identity and fact refs, filters different-content same-subject history,
+and only then applies deterministic last-write ordering. Content identity intentionally treats
+byte-identical append occurrences as equivalent. Missing receipt content, mixed frontiers,
+non-exact cardinality, tampering, unexpected receipts, or incomplete coverage fail closed. The
+report operation assembles only the selected store material, rechecks exact config-derived
+coverage, and projects the structured report. EVM collection replay belongs only to
+`mfm-adapters-evm`; portfolio replay verifies selection, snapshot, and report. Both use retained
+evidence without a live route. Public-facts CLI/REST is not portfolio selection authority.
 
 ## Certified Saga Semantics
 
@@ -911,6 +913,9 @@ They must not:
 This design contract defines runtime authority. Crate placement, taxonomy, operation/state/adapter/
 transport/signer/config boundaries, public naming rules, and reviewer checks are maintained in
 `docs/architecture.md`.
+
+The exact current EVM package, state-kind, operation-composition, and app-entry-point inventory is
+maintained in `docs/architecture.md#current-evm-inventory`.
 
 ## Documentation Update Rules
 

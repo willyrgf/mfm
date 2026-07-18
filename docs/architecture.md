@@ -67,6 +67,59 @@ registers the needed runners and certification descriptors, strictly resolves on
 `PortfolioConfig` at admission, and exposes that exact graph only through
 `mfm.portfolio/snapshot@1`.
 
+## Current EVM Inventory
+
+This is the exact current inventory. Cargo metadata, state registration, or app discovery changing
+any row requires an architecture update in the same commit.
+
+### Packages
+
+Exactly six workspace packages have an EVM-specific package name:
+
+| Package | Path | Durable responsibility |
+|---|---|---|
+| `mfm-evm-capabilities` | `crates/evm-capabilities` | Checked source-bound read and transaction authority plus canonical protocol evidence |
+| `mfm-evm-signing` | `crates/evm-signing` | Canonical transient Alloy EIP-1559 signing and finalization |
+| `mfm-states-evm` | `crates/states/evm` | Reusable balance, transaction, and exact-anchor validation semantics |
+| `mfm-adapters-evm` | `crates/adapters/evm` | Live and evidence-only replay bindings for the EVM states |
+| `mfm-transports-evm` | `crates/transports/evm` | Bounded source-stable JSON-RPC sessions |
+| `mfm-op-evm-collectors` | `crates/ops/evm-collectors-op` | The reusable two-state balance collector operation and its internal cycle wrapper |
+
+Only capabilities and signing are top-level `crates/evm-*` directories. The other four packages
+follow the repository state/adapter/transport/operation taxonomy.
+
+### State kinds
+
+`mfm-states-evm` owns exactly these four state kinds:
+
+| State type | Descriptor name | Effect |
+|---|---|---|
+| `CollectEvmBalancesState` | `mfm.evm.collect_balances` | `ReadExternal` |
+| `RecordEvmBalanceFactsState` | `mfm.evm.record_balance_facts` | `ManagedPlatformWrite` |
+| `SubmitEvmTransactionState` | `mfm.evm.transaction.submit` | `ApplySideEffect` |
+| `ValidateEvmContractState` | `mfm.evm.contract.validate` | `ReadExternal` |
+
+The adapter package binds all four and owns no operation topology. The collector operation expands
+only the first two and exports only `EvmBalanceCollectionReceipt`.
+
+### Entry points and composition
+
+`mfm-app::entry_point_ids()` contains exactly `mfm.portfolio/snapshot@1`. Its graph is:
+
+```text
+PortfolioSnapshotOperation
+  +-- BtcNetworkCollectionOperation(s)
+  +-- EvmBalanceCollectionOperation(s)
+  `-- PortfolioReportOperation
+        -> SelectHoldingsState
+        -> AssembleSnapshotState
+        `-> ProjectReportState
+```
+
+The EVM internal cycle draft calls `EvmBalanceCollectionOperation` and binds its receipt for
+scheduler-owned execution. It has no setup kind, configured target resolver, discovery id, CLI/REST
+start surface, app output renderer, or public entry point.
+
 ## Authority Contract
 
 The typed boundary separates data, evidence, authority, and implementation artifacts:
@@ -510,13 +563,9 @@ full-context calls. Its adapter binds one checked read session, executes code an
 hash, and finishes with a number-to-hash canonicality read. Live execution and evidence-only replay
 both use the state reducer; replay never binds a route or session.
 
-The reusable EVM package surface is deliberately exact: `mfm-evm-capabilities`,
-`mfm-evm-signing`, `mfm-states-evm`, `mfm-adapters-evm`, `mfm-transports-evm`, and
-`mfm-op-evm-collectors`. `mfm-states-evm` contains exactly four state kinds: balance collection,
-balance recording, transaction submission, and exact-anchor contract validation.
-`mfm-adapters-evm` owns their runtime/replay bindings. `mfm-op-evm-collectors` owns the sole
-two-state receipt-producing balance topology and an internal scheduler-cycle wrapper around that
-same operation. The wrapper has no app entry point, target resolver, discovery id, or renderer.
+The exact EVM package, state-kind, operation-composition, and entry-point surface is recorded in
+[Current EVM Inventory](#current-evm-inventory). The metadata and discovery contracts enforce that
+inventory; reusable registration never implies public ingress.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 

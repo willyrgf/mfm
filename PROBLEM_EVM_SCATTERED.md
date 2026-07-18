@@ -1,6 +1,13 @@
 # Problem: EVM is scattered across duplicated and overbuilt layers
 
-Status: architecture investigation and refactor charter for `refac-evm`.
+Status: historical first-round architecture charter; superseded for current implementation work.
+
+> **Supersession notice (2026-07-18):** [`SECOND_ROUND.md`](SECOND_ROUND.md) supersedes every
+> conflicting target-topology, ownership, package/state inventory, commit-sequence, and
+> definition-of-done claim in this document. This file intentionally retains deleted names and
+> first-round conclusions as an audit record; exclude it from current-architecture and stale-name
+> audits. The current contracts are `docs/design.md`, `docs/architecture.md`, and the second-round
+> charter.
 
 This document describes the current problem, the code that should be deleted or consolidated, the
 minimum architecture that should replace it, and a buildable commit sequence. It is intentionally

@@ -1,10 +1,11 @@
 #![warn(missing_docs)]
 //! Typed application assembly for certified MFM runs.
 //!
-//! `mfm-app` is the typed boundary used by binaries and process adapters. Its published
-//! objective uses one exact entry-point id and one target-keyed portfolio selection; this crate
-//! resolves the current target, plans, certifies, stages launch material, and wires typed services
-//! for start, resume, replay, and public-output rendering.
+//! `mfm-app` is the typed boundary used by binaries and process adapters. Its sole published
+//! objective is `mfm.portfolio/snapshot@1`, selected with one target-keyed portfolio config. This
+//! crate resolves the current target, plans, certifies, stages launch material, and wires typed
+//! services for start, resume, replay, and public-output rendering. The registered internal EVM
+//! collector cycle, transaction state, and validation state are not application entry points.
 //!
 //! Production binaries should construct run services through the Postgres-backed factory exported by
 //! this crate, while tests can use explicit test-support stores.

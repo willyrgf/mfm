@@ -32,8 +32,9 @@ The sole public objective is `mfm.portfolio/snapshot@1`. Its REST request has ex
 The request carries no collector policy, child config, runtime route, or report-only/reuse mode.
 Setup publishes only `PortfolioConfig` in this domain. The app resolves and normalizes that value
 once at admission, records its target/schema/digest in `RunAdmitted`, and passes the concrete value to
-the complete snapshot operation. Resume, replay, status, stream, and public-output reads never
-consult current configuration.
+`PortfolioSnapshotOperation`. That operation calls the required family collectors and one
+`PortfolioReportOperation`; it constructs no state directly. Resume, replay, status, stream, and
+public-output reads never consult current configuration.
 
 Domain runner behavior lives in adapter crates. `mfm-app` registers the shared reusable EVM read
 assembly for balance collection and exact-anchor validation, plus the reusable EVM transaction

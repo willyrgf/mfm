@@ -27,8 +27,8 @@ decimals and balances at the retained anchor.
 At admission, the app loads the target's current configuration, verifies and normalizes it, records
 the target/schema/digest evidence in `RunAdmitted`, and gives the concrete `PortfolioConfig` to the
 snapshot operation. That operation constructs only collector child calls and one report-operation
-call; it constructs no state directly. Admission also enforces the configured network, wallet, symbol,
-wallet-to-symbol, and per-EVM-network source limits before graph expansion.
+call; it constructs no state directly. Admission also enforces the configured network, wallet,
+symbol, wallet-to-symbol, and per-EVM-network source limits before graph expansion.
 
 The operation derives only explicit wallet-to-symbol demand. Bitcoin collection resolves one
 shared anchor per demanded network and emits checked network receipts. Each EVM network becomes one

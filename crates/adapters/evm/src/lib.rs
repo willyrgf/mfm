@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
-//! Runtime and replay bindings for reusable EVM balance, transaction, and validation states.
+//! Runtime and replay bindings for the four reusable EVM balance, transaction, and validation
+//! states. This adapter owns no operation topology or application entry point.
 
 use std::future::Future;
 use std::pin::Pin;
