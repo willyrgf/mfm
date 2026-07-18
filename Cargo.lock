@@ -2271,10 +2271,10 @@ name = "mfm-adapters-evm"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "hex",
  "mfm-canonical",
  "mfm-events",
  "mfm-evm-capabilities",
- "mfm-evm-core",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
@@ -2482,10 +2482,14 @@ dependencies = [
 name = "mfm-evm-capabilities"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
+ "derive_more 1.0.0",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -2966,7 +2970,9 @@ dependencies = [
 name = "mfm-transports-evm"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
+ "derive_more 1.0.0",
  "hex",
  "mfm-capabilities",
  "mfm-evm-capabilities",

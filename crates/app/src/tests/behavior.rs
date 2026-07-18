@@ -532,28 +532,24 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
             "expected_chain_id": 31337,
             "observed_chain_id": 31338,
             "source_ref": "primary",
-            "policy_id": "primary",
         }),
         serde_json::json!({
             "network_id": "rest-control-eth",
             "expected_chain_id": 0,
             "observed_chain_id": 31338,
             "source_ref": "primary",
-            "policy_id": "primary",
         }),
         serde_json::json!({
             "network_id": "rest-control-eth",
             "expected_chain_id": 31337,
             "observed_chain_id": 31337,
             "source_ref": "primary",
-            "policy_id": "primary",
         }),
         serde_json::json!({
             "network_id": "rest-control-eth",
             "expected_chain_id": 31337,
             "observed_chain_id": 31338,
             "source_ref": "primary",
-            "policy_id": "primary",
             "unexpected": true,
         }),
         serde_json::json!({
@@ -561,7 +557,6 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
             "expected_chain_id": 31337,
             "observed_chain_id": 31338,
             "source_ref": "bad source ref",
-            "policy_id": "primary",
         }),
     ] {
         let diagnostics = serde_json::json!([{

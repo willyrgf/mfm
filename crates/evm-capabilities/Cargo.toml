@@ -10,9 +10,15 @@ license = "MIT"
 category = "capability-contract"
 
 [dependencies]
+alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true, features = ["serde"] }
+derive_more = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-ids = { path = "../kernel/ids" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

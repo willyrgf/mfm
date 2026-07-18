@@ -1,8 +1,6 @@
 # EVM-only runtime route for the token-only portfolio snapshot example.
 # Set MFM_ETHEREUM_MAINNET_RPC_URL locally; endpoint material never enters setup or run evidence.
 
-[evm.sources.ethereum-mainnet]
-rpc_url_env = "MFM_ETHEREUM_MAINNET_RPC_URL"
-
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
+rpc_url_env = "MFM_ETHEREUM_MAINNET_RPC_URL"

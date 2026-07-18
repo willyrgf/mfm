@@ -256,10 +256,9 @@ external authority. They must not perform live IO, route endpoints, resolve sign
 workflow topology.
 
 States may depend on capability contract crates. States must not depend on live transport
-implementation crates. For example, a contract validation state may depend on an EVM capability
-contract that defines an EVM call-read capability, request, and evidence type. It must not depend on
-the live JSON-RPC transport that chooses an endpoint, attaches authorization, retries HTTP calls, or
-uses a concrete client library.
+implementation crates. For example, a contract validation state may depend on the coherent
+`EvmReadCapability` and its source-bound session types. It must not depend on the live JSON-RPC
+transport that chooses an endpoint, attaches authorization, or uses a concrete client library.
 
 Runtime/app assembly supplies concrete capability implementations for live execution. Replay
 supplies replay implementations backed only by recorded facts, typed artifacts, and side-effect
@@ -657,12 +656,13 @@ replay adapters only. Live capability construction during replay is a contract v
 Replay service construction itself is evidence-only app assembly: it must not construct the live
 runner registry, live transports, signer providers, keystores, or live capability runtime config.
 
-Live provider identity is enforced by bound provider implementations. Runners derive a certified
+Live provider identity is enforced by bound session implementations. Runners derive a certified
 semantic binding, such as EVM `network_id` plus expected chain id or Bitcoin `network_id`,
 `source_identity`, and expected network tag, before issuing operation-only capability requests. An
-EVM collection's resolved joint tip persists one redacted provider-source binding:
-`network_id`, chain id, `source_ref`, and `policy_id`. Every native balance, ERC-20 metadata,
-ERC-20 balance, and hash re-verification response must equal that binding exactly. The binding is
+EVM collection attempt binds one direct route, probes its chain once, and persists one redacted
+session identity: `network_id`, chain id, `source_ref`, and transport `implementation_id`. Every
+native balance, ERC-20 metadata, ERC-20 balance, and number-to-hash re-verification uses that same
+session. The binding is
 also carried through the ERC-20 metadata and EVM resource/network receipts, so live execution and
 evidence-only replay reject source drift or substitution even when the network and chain match. A
 route that resolves but observes incompatible source evidence fails after `RunAdmitted` as an
@@ -671,9 +671,8 @@ provider family, stable diagnostic code, optional redaction-safe operation id, a
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,
 response-shape failure, unsupported operation, operation incomplete, and source mismatch. They must
 not carry RPC URLs, authorization headers, file paths, provider messages, request/response bodies,
-signer material, or signed transactions. Replay providers rebuild the certified provider binding
-and verify recorded evidence against that binding without resolving source refs or policy ids
-through current runtime config.
+signer material, or signed transactions. Replay rebuilds the checked session evidence and verifies
+it against the certified binding without resolving source refs through current runtime config.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and

@@ -11,12 +11,12 @@ category = "adapter"
 
 [dependencies]
 alloy-primitives = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-events = { path = "../../kernel/events" }
-mfm-evm-core = { path = "../../evm-core" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }

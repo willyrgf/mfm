@@ -232,6 +232,137 @@ impl fmt::Debug for RuntimeKeystoreSigner {
     }
 }
 
+/// Exact signer binding selected for one live signing consumer.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RuntimeSignerBinding {
+    signer_ref: SignerRef,
+    signer: RuntimeKeystoreSigner,
+    keystore: KeystoreRuntimeConfig,
+}
+
+impl RuntimeSignerBinding {
+    /// Returns the selected signer reference.
+    pub const fn signer_ref(&self) -> &SignerRef {
+        &self.signer_ref
+    }
+
+    /// Returns the selected keystore signer descriptor.
+    pub const fn signer(&self) -> &RuntimeKeystoreSigner {
+        &self.signer
+    }
+
+    /// Returns the exact referenced keystore profile.
+    pub const fn keystore(&self) -> &KeystoreRuntimeConfig {
+        &self.keystore
+    }
+}
+
+impl fmt::Debug for RuntimeSignerBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeSignerBinding")
+            .field("signer_ref", &self.signer_ref)
+            .field("signer", &self.signer)
+            .field("keystore", &self.keystore)
+            .finish()
+    }
+}
+
+pub(super) fn select_signer_binding(
+    raw_signers: Option<Value>,
+    raw_keystores: Option<Value>,
+    signer_ref: &SignerRef,
+) -> Result<RuntimeSignerBinding> {
+    let raw_signers = raw_signers.ok_or_else(|| {
+        RuntimeConfigError::new(
+            RuntimeConfigLocation::Signer { signer_ref: None },
+            RuntimeConfigErrorKind::MissingFamily,
+        )
+    })?;
+    let raw_signers = deserialize_family::<BTreeMap<String, Value>>(
+        raw_signers,
+        RuntimeConfigLocation::Root.with_field("signers"),
+        RuntimeConfigErrorKind::InvalidSignerConfig,
+    )?;
+    let location = RuntimeConfigLocation::Signer {
+        signer_ref: Some(signer_ref.to_string()),
+    };
+    let raw_signer = raw_signers.get(signer_ref.as_str()).ok_or_else(|| {
+        RuntimeConfigError::new(location.clone(), RuntimeConfigErrorKind::MissingSigner)
+    })?;
+    let raw_signer = deserialize_family::<RawSignerConfig>(
+        raw_signer.clone(),
+        location.clone(),
+        RuntimeConfigErrorKind::InvalidSignerConfig,
+    )?;
+    reject_extra_fields(&raw_signer.extra, location.clone())?;
+    if raw_signer.provider.as_deref() != Some("keystore") {
+        return Err(RuntimeConfigError::new(
+            location.clone().with_field("provider"),
+            match raw_signer.provider {
+                None => RuntimeConfigErrorKind::MissingRequiredField,
+                Some(_) => RuntimeConfigErrorKind::UnsupportedSignerProvider,
+            },
+        ));
+    }
+    let raw_keystore_ref = raw_signer.keystore_ref.as_deref().ok_or_else(|| {
+        RuntimeConfigError::new(
+            location.clone().with_field("keystore_ref"),
+            RuntimeConfigErrorKind::MissingRequiredField,
+        )
+    })?;
+    let keystore_ref = parse_keystore_ref(raw_keystore_ref, location.clone())?;
+    let raw_entry_id = raw_signer.entry_id.as_deref().ok_or_else(|| {
+        RuntimeConfigError::new(
+            location.clone().with_field("entry_id"),
+            RuntimeConfigErrorKind::MissingRequiredField,
+        )
+    })?;
+    let entry_id = Uuid::parse_str(raw_entry_id).map_err(|_| {
+        RuntimeConfigError::new(
+            location.with_field("entry_id"),
+            RuntimeConfigErrorKind::InvalidEntryId,
+        )
+    })?;
+    let keystore = select_keystore(raw_keystores, &keystore_ref)?;
+    Ok(RuntimeSignerBinding {
+        signer_ref: signer_ref.clone(),
+        signer: RuntimeKeystoreSigner {
+            entry_id,
+            keystore_ref,
+        },
+        keystore,
+    })
+}
+
+pub(super) fn select_keystore(
+    raw: Option<Value>,
+    keystore_ref: &KeystoreRef,
+) -> Result<KeystoreRuntimeConfig> {
+    let raw = raw.ok_or_else(|| {
+        RuntimeConfigError::new(
+            RuntimeConfigLocation::Keystore { keystore_ref: None },
+            RuntimeConfigErrorKind::MissingFamily,
+        )
+    })?;
+    let raw_keystores = deserialize_family::<BTreeMap<String, Value>>(
+        raw,
+        RuntimeConfigLocation::Root.with_field("keystores"),
+        RuntimeConfigErrorKind::InvalidKeystoreConfig,
+    )?;
+    let location = RuntimeConfigLocation::Keystore {
+        keystore_ref: Some(keystore_ref.to_string()),
+    };
+    let raw_keystore = raw_keystores.get(keystore_ref.as_str()).ok_or_else(|| {
+        RuntimeConfigError::new(location.clone(), RuntimeConfigErrorKind::MissingKeystore)
+    })?;
+    let raw_keystore = deserialize_family::<RawKeystoreConfig>(
+        raw_keystore.clone(),
+        location.clone(),
+        RuntimeConfigErrorKind::InvalidKeystoreConfig,
+    )?;
+    KeystoreRuntimeConfig::from_raw(raw_keystore, location)
+}
+
 pub(super) fn parse_signers(
     raw: Option<Value>,
     keystores: &BTreeMap<KeystoreRef, KeystoreRuntimeConfig>,

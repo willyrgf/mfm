@@ -38,7 +38,6 @@ impl RuntimeConfigLoader {
 pub(crate) struct LiveTransportRuntime {
     runtime_config: RuntimeConfigLoader,
     parsed_config: OnceLock<Result<Option<Arc<mfm_runtime_config::RuntimeConfig>>, ()>>,
-    evm_client: OnceLock<Result<Arc<mfm_transports_evm::EvmJsonRpcClient>, ProviderDiagnosticCode>>,
     btc_router: OnceLock<
         Result<
             Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>,
@@ -52,7 +51,6 @@ impl LiveTransportRuntime {
         Self {
             runtime_config,
             parsed_config: OnceLock::new(),
-            evm_client: OnceLock::new(),
             btc_router: OnceLock::new(),
         }
     }
@@ -61,33 +59,49 @@ impl LiveTransportRuntime {
         &self,
         binding: &EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<()> {
-        self.evm_client(binding)?
-            .validate_network_binding(binding)
-            .map_err(|error| evm_transport_capability_error(binding, error))
+        self.evm_route(binding).map(|_| ())
     }
 
-    pub(crate) fn evm_provider(
+    pub(crate) async fn bind_evm_read_session(
         &self,
         binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<mfm_transports_evm::EvmJsonRpcNetworkProvider> {
-        let client = self.evm_client(&binding)?;
-        client
-            .bind_network(binding.clone())
-            .map_err(|error| evm_transport_capability_error(&binding, error))
+    ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmReadSession>> {
+        let route = self.evm_route(&binding)?;
+        mfm_transports_evm::EvmJsonRpcSession::bind(
+            binding.clone(),
+            route.source_ref().clone(),
+            route.rpc_url().expose_secret().to_owned(),
+            route
+                .auth_header()
+                .map(|value| value.expose_secret().to_owned()),
+        )
+        .await
+        .map(|session| Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmReadSession>)
+        .map_err(|error| evm_transport_capability_error(&binding, error))
     }
 
-    fn evm_client(
+    fn evm_route(
         &self,
         binding: &EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<mfm_transports_evm::EvmJsonRpcClient>> {
-        self.evm_client
-            .get_or_init(|| {
-                self.evm_runtime_config()
-                    .and_then(evm_json_rpc_client)
-                    .map(Arc::new)
-            })
-            .clone()
-            .map_err(|code| evm_provider_failure(binding, code))
+    ) -> mfm_evm_capabilities::Result<mfm_runtime_config::EvmRpcRoute> {
+        let Some(path) = self.runtime_config.path.as_ref() else {
+            return Err(evm_provider_failure(
+                binding,
+                ProviderDiagnosticCode::ProviderConfigurationMissing,
+            ));
+        };
+        mfm_runtime_config::RuntimeConfig::load_evm_route(path, binding.network_id()).map_err(
+            |error| {
+                let code = match error.kind() {
+                    mfm_runtime_config::RuntimeConfigErrorKind::MissingFamily
+                    | mfm_runtime_config::RuntimeConfigErrorKind::MissingRoute => {
+                        ProviderDiagnosticCode::ProviderConfigurationMissing
+                    }
+                    _ => ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                };
+                evm_provider_failure(binding, code)
+            },
+        )
     }
 
     fn btc_router_optional(
@@ -133,15 +147,6 @@ impl LiveTransportRuntime {
             .clone()
     }
 
-    fn evm_runtime_config(
-        &self,
-    ) -> Result<mfm_runtime_config::EvmRuntimeConfig, ProviderDiagnosticCode> {
-        self.runtime_config_optional()
-            .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)?
-            .and_then(|config| config.evm().cloned())
-            .ok_or(ProviderDiagnosticCode::ProviderConfigurationMissing)
-    }
-
     fn btc_runtime_config_optional(
         &self,
     ) -> Result<Option<mfm_runtime_config::BtcRuntimeConfig>, ProviderDiagnosticCode> {
@@ -182,55 +187,6 @@ impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRunt
             .map(|provider| Arc::new(provider) as Arc<dyn BtcBalanceReadProvider>)
             .map_err(|error| enrich_btc_capability_error(&binding, error))
     }
-}
-
-fn evm_json_rpc_client(
-    evm: mfm_runtime_config::EvmRuntimeConfig,
-) -> Result<mfm_transports_evm::EvmJsonRpcClient, ProviderDiagnosticCode> {
-    let sources = evm
-        .sources()
-        .iter()
-        .map(|(source_ref, source)| {
-            mfm_transports_evm::EvmRuntimeSource::new(
-                source_ref.clone(),
-                source.rpc_url().expose_secret().to_owned(),
-                source
-                    .auth_header()
-                    .map(|value| value.expose_secret().to_owned()),
-            )
-            .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let policies = evm
-        .policies()
-        .iter()
-        .map(|(policy_id, policy)| {
-            mfm_transports_evm::EvmSourcePolicy::new(
-                policy_id.clone(),
-                policy.ordered_sources().to_vec(),
-            )
-            .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let routes = evm
-        .routes()
-        .iter()
-        .map(|(network_id, route)| {
-            mfm_transports_evm::EvmRoute::new(
-                network_id.clone(),
-                route.source_ref().clone(),
-                route.policy_id().clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let source_registry = mfm_transports_evm::EvmSourceRegistry::new(sources, policies)
-        .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)?;
-    let route_registry = mfm_transports_evm::EvmRouteRegistry::new(routes)
-        .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)?;
-    Ok(mfm_transports_evm::EvmJsonRpcClient::new(
-        source_registry,
-        route_registry,
-    ))
 }
 
 fn btc_json_rpc_router(
@@ -348,10 +304,10 @@ fn enrich_btc_diagnostic(
 mod tests {
     use super::*;
     use mfm_btc_capabilities::{BitcoinNetworkTag, BtcNetworkId, BtcSourceIdentity};
-    use mfm_evm_capabilities::EvmNetworkId;
 
     fn evm_binding() -> EvmNetworkBinding {
-        EvmNetworkBinding::new(EvmNetworkId::new("test-evm").expect("network"), 1).expect("binding")
+        EvmNetworkBinding::new(LocalPublicId::new("test-evm").expect("network"), 1)
+            .expect("binding")
     }
 
     fn btc_binding() -> BtcSourceBinding {
@@ -450,11 +406,9 @@ mod tests {
     fn supplied_config_missing_bitcoin_reports_only_bitcoin_missing() {
         let (_dir, runtime) = runtime_with_config(
             r#"
-[evm.sources.primary]
-rpc_url = "http://127.0.0.1:8545"
-
 [evm.routes.test-evm]
 source_ref = "primary"
+rpc_url = "http://127.0.0.1:8545"
 "#,
         );
         let binding = btc_binding();
@@ -475,11 +429,9 @@ source_ref = "primary"
     fn missing_semantic_evm_route_retains_requested_binding() {
         let (_dir, runtime) = runtime_with_config(
             r#"
-[evm.sources.primary]
-rpc_url = "http://127.0.0.1:8545"
-
 [evm.routes.other-evm]
 source_ref = "primary"
+rpc_url = "http://127.0.0.1:8545"
 "#,
         );
         let error = runtime
@@ -487,7 +439,10 @@ source_ref = "primary"
             .expect_err("semantic route is missing");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
 
-        assert_eq!(diagnostic.code(), ProviderDiagnosticCode::RouteUnavailable);
+        assert_eq!(
+            diagnostic.code(),
+            ProviderDiagnosticCode::ProviderConfigurationMissing
+        );
         assert_eq!(
             serde_json::to_value(diagnostic).expect("diagnostic JSON")["fields"],
             serde_json::json!({"expected_chain_id": 1, "network_id": "test-evm"})

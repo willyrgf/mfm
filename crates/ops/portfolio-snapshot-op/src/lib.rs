@@ -1027,7 +1027,7 @@ mod tests {
             1,
             20,
             EVM_HASH,
-            mfm_states_evm::RedactedEvmProviderSourceBinding::new(
+            mfm_states_evm::RedactedEvmSessionEvidence::new(
                 "ethereum-mainnet",
                 1,
                 "primary",

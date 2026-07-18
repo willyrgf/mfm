@@ -11,12 +11,11 @@ use std::future;
 use std::num::NonZeroU64;
 use std::str::FromStr;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
 use mfm_evm_capabilities::{
-    EvmBlockReadCapability, EvmBlockReadResponse, EvmBlockSelector, EvmCallReadCapability,
-    EvmCallReadRequest, EvmCallReadResponse,
+    EvmBlock, EvmBlockSelector, EvmCall, EvmReadCapability, EvmSessionEvidence,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
@@ -35,7 +34,7 @@ use crate::{
     address_erc20_balance_fact_visibility, canonical_evm_block_hash,
     validate_canonical_erc20_contract_address, EvmAddressErc20BalanceObservation,
     EvmAddressErc20BalanceResponse, EvmAddressErc20BalanceSnapshotFact,
-    EvmAddressErc20BalanceSubject, EvmJointTip, EvmStateError, RedactedEvmProviderSourceBinding,
+    EvmAddressErc20BalanceSubject, EvmJointTip, EvmStateError, RedactedEvmSessionEvidence,
 };
 
 /// Exact number of source reads for one anchored ERC-20 `decimals()` observation.
@@ -121,7 +120,7 @@ pub struct EvmErc20TokenMetadata {
     decimals: u8,
     block_number: u64,
     block_hash: String,
-    source_binding: RedactedEvmProviderSourceBinding,
+    source_binding: RedactedEvmSessionEvidence,
     source_read_count: u64,
 }
 
@@ -134,7 +133,7 @@ impl EvmErc20TokenMetadata {
         decimals: u8,
         block_number: u64,
         block_hash: impl Into<String>,
-        source_binding: RedactedEvmProviderSourceBinding,
+        source_binding: RedactedEvmSessionEvidence,
     ) -> Result<Self, EvmStateError> {
         let network = network.into();
         let contract_address = contract_address.into();
@@ -199,7 +198,7 @@ impl EvmErc20TokenMetadata {
     }
 
     /// Returns the exact redacted provider source that supplied this metadata.
-    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+    pub const fn source_binding(&self) -> &RedactedEvmSessionEvidence {
         &self.source_binding
     }
 
@@ -252,7 +251,7 @@ impl EvmErc20TokenMetadata {
 pub fn erc20_metadata_call_request(
     config: &ObserveErc20TokenMetadataConfig,
     joint_tip: &EvmJointTip,
-) -> Result<EvmCallReadRequest, EvmStateError> {
+) -> Result<EvmCall, EvmStateError> {
     validate_observe_erc20_token_metadata_config(config)
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
     let (network, chain_id) = config
@@ -267,10 +266,10 @@ pub fn erc20_metadata_call_request(
             },
         )?;
     let block_hash = parse_joint_tip_hash(joint_tip)?;
-    Ok(EvmCallReadRequest::new(
+    Ok(EvmCall::new(
         contract_address,
-        calldata,
-        EvmBlockSelector::Hash(block_hash),
+        calldata.into(),
+        EvmBlockSelector::ExactHash(block_hash),
     ))
 }
 
@@ -278,9 +277,10 @@ pub fn erc20_metadata_call_request(
 pub fn normalize_erc20_token_metadata_from_capability(
     config: &ObserveErc20TokenMetadataConfig,
     joint_tip: &EvmJointTip,
-    request: &EvmCallReadRequest,
-    response: &EvmCallReadResponse,
-    verification: &EvmBlockReadResponse,
+    request: &EvmCall,
+    return_data: &Bytes,
+    verification: &EvmBlock,
+    evidence: &EvmSessionEvidence,
 ) -> Result<EvmErc20TokenMetadata, EvmStateError> {
     let expected_request = erc20_metadata_call_request(config, joint_tip)?;
     if request != &expected_request {
@@ -291,11 +291,20 @@ pub fn normalize_erc20_token_metadata_from_capability(
     let (network, chain_id) = config
         .evm_network_parts()
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
-    require_call_source_binding(joint_tip, &response.evidence, "erc20 metadata")?;
-    verify_joint_tip_response(network, chain_id, joint_tip, verification, "erc20 metadata")?;
-    let decimals = mfm_evm_core::encoding::decode_erc20_decimals_result(&response.return_data)
-        .map_err(|_| EvmStateError::InvalidInput {
-            reason: "erc20 decimals result was malformed".to_owned(),
+    require_call_source_binding(joint_tip, evidence, "erc20 metadata")?;
+    verify_joint_tip_response(
+        network,
+        chain_id,
+        joint_tip,
+        verification,
+        evidence,
+        "erc20 metadata",
+    )?;
+    let decimals =
+        mfm_evm_core::encoding::decode_erc20_decimals_result(return_data).map_err(|_| {
+            EvmStateError::InvalidInput {
+                reason: "erc20 decimals result was malformed".to_owned(),
+            }
         })?;
     EvmErc20TokenMetadata::new(
         network,
@@ -318,7 +327,7 @@ impl ObserveErc20TokenMetadataState {
     pub fn call_request(
         &self,
         input: &ObserveErc20TokenMetadataInput,
-    ) -> Result<EvmCallReadRequest, EvmStateError> {
+    ) -> Result<EvmCall, EvmStateError> {
         erc20_metadata_call_request(&self.config, &input.joint_tip)
     }
 
@@ -326,16 +335,18 @@ impl ObserveErc20TokenMetadataState {
     pub fn materialize_response(
         &self,
         input: &ObserveErc20TokenMetadataInput,
-        request: &EvmCallReadRequest,
-        response: &EvmCallReadResponse,
-        verification: &EvmBlockReadResponse,
+        request: &EvmCall,
+        return_data: &Bytes,
+        verification: &EvmBlock,
+        evidence: &EvmSessionEvidence,
     ) -> Result<EvmErc20TokenMetadata, EvmStateError> {
         normalize_erc20_token_metadata_from_capability(
             &self.config,
             &input.joint_tip,
             request,
-            response,
+            return_data,
             verification,
+            evidence,
         )
     }
 
@@ -351,7 +362,7 @@ impl StateSpec for ObserveErc20TokenMetadataState {
     type Input = ObserveErc20TokenMetadataInput;
     type Output = EvmErc20TokenMetadata;
     type Effect = ReadExternal;
-    type Caps = (EvmCallReadCapability, EvmBlockReadCapability);
+    type Caps = (EvmReadCapability,);
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
         state_kind("erc20_token_metadata.observe")
@@ -453,7 +464,7 @@ pub struct ObserveErc20BalanceInput {
 pub fn erc20_balance_call_request(
     config: &ObserveErc20BalanceConfig,
     input: &ObserveErc20BalanceInput,
-) -> Result<EvmCallReadRequest, EvmStateError> {
+) -> Result<EvmCall, EvmStateError> {
     validate_observe_erc20_balance_config(config)
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
     let (network, chain_id) = config
@@ -471,10 +482,10 @@ pub fn erc20_balance_call_request(
                 reason: "erc20 balance calldata could not be encoded".to_owned(),
             })?;
     let block_hash = parse_joint_tip_hash(&input.joint_tip)?;
-    Ok(EvmCallReadRequest::new(
+    Ok(EvmCall::new(
         contract_address,
-        calldata,
-        EvmBlockSelector::Hash(block_hash),
+        calldata.into(),
+        EvmBlockSelector::ExactHash(block_hash),
     ))
 }
 
@@ -482,9 +493,10 @@ pub fn erc20_balance_call_request(
 pub fn normalize_erc20_balance_from_capability(
     config: &ObserveErc20BalanceConfig,
     input: &ObserveErc20BalanceInput,
-    request: &EvmCallReadRequest,
-    response: &EvmCallReadResponse,
-    verification: &EvmBlockReadResponse,
+    request: &EvmCall,
+    return_data: &Bytes,
+    verification: &EvmBlock,
+    evidence: &EvmSessionEvidence,
 ) -> Result<EvmAddressErc20BalanceObservation, EvmStateError> {
     let expected_request = erc20_balance_call_request(config, input)?;
     if request != &expected_request {
@@ -495,15 +507,16 @@ pub fn normalize_erc20_balance_from_capability(
     let (network, chain_id) = config
         .evm_network_parts()
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
-    require_call_source_binding(&input.joint_tip, &response.evidence, "erc20 balance")?;
+    require_call_source_binding(&input.joint_tip, evidence, "erc20 balance")?;
     verify_joint_tip_response(
         network,
         chain_id,
         &input.joint_tip,
         verification,
+        evidence,
         "erc20 balance",
     )?;
-    let raw_units = mfm_evm_core::encoding::decode_erc20_balance_result(&response.return_data)
+    let raw_units = mfm_evm_core::encoding::decode_erc20_balance_result(return_data)
         .map_err(|_| EvmStateError::InvalidInput {
             reason: "erc20 balance result was malformed".to_owned(),
         })?
@@ -530,10 +543,7 @@ pub struct ObserveErc20BalanceState {
 
 impl ObserveErc20BalanceState {
     /// Builds the only admissible generic EVM call request for this state input.
-    pub fn call_request(
-        &self,
-        input: &ObserveErc20BalanceInput,
-    ) -> Result<EvmCallReadRequest, EvmStateError> {
+    pub fn call_request(&self, input: &ObserveErc20BalanceInput) -> Result<EvmCall, EvmStateError> {
         erc20_balance_call_request(&self.config, input)
     }
 
@@ -541,16 +551,18 @@ impl ObserveErc20BalanceState {
     pub fn materialize_response(
         &self,
         input: &ObserveErc20BalanceInput,
-        request: &EvmCallReadRequest,
-        response: &EvmCallReadResponse,
-        verification: &EvmBlockReadResponse,
+        request: &EvmCall,
+        return_data: &Bytes,
+        verification: &EvmBlock,
+        evidence: &EvmSessionEvidence,
     ) -> Result<EvmAddressErc20BalanceObservation, EvmStateError> {
         normalize_erc20_balance_from_capability(
             &self.config,
             input,
             request,
-            response,
+            return_data,
             verification,
+            evidence,
         )
     }
 
@@ -566,7 +578,7 @@ impl StateSpec for ObserveErc20BalanceState {
     type Input = ObserveErc20BalanceInput;
     type Output = EvmAddressErc20BalanceObservation;
     type Effect = ReadExternal;
-    type Caps = (EvmCallReadCapability, EvmBlockReadCapability);
+    type Caps = (EvmReadCapability,);
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
         state_kind("erc20_balance.observe")
@@ -903,7 +915,7 @@ pub struct EvmErc20BalanceBatchReceipt {
     chain_id: u64,
     block_number: u64,
     block_hash: String,
-    source_binding: RedactedEvmProviderSourceBinding,
+    source_binding: RedactedEvmSessionEvidence,
     successful_observation_count: u64,
     entries: Vec<EvmErc20BalanceReceiptEntry>,
 }
@@ -914,7 +926,7 @@ impl EvmErc20BalanceBatchReceipt {
         chain_id: u64,
         block_number: u64,
         block_hash: String,
-        source_binding: RedactedEvmProviderSourceBinding,
+        source_binding: RedactedEvmSessionEvidence,
         successful_observation_count: u64,
         entries: Vec<EvmErc20BalanceReceiptEntry>,
     ) -> Result<Self, EvmStateError> {
@@ -999,7 +1011,7 @@ impl EvmErc20BalanceBatchReceipt {
     }
 
     /// Returns the exact redacted provider source for this collection receipt.
-    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+    pub const fn source_binding(&self) -> &RedactedEvmSessionEvidence {
         &self.source_binding
     }
 
@@ -1026,7 +1038,7 @@ impl<'de> Deserialize<'de> for EvmErc20BalanceBatchReceipt {
             chain_id: u64,
             block_number: u64,
             block_hash: String,
-            source_binding: RedactedEvmProviderSourceBinding,
+            source_binding: RedactedEvmSessionEvidence,
             successful_observation_count: u64,
             entries: Vec<EvmErc20BalanceReceiptEntry>,
         }
@@ -1148,10 +1160,10 @@ fn parse_joint_tip_hash(joint_tip: &EvmJointTip) -> Result<B256, EvmStateError> 
 
 fn require_call_source_binding(
     joint_tip: &EvmJointTip,
-    evidence: &mfm_evm_capabilities::RedactedEvmSourceEvidence,
+    evidence: &mfm_evm_capabilities::EvmSessionEvidence,
     observation: &'static str,
 ) -> Result<(), EvmStateError> {
-    if !joint_tip.source_binding().matches_capability(evidence) {
+    if !joint_tip.source_binding().matches_session(evidence) {
         return Err(EvmStateError::InvalidInput {
             reason: format!(
                 "{observation} call response did not match the shared provider source binding"
@@ -1165,10 +1177,11 @@ fn verify_joint_tip_response(
     network: &str,
     chain_id: u64,
     joint_tip: &EvmJointTip,
-    verification: &EvmBlockReadResponse,
+    verification: &EvmBlock,
+    evidence: &EvmSessionEvidence,
     observation: &'static str,
 ) -> Result<(), EvmStateError> {
-    let verified_tip = EvmJointTip::from_block_response(network, chain_id, verification)?;
+    let verified_tip = EvmJointTip::from_session_block(network, chain_id, verification, evidence)?;
     if &verified_tip != joint_tip {
         return Err(EvmStateError::InvalidInput {
             reason: format!("{observation} anchor re-verification drifted from shared joint tip"),

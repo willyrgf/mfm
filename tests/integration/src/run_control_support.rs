@@ -130,11 +130,9 @@ pub fn write_evm_runtime_config_for_test(
     let config_path = dir.join("runtime.toml");
     let mut config = format!(
         r#"
-[evm.sources.{network}]
-rpc_url = {rpc_url}
-
 [evm.routes.{network}]
 source_ref = {network}
+rpc_url = {rpc_url}
 "#,
         network = toml_string(network_id),
         rpc_url = toml_string(rpc_url),
@@ -166,11 +164,9 @@ pub fn write_collectors_runtime_config_for_test(dir: &Path, rpc_url: &str) -> st
     let config_path = dir.join("runtime.toml");
     let config = format!(
         r#"
-[evm.sources.ethereum-mainnet]
-rpc_url = {rpc_url}
-
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
+rpc_url = {rpc_url}
 
 [btc.routes.public-bitcoin-core]
 rpc_url = {rpc_url}

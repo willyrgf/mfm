@@ -1,129 +1,107 @@
-//! Serializable, redaction-safe EVM provider-source bindings.
-//!
-//! A joint tip establishes the one provider source that may supply every
-//! hash-pinned read for its collection. The binding deliberately contains only
-//! public process-local identifiers; it never serializes an endpoint,
-//! credential, or transport configuration.
+//! Serializable redacted provenance for a source-bound EVM session.
 
-use mfm_evm_capabilities::{
-    EvmNetworkBinding, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef, RedactedEvmSourceEvidence,
-};
+use mfm_evm_capabilities::{EvmNetworkBinding, EvmSessionEvidence};
+use mfm_ids::LocalPublicId;
 use mfm_program_derive::MfmValue;
 use serde::{de, Deserialize, Serialize};
 
 use crate::EvmStateError;
 
-/// Exact redacted provider-source identity for one EVM network and chain.
-///
-/// This value is carried by the resolved joint tip, ERC-20 metadata, and
-/// collection receipts. Every live or replayed capability response must match
-/// it exactly before it can influence a holding fact.
+/// Persisted redacted session evidence used by the pre-collapse collector graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm",
-    name = "redacted_provider_source_binding",
+    name = "redacted_session_evidence",
     version = "1",
-    schema = "mfm.evm.state.value.redacted_provider_source_binding"
+    schema = "mfm.evm.state.value.redacted_session_evidence"
 )]
-pub struct RedactedEvmProviderSourceBinding {
+pub struct RedactedEvmSessionEvidence {
     network: String,
     chain_id: u64,
     source_ref: String,
-    policy_id: String,
+    implementation_id: String,
 }
 
-impl RedactedEvmProviderSourceBinding {
-    /// Creates a checked redacted provider-source binding.
+impl RedactedEvmSessionEvidence {
+    /// Creates checked redacted session evidence.
     pub fn new(
         network: impl Into<String>,
         chain_id: u64,
         source_ref: impl Into<String>,
-        policy_id: impl Into<String>,
+        implementation_id: impl Into<String>,
     ) -> Result<Self, EvmStateError> {
         let network = network.into();
         let source_ref = source_ref.into();
-        let policy_id = policy_id.into();
-        let network_id = EvmNetworkId::new(&network).map_err(|_| invalid_binding())?;
+        let implementation_id = implementation_id.into();
+        let network_id = LocalPublicId::new(&network).map_err(|_| invalid_binding())?;
         EvmNetworkBinding::new(network_id, chain_id).map_err(|_| invalid_binding())?;
-        EvmSourceRef::new(&source_ref).map_err(|_| invalid_binding())?;
-        EvmSourcePolicyId::new(&policy_id).map_err(|_| invalid_binding())?;
+        LocalPublicId::new(&source_ref).map_err(|_| invalid_binding())?;
+        LocalPublicId::new(&implementation_id).map_err(|_| invalid_binding())?;
         Ok(Self {
             network,
             chain_id,
             source_ref,
-            policy_id,
+            implementation_id,
         })
     }
 
-    /// Converts checked capability evidence into its persisted redacted binding.
-    pub fn from_capability(evidence: &RedactedEvmSourceEvidence) -> Result<Self, EvmStateError> {
-        let binding = Self::new(
-            evidence.network_id.as_str(),
-            evidence.expected_chain_id,
-            evidence.source_ref.as_str(),
-            evidence.policy_id.as_str(),
-        )?;
-        if evidence.observed_chain_id != binding.chain_id {
-            return Err(EvmStateError::InvalidInput {
-                reason: "EVM source evidence observed chain did not match its provider binding"
-                    .to_owned(),
-            });
-        }
-        Ok(binding)
-    }
-
-    /// Reconstructs checked capability evidence for evidence-only replay.
-    pub fn to_capability(&self) -> Result<RedactedEvmSourceEvidence, EvmStateError> {
-        let network_id = EvmNetworkId::new(&self.network).map_err(|_| invalid_binding())?;
-        let network_binding =
-            EvmNetworkBinding::new(network_id, self.chain_id).map_err(|_| invalid_binding())?;
-        let source_ref = EvmSourceRef::new(&self.source_ref).map_err(|_| invalid_binding())?;
-        let policy_id = EvmSourcePolicyId::new(&self.policy_id).map_err(|_| invalid_binding())?;
-        RedactedEvmSourceEvidence::from_binding(
-            &network_binding,
-            self.chain_id,
-            source_ref,
-            policy_id,
+    /// Converts bind-time capability evidence into persisted provenance.
+    pub fn from_session(evidence: &EvmSessionEvidence) -> Result<Self, EvmStateError> {
+        Self::new(
+            evidence.network_id().as_str(),
+            evidence.chain_id(),
+            evidence.source_ref().as_str(),
+            evidence.implementation_id().as_str(),
         )
-        .map_err(|_| invalid_binding())
     }
 
-    /// Returns whether this binding belongs to one certified EVM network.
+    /// Reconstructs the checked evidence value for replay reducers.
+    pub fn to_session(&self) -> Result<EvmSessionEvidence, EvmStateError> {
+        let network_id = LocalPublicId::new(&self.network).map_err(|_| invalid_binding())?;
+        let binding =
+            EvmNetworkBinding::new(network_id, self.chain_id).map_err(|_| invalid_binding())?;
+        Ok(EvmSessionEvidence::new(
+            &binding,
+            LocalPublicId::new(&self.source_ref).map_err(|_| invalid_binding())?,
+            LocalPublicId::new(&self.implementation_id).map_err(|_| invalid_binding())?,
+        ))
+    }
+
+    /// Returns whether this evidence belongs to a semantic network binding.
     pub fn is_bound_to(&self, network: &str, chain_id: u64) -> bool {
         self.network == network && self.chain_id == chain_id
     }
 
-    /// Returns whether capability evidence exactly matches this provider source.
-    pub fn matches_capability(&self, evidence: &RedactedEvmSourceEvidence) -> bool {
-        evidence.network_id.as_str() == self.network
-            && evidence.expected_chain_id == self.chain_id
-            && evidence.observed_chain_id == self.chain_id
-            && evidence.source_ref.as_str() == self.source_ref
-            && evidence.policy_id.as_str() == self.policy_id
+    /// Returns whether checked session evidence matches exactly.
+    pub fn matches_session(&self, evidence: &EvmSessionEvidence) -> bool {
+        evidence.network_id().as_str() == self.network
+            && evidence.chain_id() == self.chain_id
+            && evidence.source_ref().as_str() == self.source_ref
+            && evidence.implementation_id().as_str() == self.implementation_id
     }
 
-    /// Returns the semantic EVM network id.
+    /// Returns the semantic network id.
     pub fn network(&self) -> &str {
         &self.network
     }
 
-    /// Returns the EVM chain id.
+    /// Returns the chain id.
     pub const fn chain_id(&self) -> u64 {
         self.chain_id
     }
 
-    /// Returns the redacted process-local source reference.
+    /// Returns the process-local source reference.
     pub fn source_ref(&self) -> &str {
         &self.source_ref
     }
 
-    /// Returns the redacted source-policy id.
-    pub fn policy_id(&self) -> &str {
-        &self.policy_id
+    /// Returns the certified session implementation id.
+    pub fn implementation_id(&self) -> &str {
+        &self.implementation_id
     }
 }
 
-impl<'de> Deserialize<'de> for RedactedEvmProviderSourceBinding {
+impl<'de> Deserialize<'de> for RedactedEvmSessionEvidence {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -134,17 +112,22 @@ impl<'de> Deserialize<'de> for RedactedEvmProviderSourceBinding {
             network: String,
             chain_id: u64,
             source_ref: String,
-            policy_id: String,
+            implementation_id: String,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.network, wire.chain_id, wire.source_ref, wire.policy_id)
-            .map_err(de::Error::custom)
+        Self::new(
+            wire.network,
+            wire.chain_id,
+            wire.source_ref,
+            wire.implementation_id,
+        )
+        .map_err(de::Error::custom)
     }
 }
 
 fn invalid_binding() -> EvmStateError {
     EvmStateError::InvalidInput {
-        reason: "EVM redacted provider-source binding was invalid".to_owned(),
+        reason: "EVM redacted session evidence was invalid".to_owned(),
     }
 }

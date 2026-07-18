@@ -71,7 +71,7 @@ pub use network_collection_receipt::{
     EvmNetworkCollectionReceipt,
 };
 
-pub use source_binding::RedactedEvmProviderSourceBinding;
+pub use source_binding::RedactedEvmSessionEvidence;
 
 use std::str::FromStr;
 

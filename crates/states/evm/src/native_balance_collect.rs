@@ -10,12 +10,11 @@ use std::str::FromStr;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
-use mfm_evm_capabilities::{
-    EvmBalanceReadCapability, EvmBalanceReadResponse, EvmBlockReadCapability, EvmBlockReadResponse,
-    EvmNetworkId, RedactedEvmSourceEvidence,
-};
+use mfm_evm_capabilities::{EvmBlock, EvmReadCapability, EvmSessionEvidence};
 use mfm_fact_capabilities::FactRecordCapability;
-use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
+use mfm_ids::{
+    AdapterKind, AdapterVersion, DigestAlgorithm, LocalPublicId, StateKind, StateVersion,
+};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_program::{
@@ -29,7 +28,7 @@ use serde::{de, Deserialize, Serialize};
 use crate::{
     address_native_balance_fact_visibility, validate_canonical_evm_account,
     EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact,
-    EvmAddressNativeBalanceSubject, EvmStateError, RedactedEvmProviderSourceBinding,
+    EvmAddressNativeBalanceSubject, EvmStateError, RedactedEvmSessionEvidence,
 };
 
 pub(crate) const NAMESPACE: &str = "mfm.evm";
@@ -102,7 +101,7 @@ pub struct EvmJointTip {
     chain_id: u64,
     block_number: u64,
     block_hash: String,
-    source_binding: RedactedEvmProviderSourceBinding,
+    source_binding: RedactedEvmSessionEvidence,
 }
 
 impl EvmJointTip {
@@ -115,7 +114,7 @@ impl EvmJointTip {
         chain_id: u64,
         block_number: u64,
         block_hash: impl Into<String>,
-        source_binding: RedactedEvmProviderSourceBinding,
+        source_binding: RedactedEvmSessionEvidence,
     ) -> Result<Self, EvmStateError> {
         let network = network.into();
         if network.trim().is_empty() {
@@ -143,23 +142,28 @@ impl EvmJointTip {
         })
     }
 
-    /// Materializes a joint tip from a verified block-read capability response.
-    pub fn from_block_response(
+    /// Materializes a joint tip from one checked session block read.
+    pub fn from_session_block(
         network: &str,
         chain_id: u64,
-        response: &EvmBlockReadResponse,
+        block: &EvmBlock,
+        evidence: &EvmSessionEvidence,
     ) -> Result<Self, EvmStateError> {
-        let source_binding = RedactedEvmProviderSourceBinding::from_capability(&response.evidence)?;
+        let source_binding = RedactedEvmSessionEvidence::from_session(evidence)?;
         if !source_binding.is_bound_to(network, chain_id) {
             return Err(EvmStateError::InvalidInput {
                 reason: "block response source binding does not match collector config".to_owned(),
             });
         }
+        let block_number =
+            u64::try_from(block.number).map_err(|_| EvmStateError::InvalidInput {
+                reason: "EVM block number exceeded the supported u64 range".to_owned(),
+            })?;
         Self::new(
             network,
             chain_id,
-            response.block_number,
-            format_block_hash(&response.block_hash),
+            block_number,
+            format_block_hash(&block.hash),
             source_binding,
         )
     }
@@ -185,7 +189,7 @@ impl EvmJointTip {
     }
 
     /// Returns the exact redacted provider source used to resolve this tip.
-    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+    pub const fn source_binding(&self) -> &RedactedEvmSessionEvidence {
         &self.source_binding
     }
 
@@ -211,7 +215,7 @@ impl<'de> Deserialize<'de> for EvmJointTip {
             chain_id: u64,
             block_number: u64,
             block_hash: String,
-            source_binding: RedactedEvmProviderSourceBinding,
+            source_binding: RedactedEvmSessionEvidence,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -251,7 +255,7 @@ pub struct ResolveEvmJointTipConfig {
 pub fn validate_resolve_evm_joint_tip_config(
     config: &ResolveEvmJointTipConfig,
 ) -> Result<(), String> {
-    EvmNetworkId::new(&config.network).map_err(|error| error.to_string())?;
+    LocalPublicId::new(&config.network).map_err(|error| error.to_string())?;
     if config.chain_id == 0 {
         return Err("chain_id must be non-zero".to_owned());
     }
@@ -271,11 +275,12 @@ pub struct ResolveEvmJointTipInput {}
 /// Materializes and admits a joint tip from a verified block response.
 pub fn materialize_evm_joint_tip(
     config: &ResolveEvmJointTipConfig,
-    response: &EvmBlockReadResponse,
+    block: &EvmBlock,
+    evidence: &EvmSessionEvidence,
 ) -> Result<EvmJointTip, EvmStateError> {
     validate_resolve_evm_joint_tip_config(config)
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
-    let tip = EvmJointTip::from_block_response(&config.network, config.chain_id, response)?;
+    let tip = EvmJointTip::from_session_block(&config.network, config.chain_id, block, evidence)?;
     if !tip.is_admissible_for_balance_write() {
         return Err(EvmStateError::InvalidInput {
             reason: "joint tip is not admissible for balance write".to_owned(),
@@ -293,9 +298,10 @@ impl ResolveEvmJointTipState {
     /// Materializes a joint tip from a verified block-read response.
     pub fn materialize_response(
         &self,
-        response: &EvmBlockReadResponse,
+        block: &EvmBlock,
+        evidence: &EvmSessionEvidence,
     ) -> Result<EvmJointTip, EvmStateError> {
-        materialize_evm_joint_tip(&self.config, response)
+        materialize_evm_joint_tip(&self.config, block, evidence)
     }
 
     /// Returns the certified config.
@@ -310,7 +316,7 @@ impl StateSpec for ResolveEvmJointTipState {
     type Input = ResolveEvmJointTipInput;
     type Output = EvmJointTip;
     type Effect = ReadExternal;
-    type Caps = (EvmBlockReadCapability,);
+    type Caps = (EvmReadCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("joint_tip.resolve")
@@ -499,7 +505,7 @@ pub fn normalize_evm_native_balance_observation(
     joint_tip: &EvmJointTip,
     verified_tip: &EvmJointTip,
     balance_wei_decimal: &str,
-    balance_evidence: &RedactedEvmSourceEvidence,
+    balance_evidence: &EvmSessionEvidence,
 ) -> Result<EvmAddressNativeBalanceObservation, EvmStateError> {
     validate_observe_evm_native_balance_config(config)
         .map_err(|reason| EvmStateError::InvalidInput { reason })?;
@@ -521,10 +527,7 @@ pub fn normalize_evm_native_balance_observation(
             reason: "tip drift, hash, or provider-source mismatch before Platform write".to_owned(),
         });
     }
-    if !joint_tip
-        .source_binding()
-        .matches_capability(balance_evidence)
-    {
+    if !joint_tip.source_binding().matches_session(balance_evidence) {
         return Err(EvmStateError::InvalidInput {
             reason: "balance response evidence did not match the shared provider source".to_owned(),
         });
@@ -562,14 +565,15 @@ pub fn normalize_evm_native_balance_from_capability(
     config: &ObserveEvmNativeBalanceConfig,
     joint_tip: &EvmJointTip,
     verified_tip: &EvmJointTip,
-    balance: &EvmBalanceReadResponse,
+    balance_wei: &alloy_primitives::U256,
+    evidence: &EvmSessionEvidence,
 ) -> Result<EvmAddressNativeBalanceObservation, EvmStateError> {
     normalize_evm_native_balance_observation(
         config,
         joint_tip,
         verified_tip,
-        &balance.balance_wei.to_string(),
-        &balance.evidence,
+        &balance_wei.to_string(),
+        evidence,
     )
 }
 
@@ -584,13 +588,15 @@ impl ObserveEvmNativeBalanceState {
         &self,
         input: &ObserveEvmNativeBalanceInput,
         verified_tip: &EvmJointTip,
-        balance: &EvmBalanceReadResponse,
+        balance_wei: &alloy_primitives::U256,
+        evidence: &EvmSessionEvidence,
     ) -> Result<EvmAddressNativeBalanceObservation, EvmStateError> {
         normalize_evm_native_balance_from_capability(
             &self.config,
             &input.joint_tip,
             verified_tip,
-            balance,
+            balance_wei,
+            evidence,
         )
     }
 
@@ -606,7 +612,7 @@ impl StateSpec for ObserveEvmNativeBalanceState {
     type Input = ObserveEvmNativeBalanceInput;
     type Output = EvmAddressNativeBalanceObservation;
     type Effect = ReadExternal;
-    type Caps = (EvmBalanceReadCapability, EvmBlockReadCapability);
+    type Caps = (EvmReadCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("native_balance.observe")
@@ -968,7 +974,7 @@ pub struct EvmNativeBalanceBatchReceipt {
     chain_id: u64,
     block_number: u64,
     block_hash: String,
-    source_binding: RedactedEvmProviderSourceBinding,
+    source_binding: RedactedEvmSessionEvidence,
     successful_observation_count: u64,
     entries: Vec<EvmNativeBalanceReceiptEntry>,
 }
@@ -979,7 +985,7 @@ impl EvmNativeBalanceBatchReceipt {
         chain_id: u64,
         block_number: u64,
         block_hash: String,
-        source_binding: RedactedEvmProviderSourceBinding,
+        source_binding: RedactedEvmSessionEvidence,
         successful_observation_count: u64,
         entries: Vec<EvmNativeBalanceReceiptEntry>,
     ) -> Result<Self, EvmStateError> {
@@ -1070,7 +1076,7 @@ impl EvmNativeBalanceBatchReceipt {
     }
 
     /// Returns the exact redacted provider source for this collection receipt.
-    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+    pub const fn source_binding(&self) -> &RedactedEvmSessionEvidence {
         &self.source_binding
     }
 
@@ -1097,7 +1103,7 @@ impl<'de> Deserialize<'de> for EvmNativeBalanceBatchReceipt {
             chain_id: u64,
             block_number: u64,
             block_hash: String,
-            source_binding: RedactedEvmProviderSourceBinding,
+            source_binding: RedactedEvmSessionEvidence,
             successful_observation_count: u64,
             entries: Vec<EvmNativeBalanceReceiptEntry>,
         }

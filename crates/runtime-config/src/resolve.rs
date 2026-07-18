@@ -1,26 +1,15 @@
 use super::*;
-use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
+use mfm_ids::LocalPublicId;
 
-pub(super) fn parse_source_ref(raw: &str, location: RuntimeConfigLocation) -> Result<EvmSourceRef> {
-    EvmSourceRef::new(raw).map_err(|_| {
+pub(super) fn parse_local_public_id(
+    raw: &str,
+    location: RuntimeConfigLocation,
+) -> Result<LocalPublicId> {
+    LocalPublicId::new(raw).map_err(|_| {
         RuntimeConfigError::new(
             location,
             RuntimeConfigErrorKind::InvalidIdentifier {
                 kind: RuntimeConfigIdentifierKind::SourceRef,
-            },
-        )
-    })
-}
-
-pub(super) fn parse_policy_id(
-    raw: &str,
-    location: RuntimeConfigLocation,
-) -> Result<EvmSourcePolicyId> {
-    EvmSourcePolicyId::new(raw).map_err(|_| {
-        RuntimeConfigError::new(
-            location,
-            RuntimeConfigErrorKind::InvalidIdentifier {
-                kind: RuntimeConfigIdentifierKind::PolicyId,
             },
         )
     })

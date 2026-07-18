@@ -719,11 +719,9 @@ The CLI's process-level configuration is intentionally narrow.
   precedence over this environment variable. Read-only run commands do not load runtime config.
 
   ```toml
-  [evm.sources.reth-local]
-  rpc_url = "http://127.0.0.1:8545"
-
   [evm.routes.reth-dev]
   source_ref = "reth-local"
+  rpc_url = "http://127.0.0.1:8545"
 
   [keystores.default]
   keystore_path = "/run/mfm/deployer.keystore"

@@ -1,31 +1,13 @@
 use super::*;
 
-fn evidence(
-    network_id: &str,
-    expected_chain_id: u64,
-    observed_chain_id: u64,
-) -> RedactedEvmSourceEvidence {
-    RedactedEvmSourceEvidence {
-        network_id: EvmNetworkId::new(network_id).expect("network"),
-        expected_chain_id,
-        observed_chain_id,
-        source_ref: EvmSourceRef::new("primary").expect("source"),
-        policy_id: EvmSourcePolicyId::new("policy").expect("policy"),
-    }
+fn binding() -> EvmNetworkBinding {
+    EvmNetworkBinding::new(LocalPublicId::new("mainnet").expect("network"), 1).expect("binding")
 }
 
 #[test]
-fn fee_request_is_operation_only() {
-    let request = EvmFeeReadRequest::new();
-
-    assert_eq!(request, EvmFeeReadRequest);
-}
-
-#[test]
-fn network_binding_rejects_zero_expected_chain_id() {
-    let error = EvmNetworkBinding::new(EvmNetworkId::new("mainnet").expect("network"), 0)
+fn network_binding_rejects_zero_chain_id() {
+    let error = EvmNetworkBinding::new(LocalPublicId::new("mainnet").expect("network"), 0)
         .expect_err("zero chain id");
-
     assert_eq!(
         error,
         EvmCapabilityError::InvalidRequest {
@@ -35,31 +17,83 @@ fn network_binding_rejects_zero_expected_chain_id() {
 }
 
 #[test]
-fn source_evidence_from_binding_fails_closed_on_chain_mismatch() {
-    let binding =
-        EvmNetworkBinding::new(EvmNetworkId::new("mainnet").expect("network"), 1).expect("binding");
-    let error = RedactedEvmSourceEvidence::from_binding(
-        &binding,
-        2,
-        EvmSourceRef::new("primary").expect("source"),
-        EvmSourcePolicyId::new("policy").expect("policy"),
-    )
-    .expect_err("chain mismatch must fail closed");
+fn session_evidence_is_one_redacted_checked_value() {
+    let evidence = EvmSessionEvidence::new(
+        &binding(),
+        LocalPublicId::new("primary").expect("source"),
+        LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID).expect("implementation"),
+    );
+    let value = serde_json::to_value(&evidence).expect("JSON");
 
-    let EvmCapabilityError::SourceMismatch { diagnostic } = error else {
-        panic!("expected source mismatch");
-    };
-    assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
-    assert!(diagnostic.summary().contains("observed_chain_id=2"));
+    assert_eq!(value["network_id"], "mainnet");
+    assert_eq!(value["chain_id"], 1);
+    assert_eq!(value["source_ref"], "primary");
+    assert!(value.get("policy_id").is_none());
+    assert!(value.get("observed_chain_id").is_none());
 }
 
 #[test]
-fn source_mismatch_diagnostic_omits_secret_surfaces() {
-    let diagnostic = evidence("mainnet", 1, 2).source_mismatch_diagnostic();
+fn source_mismatch_diagnostic_is_closed_and_redacted() {
+    let error = source_mismatch_error(
+        &binding(),
+        U256::from(2),
+        &LocalPublicId::new("primary").expect("source"),
+    );
+    let diagnostic = error.redacted_diagnostic().expect("diagnostic");
     let rendered = format!("{diagnostic:?} {diagnostic}");
 
     assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
     assert!(diagnostic.summary().contains("observed_chain_id=2"));
-    assert!(!rendered.contains("http://"));
-    assert!(!rendered.contains("Bearer"));
+    for forbidden in ["http://", "Bearer", "password"] {
+        assert!(!rendered.contains(forbidden));
+    }
+}
+
+#[test]
+fn fee_policy_uses_checked_u256_arithmetic() {
+    let fees = EvmFeeInputs::from_base_and_priority(U256::from(10), U256::from(3)).expect("fees");
+    assert_eq!(fees.max_fee_per_gas, U256::from(23));
+    assert_eq!(
+        EvmFeeInputs::from_base_and_priority(U256::MAX, U256::ZERO),
+        Err(EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::FeeOverflow,
+        })
+    );
+}
+
+#[test]
+fn receipt_rejects_removed_or_incoherent_logs() {
+    let transaction_hash = B256::from([1; 32]);
+    let block_hash = B256::from([2; 32]);
+    let mut receipt = EvmReceipt {
+        transaction_hash,
+        transaction_index: U256::from(3),
+        block_number: U256::from(4),
+        block_hash,
+        from: Address::ZERO,
+        to: None,
+        contract_address: None,
+        status: EvmReceiptStatus::Success,
+        gas_used: U256::from(5),
+        cumulative_gas_used: U256::from(6),
+        logs: vec![EvmReceiptLog {
+            address: Address::ZERO,
+            topics: vec![],
+            data: Bytes::new(),
+            block_number: U256::from(4),
+            block_hash,
+            transaction_hash,
+            transaction_index: U256::from(3),
+            log_index: U256::ZERO,
+            removed: false,
+        }],
+    };
+    receipt.validate().expect("coherent receipt");
+    receipt.logs[0].removed = true;
+    assert_eq!(
+        receipt.validate(),
+        Err(EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::IncoherentReceipt,
+        })
+    );
 }

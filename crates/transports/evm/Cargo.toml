@@ -10,7 +10,9 @@ license = "MIT"
 category = "transport"
 
 [dependencies]
+alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true, features = ["serde"] }
+derive_more = { workspace = true }
 hex = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde_json = { workspace = true }

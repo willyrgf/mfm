@@ -1,8 +1,7 @@
 use super::*;
-use alloy_primitives::{Address, B256, U256};
-use mfm_evm_capabilities::{
-    EvmNetworkBinding, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef, RedactedEvmSourceEvidence,
-};
+use alloy_primitives::{Address, Bytes, B256, U256};
+use mfm_evm_capabilities::{EvmBlock, EvmNetworkBinding, EvmSessionEvidence};
+use mfm_ids::LocalPublicId;
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_program::{MfmFactType, StateSpec};
@@ -51,59 +50,47 @@ fn balance_config(account: &str) -> ObserveErc20BalanceConfig {
     }
 }
 
-fn evidence() -> RedactedEvmSourceEvidence {
+fn evidence() -> EvmSessionEvidence {
     evidence_for("primary", "default")
 }
 
-fn evidence_for(source_ref: &str, policy_id: &str) -> RedactedEvmSourceEvidence {
-    let binding = EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet").expect("net"), 1)
+fn evidence_for(source_ref: &str, implementation_id: &str) -> EvmSessionEvidence {
+    evidence_for_binding("ethereum-mainnet", 1, source_ref, implementation_id)
+}
+
+fn evidence_for_binding(
+    network: &str,
+    chain_id: u64,
+    source_ref: &str,
+    implementation_id: &str,
+) -> EvmSessionEvidence {
+    let binding = EvmNetworkBinding::new(LocalPublicId::new(network).expect("net"), chain_id)
         .expect("binding");
-    RedactedEvmSourceEvidence::from_binding(
+    EvmSessionEvidence::new(
         &binding,
-        1,
-        EvmSourceRef::new(source_ref).expect("source"),
-        EvmSourcePolicyId::new(policy_id).expect("policy"),
+        LocalPublicId::new(source_ref).expect("source"),
+        LocalPublicId::new(implementation_id).expect("implementation"),
     )
-    .expect("evidence")
 }
 
-fn source_binding() -> RedactedEvmProviderSourceBinding {
-    RedactedEvmProviderSourceBinding::from_capability(&evidence()).expect("source binding")
+fn source_binding() -> RedactedEvmSessionEvidence {
+    RedactedEvmSessionEvidence::from_session(&evidence()).expect("source binding")
 }
 
-fn source_binding_for(source_ref: &str) -> RedactedEvmProviderSourceBinding {
-    RedactedEvmProviderSourceBinding::from_capability(&evidence_for(source_ref, "default"))
+fn source_binding_for(source_ref: &str) -> RedactedEvmSessionEvidence {
+    RedactedEvmSessionEvidence::from_session(&evidence_for(source_ref, "default"))
         .expect("source binding")
 }
 
-fn block_response(number: u64, hash: &str) -> EvmBlockReadResponse {
-    block_response_with_evidence(number, hash, evidence())
-}
-
-fn block_response_with_evidence(
-    number: u64,
-    hash: &str,
-    evidence: RedactedEvmSourceEvidence,
-) -> EvmBlockReadResponse {
-    EvmBlockReadResponse {
-        evidence,
-        block_number: number,
-        block_hash: B256::from_str(hash.strip_prefix("0x").expect("prefix")).expect("hash"),
+fn block_response(number: u64, hash: &str) -> EvmBlock {
+    EvmBlock {
+        number: U256::from(number),
+        hash: B256::from_str(hash.strip_prefix("0x").expect("prefix")).expect("hash"),
     }
 }
 
-fn call_response(return_data: impl Into<Vec<u8>>) -> EvmCallReadResponse {
-    call_response_with_evidence(return_data, evidence())
-}
-
-fn call_response_with_evidence(
-    return_data: impl Into<Vec<u8>>,
-    evidence: RedactedEvmSourceEvidence,
-) -> EvmCallReadResponse {
-    EvmCallReadResponse {
-        evidence,
-        return_data: return_data.into(),
-    }
+fn call_response(return_data: impl Into<Vec<u8>>) -> Bytes {
+    return_data.into().into()
 }
 
 fn tip() -> EvmJointTip {
@@ -122,6 +109,7 @@ fn metadata(decimals: u8) -> EvmErc20TokenMetadata {
         &request,
         &call_response(result),
         &block_response(100, HASH_A),
+        &evidence(),
     )
     .expect("metadata")
 }
@@ -133,10 +121,10 @@ fn metadata_request_is_exact_hash_selected_decimals_call() {
     let request = erc20_metadata_call_request(&config, &tip).expect("request");
 
     assert_eq!(format!("{:#x}", request.to()), TOKEN_A);
-    assert_eq!(request.calldata(), &[0x31, 0x3c, 0xe5, 0x67]);
+    assert_eq!(request.input().as_ref(), &[0x31, 0x3c, 0xe5, 0x67]);
     assert!(matches!(
         request.block(),
-        EvmBlockSelector::Hash(hash) if format!("{hash:#x}") == HASH_A
+        EvmBlockSelector::ExactHash(hash) if format!("{hash:#x}") == HASH_A
     ));
 
     for decimals in [0, u8::MAX] {
@@ -148,6 +136,7 @@ fn metadata_request_is_exact_hash_selected_decimals_call() {
             &request,
             &call_response(result),
             &block_response(100, HASH_A),
+            &evidence(),
         )
         .expect("metadata output");
         assert_eq!(output.decimals(), decimals);
@@ -180,6 +169,7 @@ fn metadata_rejects_malformed_words_and_anchor_drift() {
                 &request,
                 &call_response(bytes),
                 &block_response(100, HASH_A),
+                &evidence(),
             )
             .is_err(),
             "malformed decimals result must fail"
@@ -194,6 +184,7 @@ fn metadata_rejects_malformed_words_and_anchor_drift() {
         &request,
         &call_response(valid),
         &block_response(101, HASH_A),
+        &evidence(),
     )
     .is_err());
     assert!(normalize_erc20_token_metadata_from_capability(
@@ -202,6 +193,7 @@ fn metadata_rejects_malformed_words_and_anchor_drift() {
         &request,
         &call_response(valid),
         &block_response(100, HASH_B),
+        &evidence(),
     )
     .is_err());
 }
@@ -221,8 +213,9 @@ fn erc20_reads_and_metadata_reject_substituted_provider_source() {
             &metadata_config,
             &tip,
             &metadata_request,
-            &call_response_with_evidence(decimals, substituted_evidence),
+            &call_response(decimals),
             &block_response(100, HASH_A),
+            &substituted_evidence,
         )
         .is_err());
     }
@@ -231,7 +224,8 @@ fn erc20_reads_and_metadata_reject_substituted_provider_source() {
         &tip,
         &metadata_request,
         &call_response(decimals),
-        &block_response_with_evidence(100, HASH_A, evidence_for("secondary", "default")),
+        &block_response(100, HASH_A),
+        &evidence_for("secondary", "default"),
     )
     .is_err());
 
@@ -247,8 +241,9 @@ fn erc20_reads_and_metadata_reject_substituted_provider_source() {
         &balance_config,
         &input,
         &balance_request,
-        &call_response_with_evidence([0u8; 32], evidence_for("secondary", "default")),
+        &call_response([0u8; 32]),
         &block_response(100, HASH_A),
+        &evidence_for("secondary", "default"),
     )
     .is_err());
     assert!(normalize_erc20_balance_from_capability(
@@ -256,7 +251,8 @@ fn erc20_reads_and_metadata_reject_substituted_provider_source() {
         &input,
         &balance_request,
         &call_response([0u8; 32]),
-        &block_response_with_evidence(100, HASH_A, evidence_for("secondary", "default")),
+        &block_response(100, HASH_A),
+        &evidence_for("secondary", "default"),
     )
     .is_err());
 
@@ -287,7 +283,7 @@ fn balance_request_has_exact_padding_and_binding() {
     let request = erc20_balance_call_request(&config, &input).expect("request");
     assert_eq!(format!("{:#x}", request.to()), TOKEN_A);
     assert_eq!(
-        request.calldata(),
+        request.input().as_ref(),
         &[
             0x70, 0xa0, 0x82, 0x31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11,
@@ -295,12 +291,12 @@ fn balance_request_has_exact_padding_and_binding() {
     );
     assert!(matches!(
         request.block(),
-        EvmBlockSelector::Hash(hash) if format!("{hash:#x}") == HASH_A
+        EvmBlockSelector::ExactHash(hash) if format!("{hash:#x}") == HASH_A
     ));
 
-    let wrong_token = EvmCallReadRequest::new(
+    let wrong_token = EvmCall::new(
         Address::from_str(TOKEN_B).expect("token"),
-        request.calldata().to_vec(),
+        request.input().clone(),
         request.block().clone(),
     );
     let mut zero = [0u8; 32];
@@ -310,6 +306,7 @@ fn balance_request_has_exact_padding_and_binding() {
         &wrong_token,
         &call_response(zero),
         &block_response(100, HASH_A),
+        &evidence(),
     )
     .is_err());
 
@@ -318,9 +315,9 @@ fn balance_request_has_exact_padding_and_binding() {
             &Address::from_str(ACCT_B).expect("account"),
         ))
         .expect("calldata");
-    let wrong_account = EvmCallReadRequest::new(
+    let wrong_account = EvmCall::new(
         request.to(),
-        wrong_account_calldata,
+        wrong_account_calldata.into(),
         request.block().clone(),
     );
     zero[31] = 1;
@@ -330,6 +327,7 @@ fn balance_request_has_exact_padding_and_binding() {
         &wrong_account,
         &call_response(zero),
         &block_response(100, HASH_A),
+        &evidence(),
     )
     .is_err());
 }
@@ -368,14 +366,14 @@ fn balance_rejects_network_chain_and_metadata_tip_mismatches() {
     };
     assert!(erc20_balance_call_request(&config, &wrong_tip_input).is_err());
 
-    let mut wrong_source = call_response(zero);
-    wrong_source.evidence.observed_chain_id = 2;
+    let wrong_source = call_response(zero);
     assert!(normalize_erc20_balance_from_capability(
         &config,
         &input,
         &request,
         &wrong_source,
         &block_response(100, HASH_A),
+        &evidence_for_binding("ethereum-mainnet", 2, "primary", "default"),
     )
     .is_err());
 }
@@ -395,6 +393,7 @@ fn balance_preserves_zero_and_maximum_uint256_with_closed_fact_semantics() {
         &request,
         &call_response([0u8; 32]),
         &block_response(100, HASH_A),
+        &evidence(),
     )
     .expect("zero is a successful observation");
     assert_eq!(zero_observation.response().raw_units(), "0");
@@ -421,6 +420,7 @@ fn balance_preserves_zero_and_maximum_uint256_with_closed_fact_semantics() {
         &request,
         &call_response([u8::MAX; 32]),
         &block_response(100, HASH_A),
+        &evidence(),
     )
     .expect("maximum uint256");
     assert_eq!(
@@ -444,6 +444,7 @@ fn balance_rejects_malformed_return_words() {
             &request,
             &call_response(malformed),
             &block_response(100, HASH_A),
+            &evidence(),
         )
         .is_err());
     }

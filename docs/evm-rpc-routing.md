@@ -1,41 +1,28 @@
-# Typed EVM Runtime Config
+# EVM Runtime Sessions
 
-Status: typed transport runbook for EVM-backed portfolio reads and generic signing resources.
+Status: typed transport runbook for EVM-backed reads, transactions, and signing resources.
 
-EVM RPC endpoints and signer provider bindings are live runtime inputs. They are not semantic run
-authority and must not be persisted in manifests, events, artifacts, public outputs, fixtures, or
-replay inputs.
+RPC endpoints, authorization, signer bindings, and keystore paths are live runtime inputs. They are
+not semantic run authority and must not be persisted in manifests, events, artifacts, public
+outputs, fixtures, or replay inputs.
 
-Normative architecture references:
+## Direct routes
 
-- `docs/design.md`
-- `docs/architecture.md`
+Live CLI start accepts `--runtime-config <PATH>`. Resume needs it only while verified history still
+has a pending EVM live node. CLI and REST use `MFM_RUNTIME_CONFIG_FILE` when no explicit path is
+provided. Evidence-only commands do not load this file.
 
-## Runtime Config File
-
-Live CLI start accepts `--runtime-config <PATH>`. A resume needs it only when verified history still
-has a pending EVM live-source node. CLI and REST also read `MFM_RUNTIME_CONFIG_FILE` when no
-explicit path is provided. Read-only commands and REST startup do not load this file.
-
-Example TOML:
+Each semantic EVM network has exactly one direct route:
 
 ```toml
-[evm.sources.reth-local]
-rpc_url = "http://127.0.0.1:8545"
-
-[evm.sources.mainnet-primary]
-rpc_url_file = "/run/mfm/mainnet-rpc-url"
-auth_header_file = "/run/mfm/mainnet-auth-header"
-
-[evm.policies.mainnet]
-ordered_sources = ["mainnet-primary"]
-
 [evm.routes.reth-dev]
 source_ref = "reth-local"
+rpc_url = "http://127.0.0.1:8545"
 
 [evm.routes.ethereum-mainnet]
 source_ref = "mainnet-primary"
-policy_id = "mainnet"
+rpc_url_file = "/run/mfm/mainnet-rpc-url"
+auth_header_file = "/run/mfm/mainnet-auth-header"
 
 [keystores.default]
 keystore_path = "/run/mfm/deployer.keystore"
@@ -47,96 +34,74 @@ keystore_ref = "default"
 entry_id = "00000000-0000-0000-0000-000000000000"
 ```
 
-JSON with the same shape is also accepted by `mfm-runtime-config`.
+JSON with the same shape is accepted. Expected chain id comes from certified workflow semantics;
+runtime routes cannot override it. There are no source registries, policy ids, ordered candidates,
+or fallback rotation.
 
-Runtime config validation rejects source-level chain ids. Expected chain id comes from workflow
-semantics, currently portfolio `NetworkConfig.chain_id`.
+Live reads load only the requested route. Transaction assembly loads that route plus the exact
+referenced signer and keystore. Unrelated malformed EVM routes or signer entries do not block the
+selected resource, while malformed selected material fails closed.
 
-## Provider-Bound Requests
+## Source-bound sessions
 
-App assembly creates one process-local live transport runtime from runtime config and caches the
-derived `EvmJsonRpcClient`. Runners and adapters derive an `EvmNetworkBinding` from certified
-workflow semantics, validate that binding without network IO, and bind it to an
-`EvmJsonRpcNetworkProvider` before any live call.
+The EVM state-facing capability surface has two coherent authorities:
 
-EVM capability requests are operation-only. They carry operation parameters such as block selectors,
-accounts, calldata, signed payloads, or transaction hashes. They do not carry
-`network_id`, expected chain id, source refs, policy ids, endpoints, or credentials.
+- `EvmReadCapability` / `EvmReadSession` for block, balance, code, and call reads;
+- `EvmTransactionCapability` / `EvmTransactionSession` for pending nonce, fee inputs, estimation,
+  submission, transaction observation, receipt observation, and confirmation blocks.
 
-The bound provider owns route and source resolution. It resolves the bound `network_id` through
-runtime config, selects a configured source/policy, probes chain identity, and returns redacted
-evidence containing the semantic network id, expected chain id, observed chain id, selected source
-ref, and policy id. A successful provider response has already enforced the provider binding and
-operation-specific identity checks.
+App assembly derives an `EvmNetworkBinding` from certified `network_id` and non-zero chain id, loads
+its direct route, and asynchronously binds `EvmJsonRpcSession`. Binding constructs a bounded HTTP
+client and calls `eth_chainId` once. A mismatch fails before a session is returned. The resulting
+session is fixed to one endpoint and one redacted `source_ref` for the whole attempt; methods do not
+reselect, reprobe, or fail over.
 
-The selected source and policy ids are audit provenance only. Replay and public output must not
-resolve them against current runtime config.
+The bind-time `EvmSessionEvidence` contains only semantic network id, verified chain id, source ref,
+and the certified session implementation id. Endpoints and credentials never enter capability
+requests or evidence.
 
-Portfolio snapshots pin EVM views by chain id, block number, and block hash. Later EVM balance and
-contract-call reads use the pinned block hash as an EIP-1898 block selector with
-`requireCanonical: true`; the stored block number is audit context and must not be used as the
-provider read selector. ERC-20 metadata and balance states use the existing generic `eth_call`
-capability only: `decimals()` and `balanceOf(address)` retain the destination, exact calldata,
-canonical hash selector, raw return bytes, and redacted certified-source identity as external-read
-evidence. Each call is followed by an exact hash block re-verification before a fact is recorded.
+The HTTP transport has a 10-second connection timeout, a 30-second request timeout, and a one-MiB
+response limit. It requires JSON-RPC version `2.0`, exact response id `1`, and exactly one of
+`result` or `error`. Quantities, hashes, addresses, bytes, transactions, receipts, and complete logs
+are decoded into checked Alloy-backed types. Submission succeeds only when the provider hash equals
+the local hash of the submitted bytes.
 
-The fixed deploy/configure/validate lifecycle, historical log scans, and nonce-occupancy
-investigation RPC were deleted. Generic transaction submission foundations and exact code/call
-reads remain transport capabilities for the narrower `Create`/`Call` and exact-anchor validation
-state contracts that will replace it. Until those states land, those capabilities are not an
-executable lifecycle or app route.
+## Exact anchors
 
-Transport failures, HTTP status failures, JSON-RPC error objects, malformed responses, and source
-mismatches are classified as redacted provider diagnostics. Diagnostics may carry the stable EVM
-operation id and numeric status/error code, but never endpoint URLs, authorization headers, provider
-messages, response bodies, or runtime config paths.
+Portfolio reads first resolve a number/hash anchor. Balance and ERC-20 calls use the anchor hash as
+an EIP-1898 selector with `requireCanonical: true`. After the anchored reads, the same session reads
+the anchor by number and requires the returned hash to equal the original hash. Asking for the old
+hash again is not a canonicality check and is forbidden.
 
-Ingress distinguishes absence from invalid input. No runtime file, no `evm` family, or no selected
-semantic route yields `RuntimeConfigRequired` with a `provider_configuration_missing` or
-`route_unavailable` diagnostic. The diagnostic retains only the certified `network_id` and
-`expected_chain_id`. An unreadable, malformed, or semantically invalid supplied file yields
-`RuntimeConfigInvalid`; it is never presented as a missing route. Admission aggregates and
-deduplicates all missing EVM and Bitcoin routes before any `RunAdmitted` event is appended. Resume
-performs the same check only for nonterminal live-source nodes.
+The current collector graph retains destination, exact calldata, raw return bytes, the final
+number/hash result, and one session evidence value. Replay reconstructs those typed values and runs
+the same deterministic state reducers without runtime config or network access.
 
 ## Signing
 
-Runtime config retains generic non-secret signer and keystore references for explicit signing
-consumers. `keystore tx-sign` requires one exact `--signer-ref` and `--from`; app assembly admits
-the `[signers]` and `[keystores]` support families without requiring or validating the EVM route
-family, then selects the requested signer and its referenced profile. The signer entry resolves
-exactly one keystore entry id. UUID/label lookup and direct keystore selection are not
-transaction-signing surfaces.
+`keystore tx-sign` selects one exact `[signers]` entry and its referenced `[keystores]` profile. It
+does not require an EVM route. The app calls the same canonical Alloy EIP-1559 signing service used
+by reusable mutation code. The deterministic RFC 6979 recoverable low-s profile is explicit, the
+provider is called once, and the expected sender and local transaction hash are verified.
 
-The app calls the same `mfm-evm-signing` service used by the reusable mutation substrate. That
-service admits only an Alloy EIP-1559 envelope, uses the explicit deterministic RFC 6979
-recoverable low-s profile, calls the provider once, verifies the expected sender, and computes a
-local hash from the exact signed EIP-2718 bytes. There is no legacy envelope, custom RLP, provider
-fallback, or CLI-local signing implementation. File reads, unlock/KDF, key access, and signing run
-on a blocking worker.
+Keystore paths, unlock files, passwords, private keys, mnemonics, signatures, signed envelopes, and
+raw transactions remain runtime-only. The explicit `tx-sign --out` file is the sole user-selected
+bearer boundary and is written mode 0600; stdout and stderr expose only redacted metadata.
 
-Keystore paths, unlock files, passwords, private keys, mnemonics, signed material, and raw
-transactions remain runtime-only and must be redacted from diagnostics. The explicit `tx-sign
---out` path is a user-selected bearer boundary: it receives a mode-0600 raw-transaction hex file,
-while stdout/stderr expose only sender, destination, canonical decimal chain/nonce, signing digest,
-and transaction hash.
+## Failure and replay rules
 
-## Replay
+No runtime file, no `evm` family, or no selected route is a missing provider configuration. An
+unreadable, malformed, or invalid selected route is invalid provider configuration. Diagnostics may
+carry the certified network, expected chain id, source ref, closed operation id, and reviewed
+numeric codes, but never endpoints, authorization, provider messages, response bodies, or paths.
 
-Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
-must not open live RPC connections or consult runtime config.
+Replay uses the certified spec, append-only stream, retained typed artifacts, and replay verifiers.
+It must not open an RPC connection, resolve a current route, or construct a signer.
 
-EVM collector replay recomputes native and ERC-20 reads from retained evidence without a live
-provider: it validates the destination, calldata, canonical hash selector, raw return bytes,
-source binding, re-verified anchor, decoded output, and recorded fact evidence. There is no retained
-contract-lifecycle replay path.
+Contributor ownership:
 
-## Contributor Guidance
-
-- Keep runtime config parsing in `mfm-runtime-config`.
-- Keep live EVM source and route resolution in `mfm-transports-evm`.
-- Bind live providers from certified semantic source intent before issuing operation-only requests.
-- Keep workflow topology in operation crates and runner binding in adapters.
-- Keep binaries limited to parsing and passing runtime config paths.
-- Add tests that prove replay uses recorded evidence and fails closed on missing or mismatched
-  facts, artifacts, or verifier identities.
+- `mfm-runtime-config` parses and selectively resolves routes and signers;
+- app assembly selects runtime resources and binds sessions;
+- `mfm-transports-evm` owns bounded JSON-RPC and typed protocol decoding;
+- `mfm-adapters-evm` sequences state intent over a bound session and records redacted evidence;
+- states own deterministic validation and reduction; binaries only pass paths and render results.

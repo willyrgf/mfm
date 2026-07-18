@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use alloy_primitives::Address;
 use mfm_evm_signing::{EvmSigningError, TransientSignedEip1559Envelope, UnsignedEip1559Envelope};
-use mfm_runtime_config::{RuntimeConfig, RuntimeConfigRequirement};
+use mfm_runtime_config::{RuntimeConfig, RuntimeConfigErrorKind};
 use mfm_signers_keystore::KeystoreSignerProvider;
 use mfm_signing::{SignerRef, SigningError};
 
@@ -51,31 +51,22 @@ fn assemble_keystore_signer(
     runtime_config_path: PathBuf,
     signer_ref: SignerRef,
 ) -> Result<KeystoreSignerProvider, PublicError> {
-    let config = RuntimeConfig::load_path_with_requirements(
-        runtime_config_path,
-        RuntimeConfigRequirement::signers(),
-    )
-    .map_err(|_| {
-        PublicError::backend(
-            ErrorClass::ServiceUnavailable,
-            "RuntimeConfigInvalid",
-            "EVM signer runtime configuration is invalid",
-        )
-    })?;
-    let signer = config.signers().get(&signer_ref).ok_or_else(|| {
-        PublicError::bad_request("SignerNotConfigured", "Requested signer is not configured")
-    })?;
-    let signer = signer.as_keystore();
-    let keystore = config
-        .keystores()
-        .get(signer.keystore_ref())
-        .ok_or_else(|| {
-            PublicError::backend(
-                ErrorClass::Internal,
-                "SignerBindingInvalid",
-                "Runtime signer binding is internally inconsistent",
-            )
+    let binding =
+        RuntimeConfig::load_signer_binding(runtime_config_path, &signer_ref).map_err(|error| {
+            match error.kind() {
+                RuntimeConfigErrorKind::MissingSigner => PublicError::bad_request(
+                    "SignerNotConfigured",
+                    "Requested signer is not configured",
+                ),
+                _ => PublicError::backend(
+                    ErrorClass::ServiceUnavailable,
+                    "RuntimeConfigInvalid",
+                    "EVM signer runtime configuration is invalid",
+                ),
+            }
         })?;
+    let signer = binding.signer();
+    let keystore = binding.keystore();
     Ok(KeystoreSignerProvider::new(
         signer_ref,
         signer.entry_id(),

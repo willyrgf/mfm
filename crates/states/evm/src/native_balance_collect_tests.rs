@@ -1,8 +1,7 @@
 use super::*;
 use alloy_primitives::{Address, B256, U256};
-use mfm_evm_capabilities::{
-    EvmNetworkBinding, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef, RedactedEvmSourceEvidence,
-};
+use mfm_evm_capabilities::{EvmBlock, EvmNetworkBinding, EvmSessionEvidence};
+use mfm_ids::LocalPublicId;
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::StateSpec;
 use mfm_values::NonEmpty;
@@ -43,55 +42,72 @@ fn observe_config(account: &str) -> ObserveEvmNativeBalanceConfig {
     }
 }
 
-fn evidence() -> RedactedEvmSourceEvidence {
+fn evidence() -> EvmSessionEvidence {
     evidence_for("primary", "default")
 }
 
-fn evidence_for(source_ref: &str, policy_id: &str) -> RedactedEvmSourceEvidence {
-    let binding = EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet").expect("net"), 1)
+fn evidence_for(source_ref: &str, implementation_id: &str) -> EvmSessionEvidence {
+    let binding = EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet").expect("net"), 1)
         .expect("binding");
-    RedactedEvmSourceEvidence::from_binding(
+    EvmSessionEvidence::new(
         &binding,
-        1,
-        EvmSourceRef::new(source_ref).expect("source"),
-        EvmSourcePolicyId::new(policy_id).expect("policy"),
+        LocalPublicId::new(source_ref).expect("source"),
+        LocalPublicId::new(implementation_id).expect("implementation"),
     )
-    .expect("evidence")
 }
 
-fn source_binding() -> RedactedEvmProviderSourceBinding {
-    RedactedEvmProviderSourceBinding::from_capability(&evidence()).expect("source binding")
+fn source_binding() -> RedactedEvmSessionEvidence {
+    RedactedEvmSessionEvidence::from_session(&evidence()).expect("source binding")
 }
 
-fn block_response(number: u64, hash: &str) -> EvmBlockReadResponse {
-    block_response_with_evidence(number, hash, evidence())
+fn block(number: u64, hash: &str) -> EvmBlock {
+    let hex = hash.strip_prefix("0x").unwrap_or(hash);
+    EvmBlock {
+        number: U256::from(number),
+        hash: B256::from_str(hex).expect("hash"),
+    }
 }
 
-fn block_response_with_evidence(
+fn materialize_tip_with_evidence(
+    config: &ResolveEvmJointTipConfig,
     number: u64,
     hash: &str,
-    evidence: RedactedEvmSourceEvidence,
-) -> EvmBlockReadResponse {
-    let hex = hash.strip_prefix("0x").unwrap_or(hash);
-    EvmBlockReadResponse {
-        evidence,
-        block_number: number,
-        block_hash: B256::from_str(hex).expect("hash"),
-    }
+    evidence: EvmSessionEvidence,
+) -> Result<EvmJointTip, EvmStateError> {
+    materialize_evm_joint_tip(config, &block(number, hash), &evidence)
 }
 
-fn balance_response(wei: u64) -> EvmBalanceReadResponse {
-    balance_response_with_evidence(wei, evidence())
+fn materialize_tip(
+    config: &ResolveEvmJointTipConfig,
+    number: u64,
+    hash: &str,
+) -> Result<EvmJointTip, EvmStateError> {
+    materialize_tip_with_evidence(config, number, hash, evidence())
 }
 
-fn balance_response_with_evidence(
+fn normalize_balance_with_evidence(
+    config: &ObserveEvmNativeBalanceConfig,
+    joint_tip: &EvmJointTip,
+    verified_tip: &EvmJointTip,
     wei: u64,
-    evidence: RedactedEvmSourceEvidence,
-) -> EvmBalanceReadResponse {
-    EvmBalanceReadResponse {
-        evidence,
-        balance_wei: U256::from(wei),
-    }
+    evidence: EvmSessionEvidence,
+) -> Result<EvmAddressNativeBalanceObservation, EvmStateError> {
+    normalize_evm_native_balance_from_capability(
+        config,
+        joint_tip,
+        verified_tip,
+        &U256::from(wei),
+        &evidence,
+    )
+}
+
+fn normalize_balance(
+    config: &ObserveEvmNativeBalanceConfig,
+    joint_tip: &EvmJointTip,
+    verified_tip: &EvmJointTip,
+    wei: u64,
+) -> Result<EvmAddressNativeBalanceObservation, EvmStateError> {
+    normalize_balance_with_evidence(config, joint_tip, verified_tip, wei, evidence())
 }
 
 #[test]
@@ -120,47 +136,29 @@ fn joint_tip_config_requires_exact_state_owned_read_budget() {
         .expect_err("excessive read budget")
         .contains("must equal 1"));
 
-    let error = materialize_evm_joint_tip(&excessive, &block_response(100, HASH_A))
+    let error = materialize_tip(&excessive, 100, HASH_A)
         .expect_err("materialization must reject an excessive read budget");
     assert!(error.to_string().contains("must equal 1"));
 }
 
 #[test]
 fn prove_before_write_rejects_missing_hash_and_tip_drift() {
-    let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+    let tip = materialize_tip(&tip_config(), 100, HASH_A).expect("tip");
     let drifted =
         EvmJointTip::new("ethereum-mainnet", 1, 101, HASH_A, source_binding()).expect("drift tip");
-    let error = normalize_evm_native_balance_from_capability(
-        &observe_config(ACCT_A),
-        &tip,
-        &drifted,
-        &balance_response(1),
-    )
-    .expect_err("drift");
+    let error = normalize_balance(&observe_config(ACCT_A), &tip, &drifted, 1).expect_err("drift");
     assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
 
     let mismatched =
         EvmJointTip::new("ethereum-mainnet", 1, 100, HASH_B, source_binding()).expect("hash tip");
-    let error = normalize_evm_native_balance_from_capability(
-        &observe_config(ACCT_A),
-        &tip,
-        &mismatched,
-        &balance_response(1),
-    )
-    .expect_err("hash");
+    let error = normalize_balance(&observe_config(ACCT_A), &tip, &mismatched, 1).expect_err("hash");
     assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
 }
 
 #[test]
 fn prove_before_write_admits_hash_bound_balance() {
-    let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
-    let obs = normalize_evm_native_balance_from_capability(
-        &observe_config(ACCT_A),
-        &tip,
-        &tip,
-        &balance_response(42),
-    )
-    .expect("ok");
+    let tip = materialize_tip(&tip_config(), 100, HASH_A).expect("tip");
+    let obs = normalize_balance(&observe_config(ACCT_A), &tip, &tip, 42).expect("ok");
     assert_eq!(obs.response().block_number(), 100);
     assert_eq!(obs.response().block_hash(), HASH_A);
     assert_eq!(obs.response().raw_wei(), "42");
@@ -178,33 +176,29 @@ fn prove_before_write_admits_hash_bound_balance() {
 
 #[test]
 fn native_balance_rejects_substituted_provider_source_in_read_or_reverification() {
-    let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+    let tip = materialize_tip(&tip_config(), 100, HASH_A).expect("tip");
     for substituted_evidence in [
         evidence_for("secondary", "default"),
         evidence_for("primary", "secondary"),
     ] {
-        let substituted_balance = balance_response_with_evidence(1, substituted_evidence);
-        assert!(normalize_evm_native_balance_from_capability(
+        assert!(normalize_balance_with_evidence(
             &observe_config(ACCT_A),
             &tip,
             &tip,
-            &substituted_balance,
+            1,
+            substituted_evidence,
         )
         .is_err());
     }
 
-    let substituted_tip = materialize_evm_joint_tip(
+    let substituted_tip = materialize_tip_with_evidence(
         &tip_config(),
-        &block_response_with_evidence(100, HASH_A, evidence_for("secondary", "default")),
+        100,
+        HASH_A,
+        evidence_for("secondary", "default"),
     )
     .expect("substituted tip material");
-    assert!(normalize_evm_native_balance_from_capability(
-        &observe_config(ACCT_A),
-        &tip,
-        &substituted_tip,
-        &balance_response(1),
-    )
-    .is_err());
+    assert!(normalize_balance(&observe_config(ACCT_A), &tip, &substituted_tip, 1,).is_err());
 }
 
 #[test]
@@ -224,7 +218,7 @@ fn observe_config_requires_canonical_account_and_exact_read_budget() {
 
 #[test]
 fn multi_subject_batch_must_share_one_joint_tip() {
-    let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+    let tip = materialize_tip(&tip_config(), 100, HASH_A).expect("tip");
     let receipt =
         assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
             joint_tip: tip.clone(),
@@ -243,19 +237,14 @@ fn multi_subject_batch_must_share_one_joint_tip() {
 }
 
 fn native_fact(tip: &EvmJointTip, account: &str, wei: u64) -> EvmAddressNativeBalanceSnapshotFact {
-    normalize_evm_native_balance_from_capability(
-        &observe_config(account),
-        tip,
-        tip,
-        &balance_response(wei),
-    )
-    .expect("observation")
-    .to_fact()
+    normalize_balance(&observe_config(account), tip, tip, wei)
+        .expect("observation")
+        .to_fact()
 }
 
 #[test]
 fn native_receipt_rejects_tampered_identity_fact_anchor_and_duplicate_source() {
-    let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+    let tip = materialize_tip(&tip_config(), 100, HASH_A).expect("tip");
     let fact = native_fact(&tip, ACCT_A, 1);
     let receipt =
         assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
@@ -302,8 +291,7 @@ fn native_receipt_rejects_tampered_identity_fact_anchor_and_duplicate_source() {
         .is_err()
     );
 
-    let other =
-        materialize_evm_joint_tip(&tip_config(), &block_response(99, HASH_B)).expect("other");
+    let other = materialize_tip(&tip_config(), 99, HASH_B).expect("other");
     assert!(
         assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
             joint_tip: other,

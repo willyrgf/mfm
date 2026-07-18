@@ -7,21 +7,22 @@
 //! fact recording.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
-    EvmBalanceReadCapability, EvmBalanceReadProvider, EvmBalanceReadRequest,
-    EvmBlockReadCapability, EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector,
-    EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse,
-    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId, ProviderDiagnosticCode,
-    RedactedEvmSourceEvidence, EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
+    EvmBlock, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding, EvmReadCapability,
+    EvmReadSession, EvmSessionEvidence, ProviderDiagnosticCode,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
+use mfm_ids::LocalPublicId;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1::{
@@ -41,19 +42,19 @@ use mfm_states_evm::{
     assemble_evm_network_collection_receipt, erc20_balance_record_visibility,
     evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, materialize_evm_joint_tip,
     native_balance_record_visibility, normalize_erc20_balance_from_capability,
-    normalize_erc20_token_metadata_from_capability, normalize_evm_native_balance_observation,
-    AssembleEvmErc20BalanceBatchReceiptConfig, AssembleEvmErc20BalanceBatchReceiptInput,
-    AssembleEvmErc20BalanceBatchReceiptState, AssembleEvmNativeBalanceBatchReceiptConfig,
-    AssembleEvmNativeBalanceBatchReceiptInput, AssembleEvmNativeBalanceBatchReceiptState,
-    AssembleEvmNetworkCollectionReceiptConfig, AssembleEvmNetworkCollectionReceiptInput,
-    AssembleEvmNetworkCollectionReceiptState, EvmAddressErc20BalanceObservation,
-    EvmAddressErc20BalanceSnapshotFact, EvmAddressNativeBalanceObservation,
-    EvmAddressNativeBalanceSnapshotFact, EvmErc20BalanceBatchReceipt, EvmErc20TokenMetadata,
-    EvmJointTip, EvmNativeBalanceBatchReceipt, ObserveErc20BalanceConfig, ObserveErc20BalanceInput,
-    ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
+    normalize_erc20_token_metadata_from_capability, AssembleEvmErc20BalanceBatchReceiptConfig,
+    AssembleEvmErc20BalanceBatchReceiptInput, AssembleEvmErc20BalanceBatchReceiptState,
+    AssembleEvmNativeBalanceBatchReceiptConfig, AssembleEvmNativeBalanceBatchReceiptInput,
+    AssembleEvmNativeBalanceBatchReceiptState, AssembleEvmNetworkCollectionReceiptConfig,
+    AssembleEvmNetworkCollectionReceiptInput, AssembleEvmNetworkCollectionReceiptState,
+    EvmAddressErc20BalanceObservation, EvmAddressErc20BalanceSnapshotFact,
+    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact,
+    EvmErc20BalanceBatchReceipt, EvmErc20TokenMetadata, EvmJointTip, EvmNativeBalanceBatchReceipt,
+    ObserveErc20BalanceConfig, ObserveErc20BalanceInput, ObserveErc20BalanceState,
+    ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
     ObserveErc20TokenMetadataState, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
     ObserveEvmNativeBalanceState, RecordErc20BalanceFactState, RecordEvmNativeBalanceFactState,
-    RedactedEvmProviderSourceBinding, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
+    RedactedEvmSessionEvidence, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
     ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS,
 };
 use mfm_store::v1 as store;
@@ -76,20 +77,34 @@ struct EvmJointTipReadEvidence {
     request_block_selector: String,
     response_block_number: u64,
     response_block_hash: String,
-    source: RedactedEvmProviderSourceBinding,
+    source: RedactedEvmSessionEvidence,
 }
 
 impl EvmJointTipReadEvidence {
-    fn from_capability(
-        request: &EvmBlockReadRequest,
-        response: &mfm_evm_capabilities::EvmBlockReadResponse,
+    fn from_session(
+        selector: &EvmBlockSelector,
+        block: &EvmBlock,
+        source: &EvmSessionEvidence,
     ) -> Result<Self> {
         Ok(Self {
-            request_block_selector: evm_block_selector_text(request.block()),
-            response_block_number: response.block_number,
-            response_block_hash: format!("{:#x}", response.block_hash),
-            source: source_binding_from_capability(&response.evidence)?,
+            request_block_selector: evm_block_selector_text(selector),
+            response_block_number: block_number_u64(block)?,
+            response_block_hash: format!("{:#x}", block.hash),
+            source: source_binding_from_capability(source)?,
         })
+    }
+
+    fn replay_material(&self) -> Result<(EvmBlock, EvmSessionEvidence)> {
+        if self.request_block_selector != "latest" {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        Ok((
+            EvmBlock {
+                number: U256::from(self.response_block_number),
+                hash: parse_canonical_hash(&self.response_block_hash)?,
+            },
+            capability_source_from_binding(&self.source)?,
+        ))
     }
 }
 
@@ -102,74 +117,48 @@ impl EvmJointTipReadEvidence {
 )]
 struct EvmNativeBalanceReadEvidence {
     balance_request_account: String,
-    balance_request_block_selector: String,
+    anchor_block_hash: String,
     balance_response_wei: String,
-    balance_source: RedactedEvmProviderSourceBinding,
-    verification_request_block_selector: String,
     verification_response_block_number: u64,
     verification_response_block_hash: String,
-    verification_source: RedactedEvmProviderSourceBinding,
+    source: RedactedEvmSessionEvidence,
 }
 
 impl EvmNativeBalanceReadEvidence {
-    fn from_capability(
-        balance_request: &EvmBalanceReadRequest,
-        balance_response: &mfm_evm_capabilities::EvmBalanceReadResponse,
-        verification_request: &EvmBlockReadRequest,
-        verification_response: &mfm_evm_capabilities::EvmBlockReadResponse,
+    fn from_session(
+        account: Address,
+        anchor_block_hash: B256,
+        balance: U256,
+        verification: &EvmBlock,
+        source: &EvmSessionEvidence,
     ) -> Result<Self> {
-        let balance_source = source_binding_from_capability(&balance_response.evidence)?;
-        let verification_source = source_binding_from_capability(&verification_response.evidence)?;
-        if balance_source != verification_source {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
         Ok(Self {
-            balance_request_account: format!("{:#x}", balance_request.account()),
-            balance_request_block_selector: evm_block_selector_text(balance_request.block()),
-            balance_response_wei: balance_response.balance_wei.to_string(),
-            balance_source,
-            verification_request_block_selector: evm_block_selector_text(
-                verification_request.block(),
-            ),
-            verification_response_block_number: verification_response.block_number,
-            verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
-            verification_source,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.evm.jsonrpc",
-    name = "canonical_hash_selector_evidence",
-    version = "1",
-    schema = "mfm.evm.jsonrpc.external_read.canonical_hash_selector"
-)]
-struct EvmCanonicalHashSelectorEvidence {
-    block_hash: String,
-    require_canonical: bool,
-}
-
-impl EvmCanonicalHashSelectorEvidence {
-    fn from_selector(selector: &EvmBlockSelector) -> Result<Self> {
-        let EvmBlockSelector::Hash(block_hash) = selector else {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        };
-        Ok(Self {
-            block_hash: format!("{block_hash:#x}"),
-            require_canonical: true,
+            balance_request_account: format!("{account:#x}"),
+            anchor_block_hash: format!("{anchor_block_hash:#x}"),
+            balance_response_wei: balance.to_string(),
+            verification_response_block_number: block_number_u64(verification)?,
+            verification_response_block_hash: format!("{:#x}", verification.hash),
+            source: source_binding_from_capability(source)?,
         })
     }
 
-    fn to_selector(&self) -> Result<EvmBlockSelector> {
-        if !self.require_canonical {
+    fn replay_material(&self) -> Result<(Address, B256, U256, EvmBlock, EvmSessionEvidence)> {
+        let account = parse_account(&self.balance_request_account)?;
+        if format!("{account:#x}") != self.balance_request_account {
             return Err(EvmAdapterError::InvalidCapabilityRequest);
         }
-        let block_hash = parse_block_hash(&self.block_hash)?;
-        if format!("{block_hash:#x}") != self.block_hash {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
-        Ok(EvmBlockSelector::Hash(block_hash))
+        let balance = U256::from_str(&self.balance_response_wei)
+            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        Ok((
+            account,
+            parse_canonical_hash(&self.anchor_block_hash)?,
+            balance,
+            EvmBlock {
+                number: U256::from(self.verification_response_block_number),
+                hash: parse_canonical_hash(&self.verification_response_block_hash)?,
+            },
+            capability_source_from_binding(&self.source)?,
+        ))
     }
 }
 
@@ -183,172 +172,167 @@ impl EvmCanonicalHashSelectorEvidence {
 struct EvmErc20CallReadEvidence {
     destination: String,
     calldata: String,
-    block_selector: EvmCanonicalHashSelectorEvidence,
+    anchor_block_hash: String,
     return_data: String,
-    source: RedactedEvmProviderSourceBinding,
-    verification_block_hash: String,
+    source: RedactedEvmSessionEvidence,
     verification_response_block_number: u64,
     verification_response_block_hash: String,
-    verification_source: RedactedEvmProviderSourceBinding,
 }
 
 impl EvmErc20CallReadEvidence {
-    fn from_capability(
-        request: &EvmCallReadRequest,
-        response: &EvmCallReadResponse,
-        verification_request: &EvmBlockReadRequest,
-        verification_response: &mfm_evm_capabilities::EvmBlockReadResponse,
+    fn from_session(
+        request: &EvmCall,
+        response: &Bytes,
+        verification: &EvmBlock,
+        source: &EvmSessionEvidence,
     ) -> Result<Self> {
-        let source = source_binding_from_capability(&response.evidence)?;
-        let verification_source = source_binding_from_capability(&verification_response.evidence)?;
-        if source != verification_source {
+        let EvmBlockSelector::ExactHash(anchor_block_hash) = request.block() else {
             return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
+        };
         Ok(Self {
             destination: format!("{:#x}", request.to()),
-            calldata: mfm_evm_core::hex::bytes_to_hex_prefixed(request.calldata()),
-            block_selector: EvmCanonicalHashSelectorEvidence::from_selector(request.block())?,
-            return_data: mfm_evm_core::hex::bytes_to_hex_prefixed(&response.return_data),
-            source,
-            verification_block_hash: hash_selector_text(verification_request.block())?,
-            verification_response_block_number: verification_response.block_number,
-            verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
-            verification_source,
+            calldata: encode_hex(request.input()),
+            anchor_block_hash: format!("{anchor_block_hash:#x}"),
+            return_data: encode_hex(response),
+            source: source_binding_from_capability(source)?,
+            verification_response_block_number: block_number_u64(verification)?,
+            verification_response_block_hash: format!("{:#x}", verification.hash),
         })
     }
 
-    fn replay_material(
-        &self,
-    ) -> Result<(
-        EvmCallReadRequest,
-        EvmCallReadResponse,
-        EvmBlockReadRequest,
-        mfm_evm_capabilities::EvmBlockReadResponse,
-    )> {
-        if self.source != self.verification_source {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
+    fn replay_material(&self) -> Result<(EvmCall, Bytes, EvmBlock, EvmSessionEvidence)> {
         let destination = parse_account(&self.destination)?;
         if format!("{destination:#x}") != self.destination {
             return Err(EvmAdapterError::InvalidCapabilityRequest);
         }
-        let calldata = mfm_evm_core::hex::hex_to_bytes(&self.calldata)
-            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
-        if mfm_evm_core::hex::bytes_to_hex_prefixed(&calldata) != self.calldata {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
-        let return_data = mfm_evm_core::hex::hex_to_bytes(&self.return_data)
-            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
-        if mfm_evm_core::hex::bytes_to_hex_prefixed(&return_data) != self.return_data {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
-        let block = self.block_selector.to_selector()?;
-        let verification_block_hash = parse_block_hash(&self.verification_block_hash)?;
-        if format!("{verification_block_hash:#x}") != self.verification_block_hash {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
-        let verification_hash = parse_block_hash(&self.verification_response_block_hash)?;
-        if format!("{verification_hash:#x}") != self.verification_response_block_hash {
-            return Err(EvmAdapterError::InvalidCapabilityRequest);
-        }
+        let calldata = decode_hex(&self.calldata)?;
+        let return_data = decode_hex(&self.return_data)?;
+        let block_hash = parse_canonical_hash(&self.anchor_block_hash)?;
         Ok((
-            EvmCallReadRequest::new(destination, calldata, block),
-            EvmCallReadResponse {
-                evidence: capability_source_from_binding(&self.source)?,
-                return_data,
+            EvmCall::new(
+                destination,
+                calldata.into(),
+                EvmBlockSelector::ExactHash(block_hash),
+            ),
+            return_data.into(),
+            EvmBlock {
+                number: U256::from(self.verification_response_block_number),
+                hash: parse_canonical_hash(&self.verification_response_block_hash)?,
             },
-            EvmBlockReadRequest::new(EvmBlockSelector::Hash(verification_block_hash)),
-            mfm_evm_capabilities::EvmBlockReadResponse {
-                evidence: capability_source_from_binding(&self.verification_source)?,
-                block_number: self.verification_response_block_number,
-                block_hash: verification_hash,
-            },
+            capability_source_from_binding(&self.source)?,
         ))
     }
 }
 
-fn hash_selector_text(selector: &EvmBlockSelector) -> Result<String> {
-    let EvmBlockSelector::Hash(block_hash) = selector else {
+fn block_number_u64(block: &EvmBlock) -> Result<u64> {
+    u64::try_from(block.number).map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>> {
+    let body = value
+        .strip_prefix("0x")
+        .ok_or(EvmAdapterError::InvalidCapabilityRequest)?;
+    let bytes = hex::decode(body).map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+    if encode_hex(&bytes) != value {
         return Err(EvmAdapterError::InvalidCapabilityRequest);
-    };
-    Ok(format!("{block_hash:#x}"))
+    }
+    Ok(bytes)
 }
 
 fn source_binding_from_capability(
-    evidence: &RedactedEvmSourceEvidence,
-) -> Result<RedactedEvmProviderSourceBinding> {
-    RedactedEvmProviderSourceBinding::from_capability(evidence)
+    evidence: &EvmSessionEvidence,
+) -> Result<RedactedEvmSessionEvidence> {
+    RedactedEvmSessionEvidence::from_session(evidence)
         .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
 }
 
 fn capability_source_from_binding(
-    binding: &RedactedEvmProviderSourceBinding,
-) -> Result<RedactedEvmSourceEvidence> {
+    binding: &RedactedEvmSessionEvidence,
+) -> Result<EvmSessionEvidence> {
     binding
-        .to_capability()
+        .to_session()
         .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
 }
 
 fn evm_block_selector_text(selector: &EvmBlockSelector) -> String {
     match selector {
         EvmBlockSelector::Latest => "latest".to_owned(),
-        EvmBlockSelector::Pending => "pending".to_owned(),
         EvmBlockSelector::Number(number) => format!("number:{number}"),
-        EvmBlockSelector::Hash(hash) => format!("hash:{hash:#x}"),
+        EvmBlockSelector::ExactHash(hash) => format!("hash:{hash:#x}"),
     }
 }
 
 /// Result type for EVM adapter operations.
 pub type Result<T> = std::result::Result<T, EvmAdapterError>;
 
-/// Factory for EVM network providers bound to a certified network binding.
-pub trait EvmProviderFactory: Send + Sync {
-    /// Validates that the binding can resolve without live network IO.
-    fn validate_network_binding(
-        &self,
-        binding: &EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<()>;
+/// Future returned by the application-owned asynchronous session binder.
+pub type EvmReadSessionBindFuture = Pin<
+    Box<
+        dyn Future<Output = mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>>> + Send + 'static,
+    >,
+>;
 
-    /// Binds a checked network binding to a provider that supports block, balance, and call reads.
-    fn bind_network(
-        &self,
-        binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn EvmBoundProvider>>;
-}
-
-/// Bound EVM provider exposing the collector-needed read surfaces.
-pub trait EvmBoundProvider:
-    EvmBlockReadProvider + EvmBalanceReadProvider + EvmCallReadProvider
-{
-}
-
-impl<T> EvmBoundProvider for T where
-    T: EvmBlockReadProvider + EvmBalanceReadProvider + EvmCallReadProvider
-{
-}
+type ValidateEvmBinding =
+    dyn Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync;
+type BindEvmReadSession = dyn Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync;
 
 /// Runtime capabilities used by EVM collector runners.
 #[derive(Clone)]
 pub struct EvmRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    evm: Arc<dyn EvmProviderFactory>,
+    validate_evm_binding: Arc<ValidateEvmBinding>,
+    bind_evm_read_session: Arc<BindEvmReadSession>,
 }
 
 impl EvmRunnerCapabilities {
-    /// Creates runner capabilities from artifact and EVM provider factory.
-    pub fn new(
+    /// Creates runner capabilities from retained artifacts and direct session bindings.
+    pub fn new<V, B>(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-        evm: Arc<dyn EvmProviderFactory>,
-    ) -> Self {
-        Self { artifacts, evm }
+        validate_evm_binding: V,
+        bind_evm_read_session: B,
+    ) -> Self
+    where
+        V: Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync + 'static,
+        B: Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync + 'static,
+    {
+        Self {
+            artifacts,
+            validate_evm_binding: Arc::new(validate_evm_binding),
+            bind_evm_read_session: Arc::new(bind_evm_read_session),
+        }
     }
 
     fn artifacts(&self) -> Arc<dyn store::RetainedArtifactReadProvider> {
         Arc::clone(&self.artifacts)
     }
 
-    fn evm(&self) -> Arc<dyn EvmProviderFactory> {
-        Arc::clone(&self.evm)
+    fn validate_evm_binding(
+        &self,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<()> {
+        (self.validate_evm_binding)(binding)
+    }
+
+    async fn bind_evm_read_session(
+        &self,
+        binding: EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>> {
+        let session = (self.bind_evm_read_session)(binding.clone()).await?;
+        let evidence = session.evidence();
+        if !evidence.matches_binding(&binding)
+            || evidence.implementation_id().as_str() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+        {
+            return Err(EvmCapabilityError::provider_failure(
+                mfm_evm_capabilities::evm_diagnostic(
+                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                ),
+            ));
+        }
+        Ok(session)
     }
 }
 
@@ -358,15 +342,8 @@ pub fn register_evm_collectors_runners(
     capabilities: EvmRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
     let artifacts = capabilities.artifacts();
-    let evm = capabilities.evm();
-    registry.register_capability_spec::<EvmBlockReadCapability>(
-        CapabilityImplementationId::new(EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID)?,
-    )?;
-    registry.register_capability_spec::<EvmBalanceReadCapability>(
-        CapabilityImplementationId::new(EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID)?,
-    )?;
-    registry.register_capability_spec::<EvmCallReadCapability>(CapabilityImplementationId::new(
-        EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
+    registry.register_capability_spec::<EvmReadCapability>(CapabilityImplementationId::new(
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
     )?)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
@@ -391,28 +368,28 @@ pub fn register_evm_collectors_runners(
         &read_factory,
         Arc::new(ResolveJointTipRunner {
             artifacts: artifacts.clone(),
-            evm: evm.clone(),
+            capabilities: capabilities.clone(),
         }),
     )?;
     registrations.register_state_runner_with_factory::<ObserveEvmNativeBalanceState>(
         &read_factory,
         Arc::new(ObserveNativeBalanceRunner {
             artifacts: artifacts.clone(),
-            evm: evm.clone(),
+            capabilities: capabilities.clone(),
         }),
     )?;
     registrations.register_state_runner_with_factory::<ObserveErc20TokenMetadataState>(
         &read_factory,
         Arc::new(ObserveErc20TokenMetadataRunner {
             artifacts: artifacts.clone(),
-            evm: evm.clone(),
+            capabilities: capabilities.clone(),
         }),
     )?;
     registrations.register_state_runner_with_factory::<ObserveErc20BalanceState>(
         &read_factory,
         Arc::new(ObserveErc20BalanceRunner {
             artifacts: artifacts.clone(),
-            evm,
+            capabilities,
         }),
     )?;
     registrations.register_state_runner_with_factory::<RecordEvmNativeBalanceFactState>(
@@ -460,7 +437,7 @@ pub enum EvmAdapterError {
 
 fn network_binding(network: &str, chain_id: u64) -> Result<EvmNetworkBinding> {
     let network_id =
-        EvmNetworkId::new(network).map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        LocalPublicId::new(network).map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
     EvmNetworkBinding::new(network_id, chain_id)
         .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
 }
@@ -513,21 +490,29 @@ fn parse_block_hash(value: &str) -> Result<B256> {
     B256::from_str(hex).map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
 }
 
+fn parse_canonical_hash(value: &str) -> Result<B256> {
+    let hash = parse_block_hash(value)?;
+    if format!("{hash:#x}") != value {
+        return Err(EvmAdapterError::InvalidCapabilityRequest);
+    }
+    Ok(hash)
+}
+
 fn parse_account(value: &str) -> Result<Address> {
     Address::from_str(value).map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
 }
 
 struct ResolveJointTipRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    evm: Arc<dyn EvmProviderFactory>,
+    capabilities: EvmRunnerCapabilities,
 }
 
 impl ErasedNodeRunner for ResolveJointTipRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
         let config = load_launch_config_for_node::<ResolveEvmJointTipConfig>(&ctx, ctx.node())?;
         let binding = joint_tip_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
-        self.evm
-            .validate_network_binding(&binding)
+        self.capabilities
+            .validate_evm_binding(&binding)
             .map_err(evm_capability_runtime_error)
     }
 
@@ -547,20 +532,22 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let provider = self
-                .evm
-                .bind_network(binding)
+            let session = self
+                .capabilities
+                .bind_evm_read_session(binding)
+                .await
                 .map_err(evm_capability_runtime_error)?;
-            let response = provider
-                .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Latest))
+            let selector = EvmBlockSelector::Latest;
+            let block = session
+                .read_block(&selector)
                 .await
                 .map_err(evm_capability_runtime_error)?;
             let tip = state
-                .materialize_response(&response)
+                .materialize_response(&block, session.evidence())
                 .map_err(evm_state_runtime_error)?;
-            let request = EvmBlockReadRequest::new(EvmBlockSelector::Latest);
-            let evidence = EvmJointTipReadEvidence::from_capability(&request, &response)
-                .map_err(evm_adapter_runtime_error)?;
+            let evidence =
+                EvmJointTipReadEvidence::from_session(&selector, &block, session.evidence())
+                    .map_err(evm_adapter_runtime_error)?;
             let mut output = RunnerOutputBuilder::new(&ctx);
             output.record_external_read_evidence(&evidence)?;
             output.state_output(&tip)?;
@@ -571,7 +558,7 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
 
 struct ObserveNativeBalanceRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    evm: Arc<dyn EvmProviderFactory>,
+    capabilities: EvmRunnerCapabilities,
 }
 
 impl ErasedNodeRunner for ObserveNativeBalanceRunner {
@@ -579,8 +566,8 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
         let config =
             load_launch_config_for_node::<ObserveEvmNativeBalanceConfig>(&ctx, ctx.node())?;
         let binding = balance_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
-        self.evm
-            .validate_network_binding(&binding)
+        self.capabilities
+            .validate_evm_binding(&binding)
             .map_err(evm_capability_runtime_error)
     }
 
@@ -604,27 +591,27 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
                 parse_account(&state.config().account).map_err(evm_adapter_runtime_error)?;
             let tip_hash = parse_block_hash(input.joint_tip.block_hash())
                 .map_err(evm_adapter_runtime_error)?;
-            let provider = self
-                .evm
-                .bind_network(binding)
-                .map_err(evm_capability_runtime_error)?;
-            // Hash-bound balance (EIP-1898 style).
-            let balance = provider
-                .read_balance(&EvmBalanceReadRequest::new(
-                    account,
-                    EvmBlockSelector::Hash(tip_hash),
-                ))
+            let session = self
+                .capabilities
+                .bind_evm_read_session(binding)
                 .await
                 .map_err(evm_capability_runtime_error)?;
-            // Re-read tip by hash to prove no drift / mismatch before write.
-            let verified_block = provider
-                .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Hash(tip_hash)))
+            let balance_selector = EvmBlockSelector::ExactHash(tip_hash);
+            let balance = session
+                .read_balance(account, &balance_selector)
+                .await
+                .map_err(evm_capability_runtime_error)?;
+            let verification_selector =
+                EvmBlockSelector::Number(U256::from(input.joint_tip.block_number()));
+            let verified_block = session
+                .read_block(&verification_selector)
                 .await
                 .map_err(evm_capability_runtime_error)?;
             let verified_tip = materialize_evm_joint_tip(
                 &joint_tip_config_for_observation(state.config())
                     .map_err(evm_adapter_runtime_error)?,
                 &verified_block,
+                session.evidence(),
             )
             .map_err(evm_state_runtime_error)?;
             // Explicit tip equality check (number must match joint tip as well).
@@ -637,16 +624,14 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
                 ));
             }
             let observation = state
-                .materialize_response(&input, &verified_tip, &balance)
+                .materialize_response(&input, &verified_tip, &balance, session.evidence())
                 .map_err(evm_state_runtime_error)?;
-            let balance_request =
-                EvmBalanceReadRequest::new(account, EvmBlockSelector::Hash(tip_hash));
-            let verification_request = EvmBlockReadRequest::new(EvmBlockSelector::Hash(tip_hash));
-            let evidence = EvmNativeBalanceReadEvidence::from_capability(
-                &balance_request,
-                &balance,
-                &verification_request,
+            let evidence = EvmNativeBalanceReadEvidence::from_session(
+                account,
+                tip_hash,
+                balance,
                 &verified_block,
+                session.evidence(),
             )
             .map_err(evm_adapter_runtime_error)?;
             let mut output = RunnerOutputBuilder::new(&ctx);
@@ -659,7 +644,7 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
 
 struct ObserveErc20TokenMetadataRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    evm: Arc<dyn EvmProviderFactory>,
+    capabilities: EvmRunnerCapabilities,
 }
 
 impl ErasedNodeRunner for ObserveErc20TokenMetadataRunner {
@@ -667,8 +652,8 @@ impl ErasedNodeRunner for ObserveErc20TokenMetadataRunner {
         let config =
             load_launch_config_for_node::<ObserveErc20TokenMetadataConfig>(&ctx, ctx.node())?;
         let binding = erc20_metadata_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
-        self.evm
-            .validate_network_binding(&binding)
+        self.capabilities
+            .validate_evm_binding(&binding)
             .map_err(evm_capability_runtime_error)
     }
 
@@ -692,27 +677,35 @@ impl ErasedNodeRunner for ObserveErc20TokenMetadataRunner {
             let request = state
                 .call_request(&input)
                 .map_err(evm_state_runtime_error)?;
-            let verification_request = EvmBlockReadRequest::new(request.block().clone());
-            let provider = self
-                .evm
-                .bind_network(binding)
-                .map_err(evm_capability_runtime_error)?;
-            let response = provider
-                .read_call(&request)
+            let verification_selector =
+                EvmBlockSelector::Number(U256::from(input.joint_tip.block_number()));
+            let session = self
+                .capabilities
+                .bind_evm_read_session(binding)
                 .await
                 .map_err(evm_capability_runtime_error)?;
-            let verification = provider
-                .read_block(&verification_request)
+            let response = session
+                .call(&request)
+                .await
+                .map_err(evm_capability_runtime_error)?;
+            let verification = session
+                .read_block(&verification_selector)
                 .await
                 .map_err(evm_capability_runtime_error)?;
             let metadata = state
-                .materialize_response(&input, &request, &response, &verification)
+                .materialize_response(
+                    &input,
+                    &request,
+                    &response,
+                    &verification,
+                    session.evidence(),
+                )
                 .map_err(evm_state_runtime_error)?;
-            let evidence = EvmErc20CallReadEvidence::from_capability(
+            let evidence = EvmErc20CallReadEvidence::from_session(
                 &request,
                 &response,
-                &verification_request,
                 &verification,
+                session.evidence(),
             )
             .map_err(evm_adapter_runtime_error)?;
             let mut output = RunnerOutputBuilder::new(&ctx);
@@ -725,15 +718,15 @@ impl ErasedNodeRunner for ObserveErc20TokenMetadataRunner {
 
 struct ObserveErc20BalanceRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    evm: Arc<dyn EvmProviderFactory>,
+    capabilities: EvmRunnerCapabilities,
 }
 
 impl ErasedNodeRunner for ObserveErc20BalanceRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
         let config = load_launch_config_for_node::<ObserveErc20BalanceConfig>(&ctx, ctx.node())?;
         let binding = erc20_balance_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
-        self.evm
-            .validate_network_binding(&binding)
+        self.capabilities
+            .validate_evm_binding(&binding)
             .map_err(evm_capability_runtime_error)
     }
 
@@ -757,27 +750,35 @@ impl ErasedNodeRunner for ObserveErc20BalanceRunner {
             let request = state
                 .call_request(&input)
                 .map_err(evm_state_runtime_error)?;
-            let verification_request = EvmBlockReadRequest::new(request.block().clone());
-            let provider = self
-                .evm
-                .bind_network(binding)
-                .map_err(evm_capability_runtime_error)?;
-            let response = provider
-                .read_call(&request)
+            let verification_selector =
+                EvmBlockSelector::Number(U256::from(input.joint_tip.block_number()));
+            let session = self
+                .capabilities
+                .bind_evm_read_session(binding)
                 .await
                 .map_err(evm_capability_runtime_error)?;
-            let verification = provider
-                .read_block(&verification_request)
+            let response = session
+                .call(&request)
+                .await
+                .map_err(evm_capability_runtime_error)?;
+            let verification = session
+                .read_block(&verification_selector)
                 .await
                 .map_err(evm_capability_runtime_error)?;
             let observation = state
-                .materialize_response(&input, &request, &response, &verification)
+                .materialize_response(
+                    &input,
+                    &request,
+                    &response,
+                    &verification,
+                    session.evidence(),
+                )
                 .map_err(evm_state_runtime_error)?;
-            let evidence = EvmErc20CallReadEvidence::from_capability(
+            let evidence = EvmErc20CallReadEvidence::from_session(
                 &request,
                 &response,
-                &verification_request,
                 &verification,
+                session.evidence(),
             )
             .map_err(evm_adapter_runtime_error)?;
             let mut output = RunnerOutputBuilder::new(&ctx);
@@ -1007,7 +1008,7 @@ fn verify_evm_shared_joint_tips(
     metadata_frames: &[replay::ProducedCellReplayFrame],
     balance_frames: &[replay::ProducedCellReplayFrame],
 ) -> replay::Result<()> {
-    let mut anchors = BTreeMap::<String, (u64, String, RedactedEvmProviderSourceBinding)>::new();
+    let mut anchors = BTreeMap::<String, (u64, String, RedactedEvmSessionEvidence)>::new();
     for frame in native_frames {
         let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
         let tip = replay_joint_tip_input(broker, &frame.node)?;
@@ -1074,25 +1075,17 @@ fn verify_evm_joint_tip_replay(broker: &replay::ReplayBroker) -> replay::Result<
     for frame in &frames {
         let config: ResolveEvmJointTipConfig = replay_node_config(broker, &frame.node)?;
         let evidence: EvmJointTipReadEvidence = replay_external_read_evidence(broker, frame)?;
-        if evidence.request_block_selector != "latest"
-            || !evidence
-                .source
-                .is_bound_to(&config.network, config.chain_id)
+        let (block, source) = evidence.replay_material().map_err(replay_adapter_error)?;
+        if !evidence
+            .source
+            .is_bound_to(&config.network, config.chain_id)
         {
             return Err(replay_evm_mismatch(
                 "EVM joint-tip read evidence did not match certified request or source binding",
             ));
         }
-        let block_hash =
-            parse_block_hash(&evidence.response_block_hash).map_err(replay_adapter_error)?;
-        let expected = EvmJointTip::new(
-            config.network,
-            config.chain_id,
-            evidence.response_block_number,
-            format!("{block_hash:#x}"),
-            evidence.source,
-        )
-        .map_err(replay_adapter_error)?;
+        let expected =
+            materialize_evm_joint_tip(&config, &block, &source).map_err(replay_adapter_error)?;
         ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
     }
     Ok(())
@@ -1105,38 +1098,31 @@ fn verify_evm_native_balance_observation_replay(
     let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
     let input_tip = replay_joint_tip_input(broker, &frame.node)?;
     let evidence: EvmNativeBalanceReadEvidence = replay_external_read_evidence(broker, frame)?;
-    let account = parse_account(&config.account).map_err(replay_adapter_error)?;
-    let expected_selector = format!(
-        "hash:{:#x}",
-        parse_block_hash(input_tip.block_hash()).map_err(replay_adapter_error)?
-    );
-    let (network, chain_id, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
-    let verified_tip = EvmJointTip::new(
-        network,
-        chain_id,
-        evidence.verification_response_block_number,
-        &evidence.verification_response_block_hash,
-        evidence.verification_source.clone(),
+    let (account, anchor_hash, balance, verification, source) =
+        evidence.replay_material().map_err(replay_adapter_error)?;
+    let expected_account = parse_account(&config.account).map_err(replay_adapter_error)?;
+    let expected_anchor = parse_block_hash(input_tip.block_hash()).map_err(replay_adapter_error)?;
+    let verified_tip = materialize_evm_joint_tip(
+        &joint_tip_config_for_observation(&config).map_err(replay_adapter_error)?,
+        &verification,
+        &source,
     )
     .map_err(replay_adapter_error)?;
-    if evidence.balance_request_account != format!("{account:#x}")
-        || evidence.balance_request_block_selector != expected_selector
-        || evidence.verification_request_block_selector != expected_selector
+    if account != expected_account
+        || anchor_hash != expected_anchor
         || verified_tip != input_tip
-        || evidence.balance_source != *input_tip.source_binding()
+        || evidence.source != *input_tip.source_binding()
     {
         return Err(replay_evm_mismatch(
             "EVM native-balance read evidence did not match certified requests or source binding",
         ));
     }
-    let balance_evidence =
-        capability_source_from_binding(&evidence.balance_source).map_err(replay_adapter_error)?;
-    let expected = normalize_evm_native_balance_observation(
+    let expected = mfm_states_evm::normalize_evm_native_balance_from_capability(
         &config,
         &input_tip,
         &verified_tip,
-        &evidence.balance_response_wei,
-        &balance_evidence,
+        &balance,
+        &source,
     )
     .map_err(replay_adapter_error)?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
@@ -1148,20 +1134,8 @@ fn verify_erc20_token_metadata_replay(
 ) -> replay::Result<()> {
     let config: ObserveErc20TokenMetadataConfig = replay_node_config(broker, &frame.node)?;
     let joint_tip = replay_joint_tip_input(broker, &frame.node)?;
-    let (request, response, verification_request, verification) =
-        replay_erc20_call_evidence(broker, frame)?;
-    if verification_request.block() != request.block() {
-        return Err(replay_evm_mismatch(
-            "ERC-20 metadata anchor re-verification did not use the call hash selector",
-        ));
-    }
-    if !joint_tip
-        .source_binding()
-        .matches_capability(&response.evidence)
-        || !joint_tip
-            .source_binding()
-            .matches_capability(&verification.evidence)
-    {
+    let (request, response, verification, source) = replay_erc20_call_evidence(broker, frame)?;
+    if !joint_tip.source_binding().matches_session(&source) {
         return Err(replay_evm_mismatch(
             "ERC-20 metadata read evidence did not match certified source binding",
         ));
@@ -1172,6 +1146,7 @@ fn verify_erc20_token_metadata_replay(
         &request,
         &response,
         &verification,
+        &source,
     )
     .map_err(replay_adapter_error)?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
@@ -1188,22 +1163,8 @@ fn verify_erc20_balance_observation_replay(
         joint_tip,
         metadata,
     };
-    let (request, response, verification_request, verification) =
-        replay_erc20_call_evidence(broker, frame)?;
-    if verification_request.block() != request.block() {
-        return Err(replay_evm_mismatch(
-            "ERC-20 balance anchor re-verification did not use the call hash selector",
-        ));
-    }
-    if !input
-        .joint_tip
-        .source_binding()
-        .matches_capability(&response.evidence)
-        || !input
-            .joint_tip
-            .source_binding()
-            .matches_capability(&verification.evidence)
-    {
+    let (request, response, verification, source) = replay_erc20_call_evidence(broker, frame)?;
+    if !input.joint_tip.source_binding().matches_session(&source) {
         return Err(replay_evm_mismatch(
             "ERC-20 balance read evidence did not match certified source binding",
         ));
@@ -1214,6 +1175,7 @@ fn verify_erc20_balance_observation_replay(
         &request,
         &response,
         &verification,
+        &source,
     )
     .map_err(replay_adapter_error)?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
@@ -1222,12 +1184,7 @@ fn verify_erc20_balance_observation_replay(
 fn replay_erc20_call_evidence(
     broker: &replay::ReplayBroker,
     frame: &replay::ProducedCellReplayFrame,
-) -> replay::Result<(
-    EvmCallReadRequest,
-    EvmCallReadResponse,
-    EvmBlockReadRequest,
-    mfm_evm_capabilities::EvmBlockReadResponse,
-)> {
+) -> replay::Result<(EvmCall, Bytes, EvmBlock, EvmSessionEvidence)> {
     let evidence: EvmErc20CallReadEvidence = replay_external_read_evidence(broker, frame)?;
     evidence.replay_material().map_err(replay_adapter_error)
 }
@@ -1517,26 +1474,23 @@ fn replay_evm_mismatch(message: &'static str) -> replay::ReplayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
 
     const HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const TOKEN: &str = "0x0000000000000000000000000000000000000001";
 
-    fn source_evidence() -> RedactedEvmSourceEvidence {
+    fn source_evidence() -> EvmSessionEvidence {
         source_evidence_for("primary", "default")
     }
 
-    fn source_evidence_for(source_ref: &str, policy_id: &str) -> RedactedEvmSourceEvidence {
+    fn source_evidence_for(source_ref: &str, implementation_id: &str) -> EvmSessionEvidence {
         let binding =
-            EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet").expect("net"), 1)
+            EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet").expect("net"), 1)
                 .expect("binding");
-        RedactedEvmSourceEvidence::from_binding(
+        EvmSessionEvidence::new(
             &binding,
-            1,
-            EvmSourceRef::new(source_ref).expect("source"),
-            EvmSourcePolicyId::new(policy_id).expect("policy"),
+            LocalPublicId::new(source_ref).expect("source"),
+            LocalPublicId::new(implementation_id).expect("implementation"),
         )
-        .expect("source evidence")
     }
 
     fn hash() -> B256 {
@@ -1544,26 +1498,21 @@ mod tests {
     }
 
     fn evidence() -> EvmErc20CallReadEvidence {
-        let request = EvmCallReadRequest::new(
+        let request = EvmCall::new(
             Address::from_str(TOKEN).expect("token"),
-            vec![0x31, 0x3c, 0xe5, 0x67],
-            EvmBlockSelector::Hash(hash()),
+            vec![0x31, 0x3c, 0xe5, 0x67].into(),
+            EvmBlockSelector::ExactHash(hash()),
         );
-        let response = EvmCallReadResponse {
-            evidence: source_evidence(),
-            return_data: vec![0; 32],
+        let response: Bytes = vec![0; 32].into();
+        let verification = EvmBlock {
+            number: U256::from(100),
+            hash: hash(),
         };
-        let verification_request = EvmBlockReadRequest::new(EvmBlockSelector::Hash(hash()));
-        let verification_response = mfm_evm_capabilities::EvmBlockReadResponse {
-            evidence: source_evidence(),
-            block_number: 100,
-            block_hash: hash(),
-        };
-        EvmErc20CallReadEvidence::from_capability(
+        EvmErc20CallReadEvidence::from_session(
             &request,
             &response,
-            &verification_request,
-            &verification_response,
+            &verification,
+            &source_evidence(),
         )
         .expect("evidence")
     }
@@ -1573,16 +1522,14 @@ mod tests {
         let evidence = evidence();
         assert_eq!(evidence.destination, TOKEN);
         assert_eq!(evidence.calldata, "0x313ce567");
-        assert_eq!(evidence.block_selector.block_hash, HASH);
-        assert!(evidence.block_selector.require_canonical);
+        assert_eq!(evidence.anchor_block_hash, HASH);
         assert_eq!(evidence.return_data, format!("0x{}", "00".repeat(32)));
-        assert_eq!(evidence.verification_block_hash, HASH);
         assert_eq!(evidence.verification_response_block_number, 100);
         assert_eq!(evidence.verification_response_block_hash, HASH);
         assert_eq!(evidence.source.network(), "ethereum-mainnet");
         assert_eq!(evidence.source.chain_id(), 1);
         assert_eq!(evidence.source.source_ref(), "primary");
-        assert_eq!(evidence.source.policy_id(), "default");
+        assert_eq!(evidence.source.implementation_id(), "default");
         let value = serde_json::to_value(&evidence).expect("JSON value");
         assert_eq!(value["source"]["network"], "ethereum-mainnet");
         assert_eq!(value["source"]["chain_id"], 1);
@@ -1592,70 +1539,43 @@ mod tests {
             assert!(!rendered.contains(forbidden), "leaked {forbidden}");
         }
 
-        let (request, response, verification_request, verification_response) =
+        let (request, response, verification, source) =
             evidence.replay_material().expect("replay material");
         assert_eq!(format!("{:#x}", request.to()), TOKEN);
-        assert_eq!(request.calldata(), &[0x31, 0x3c, 0xe5, 0x67]);
+        assert_eq!(request.input().as_ref(), &[0x31, 0x3c, 0xe5, 0x67]);
         assert!(
-            matches!(request.block(), EvmBlockSelector::Hash(value) if format!("{value:#x}") == HASH)
+            matches!(request.block(), EvmBlockSelector::ExactHash(value) if format!("{value:#x}") == HASH)
         );
-        assert_eq!(response.return_data, vec![0; 32]);
-        assert_eq!(verification_request.block(), request.block());
-        assert_eq!(verification_response.block_number, 100);
-        assert_eq!(format!("{:#x}", verification_response.block_hash), HASH);
+        assert_eq!(response.as_ref(), &[0; 32]);
+        assert_eq!(verification.number, U256::from(100));
+        assert_eq!(format!("{:#x}", verification.hash), HASH);
+        assert_eq!(source, source_evidence());
     }
 
     #[test]
     fn erc20_evidence_rejects_noncanonical_or_noncanonicality_tampering() {
-        let mut missing_canonicality = evidence();
-        missing_canonicality.block_selector.require_canonical = false;
-        assert!(missing_canonicality.replay_material().is_err());
+        let mut noncanonical_hash = evidence();
+        noncanonical_hash.anchor_block_hash = HASH.to_uppercase();
+        assert!(noncanonical_hash.replay_material().is_err());
 
         let mut noncanonical_hex = evidence();
         noncanonical_hex.calldata = "0x313CE567".to_owned();
         assert!(noncanonical_hex.replay_material().is_err());
 
-        let mut latest_verification = evidence();
-        latest_verification.verification_block_hash = "0x".to_owned();
-        assert!(latest_verification.replay_material().is_err());
+        let mut malformed_verification = evidence();
+        malformed_verification.verification_response_block_hash = "0x".to_owned();
+        assert!(malformed_verification.replay_material().is_err());
     }
 
     #[test]
-    fn erc20_replay_evidence_rejects_provider_source_or_policy_tampering() {
-        let request = EvmCallReadRequest::new(
-            Address::from_str(TOKEN).expect("token"),
-            vec![0x31, 0x3c, 0xe5, 0x67],
-            EvmBlockSelector::Hash(hash()),
-        );
-        let response = EvmCallReadResponse {
-            evidence: source_evidence(),
-            return_data: vec![0; 32],
-        };
-        let verification_request = EvmBlockReadRequest::new(EvmBlockSelector::Hash(hash()));
-        let verification_response = mfm_evm_capabilities::EvmBlockReadResponse {
-            evidence: source_evidence_for("secondary", "default"),
-            block_number: 100,
-            block_hash: hash(),
-        };
-        assert!(EvmErc20CallReadEvidence::from_capability(
-            &request,
-            &response,
-            &verification_request,
-            &verification_response,
-        )
-        .is_err());
+    fn erc20_evidence_has_one_checked_session_provenance() {
+        let persisted = serde_json::to_value(evidence()).expect("persisted evidence");
+        assert!(persisted.get("source").is_some());
+        assert!(persisted.get("verification_source").is_none());
+        assert!(persisted.get("policy_id").is_none());
 
-        for (field, value) in [("source_ref", "secondary"), ("policy_id", "secondary")] {
-            let mut persisted = serde_json::to_value(evidence()).expect("persisted evidence");
-            persisted["source"][field] = serde_json::json!(value);
-            let tampered: EvmErc20CallReadEvidence =
-                serde_json::from_value(persisted).expect("well-formed tampered evidence");
-            assert!(
-                tampered.replay_material().is_err(),
-                "replay must reject {field} drift"
-            );
-        }
-
-        assert!(evidence().replay_material().is_ok());
+        let mut malformed = persisted;
+        malformed["source"]["source_ref"] = serde_json::json!("INVALID SOURCE");
+        assert!(serde_json::from_value::<EvmErc20CallReadEvidence>(malformed).is_err());
     }
 }

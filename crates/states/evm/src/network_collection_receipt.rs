@@ -14,7 +14,7 @@ use serde::{de, Deserialize, Serialize};
 use crate::native_balance_collect::{state_kind, state_version};
 use crate::{
     canonical_evm_block_hash, EvmErc20BalanceBatchReceipt, EvmJointTip,
-    EvmNativeBalanceBatchReceipt, EvmStateError, RedactedEvmProviderSourceBinding,
+    EvmNativeBalanceBatchReceipt, EvmStateError, RedactedEvmSessionEvidence,
 };
 
 /// Certified expectation for the resource receipts required by one EVM network collection.
@@ -75,7 +75,7 @@ pub struct EvmNetworkCollectionReceipt {
     chain_id: u64,
     block_number: u64,
     block_hash: String,
-    source_binding: RedactedEvmProviderSourceBinding,
+    source_binding: RedactedEvmSessionEvidence,
     native_balance_receipt: Option<EvmNativeBalanceBatchReceipt>,
     erc20_balance_receipt: Option<EvmErc20BalanceBatchReceipt>,
 }
@@ -86,7 +86,7 @@ impl EvmNetworkCollectionReceipt {
         chain_id: u64,
         block_number: u64,
         block_hash: String,
-        source_binding: RedactedEvmProviderSourceBinding,
+        source_binding: RedactedEvmSessionEvidence,
         native_balance_receipt: Option<EvmNativeBalanceBatchReceipt>,
         erc20_balance_receipt: Option<EvmErc20BalanceBatchReceipt>,
     ) -> Result<Self, EvmStateError> {
@@ -167,7 +167,7 @@ impl EvmNetworkCollectionReceipt {
     }
 
     /// Returns the exact redacted provider source for this collection receipt.
-    pub const fn source_binding(&self) -> &RedactedEvmProviderSourceBinding {
+    pub const fn source_binding(&self) -> &RedactedEvmSessionEvidence {
         &self.source_binding
     }
 
@@ -194,7 +194,7 @@ impl<'de> Deserialize<'de> for EvmNetworkCollectionReceipt {
             chain_id: u64,
             block_number: u64,
             block_hash: String,
-            source_binding: RedactedEvmProviderSourceBinding,
+            source_binding: RedactedEvmSessionEvidence,
             native_balance_receipt: Option<EvmNativeBalanceBatchReceipt>,
             erc20_balance_receipt: Option<EvmErc20BalanceBatchReceipt>,
         }
@@ -332,7 +332,7 @@ mod tests {
             1,
             100,
             HASH,
-            RedactedEvmProviderSourceBinding::new("ethereum-mainnet", 1, "primary", "default")
+            RedactedEvmSessionEvidence::new("ethereum-mainnet", 1, "primary", "default")
                 .expect("source binding"),
         )
         .expect("tip")

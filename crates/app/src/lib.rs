@@ -22,10 +22,9 @@ use mfm_capabilities::{
 };
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
-use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
-    SpecHash, StoreScopeId,
+    ArtifactId, ContentDigest, DigestAlgorithm, EventId, LocalPublicId, RunId, SchemaId, SeedId,
+    SemanticTypeId, SpecHash, StoreScopeId,
 };
 use mfm_replay::v1::{ReplayBroker, ReplayReadAuthority, RetainedSourceFactReplayEvent};
 use mfm_runtime::{
@@ -558,15 +557,9 @@ fn diagnostic_artifact_requirement(
 fn validate_evm_source_mismatch_diagnostic(
     diagnostic: &mfm_capabilities::RedactedProviderDiagnostic,
 ) -> Result<(), PublicError> {
-    const FIELDS: [&str; 5] = [
-        "network_id",
-        "expected_chain_id",
-        "observed_chain_id",
-        "source_ref",
-        "policy_id",
-    ];
-    if diagnostic.fields().len() != FIELDS.len()
-        || FIELDS
+    const REQUIRED_FIELDS: [&str; 3] = ["network_id", "expected_chain_id", "source_ref"];
+    if diagnostic.fields().len() != 4
+        || REQUIRED_FIELDS
             .iter()
             .any(|field| !diagnostic.fields().keys().any(|key| key.as_str() == *field))
     {
@@ -588,23 +581,28 @@ fn validate_evm_source_mismatch_diagnostic(
         ProviderDiagnosticValue::U64(value) => *value,
         _ => return Err(replay_diagnostic_error()),
     };
-    let observed_chain_id = match field("observed_chain_id")? {
-        ProviderDiagnosticValue::U64(value) => *value,
-        _ => return Err(replay_diagnostic_error()),
-    };
     let source_ref = match field("source_ref")? {
         ProviderDiagnosticValue::Id(value) => value.as_str(),
         _ => return Err(replay_diagnostic_error()),
     };
-    let policy_id = match field("policy_id")? {
-        ProviderDiagnosticValue::Id(value) => value.as_str(),
-        _ => return Err(replay_diagnostic_error()),
-    };
-    EvmNetworkId::new(network_id).map_err(|_| replay_diagnostic_error())?;
-    EvmSourceRef::new(source_ref).map_err(|_| replay_diagnostic_error())?;
-    EvmSourcePolicyId::new(policy_id).map_err(|_| replay_diagnostic_error())?;
-    if expected_chain_id == 0 || expected_chain_id == observed_chain_id {
+    LocalPublicId::new(network_id).map_err(|_| replay_diagnostic_error())?;
+    LocalPublicId::new(source_ref).map_err(|_| replay_diagnostic_error())?;
+    if expected_chain_id == 0 {
         return Err(replay_diagnostic_error());
+    }
+    match diagnostic
+        .fields()
+        .iter()
+        .find(|(key, _)| key.as_str() == "observed_chain_id")
+        .map(|(_, value)| value)
+    {
+        Some(ProviderDiagnosticValue::U64(observed_chain_id))
+            if *observed_chain_id != expected_chain_id => {}
+        None => match field("observed_chain_id_out_of_range")? {
+            ProviderDiagnosticValue::Bool(true) => {}
+            _ => return Err(replay_diagnostic_error()),
+        },
+        _ => return Err(replay_diagnostic_error()),
     }
     Ok(())
 }

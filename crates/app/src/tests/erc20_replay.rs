@@ -5,17 +5,12 @@ use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use alloy_primitives::{Address, B256};
-use mfm_adapters_evm::{
-    register_evm_collectors_runners, EvmBoundProvider, EvmProviderFactory, EvmRunnerCapabilities,
-};
+use alloy_primitives::{Address, Bytes, B256, U256};
+use mfm_adapters_evm::{register_evm_collectors_runners, EvmRunnerCapabilities};
 use mfm_certify::CertificationRegistry;
 use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse,
-    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
-    EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
-    EvmCapabilityFuture, EvmNetworkBinding, EvmSourcePolicyId, EvmSourceRef,
-    RedactedEvmSourceEvidence,
+    evm_diagnostic, EvmBlock, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding,
+    EvmReadSession, EvmSessionEvidence, EvmSessionFuture,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_portfolio_model::{
@@ -80,7 +75,7 @@ async fn erc20_collector_replay_uses_retained_evidence_and_rejects_tampering() {
     );
     drop(launch_services);
 
-    // This service has neither a runner registry nor an EVM provider factory: replay can only
+    // This service has neither a runner registry nor an EVM session binder: replay can only
     // use the certified run stream and retained artifacts produced above.
     let replay_services =
         make_run_read_services(store.clone(), store.clone(), certification.clone());
@@ -210,7 +205,13 @@ fn erc20_replay_runners(store: &store::AsyncInMemoryRunStore) -> ErasedRunnerReg
         &mut runners,
         EvmRunnerCapabilities::new(
             Arc::new(store.clone()),
-            Arc::new(Erc20ReplayProviderFactory),
+            validate_replay_binding,
+            |binding| {
+                Box::pin(async move {
+                    validate_replay_binding(&binding)?;
+                    Ok(Arc::new(Erc20ReplaySession::new(binding)) as Arc<dyn EvmReadSession>)
+                })
+            },
         ),
     )
     .expect("register ERC-20 collector runners");
@@ -248,100 +249,82 @@ fn provider_failure() -> EvmCapabilityError {
     ))
 }
 
-#[derive(Clone)]
-struct Erc20ReplayProviderFactory;
+fn validate_replay_binding(binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
+    if binding.network_id().as_str() == "ethereum-mainnet" && binding.expected_chain_id() == 1 {
+        Ok(())
+    } else {
+        Err(provider_failure())
+    }
+}
 
-impl EvmProviderFactory for Erc20ReplayProviderFactory {
-    fn validate_network_binding(
-        &self,
-        binding: &EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<()> {
-        if binding.network_id().as_str() == "ethereum-mainnet" && binding.expected_chain_id() == 1 {
-            Ok(())
-        } else {
-            Err(provider_failure())
+struct Erc20ReplaySession {
+    evidence: EvmSessionEvidence,
+}
+
+impl Erc20ReplaySession {
+    fn new(binding: EvmNetworkBinding) -> Self {
+        Self {
+            evidence: EvmSessionEvidence::new(
+                &binding,
+                LocalPublicId::new("primary").expect("source ref"),
+                LocalPublicId::new(mfm_evm_capabilities::EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
+                    .expect("implementation id"),
+            ),
         }
     }
 
-    fn bind_network(
-        &self,
-        binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn EvmBoundProvider>> {
-        self.validate_network_binding(&binding)?;
-        Ok(Arc::new(Erc20ReplayProvider { binding }))
-    }
-}
-
-struct Erc20ReplayProvider {
-    binding: EvmNetworkBinding,
-}
-
-impl Erc20ReplayProvider {
-    fn source_evidence(&self) -> RedactedEvmSourceEvidence {
-        RedactedEvmSourceEvidence::from_binding(
-            &self.binding,
-            1,
-            EvmSourceRef::new("primary").expect("source ref"),
-            EvmSourcePolicyId::new("default").expect("source policy"),
-        )
-        .expect("redacted source evidence")
-    }
-
-    fn block_response(&self) -> EvmBlockReadResponse {
-        EvmBlockReadResponse {
-            evidence: self.source_evidence(),
-            block_number: 100,
-            block_hash: anchor_hash(),
+    fn block() -> EvmBlock {
+        EvmBlock {
+            number: U256::from(100),
+            hash: anchor_hash(),
         }
     }
 }
 
-impl EvmBlockReadProvider for Erc20ReplayProvider {
-    fn read_block<'a>(
-        &'a self,
-        request: &'a EvmBlockReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
-        let result = match request.block() {
-            EvmBlockSelector::Latest => Ok(self.block_response()),
-            EvmBlockSelector::Hash(hash) if *hash == anchor_hash() => Ok(self.block_response()),
+impl EvmReadSession for Erc20ReplaySession {
+    fn evidence(&self) -> &EvmSessionEvidence {
+        &self.evidence
+    }
+
+    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+        let result = match selector {
+            EvmBlockSelector::Latest => Ok(Self::block()),
+            EvmBlockSelector::Number(number) if *number == U256::from(100) => Ok(Self::block()),
+            EvmBlockSelector::ExactHash(hash) if *hash == anchor_hash() => Ok(Self::block()),
             _ => Err(provider_failure()),
         };
         Box::pin(std::future::ready(result))
     }
-}
 
-impl EvmBalanceReadProvider for Erc20ReplayProvider {
     fn read_balance<'a>(
         &'a self,
-        _request: &'a EvmBalanceReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmBalanceReadResponse> {
+        _account: Address,
+        _block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, U256> {
         Box::pin(std::future::ready(Err(provider_failure())))
     }
-}
 
-impl EvmCallReadProvider for Erc20ReplayProvider {
-    fn read_call<'a>(
+    fn read_code<'a>(
         &'a self,
-        request: &'a EvmCallReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
+        _address: Address,
+        _block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, mfm_evm_capabilities::EvmCode> {
+        Box::pin(std::future::ready(Err(provider_failure())))
+    }
+
+    fn call<'a>(&'a self, request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes> {
         let result = if request.to() != token_address()
-            || !matches!(request.block(), EvmBlockSelector::Hash(hash) if *hash == anchor_hash())
+            || !matches!(request.block(), EvmBlockSelector::ExactHash(hash) if *hash == anchor_hash())
         {
             Err(provider_failure())
-        } else if request.calldata() == [0x31, 0x3c, 0xe5, 0x67] {
+        } else if request.input().as_ref() == [0x31, 0x3c, 0xe5, 0x67] {
             let mut return_data = vec![0; 32];
             return_data[31] = 18;
-            Ok(EvmCallReadResponse {
-                evidence: self.source_evidence(),
-                return_data,
-            })
-        } else if request.calldata() == erc20_balance_calldata() {
+            Ok(return_data.into())
+        } else if request.input().as_ref() == erc20_balance_calldata() {
             let mut return_data = vec![0; 32];
             return_data[31] = 42;
-            Ok(EvmCallReadResponse {
-                evidence: self.source_evidence(),
-                return_data,
-            })
+            Ok(return_data.into())
         } else {
             Err(provider_failure())
         };

@@ -57,7 +57,7 @@ fn transport_sources_exclude_artifact_write_surfaces() {
 }
 
 #[test]
-fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
+fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
     let production_sources = [
         (
             "btc-capabilities",
@@ -118,68 +118,59 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
         assert_no_source_bearing_request_constructors(
             name,
             source,
-            &[
-                "EvmChainIdentityRequest",
-                "EvmBlockReadRequest",
-                "EvmBalanceReadRequest",
-                "EvmCallReadRequest",
-                "EvmCodeReadRequest",
-                "EvmNonceReadRequest",
-                "EvmFeeReadRequest",
-                "EvmGasEstimateRequest",
-                "EvmTransactionSubmitRequest",
-                "EvmReceiptReadRequest",
-            ],
-            &["network_id", "expected_chain_id"],
-        );
-        assert_no_source_bearing_request_constructors(
-            name,
-            source,
             &["BtcChainHeadRequest", "BtcBalanceReadRequest"],
             &["network_id", "source_identity", "bitcoin_network"],
         );
     }
 
-    let evm_transport = include_str!("../../transports/evm/src/lib.rs");
-    assert!(
-        !evm_transport.contains("pub fn validate_route_binding"),
-        "EVM transport must not expose route-only source validation"
-    );
-    assert!(
-        !evm_transport.contains("async fn rpc_call("),
-        "EVM raw operation RPC must be split into verified/source-probe paths"
-    );
-    assert!(
-        !evm_transport.contains("binding: &EvmNetworkBinding,\n        request: &Evm"),
-        "EVM operation helpers must require VerifiedEvmCall, not source bindings"
-    );
-    assert!(
-        evm_transport
-            .contains("verified_rpc_call(\n        &self,\n        verified: &VerifiedEvmCall"),
-        "EVM operation RPC helper must require a private verified-call token"
-    );
-    assert_no_generic_evm_source_rpc_helper(evm_transport);
-    for provider_trait in [
-        "EvmChainIdentityProvider",
-        "EvmBlockReadProvider",
-        "EvmBalanceReadProvider",
-        "EvmCallReadProvider",
-        "EvmCodeReadProvider",
-        "EvmNonceReadProvider",
-        "EvmFeeReadProvider",
-        "EvmGasEstimateProvider",
-        "EvmTransactionSubmitProvider",
-        "EvmReceiptReadProvider",
+    let evm_capabilities = include_str!("../../evm-capabilities/src/lib.rs");
+    assert!(evm_capabilities.contains("EvmReadCapability"));
+    assert!(evm_capabilities.contains("pub trait EvmReadSession"));
+    assert!(evm_capabilities.contains("EvmTransactionCapability"));
+    assert!(evm_capabilities.contains("pub trait EvmTransactionSession"));
+    for deleted in [
+        concat!("EvmBlockRead", "Provider"),
+        concat!("EvmBalanceRead", "Provider"),
+        concat!("EvmCallRead", "Provider"),
+        concat!("EvmSource", "PolicyId"),
     ] {
         assert!(
-            !evm_transport.contains(&format!("impl {provider_trait} for EvmJsonRpcClient")),
-            "raw EvmJsonRpcClient must not implement {provider_trait}"
+            !evm_capabilities.contains(deleted),
+            "EVM capability surface must not retain {deleted}"
         );
     }
+
+    let evm_transport = include_str!("../../transports/evm/src/lib.rs");
     assert!(
-        evm_transport.contains("impl_network_provider!(")
-            && evm_transport.contains("impl $trait for EvmJsonRpcNetworkProvider"),
-        "EVM transport provider impl macro must target the bound network provider"
+        evm_transport.contains("pub struct EvmJsonRpcSession")
+            && evm_transport.contains("impl EvmReadSession for EvmJsonRpcSession")
+            && evm_transport.contains("impl EvmTransactionSession for EvmJsonRpcSession"),
+        "EVM transport must expose the two views on one bound session"
+    );
+    assert_eq!(
+        evm_transport.matches("rpc_call(\"eth_chainId\"").count(),
+        1,
+        "a session must probe chain identity exactly once while binding"
+    );
+    for deleted in [
+        concat!("EvmSource", "Registry"),
+        concat!("EvmRoute", "Registry"),
+        concat!("EvmSource", "Policy"),
+        concat!("EvmJsonRpc", "Client"),
+    ] {
+        assert!(
+            !evm_transport.contains(deleted),
+            "EVM transport must not retain routing/client surface {deleted}"
+        );
+    }
+
+    let evm_adapter = include_str!("../../adapters/evm/src/lib.rs");
+    let app_evm = include_str!("../src/evm_collector.rs");
+    assert!(
+        !evm_adapter.contains(concat!("EvmProvider", "Factory"))
+            && !evm_adapter.contains(concat!("EvmBound", "Provider"))
+            && !app_evm.contains(concat!("BoundLiveEvm", "Provider")),
+        "adapter and app must bind sessions directly without provider proxies"
     );
 
     let btc_transport = include_str!("../../transports/btc-jsonrpc-http/src/lib.rs");
@@ -234,23 +225,6 @@ fn assert_btc_operation_io_requires_verified_call(source: &str) {
                 && !args.contains("BtcJsonRpcChainHeadTransport")
                 && !args.contains("BlockchainInfo"),
             "BTC selected_head must use VerifiedBtcCall instead of raw transport or probe output"
-        );
-    }
-}
-
-fn assert_no_generic_evm_source_rpc_helper(source: &str) {
-    assert!(
-        !source.contains("source_probe_rpc_call"),
-        "EVM source-probe IO must stay closed to eth_chainId and must not expose a generic RPC helper"
-    );
-
-    for (offset, _) in source.match_indices("fn ") {
-        let args = function_args(source, offset);
-        assert!(
-            !(args.contains("source: &EvmRuntimeSource")
-                && args.contains("method: &'static str")
-                && args.contains("params: Value")),
-            "EVM operation RPC helpers must not accept source + method + params without VerifiedEvmCall"
         );
     }
 }
