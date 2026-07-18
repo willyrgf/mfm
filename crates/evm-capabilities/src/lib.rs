@@ -156,7 +156,11 @@ impl EvmSessionEvidence {
         self.chain_id
     }
 
-    /// Returns the process-local source reference.
+    /// Returns the process-local source reference retained as audit provenance.
+    ///
+    /// The reference identifies the route used by this attempt. It is not
+    /// semantic binding policy and may change when a later attempt is resumed
+    /// under different process-local routing.
     pub fn source_ref(&self) -> &str {
         &self.source_ref
     }

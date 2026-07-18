@@ -307,7 +307,8 @@ hash other than the empty-code digest. Its bounded ordered checks retain full ca
 calldata, gas, access-list, and exact-return context. One bound `EvmReadSession` performs code and
 calls at the same EIP-1898 hash selector with `requireCanonical = true`, then re-reads the authored
 number and requires the same hash. The state-owned reducer rejects empty code, code-hash drift,
-call-context/result drift, source/network/chain drift, evidence omission/reordering, and reorgs.
+call-context/result drift, session-implementation/network/chain drift, evidence
+omission/reordering, and reorgs.
 The compact output contains only the address, anchor, observed code hash, and validation-plan
 digest. Evidence-only replay invokes that reducer without a route, transport, signer, or runtime
 configuration.
@@ -755,10 +756,15 @@ native balance, ERC-20 metadata, ERC-20 balance, and number-to-hash re-verificat
 session. The canonical capability evidence is carried directly in the aggregate EVM collection
 evidence; the shared block anchor and typed address/asset algebra are likewise retained without
 portfolio-specific mirrors. The direct network snapshot carries the checked semantic network,
-chain, and anchor, while source provenance remains only in read evidence. The state reducer and
-evidence-only replay reject source drift or substitution even when the network and chain match. A
-route that resolves but observes incompatible source evidence fails
-after `RunAdmitted` as an attempt/capability failure with a closed redacted provider diagnostic.
+chain, and anchor, while source provenance remains only in read evidence. One live attempt keeps
+one fixed source-bound session. Its checked `source_ref` is audit provenance explaining which
+process-local route served that attempt; it may differ on a later attempt or resume after runtime
+routing changes. Replay never resolves it against current runtime config or compares it with a
+current route. Post-commit changes remain detectable through ordinary artifact digest and stream
+integrity. If provider identity must influence semantic trust, the author must certify an explicit
+oracle/source identity instead of relying on process-local routing. A route that resolves but
+observes an incompatible semantic network or chain fails after `RunAdmitted` as an
+attempt/capability failure with a closed redacted provider diagnostic.
 Provider diagnostics carry a
 provider family, stable diagnostic code, optional redaction-safe operation id, and closed
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,

@@ -1,19 +1,20 @@
 #![warn(missing_docs)]
 //! Bounded, source-stable EVM JSON-RPC sessions.
 //!
-//! Binding is asynchronous and fallible: it constructs one bounded HTTP
-//! client, probes `eth_chainId` once, and returns a session fixed to that
-//! source for its entire lifetime. Routing and secret resolution stay in app
-//! assembly.
+//! One transport owns the bounded HTTP pool and process-local concurrency
+//! guards shared by every session it binds. Binding probes `eth_chainId` once
+//! and returns a session fixed to that source for its entire lifetime. Routing
+//! and secret resolution stay in app assembly.
 //!
 //! ```no_run
 //! use mfm_evm_capabilities::EvmNetworkBinding;
 //! use mfm_ids::LocalPublicId;
-//! use mfm_transports_evm::EvmJsonRpcSession;
+//! use mfm_transports_evm::EvmJsonRpcTransport;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let binding = EvmNetworkBinding::new(LocalPublicId::new("reth-dev")?, 31337)?;
-//! let _session = EvmJsonRpcSession::bind(
+//! let transport = EvmJsonRpcTransport::new()?;
+//! let _session = transport.bind(
 //!     binding,
 //!     LocalPublicId::new("local")?,
 //!     "http://127.0.0.1:8545".to_owned(),
@@ -23,7 +24,9 @@
 //! # }
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
@@ -40,11 +43,15 @@ use mfm_evm_capabilities::{
 use mfm_ids::LocalPublicId;
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
 use serde_json::{json, Map, Value};
+use tokio::sync::Semaphore;
 use tracing::debug;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_GLOBAL_IN_FLIGHT_EXCHANGES: usize = 64;
+const MAX_IN_FLIGHT_EXCHANGES_PER_SOURCE: usize = 16;
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 16;
 const JSON_RPC_ID: u64 = 1;
 
 /// Result type for EVM transport setup and exchange.
@@ -54,32 +61,57 @@ pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
 struct BoundEndpoint {
     url: reqwest::Url,
     authorization: Option<HeaderValue>,
+    source_limit: Arc<Semaphore>,
 }
 
-/// One checked JSON-RPC session bound to one source and chain.
+/// Shared bounded HTTP runtime used to bind checked EVM JSON-RPC sessions.
+///
+/// Clones share the same connection pool, global exchange bound, and
+/// `source_ref` exchange bounds. Redirects and implicit HTTP retries are
+/// disabled, so one capability call owns exactly one HTTP exchange.
 #[derive(Clone)]
-pub struct EvmJsonRpcSession {
-    client: reqwest::Client,
-    endpoint: BoundEndpoint,
-    evidence: EvmSessionEvidence,
+pub struct EvmJsonRpcTransport {
+    shared: Arc<SharedHttpRuntime>,
 }
 
-impl EvmJsonRpcSession {
-    /// Constructs and binds one source-stable session.
+struct SharedHttpRuntime {
+    client: reqwest::Client,
+    global_limit: Arc<Semaphore>,
+    source_limits: Mutex<BTreeMap<String, Weak<Semaphore>>>,
+}
+
+impl EvmJsonRpcTransport {
+    /// Constructs the shared bounded HTTP runtime.
+    pub fn new() -> TransportResult<Self> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
+            .build()
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        Ok(Self {
+            shared: Arc::new(SharedHttpRuntime {
+                client,
+                global_limit: Arc::new(Semaphore::new(MAX_GLOBAL_IN_FLIGHT_EXCHANGES)),
+                source_limits: Mutex::new(BTreeMap::new()),
+            }),
+        })
+    }
+
+    /// Binds one source-stable session through this transport's shared pool.
     pub async fn bind(
+        &self,
         binding: EvmNetworkBinding,
         source_ref: LocalPublicId,
         rpc_url: String,
         authorization: Option<String>,
-    ) -> TransportResult<Self> {
-        let endpoint = checked_endpoint(rpc_url, authorization)?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
-        let unbound = Self {
-            client,
+    ) -> TransportResult<EvmJsonRpcSession> {
+        let source_limit = self.source_limit(&source_ref)?;
+        let endpoint = checked_endpoint(rpc_url, authorization, source_limit)?;
+        let unbound = EvmJsonRpcSession {
+            shared: Arc::clone(&self.shared),
             endpoint,
             evidence: EvmSessionEvidence::new(
                 &binding,
@@ -105,6 +137,30 @@ impl EvmJsonRpcSession {
         Ok(unbound)
     }
 
+    fn source_limit(&self, source_ref: &LocalPublicId) -> TransportResult<Arc<Semaphore>> {
+        let mut limits = self
+            .shared
+            .source_limits
+            .lock()
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        if let Some(limit) = limits.get(source_ref.as_str()).and_then(Weak::upgrade) {
+            return Ok(limit);
+        }
+        let limit = Arc::new(Semaphore::new(MAX_IN_FLIGHT_EXCHANGES_PER_SOURCE));
+        limits.insert(source_ref.as_str().to_owned(), Arc::downgrade(&limit));
+        Ok(limit)
+    }
+}
+
+/// One checked JSON-RPC session bound to one source and chain.
+#[derive(Clone)]
+pub struct EvmJsonRpcSession {
+    shared: Arc<SharedHttpRuntime>,
+    endpoint: BoundEndpoint,
+    evidence: EvmSessionEvidence,
+}
+
+impl EvmJsonRpcSession {
     async fn block(&self, selector: &EvmBlockSelector) -> TransportResult<EvmBlock> {
         let value = match selector {
             EvmBlockSelector::ExactHash(hash) => {
@@ -317,12 +373,28 @@ impl EvmJsonRpcSession {
 
     async fn rpc_call(&self, method: &'static str, params: Value) -> TransportResult<Value> {
         let operation = operation_id(method);
-        let mut request = self.client.post(self.endpoint.url.clone()).json(&json!({
-            "jsonrpc": "2.0",
-            "id": JSON_RPC_ID,
-            "method": method,
-            "params": params,
-        }));
+        let _source_permit = Arc::clone(&self.endpoint.source_limit)
+            .acquire_owned()
+            .await
+            .map_err(|_| EvmTransportError::TransportFailed {
+                operation: operation.clone(),
+            })?;
+        let _global_permit = Arc::clone(&self.shared.global_limit)
+            .acquire_owned()
+            .await
+            .map_err(|_| EvmTransportError::TransportFailed {
+                operation: operation.clone(),
+            })?;
+        let mut request = self
+            .shared
+            .client
+            .post(self.endpoint.url.clone())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": JSON_RPC_ID,
+                "method": method,
+                "params": params,
+            }));
         if let Some(authorization) = &self.endpoint.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
@@ -473,6 +545,7 @@ impl fmt::Debug for EvmJsonRpcSession {
 fn checked_endpoint(
     rpc_url: String,
     authorization: Option<String>,
+    source_limit: Arc<Semaphore>,
 ) -> TransportResult<BoundEndpoint> {
     let url = reqwest::Url::parse(&rpc_url).map_err(|_| EvmTransportError::InvalidConfiguration)?;
     if !matches!(url.scheme(), "http" | "https")
@@ -486,7 +559,11 @@ fn checked_endpoint(
             HeaderValue::from_str(&value).map_err(|_| EvmTransportError::InvalidConfiguration)
         })
         .transpose()?;
-    Ok(BoundEndpoint { url, authorization })
+    Ok(BoundEndpoint {
+        url,
+        authorization,
+        source_limit,
+    })
 }
 
 fn validate_rpc_response(body: Value, operation: LocalPublicId) -> TransportResult<Value> {

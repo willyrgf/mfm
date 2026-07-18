@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, B256, U256};
@@ -29,11 +30,14 @@ enum Mode {
     Oversized,
     OversizedChunked,
     Stall,
+    SlowBalance,
+    SubmitHttpFailure,
 }
 
 struct TestServer {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    max_active: Arc<AtomicUsize>,
 }
 
 impl TestServer {
@@ -42,12 +46,18 @@ impl TestServer {
         let address = listener.local_addr().expect("address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let observed_active = Arc::clone(&active);
+        let observed_max = Arc::clone(&max_active);
         tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
                 let captured = Arc::clone(&captured);
+                let active = Arc::clone(&observed_active);
+                let max_active = Arc::clone(&observed_max);
                 tokio::spawn(async move {
                     let mut bytes = vec![0; 16 * 1024];
                     let mut read = 0;
@@ -67,6 +77,12 @@ impl TestServer {
                     if matches!(mode, Mode::Stall) {
                         std::future::pending::<()>().await;
                     }
+                    if matches!(mode, Mode::SlowBalance) && request["method"] == "eth_getBalance" {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    }
                     let response = response(mode, &request);
                     stream
                         .write_all(response.as_bytes())
@@ -78,6 +94,7 @@ impl TestServer {
         Self {
             url: format!("http://{address}"),
             requests,
+            max_active,
         }
     }
 
@@ -86,15 +103,20 @@ impl TestServer {
     }
 }
 
+fn transport() -> EvmJsonRpcTransport {
+    EvmJsonRpcTransport::new().expect("transport")
+}
+
 async fn session(server: &TestServer) -> EvmJsonRpcSession {
-    EvmJsonRpcSession::bind(
-        binding(1),
-        LocalPublicId::new("primary").expect("source"),
-        server.url.clone(),
-        Some("Bearer top-secret".to_owned()),
-    )
-    .await
-    .expect("bind session")
+    transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            server.url.clone(),
+            Some("Bearer top-secret".to_owned()),
+        )
+        .await
+        .expect("bind session")
 }
 
 fn binding(chain_id: u64) -> EvmNetworkBinding {
@@ -229,6 +251,108 @@ async fn transaction_submit_preserves_a_wrong_provider_hash_for_adapter_ambiguit
 }
 
 #[tokio::test]
+async fn one_submission_capability_call_owns_one_http_exchange() {
+    let server = TestServer::spawn(Mode::SubmitHttpFailure).await;
+    let session = session(&server).await;
+    let signed_bytes = [0x01, 0x02, 0x03];
+    let expected_hash = keccak256(signed_bytes);
+
+    session
+        .submit_raw_transaction(&signed_bytes, expected_hash)
+        .await
+        .expect_err("HTTP failure must be returned without an implicit retry");
+
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request["method"] == "eth_sendRawTransaction")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn sessions_share_the_process_local_source_concurrency_bound() {
+    let server = TestServer::spawn(Mode::SlowBalance).await;
+    let transport = transport();
+    let first = transport
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            server.url.clone(),
+            None,
+        )
+        .await
+        .expect("first session");
+    let second = transport
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            server.url.clone(),
+            None,
+        )
+        .await
+        .expect("second session");
+    let selector = EvmBlockSelector::ExactHash(BLOCK_HASH.parse().expect("hash"));
+    let mut reads = tokio::task::JoinSet::new();
+    for index in 0..(MAX_IN_FLIGHT_EXCHANGES_PER_SOURCE * 3) {
+        let session = if index.is_multiple_of(2) {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let selector = selector.clone();
+        reads.spawn(async move { session.read_balance(ACCOUNT, &selector).await });
+    }
+    while let Some(result) = reads.join_next().await {
+        result.expect("read task").expect("balance read");
+    }
+
+    let max_active = server.max_active.load(Ordering::SeqCst);
+    assert!(max_active > 1, "test must exercise concurrent exchanges");
+    assert!(
+        max_active <= MAX_IN_FLIGHT_EXCHANGES_PER_SOURCE,
+        "shared source bound was exceeded: {max_active}"
+    );
+}
+
+#[tokio::test]
+async fn redirects_are_rejected_without_contacting_or_authorizing_the_target() {
+    let fixture = RedirectFixture::spawn().await;
+    let error = transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            fixture.origin_url.clone(),
+            Some("Bearer top-secret".to_owned()),
+        )
+        .await
+        .expect_err("redirect response must fail binding");
+
+    assert!(matches!(
+        error,
+        EvmTransportError::RpcHttpStatus { status: 307, .. }
+    ));
+    let origin_requests = fixture.origin_requests.lock().expect("origin requests");
+    assert_eq!(origin_requests.len(), 1);
+    assert!(
+        origin_requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer top-secret"),
+        "origin must receive its configured authorization"
+    );
+    assert!(
+        fixture
+            .target_requests
+            .lock()
+            .expect("target requests")
+            .is_empty(),
+        "redirect target must receive neither a request nor authorization"
+    );
+}
+
+#[tokio::test]
 async fn null_observations_are_absence_not_fabricated_receipts() {
     let server = TestServer::spawn(Mode::ReceiptNull).await;
     let session = session(&server).await;
@@ -265,14 +389,15 @@ async fn missing_eip1559_fee_input_fails_closed() {
 #[tokio::test]
 async fn bind_rejects_chain_mismatch_and_redacts_endpoint() {
     let server = TestServer::spawn(Mode::ChainMismatch).await;
-    let error = EvmJsonRpcSession::bind(
-        binding(1),
-        LocalPublicId::new("primary").expect("source"),
-        server.url.clone(),
-        Some("Bearer top-secret".to_owned()),
-    )
-    .await
-    .expect_err("chain mismatch");
+    let error = transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            server.url.clone(),
+            Some("Bearer top-secret".to_owned()),
+        )
+        .await
+        .expect_err("chain mismatch");
     let rendered = format!("{error:?} {error}");
     let EvmTransportError::SourceMismatch { diagnostic } = error else {
         panic!("expected source mismatch");
@@ -288,14 +413,15 @@ async fn bind_rejects_chain_mismatch_and_redacts_endpoint() {
 #[tokio::test]
 async fn oversized_bind_response_fails_before_body_read() {
     let server = TestServer::spawn(Mode::Oversized).await;
-    let error = EvmJsonRpcSession::bind(
-        binding(1),
-        LocalPublicId::new("primary").expect("source"),
-        server.url,
-        None,
-    )
-    .await
-    .expect_err("oversized response");
+    let error = transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            server.url,
+            None,
+        )
+        .await
+        .expect_err("oversized response");
 
     assert_eq!(error, EvmTransportError::ResponseTooLarge);
 }
@@ -303,14 +429,15 @@ async fn oversized_bind_response_fails_before_body_read() {
 #[tokio::test]
 async fn chunked_bind_response_without_content_length_obeys_body_bound() {
     let server = TestServer::spawn(Mode::OversizedChunked).await;
-    let error = EvmJsonRpcSession::bind(
-        binding(1),
-        LocalPublicId::new("primary").expect("source"),
-        server.url,
-        None,
-    )
-    .await
-    .expect_err("oversized chunked response");
+    let error = transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            server.url,
+            None,
+        )
+        .await
+        .expect_err("oversized chunked response");
 
     assert_eq!(error, EvmTransportError::ResponseTooLarge);
 }
@@ -318,12 +445,18 @@ async fn chunked_bind_response_without_content_length_obeys_body_bound() {
 #[tokio::test(start_paused = true)]
 async fn stalled_bind_response_obeys_request_timeout() {
     let server = TestServer::spawn(Mode::Stall).await;
-    let bind = tokio::spawn(EvmJsonRpcSession::bind(
-        binding(1),
-        LocalPublicId::new("primary").expect("source"),
-        server.url.clone(),
-        None,
-    ));
+    let transport = transport();
+    let url = server.url.clone();
+    let bind = tokio::spawn(async move {
+        transport
+            .bind(
+                binding(1),
+                LocalPublicId::new("primary").expect("source"),
+                url,
+                None,
+            )
+            .await
+    });
     while server.requests().is_empty() {
         tokio::task::yield_now().await;
     }
@@ -341,13 +474,14 @@ async fn response_version_and_id_are_strict() {
     for mode in [Mode::BadVersion, Mode::BadId] {
         let server = TestServer::spawn(mode).await;
         assert!(matches!(
-            EvmJsonRpcSession::bind(
-                binding(1),
-                LocalPublicId::new("primary").expect("source"),
-                server.url,
-                None,
-            )
-            .await,
+            transport()
+                .bind(
+                    binding(1),
+                    LocalPublicId::new("primary").expect("source"),
+                    server.url,
+                    None,
+                )
+                .await,
             Err(EvmTransportError::InvalidResponse)
         ));
     }
@@ -360,14 +494,15 @@ async fn http_and_json_rpc_diagnostics_exclude_bodies() {
         (Mode::JsonError, ProviderDiagnosticCode::RpcJsonError),
     ] {
         let server = TestServer::spawn(mode).await;
-        let error = EvmJsonRpcSession::bind(
-            binding(1),
-            LocalPublicId::new("primary").expect("source"),
-            server.url.clone(),
-            Some("Bearer top-secret".to_owned()),
-        )
-        .await
-        .expect_err("bind failure");
+        let error = transport()
+            .bind(
+                binding(1),
+                LocalPublicId::new("primary").expect("source"),
+                server.url.clone(),
+                Some("Bearer top-secret".to_owned()),
+            )
+            .await
+            .expect_err("bind failure");
         let diagnostic = error.into_provider_diagnostic();
         let rendered = format!("{diagnostic:?} {diagnostic}");
         assert_eq!(diagnostic.code(), code);
@@ -404,6 +539,9 @@ fn response(mode: Mode, request: &Value) -> String {
     if matches!(mode, Mode::HttpFailure) {
         return "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n".to_owned();
     }
+    if matches!(mode, Mode::SubmitHttpFailure) && request["method"] == "eth_sendRawTransaction" {
+        return "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n".to_owned();
+    }
     if matches!(mode, Mode::Oversized) {
         return format!(
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -438,6 +576,91 @@ fn response(mode: Mode, request: &Value) -> String {
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(), body
     )
+}
+
+struct RedirectFixture {
+    origin_url: String,
+    origin_requests: Arc<Mutex<Vec<String>>>,
+    target_requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl RedirectFixture {
+    async fn spawn() -> Self {
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.expect("target bind");
+        let target_address = target_listener.local_addr().expect("target address");
+        let target_requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_target = Arc::clone(&target_requests);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = target_listener.accept().await else {
+                    return;
+                };
+                let captured_target = Arc::clone(&captured_target);
+                tokio::spawn(async move {
+                    let request = read_http_request(&mut stream).await;
+                    captured_target
+                        .lock()
+                        .expect("target requests")
+                        .push(request);
+                    let body = json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("target response");
+                });
+            }
+        });
+
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.expect("origin bind");
+        let origin_address = origin_listener.local_addr().expect("origin address");
+        let origin_requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_origin = Arc::clone(&origin_requests);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = origin_listener.accept().await else {
+                    return;
+                };
+                let captured_origin = Arc::clone(&captured_origin);
+                tokio::spawn(async move {
+                    let request = read_http_request(&mut stream).await;
+                    captured_origin
+                        .lock()
+                        .expect("origin requests")
+                        .push(request);
+                    let response = format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://{target_address}\r\ncontent-length: 0\r\n\r\n"
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("origin response");
+                });
+            }
+        });
+
+        Self {
+            origin_url: format!("http://{origin_address}"),
+            origin_requests,
+            target_requests,
+        }
+    }
+}
+
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
+    let mut bytes = vec![0; 16 * 1024];
+    let mut read = 0;
+    loop {
+        let count = stream.read(&mut bytes[read..]).await.expect("request read");
+        assert_ne!(count, 0, "request ended before the body was complete");
+        read += count;
+        if request_complete(&bytes[..read]) {
+            return String::from_utf8(bytes[..read].to_vec()).expect("HTTP request is UTF-8");
+        }
+    }
 }
 
 fn rpc_result(mode: Mode, request: &Value, method: &str) -> Value {

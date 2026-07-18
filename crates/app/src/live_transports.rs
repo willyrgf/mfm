@@ -38,6 +38,8 @@ impl RuntimeConfigLoader {
 
 pub(crate) struct LiveTransportRuntime {
     runtime_config: RuntimeConfigLoader,
+    evm_transport:
+        OnceLock<mfm_transports_evm::TransportResult<mfm_transports_evm::EvmJsonRpcTransport>>,
     parsed_config: OnceLock<Result<Option<Arc<mfm_runtime_config::RuntimeConfig>>, ()>>,
     btc_router: OnceLock<
         Result<
@@ -51,6 +53,7 @@ impl LiveTransportRuntime {
     pub(crate) fn new(runtime_config: RuntimeConfigLoader) -> Self {
         Self {
             runtime_config,
+            evm_transport: OnceLock::new(),
             parsed_config: OnceLock::new(),
             btc_router: OnceLock::new(),
         }
@@ -68,17 +71,18 @@ impl LiveTransportRuntime {
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmReadSession>> {
         let route = self.evm_route_async(&binding).await?;
-        mfm_transports_evm::EvmJsonRpcSession::bind(
-            binding.clone(),
-            route.source_ref().clone(),
-            route.rpc_url().expose_secret().to_owned(),
-            route
-                .auth_header()
-                .map(|value| value.expose_secret().to_owned()),
-        )
-        .await
-        .map(|session| Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmReadSession>)
-        .map_err(|error| evm_transport_capability_error(&binding, error))
+        self.evm_transport(&binding)?
+            .bind(
+                binding.clone(),
+                route.source_ref().clone(),
+                route.rpc_url().expose_secret().to_owned(),
+                route
+                    .auth_header()
+                    .map(|value| value.expose_secret().to_owned()),
+            )
+            .await
+            .map(|session| Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmReadSession>)
+            .map_err(|error| evm_transport_capability_error(&binding, error))
     }
 
     pub(crate) async fn bind_evm_transaction_session(
@@ -86,17 +90,20 @@ impl LiveTransportRuntime {
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmTransactionSession>> {
         let route = self.evm_route_async(&binding).await?;
-        mfm_transports_evm::EvmJsonRpcSession::bind(
-            binding.clone(),
-            route.source_ref().clone(),
-            route.rpc_url().expose_secret().to_owned(),
-            route
-                .auth_header()
-                .map(|value| value.expose_secret().to_owned()),
-        )
-        .await
-        .map(|session| Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmTransactionSession>)
-        .map_err(|error| evm_transport_capability_error(&binding, error))
+        self.evm_transport(&binding)?
+            .bind(
+                binding.clone(),
+                route.source_ref().clone(),
+                route.rpc_url().expose_secret().to_owned(),
+                route
+                    .auth_header()
+                    .map(|value| value.expose_secret().to_owned()),
+            )
+            .await
+            .map(|session| {
+                Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmTransactionSession>
+            })
+            .map_err(|error| evm_transport_capability_error(&binding, error))
     }
 
     pub(crate) async fn validate_evm_mutation_binding(
@@ -172,6 +179,16 @@ impl LiveTransportRuntime {
                 evm_provider_failure(binding, code)
             },
         )
+    }
+
+    fn evm_transport(
+        &self,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<mfm_transports_evm::EvmJsonRpcTransport> {
+        self.evm_transport
+            .get_or_init(mfm_transports_evm::EvmJsonRpcTransport::new)
+            .clone()
+            .map_err(|error| evm_transport_capability_error(binding, error))
     }
 
     async fn evm_route_async(

@@ -51,20 +51,26 @@ The EVM state-facing capability surface has two coherent authorities:
   submission, transaction observation, receipt observation, and confirmation blocks.
 
 App assembly derives an `EvmNetworkBinding` from certified `network_id` and non-zero chain id, loads
-its direct route, and asynchronously binds `EvmJsonRpcSession`. Binding constructs a bounded HTTP
-client and calls `eth_chainId` once. A mismatch fails before a session is returned. The resulting
-session is fixed to one endpoint and one redacted `source_ref` for the whole attempt; methods do not
-reselect, reprobe, or fail over.
+its direct route, and asynchronously binds `EvmJsonRpcSession` through one process-shared
+`EvmJsonRpcTransport`. Binding calls `eth_chainId` once. A mismatch fails before a session is
+returned. The resulting session is fixed to one endpoint and one redacted `source_ref` for the
+whole attempt; methods do not reselect, reprobe, or fail over.
 
 The bind-time `EvmSessionEvidence` contains only semantic network id, verified chain id, source ref,
-and the certified session implementation id. Endpoints and credentials never enter capability
+and the certified session implementation id. The source ref is audit provenance for the route used
+by that attempt, not semantic policy: it may change across attempts or resume, and replay never
+resolves it against current runtime routing. Endpoints and credentials never enter capability
 requests or evidence.
 
-The HTTP transport has a 10-second connection timeout, a 30-second request timeout, and a one-MiB
-response limit. It requires JSON-RPC version `2.0`, exact response id `1`, and exactly one of
-`result` or `error`. Quantities, hashes, addresses, bytes, transactions, receipts, and complete logs
-are decoded into checked Alloy-backed types. Submission succeeds only when the provider hash equals
-the local hash of the submitted bytes.
+The HTTP transport has one shared connection pool, a global bound of 64 in-flight exchanges, a
+process-local bound of 16 in-flight exchanges for each `source_ref`, a 10-second connection timeout,
+a 30-second request timeout, and a one-MiB response limit. Redirect following and reqwest's implicit
+retry policy are disabled. Every capability call therefore owns exactly one exchange with its fixed
+endpoint; every later transaction broadcast is an explicit adapter recovery decision. The
+transport requires JSON-RPC version `2.0`, exact response id `1`, and exactly one of `result` or
+`error`. Quantities, hashes, addresses, bytes, transactions, receipts, and complete logs are decoded
+into checked Alloy-backed types. Submission succeeds only when the provider hash equals the local
+hash of the submitted bytes.
 
 ## Exact anchors
 

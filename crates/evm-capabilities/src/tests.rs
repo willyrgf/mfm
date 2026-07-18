@@ -44,6 +44,25 @@ fn session_evidence_deserialization_rechecks_all_identifiers() {
 }
 
 #[test]
+fn source_ref_is_audit_provenance_not_semantic_binding() {
+    let binding = binding();
+    let first = EvmSessionEvidence::new(
+        &binding,
+        LocalPublicId::new("primary").expect("source"),
+        LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID).expect("implementation"),
+    );
+    let resumed = EvmSessionEvidence::new(
+        &binding,
+        LocalPublicId::new("replacement").expect("source"),
+        LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID).expect("implementation"),
+    );
+
+    assert!(first.matches_binding(&binding));
+    assert!(resumed.matches_binding(&binding));
+    assert_ne!(first.source_ref(), resumed.source_ref());
+}
+
+#[test]
 fn source_mismatch_diagnostic_is_closed_and_redacted() {
     let error = source_mismatch_error(
         &binding(),
