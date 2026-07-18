@@ -115,11 +115,16 @@ impl LiveTransportRuntime {
             runtime
                 .load_evm_route(&binding)
                 .map(|_| ())
-                .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+                .map_err(mfm_adapters_evm::evm_ingress_runtime_error)?;
             runtime
                 .assemble_evm_signer(signer_ref)
                 .map(|_| ())
-                .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))
+                .map_err(|_| {
+                    mfm_adapters_evm::evm_ingress_runtime_error(evm_provider_failure(
+                        &binding,
+                        ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                    ))
+                })
         })
         .await
         .map_err(|_| {

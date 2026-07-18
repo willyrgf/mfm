@@ -23,7 +23,7 @@ use mfm_states_evm::{
 };
 use mfm_store::v1 as store;
 
-use crate::{evm_read_runtime_error, EvmReadRunnerCapabilities};
+use crate::{evm_ingress_runtime_error, evm_read_runtime_error, EvmReadRunnerCapabilities};
 
 pub(crate) const EVM_READ_CONCURRENCY_LIMIT: usize = 16;
 pub(crate) const ERC20_DECIMALS_SELECTOR: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];
@@ -45,7 +45,7 @@ impl CollectEvmBalancesExecutor {
         self.capabilities
             .validate_read_route(binding)
             .await
-            .map_err(evm_read_runtime_error)
+            .map_err(evm_ingress_runtime_error)
     }
 }
 

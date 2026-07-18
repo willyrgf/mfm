@@ -78,6 +78,33 @@ pub(super) fn resolve_optional_value(
     Ok(Some(resolve_selected_value(location, source)?))
 }
 
+pub(super) fn resolve_optional_http_authorization(
+    location: RuntimeConfigLocation,
+    direct: &Option<String>,
+    env_name: &Option<String>,
+    file_path: &Option<String>,
+    file_env: &Option<String>,
+) -> Result<Option<RuntimeSecretValue>> {
+    let authorization = resolve_optional_value(
+        location.clone(),
+        "auth_header",
+        direct,
+        env_name,
+        file_path,
+        file_env,
+    )?;
+    if authorization
+        .as_ref()
+        .is_some_and(|value| value.expose_secret().parse::<http::HeaderValue>().is_err())
+    {
+        return Err(RuntimeConfigError::new(
+            location.with_field("auth_header"),
+            RuntimeConfigErrorKind::InvalidHttpAuthorization,
+        ));
+    }
+    Ok(authorization)
+}
+
 pub(super) fn resolve_required_path(
     location: RuntimeConfigLocation,
     field: &'static str,
@@ -222,6 +249,12 @@ pub(super) fn validate_rpc_url(
     let url = url::Url::parse(value.expose_secret()).map_err(|_| {
         RuntimeConfigError::new(location.clone(), RuntimeConfigErrorKind::InvalidUrl)
     })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(RuntimeConfigError::new(
+            location,
+            RuntimeConfigErrorKind::UnsupportedUrlScheme,
+        ));
+    }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(RuntimeConfigError::new(
             location,

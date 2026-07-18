@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use mfm_capabilities::ProviderDiagnosticCode;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmCapabilityError, EvmCapabilityFailureDisposition, EvmCapabilityPhase, EvmInvalidRequest,
@@ -166,7 +167,7 @@ impl ValidateContractExecutor {
         self.capabilities
             .validate_read_route(binding)
             .await
-            .map_err(evm_read_runtime_error)
+            .map_err(evm_ingress_runtime_error)
     }
 }
 
@@ -247,6 +248,33 @@ pub fn verify_evm_validation_replay(
 
 fn evm_read_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
     evm_capability_runtime_error(error, EvmCapabilityPhase::ReadOnly)
+}
+
+/// Preserves closed runtime-configuration failures during pre-admission EVM validation.
+///
+/// Live execution uses phase-aware operational blocking instead; this conversion is only for
+/// runner ingress, before `RunAdmitted` can be persisted.
+pub fn evm_ingress_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
+    let Some(diagnostic) = error.redacted_diagnostic() else {
+        return evm_read_runtime_error(error);
+    };
+    let (code, safe_message) = match diagnostic.code() {
+        ProviderDiagnosticCode::ProviderConfigurationMissing => {
+            ("RuntimeConfigRequired", "runtime configuration is required")
+        }
+        ProviderDiagnosticCode::ProviderConfigurationInvalid => {
+            ("RuntimeConfigInvalid", "runtime configuration is invalid")
+        }
+        _ => return evm_read_runtime_error(error),
+    };
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("runtime configuration error code is checked text"),
+        events::ErrorCategory::Capability,
+        safe_message,
+        vec![diagnostic.clone()],
+    )
+    .expect("runtime configuration failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::Failure(failure)
 }
 
 fn evm_capability_runtime_error(

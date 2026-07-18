@@ -142,8 +142,12 @@ pub enum RuntimeConfigErrorKind {
     EmptyResolvedValue,
     /// RPC URL was not syntactically valid.
     InvalidUrl,
+    /// RPC URL scheme was not HTTP or HTTPS.
+    UnsupportedUrlScheme,
     /// RPC URL contained userinfo.
     UrlUserInfo,
+    /// Resolved HTTP authorization value was not a valid header value.
+    InvalidHttpAuthorization,
     /// Requested semantic route was missing.
     MissingRoute,
     /// Bitcoin JSON-RPC basic authentication had only one of user/password.
@@ -186,7 +190,9 @@ impl fmt::Display for RuntimeConfigErrorKind {
             Self::IndirectionFileRead => f.write_str("indirection file could not be read"),
             Self::EmptyResolvedValue => f.write_str("resolved value is empty"),
             Self::InvalidUrl => f.write_str("RPC URL is invalid"),
+            Self::UnsupportedUrlScheme => f.write_str("RPC URL scheme is unsupported"),
             Self::UrlUserInfo => f.write_str("RPC URL userinfo is forbidden"),
+            Self::InvalidHttpAuthorization => f.write_str("HTTP authorization value is invalid"),
             Self::MissingRoute => f.write_str("requested EVM route is missing"),
             Self::IncompleteBasicAuth => {
                 f.write_str("basic authentication requires both user and password")

@@ -103,8 +103,9 @@ async fn contract_validation_validates_its_async_route_before_admission() {
         .await
         .expect_err("missing EVM route rejects validation before admission");
 
-    assert_eq!(error.code, "LaunchRuntimeError");
-    assert!(error.diagnostics.is_empty());
+    assert_eq!(error.code, "RuntimeConfigRequired");
+    assert_eq!(error.diagnostics.len(), 1);
+    assert_eq!(error.diagnostics[0].provider_family().as_str(), "evm");
     assert!(store
         .load_run_stream(&run_id)
         .await

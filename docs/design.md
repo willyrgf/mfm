@@ -211,7 +211,10 @@ references to process-local routing and capability resources, is not semantic co
 and is never persisted in specs, events, artifacts, public outputs, or replay inputs. Live assembly
 selectively resolves only the requested EVM route or the requested signer plus its referenced
 keystore; unrelated malformed entries do not block that resource. Evidence-only reads do not load
-runtime TOML. There is no fallback or compatibility surface.
+runtime TOML. Selected EVM routes admit only HTTP(S) URLs without userinfo and valid HTTP
+authorization values. Ingress validates those rules before `RunAdmitted` and preserves
+`RuntimeConfigRequired` versus `RuntimeConfigInvalid` with closed semantic diagnostics. There is no
+fallback or compatibility surface.
 
 Portfolio selection consumes family completion authority without a generic fan-in value. The
 snapshot operation passes typed Bitcoin and EVM receipt vectors into one report operation. That

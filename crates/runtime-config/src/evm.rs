@@ -5,7 +5,7 @@ use mfm_ids::LocalPublicId;
 use serde_json::Value;
 
 use super::raw::{RawEvmConfig, RawEvmRoute};
-use super::resolve::{parse_local_public_id, resolve_optional_value, resolve_rpc_url};
+use super::resolve::{parse_local_public_id, resolve_optional_http_authorization, resolve_rpc_url};
 use super::{
     deserialize_family, reject_extra_fields, Result, RuntimeConfigError, RuntimeConfigErrorKind,
     RuntimeConfigIdentifierKind, RuntimeConfigLocation, RuntimeSecretValue,
@@ -111,9 +111,8 @@ impl EvmRpcRoute {
             &raw.rpc_url_file,
             &raw.rpc_url_file_env,
         )?;
-        let auth_header = resolve_optional_value(
+        let auth_header = resolve_optional_http_authorization(
             location,
-            "auth_header",
             &raw.auth_header,
             &raw.auth_header_env,
             &raw.auth_header_file,

@@ -69,6 +69,7 @@ tokio = { version = "1.44", features = ["full"] }
 clap = { version = "4.4", features = ["derive"] }
 url = "2.5"
 hex = "0.4"
+http = "1"
 rand = "0.9"
 async-trait = "0.1"
 tracing = "0.1"

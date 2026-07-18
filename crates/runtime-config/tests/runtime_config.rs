@@ -242,6 +242,16 @@ fn route_shape_and_urls_fail_closed() {
             RuntimeConfigErrorKind::UrlUserInfo,
         ),
         (
+            "unsupported URL scheme",
+            "source_ref='local'\nrpc_url='ws://example.invalid'",
+            RuntimeConfigErrorKind::UnsupportedUrlScheme,
+        ),
+        (
+            "invalid authorization header",
+            "source_ref='local'\nrpc_url='https://example.invalid'\nauth_header=\"Bearer\\nsecret\"",
+            RuntimeConfigErrorKind::InvalidHttpAuthorization,
+        ),
+        (
             "source chain",
             "source_ref='local'\nrpc_url='http://127.0.0.1:8545'\nexpected_chain_id=1",
             RuntimeConfigErrorKind::ForbiddenExpectedChainId,

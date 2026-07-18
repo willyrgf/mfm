@@ -699,7 +699,7 @@ async fn evm_balance_collection_validates_its_async_route_before_admission() {
         .expect("EVM source")],
     )
     .expect("EVM collection config");
-    let draft = mfm_op_evm_collectors::evm_balance_collection_cycle_program_draft(config)
+    let draft = mfm_op_evm_collectors::evm_balance_collection_cycle_program_draft(config.clone())
         .expect("internal EVM collection draft");
     let certification = production_certification_registry().expect("production registry");
     let request = prepare_typed_program_run_launch_for_test(
@@ -714,19 +714,71 @@ async fn evm_balance_collection_validates_its_async_route_before_admission() {
     let fact_index = crate::ProjectionFactIndexProvider::new(store.clone());
     let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
         .expect("production runners without EVM config");
-    let services = make_run_services(runners, store.clone(), store.clone(), certification);
+    let services = make_run_services(runners, store.clone(), store.clone(), certification.clone());
 
     let error = services
         .launch_run(request)
         .await
         .expect_err("missing EVM route rejects collection before admission");
 
-    assert_eq!(error.code, "LaunchRuntimeError");
-    assert!(error.diagnostics.is_empty());
+    assert_eq!(error.code, "RuntimeConfigRequired");
+    assert_eq!(error.diagnostics.len(), 1);
+    assert_eq!(error.diagnostics[0].provider_family().as_str(), "evm");
     assert!(store
         .load_run_stream(&run_id)
         .await
         .expect("run stream")
+        .is_empty());
+
+    let invalid_store = store::AsyncInMemoryRunStore::default();
+    let invalid_draft = mfm_op_evm_collectors::evm_balance_collection_cycle_program_draft(config)
+        .expect("invalid-route EVM collection draft");
+    let invalid_request = prepare_typed_program_run_launch_for_test(
+        invalid_draft,
+        BTreeMap::new(),
+        &certification,
+        invalid_store
+            .load_store_scope_id()
+            .await
+            .expect("invalid-route store scope"),
+        None,
+    )
+    .expect("invalid-route EVM collection launch request");
+    let invalid_run_id = invalid_request.run_id.clone();
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = runtime_dir.path().join("runtime.toml");
+    std::fs::write(
+        &runtime_path,
+        r#"
+[evm.routes.ethereum-mainnet]
+source_ref = "invalid-route"
+rpc_url = "ws://example.invalid"
+"#,
+    )
+    .expect("write invalid runtime config");
+    let fact_index = crate::ProjectionFactIndexProvider::new(invalid_store.clone());
+    let runners = production_runner_registry(
+        Arc::new(invalid_store.clone()),
+        Arc::new(fact_index),
+        Some(&runtime_path),
+    )
+    .expect("production runners with invalid EVM config");
+    let services = make_run_services(
+        runners,
+        invalid_store.clone(),
+        invalid_store.clone(),
+        certification,
+    );
+    let error = services
+        .launch_run(invalid_request)
+        .await
+        .expect_err("invalid EVM route rejects collection before admission");
+    assert_eq!(error.code, "RuntimeConfigInvalid");
+    assert_eq!(error.diagnostics.len(), 1);
+    assert!(invalid_store
+        .load_run_stream(&invalid_run_id)
+        .await
+        .expect("invalid-route run stream")
         .is_empty());
 }
 

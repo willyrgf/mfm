@@ -42,6 +42,13 @@ Live reads load only the requested route. Transaction assembly loads that route 
 referenced signer and keystore. Unrelated malformed EVM routes or signer entries do not block the
 selected resource, while malformed selected material fails closed.
 
+Selected RPC URLs must use `http` or `https`, must not contain userinfo, and selected authorization
+values must parse as one HTTP header value. Selective route resolution enforces all three rules on
+the blocking config worker before admission, before any transport or signer is constructed.
+Missing selected routes surface `RuntimeConfigRequired`; unreadable or malformed selected routes,
+including unsupported schemes and invalid authorization values, surface `RuntimeConfigInvalid`.
+Both retain only closed semantic EVM diagnostics and leave the run stream empty.
+
 ## Source-bound sessions
 
 The EVM state-facing capability surface has two coherent authorities:

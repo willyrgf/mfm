@@ -224,6 +224,30 @@ fn validation_provider_availability_blocks_while_contract_failures_terminalize()
     ));
 }
 
+#[test]
+fn ingress_preserves_runtime_configuration_codes_and_diagnostics() {
+    for (diagnostic_code, expected_code) in [
+        (
+            ProviderDiagnosticCode::ProviderConfigurationMissing,
+            "RuntimeConfigRequired",
+        ),
+        (
+            ProviderDiagnosticCode::ProviderConfigurationInvalid,
+            "RuntimeConfigInvalid",
+        ),
+    ] {
+        let error = EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+            diagnostic_code,
+        ));
+        let mfm_runtime::RuntimeError::Failure(failure) = evm_ingress_runtime_error(error) else {
+            panic!("expected structured runtime configuration failure");
+        };
+        assert_eq!(failure.code().as_str(), expected_code);
+        assert_eq!(failure.diagnostics().len(), 1);
+        assert_eq!(failure.diagnostics()[0].code(), diagnostic_code);
+    }
+}
+
 struct ScriptedValidationSession {
     evidence: EvmSessionEvidence,
     code: EvmCode,
