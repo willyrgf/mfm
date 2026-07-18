@@ -33,6 +33,33 @@ fn session_evidence_is_one_redacted_checked_value() {
 }
 
 #[test]
+fn session_evidence_deserialization_rechecks_all_identifiers() {
+    let value = serde_json::json!({
+        "network_id": "mainnet",
+        "chain_id": 0,
+        "source_ref": "primary",
+        "implementation_id": EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    });
+    assert!(serde_json::from_value::<EvmSessionEvidence>(value).is_err());
+}
+
+#[test]
+fn block_anchor_preserves_u256_numbers_and_rejects_noncanonical_wire_values() {
+    let number = U256::from(u64::MAX) + U256::from(1);
+    let hash = B256::from([0xab; 32]);
+    let anchor = EvmBlockAnchor::new(number, hash);
+    let value = serde_json::to_value(&anchor).expect("JSON");
+
+    assert_eq!(anchor.to_block().expect("checked anchor").number, number);
+    assert_eq!(value["number"], number.to_string());
+    assert!(serde_json::from_value::<EvmBlockAnchor>(serde_json::json!({
+        "number": "01",
+        "hash": format!("{hash:#x}"),
+    }))
+    .is_err());
+}
+
+#[test]
 fn source_mismatch_diagnostic_is_closed_and_redacted() {
     let error = source_mismatch_error(
         &binding(),

@@ -36,7 +36,10 @@ atomic publication state. One checked session resolves latest once, reads dedupl
 metadata and every native/ERC-20 balance at the exact hash, and rechecks that hash by block number.
 The publication attempt records the complete `portfolio.evm_balance_snapshot` fact batch and a
 direct network snapshot together. Assembly consumes that snapshot directly; token-only runs make no
-fact-index request.
+fact-index request. Collection plans, evidence, snapshots, and fact subjects reuse the configured
+`NormalizedEvmAddress` plus `HoldingSourceConfig` values directly. Session evidence and block
+anchors are the shared EVM capability values, and block numbers retain their full U256 range as
+canonical decimal strings.
 
 A wallet with no configured symbols is retained with empty observations and zero quote totals, but
 creates no collection work or network pin; the aggregate remains valid only when another explicit

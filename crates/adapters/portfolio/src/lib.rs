@@ -13,10 +13,12 @@ use std::sync::Arc;
 use alloy_primitives::{Address, Bytes, U256};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
-    EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding, EvmReadCapability,
-    EvmReadSession, ProviderDiagnosticCode, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding,
+    EvmReadCapability, EvmReadSession, ProviderDiagnosticCode,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
+use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{ManagedWriteState, StateSpec};
 use mfm_runtime::{
     load_materialized_struct_input, load_runner_config_for_node, CapabilityImplementationId,
@@ -29,11 +31,11 @@ use mfm_state_portfolio::{
     assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version,
     validate_receipt_against_portfolio, AssembleSnapshotConfig, AssembleSnapshotInput,
     AssembleSnapshotState, CollectEvmNetworkEvidence, CollectEvmNetworkPlan,
-    CollectEvmNetworkState, EvmBalanceAsset, EvmBalanceReadEvidence, EvmCollectionAnchor,
-    EvmNetworkCollectionConfig, EvmTokenDecimalsEvidence, PortfolioCollectionReceipt,
-    ProjectReportConfig, ProjectReportInput, ProjectReportState, PublishEvmHoldingsInput,
-    PublishEvmHoldingsState, SelectHoldingsConfig, SelectHoldingsInput, SelectHoldingsReadEvidence,
-    SelectHoldingsReadPlan, SelectHoldingsState, SelectedHoldings,
+    CollectEvmNetworkState, EvmBalanceReadEvidence, EvmNetworkCollectionConfig,
+    EvmTokenDecimalsEvidence, PortfolioCollectionReceipt, ProjectReportConfig, ProjectReportInput,
+    ProjectReportState, PublishEvmHoldingsInput, PublishEvmHoldingsState, SelectHoldingsConfig,
+    SelectHoldingsInput, SelectHoldingsReadEvidence, SelectHoldingsReadPlan, SelectHoldingsState,
+    SelectedHoldings,
 };
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -113,8 +115,7 @@ impl PortfolioRunnerCapabilities {
     ) -> mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>> {
         let session = (self.bind_evm_read_session)(binding.clone()).await?;
         if !session.evidence().matches_binding(&binding)
-            || session.evidence().implementation_id().as_str()
-                != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+            || session.evidence().implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
         {
             return Err(EvmCapabilityError::provider_failure(
                 mfm_evm_capabilities::evm_diagnostic(
@@ -277,13 +278,7 @@ async fn collect_evm_network(
         .read_block(&EvmBlockSelector::Latest)
         .await
         .map_err(evm_capability_runtime_error)?;
-    let anchor_number = u64::try_from(latest.number).map_err(|_| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "EVM collection block number exceeded u64".to_owned(),
-        )
-    })?;
-    let anchor = EvmCollectionAnchor::new(anchor_number, format!("{:#x}", latest.hash))
-        .map_err(portfolio_evm_state_runtime_error)?;
+    let anchor = EvmBlockAnchor::from_block(&latest);
     let exact = EvmBlockSelector::ExactHash(latest.hash);
 
     let token_decimals = read_token_decimals(plan, Arc::clone(&session), exact.clone()).await?;
@@ -292,14 +287,7 @@ async fn collect_evm_network(
         .read_block(&EvmBlockSelector::Number(latest.number))
         .await
         .map_err(evm_capability_runtime_error)?;
-    let final_number = u64::try_from(final_block.number).map_err(|_| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "EVM canonicality block number exceeded u64".to_owned(),
-        )
-    })?;
-    let final_canonical_block =
-        EvmCollectionAnchor::new(final_number, format!("{:#x}", final_block.hash))
-            .map_err(portfolio_evm_state_runtime_error)?;
+    let final_canonical_block = EvmBlockAnchor::from_block(&final_block);
     Ok(CollectEvmNetworkEvidence::new(
         session.evidence(),
         anchor,
@@ -323,7 +311,7 @@ async fn read_token_decimals(
             let session = Arc::clone(&session);
             let selector = selector.clone();
             tasks.spawn(async move {
-                let contract_address = contract.parse::<Address>().map_err(|_| {
+                let contract_address = contract.as_str().parse::<Address>().map_err(|_| {
                     mfm_runtime::RuntimeError::InvalidRunnerOutput(
                         "certified ERC-20 contract address was invalid".to_owned(),
                     )
@@ -376,16 +364,17 @@ async fn read_balances(
                     .account_address()
                     .map_err(portfolio_evm_state_runtime_error)?;
                 let raw_units = match source.asset() {
-                    EvmBalanceAsset::Native => session
+                    HoldingSourceConfig::Native => session
                         .read_balance(account, &selector)
                         .await
                         .map_err(evm_capability_runtime_error)?,
-                    EvmBalanceAsset::Erc20 { contract_address } => {
-                        let contract = contract_address.parse::<Address>().map_err(|_| {
-                            mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                                "certified ERC-20 contract address was invalid".to_owned(),
-                            )
-                        })?;
+                    HoldingSourceConfig::Erc20 { contract_address } => {
+                        let contract =
+                            contract_address.as_str().parse::<Address>().map_err(|_| {
+                                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                                    "certified ERC-20 contract address was invalid".to_owned(),
+                                )
+                            })?;
                         let call = EvmCall::new(
                             Address::ZERO,
                             contract,

@@ -128,7 +128,7 @@ impl EvmTransactionRunnerCapabilities {
             .map_err(capability_error)?;
         let evidence = session.evidence();
         if !evidence.matches_binding(&binding)
-            || evidence.implementation_id().as_str() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+            || evidence.implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
         {
             return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
                 "bound EVM transaction session violated semantic authority".to_owned(),

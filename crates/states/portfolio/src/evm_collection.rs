@@ -4,14 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future;
 use std::str::FromStr;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, U256};
 use mfm_evm_capabilities::{
-    EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_facts::{FactAudience, FactVisibility};
 use mfm_ids::LocalPublicId;
+use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
+use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
     fact_descriptor_ref, ExternalReadEvidenceSet, FactDescriptorRef, ManagedWriteState, NoContext,
     ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
@@ -47,57 +50,6 @@ fn invalid(reason: impl Into<String>) -> PortfolioEvmError {
     }
 }
 
-/// One balance asset in a portfolio-owned EVM collection plan.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_balance_asset",
-    schema = "mfm.portfolio.evm.balance_asset"
-)]
-pub enum EvmBalanceAsset {
-    /// The semantic network's native asset.
-    Native,
-    /// One ERC-20 contract on the semantic network.
-    Erc20 {
-        /// Canonical non-zero ERC-20 contract address.
-        contract_address: String,
-    },
-}
-
-impl EvmBalanceAsset {
-    /// Creates a checked ERC-20 asset.
-    pub fn erc20(contract_address: impl Into<String>) -> Result<Self, PortfolioEvmError> {
-        let contract_address = contract_address.into();
-        let parsed = parse_address(&contract_address)?;
-        if parsed.is_zero() {
-            return Err(invalid("ERC-20 contract address must be non-zero"));
-        }
-        Ok(Self::Erc20 { contract_address })
-    }
-
-    /// Returns the ERC-20 contract address when this is a token asset.
-    pub fn contract_address(&self) -> Option<&str> {
-        match self {
-            Self::Native => None,
-            Self::Erc20 { contract_address } => Some(contract_address),
-        }
-    }
-
-    fn validate(&self) -> Result<(), PortfolioEvmError> {
-        match self {
-            Self::Native => Ok(()),
-            Self::Erc20 { contract_address } => {
-                let parsed = parse_address(contract_address)?;
-                if parsed.is_zero() {
-                    return Err(invalid("ERC-20 contract address must be non-zero"));
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
 /// One unique account/asset balance source collected for a portfolio.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -107,47 +59,53 @@ impl EvmBalanceAsset {
     schema = "mfm.portfolio.evm.balance_source"
 )]
 pub struct EvmBalanceSource {
-    account: String,
-    asset: EvmBalanceAsset,
+    account: NormalizedEvmAddress,
+    asset: HoldingSourceConfig,
 }
 
 impl EvmBalanceSource {
     /// Creates one checked balance source.
     pub fn new(
-        account: impl Into<String>,
-        asset: EvmBalanceAsset,
+        account: NormalizedEvmAddress,
+        asset: HoldingSourceConfig,
     ) -> Result<Self, PortfolioEvmError> {
-        let source = Self {
-            account: account.into(),
-            asset,
-        };
+        let source = Self { account, asset };
         source.validate()?;
         Ok(source)
     }
 
     /// Returns the canonical account address.
-    pub fn account(&self) -> &str {
+    pub const fn account(&self) -> &NormalizedEvmAddress {
         &self.account
     }
 
     /// Returns the collected asset.
-    pub const fn asset(&self) -> &EvmBalanceAsset {
+    pub const fn asset(&self) -> &HoldingSourceConfig {
         &self.asset
     }
 
     /// Returns the parsed account address for adapter execution.
     pub fn account_address(&self) -> Result<Address, PortfolioEvmError> {
-        parse_address(&self.account)
+        parse_address(self.account.as_str())
     }
 
     /// Returns the parsed token contract address when this is an ERC-20 source.
     pub fn contract_address_value(&self) -> Result<Option<Address>, PortfolioEvmError> {
-        self.asset.contract_address().map(parse_address).transpose()
+        self.asset
+            .contract_address()
+            .map(|address| parse_address(address.as_str()))
+            .transpose()
     }
 
     fn validate(&self) -> Result<(), PortfolioEvmError> {
-        parse_address(&self.account)?;
-        self.asset.validate()
+        if self
+            .asset
+            .contract_address()
+            .is_some_and(|address| address.is_zero())
+        {
+            return Err(invalid("ERC-20 contract address must be non-zero"));
+        }
+        Ok(())
     }
 }
 
@@ -241,12 +199,6 @@ pub fn validate_evm_network_collection_config(
     Ok(())
 }
 
-/// Empty input for an independently planned EVM network read.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, StateInput)]
-#[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.portfolio.input.collect_evm_network")]
-pub struct CollectEvmNetworkInput {}
-
 /// Deterministic request plan for one EVM network collection attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -284,10 +236,10 @@ impl CollectEvmNetworkPlan {
     }
 
     /// Returns distinct token contracts in canonical order.
-    pub fn token_contracts(&self) -> Vec<String> {
+    pub fn token_contracts(&self) -> Vec<NormalizedEvmAddress> {
         self.sources
             .iter()
-            .filter_map(|source| source.asset.contract_address().map(ToOwned::to_owned))
+            .filter_map(|source| source.asset.contract_address().cloned())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -303,92 +255,6 @@ impl CollectEvmNetworkPlan {
     }
 }
 
-/// Canonical block anchor retained for collection replay.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_collection_anchor",
-    schema = "mfm.portfolio.evm.collection_anchor"
-)]
-pub struct EvmCollectionAnchor {
-    block_number: u64,
-    block_hash: String,
-}
-
-impl EvmCollectionAnchor {
-    /// Creates a checked canonical anchor.
-    pub fn new(
-        block_number: u64,
-        block_hash: impl Into<String>,
-    ) -> Result<Self, PortfolioEvmError> {
-        let block_hash = block_hash.into();
-        parse_hash(&block_hash)?;
-        Ok(Self {
-            block_number,
-            block_hash,
-        })
-    }
-
-    /// Returns the block number.
-    pub const fn block_number(&self) -> u64 {
-        self.block_number
-    }
-
-    /// Returns the canonical block hash.
-    pub fn block_hash(&self) -> &str {
-        &self.block_hash
-    }
-
-    /// Returns the parsed block hash for an exact EIP-1898 selector.
-    pub fn block_hash_value(&self) -> Result<B256, PortfolioEvmError> {
-        parse_hash(&self.block_hash)
-    }
-}
-
-/// Redacted provenance for one source-bound EVM collection session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_collection_session",
-    schema = "mfm.portfolio.evm.collection_session"
-)]
-pub struct EvmCollectionSession {
-    network_id: String,
-    chain_id: u64,
-    source_ref: String,
-    implementation_id: String,
-}
-
-impl EvmCollectionSession {
-    /// Converts checked bind-time evidence into retained redacted provenance.
-    pub fn from_session(evidence: &EvmSessionEvidence) -> Self {
-        Self {
-            network_id: evidence.network_id().as_str().to_owned(),
-            chain_id: evidence.chain_id(),
-            source_ref: evidence.source_ref().as_str().to_owned(),
-            implementation_id: evidence.implementation_id().as_str().to_owned(),
-        }
-    }
-
-    fn validate(&self, plan: &CollectEvmNetworkPlan) -> Result<(), PortfolioEvmError> {
-        if self.network_id != plan.network_id
-            || self.chain_id != plan.chain_id
-            || self.implementation_id != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
-        {
-            return Err(invalid(
-                "EVM collection session did not match certified network authority",
-            ));
-        }
-        LocalPublicId::new(&self.source_ref)
-            .map_err(|_| invalid("EVM collection source reference was invalid"))?;
-        LocalPublicId::new(&self.implementation_id)
-            .map_err(|_| invalid("EVM collection implementation identity was invalid"))?;
-        Ok(())
-    }
-}
-
 /// One exact token-decimals result retained once per distinct contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -398,18 +264,19 @@ impl EvmCollectionSession {
     schema = "mfm.portfolio.evm.token_decimals_evidence"
 )]
 pub struct EvmTokenDecimalsEvidence {
-    contract_address: String,
+    contract_address: NormalizedEvmAddress,
     decimals: u8,
 }
 
 impl EvmTokenDecimalsEvidence {
     /// Creates checked token metadata evidence.
     pub fn new(
-        contract_address: impl Into<String>,
+        contract_address: NormalizedEvmAddress,
         decimals: u8,
     ) -> Result<Self, PortfolioEvmError> {
-        let contract_address = contract_address.into();
-        EvmBalanceAsset::erc20(contract_address.clone())?;
+        if contract_address.is_zero() {
+            return Err(invalid("ERC-20 contract address must be non-zero"));
+        }
         Ok(Self {
             contract_address,
             decimals,
@@ -417,7 +284,7 @@ impl EvmTokenDecimalsEvidence {
     }
 
     /// Returns the canonical token contract address.
-    pub fn contract_address(&self) -> &str {
+    pub const fn contract_address(&self) -> &NormalizedEvmAddress {
         &self.contract_address
     }
 
@@ -469,26 +336,26 @@ impl EvmBalanceReadEvidence {
     schema = "mfm.portfolio.external_read.collect_evm_network.evidence"
 )]
 pub struct CollectEvmNetworkEvidence {
-    session: EvmCollectionSession,
-    anchor: EvmCollectionAnchor,
+    session: EvmSessionEvidence,
+    anchor: EvmBlockAnchor,
     token_decimals: Vec<EvmTokenDecimalsEvidence>,
     balances: Vec<EvmBalanceReadEvidence>,
-    final_canonical_block: EvmCollectionAnchor,
+    final_canonical_block: EvmBlockAnchor,
 }
 
 impl CollectEvmNetworkEvidence {
     /// Creates canonical evidence from one live checked session attempt.
     pub fn new(
         session: &EvmSessionEvidence,
-        anchor: EvmCollectionAnchor,
+        anchor: EvmBlockAnchor,
         mut token_decimals: Vec<EvmTokenDecimalsEvidence>,
         mut balances: Vec<EvmBalanceReadEvidence>,
-        final_canonical_block: EvmCollectionAnchor,
+        final_canonical_block: EvmBlockAnchor,
     ) -> Self {
         token_decimals.sort();
         balances.sort();
         Self {
-            session: EvmCollectionSession::from_session(session),
+            session: session.clone(),
             anchor,
             token_decimals,
             balances,
@@ -539,7 +406,7 @@ impl EvmCollectedBalance {
 pub struct EvmCollectionBatch {
     network_id: String,
     chain_id: u64,
-    anchor: EvmCollectionAnchor,
+    anchor: EvmBlockAnchor,
     balances: Vec<EvmCollectedBalance>,
 }
 
@@ -555,7 +422,7 @@ impl EvmCollectionBatch {
     }
 
     /// Returns the common exact canonical anchor.
-    pub const fn anchor(&self) -> &EvmCollectionAnchor {
+    pub const fn anchor(&self) -> &EvmBlockAnchor {
         &self.anchor
     }
 
@@ -569,7 +436,7 @@ impl EvmCollectionBatch {
         config: &EvmNetworkCollectionConfig,
     ) -> Result<(), PortfolioEvmError> {
         validate_evm_network_collection_config(config).map_err(invalid)?;
-        parse_hash(&self.anchor.block_hash)?;
+        validate_anchor(&self.anchor)?;
         if self.network_id != config.network_id
             || self.chain_id != config.chain_id
             || self.balances.len() != config.sources.len()
@@ -598,13 +465,13 @@ impl EvmCollectionBatch {
                 ));
             }
             match balance.source.asset() {
-                EvmBalanceAsset::Native if balance.decimals != config.native_decimals => {
+                HoldingSourceConfig::Native if balance.decimals != config.native_decimals => {
                     return Err(invalid(
                         "native balance decimals did not match network config",
                     ));
                 }
-                EvmBalanceAsset::Erc20 { contract_address }
-                    if token_decimals.get(contract_address.as_str()) != Some(&balance.decimals) =>
+                HoldingSourceConfig::Erc20 { contract_address }
+                    if token_decimals.get(contract_address) != Some(&balance.decimals) =>
                 {
                     return Err(invalid(
                         "ERC-20 balances disagreed on one contract decimal scale",
@@ -632,7 +499,7 @@ impl CollectEvmNetworkState {
 impl StateSpec for CollectEvmNetworkState {
     type Config = EvmNetworkCollectionConfig;
     type Context = NoContext;
-    type Input = CollectEvmNetworkInput;
+    type Input = ();
     type Output = EvmCollectionBatch;
     type Effect = mfm_effects::ReadExternal;
     type Caps = (EvmReadCapability,);
@@ -700,13 +567,13 @@ pub fn reduce_evm_network_collection(
     evidence: &CollectEvmNetworkEvidence,
 ) -> Result<EvmCollectionBatch, PortfolioEvmError> {
     validate_evm_network_collection_config(&plan.config()).map_err(invalid)?;
-    evidence.session.validate(plan)?;
+    validate_session(&evidence.session, plan)?;
     if evidence.anchor != evidence.final_canonical_block {
         return Err(invalid(
             "EVM collection anchor was no longer canonical after observations",
         ));
     }
-    parse_hash(&evidence.anchor.block_hash)?;
+    validate_anchor(&evidence.anchor)?;
 
     let expected_contracts = plan.token_contracts();
     if evidence.token_decimals.len() != expected_contracts.len() {
@@ -714,10 +581,9 @@ pub fn reduce_evm_network_collection(
     }
     let mut decimals = BTreeMap::new();
     for (expected, observed) in expected_contracts.iter().zip(&evidence.token_decimals) {
-        EvmBalanceAsset::erc20(observed.contract_address.clone())?;
         if &observed.contract_address != expected
             || decimals
-                .insert(observed.contract_address.as_str(), observed.decimals)
+                .insert(&observed.contract_address, observed.decimals)
                 .is_some()
         {
             return Err(invalid(
@@ -738,9 +604,9 @@ pub fn reduce_evm_network_collection(
         }
         parse_quantity(&observed.raw_units)?;
         let decimals = match observed.source.asset() {
-            EvmBalanceAsset::Native => plan.native_decimals,
-            EvmBalanceAsset::Erc20 { contract_address } => *decimals
-                .get(contract_address.as_str())
+            HoldingSourceConfig::Native => plan.native_decimals,
+            HoldingSourceConfig::Erc20 { contract_address } => *decimals
+                .get(contract_address)
                 .ok_or_else(|| invalid("ERC-20 balance lacked token metadata"))?,
         };
         balances.push(EvmCollectedBalance {
@@ -780,7 +646,7 @@ pub struct PublishEvmHoldingsInput {
 pub struct EvmNetworkSnapshot {
     network_id: String,
     chain_id: u64,
-    anchor: EvmCollectionAnchor,
+    anchor: EvmBlockAnchor,
     balances: Vec<EvmCollectedBalance>,
 }
 
@@ -796,7 +662,7 @@ impl EvmNetworkSnapshot {
     }
 
     /// Returns the common exact canonical anchor.
-    pub const fn anchor(&self) -> &EvmCollectionAnchor {
+    pub const fn anchor(&self) -> &EvmBlockAnchor {
         &self.anchor
     }
 
@@ -831,8 +697,7 @@ impl EvmNetworkSnapshot {
                         &balance.source,
                     ),
                     EvmBalanceSnapshotResponse {
-                        block_number: self.anchor.block_number,
-                        block_hash: self.anchor.block_hash.clone(),
+                        anchor: self.anchor.clone(),
                         raw_units: balance.raw_units.clone(),
                         decimals: balance.decimals,
                     },
@@ -921,23 +786,17 @@ pub fn publish_evm_holdings(
 pub struct EvmBalanceSnapshotSubject {
     network: String,
     chain_id: u64,
-    account: String,
-    asset: String,
+    account: NormalizedEvmAddress,
+    asset: HoldingSourceConfig,
 }
 
 impl EvmBalanceSnapshotSubject {
     fn from_source(network: &str, chain_id: u64, source: &EvmBalanceSource) -> Self {
-        let asset = match source.asset() {
-            EvmBalanceAsset::Native => "native".to_owned(),
-            EvmBalanceAsset::Erc20 { contract_address } => {
-                format!("erc20:{contract_address}")
-            }
-        };
         Self {
             network: network.to_owned(),
             chain_id,
             account: source.account.clone(),
-            asset,
+            asset: source.asset.clone(),
         }
     }
 }
@@ -951,8 +810,7 @@ impl EvmBalanceSnapshotSubject {
     schema = "mfm.portfolio.fact.evm_balance_snapshot.response"
 )]
 pub struct EvmBalanceSnapshotResponse {
-    block_number: u64,
-    block_hash: String,
+    anchor: EvmBlockAnchor,
     raw_units: String,
     decimals: u8,
 }
@@ -988,35 +846,6 @@ pub struct EvmBalanceSnapshotResponse {
     exposure = "returnable"
 ))]
 #[mfm_fact(field(
-    id = "subject.asset",
-    source = "subject",
-    path = "asset",
-    value_type = "string",
-    exposure = "returnable"
-))]
-#[mfm_fact(field(
-    id = "result.block_number",
-    source = "result",
-    path = "block_number",
-    value_type = "unsigned_integer",
-    operators(
-        equal,
-        greater_than,
-        greater_than_or_equal,
-        less_than,
-        less_than_or_equal
-    ),
-    exposure = "returnable",
-    sortable
-))]
-#[mfm_fact(field(
-    id = "result.block_hash",
-    source = "result",
-    path = "block_hash",
-    value_type = "string",
-    exposure = "returnable"
-))]
-#[mfm_fact(field(
     id = "result.raw_units",
     source = "result",
     path = "raw_units",
@@ -1044,14 +873,6 @@ pub struct EvmBalanceSnapshotResponse {
     ),
     exposure = "returnable",
     sortable
-))]
-#[mfm_fact(ordering(
-    name = "result.block_number.desc",
-    term(
-        field = "result.block_number",
-        direction = "descending",
-        nulls = "last"
-    )
 ))]
 pub struct EvmBalanceSnapshotFact {
     subject: EvmBalanceSnapshotSubject,
@@ -1083,20 +904,34 @@ fn network_binding(
         .map_err(|_| invalid("EVM collection network binding was invalid"))
 }
 
+fn validate_session(
+    session: &EvmSessionEvidence,
+    plan: &CollectEvmNetworkPlan,
+) -> Result<(), PortfolioEvmError> {
+    if session.network_id() != plan.network_id
+        || session.chain_id() != plan.chain_id
+        || session.implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    {
+        return Err(invalid(
+            "EVM collection session did not match certified network authority",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_anchor(anchor: &EvmBlockAnchor) -> Result<(), PortfolioEvmError> {
+    anchor
+        .to_block()
+        .map(|_| ())
+        .map_err(|_| invalid("EVM collection block anchor was invalid"))
+}
+
 fn parse_address(value: &str) -> Result<Address, PortfolioEvmError> {
     let address = Address::from_str(value).map_err(|_| invalid("EVM address was invalid"))?;
     if format!("{address:#x}") != value {
         return Err(invalid("EVM address was not canonical"));
     }
     Ok(address)
-}
-
-fn parse_hash(value: &str) -> Result<B256, PortfolioEvmError> {
-    let hash = B256::from_str(value).map_err(|_| invalid("EVM block hash was invalid"))?;
-    if format!("{hash:#x}") != value {
-        return Err(invalid("EVM block hash was not canonical"));
-    }
-    Ok(hash)
 }
 
 fn parse_quantity(value: &str) -> Result<U256, PortfolioEvmError> {

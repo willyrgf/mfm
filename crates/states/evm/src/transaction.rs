@@ -4,9 +4,9 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_effects::ApplySideEffect;
 use mfm_evm_capabilities::{
-    EvmBlock, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction as CapabilityTransaction,
-    EvmReceipt as CapabilityReceipt, EvmReceiptStatus as CapabilityReceiptStatus,
-    EvmSessionEvidence, EvmTransactionEstimate,
+    EvmBlock, EvmBlockAnchor, EvmFeeInputs, EvmNetworkBinding,
+    EvmObservedTransaction as CapabilityTransaction, EvmReceipt as CapabilityReceipt,
+    EvmReceiptStatus as CapabilityReceiptStatus, EvmSessionEvidence, EvmTransactionEstimate,
 };
 use mfm_ids::LocalPublicId;
 use mfm_program::{
@@ -19,11 +19,12 @@ use mfm_values::MfmValue as _;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{
-    canonical_address, canonical_bytes, canonical_hash, invalid, parse_address, parse_bytes,
-    parse_hash, parse_quantity, validate_session,
+    block_anchor_number, canonical_address, canonical_bytes, canonical_hash, invalid,
+    parse_address, parse_bytes, parse_hash, parse_quantity, validate_block_anchor,
+    validate_session,
 };
 use crate::identity::{adapter_binding, state_kind, state_version};
-use crate::{EvmStateError, RedactedEvmSessionEvidence};
+use crate::EvmStateError;
 
 /// Maximum init-code or calldata size admitted into typed transaction intent.
 pub const EVM_TRANSACTION_DATA_MAX_BYTES: usize = 128 * 1024;
@@ -681,7 +682,7 @@ pub struct EvmPreparedTransaction {
     signing_digest: String,
     expected_transaction_hash: String,
     expected_create_address: Option<String>,
-    preparation_session: RedactedEvmSessionEvidence,
+    preparation_session: EvmSessionEvidence,
 }
 
 impl EvmPreparedTransaction {
@@ -717,7 +718,7 @@ impl EvmPreparedTransaction {
             signing_digest: canonical_hash(envelope.signing_digest()),
             expected_transaction_hash: canonical_hash(expected_transaction_hash),
             expected_create_address,
-            preparation_session: RedactedEvmSessionEvidence::from_session(preparation_session)?,
+            preparation_session: preparation_session.clone(),
         };
         prepared.validate()?;
         Ok(prepared)
@@ -826,7 +827,7 @@ pub struct EvmTransactionSubmission {
     transaction_hash: String,
     from: String,
     unsigned: EvmUnsignedTransaction,
-    session: RedactedEvmSessionEvidence,
+    session: EvmSessionEvidence,
 }
 
 impl EvmTransactionSubmission {
@@ -856,7 +857,7 @@ impl EvmTransactionSubmission {
             transaction_hash: canonical_hash(observation.transaction_hash),
             from: canonical_address(observation.from),
             unsigned,
-            session: RedactedEvmSessionEvidence::from_session(session)?,
+            session: session.clone(),
         };
         submission.validate_against(prepared)?;
         Ok(submission)
@@ -901,7 +902,7 @@ impl EvmTransactionSubmission {
 )]
 pub struct EvmTransactionRecoveryEvidence {
     transaction_hash: String,
-    session: RedactedEvmSessionEvidence,
+    session: EvmSessionEvidence,
 }
 
 impl EvmTransactionRecoveryEvidence {
@@ -913,7 +914,7 @@ impl EvmTransactionRecoveryEvidence {
         prepared.validate()?;
         let evidence = Self {
             transaction_hash: prepared.expected_transaction_hash.clone(),
-            session: RedactedEvmSessionEvidence::from_session(session)?,
+            session: session.clone(),
         };
         evidence.validate_against(prepared)?;
         Ok(evidence)
@@ -995,7 +996,7 @@ pub struct EvmTransactionReceipt {
     gas_used: String,
     cumulative_gas_used: String,
     logs: Vec<EvmTransactionLog>,
-    session: RedactedEvmSessionEvidence,
+    session: EvmSessionEvidence,
 }
 
 impl EvmTransactionReceipt {
@@ -1038,7 +1039,7 @@ impl EvmTransactionReceipt {
                     removed: log.removed,
                 })
                 .collect(),
-            session: RedactedEvmSessionEvidence::from_session(session)?,
+            session: session.clone(),
         };
         converted.validate_against(prepared)?;
         Ok(converted)
@@ -1065,11 +1066,11 @@ impl EvmTransactionReceipt {
     }
 
     /// Returns the inclusion anchor.
-    pub fn block_anchor(&self) -> EvmBlockAnchor {
-        EvmBlockAnchor {
-            number: self.block_number.clone(),
-            hash: self.block_hash.clone(),
-        }
+    pub fn block_anchor(&self) -> Result<EvmBlockAnchor, EvmStateError> {
+        Ok(EvmBlockAnchor::new(
+            self.block_number_quantity()?,
+            self.block_hash_value()?,
+        ))
     }
 
     /// Returns the inclusion block number as U256.
@@ -1222,70 +1223,6 @@ impl EvmTransactionLog {
     }
 }
 
-/// Canonical block number and hash pair.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "block_anchor",
-    version = "1",
-    schema = "mfm.evm.block_anchor"
-)]
-pub struct EvmBlockAnchor {
-    number: String,
-    hash: String,
-}
-
-impl EvmBlockAnchor {
-    /// Creates one canonical concrete block anchor.
-    pub fn new(number: U256, hash: B256) -> Self {
-        Self {
-            number: number.to_string(),
-            hash: canonical_hash(hash),
-        }
-    }
-
-    /// Converts a checked capability block.
-    pub fn from_block(block: &EvmBlock) -> Self {
-        Self::new(block.number, block.hash)
-    }
-
-    /// Returns the canonical block number.
-    pub fn number(&self) -> &str {
-        &self.number
-    }
-
-    /// Returns the canonical block hash.
-    pub fn hash(&self) -> &str {
-        &self.hash
-    }
-
-    /// Returns the anchor number as an Alloy quantity.
-    pub fn number_quantity(&self) -> Result<U256, EvmStateError> {
-        parse_quantity(&self.number)
-    }
-
-    /// Returns the anchor hash as an Alloy primitive.
-    pub fn hash_value(&self) -> Result<B256, EvmStateError> {
-        parse_hash(&self.hash)
-    }
-
-    /// Converts this canonical persisted anchor into a capability block value.
-    pub fn to_block(&self) -> Result<EvmBlock, EvmStateError> {
-        self.validate()?;
-        Ok(EvmBlock {
-            number: self.number_quantity()?,
-            hash: self.hash_value()?,
-        })
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), EvmStateError> {
-        parse_quantity(&self.number)?;
-        parse_hash(&self.hash)?;
-        Ok(())
-    }
-}
-
 /// Finality evidence from a fresh receipt, its canonical block, and a checked head.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -1301,7 +1238,7 @@ pub struct EvmTransactionConfirmation {
     head: EvmBlockAnchor,
     required_depth: u64,
     confirmations: String,
-    session: RedactedEvmSessionEvidence,
+    session: EvmSessionEvidence,
 }
 
 impl EvmTransactionConfirmation {
@@ -1328,7 +1265,7 @@ impl EvmTransactionConfirmation {
             head: EvmBlockAnchor::from_block(head),
             required_depth,
             confirmations: confirmations.to_string(),
-            session: RedactedEvmSessionEvidence::from_session(session)?,
+            session: session.clone(),
         };
         confirmation.validate_against(prepared, retained_receipt)?;
         Ok(confirmation)
@@ -1357,8 +1294,8 @@ impl EvmTransactionConfirmation {
             prepared.intent.network_id(),
             prepared.intent.chain_id(),
         )?;
-        self.canonical_block.validate()?;
-        self.head.validate()?;
+        validate_block_anchor(&self.canonical_block)?;
+        validate_block_anchor(&self.head)?;
         if self.required_depth == 0 {
             return Err(invalid("confirmation depth must be positive"));
         }
@@ -1372,11 +1309,11 @@ impl EvmTransactionConfirmation {
                 "fresh receipt provenance differed from confirmation session",
             ));
         }
-        if self.canonical_block != retained_receipt.block_anchor() {
+        if self.canonical_block != retained_receipt.block_anchor()? {
             return Err(invalid("canonical block did not match receipt anchor"));
         }
         let receipt_number = parse_quantity(&retained_receipt.block_number)?;
-        let head_number = parse_quantity(&self.head.number)?;
+        let head_number = block_anchor_number(&self.head)?;
         let recomputed = head_number
             .checked_sub(receipt_number)
             .and_then(|distance| distance.checked_add(U256::from(1)))

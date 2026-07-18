@@ -31,7 +31,6 @@
 mod canonical;
 mod contract_validation;
 mod identity;
-mod source_binding;
 mod transaction;
 
 pub use contract_validation::{
@@ -42,13 +41,13 @@ pub use contract_validation::{
     EVM_CONTRACT_VALIDATION_MAX_CALLS, EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES,
 };
 pub use identity::{evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version};
-pub use source_binding::RedactedEvmSessionEvidence;
+pub use mfm_evm_capabilities::EvmBlockAnchor;
 pub use transaction::{
-    evm_sender_lane_resource_claim, EvmAccessListEntry, EvmBlockAnchor, EvmExecutionStatus,
-    EvmPreparedTransaction, EvmSenderLane, EvmTransactionAction, EvmTransactionActionKind,
-    EvmTransactionConfig, EvmTransactionConfirmation, EvmTransactionIntent, EvmTransactionLog,
-    EvmTransactionOutcome, EvmTransactionReceipt, EvmTransactionRecoveryEvidence,
-    EvmTransactionResult, EvmTransactionSubmission, EvmTransactionSuccess, EvmUnsignedTransaction,
+    evm_sender_lane_resource_claim, EvmAccessListEntry, EvmExecutionStatus, EvmPreparedTransaction,
+    EvmSenderLane, EvmTransactionAction, EvmTransactionActionKind, EvmTransactionConfig,
+    EvmTransactionConfirmation, EvmTransactionIntent, EvmTransactionLog, EvmTransactionOutcome,
+    EvmTransactionReceipt, EvmTransactionRecoveryEvidence, EvmTransactionResult,
+    EvmTransactionSubmission, EvmTransactionSuccess, EvmUnsignedTransaction,
     SubmitEvmTransactionState, EVM_GAS_POLICY, EVM_SENDER_LANE_NAMESPACE,
     EVM_TRANSACTION_DATA_MAX_BYTES, EVM_TRANSACTION_FEE_POLICY,
 };

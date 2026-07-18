@@ -10,18 +10,18 @@ use mfm_facts::{
     StoreReadFrontier, StoreReadFrontierType, StoreScopeRef,
 };
 use mfm_portfolio_model::portfolio::ExecutionAnchor;
-use mfm_portfolio_model::symbol::{HoldingSourceConfig, ObservationAnchor};
+use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 
+use crate::selection::{holding_candidate_from_bitcoin, BitcoinHoldingCandidateFields};
 use crate::{
-    holding_candidate_from_normalized, observations_from_selected_holdings,
-    portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
-    project_network_pins_from_observations, symbols_by_id_map, validate_receipt_against_portfolio,
-    CollectedHoldingReceipt, HoldingCandidate, HoldingSourceKey, NormalizedHoldingFields,
-    PortfolioCollectionReceipt, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
-    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput, SelectedHolding,
-    SelectedHoldings,
+    observations_from_selected_holdings, portfolio_holding_select_scope_decision_hash,
+    portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
+    symbols_by_id_map, validate_receipt_against_portfolio, CollectedHoldingReceipt,
+    HoldingCandidate, HoldingSourceKey, PortfolioCollectionReceipt, PortfolioHoldingErrorCode,
+    PortfolioHoldingSelectionError, SelectHoldingsConfig, SelectHoldingsFactDescriptors,
+    SelectHoldingsInput, SelectedHolding, SelectedHoldings,
 };
 
 /// Complete deterministic fact-query plan for receipt-pinned portfolio selection.
@@ -493,18 +493,16 @@ fn btc_candidate(
             "hydrated Bitcoin response did not match receipt anchor/status",
         ));
     }
-    holding_candidate_from_normalized(
+    holding_candidate_from_bitcoin(
         entry.requirement(),
         store_commit_order,
         fact_ref.fact_claim_id().clone(),
-        NormalizedHoldingFields {
+        BitcoinHoldingCandidateFields {
             holding,
             raw_dec: balance_sats.to_string(),
             decimals: 8,
-            observation_anchor: ObservationAnchor::Bitcoin {
-                height: anchor_height,
-                block_hash: anchor_hash.to_owned(),
-            },
+            height: anchor_height,
+            block_hash: anchor_hash.to_owned(),
             coverage: coverage.to_owned(),
             source_status: source_status.to_owned(),
         },

@@ -33,23 +33,21 @@ pub use collection_receipt::{
 };
 pub use evm_collection::{
     evm_balance_fact_visibility, publish_evm_holdings, reduce_evm_network_collection,
-    validate_evm_network_collection_config, CollectEvmNetworkEvidence, CollectEvmNetworkInput,
-    CollectEvmNetworkInputHandles, CollectEvmNetworkPlan, CollectEvmNetworkState, EvmBalanceAsset,
-    EvmBalanceReadEvidence, EvmBalanceSnapshotFact, EvmBalanceSnapshotResponse,
-    EvmBalanceSnapshotSubject, EvmBalanceSource, EvmCollectedBalance, EvmCollectionAnchor,
-    EvmCollectionBatch, EvmCollectionSession, EvmNetworkCollectionConfig, EvmNetworkSnapshot,
-    EvmTokenDecimalsEvidence, PortfolioEvmError, PublishEvmHoldingsInput,
-    PublishEvmHoldingsInputHandles, PublishEvmHoldingsState, EVM_NETWORK_HOLDING_SOURCE_LIMIT,
+    validate_evm_network_collection_config, CollectEvmNetworkEvidence, CollectEvmNetworkPlan,
+    CollectEvmNetworkState, EvmBalanceReadEvidence, EvmBalanceSnapshotFact,
+    EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject, EvmBalanceSource, EvmCollectedBalance,
+    EvmCollectionBatch, EvmNetworkCollectionConfig, EvmNetworkSnapshot, EvmTokenDecimalsEvidence,
+    PortfolioEvmError, PublishEvmHoldingsInput, PublishEvmHoldingsInputHandles,
+    PublishEvmHoldingsState, EVM_NETWORK_HOLDING_SOURCE_LIMIT,
 };
 pub use holding_read::{
     PortfolioHoldingFactResponse, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
 };
 pub use selection::{
-    holding_candidate_from_normalized, portfolio_holding_select_scope_decision_hash,
-    portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
-    HoldingAnchor, HoldingCandidate, NormalizedHoldingFields, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, SelectedHolding, SelectedHoldingMaterial,
-    PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
+    portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
+    project_network_pins_from_observations, HoldingAnchor, HoldingCandidate,
+    PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, SelectedHolding,
+    SelectedHoldingMaterial, PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,8 +64,8 @@ use mfm_portfolio_model::portfolio::{
     ValidatedPortfolioConfig, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
-    AnchoredHoldingSource, Observation, ObservationAnchor, ObservationQuantity, ObservationValue,
-    QuoteCode, SymbolConfig,
+    AnchoredHoldingSource, Observation, ObservationQuantity, ObservationValue, QuoteCode,
+    SymbolConfig,
 };
 use mfm_program::{
     AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, PureState, ReadState, StateError,

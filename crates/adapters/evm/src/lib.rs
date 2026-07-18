@@ -83,8 +83,7 @@ impl EvmValidationRunnerCapabilities {
     ) -> mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>> {
         let session = (self.bind_evm_read_session)(binding.clone()).await?;
         if !session.evidence().matches_binding(&binding)
-            || session.evidence().implementation_id().as_str()
-                != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+            || session.evidence().implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
         {
             return Err(EvmCapabilityError::provider_failure(
                 mfm_evm_capabilities::evm_diagnostic(

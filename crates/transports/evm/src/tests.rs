@@ -26,6 +26,8 @@ enum Mode {
     ReceiptRemoved,
     HttpFailure,
     JsonError,
+    Oversized,
+    Stall,
 }
 
 struct TestServer {
@@ -61,6 +63,9 @@ impl TestServer {
                     let request: Value =
                         serde_json::from_slice(request_body(&bytes[..read])).expect("request JSON");
                     captured.lock().expect("requests").push(request.clone());
+                    if matches!(mode, Mode::Stall) {
+                        std::future::pending::<()>().await;
+                    }
                     let response = response(mode, &request);
                     stream
                         .write_all(response.as_bytes())
@@ -131,10 +136,7 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
     assert_eq!(code.bytes, Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]));
     assert_eq!(code.hash, keccak256(&code.bytes));
     assert_eq!(call, Bytes::from_static(&[0x12, 0x34]));
-    assert_eq!(
-        EvmReadSession::evidence(&session).source_ref().as_str(),
-        "primary"
-    );
+    assert_eq!(EvmReadSession::evidence(&session).source_ref(), "primary");
     assert!(!format!("{session:?}").contains(&server.url));
     assert!(!format!("{session:?}").contains("top-secret"));
 
@@ -277,6 +279,45 @@ async fn bind_rejects_chain_mismatch_and_redacts_endpoint() {
     assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
     assert!(!rendered.contains(&server.url));
     assert!(!rendered.contains("top-secret"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "eth_chainId");
+}
+
+#[tokio::test]
+async fn oversized_bind_response_fails_before_body_read() {
+    let server = TestServer::spawn(Mode::Oversized).await;
+    let error = EvmJsonRpcSession::bind(
+        binding(1),
+        LocalPublicId::new("primary").expect("source"),
+        server.url,
+        None,
+    )
+    .await
+    .expect_err("oversized response");
+
+    assert_eq!(error, EvmTransportError::ResponseTooLarge);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_bind_response_obeys_request_timeout() {
+    let server = TestServer::spawn(Mode::Stall).await;
+    let bind = tokio::spawn(EvmJsonRpcSession::bind(
+        binding(1),
+        LocalPublicId::new("primary").expect("source"),
+        server.url.clone(),
+        None,
+    ));
+    while server.requests().is_empty() {
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::advance(REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+    let error = bind
+        .await
+        .expect("bind task")
+        .expect_err("stalled response must time out");
+    assert!(matches!(error, EvmTransportError::TransportFailed { .. }));
 }
 
 #[tokio::test]
@@ -346,6 +387,12 @@ fn private_codecs_reject_noncanonical_quantities_and_data() {
 fn response(mode: Mode, request: &Value) -> String {
     if matches!(mode, Mode::HttpFailure) {
         return "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n".to_owned();
+    }
+    if matches!(mode, Mode::Oversized) {
+        return format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            MAX_RESPONSE_BYTES + 1
+        );
     }
     let method = request["method"].as_str().expect("method");
     let body = if matches!(mode, Mode::JsonError) {

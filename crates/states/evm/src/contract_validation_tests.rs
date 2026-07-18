@@ -220,8 +220,7 @@ fn reducer_rejects_changed_call_context_return_source_or_canonical_block() {
     assert!(validate_evm_contract(&plan, &changed_return).is_err());
 
     let mut changed_source = valid.clone();
-    changed_source.session =
-        RedactedEvmSessionEvidence::from_session(&source("other", 1)).expect("source evidence");
+    changed_source.session = source("other", 1);
     assert!(validate_evm_contract(&plan, &changed_source).is_err());
 
     let mut changed_anchor = valid;

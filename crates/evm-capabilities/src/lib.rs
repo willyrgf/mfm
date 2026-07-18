@@ -20,6 +20,7 @@
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::str::FromStr;
 
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
@@ -30,7 +31,8 @@ use mfm_capabilities::{
     ReadExternalRole, RedactedProviderDiagnostic,
 };
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
-use serde::{Deserialize, Serialize};
+use mfm_program_derive::MfmValue;
+use serde::{de, Deserialize, Serialize};
 
 /// Result type for EVM capability contracts.
 pub type Result<T> = std::result::Result<T, EvmCapabilityError>;
@@ -116,12 +118,18 @@ impl EvmNetworkBinding {
 }
 
 /// Redacted provenance for one checked, source-stable session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "session_evidence",
+    version = "1",
+    schema = "mfm.evm.session_evidence"
+)]
 pub struct EvmSessionEvidence {
-    network_id: LocalPublicId,
-    chain_id: NonZeroU64,
-    source_ref: LocalPublicId,
-    implementation_id: LocalPublicId,
+    network_id: String,
+    chain_id: u64,
+    source_ref: String,
+    implementation_id: String,
 }
 
 impl EvmSessionEvidence {
@@ -132,37 +140,62 @@ impl EvmSessionEvidence {
         implementation_id: LocalPublicId,
     ) -> Self {
         Self {
-            network_id: binding.network_id.clone(),
-            chain_id: binding.expected_chain_id,
-            source_ref,
-            implementation_id,
+            network_id: binding.network_id.as_str().to_owned(),
+            chain_id: binding.expected_chain_id.get(),
+            source_ref: source_ref.as_str().to_owned(),
+            implementation_id: implementation_id.as_str().to_owned(),
         }
     }
 
     /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &LocalPublicId {
+    pub fn network_id(&self) -> &str {
         &self.network_id
     }
 
     /// Returns the verified chain id.
     pub const fn chain_id(&self) -> u64 {
-        self.chain_id.get()
+        self.chain_id
     }
 
     /// Returns the process-local source reference.
-    pub const fn source_ref(&self) -> &LocalPublicId {
+    pub fn source_ref(&self) -> &str {
         &self.source_ref
     }
 
     /// Returns the certified transport implementation identity.
-    pub const fn implementation_id(&self) -> &LocalPublicId {
+    pub fn implementation_id(&self) -> &str {
         &self.implementation_id
     }
 
     /// Returns whether this evidence belongs to the binding.
     pub fn matches_binding(&self, binding: &EvmNetworkBinding) -> bool {
-        self.network_id == binding.network_id
-            && self.chain_id.get() == binding.expected_chain_id.get()
+        self.network_id == binding.network_id.as_str()
+            && self.chain_id == binding.expected_chain_id.get()
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmSessionEvidence {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            network_id: String,
+            chain_id: u64,
+            source_ref: String,
+            implementation_id: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let network_id = LocalPublicId::new(&wire.network_id).map_err(de::Error::custom)?;
+        let binding =
+            EvmNetworkBinding::new(network_id, wire.chain_id).map_err(de::Error::custom)?;
+        let source_ref = LocalPublicId::new(&wire.source_ref).map_err(de::Error::custom)?;
+        let implementation_id =
+            LocalPublicId::new(&wire.implementation_id).map_err(de::Error::custom)?;
+        Ok(Self::new(&binding, source_ref, implementation_id))
     }
 }
 
@@ -184,6 +217,110 @@ pub struct EvmBlock {
     pub number: U256,
     /// Block hash.
     pub hash: B256,
+}
+
+/// Canonical persisted EVM block number and hash pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "block_anchor",
+    version = "1",
+    schema = "mfm.evm.block_anchor"
+)]
+pub struct EvmBlockAnchor {
+    number: String,
+    hash: String,
+}
+
+impl EvmBlockAnchor {
+    /// Creates one concrete block anchor without narrowing its U256 number.
+    pub fn new(number: U256, hash: B256) -> Self {
+        Self {
+            number: number.to_string(),
+            hash: format!("{hash:#x}"),
+        }
+    }
+
+    /// Converts a checked capability block.
+    pub fn from_block(block: &EvmBlock) -> Self {
+        Self::new(block.number, block.hash)
+    }
+
+    /// Returns the canonical decimal block number.
+    pub fn number(&self) -> &str {
+        &self.number
+    }
+
+    /// Returns the canonical lower-case block hash.
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    /// Parses the checked block number as an Alloy U256.
+    pub fn number_quantity(&self) -> Result<U256> {
+        parse_anchor_number(&self.number)
+    }
+
+    /// Parses the checked block hash as an Alloy B256.
+    pub fn hash_value(&self) -> Result<B256> {
+        parse_anchor_hash(&self.hash)
+    }
+
+    /// Converts this persisted anchor into a capability block value.
+    pub fn to_block(&self) -> Result<EvmBlock> {
+        Ok(EvmBlock {
+            number: self.number_quantity()?,
+            hash: self.hash_value()?,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmBlockAnchor {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            number: String,
+            hash: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let number = parse_anchor_number(&wire.number).map_err(de::Error::custom)?;
+        let hash = parse_anchor_hash(&wire.hash).map_err(de::Error::custom)?;
+        Ok(Self::new(number, hash))
+    }
+}
+
+fn parse_anchor_number(value: &str) -> Result<U256> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::InvalidBlockAnchor,
+        });
+    }
+    let number = U256::from_str(value).map_err(|_| EvmCapabilityError::InvalidRequest {
+        reason: EvmInvalidRequest::InvalidBlockAnchor,
+    })?;
+    if number.to_string() != value {
+        return Err(EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::InvalidBlockAnchor,
+        });
+    }
+    Ok(number)
+}
+
+fn parse_anchor_hash(value: &str) -> Result<B256> {
+    let hash = B256::from_str(value).map_err(|_| EvmCapabilityError::InvalidRequest {
+        reason: EvmInvalidRequest::InvalidBlockAnchor,
+    })?;
+    if format!("{hash:#x}") != value {
+        return Err(EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::InvalidBlockAnchor,
+        });
+    }
+    Ok(hash)
 }
 
 /// Checked call request.
@@ -549,6 +686,8 @@ pub enum EvmInvalidRequest {
     EmptySignedTransaction,
     /// Receipt/log identities were inconsistent or a log was removed.
     IncoherentReceipt,
+    /// A persisted block anchor was malformed or non-canonical.
+    InvalidBlockAnchor,
 }
 
 /// Redaction-safe EVM capability error.

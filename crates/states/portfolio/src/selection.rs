@@ -5,15 +5,15 @@
 //! before this module projects a hydrated, identity-matching fact into an observation.
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
+use alloy_primitives::U256;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkPin};
-use mfm_portfolio_model::symbol::{
-    AnchoredHoldingSource, HoldingSourceConfig, Observation, ObservationAnchor,
-};
+use mfm_portfolio_model::symbol::{AnchoredHoldingSource, HoldingSourceConfig, Observation};
 
 /// Certified selection policy id for receipt-pinned portfolio holding selection.
 pub const PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID: &str =
@@ -162,40 +162,30 @@ pub struct SelectedHoldingMaterial {
     /// Token decimals.
     pub decimals: u8,
     /// Family-specific execution anchor for observation source.
-    pub observation_anchor: ObservationAnchor,
+    pub observation_anchor: ExecutionAnchor,
     /// Coverage tag retained for honesty surfaces after selection.
     pub coverage: String,
     /// Source status tag.
     pub source_status: String,
 }
 
-/// Family-normalized quantity/anchor fields used to build a [`HoldingCandidate`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NormalizedHoldingFields {
-    /// Direct holding source for the observation.
-    pub holding: HoldingSourceConfig,
-    /// Raw amount decimal string.
-    pub raw_dec: String,
-    /// Token decimals.
-    pub decimals: u8,
-    /// Family-specific execution anchor for observation source.
-    pub observation_anchor: ObservationAnchor,
-    /// Coverage tag checked by the portfolio selection policy.
-    pub coverage: String,
-    /// Source status tag.
-    pub source_status: String,
+pub(crate) struct BitcoinHoldingCandidateFields {
+    pub(crate) holding: HoldingSourceConfig,
+    pub(crate) raw_dec: String,
+    pub(crate) decimals: u8,
+    pub(crate) height: u64,
+    pub(crate) block_hash: String,
+    pub(crate) coverage: String,
+    pub(crate) source_status: String,
 }
 
-/// Builds a holding candidate from family-normalized scalars (no BTC/EVM types).
-///
-/// Family crates own normalize/acceptability; this joins report keys and selection anchors.
-pub fn holding_candidate_from_normalized(
+pub(crate) fn holding_candidate_from_bitcoin(
     key: &crate::HoldingRequirementKey,
     store_commit_order: u64,
     fact_claim_id: FactClaimId,
-    fields: NormalizedHoldingFields,
+    fields: BitcoinHoldingCandidateFields,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
-    let coverage = fields.coverage.parse::<CoverageStatus>().map_err(|_| {
+    let parsed_coverage = fields.coverage.parse::<CoverageStatus>().map_err(|_| {
         PortfolioHoldingSelectionError::new(
             PortfolioHoldingErrorCode::MissingFact,
             "holding fact has unknown coverage status",
@@ -203,7 +193,7 @@ pub fn holding_candidate_from_normalized(
             Some(key.network_id.clone()),
         )
     })?;
-    let source_status = fields
+    let parsed_source_status = fields
         .source_status
         .parse::<HoldingSourceStatus>()
         .map_err(|_| {
@@ -214,7 +204,7 @@ pub fn holding_candidate_from_normalized(
                 Some(key.network_id.clone()),
             )
         })?;
-    if !portfolio_selection_accepts_status(coverage, source_status) {
+    if !portfolio_selection_accepts_status(parsed_coverage, parsed_source_status) {
         return Err(PortfolioHoldingSelectionError::new(
             PortfolioHoldingErrorCode::MissingFact,
             "holding fact is not acceptable for portfolio selection",
@@ -222,15 +212,7 @@ pub fn holding_candidate_from_normalized(
             Some(key.network_id.clone()),
         ));
     }
-    let (height, hash) = match &fields.observation_anchor {
-        ObservationAnchor::Bitcoin { height, block_hash } => (*height, block_hash.clone()),
-        ObservationAnchor::Evm {
-            block_number,
-            block_hash,
-            ..
-        } => (*block_number, block_hash.clone()),
-    };
-    let anchor = HoldingAnchor::new(height, hash).map_err(|mut error| {
+    let anchor = HoldingAnchor::new(fields.height, &fields.block_hash).map_err(|mut error| {
         error.holding_key = Some(key.as_key_str());
         error.network_id = Some(key.network_id.clone());
         error
@@ -247,7 +229,10 @@ pub fn holding_candidate_from_normalized(
             holding: fields.holding,
             raw_dec: fields.raw_dec,
             decimals: fields.decimals,
-            observation_anchor: fields.observation_anchor,
+            observation_anchor: ExecutionAnchor::Bitcoin {
+                height: fields.height,
+                block_hash: fields.block_hash,
+            },
             coverage: fields.coverage,
             source_status: fields.source_status,
         },
@@ -325,11 +310,19 @@ fn execution_anchor_from_anchored_holding_source(
     network_id: &str,
 ) -> Result<ExecutionAnchor, PortfolioHoldingSelectionError> {
     match &source.anchor {
-        ObservationAnchor::Evm {
-            chain_id,
+        ExecutionAnchor::Evm {
             block_number,
             block_hash,
+            ..
         } => {
+            let parsed_number = U256::from_str(block_number).map_err(|_| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::MissingFact,
+                    "observation EVM block_number must be canonical U256 decimal",
+                    None,
+                    Some(network_id.to_owned()),
+                )
+            })?;
             if block_hash.trim().is_empty() {
                 return Err(PortfolioHoldingSelectionError::new(
                     PortfolioHoldingErrorCode::MissingFact,
@@ -338,13 +331,17 @@ fn execution_anchor_from_anchored_holding_source(
                     Some(network_id.to_owned()),
                 ));
             }
-            Ok(ExecutionAnchor::Evm {
-                chain_id: *chain_id,
-                block_number: *block_number,
-                block_hash: block_hash.clone(),
-            })
+            if parsed_number.to_string() != *block_number {
+                return Err(PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::MissingFact,
+                    "observation EVM block_number must be canonical U256 decimal",
+                    None,
+                    Some(network_id.to_owned()),
+                ));
+            }
+            Ok(source.anchor.clone())
         }
-        ObservationAnchor::Bitcoin { height, block_hash } => {
+        ExecutionAnchor::Bitcoin { block_hash, .. } => {
             if block_hash.trim().is_empty() {
                 return Err(PortfolioHoldingSelectionError::new(
                     PortfolioHoldingErrorCode::MissingFact,
@@ -353,10 +350,7 @@ fn execution_anchor_from_anchored_holding_source(
                     Some(network_id.to_owned()),
                 ));
             }
-            Ok(ExecutionAnchor::Bitcoin {
-                height: *height,
-                block_hash: block_hash.clone(),
-            })
+            Ok(source.anchor.clone())
         }
     }
 }

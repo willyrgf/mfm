@@ -24,8 +24,8 @@ use mfm_portfolio_model::wallet::{
 };
 use mfm_program::{MfmFactType, ReadState, StateSpec, ValidatedConfig};
 use mfm_state_portfolio::{
-    reduce_evm_network_collection, CollectEvmNetworkInput, EvmBalanceSource,
-    PortfolioCollectionReceipt, SelectHoldingsFactDescriptors,
+    reduce_evm_network_collection, EvmBalanceSource, PortfolioCollectionReceipt,
+    SelectHoldingsFactDescriptors,
 };
 use mfm_states_btc::BtcAddressBalanceSnapshotFact;
 
@@ -186,8 +186,12 @@ fn network() -> NetworkConfig {
     .expect("EVM network")
 }
 
-fn source(account: Address, asset: EvmBalanceAsset) -> EvmBalanceSource {
-    EvmBalanceSource::new(format!("{account:#x}"), asset).expect("EVM source")
+fn source(account: Address, asset: HoldingSourceConfig) -> EvmBalanceSource {
+    EvmBalanceSource::new(
+        format!("{account:#x}").parse().expect("normalized account"),
+        asset,
+    )
+    .expect("EVM source")
 }
 
 fn plan_for(sources: Vec<EvmBalanceSource>) -> CollectEvmNetworkPlan {
@@ -197,10 +201,7 @@ fn plan_for(sources: Vec<EvmBalanceSource>) -> CollectEvmNetworkPlan {
     )
     .expect("collection state");
     state
-        .plan(
-            &CollectEvmNetworkInput::default(),
-            &mfm_program::CertifiedContext::no_context(),
-        )
+        .plan(&(), &mfm_program::CertifiedContext::no_context())
         .expect("collection plan")
 }
 
@@ -245,10 +246,12 @@ fn portfolio_runner_registration_keeps_factory_identity_explicit() {
 #[tokio::test]
 async fn one_session_uses_latest_then_exact_hash_reads_then_number_recheck() {
     let plan = plan_for(vec![
-        source(ACCOUNT, EvmBalanceAsset::Native),
+        source(ACCOUNT, HoldingSourceConfig::Native),
         source(
             ACCOUNT,
-            EvmBalanceAsset::erc20(format!("{TOKEN:#x}")).expect("token asset"),
+            HoldingSourceConfig::Erc20 {
+                contract_address: format!("{TOKEN:#x}").parse().expect("normalized token"),
+            },
         ),
     ]);
     let binding = plan.binding().expect("binding");
@@ -296,7 +299,7 @@ async fn one_session_uses_latest_then_exact_hash_reads_then_number_recheck() {
 
 #[tokio::test]
 async fn final_number_recheck_exposes_reorg_to_the_deterministic_reducer() {
-    let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
+    let plan = plan_for(vec![source(ACCOUNT, HoldingSourceConfig::Native)]);
     let session = Arc::new(RecordingSession::new(
         &plan.binding().expect("binding"),
         REORG_HASH,
@@ -321,7 +324,7 @@ async fn balance_reads_never_exceed_the_hard_concurrency_limit() {
         .map(|index| {
             source(
                 Address::from_word(U256::from(index).into()),
-                EvmBalanceAsset::Native,
+                HoldingSourceConfig::Native,
             )
         })
         .collect();
@@ -341,6 +344,27 @@ async fn balance_reads_never_exceed_the_hard_concurrency_limit() {
     let max_active = session.max_active.load(Ordering::SeqCst);
     assert!(max_active > 1, "test must exercise concurrent reads");
     assert!(max_active <= EVM_READ_CONCURRENCY_LIMIT);
+}
+
+#[tokio::test]
+async fn wrong_chain_session_is_rejected_before_any_network_read() {
+    let plan = plan_for(vec![source(ACCOUNT, HoldingSourceConfig::Native)]);
+    let wrong_binding = EvmNetworkBinding::new(
+        LocalPublicId::new("ethereum-mainnet").expect("network id"),
+        2,
+    )
+    .expect("wrong binding");
+    let session = Arc::new(RecordingSession::new(&wrong_binding, ANCHOR_HASH));
+    let capabilities = capabilities(
+        Arc::clone(&session),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(EmptyFactIndex::new()),
+    );
+
+    collect_evm_network(&plan, &capabilities)
+        .await
+        .expect_err("wrong-chain session must fail binding");
+    assert!(session.records().is_empty());
 }
 
 #[tokio::test]

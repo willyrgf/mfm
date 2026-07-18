@@ -38,11 +38,10 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, OperationOutput, StateInput};
 use mfm_state_portfolio::{
     AssembleSnapshotConfig, AssembleSnapshotInputHandles, AssembleSnapshotState,
-    CollectEvmNetworkInputHandles, CollectEvmNetworkState, CollectedHoldingReceipt,
-    EvmBalanceAsset, EvmBalanceSource, EvmNetworkCollectionConfig, EvmNetworkSnapshot,
-    HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey, PortfolioCollectionReceipt,
-    PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, PortfolioPublicOutputs,
-    ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
+    CollectEvmNetworkState, CollectedHoldingReceipt, EvmBalanceSource, EvmNetworkCollectionConfig,
+    EvmNetworkSnapshot, HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey,
+    PortfolioCollectionReceipt, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
+    PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
     PublishEvmHoldingsInputHandles, PublishEvmHoldingsState, SelectHoldingsConfig,
     SelectHoldingsFactDescriptors, SelectHoldingsInputHandles, SelectHoldingsState,
 };
@@ -395,7 +394,7 @@ impl Operation for PortfolioSnapshotOperation {
                         mfm_program::StateKey::new("collect_network")?,
                         NoContext,
                         child_config.clone(),
-                        CollectEvmNetworkInputHandles {},
+                        (),
                     )?;
                     let snapshot = child.scope().state::<PublishEvmHoldingsState, _>(
                         mfm_program::StateKey::new("publish_holdings")?,
@@ -597,7 +596,7 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                         ConfigError::new("EVM wallet did not contain an EVM address")
                     })?;
                     network_demand.evm_sources.insert(
-                        EvmBalanceSource::new(account.to_string(), EvmBalanceAsset::Native)
+                        EvmBalanceSource::new(account.clone(), HoldingSourceConfig::Native)
                             .map_err(|error| ConfigError::new(error.to_string()))?,
                     );
                 }
@@ -607,9 +606,10 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                     })?;
                     network_demand.evm_sources.insert(
                         EvmBalanceSource::new(
-                            account.to_string(),
-                            EvmBalanceAsset::erc20(contract_address.to_string())
-                                .map_err(|error| ConfigError::new(error.to_string()))?,
+                            account.clone(),
+                            HoldingSourceConfig::Erc20 {
+                                contract_address: contract_address.clone(),
+                            },
                         )
                         .map_err(|error| ConfigError::new(error.to_string()))?,
                     );
@@ -720,11 +720,12 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert!(sources
             .iter()
-            .any(|source| matches!(source.asset(), EvmBalanceAsset::Native)));
+            .any(|source| matches!(source.asset(), HoldingSourceConfig::Native)));
         assert!(sources.iter().any(|source| {
             matches!(
                 source.asset(),
-                EvmBalanceAsset::Erc20 { contract_address } if contract_address == TOKEN
+                HoldingSourceConfig::Erc20 { contract_address }
+                    if contract_address.as_str() == TOKEN
             )
         }));
     }
@@ -738,7 +739,8 @@ mod tests {
         assert_eq!(compiled.evm_collections[0].sources().len(), 1);
         assert!(matches!(
             compiled.evm_collections[0].sources()[0].asset(),
-            EvmBalanceAsset::Erc20 { contract_address } if contract_address == TOKEN
+            HoldingSourceConfig::Erc20 { contract_address }
+                if contract_address.as_str() == TOKEN
         ));
     }
 

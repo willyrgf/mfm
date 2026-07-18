@@ -3,9 +3,11 @@
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
-use mfm_evm_capabilities::EVM_JSONRPC_SESSION_IMPLEMENTATION_ID;
+use mfm_evm_capabilities::{
+    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
 
-use crate::{EvmStateError, RedactedEvmSessionEvidence};
+use crate::EvmStateError;
 
 pub(crate) fn parse_address(value: &str) -> Result<Address, EvmStateError> {
     let address = Address::from_str(value).map_err(|_| invalid("EVM address was invalid"))?;
@@ -61,18 +63,38 @@ pub(crate) fn canonical_bytes(value: &[u8]) -> String {
 }
 
 pub(crate) fn validate_session(
-    session: &RedactedEvmSessionEvidence,
+    session: &EvmSessionEvidence,
     network_id: &str,
     chain_id: u64,
 ) -> Result<(), EvmStateError> {
-    if !session.is_bound_to(network_id, chain_id)
+    if session.network_id() != network_id
+        || session.chain_id() != chain_id
         || session.implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
     {
         return Err(invalid(
             "EVM session did not match certified semantic authority",
         ));
     }
-    session.to_session().map(|_| ())
+    Ok(())
+}
+
+pub(crate) fn validate_block_anchor(anchor: &EvmBlockAnchor) -> Result<(), EvmStateError> {
+    anchor
+        .to_block()
+        .map(|_| ())
+        .map_err(|_| invalid("EVM block anchor was invalid"))
+}
+
+pub(crate) fn block_anchor_number(anchor: &EvmBlockAnchor) -> Result<U256, EvmStateError> {
+    anchor
+        .number_quantity()
+        .map_err(|_| invalid("EVM block anchor number was invalid"))
+}
+
+pub(crate) fn block_anchor_hash(anchor: &EvmBlockAnchor) -> Result<B256, EvmStateError> {
+    anchor
+        .hash_value()
+        .map_err(|_| invalid("EVM block anchor hash was invalid"))
 }
 
 pub(crate) fn invalid(reason: impl Into<String>) -> EvmStateError {

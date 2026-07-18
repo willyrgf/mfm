@@ -5,8 +5,8 @@ use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_effects::ReadExternal;
 use mfm_evm_capabilities::{
-    EvmBlock, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
-    EvmSessionEvidence,
+    EvmBlock, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding,
+    EvmReadCapability, EvmSessionEvidence,
 };
 use mfm_ids::LocalPublicId;
 use mfm_program::{
@@ -17,14 +17,12 @@ use mfm_program_derive::{MfmConfig, MfmValue};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{
-    canonical_address, canonical_bytes, canonical_hash, invalid, parse_address, parse_bytes,
-    parse_hash, parse_quantity, validate_session,
+    block_anchor_hash, block_anchor_number, canonical_address, canonical_bytes, canonical_hash,
+    invalid, parse_address, parse_bytes, parse_hash, parse_quantity, validate_block_anchor,
+    validate_session,
 };
 use crate::identity::{adapter_binding, state_kind, state_version};
-use crate::{
-    EvmAccessListEntry, EvmBlockAnchor, EvmStateError, RedactedEvmSessionEvidence,
-    EVM_TRANSACTION_DATA_MAX_BYTES,
-};
+use crate::{EvmAccessListEntry, EvmStateError, EVM_TRANSACTION_DATA_MAX_BYTES};
 
 /// Maximum checked calls admitted by one validation node.
 pub const EVM_CONTRACT_VALIDATION_MAX_CALLS: usize = 64;
@@ -109,7 +107,7 @@ impl EvmContractCallContext {
     /// Creates the exact source-bound capability request at `anchor`.
     pub fn capability_request(&self, anchor: &EvmBlockAnchor) -> Result<EvmCall, EvmStateError> {
         self.validate()?;
-        anchor.validate()?;
+        validate_block_anchor(anchor)?;
         EvmCall::new(
             parse_address(&self.caller)?,
             parse_address(&self.target)?,
@@ -117,7 +115,7 @@ impl EvmContractCallContext {
             Bytes::from(parse_bytes(&self.calldata, EVM_TRANSACTION_DATA_MAX_BYTES)?),
             parse_quantity(&self.gas_limit)?,
             access_list_to_alloy(&self.access_list)?,
-            EvmBlockSelector::ExactHash(anchor.hash_value()?),
+            EvmBlockSelector::ExactHash(block_anchor_hash(anchor)?),
         )
         .map_err(|_| invalid("contract validation call request was invalid"))
     }
@@ -380,7 +378,7 @@ impl EvmContractValidationTarget {
 
     fn validate(&self) -> Result<(), EvmStateError> {
         parse_address(&self.address)?;
-        self.anchor.validate()
+        validate_block_anchor(&self.anchor)
     }
 }
 
@@ -449,7 +447,7 @@ impl EvmContractValidationPlan {
         self.validate()?;
         Ok((
             parse_address(&self.address)?,
-            EvmBlockSelector::ExactHash(self.anchor.hash_value()?),
+            EvmBlockSelector::ExactHash(block_anchor_hash(&self.anchor)?),
         ))
     }
 
@@ -465,7 +463,7 @@ impl EvmContractValidationPlan {
     /// Returns the final block-number selector used for canonicality.
     pub fn canonicality_selector(&self) -> Result<EvmBlockSelector, EvmStateError> {
         self.validate()?;
-        Ok(EvmBlockSelector::Number(self.anchor.number_quantity()?))
+        Ok(EvmBlockSelector::Number(block_anchor_number(&self.anchor)?))
     }
 
     fn validate(&self) -> Result<(), EvmStateError> {
@@ -477,7 +475,7 @@ impl EvmContractValidationPlan {
         };
         config.validate().map_err(EvmStateError::invalid)?;
         parse_address(&self.address)?;
-        self.anchor.validate()
+        validate_block_anchor(&self.anchor)
     }
 }
 
@@ -527,7 +525,7 @@ pub enum EvmContractValidationObservation {
 )]
 pub struct EvmContractValidationEvidence {
     observations: Vec<EvmContractValidationObservation>,
-    session: RedactedEvmSessionEvidence,
+    session: EvmSessionEvidence,
 }
 
 impl EvmContractValidationEvidence {
@@ -567,12 +565,12 @@ impl EvmContractValidationEvidence {
         });
         Ok(Self {
             observations,
-            session: RedactedEvmSessionEvidence::from_session(session)?,
+            session: session.clone(),
         })
     }
 
     /// Returns the retained source binding.
-    pub const fn session(&self) -> &RedactedEvmSessionEvidence {
+    pub const fn session(&self) -> &EvmSessionEvidence {
         &self.session
     }
 }
@@ -690,7 +688,7 @@ pub fn validate_evm_contract(
             "contract validation evidence contained unexpected extra observations",
         ));
     }
-    block.validate()?;
+    validate_block_anchor(block)?;
     if block != &plan.anchor {
         return Err(invalid(
             "final block-by-number result did not preserve the authored anchor",

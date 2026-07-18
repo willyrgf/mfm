@@ -2489,6 +2489,8 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",

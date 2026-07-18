@@ -125,7 +125,7 @@ fn require_receipt_holding_observations(
                 "selected observation source did not match the collection receipt",
             ));
         }
-        if observation_execution_anchor(&observation.source.anchor) != *entry.anchor() {
+        if observation.source.anchor != *entry.anchor() {
             return Err(receipt_observation_error(
                 &key,
                 "selected observation anchor did not match the collection receipt",
@@ -174,24 +174,6 @@ fn observation_source_matches_receipt(
     )
 }
 
-fn observation_execution_anchor(anchor: &ObservationAnchor) -> ExecutionAnchor {
-    match anchor {
-        ObservationAnchor::Bitcoin { height, block_hash } => ExecutionAnchor::Bitcoin {
-            height: *height,
-            block_hash: block_hash.clone(),
-        },
-        ObservationAnchor::Evm {
-            chain_id,
-            block_number,
-            block_hash,
-        } => ExecutionAnchor::Evm {
-            chain_id: *chain_id,
-            block_number: *block_number,
-            block_hash: block_hash.clone(),
-        },
-    }
-}
-
 fn observations_from_evm_snapshots(
     portfolio: &PortfolioConfig,
     snapshots: Vec<EvmNetworkSnapshot>,
@@ -219,14 +201,7 @@ fn observations_from_evm_snapshots(
             let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
                 StateError::Message("wallet symbol was missing from portfolio config".to_owned())
             })?;
-            let asset = match &symbol.source {
-                HoldingSourceConfig::Native => EvmBalanceAsset::Native,
-                HoldingSourceConfig::Erc20 { contract_address } => {
-                    EvmBalanceAsset::erc20(contract_address.to_string())
-                        .map_err(|error| StateError::Message(error.to_string()))?
-                }
-            };
-            let source = EvmBalanceSource::new(account.to_string(), asset)
+            let source = EvmBalanceSource::new(account.clone(), symbol.source.clone())
                 .map_err(|error| StateError::Message(error.to_string()))?;
             if !expected_sources
                 .entry(wallet.network_id.to_string())
@@ -302,14 +277,7 @@ fn observations_from_evm_snapshots(
             let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
                 StateError::Message("wallet symbol was missing from portfolio config".to_owned())
             })?;
-            let asset = match &symbol.source {
-                HoldingSourceConfig::Native => EvmBalanceAsset::Native,
-                HoldingSourceConfig::Erc20 { contract_address } => {
-                    EvmBalanceAsset::erc20(contract_address.to_string())
-                        .map_err(|error| StateError::Message(error.to_string()))?
-                }
-            };
-            let source = EvmBalanceSource::new(account.to_string(), asset)
+            let source = EvmBalanceSource::new(account.clone(), symbol.source.clone())
                 .map_err(|error| StateError::Message(error.to_string()))?;
             let (anchor, balance) = actual
                 .remove(&(wallet.network_id.to_string(), source))
@@ -332,12 +300,12 @@ fn observations_from_evm_snapshots(
                 values: Vec::new(),
                 source: AnchoredHoldingSource {
                     holding: symbol.source.clone(),
-                    anchor: ObservationAnchor::Evm {
+                    anchor: ExecutionAnchor::Evm {
                         chain_id: network.chain_id_u64().ok_or_else(|| {
                             StateError::Message("EVM network chain id was missing".to_owned())
                         })?,
-                        block_number: anchor.block_number(),
-                        block_hash: anchor.block_hash().to_owned(),
+                        block_number: anchor.number().to_owned(),
+                        block_hash: anchor.hash().to_owned(),
                     },
                 },
                 coverage: "complete_at_anchor".to_owned(),

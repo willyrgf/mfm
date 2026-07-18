@@ -18,6 +18,10 @@ batch, factory deployment, CREATE2 deployment, swap, or flash-loan executor is o
 one atomic chain transaction. Operation crates own byte encoding and typed interpretation of logs;
 the generic state owns no ABI JSON, function lookup, or multi-transaction workflow topology.
 
+Exact validation composes independently at the receipt anchor. Both `Create -> Validate` and
+`Create -> Call -> Call -> Validate` are covered end to end, including evidence-only replay; no
+fixed deployment lifecycle or validation-only mutation path exists.
+
 ## Authored authority
 
 `EvmTransactionConfig` fixes the semantic network and chain, expected sender, signer reference,
@@ -56,7 +60,7 @@ different durable bearer-material design.
 - the exact unsigned EIP-1559 envelope and Alloy signing digest;
 - the expected signed transaction hash;
 - the sender/nonce-derived address for direct creation; and
-- redacted network/chain/source/implementation session evidence.
+- the canonical redacted network/chain/source/implementation `EvmSessionEvidence`.
 
 It never retains signature scalars, a signed envelope, raw transaction bytes, endpoint, auth header,
 provider body, keystore path, unlock path, password, private key, or mnemonic.
@@ -106,6 +110,8 @@ For `Finalized { depth }`, verification fetches a fresh unchanged receipt, reads
 and requires the exact retained hash, then reads a fresh head and checks `head - receipt + 1 >= depth`.
 A disappeared or moved receipt, wrong canonical block, or shallow head remains pending. Confirmation
 evidence retains the fresh receipt, canonical block, head, checked depth, and redacted session.
+Transaction and contract-validation evidence use the same `EvmBlockAnchor`, which persists the
+full U256 block number as canonical decimal and never narrows it to u64.
 
 ## Replay and secret boundary
 

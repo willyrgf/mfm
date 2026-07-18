@@ -55,7 +55,7 @@ impl PartialOrd for QuoteCode {
 }
 
 /// The only source algebra supported by the portfolio model.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -333,33 +333,6 @@ pub struct ObservationValue {
     pub unit_price_dec: String,
 }
 
-/// Concrete execution anchor captured for one observation source.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "family", rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "observation-anchor",
-    schema = "mfm.portfolio.observation_anchor"
-)]
-pub enum ObservationAnchor {
-    /// EVM observation pinned to one block hash and number on one chain.
-    Evm {
-        /// EVM chain id.
-        chain_id: u64,
-        /// Concrete pinned block number.
-        block_number: u64,
-        /// Concrete pinned block hash.
-        block_hash: String,
-    },
-    /// Bitcoin observation pinned to one height and block hash.
-    Bitcoin {
-        /// Concrete pinned block height.
-        height: u64,
-        /// Concrete pinned block hash.
-        block_hash: String,
-    },
-}
-
 /// One direct holding source pinned to a concrete observation anchor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -371,7 +344,7 @@ pub struct AnchoredHoldingSource {
     /// The direct semantic holding source.
     pub holding: HoldingSourceConfig,
     /// Concrete pinned execution anchor.
-    pub anchor: ObservationAnchor,
+    pub anchor: crate::portfolio::ExecutionAnchor,
 }
 
 /// Validation errors for canonical symbol configs.

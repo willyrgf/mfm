@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-ids = { path = "../kernel/ids" }
+mfm-program-derive = { path = "../kernel/program-derive" }
+mfm-values = { path = "../kernel/values" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

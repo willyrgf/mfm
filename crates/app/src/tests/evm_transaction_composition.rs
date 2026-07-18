@@ -55,6 +55,7 @@ struct ProjectionConfig {}
 struct FirstCallActionState;
 struct SecondCallActionState;
 struct ValidationTargetState;
+struct DirectValidationTargetState;
 
 fn composition_state_kind(name: &str) -> mfm_program::Result<mfm_ids::StateKind> {
     mfm_ids::StateKind::new(
@@ -158,8 +159,36 @@ impl PureState for ValidationTargetState {
                 "final configuration call did not target the created contract".to_owned(),
             ));
         }
-        EvmContractValidationTarget::new(created, input.final_call.receipt().block_anchor())
-            .map_err(StateError::from)
+        EvmContractValidationTarget::new(
+            created,
+            input
+                .final_call
+                .receipt()
+                .block_anchor()
+                .map_err(StateError::from)?,
+        )
+        .map_err(StateError::from)
+    }
+}
+
+impl_projection_state_spec!(
+    DirectValidationTargetState,
+    EvmTransactionOutcome,
+    EvmContractValidationTarget,
+    "evm_direct_contract_validation_target"
+);
+
+impl PureState for DirectValidationTargetState {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        EvmContractValidationTarget::new(
+            created_address(&input)?,
+            input.receipt().block_anchor().map_err(StateError::from)?,
+        )
+        .map_err(StateError::from)
     }
 }
 
@@ -197,6 +226,23 @@ struct TransactionCompositionPublicOutputs<'program, 'scope> {
 
 #[tokio::test]
 async fn create_call_call_validate_graph_replays_from_evidence_only() {
+    assert_composition_replays(composition_launch_material, 3).await;
+}
+
+#[tokio::test]
+async fn direct_create_validate_graph_replays_from_evidence_only() {
+    assert_composition_replays(direct_composition_launch_material, 1).await;
+}
+
+type CompositionLaunchMaterial = (
+    mfm_program::TypedProgramDraft,
+    BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
+);
+
+async fn assert_composition_replays(
+    build: fn(Address, Address) -> CompositionLaunchMaterial,
+    expected_transaction_count: usize,
+) {
     let store = store::AsyncInMemoryRunStore::default();
     let signing_key = Arc::new(SigningKey::random(&mut OsRng));
     let sender = signing_key_address(&signing_key);
@@ -215,7 +261,7 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
         store.clone(),
         certification.clone(),
     );
-    let (draft, seed_material) = composition_launch_material(sender, created);
+    let (draft, seed_material) = build(sender, created);
     let lowered = mfm_certify::lower_program_draft(&draft).expect("lower composition draft");
     let scoped = certification
         .scoped_for_spec(lowered.spec())
@@ -234,7 +280,7 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
     let launch = launch_services
         .launch_run(request)
         .await
-        .expect("launch create/call/call/validate graph");
+        .expect("launch transaction composition graph");
     let (_, launched, _) = launch.into_response_parts();
     assert_eq!(
         launched
@@ -242,12 +288,11 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
             .run_mode,
         RunModeStatus::Completed
     );
-    assert_eq!(world.included_count(), 3);
+    assert_eq!(world.included_count(), expected_transaction_count);
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 3);
     drop(launch_services);
     drop(signing_key);
 
-    // The replay service has no transaction session, read session, signer, or runner registry.
     let replay_services = make_run_read_services(store.clone(), store, certification);
     let replay = replay_services
         .verify_replay_for_run(&run_id)
@@ -257,38 +302,65 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 3);
 }
 
-fn composition_launch_material(
+fn direct_composition_launch_material(
     sender: Address,
     created: Address,
-) -> (
-    mfm_program::TypedProgramDraft,
-    BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
-) {
+) -> CompositionLaunchMaterial {
     let create_action = CanonicalSeed::from_value(
         &EvmTransactionAction::create([0x60, 0x00], U256::ZERO).expect("create action"),
     )
     .expect("create action seed");
     let create_bytes = create_action.canonical_json().clone();
-    let mut states = StateRegistryBuilder::new();
-    states
-        .register::<SubmitEvmTransactionState>()
-        .expect("register transaction state");
-    states
-        .register::<FirstCallActionState>()
-        .expect("register first-call projection");
-    states
-        .register::<SecondCallActionState>()
-        .expect("register second-call projection");
-    states
-        .register::<ValidationTargetState>()
-        .expect("register validation-target projection");
-    states
-        .register::<ValidateEvmContractState>()
-        .expect("register validation state");
+    let draft = build_root_with_registries(
+        ScopeKey::new("evm-direct-transaction-composition").expect("scope key"),
+        composition_state_registry(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
+            let create_action = root.seed(SeedKey::new("create-action")?, create_action.clone())?;
+            let created_outcome = root
+                .scope()
+                .side_effect::<SubmitEvmTransactionState, _>(
+                    StateKey::new("create")?,
+                    NoContext,
+                    composition_transaction_config(sender),
+                    create_action,
+                    evm_sender_lane_resource_claim()?,
+                    SideEffectVerificationSpec::Receipt,
+                )?
+                .into_handle();
+            let target = root.scope().state::<DirectValidationTargetState, _>(
+                StateKey::new("validation-target")?,
+                NoContext,
+                ProjectionConfig {},
+                created_outcome,
+            )?;
+            let verified = root.scope().state::<ValidateEvmContractState, _>(
+                StateKey::new("validate")?,
+                NoContext,
+                composition_validation_config(sender, created),
+                target,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &TransactionCompositionPublicOutputs { verified },
+            )
+        },
+    )
+    .expect("direct transaction composition draft");
+    let seed_material = BTreeMap::from([(draft.seeds()[0].seed_id.clone(), create_bytes)]);
+    (draft, seed_material)
+}
 
+fn composition_launch_material(sender: Address, created: Address) -> CompositionLaunchMaterial {
+    let create_action = CanonicalSeed::from_value(
+        &EvmTransactionAction::create([0x60, 0x00], U256::ZERO).expect("create action"),
+    )
+    .expect("create action seed");
+    let create_bytes = create_action.canonical_json().clone();
     let draft = build_root_with_registries(
         ScopeKey::new("evm-transaction-composition").expect("scope key"),
-        states.snapshot(),
+        composition_state_registry(),
         mfm_program::OperationRegistryBuilder::new().snapshot(),
         |root: &mut RootBuilder<'_, '_>| {
             root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
@@ -364,6 +436,29 @@ fn composition_launch_material(
     (draft, seed_material)
 }
 
+fn composition_state_registry() -> mfm_program::StateRegistrySnapshot {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<SubmitEvmTransactionState>()
+        .expect("register transaction state");
+    states
+        .register::<FirstCallActionState>()
+        .expect("register first-call projection");
+    states
+        .register::<SecondCallActionState>()
+        .expect("register second-call projection");
+    states
+        .register::<ValidationTargetState>()
+        .expect("register validation-target projection");
+    states
+        .register::<DirectValidationTargetState>()
+        .expect("register direct validation-target projection");
+    states
+        .register::<ValidateEvmContractState>()
+        .expect("register validation state");
+    states.snapshot()
+}
+
 fn composition_transaction_config(sender: Address) -> EvmTransactionConfig {
     EvmTransactionConfig::new(
         "ethereum-mainnet",
@@ -408,6 +503,9 @@ fn composition_certification_registry() -> CertificationRegistry {
     registry
         .register_state::<ValidationTargetState>()
         .expect("certify validation-target projection");
+    registry
+        .register_state::<DirectValidationTargetState>()
+        .expect("certify direct validation-target projection");
     registry
         .register_state::<ValidateEvmContractState>()
         .expect("certify validation state");
@@ -525,9 +623,19 @@ fn register_projection_runners(
     registrations
         .register_state_runner_with_factory::<ValidationTargetState>(
             &factory,
-            Arc::new(ProjectionRunner::<ValidationTargetState>::new(artifacts)),
+            Arc::new(ProjectionRunner::<ValidationTargetState>::new(Arc::clone(
+                &artifacts,
+            ))),
         )
         .expect("register validation-target projection runner");
+    registrations
+        .register_state_runner_with_factory::<DirectValidationTargetState>(
+            &factory,
+            Arc::new(ProjectionRunner::<DirectValidationTargetState>::new(
+                artifacts,
+            )),
+        )
+        .expect("register direct validation-target projection runner");
 }
 
 struct ProjectionRunner<S> {

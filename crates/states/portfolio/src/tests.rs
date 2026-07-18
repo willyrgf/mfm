@@ -3,7 +3,9 @@ use super::*;
 use std::collections::BTreeMap;
 
 use alloy_primitives::U256;
-use mfm_evm_capabilities::{EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID};
+use mfm_evm_capabilities::{
+    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
 use mfm_ids::LocalPublicId;
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::{
@@ -84,12 +86,21 @@ fn sample_portfolio() -> PortfolioConfig {
 }
 
 fn native_source(account: &str) -> EvmBalanceSource {
-    EvmBalanceSource::new(account, EvmBalanceAsset::Native).expect("native source")
+    EvmBalanceSource::new(
+        account.parse().expect("normalized account"),
+        HoldingSourceConfig::Native,
+    )
+    .expect("native source")
 }
 
 fn token_source(account: &str) -> EvmBalanceSource {
-    EvmBalanceSource::new(account, EvmBalanceAsset::erc20(TOKEN).expect("token asset"))
-        .expect("token source")
+    EvmBalanceSource::new(
+        account.parse().expect("normalized account"),
+        HoldingSourceConfig::Erc20 {
+            contract_address: TOKEN.parse().expect("normalized token"),
+        },
+    )
+    .expect("token source")
 }
 
 fn collection_config(sources: Vec<EvmBalanceSource>) -> EvmNetworkCollectionConfig {
@@ -103,10 +114,7 @@ fn collection_plan(config: &EvmNetworkCollectionConfig) -> CollectEvmNetworkPlan
     )
     .expect("collection state");
     state
-        .plan(
-            &CollectEvmNetworkInput::default(),
-            &mfm_program::CertifiedContext::no_context(),
-        )
+        .plan(&(), &mfm_program::CertifiedContext::no_context())
         .expect("collection plan")
 }
 
@@ -134,10 +142,10 @@ fn evidence_for(config: &EvmNetworkCollectionConfig, values: &[u64]) -> CollectE
         .collect();
     CollectEvmNetworkEvidence::new(
         &session(config),
-        EvmCollectionAnchor::new(10, EVM_HASH).expect("anchor"),
+        EvmBlockAnchor::new(U256::from(10), EVM_HASH.parse().expect("anchor hash")),
         token_decimals,
         balances,
-        EvmCollectionAnchor::new(10, EVM_HASH).expect("final anchor"),
+        EvmBlockAnchor::new(U256::from(10), EVM_HASH.parse().expect("final anchor hash")),
     )
 }
 
@@ -251,17 +259,25 @@ fn reducer_deduplicates_metadata_and_publishes_one_unified_fact_per_source() {
         token_source(EVM_ACCOUNT),
     ]);
     let plan = collection_plan(&config);
-    assert_eq!(plan.token_contracts(), vec![TOKEN.to_owned()]);
+    assert_eq!(
+        plan.token_contracts()
+            .iter()
+            .map(|address| address.as_str())
+            .collect::<Vec<_>>(),
+        vec![TOKEN]
+    );
 
     let evidence = evidence_for(&config, &[10, 20, 30]);
     let batch = reduce_evm_network_collection(&plan, &evidence).expect("reduced collection");
-    assert_eq!(batch.anchor().block_number(), 10);
+    assert_eq!(batch.anchor().number(), "10");
     assert_eq!(batch.balances().len(), 3);
     assert_eq!(
         batch
             .balances()
             .iter()
-            .filter(|balance| matches!(balance.source().asset(), EvmBalanceAsset::Erc20 { .. }))
+            .filter(|balance| {
+                matches!(balance.source().asset(), HoldingSourceConfig::Erc20 { .. })
+            })
             .map(EvmCollectedBalance::decimals)
             .collect::<Vec<_>>(),
         vec![6, 6]
@@ -275,24 +291,22 @@ fn reducer_deduplicates_metadata_and_publishes_one_unified_fact_per_source() {
         descriptor.fact_kind().as_str(),
         "portfolio.evm_balance_snapshot"
     );
-    assert!(descriptor
+    assert!(!descriptor
         .fields()
         .iter()
         .any(|field| field.field_id().as_str() == "subject.asset"));
     let fact_json = serde_json::to_value(&facts).expect("fact JSON");
-    assert_eq!(fact_json[0]["response"]["block_hash"], EVM_HASH);
+    assert_eq!(fact_json[0]["response"]["anchor"]["hash"], EVM_HASH);
     assert_eq!(
         fact_json
             .as_array()
             .expect("fact array")
             .iter()
-            .map(|fact| fact["subject"]["asset"].as_str().expect("asset key"))
+            .map(|fact| fact["subject"]["asset"]["kind"]
+                .as_str()
+                .expect("asset kind"))
             .collect::<Vec<_>>(),
-        vec![
-            format!("erc20:{TOKEN}"),
-            "native".to_owned(),
-            format!("erc20:{TOKEN}"),
-        ]
+        vec!["erc20", "native", "erc20",]
     );
 }
 
@@ -303,7 +317,7 @@ fn reducer_rejects_reorg_session_order_coverage_and_decimal_tampering() {
     let evidence = evidence_for(&config, &[10, 20]);
 
     let mut reorg = serde_json::to_value(&evidence).expect("evidence JSON");
-    reorg["final_canonical_block"]["block_hash"] = serde_json::json!(REORG_HASH);
+    reorg["final_canonical_block"]["hash"] = serde_json::json!(REORG_HASH);
     let reorg = serde_json::from_value(reorg).expect("reorg evidence");
     assert!(reduce_evm_network_collection(&plan, &reorg)
         .expect_err("reorg must fail")

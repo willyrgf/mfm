@@ -385,8 +385,11 @@ reducer. One checked source-bound session resolves latest once, reads deduplicat
 and every balance at the exact EIP-1898 hash with canonicality required, and finishes with one
 number-to-hash recheck. Reads use bounded concurrency. The managed-write state publishes one
 `portfolio.evm_balance_snapshot` fact per source and its direct `EvmNetworkSnapshot` in one atomic
-attempt. The required fact subject asset is `native` or
-`erc20:<canonical-contract-address>`, so token contracts cannot share identity.
+attempt. The fact subject uses the typed `HoldingSourceConfig` algebra: `Native` or `Erc20` with its
+`NormalizedEvmAddress`, so token contracts cannot share identity. Collection plans, retained
+evidence, direct snapshots, and fact subjects use that same address/asset algebra; there is no
+collection-only or flattened asset vocabulary. Their shared EVM block anchor persists the full
+U256 number as canonical decimal plus canonical hash.
 
 Portfolio assembly consumes those direct EVM snapshots with exact config-derived network/source
 coverage. Only Bitcoin holdings use receipt-pinned fact-index selection; an all-EVM run issues no
@@ -733,16 +736,19 @@ semantic binding, such as EVM `network_id` plus expected chain id or Bitcoin `ne
 EVM collection attempt binds one direct route, probes its chain once, and persists one redacted
 session identity: `network_id`, chain id, `source_ref`, and transport `implementation_id`. Every
 native balance, ERC-20 metadata, ERC-20 balance, and number-to-hash re-verification uses that same
-session. The binding is carried once in the aggregate EVM collection evidence and direct network
-snapshot; the state reducer and evidence-only replay reject source drift or substitution even when
-the network and chain match. A route that resolves but observes incompatible source evidence fails
+session. The canonical capability evidence is carried directly in the aggregate EVM collection
+evidence; the shared block anchor and typed address/asset algebra are likewise retained without
+portfolio-specific mirrors. The direct network snapshot carries the checked semantic network,
+chain, and anchor, while source provenance remains only in read evidence. The state reducer and
+evidence-only replay reject source drift or substitution even when the network and chain match. A
+route that resolves but observes incompatible source evidence fails
 after `RunAdmitted` as an attempt/capability failure with a closed redacted provider diagnostic.
 Provider diagnostics carry a
 provider family, stable diagnostic code, optional redaction-safe operation id, and closed
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,
 response-shape failure, unsupported operation, operation incomplete, and source mismatch. They must
 not carry RPC URLs, authorization headers, file paths, provider messages, request/response bodies,
-signer material, or signed transactions. Replay rebuilds the checked session evidence and verifies
+signer material, or signed transactions. Replay decodes the checked session evidence and verifies
 it against the certified binding without resolving source refs through current runtime config.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the

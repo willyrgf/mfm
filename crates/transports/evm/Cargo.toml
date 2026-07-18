@@ -24,4 +24,4 @@ mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
