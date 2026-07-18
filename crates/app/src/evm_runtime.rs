@@ -24,11 +24,17 @@ pub(crate) fn register_evm_runners(
     let validate_runtime = Arc::clone(&runtime_config);
     let bind_transaction_runtime = Arc::clone(&runtime_config);
     let bind_signer_runtime = runtime_config;
+    let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
+        mfm_signers_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID,
+        move |signer_ref| {
+            let runtime = Arc::clone(&bind_signer_runtime);
+            Box::pin(async move { runtime.bind_evm_signer(signer_ref).await })
+        },
+    )
+    .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     let transaction_capabilities = mfm_adapters_evm::EvmTransactionRunnerCapabilities::new(
         artifacts,
-        mfm_runtime::CapabilityImplementationId::new(
-            mfm_signers_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID,
-        )?,
+        signer_binder,
         move |binding, signer_ref| {
             let runtime = Arc::clone(&validate_runtime);
             Box::pin(async move {
@@ -40,10 +46,6 @@ pub(crate) fn register_evm_runners(
         move |binding| {
             let runtime = Arc::clone(&bind_transaction_runtime);
             Box::pin(async move { runtime.bind_evm_transaction_session(binding).await })
-        },
-        move |signer_ref| {
-            let runtime = Arc::clone(&bind_signer_runtime);
-            Box::pin(async move { runtime.bind_evm_signer(signer_ref).await })
         },
     );
     mfm_adapters_evm::register_evm_transaction_runner(registry, transaction_capabilities)?;

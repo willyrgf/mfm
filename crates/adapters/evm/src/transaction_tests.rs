@@ -38,9 +38,15 @@ struct MockSession {
 
 impl MockSession {
     fn new(mode: LookupMode) -> Self {
-        let binding =
-            EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet").expect("network"), 1)
-                .expect("binding");
+        Self::with_evidence_chain(mode, 1)
+    }
+
+    fn with_evidence_chain(mode: LookupMode, chain_id: u64) -> Self {
+        let binding = EvmNetworkBinding::new(
+            LocalPublicId::new("ethereum-mainnet").expect("network"),
+            chain_id,
+        )
+        .expect("binding");
         Self {
             evidence: EvmSessionEvidence::new(
                 &binding,
@@ -198,6 +204,28 @@ impl SigningProvider for FixedProvider {
 }
 
 impl DeterministicSigningProvider for FixedProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.deterministic-signer"
+    }
+
+    fn deterministic_profile_id(&self) -> &'static str {
+        SECP256K1_RFC6979_LOW_S_PROFILE_ID
+    }
+}
+
+struct MismatchedProvider(Arc<FixedProvider>);
+
+impl SigningProvider for MismatchedProvider {
+    fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a> {
+        self.0.sign(request)
+    }
+}
+
+impl DeterministicSigningProvider for MismatchedProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.mismatched-signer"
+    }
+
     fn deterministic_profile_id(&self) -> &'static str {
         SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }
@@ -235,22 +263,54 @@ fn intent() -> EvmTransactionIntent {
     .expect("intent")
 }
 
+fn other_intent() -> EvmTransactionIntent {
+    let config = EvmTransactionConfig::new(
+        "ethereum-mainnet",
+        1,
+        EXPECTED_SENDER,
+        mfm_signing::SignerRef::new("deployer").expect("signer"),
+        Vec::new(),
+    )
+    .expect("config");
+    EvmTransactionIntent::from_config(
+        &config,
+        &EvmTransactionAction::call(DESTINATION, [0x01], U256::ZERO).expect("other call"),
+    )
+    .expect("other intent")
+}
+
 fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTransactionAdapter {
     let bind_session = Arc::clone(&session);
     let bind_signer = Arc::clone(&signer);
+    let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
+        "mfm.test.deterministic-signer",
+        move |_signer_ref| {
+            let signer = Arc::clone(&bind_signer);
+            Box::pin(async move { Ok(signer as Arc<dyn DeterministicSigningProvider>) })
+        },
+    )
+    .expect("signer binder");
     EvmTransactionAdapter::new(EvmTransactionRunnerCapabilities::new(
         Arc::new(MissingArtifacts),
-        CapabilityImplementationId::new("mfm.test.deterministic-signer").expect("implementation"),
+        signer_binder,
         |_binding, _signer_ref| Box::pin(async { Ok(()) }),
         move |_binding| {
             let session = Arc::clone(&bind_session);
             Box::pin(async move { Ok(session as Arc<dyn EvmTransactionSession>) })
         },
-        move |_signer_ref| {
-            let signer = Arc::clone(&bind_signer);
-            Box::pin(async move { Ok(signer as Arc<dyn DeterministicSigningProvider>) })
-        },
     ))
+}
+
+async fn prepare_and_commit(adapter: &EvmTransactionAdapter) -> EvmPreparedTransaction {
+    let prepared = adapter
+        .prepare_transaction(&intent())
+        .await
+        .expect("prepare");
+    let (prepared, settlement) = prepared.into_parts();
+    settlement
+        .expect("EVM preparation settlement")
+        .settle_appended();
+    prepared
 }
 
 #[tokio::test]
@@ -259,10 +319,7 @@ async fn normal_path_signs_once_and_submits_cached_exact_bytes() {
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
 
-    let prepared = adapter
-        .prepare_transaction(&intent())
-        .await
-        .expect("prepare");
+    let prepared = prepare_and_commit(&adapter).await;
     assert_eq!(prepared.expected_hash().expect("hash"), EXPECTED_HASH);
     assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
     let decision = adapter.submit_transaction(prepared).await.expect("submit");
@@ -280,10 +337,7 @@ async fn external_nonce_conflict_stays_unknown_and_rebroadcasts_only_the_prepare
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
-    let prepared = adapter
-        .prepare_transaction(&intent())
-        .await
-        .expect("prepare");
+    let prepared = prepare_and_commit(&adapter).await;
     let recovery_prepared = prepared.clone();
 
     let decision = adapter.submit_transaction(prepared).await.expect("submit");
@@ -309,10 +363,8 @@ async fn external_nonce_conflict_stays_unknown_and_rebroadcasts_only_the_prepare
 async fn resumed_started_submission_looks_up_before_signing_or_broadcasting() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     let preparation_signer = Arc::new(FixedProvider::new());
-    let prepared = make_adapter(Arc::clone(&session), preparation_signer)
-        .prepare_transaction(&intent())
-        .await
-        .expect("prepare");
+    let preparation_adapter = make_adapter(Arc::clone(&session), preparation_signer);
+    let prepared = prepare_and_commit(&preparation_adapter).await;
     session.set_lookup_mode(LookupMode::Observed);
     let resumed_signer = Arc::new(FixedProvider::new());
     let resumed_adapter = make_adapter(Arc::clone(&session), Arc::clone(&resumed_signer));
@@ -331,27 +383,28 @@ async fn resumed_started_submission_looks_up_before_signing_or_broadcasting() {
 }
 
 #[tokio::test]
-async fn signed_envelope_capacity_blocks_before_preparation_reads_or_signing() {
+async fn discarded_preparation_settlements_release_signed_envelope_capacity() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
 
-    for _ in 0..SIGNED_ENVELOPE_CACHE_CAPACITY {
-        adapter
+    for _ in 0..SIGNED_ENVELOPE_CACHE_CAPACITY * 2 {
+        let unsettled = adapter
             .prepare_transaction(&intent())
             .await
-            .expect("reserved preparation");
+            .expect("unsettled preparation");
+        drop(unsettled);
     }
     let result = adapter.prepare_transaction(&intent()).await;
 
-    assert!(matches!(result, Err(mfm_runtime::RuntimeError::Blocked(_))));
+    assert!(result.is_ok());
     assert_eq!(
         session.pending_nonce_calls.load(Ordering::SeqCst),
-        SIGNED_ENVELOPE_CACHE_CAPACITY
+        SIGNED_ENVELOPE_CACHE_CAPACITY * 2 + 1
     );
     assert_eq!(
         signer.calls.load(Ordering::SeqCst),
-        SIGNED_ENVELOPE_CACHE_CAPACITY
+        SIGNED_ENVELOPE_CACHE_CAPACITY * 2 + 1
     );
 }
 
@@ -360,10 +413,7 @@ async fn recovery_observes_expected_hash_before_any_rebroadcast() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
-    let prepared = adapter
-        .prepare_transaction(&intent())
-        .await
-        .expect("prepare");
+    let prepared = prepare_and_commit(&adapter).await;
     let recovery_prepared = prepared.clone();
     assert!(matches!(
         adapter.submit_transaction(prepared).await.expect("submit"),
@@ -385,15 +435,148 @@ async fn recovery_observes_expected_hash_before_any_rebroadcast() {
 }
 
 #[tokio::test]
+async fn same_process_retry_looks_up_uncertain_envelope_before_rebroadcasting() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
+    let prepared = prepare_and_commit(&adapter).await;
+    let retry_prepared = prepared.clone();
+
+    assert!(matches!(
+        adapter.submit_transaction(prepared).await.expect("submit"),
+        SideEffectSubmissionDecision::Unknown(_)
+    ));
+    session.set_lookup_mode(LookupMode::Observed);
+    let retry = adapter
+        .submit_transaction(retry_prepared)
+        .await
+        .expect("same-process retry");
+
+    assert!(matches!(retry, SideEffectSubmissionDecision::Observed(_)));
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
+}
+
+#[tokio::test]
+async fn signer_implementation_mismatch_fails_before_requesting_a_signature() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let signer = Arc::new(FixedProvider::new());
+    let bind_session = Arc::clone(&session);
+    let mismatched = Arc::new(MismatchedProvider(Arc::clone(&signer)));
+    let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
+        "mfm.test.deterministic-signer",
+        move |_signer_ref| {
+            let mismatched = Arc::clone(&mismatched);
+            Box::pin(async move { Ok(mismatched as Arc<dyn DeterministicSigningProvider>) })
+        },
+    )
+    .expect("signer binder");
+    let adapter = EvmTransactionAdapter::new(EvmTransactionRunnerCapabilities::new(
+        Arc::new(MissingArtifacts),
+        signer_binder,
+        |_binding, _signer_ref| Box::pin(async { Ok(()) }),
+        move |_binding| {
+            let session = Arc::clone(&bind_session);
+            Box::pin(async move { Ok(session as Arc<dyn EvmTransactionSession>) })
+        },
+    ));
+
+    let error = match adapter.prepare_transaction(&intent()).await {
+        Ok(_) => panic!("implementation mismatch must fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+    ));
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn wrong_session_binding_fails_before_using_transaction_or_signing_authority() {
+    let session = Arc::new(MockSession::with_evidence_chain(LookupMode::Missing, 2));
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
+
+    let error = match adapter.prepare_transaction(&intent()).await {
+        Ok(_) => panic!("wrong session binding must fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+    ));
+    assert_eq!(session.pending_nonce_calls.load(Ordering::SeqCst), 0);
+    assert!(session.submitted.lock().expect("submitted").is_empty());
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn replay_rejects_intent_or_idempotency_different_from_certified_authorship() {
+    let authored = intent();
+    let expected_key = side_effect_idempotency_key(&authored).expect("idempotency key");
+
+    let intent_error =
+        verify_authored_transaction_replay(&authored, &authored, &other_intent(), &expected_key)
+            .expect_err("changed authored input must reject");
+    assert_eq!(
+        intent_error.kind,
+        replay::ReplayErrorKind::SideEffectMismatch
+    );
+
+    let wrong_key = events::IdempotencyKeyRef::new("wrong-idempotency-key").expect("wrong key");
+    let idempotency_error =
+        verify_authored_transaction_replay(&authored, &authored, &authored, &wrong_key)
+            .expect_err("changed idempotency key must reject");
+    assert_eq!(
+        idempotency_error.kind,
+        replay::ReplayErrorKind::SideEffectMismatch
+    );
+}
+
+#[tokio::test]
+async fn replay_rejects_prepared_intent_different_from_retained_intent() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(session, signer);
+    let prepared = prepare_and_commit(&adapter).await;
+
+    let error = verify_prepared_intent(&other_intent(), &prepared)
+        .expect_err("prepared intent mismatch must reject");
+
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+}
+
+#[test]
+fn replay_rejects_prepared_sender_lane_different_from_certified_lane() {
+    let lane = intent().sender_lane();
+    let expected = events::ResourceKeyEvidence {
+        namespace: spec::ResourceNamespace::new(EVM_SENDER_LANE_NAMESPACE).expect("lane namespace"),
+        key_schema_id: EvmSenderLane::schema_id().expect("lane schema"),
+        key: events::ResourceKey::new(lane.resource_key()).expect("lane key"),
+    };
+    let mut wrong = expected.clone();
+    wrong.key =
+        events::ResourceKey::new("ethereum-mainnet:1:0x0000000000000000000000000000000000000000")
+            .expect("wrong lane key");
+
+    assert!(verify_prepared_sender_lane(Some(&expected), &expected).is_ok());
+    for retained in [None, Some(&wrong)] {
+        let error = verify_prepared_sender_lane(retained, &expected)
+            .expect_err("missing or changed sender lane must reject");
+        assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+    }
+}
+
+#[tokio::test]
 async fn provider_hash_or_transaction_field_mismatch_becomes_ambiguity() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     session.return_wrong_hash.store(true, Ordering::SeqCst);
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(Arc::clone(&session), signer);
-    let prepared = adapter
-        .prepare_transaction(&intent())
-        .await
-        .expect("prepare");
+    let prepared = prepare_and_commit(&adapter).await;
     assert!(matches!(
         adapter.submit_transaction(prepared).await.expect("submit"),
         SideEffectSubmissionDecision::Ambiguous { .. }
@@ -402,10 +585,7 @@ async fn provider_hash_or_transaction_field_mismatch_becomes_ambiguity() {
     let session = Arc::new(MockSession::new(LookupMode::Mismatched));
     let signer = Arc::new(FixedProvider::new());
     let adapter = make_adapter(session, signer);
-    let prepared = adapter
-        .prepare_transaction(&intent())
-        .await
-        .expect("prepare");
+    let prepared = prepare_and_commit(&adapter).await;
     assert!(matches!(
         adapter.submit_transaction(prepared).await.expect("submit"),
         SideEffectSubmissionDecision::Ambiguous { .. }

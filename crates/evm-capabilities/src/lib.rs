@@ -20,7 +20,6 @@
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
-use std::str::FromStr;
 
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
@@ -217,110 +216,6 @@ pub struct EvmBlock {
     pub number: U256,
     /// Block hash.
     pub hash: B256,
-}
-
-/// Canonical persisted EVM block number and hash pair.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "block_anchor",
-    version = "1",
-    schema = "mfm.evm.block_anchor"
-)]
-pub struct EvmBlockAnchor {
-    number: String,
-    hash: String,
-}
-
-impl EvmBlockAnchor {
-    /// Creates one concrete block anchor without narrowing its U256 number.
-    pub fn new(number: U256, hash: B256) -> Self {
-        Self {
-            number: number.to_string(),
-            hash: format!("{hash:#x}"),
-        }
-    }
-
-    /// Converts a checked capability block.
-    pub fn from_block(block: &EvmBlock) -> Self {
-        Self::new(block.number, block.hash)
-    }
-
-    /// Returns the canonical decimal block number.
-    pub fn number(&self) -> &str {
-        &self.number
-    }
-
-    /// Returns the canonical lower-case block hash.
-    pub fn hash(&self) -> &str {
-        &self.hash
-    }
-
-    /// Parses the checked block number as an Alloy U256.
-    pub fn number_quantity(&self) -> Result<U256> {
-        parse_anchor_number(&self.number)
-    }
-
-    /// Parses the checked block hash as an Alloy B256.
-    pub fn hash_value(&self) -> Result<B256> {
-        parse_anchor_hash(&self.hash)
-    }
-
-    /// Converts this persisted anchor into a capability block value.
-    pub fn to_block(&self) -> Result<EvmBlock> {
-        Ok(EvmBlock {
-            number: self.number_quantity()?,
-            hash: self.hash_value()?,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmBlockAnchor {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            number: String,
-            hash: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let number = parse_anchor_number(&wire.number).map_err(de::Error::custom)?;
-        let hash = parse_anchor_hash(&wire.hash).map_err(de::Error::custom)?;
-        Ok(Self::new(number, hash))
-    }
-}
-
-fn parse_anchor_number(value: &str) -> Result<U256> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(EvmCapabilityError::InvalidRequest {
-            reason: EvmInvalidRequest::InvalidBlockAnchor,
-        });
-    }
-    let number = U256::from_str(value).map_err(|_| EvmCapabilityError::InvalidRequest {
-        reason: EvmInvalidRequest::InvalidBlockAnchor,
-    })?;
-    if number.to_string() != value {
-        return Err(EvmCapabilityError::InvalidRequest {
-            reason: EvmInvalidRequest::InvalidBlockAnchor,
-        });
-    }
-    Ok(number)
-}
-
-fn parse_anchor_hash(value: &str) -> Result<B256> {
-    let hash = B256::from_str(value).map_err(|_| EvmCapabilityError::InvalidRequest {
-        reason: EvmInvalidRequest::InvalidBlockAnchor,
-    })?;
-    if format!("{hash:#x}") != value {
-        return Err(EvmCapabilityError::InvalidRequest {
-            reason: EvmInvalidRequest::InvalidBlockAnchor,
-        });
-    }
-    Ok(hash)
 }
 
 /// Checked call request.
@@ -521,10 +416,8 @@ impl EvmTransactionEstimate {
 /// Optional block placement of an observed transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmTransactionPlacement {
-    /// Block number.
-    pub block_number: U256,
-    /// Block hash.
-    pub block_hash: B256,
+    /// Exact inclusion block identity.
+    pub block: EvmBlock,
     /// Transaction index within the block.
     pub transaction_index: U256,
 }
@@ -576,10 +469,8 @@ pub struct EvmReceiptLog {
     pub topics: Vec<B256>,
     /// Unindexed log data.
     pub data: Bytes,
-    /// Inclusion block number.
-    pub block_number: U256,
-    /// Inclusion block hash.
-    pub block_hash: B256,
+    /// Exact inclusion block identity.
+    pub block: EvmBlock,
     /// Enclosing transaction hash.
     pub transaction_hash: B256,
     /// Transaction index within the block.
@@ -597,10 +488,8 @@ pub struct EvmReceipt {
     pub transaction_hash: B256,
     /// Transaction index within the block.
     pub transaction_index: U256,
-    /// Inclusion block number.
-    pub block_number: U256,
-    /// Inclusion block hash.
-    pub block_hash: B256,
+    /// Exact inclusion block identity.
+    pub block: EvmBlock,
     /// Sender.
     pub from: Address,
     /// Destination, or none for creation.
@@ -624,8 +513,7 @@ impl EvmReceipt {
             if log.removed
                 || log.transaction_hash != self.transaction_hash
                 || log.transaction_index != self.transaction_index
-                || log.block_number != self.block_number
-                || log.block_hash != self.block_hash
+                || log.block != self.block
             {
                 return Err(EvmCapabilityError::InvalidRequest {
                     reason: EvmInvalidRequest::IncoherentReceipt,

@@ -16,8 +16,10 @@ canonical uint256 decimals, and one final number-to-hash canonicality check.
 
 `PublishEvmHoldingsState` records the complete batch as
 `portfolio.evm_balance_snapshot` facts and returns the direct network snapshot in the same atomic
-managed-write attempt. Native facts use the subject asset key `native`; ERC-20 facts use
-`erc20:<canonical-contract-address>`.
+managed-write attempt. Every fact retains the complete typed subject object. Its asset is the same
+`HoldingSourceConfig` algebra used by configuration and collection: `Native` or `Erc20` with the
+checked contract address. Descriptor scalar paths are query terms only and never replace or
+flatten that identity.
 
 The remaining snapshot projection is:
 

@@ -26,9 +26,9 @@ use mfm_program::{
 };
 use mfm_program_derive::{MfmConfig, PublicOutputs, StateInput};
 use mfm_runtime::{
-    load_materialized_input, load_runner_config_for_node, CapabilityImplementationId,
-    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    RunnerExecutableIdentityTemplate, RunnerRegistrationBuilder,
+    load_materialized_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, RunnerExecutableIdentityTemplate,
+    RunnerRegistrationBuilder,
 };
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
@@ -159,15 +159,8 @@ impl PureState for ValidationTargetState {
                 "final configuration call did not target the created contract".to_owned(),
             ));
         }
-        EvmContractValidationTarget::new(
-            created,
-            input
-                .final_call
-                .receipt()
-                .block_anchor()
-                .map_err(StateError::from)?,
-        )
-        .map_err(StateError::from)
+        EvmContractValidationTarget::new(created, input.final_call.receipt().block_anchor().clone())
+            .map_err(StateError::from)
     }
 }
 
@@ -185,10 +178,24 @@ impl PureState for DirectValidationTargetState {
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         EvmContractValidationTarget::new(
-            created_address(&input)?,
-            input.receipt().block_anchor().map_err(StateError::from)?,
+            successful_transaction_address(&input)?,
+            input.receipt().block_anchor().clone(),
         )
         .map_err(StateError::from)
+    }
+}
+
+fn successful_transaction_address(outcome: &EvmTransactionOutcome) -> StateResult<Address> {
+    match outcome.result() {
+        EvmTransactionResult::Succeeded {
+            result:
+                EvmTransactionSuccess::Created { address } | EvmTransactionSuccess::Called { address },
+        } => Address::from_str(address).map_err(|_| {
+            StateError::Message("successful transaction address was invalid".to_owned())
+        }),
+        EvmTransactionResult::Reverted { .. } => Err(StateError::Message(
+            "reverted transaction did not produce a usable address".to_owned(),
+        )),
     }
 }
 
@@ -232,6 +239,90 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
 #[tokio::test]
 async fn direct_create_validate_graph_replays_from_evidence_only() {
     assert_composition_replays(direct_composition_launch_material, 1).await;
+}
+
+#[tokio::test]
+async fn isolated_call_validate_graph_replays_from_evidence_only() {
+    assert_composition_replays(call_validate_launch_material, 1).await;
+}
+
+#[tokio::test]
+async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
+    let store = store::AsyncInMemoryRunStore::default();
+    let signing_key = Arc::new(SigningKey::random(&mut OsRng));
+    let sender = signing_key_address(&signing_key);
+    let created = sender.create(BASE_NONCE);
+    let world = Arc::new(TransactionCompositionWorld::reverting_first_call(
+        sender, created,
+    ));
+    let live_validation_reads = Arc::new(AtomicUsize::new(0));
+    let certification = composition_certification_registry();
+    let launch_services = make_run_services(
+        composition_runners(
+            &store,
+            Arc::clone(&world),
+            Arc::clone(&signing_key),
+            Arc::clone(&live_validation_reads),
+        ),
+        store.clone(),
+        store.clone(),
+        certification.clone(),
+    );
+    let (draft, seed_material) = composition_launch_material(sender, created);
+    let request = crate::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        launch_services.certification_registry(),
+        store.load_store_scope_id().await.expect("store scope"),
+        None,
+    )
+    .expect("failed composition launch request");
+    let run_id = request.run_id.clone();
+
+    let launch = launch_services
+        .launch_run(request)
+        .await
+        .expect("launch reverted transaction composition");
+    let (_, launched, _) = launch.into_response_parts();
+    let launched = launched.expect("admitted reverted composition");
+    assert_eq!(launched.run_mode, RunModeStatus::FailedWithoutAcdcClaim);
+    assert_eq!(world.included_count(), 2);
+    assert_eq!(
+        world.receipt_statuses(),
+        vec![EvmReceiptStatus::Success, EvmReceiptStatus::Reverted]
+    );
+    assert_eq!(live_validation_reads.load(Ordering::SeqCst), 0);
+    let stream = store.load_run_stream(&run_id).await.expect("run stream");
+    assert_eq!(
+        stream
+            .iter()
+            .filter(|event| matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectReceiptObserved(_)
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        stream
+            .iter()
+            .filter(|event| matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectSubmissionObserved(_)
+            ))
+            .count(),
+        2
+    );
+    drop(launch_services);
+    drop(signing_key);
+
+    let replay_services = make_run_read_services(store.clone(), store, certification);
+    let replay = replay_services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect("evidence-only failed composition replay");
+    assert_eq!(replay.run_mode, RunModeStatus::FailedWithoutAcdcClaim);
+    assert_eq!(live_validation_reads.load(Ordering::SeqCst), 0);
 }
 
 type CompositionLaunchMaterial = (
@@ -349,6 +440,53 @@ fn direct_composition_launch_material(
     )
     .expect("direct transaction composition draft");
     let seed_material = BTreeMap::from([(draft.seeds()[0].seed_id.clone(), create_bytes)]);
+    (draft, seed_material)
+}
+
+fn call_validate_launch_material(sender: Address, created: Address) -> CompositionLaunchMaterial {
+    let call_action = CanonicalSeed::from_value(
+        &EvmTransactionAction::call(created, [0x01], U256::ZERO).expect("call action"),
+    )
+    .expect("call action seed");
+    let call_bytes = call_action.canonical_json().clone();
+    let draft = build_root_with_registries(
+        ScopeKey::new("evm-call-validation-composition").expect("scope key"),
+        composition_state_registry(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
+            let call_action = root.seed(SeedKey::new("call-action")?, call_action.clone())?;
+            let call_outcome = root
+                .scope()
+                .side_effect::<SubmitEvmTransactionState, _>(
+                    StateKey::new("call")?,
+                    NoContext,
+                    composition_transaction_config(sender),
+                    call_action,
+                    evm_sender_lane_resource_claim()?,
+                    SideEffectVerificationSpec::Receipt,
+                )?
+                .into_handle();
+            let target = root.scope().state::<DirectValidationTargetState, _>(
+                StateKey::new("validation-target")?,
+                NoContext,
+                ProjectionConfig {},
+                call_outcome,
+            )?;
+            let verified = root.scope().state::<ValidateEvmContractState, _>(
+                StateKey::new("validate")?,
+                NoContext,
+                composition_validation_config(sender, created),
+                target,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &TransactionCompositionPublicOutputs { verified },
+            )
+        },
+    )
+    .expect("call-validation composition draft");
+    let seed_material = BTreeMap::from([(draft.seeds()[0].seed_id.clone(), call_bytes)]);
     (draft, seed_material)
 }
 
@@ -529,12 +667,26 @@ fn composition_runners(
         signing_key,
         sender,
     });
+    let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
+        "mfm.test.composition-signer",
+        move |signer_ref| {
+            let signer = Arc::clone(&signer);
+            Box::pin(async move {
+                if signer_ref.as_str() != "composition-signer" {
+                    return Err(mfm_signing::SigningError::redacted_provider_failure(
+                        "unexpected signer reference",
+                    ));
+                }
+                Ok(signer as Arc<dyn DeterministicSigningProvider>)
+            })
+        },
+    )
+    .expect("signer binder");
     register_evm_transaction_runner(
         &mut runners,
         EvmTransactionRunnerCapabilities::new(
             Arc::clone(&artifacts),
-            CapabilityImplementationId::new("mfm.test.composition-signer")
-                .expect("signing implementation"),
+            signer_binder,
             move |binding, signer_ref| {
                 Box::pin(async move {
                     if binding.network_id().as_str() == "ethereum-mainnet"
@@ -554,17 +706,6 @@ fn composition_runners(
                 Box::pin(async move {
                     validate_composition_binding(&binding)?;
                     Ok(transaction_session as Arc<dyn EvmTransactionSession>)
-                })
-            },
-            move |signer_ref| {
-                let signer = Arc::clone(&signer);
-                Box::pin(async move {
-                    if signer_ref.as_str() != "composition-signer" {
-                        return Err(mfm_signing::SigningError::redacted_provider_failure(
-                            "unexpected signer reference",
-                        ));
-                    }
-                    Ok(signer as Arc<dyn DeterministicSigningProvider>)
                 })
             },
         ),
@@ -711,6 +852,7 @@ struct CompositionChain {
 struct TransactionCompositionWorld {
     sender: Address,
     created: Address,
+    revert_first_call: bool,
     chain: Mutex<CompositionChain>,
 }
 
@@ -719,6 +861,16 @@ impl TransactionCompositionWorld {
         Self {
             sender,
             created,
+            revert_first_call: false,
+            chain: Mutex::new(CompositionChain::default()),
+        }
+    }
+
+    fn reverting_first_call(sender: Address, created: Address) -> Self {
+        Self {
+            sender,
+            created,
+            revert_first_call: true,
             chain: Mutex::new(CompositionChain::default()),
         }
     }
@@ -727,16 +879,29 @@ impl TransactionCompositionWorld {
         self.chain.lock().expect("composition chain").included.len()
     }
 
+    fn receipt_statuses(&self) -> Vec<EvmReceiptStatus> {
+        let mut statuses = self
+            .chain
+            .lock()
+            .expect("composition chain")
+            .included
+            .values()
+            .map(|included| (included.receipt.transaction_index, included.receipt.status))
+            .collect::<Vec<_>>();
+        statuses.sort_by_key(|(index, _)| *index);
+        statuses.into_iter().map(|(_, status)| status).collect()
+    }
+
     fn block_by_number(&self, number: U256) -> Option<EvmBlock> {
         self.chain
             .lock()
             .expect("composition chain")
             .included
             .values()
-            .find(|included| included.receipt.block_number == number)
+            .find(|included| included.receipt.block.number == number)
             .map(|included| EvmBlock {
                 number,
-                hash: included.receipt.block_hash,
+                hash: included.receipt.block.hash,
             })
     }
 
@@ -746,7 +911,7 @@ impl TransactionCompositionWorld {
             .expect("composition chain")
             .included
             .values()
-            .any(|included| included.receipt.block_hash == hash)
+            .any(|included| included.receipt.block.hash == hash)
     }
 }
 
@@ -846,12 +1011,18 @@ impl EvmTransactionSession for CompositionTransactionSession {
         let receipt = EvmReceipt {
             transaction_hash: expected_hash,
             transaction_index: U256::from(transaction_index),
-            block_number,
-            block_hash,
+            block: EvmBlock {
+                number: block_number,
+                hash: block_hash,
+            },
             from: self.world.sender,
             to,
             contract_address,
-            status: EvmReceiptStatus::Success,
+            status: if self.world.revert_first_call && transaction_index == 1 {
+                EvmReceiptStatus::Reverted
+            } else {
+                EvmReceiptStatus::Success
+            },
             gas_used: U256::from(80_000),
             cumulative_gas_used: U256::from(80_000 * (transaction_index + 1)),
             logs: Vec::new(),
@@ -1033,6 +1204,10 @@ impl SigningProvider for CompositionSigner {
 }
 
 impl DeterministicSigningProvider for CompositionSigner {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.composition-signer"
+    }
+
     fn deterministic_profile_id(&self) -> &'static str {
         SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }

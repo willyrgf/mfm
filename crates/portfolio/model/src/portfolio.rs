@@ -13,7 +13,7 @@ use crate::symbol::{
     validate_symbol_config, HoldingSourceConfig, Observation, QuoteCode, SymbolConfig,
     SymbolConfigError,
 };
-use crate::wallet::{WalletConfig, WalletSubjectKind};
+use crate::wallet::{WalletConfig, WalletSubject, WalletSubjectKind};
 
 #[path = "portfolio_snapshot.rs"]
 mod portfolio_snapshot;

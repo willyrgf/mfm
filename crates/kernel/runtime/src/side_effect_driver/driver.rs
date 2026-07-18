@@ -92,6 +92,7 @@ impl SideEffectDriver {
         let prepared = adapter
             .prepare(ctx, &plan.intent, &plan.idempotency)
             .await?;
+        let (prepared, settlement) = prepared.into_parts();
         let projection = view
             .projection()
             .ok_or_else(|| missing_driver_projection("claimed side-effect projection"))?;
@@ -106,11 +107,15 @@ impl SideEffectDriver {
             }
             _ => return Err(missing_driver_projection("claimed authority")),
         };
-        SideEffectEvidenceBuilder::new(ctx).prepare_claimed_invocation_and_start(
+        let output = SideEffectEvidenceBuilder::new(ctx).prepare_claimed_invocation_and_start(
             side_effect,
             claim,
             &prepared,
-        )
+        )?;
+        Ok(match settlement {
+            Some(settlement) => output.with_settlement(settlement),
+            None => output,
+        })
     }
 
     async fn submit<A>(

@@ -147,6 +147,106 @@ pub(super) async fn scheduler_reloads_and_redecides_after_stale_expected_sequenc
     );
 }
 
+#[tokio::test]
+async fn runner_output_settlement_requires_an_appended_outcome() {
+    let fixture = fixture();
+
+    let appended_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let appended_scheduler = test_scheduler(settlement_fixture_runners(
+        &fixture,
+        Arc::clone(&appended_count),
+    ));
+    let appended_store = RecordingTypedRunStore::new();
+    start_fixture_run_async_store(
+        &appended_scheduler,
+        &appended_store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start appended settlement run");
+    drive_once_with_claim(
+        &appended_scheduler,
+        &appended_store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive appended settlement");
+    assert_eq!(appended_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let uncertain_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let uncertain_scheduler = test_scheduler(settlement_fixture_runners(
+        &fixture,
+        Arc::clone(&uncertain_count),
+    ));
+    let uncertain_store = StaleOnceTypedRunStore::new();
+    start_fixture_run_async_store(
+        &uncertain_scheduler,
+        &uncertain_store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start uncertain settlement run");
+    drive_once_with_claim(
+        &uncertain_scheduler,
+        &uncertain_store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive uncertain settlement");
+    assert_eq!(
+        uncertain_count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an append error must discard process-local authority even if a retry observes the commit"
+    );
+}
+
+struct SettlementFixtureRunner {
+    inner: RecordingRunner,
+    settled: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ErasedNodeRunner for SettlementFixtureRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let output = self.inner.run_erased(ctx).await?;
+            let settled = Arc::clone(&self.settled);
+            Ok(
+                output.with_settlement(RunnerOutputSettlement::on_appended(move || {
+                    settled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })),
+            )
+        })
+    }
+}
+
+fn settlement_fixture_runners(
+    fixture: &Fixture,
+    settled: Arc<std::sync::atomic::AtomicUsize>,
+) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            SettlementFixtureRunner {
+                inner: RecordingRunner {
+                    expected_caps: Vec::new(),
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+                settled,
+            },
+        ))
+        .expect("settlement runner binding");
+    register_fixture_read_runner(&mut registry, fixture, "read");
+    registry
+}
+
 pub(super) fn attempt_started_count(
     store: &TestTypedRunStore,
     run_id: &RunId,

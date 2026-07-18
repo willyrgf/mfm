@@ -349,11 +349,13 @@ the signed raw transaction hex to an explicit bearer-output file. The command re
 keystore/key selector, label lookup, private-key access, custom encoder, legacy transaction mode, or
 provider fallback.
 
-The unsigned envelope uses Alloy as its only signing-hash and encoding implementation. CLI
-quantities accept canonical unsigned decimal or lowercase `0x`-prefixed input as `U256`; values
-outside Alloy's exact EIP-1559 field representation fail closed. The keystore provider enforces the
-deterministic RFC 6979 recoverable low-s profile and expected sender, and blocking file/unlock/KDF/key
-work runs outside async runtime workers.
+The unsigned envelope uses Alloy as its only signing-hash and encoding implementation. The app
+signing service parses canonical unsigned decimal or lowercase `0x`-prefixed quantities as `U256`,
+constructs the checked envelope, and rejects values outside Alloy's exact EIP-1559 field
+representation. The CLI binary only maps arguments into that raw app request, writes the returned
+bearer to the explicit protected file, and renders redacted metadata. The keystore provider enforces
+the deterministic RFC 6979 recoverable low-s profile and expected sender, and blocking
+file/unlock/KDF/key work runs outside async runtime workers.
 
 Command output contains metadata only: `from`, `to`, canonical decimal-string `nonce` and
 `chain_id`, `signing_digest`, and `transaction_hash`. The two hashes are intentionally distinct.

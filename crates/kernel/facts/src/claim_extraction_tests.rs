@@ -48,12 +48,10 @@ fn canonical_descriptor_bytes_parse_back_to_descriptor_only_when_canonical() {
 
 #[test]
 fn subject_evidence_carries_canonical_subject_material() {
-    let material = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
-        FactFieldId::new("subject.chain").expect("field"),
-        FactFieldValueType::String,
-        FactCanonicalScalar::string("bitcoin"),
+    let material = FactSubjectMaterialV2::new(
+        CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
+            .expect("subject"),
     )
-    .expect("value")])
     .expect("material");
     let namespace_hash = digest(41);
     let evidence = FactSubjectEvidence::from_material(namespace_hash.clone(), &material)
@@ -105,19 +103,15 @@ fn fact_key_changes_when_subject_value_changes() {
     .expect("descriptor");
     let namespace_hash = fact_subject_namespace_hash(&descriptor).expect("namespace hash");
 
-    let bitcoin = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
-        FactFieldId::new("subject.chain").expect("field"),
-        FactFieldValueType::String,
-        FactCanonicalScalar::string("bitcoin"),
+    let bitcoin = FactSubjectMaterialV2::new(
+        CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
+            .expect("subject"),
     )
-    .expect("value")])
     .expect("material");
-    let ethereum = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
-        FactFieldId::new("subject.chain").expect("field"),
-        FactFieldValueType::String,
-        FactCanonicalScalar::string("ethereum"),
+    let ethereum = FactSubjectMaterialV2::new(
+        CanonicalValue::object([("chain", CanonicalValue::String("ethereum".into()))])
+            .expect("subject"),
     )
-    .expect("value")])
     .expect("material");
 
     let bitcoin_key = derive_fact_key(
@@ -132,6 +126,46 @@ fn fact_key_changes_when_subject_value_changes() {
     .expect("ethereum key");
 
     assert_ne!(bitcoin_key, ethereum_key);
+}
+
+#[test]
+fn optional_union_arm_participates_in_subject_identity_when_present() {
+    let descriptor = descriptor_without_orderings(vec![
+        required_subject_field("subject.asset.kind", "asset.kind"),
+        optional_subject_field("subject.asset.contract_address", "asset.contract_address"),
+        sortable_result_field("result.height"),
+    ])
+    .expect("descriptor");
+    let native = CanonicalValue::object([(
+        "asset",
+        CanonicalValue::object([("kind", CanonicalValue::String("native".into()))])
+            .expect("native asset"),
+    )])
+    .expect("native subject");
+    let token = CanonicalValue::object([(
+        "asset",
+        CanonicalValue::object([
+            ("kind", CanonicalValue::String("erc20".into())),
+            (
+                "contract_address",
+                CanonicalValue::String("0x0000000000000000000000000000000000000001".into()),
+            ),
+        ])
+        .expect("token asset"),
+    )])
+    .expect("token subject");
+
+    let native = fact_subject_evidence(&descriptor, &native).expect("native evidence");
+    let token = fact_subject_evidence(&descriptor, &token).expect("token evidence");
+    assert_ne!(native.fact_key(), token.fact_key());
+    assert!(native
+        .subject_material()
+        .as_str()
+        .contains(r#""kind":"native""#));
+    assert!(token
+        .subject_material()
+        .as_str()
+        .contains(r#""contract_address":"0x0000000000000000000000000000000000000001""#));
 }
 
 #[test]
@@ -165,7 +199,7 @@ fn extraction_derives_subject_material_and_terms() {
         FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42).expect("metadata");
 
     let material = extract_subject_material(&descriptor, &subject).expect("subject material");
-    assert_eq!(material.values().len(), 1);
+    assert_eq!(material.subject(), &subject);
     let terms = extract_terms(&descriptor, &subject, &response, &metadata).expect("terms");
 
     assert_eq!(terms.len(), 3);

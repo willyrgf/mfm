@@ -273,12 +273,13 @@ pub(super) fn fact_claim(artifact: &StoredArtifactEvidenceRef) -> mfm_facts::Fac
 }
 
 pub(super) fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
-        mfm_facts::FactFieldId::new("subject.account").expect("field id"),
-        mfm_facts::FactFieldValueType::String,
-        mfm_facts::FactCanonicalScalar::string("same-subject"),
+    let material = mfm_facts::FactSubjectMaterialV2::new(
+        mfm_canonical::CanonicalValue::object([(
+            "account",
+            mfm_canonical::CanonicalValue::String("same-subject".into()),
+        )])
+        .expect("subject"),
     )
-    .expect("subject value")])
     .expect("subject material");
     mfm_facts::FactSubjectEvidence::from_material(content_digest(0xcd), &material)
         .expect("subject evidence")

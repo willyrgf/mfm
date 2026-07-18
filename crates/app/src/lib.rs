@@ -76,9 +76,10 @@ pub use self::responses::*;
 #[path = "status.rs"]
 mod status;
 pub use self::status::*;
-pub use self::transaction_signing::sign_eip1559_transaction;
-pub use mfm_evm_signing::UnsignedEip1559Envelope;
-pub use mfm_signing::SignerRef;
+pub use self::transaction_signing::{
+    sign_evm_transaction_command, EvmTransactionSigningEnvelopeInput,
+    EvmTransactionSigningMetadata, EvmTransactionSigningRequest, SignedEvmTransaction,
+};
 #[path = "launch_artifacts.rs"]
 mod launch_artifacts;
 use self::launch_artifacts::*;

@@ -17,8 +17,8 @@ use crate::side_effect_lifecycle::SideEffectAttemptView;
 use crate::{
     canonical_json, CertifiedRuntimeSpec, ErasedRunCtx, ErasedRunnerOutput, MaterializedInputs,
     PreInvocationRunCtx, Result, RunnerArtifactBuilder, RunnerCapabilityBinding,
-    RunnerEventPayload, RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RuntimeError, StagedArtifact, StagedRetentionRefs,
+    RunnerEventPayload, RunnerJsonArtifact, RunnerOutputBuilder, RunnerOutputSettlement,
+    RunnerPayloadBuilder, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by side-effect driver callbacks.
@@ -31,6 +31,35 @@ pub type SideEffectSubmissionDecisionFuture<'a, Submission, RecoveryEvidence> =
 /// Future returned by callbacks that recover a previously unknown submission.
 pub type SideEffectUnknownSubmissionDecisionFuture<'a, Submission, RecoveryEvidence> =
     SideEffectDriverFuture<'a, SideEffectUnknownSubmissionDecision<Submission, RecoveryEvidence>>;
+
+/// Public prepared invocation plus optional process-local authority awaiting durable settlement.
+pub struct SideEffectPreparedInvocation<T> {
+    evidence: T,
+    settlement: Option<RunnerOutputSettlement>,
+}
+
+impl<T> SideEffectPreparedInvocation<T> {
+    /// Creates prepared evidence that carries no process-local settlement.
+    pub const fn new(evidence: T) -> Self {
+        Self {
+            evidence,
+            settlement: None,
+        }
+    }
+
+    /// Creates prepared evidence with authority promoted only after its append succeeds.
+    pub fn with_settlement(evidence: T, settlement: RunnerOutputSettlement) -> Self {
+        Self {
+            evidence,
+            settlement: Some(settlement),
+        }
+    }
+
+    /// Separates persisted evidence from its optional process-local settlement.
+    pub fn into_parts(self) -> (T, Option<RunnerOutputSettlement>) {
+        (self.evidence, self.settlement)
+    }
+}
 
 /// Builds pre-invocation side-effect resource-lane claim evidence for the first epoch.
 pub fn preclaim_side_effect_resource_lane<Intent, Idempotency>(
@@ -504,7 +533,7 @@ pub trait SideEffectAdapter {
         ctx: &'a ErasedRunCtx<'ctx>,
         intent: &'a Self::Intent,
         idempotency: &'a Self::Idempotency,
-    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation>;
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocation<Self::PreparedInvocation>>;
 
     /// Loads and type-checks retained prepared invocation authority.
     fn load_prepared<'a, 'ctx>(

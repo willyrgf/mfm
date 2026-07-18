@@ -38,7 +38,7 @@ const REORG_HASH: B256 = b256!("222222222222222222222222222222222222222222222222
 enum ReadRecord {
     Block(EvmBlockSelector),
     Balance(Address, EvmBlockSelector),
-    Call(Vec<u8>, EvmBlockSelector),
+    Call(Address, Vec<u8>, EvmBlockSelector),
 }
 
 struct RecordingSession {
@@ -125,7 +125,11 @@ impl EvmReadSession for RecordingSession {
 
     fn call<'a>(&'a self, request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes> {
         let input = request.input().to_vec();
-        self.record(ReadRecord::Call(input.clone(), request.block().clone()));
+        self.record(ReadRecord::Call(
+            request.to(),
+            input.clone(),
+            request.block().clone(),
+        ));
         Box::pin(async move {
             self.concurrent_read().await;
             let value = if input.starts_with(&ERC20_DECIMALS_SELECTOR) {
@@ -285,7 +289,7 @@ async fn one_session_uses_latest_then_exact_hash_reads_then_number_recheck() {
             ReadRecord::Balance(_, EvmBlockSelector::ExactHash(hash)) => {
                 assert_eq!(*hash, ANCHOR_HASH);
             }
-            ReadRecord::Call(input, EvmBlockSelector::ExactHash(hash)) => {
+            ReadRecord::Call(_, input, EvmBlockSelector::ExactHash(hash)) => {
                 assert_eq!(*hash, ANCHOR_HASH);
                 decimals_calls += usize::from(input.starts_with(&ERC20_DECIMALS_SELECTOR));
                 balance_of_calls += usize::from(input.starts_with(&ERC20_BALANCE_OF_SELECTOR));
@@ -344,6 +348,75 @@ async fn balance_reads_never_exceed_the_hard_concurrency_limit() {
     let max_active = session.max_active.load(Ordering::SeqCst);
     assert!(max_active > 1, "test must exercise concurrent reads");
     assert!(max_active <= EVM_READ_CONCURRENCY_LIMIT);
+}
+
+#[tokio::test]
+async fn concurrent_reads_are_issued_in_certified_plan_order() {
+    let first_token = Address::from_word(U256::from(11).into());
+    let second_token = Address::from_word(U256::from(12).into());
+    let plan = plan_for(vec![
+        source(
+            Address::from_word(U256::from(3).into()),
+            HoldingSourceConfig::Native,
+        ),
+        source(
+            Address::from_word(U256::from(2).into()),
+            HoldingSourceConfig::Native,
+        ),
+        source(
+            Address::from_word(U256::from(1).into()),
+            HoldingSourceConfig::Erc20 {
+                contract_address: format!("{second_token:#x}").parse().expect("second token"),
+            },
+        ),
+        source(
+            Address::from_word(U256::from(1).into()),
+            HoldingSourceConfig::Erc20 {
+                contract_address: format!("{first_token:#x}").parse().expect("first token"),
+            },
+        ),
+    ]);
+    let session = Arc::new(RecordingSession::new(
+        &plan.binding().expect("binding"),
+        ANCHOR_HASH,
+    ));
+    let capabilities = capabilities(
+        Arc::clone(&session),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(EmptyFactIndex::new()),
+    );
+
+    collect_evm_network(&plan, &capabilities)
+        .await
+        .expect("ordered collection");
+    let records = session.records();
+    let decimals_targets = records
+        .iter()
+        .filter_map(|record| match record {
+            ReadRecord::Call(target, input, _) if input.starts_with(&ERC20_DECIMALS_SELECTOR) => {
+                Some(*target)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(decimals_targets, vec![first_token, second_token]);
+
+    let planned_accounts = plan
+        .sources()
+        .iter()
+        .map(|source| source.account_address().expect("planned account"))
+        .collect::<Vec<_>>();
+    let issued_accounts = records
+        .iter()
+        .filter_map(|record| match record {
+            ReadRecord::Balance(account, _) => Some(*account),
+            ReadRecord::Call(_, input, _) if input.starts_with(&ERC20_BALANCE_OF_SELECTOR) => {
+                Some(Address::from_slice(&input[16..36]))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(issued_accounts, planned_accounts);
 }
 
 #[tokio::test]

@@ -12,6 +12,7 @@ fn erased_runner_output_fields() {
     let _ = output.staged_artifacts;
     let _ = output.staged_retention_refs;
     let _ = output.payloads;
+    let _ = output.settlement;
 }
 
 fn runner_capability_binding_fields(binding: mfm_runtime::RunnerCapabilityBinding) {

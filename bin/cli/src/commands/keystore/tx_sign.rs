@@ -1,10 +1,6 @@
-use std::fmt;
 use std::path::PathBuf;
-use std::str::FromStr;
 
-use alloy_primitives::{Address, Bytes, TxKind, U256};
 use clap::Args;
-use serde::Serialize;
 
 use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
@@ -67,76 +63,36 @@ pub(crate) struct TxSignArgs {
     pub runtime_config: Option<PathBuf>,
 }
 
-/// Response returned after writing one signed transaction bearer.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct TxSignResponse {
-    from: String,
-    to: String,
-    nonce: String,
-    chain_id: String,
-    signing_digest: String,
-    transaction_hash: String,
-}
-
-impl fmt::Display for TxSignResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Signed EIP-1559 transaction {} from {} to {} and wrote bearer output locally",
-            self.transaction_hash, self.from, self.to
-        )
-    }
-}
-
 /// Executes the signing command and terminates the process.
 pub(crate) async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
     let result = execute_internal(args).await;
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
-    let signer_ref = mfm_app::SignerRef::new(&args.signer_ref)
-        .map_err(|_| PublicError::bad_request("invalid_signer_ref", "Signer ref is invalid"))?;
-    let expected_from = parse_address(&args.expected_from, "from")?;
-    let to = parse_address(&args.to, "to")?;
-    let chain_id = parse_quantity(&args.chain_id, "chain-id")?;
-    let nonce = parse_quantity(&args.nonce, "nonce")?;
-    let max_priority_fee_per_gas =
-        parse_quantity(&args.max_priority_fee_per_gas, "max-priority-fee-per-gas")?;
-    let max_fee_per_gas = parse_quantity(&args.max_fee_per_gas, "max-fee-per-gas")?;
-    let gas_limit = parse_quantity(&args.gas_limit, "gas-limit")?;
-    let value = parse_quantity(&args.value_wei, "value-wei")?;
-    let data = parse_data(&args.data)?;
-    let envelope = mfm_app::UnsignedEip1559Envelope::new(
-        chain_id,
-        nonce,
-        max_priority_fee_per_gas,
-        max_fee_per_gas,
-        gas_limit,
-        TxKind::Call(to),
-        value,
-        Default::default(),
-        data,
-    )
-    .map_err(|_| {
-        PublicError::bad_request(
-            "invalid_eip1559_transaction",
-            "EIP-1559 transaction inputs are invalid",
-        )
-    })?;
-    let signing_digest = envelope.signing_digest();
-    let signed = mfm_app::sign_eip1559_transaction(
-        args.runtime_config.as_deref(),
-        signer_ref,
-        expected_from,
-        &envelope,
-    )
-    .await?;
-    let transaction_hash = signed.transaction_hash();
+async fn execute_internal(
+    args: &TxSignArgs,
+) -> CommandResult<mfm_app::EvmTransactionSigningMetadata> {
+    let request = mfm_app::EvmTransactionSigningRequest {
+        runtime_config_path: args.runtime_config.clone(),
+        signer_ref: args.signer_ref.clone(),
+        envelope: mfm_app::EvmTransactionSigningEnvelopeInput {
+            expected_from: args.expected_from.clone(),
+            to: args.to.clone(),
+            value_wei: args.value_wei.clone(),
+            chain_id: args.chain_id.clone(),
+            nonce: args.nonce.clone(),
+            max_fee_per_gas: args.max_fee_per_gas.clone(),
+            max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
+            gas_limit: args.gas_limit.clone(),
+            data: args.data.clone(),
+        },
+    };
+    let signed = mfm_app::sign_evm_transaction_command(request).await?;
+    let (metadata, bearer) = signed.into_parts();
     let output_path = args.out.clone();
     let overwrite = args.overwrite;
     tokio::task::spawn_blocking(move || {
-        let raw_transaction_hex = format!("0x{}", hex::encode(signed.bytes()));
+        let raw_transaction_hex = format!("0x{}", hex::encode(bearer.bytes()));
         output_file::publish_bearer_atomic(&output_path, raw_transaction_hex.as_bytes(), overwrite)
             .map_err(public_output_error)
     })
@@ -148,72 +104,7 @@ async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
         )
     })??;
 
-    Ok(CommandOutput::new(TxSignResponse {
-        from: format!("{expected_from:?}"),
-        to: format!("{to:?}"),
-        nonce: nonce.to_string(),
-        chain_id: chain_id.to_string(),
-        signing_digest: format!("{signing_digest:?}"),
-        transaction_hash: format!("{transaction_hash:?}"),
-    }))
-}
-
-fn parse_address(raw: &str, field: &'static str) -> Result<Address, PublicError> {
-    if raw.len() != 42
-        || !raw.starts_with("0x")
-        || !raw.as_bytes()[2..].iter().all(u8::is_ascii_hexdigit)
-    {
-        return Err(invalid_input(
-            field,
-            "must be a 0x-prefixed 20-byte address",
-        ));
-    }
-    Address::from_str(raw)
-        .map_err(|_| invalid_input(field, "must be a 0x-prefixed 20-byte address"))
-}
-
-fn parse_quantity(raw: &str, field: &'static str) -> Result<U256, PublicError> {
-    let valid = match raw.strip_prefix("0x") {
-        Some(hex) => !hex.is_empty() && hex.as_bytes().iter().all(u8::is_ascii_hexdigit),
-        None => !raw.is_empty() && raw.as_bytes().iter().all(u8::is_ascii_digit),
-    };
-    if !valid {
-        return Err(invalid_input(
-            field,
-            "must be an unsigned decimal or 0x-prefixed hexadecimal quantity",
-        ));
-    }
-    U256::from_str(raw).map_err(|_| {
-        invalid_input(
-            field,
-            "must fit the canonical unsigned 256-bit quantity range",
-        )
-    })
-}
-
-fn parse_data(raw: &str) -> Result<Bytes, PublicError> {
-    let Some(hex) = raw.strip_prefix("0x") else {
-        return Err(invalid_input(
-            "data",
-            "must be 0x-prefixed hexadecimal bytes",
-        ));
-    };
-    if hex.len() % 2 != 0 || !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return Err(invalid_input(
-            "data",
-            "must be 0x-prefixed hexadecimal bytes",
-        ));
-    }
-    hex::decode(hex)
-        .map(Bytes::from)
-        .map_err(|_| invalid_input("data", "must be 0x-prefixed hexadecimal bytes"))
-}
-
-fn invalid_input(field: &'static str, requirement: &'static str) -> PublicError {
-    PublicError::bad_request(
-        format!("invalid_{}", field.replace('-', "_")),
-        format!("{field} {requirement}"),
-    )
+    Ok(CommandOutput::new(metadata))
 }
 
 fn public_output_error(error: CreateNewFileError) -> PublicError {
@@ -230,31 +121,5 @@ fn public_output_error(error: CreateNewFileError) -> PublicError {
             "file_write_error",
             "Failed to publish signed transaction output",
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parsers_accept_only_documented_canonical_cli_forms() {
-        assert_eq!(
-            parse_quantity("42", "nonce").expect("decimal"),
-            U256::from(42)
-        );
-        assert_eq!(
-            parse_quantity("0x2a", "nonce").expect("hex"),
-            U256::from(42)
-        );
-        for invalid in ["", "0x", "0X2a", "2_a", "-1", " 1"] {
-            assert!(parse_quantity(invalid, "nonce").is_err(), "{invalid}");
-        }
-
-        assert!(parse_address("0x1111111111111111111111111111111111111111", "to").is_ok());
-        assert!(parse_address("1111111111111111111111111111111111111111", "to").is_err());
-        assert_eq!(parse_data("0x").expect("empty data"), Bytes::new());
-        assert!(parse_data("0x0").is_err());
-        assert!(parse_data("00").is_err());
     }
 }

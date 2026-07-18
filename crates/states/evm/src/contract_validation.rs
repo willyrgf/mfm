@@ -5,10 +5,11 @@ use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_effects::ReadExternal;
 use mfm_evm_capabilities::{
-    EvmBlock, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding,
-    EvmReadCapability, EvmSessionEvidence,
+    EvmBlock, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
+    EvmSessionEvidence,
 };
 use mfm_ids::LocalPublicId;
+use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_program::{
     AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, ReadState, StateError, StateResult,
     StateSpec, ValidatedConfig,
@@ -561,7 +562,7 @@ impl EvmContractValidationEvidence {
             });
         }
         observations.push(EvmContractValidationObservation::AnchorByNumber {
-            block: EvmBlockAnchor::from_block(final_canonical_block),
+            block: EvmBlockAnchor::new(final_canonical_block.number, final_canonical_block.hash),
         });
         Ok(Self {
             observations,

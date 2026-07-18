@@ -173,6 +173,10 @@ impl SigningProvider for KeystoreSignerProvider {
 }
 
 impl DeterministicSigningProvider for KeystoreSignerProvider {
+    fn implementation_id(&self) -> &'static str {
+        KEYSTORE_SIGNING_IMPLEMENTATION_ID
+    }
+
     fn deterministic_profile_id(&self) -> &'static str {
         SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }

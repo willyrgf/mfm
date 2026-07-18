@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use mfm_canonical::{
     sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue, PlainCanonicalJsonBytes,
 };
@@ -16,8 +14,8 @@ pub const FACT_CONTENT_IDENTITY_DIGEST_DOMAIN: &str = "mfm.fact.content-identity
 /// Verified semantic identity for fact content, independent of its stored claim occurrence.
 ///
 /// A fact claim, internal reference, artifact id, run coordinate, and store order identify where
-/// a fact was observed. This value instead identifies the descriptor, descriptor-derived subject
-/// material, response schema, and canonical response content. Construct it only with
+/// a fact was observed. This value instead identifies the descriptor, complete canonical typed
+/// subject material, response schema, and canonical response content. Construct it only with
 /// [`derive_fact_content_identity`] or one of the verification helpers, which recompute all four
 /// components from hydrated canonical material. Direct deserialization is intentionally rejected:
 /// the compact serialized fields do not carry enough evidence to establish that relationship.
@@ -102,7 +100,7 @@ impl FactContentIdentity {
         &self.fact_descriptor_hash
     }
 
-    /// Returns the digest of canonical descriptor-derived subject material.
+    /// Returns the digest of the complete canonical typed subject material.
     pub const fn subject_material_hash(&self) -> &ContentDigest {
         &self.subject_material_hash
     }
@@ -218,7 +216,7 @@ impl MfmValue for FactContentIdentityEvidence {
 /// function intentionally accepts no caller-authored component hashes.
 pub fn derive_fact_content_identity(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV1,
+    subject_material: &FactSubjectMaterialV2,
     response_bytes: &[u8],
 ) -> Result<FactContentIdentity> {
     validate_descriptor(descriptor)?;
@@ -332,12 +330,12 @@ pub fn verify_fact_claim_content_identity(
 /// Recomputes and verifies semantic content identity for an indexed fact reference.
 ///
 /// Internal references intentionally retain only compact hashes, so callers must provide the
-/// descriptor-derived subject material and hydrated canonical response bytes that the reference
-/// claims to identify.
+/// complete canonical typed subject material and hydrated canonical response bytes that the
+/// reference claims to identify.
 pub fn verify_internal_fact_ref_content_identity(
     reference: &InternalFactRef,
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV1,
+    subject_material: &FactSubjectMaterialV2,
     response_bytes: &[u8],
 ) -> Result<FactContentIdentity> {
     let identity = derive_fact_content_identity(descriptor, subject_material, response_bytes)?;
@@ -460,40 +458,16 @@ fn canonical_fact_content_identity_value(identity: &FactContentIdentity) -> Resu
 
 fn validate_subject_material(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV1,
+    subject_material: &FactSubjectMaterialV2,
 ) -> Result<()> {
-    let expected = descriptor
-        .fields()
-        .iter()
-        .filter(|field| matches!(field.extraction(), FactFieldExtraction::Subject(_)))
-        .map(|field| (field.field_id().clone(), field))
-        .collect::<BTreeMap<_, _>>();
-    let actual = subject_material
-        .values()
-        .iter()
-        .map(|value| (value.field_id().clone(), value))
-        .collect::<BTreeMap<_, _>>();
-
-    if expected.len() != actual.len() {
+    let typed_subject = crate::codec::typed_subject_from_material(descriptor, subject_material)?;
+    let checked = extract_subject_material(descriptor, &typed_subject)?;
+    if canonical_fact_subject_material_bytes(subject_material)?
+        != canonical_fact_subject_material_bytes(&checked)?
+    {
         return Err(FactError::descriptor(
-            "subject material fields do not exactly match descriptor subject fields",
+            "subject material does not match its checked typed subject",
         ));
-    }
-
-    for (field_id, field) in expected {
-        let value = actual.get(&field_id).ok_or_else(|| {
-            FactError::field(
-                field_id.clone(),
-                "required subject material field is missing",
-            )
-        })?;
-        if value.value_type() != field.value_type() {
-            return Err(FactError::field(
-                field_id,
-                "subject material value type does not match descriptor field",
-            ));
-        }
-        validate_extracted_scalar(field, value.value())?;
     }
     Ok(())
 }
@@ -584,7 +558,7 @@ mod tests {
         .expect("descriptor")
     }
 
-    fn subject_material(descriptor: &FactDescriptor, chain: &str) -> FactSubjectMaterialV1 {
+    fn subject_material(descriptor: &FactDescriptor, chain: &str) -> FactSubjectMaterialV2 {
         extract_subject_material(
             descriptor,
             &CanonicalValue::object([("chain", CanonicalValue::String(chain.to_owned()))])
@@ -616,7 +590,7 @@ mod tests {
 
     fn claim(
         descriptor: &FactDescriptor,
-        material: &FactSubjectMaterialV1,
+        material: &FactSubjectMaterialV2,
         descriptor_hash: ContentDigest,
         response_hash: ContentDigest,
     ) -> FactClaim {

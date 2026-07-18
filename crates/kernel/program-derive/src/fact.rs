@@ -150,13 +150,6 @@ fn validate_fact_container_attrs(attrs: &FactContainerAttrs) -> syn::Result<()> 
         }
         seen_fields.push(field.id.as_str());
 
-        if field.source == FactFieldAttrSource::Subject && !field.required {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "MfmFactType derive does not allow optional subject fields",
-            ));
-        }
-
         validate_fact_field_attr(field)?;
     }
 
@@ -168,6 +161,16 @@ fn validate_fact_container_attrs(attrs: &FactContainerAttrs) -> syn::Result<()> 
         return Err(syn::Error::new(
             Span::call_site(),
             "MfmFactType derive requires at least one subject fact field",
+        ));
+    }
+    if !attrs
+        .fields
+        .iter()
+        .any(|field| field.source == FactFieldAttrSource::Subject && field.required)
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "MfmFactType derive requires at least one required subject field",
         ));
     }
 

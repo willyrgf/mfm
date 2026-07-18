@@ -28,6 +28,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilityError, CapabilitySpec, SupportRole};
@@ -42,6 +43,10 @@ pub type Result<T> = std::result::Result<T, SigningError>;
 
 /// Boxed future returned by signer providers.
 pub type SigningFuture<'a> = Pin<Box<dyn Future<Output = Result<SigningResult>> + Send + 'a>>;
+
+/// Future returned by an identity-bearing deterministic signing-provider binder.
+pub type DeterministicSigningProviderBindFuture =
+    Pin<Box<dyn Future<Output = Result<Arc<dyn DeterministicSigningProvider>>> + Send + 'static>>;
 
 const MAX_PUBLIC_KEY_LEN: usize = 4096;
 const MAX_SIGNATURE_LEN: usize = 4096;
@@ -95,8 +100,50 @@ pub trait SigningProvider: Send + Sync {
 /// stronger contract is required when recovery must regenerate bearer material that is purposely
 /// not persisted.
 pub trait DeterministicSigningProvider: SigningProvider {
+    /// Returns the non-secret implementation identity of this concrete provider.
+    fn implementation_id(&self) -> &'static str;
+
     /// Returns the one deterministic profile certified by this provider binding.
     fn deterministic_profile_id(&self) -> &'static str;
+}
+
+type BindDeterministicSigningProvider =
+    dyn Fn(SignerRef) -> DeterministicSigningProviderBindFuture + Send + Sync;
+
+/// Identity-bearing process-local binder for deterministic signing providers.
+///
+/// The binder identity is used for capability registration. Consumers must also compare it with
+/// the identity exposed by every returned provider before requesting a signature.
+#[derive(Clone)]
+pub struct DeterministicSigningProviderBinder {
+    implementation_id: LocalPublicId,
+    bind: Arc<BindDeterministicSigningProvider>,
+}
+
+impl DeterministicSigningProviderBinder {
+    /// Creates a binder with one checked concrete implementation identity.
+    pub fn new<B>(implementation_id: impl AsRef<str>, bind: B) -> Result<Self>
+    where
+        B: Fn(SignerRef) -> DeterministicSigningProviderBindFuture + Send + Sync + 'static,
+    {
+        Ok(Self {
+            implementation_id: checked_local_public_id(
+                SigningIdentifierKind::Implementation,
+                implementation_id,
+            )?,
+            bind: Arc::new(bind),
+        })
+    }
+
+    /// Returns the checked concrete implementation identity used for registration.
+    pub const fn implementation_id(&self) -> &LocalPublicId {
+        &self.implementation_id
+    }
+
+    /// Binds one exact signer reference to a deterministic provider.
+    pub fn bind(&self, signer_ref: SignerRef) -> DeterministicSigningProviderBindFuture {
+        (self.bind)(signer_ref)
+    }
 }
 
 /// Process-local signer reference used by workflow config and runtime binding.
@@ -686,6 +733,8 @@ pub enum SigningIdentifierKind {
     Purpose,
     /// Public account id.
     Account,
+    /// Concrete signing-provider implementation id.
+    Implementation,
 }
 
 impl SigningIdentifierKind {
@@ -697,6 +746,7 @@ impl SigningIdentifierKind {
             Self::Domain => "domain",
             Self::Purpose => "purpose",
             Self::Account => "account",
+            Self::Implementation => "implementation",
         }
     }
 }

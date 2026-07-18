@@ -1,13 +1,13 @@
 error[E0433]: cannot find `SideEffectLanePreclaimBuilder` in `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:42:26
+  --> tests/ui/fail/runtime_surface_private.rs:43:26
    |
-42 |     let _ = mfm_runtime::SideEffectLanePreclaimBuilder::new;
+43 |     let _ = mfm_runtime::SideEffectLanePreclaimBuilder::new;
    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ could not find `SideEffectLanePreclaimBuilder` in `mfm_runtime`
 
 error[E0425]: cannot find type `RunnerSideEffectBinding` in crate `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:32:47
+  --> tests/ui/fail/runtime_surface_private.rs:33:47
    |
-32 |     let _ = core::mem::size_of::<mfm_runtime::RunnerSideEffectBinding>();
+33 |     let _ = core::mem::size_of::<mfm_runtime::RunnerSideEffectBinding>();
    |                                               ^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
    |
 note: found an item that was configured out
@@ -19,21 +19,32 @@ note: found an item that was configured out
    |                                      ^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0425]: cannot find type `StagedFactRecord` in crate `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:41:47
+  --> tests/ui/fail/runtime_surface_private.rs:42:47
    |
-41 |     let _ = core::mem::size_of::<mfm_runtime::StagedFactRecord>();
+42 |     let _ = core::mem::size_of::<mfm_runtime::StagedFactRecord>();
    |                                               ^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
 
 error[E0425]: cannot find type `SideEffectPreparedInvocationPlan` in crate `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:43:47
+  --> tests/ui/fail/runtime_surface_private.rs:44:47
    |
-43 |     let _ = core::mem::size_of::<mfm_runtime::SideEffectPreparedInvocationPlan<()>>();
-   |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
+44 |     let _ = core::mem::size_of::<mfm_runtime::SideEffectPreparedInvocationPlan<()>>();
+   |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+  ::: src/side_effect_driver.rs
+   |
+   | pub struct SideEffectPreparedInvocation<T> {
+   | ------------------------------------------ similarly named struct `SideEffectPreparedInvocation` defined here
+   |
+help: a struct with a similar name exists
+   |
+44 -     let _ = core::mem::size_of::<mfm_runtime::SideEffectPreparedInvocationPlan<()>>();
+44 +     let _ = core::mem::size_of::<mfm_runtime::SideEffectPreparedInvocation<()>>();
+   |
 
 error[E0425]: cannot find type `StagedArtifactHandle` in crate `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:47:47
+  --> tests/ui/fail/runtime_surface_private.rs:48:47
    |
-47 |     let _ = core::mem::size_of::<mfm_runtime::StagedArtifactHandle>();
+48 |     let _ = core::mem::size_of::<mfm_runtime::StagedArtifactHandle>();
    |                                               ^^^^^^^^^^^^^^^^^^^^
    |
   ::: src/artifacts.rs
@@ -43,14 +54,14 @@ error[E0425]: cannot find type `StagedArtifactHandle` in crate `mfm_runtime`
    |
 help: a struct with a similar name exists
    |
-47 -     let _ = core::mem::size_of::<mfm_runtime::StagedArtifactHandle>();
-47 +     let _ = core::mem::size_of::<mfm_runtime::StagedArtifact>();
+48 -     let _ = core::mem::size_of::<mfm_runtime::StagedArtifactHandle>();
+48 +     let _ = core::mem::size_of::<mfm_runtime::StagedArtifact>();
    |
 
 error[E0425]: cannot find type `StagedArtifactBindingKind` in crate `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:48:47
+  --> tests/ui/fail/runtime_surface_private.rs:49:47
    |
-48 |     let _ = core::mem::size_of::<mfm_runtime::StagedArtifactBindingKind>();
+49 |     let _ = core::mem::size_of::<mfm_runtime::StagedArtifactBindingKind>();
    |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
    |
 note: found an item that was configured out
@@ -63,15 +74,15 @@ note: found an item that was configured out
    |                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0425]: cannot find type `StagedSideEffectArtifactPhase` in crate `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:49:47
+  --> tests/ui/fail/runtime_surface_private.rs:50:47
    |
-49 |     let _ = core::mem::size_of::<mfm_runtime::StagedSideEffectArtifactPhase>();
+50 |     let _ = core::mem::size_of::<mfm_runtime::StagedSideEffectArtifactPhase>();
    |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
 
 error[E0425]: cannot find type `SideEffectAttemptView` in crate `mfm_runtime`
-  --> tests/ui/fail/runtime_surface_private.rs:59:47
+  --> tests/ui/fail/runtime_surface_private.rs:60:47
    |
-59 |     let _ = core::mem::size_of::<mfm_runtime::SideEffectAttemptView<'_>>();
+60 |     let _ = core::mem::size_of::<mfm_runtime::SideEffectAttemptView<'_>>();
    |                                               ^^^^^^^^^^^^^^^^^^^^^
    |
   ::: src/side_effect_driver.rs
@@ -88,8 +99,8 @@ note: found an item that was configured out
    |                                                                 ^^^^^^^^^^^^^^^^^^^^^
 help: a trait with a similar name exists
    |
-59 -     let _ = core::mem::size_of::<mfm_runtime::SideEffectAttemptView<'_>>();
-59 +     let _ = core::mem::size_of::<mfm_runtime::SideEffectAdapter<'_>>();
+60 -     let _ = core::mem::size_of::<mfm_runtime::SideEffectAttemptView<'_>>();
+60 +     let _ = core::mem::size_of::<mfm_runtime::SideEffectAdapter<'_>>();
    |
 
 error[E0616]: field `fact` of struct `FactRecordInput` is private
@@ -148,54 +159,60 @@ help: a method `payloads` also exists, call it with parentheses
 14 |     let _ = output.payloads();
    |                            ++
 
-error[E0616]: field `capability_kind` of struct `RunnerCapabilityBinding` is private
-  --> tests/ui/fail/runtime_surface_private.rs:18:21
+error[E0616]: field `settlement` of struct `ErasedRunnerOutput` is private
+  --> tests/ui/fail/runtime_surface_private.rs:15:20
    |
-18 |     let _ = binding.capability_kind;
+15 |     let _ = output.settlement;
+   |                    ^^^^^^^^^^ private field
+
+error[E0616]: field `capability_kind` of struct `RunnerCapabilityBinding` is private
+  --> tests/ui/fail/runtime_surface_private.rs:19:21
+   |
+19 |     let _ = binding.capability_kind;
    |                     ^^^^^^^^^^^^^^^ private field
    |
 help: a method `capability_kind` also exists, call it with parentheses
    |
-18 |     let _ = binding.capability_kind();
+19 |     let _ = binding.capability_kind();
    |                                    ++
 
 error[E0616]: field `capability_version` of struct `RunnerCapabilityBinding` is private
-  --> tests/ui/fail/runtime_surface_private.rs:19:21
+  --> tests/ui/fail/runtime_surface_private.rs:20:21
    |
-19 |     let _ = binding.capability_version;
+20 |     let _ = binding.capability_version;
    |                     ^^^^^^^^^^^^^^^^^^ private field
    |
 help: a method `capability_version` also exists, call it with parentheses
    |
-19 |     let _ = binding.capability_version();
+20 |     let _ = binding.capability_version();
    |                                       ++
 
 error[E0616]: field `adapter_kind` of struct `RunnerCapabilityBinding` is private
-  --> tests/ui/fail/runtime_surface_private.rs:20:21
+  --> tests/ui/fail/runtime_surface_private.rs:21:21
    |
-20 |     let _ = binding.adapter_kind;
+21 |     let _ = binding.adapter_kind;
    |                     ^^^^^^^^^^^^ private field
    |
 help: a method `adapter_kind` also exists, call it with parentheses
    |
-20 |     let _ = binding.adapter_kind();
+21 |     let _ = binding.adapter_kind();
    |                                 ++
 
 error[E0616]: field `adapter_version` of struct `RunnerCapabilityBinding` is private
-  --> tests/ui/fail/runtime_surface_private.rs:21:21
+  --> tests/ui/fail/runtime_surface_private.rs:22:21
    |
-21 |     let _ = binding.adapter_version;
+22 |     let _ = binding.adapter_version;
    |                     ^^^^^^^^^^^^^^^ private field
    |
 help: a method `adapter_version` also exists, call it with parentheses
    |
-21 |     let _ = binding.adapter_version();
+22 |     let _ = binding.adapter_version();
    |                                    ++
 
 error[E0624]: method `side_effect_intent` is private
-  --> tests/ui/fail/runtime_surface_private.rs:25:49
+  --> tests/ui/fail/runtime_surface_private.rs:26:49
    |
-25 |       let _ = mfm_runtime::RunnerArtifactBuilder::side_effect_intent;
+26 |       let _ = mfm_runtime::RunnerArtifactBuilder::side_effect_intent;
    |                                                   ^^^^^^^^^^^^^^^^^^ private method
    |
   ::: src/runner_kit/artifact_builder.rs
@@ -206,9 +223,9 @@ error[E0624]: method `side_effect_intent` is private
    | |____________________- private method defined here
 
 error[E0624]: method `prepared_invocation` is private
-  --> tests/ui/fail/runtime_surface_private.rs:26:49
+  --> tests/ui/fail/runtime_surface_private.rs:27:49
    |
-26 |       let _ = mfm_runtime::RunnerArtifactBuilder::prepared_invocation;
+27 |       let _ = mfm_runtime::RunnerArtifactBuilder::prepared_invocation;
    |                                                   ^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: src/runner_kit/artifact_builder.rs
@@ -219,9 +236,9 @@ error[E0624]: method `prepared_invocation` is private
    | |____________________- private method defined here
 
 error[E0624]: method `staged_side_effect` is private
-  --> tests/ui/fail/runtime_surface_private.rs:27:49
+  --> tests/ui/fail/runtime_surface_private.rs:28:49
    |
-27 |       let _ = mfm_runtime::RunnerArtifactBuilder::staged_side_effect;
+28 |       let _ = mfm_runtime::RunnerArtifactBuilder::staged_side_effect;
    |                                                   ^^^^^^^^^^^^^^^^^^ private method
    |
   ::: src/runner_kit/artifact_builder.rs
@@ -235,9 +252,9 @@ error[E0624]: method `staged_side_effect` is private
    | |_______________________________- private method defined here
 
 error[E0624]: method `side_effect_failed` is private
-  --> tests/ui/fail/runtime_surface_private.rs:31:48
+  --> tests/ui/fail/runtime_surface_private.rs:32:48
    |
-31 |       let _ = mfm_runtime::RunnerPayloadBuilder::side_effect_failed;
+32 |       let _ = mfm_runtime::RunnerPayloadBuilder::side_effect_failed;
    |                                                  ^^^^^^^^^^^^^^^^^^ private method
    |
   ::: src/runner_kit/payload_builder.rs
@@ -252,33 +269,33 @@ error[E0624]: method `side_effect_failed` is private
    | |___________________________- private method defined here
 
 error: cannot construct `SideEffectReplayEvidence` with struct literal syntax due to private fields
-  --> tests/ui/fail/runtime_surface_private.rs:36:13
+  --> tests/ui/fail/runtime_surface_private.rs:37:13
    |
-36 |     let _ = mfm_runtime::SideEffectReplayEvidence {};
+37 |     let _ = mfm_runtime::SideEffectReplayEvidence {};
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
 help: you might have meant to use the `new` associated function
    |
-36 -     let _ = mfm_runtime::SideEffectReplayEvidence {};
-36 +     let _ = mfm_runtime::SideEffectReplayEvidence::new(_, _);
+37 -     let _ = mfm_runtime::SideEffectReplayEvidence {};
+37 +     let _ = mfm_runtime::SideEffectReplayEvidence::new(_, _);
    |
 
 error: cannot construct `SideEffectObservedEvidence<()>` with struct literal syntax due to private fields
-  --> tests/ui/fail/runtime_surface_private.rs:37:13
+  --> tests/ui/fail/runtime_surface_private.rs:38:13
    |
-37 |     let _ = mfm_runtime::SideEffectObservedEvidence::<()> {};
+38 |     let _ = mfm_runtime::SideEffectObservedEvidence::<()> {};
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
 help: you might have meant to use the `new` associated function
    |
-37 -     let _ = mfm_runtime::SideEffectObservedEvidence::<()> {};
-37 +     let _ = mfm_runtime::SideEffectObservedEvidence::<()>::new(_, _);
+38 -     let _ = mfm_runtime::SideEffectObservedEvidence::<()> {};
+38 +     let _ = mfm_runtime::SideEffectObservedEvidence::<()>::new(_, _);
    |
 
 error[E0624]: method `handle` is private
-  --> tests/ui/fail/runtime_surface_private.rs:50:42
+  --> tests/ui/fail/runtime_surface_private.rs:51:42
    |
-50 |     let _ = mfm_runtime::StagedArtifact::handle;
+51 |     let _ = mfm_runtime::StagedArtifact::handle;
    |                                          ^^^^^^ private method
    |
   ::: src/artifacts.rs
@@ -287,9 +304,9 @@ error[E0624]: method `handle` is private
    |     ---------------------------------------------------- private method defined here
 
 error[E0624]: associated function `inline_side_effect_artifact` is private
-  --> tests/ui/fail/runtime_surface_private.rs:54:42
+  --> tests/ui/fail/runtime_surface_private.rs:55:42
    |
-54 |       let _ = mfm_runtime::StagedArtifact::inline_side_effect_artifact;
+55 |       let _ = mfm_runtime::StagedArtifact::inline_side_effect_artifact;
    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ private associated function
    |
   ::: src/artifacts.rs
@@ -304,9 +321,9 @@ error[E0624]: associated function `inline_side_effect_artifact` is private
    | |_____________________- private associated function defined here
 
 error[E0624]: associated function `inline_pre_invocation_side_effect_artifact` is private
-  --> tests/ui/fail/runtime_surface_private.rs:55:42
+  --> tests/ui/fail/runtime_surface_private.rs:56:42
    |
-55 |       let _ = mfm_runtime::StagedArtifact::inline_pre_invocation_side_effect_artifact;
+56 |       let _ = mfm_runtime::StagedArtifact::inline_pre_invocation_side_effect_artifact;
    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private associated function
    |
   ::: src/artifacts.rs

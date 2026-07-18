@@ -44,22 +44,6 @@ fn session_evidence_deserialization_rechecks_all_identifiers() {
 }
 
 #[test]
-fn block_anchor_preserves_u256_numbers_and_rejects_noncanonical_wire_values() {
-    let number = U256::from(u64::MAX) + U256::from(1);
-    let hash = B256::from([0xab; 32]);
-    let anchor = EvmBlockAnchor::new(number, hash);
-    let value = serde_json::to_value(&anchor).expect("JSON");
-
-    assert_eq!(anchor.to_block().expect("checked anchor").number, number);
-    assert_eq!(value["number"], number.to_string());
-    assert!(serde_json::from_value::<EvmBlockAnchor>(serde_json::json!({
-        "number": "01",
-        "hash": format!("{hash:#x}"),
-    }))
-    .is_err());
-}
-
-#[test]
 fn source_mismatch_diagnostic_is_closed_and_redacted() {
     let error = source_mismatch_error(
         &binding(),
@@ -116,8 +100,10 @@ fn receipt_rejects_removed_or_incoherent_logs() {
     let mut receipt = EvmReceipt {
         transaction_hash,
         transaction_index: U256::from(3),
-        block_number: U256::from(4),
-        block_hash,
+        block: EvmBlock {
+            number: U256::from(4),
+            hash: block_hash,
+        },
         from: Address::ZERO,
         to: None,
         contract_address: None,
@@ -128,8 +114,10 @@ fn receipt_rejects_removed_or_incoherent_logs() {
             address: Address::ZERO,
             topics: vec![],
             data: Bytes::new(),
-            block_number: U256::from(4),
-            block_hash,
+            block: EvmBlock {
+                number: U256::from(4),
+                hash: block_hash,
+            },
             transaction_hash,
             transaction_index: U256::from(3),
             log_index: U256::ZERO,

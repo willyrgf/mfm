@@ -1,12 +1,12 @@
 use super::*;
-use std::str::FromStr;
+use std::num::NonZeroU64;
 
-use alloy_primitives::{B256, U256};
-use serde::de;
+use crate::evm::EvmBlockAnchor;
 
 /// Concrete execution anchor captured for one pinned network.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "family", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "execution-anchor",
@@ -16,11 +16,9 @@ pub enum ExecutionAnchor {
     /// EVM execution pinned to one block hash and number on one chain id.
     Evm {
         /// EVM chain id.
-        chain_id: u64,
-        /// Concrete pinned U256 block number encoded as canonical decimal.
-        block_number: String,
-        /// Concrete pinned block hash.
-        block_hash: String,
+        chain_id: NonZeroU64,
+        /// Concrete checked EVM block anchor.
+        block: EvmBlockAnchor,
     },
     /// Bitcoin execution pinned to one height and block hash.
     Bitcoin {
@@ -29,57 +27,6 @@ pub enum ExecutionAnchor {
         /// Concrete pinned block hash.
         block_hash: String,
     },
-}
-
-impl<'de> Deserialize<'de> for ExecutionAnchor {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(tag = "family", rename_all = "snake_case", deny_unknown_fields)]
-        enum Wire {
-            Evm {
-                chain_id: u64,
-                block_number: String,
-                block_hash: String,
-            },
-            Bitcoin {
-                height: u64,
-                block_hash: String,
-            },
-        }
-
-        match Wire::deserialize(deserializer)? {
-            Wire::Evm {
-                chain_id,
-                block_number,
-                block_hash,
-            } => {
-                if chain_id == 0 {
-                    return Err(de::Error::custom("EVM execution anchor chain id was zero"));
-                }
-                let number = U256::from_str(&block_number)
-                    .map_err(|_| de::Error::custom("EVM block number exceeded U256"))?;
-                if number.to_string() != block_number {
-                    return Err(de::Error::custom(
-                        "EVM block number was not canonical decimal",
-                    ));
-                }
-                let hash = B256::from_str(&block_hash)
-                    .map_err(|_| de::Error::custom("EVM block hash was invalid"))?;
-                if format!("{hash:#x}") != block_hash {
-                    return Err(de::Error::custom("EVM block hash was not canonical"));
-                }
-                Ok(Self::Evm {
-                    chain_id,
-                    block_number,
-                    block_hash,
-                })
-            }
-            Wire::Bitcoin { height, block_hash } => Ok(Self::Bitcoin { height, block_hash }),
-        }
-    }
 }
 
 /// Concrete pinned network view captured in a snapshot/report artifact.
@@ -106,10 +53,8 @@ pub struct NetworkPin {
 pub struct WalletSnapshot {
     /// Stable wallet identifier.
     pub wallet_id: String,
-    /// Canonical wallet address.
-    pub address: String,
-    /// Canonical wallet subject kind.
-    pub subject_kind: WalletSubjectKind,
+    /// Canonical checked wallet subject.
+    pub subject: WalletSubject,
     /// Stable network identifier.
     pub network_id: String,
     /// Observations collected for the wallet.

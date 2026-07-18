@@ -65,12 +65,13 @@ pub(super) fn fact_descriptor_fixture(
 }
 
 pub(super) fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
-        mfm_facts::FactFieldId::new("subject.chain").expect("field"),
-        mfm_facts::FactFieldValueType::String,
-        mfm_facts::FactCanonicalScalar::string("store_test_chain"),
+    let material = mfm_facts::FactSubjectMaterialV2::new(
+        mfm_canonical::CanonicalValue::object([(
+            "chain",
+            mfm_canonical::CanonicalValue::String("store_test_chain".into()),
+        )])
+        .expect("subject"),
     )
-    .expect("subject value")])
     .expect("subject material");
     let namespace_hash =
         mfm_facts::fact_subject_namespace_hash(&fact_descriptor()).expect("subject namespace hash");

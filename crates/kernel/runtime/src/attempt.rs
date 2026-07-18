@@ -249,9 +249,13 @@ impl AttemptLifecycle {
                         node.node_id
                     )));
                 }
-                let bundle = preclaim.into_prepared_commit_bundle()?;
+                let (bundle, settlement) = preclaim.into_prepared_commit_bundle()?;
                 match store.append_prepared_commit_bundle(bundle).await {
-                    Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
+                    Ok(store::CommitOutcome::Appended(_)) => {
+                        settle_runner_output(settlement);
+                        advanced = true;
+                    }
+                    Ok(store::CommitOutcome::Idempotent(_)) => {
                         advanced = true;
                     }
                     Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
@@ -338,11 +342,13 @@ impl AttemptLifecycle {
             });
         }
         let has_resource_lane_claim = request_has_resource_lane_claim(terminal_output.request());
-        let bundle = terminal_output.into_prepared_commit_bundle()?;
+        let (bundle, settlement) = terminal_output.into_prepared_commit_bundle()?;
         match store.append_prepared_commit_bundle(bundle).await {
-            Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
+            Ok(store::CommitOutcome::Appended(_)) => {
+                settle_runner_output(settlement);
                 Ok(AttemptRunStatus::Advanced)
             }
+            Ok(store::CommitOutcome::Idempotent(_)) => Ok(AttemptRunStatus::Advanced),
             Ok(store::CommitOutcome::AdmissionBlocked(block)) if has_resource_lane_claim => {
                 Ok(AttemptRunStatus::BlockedOnResourceLane {
                     witness: Box::new(resource_lane_block_witness_from_outcome(
@@ -404,11 +410,13 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
         error: failure_info.error,
         diagnostic_artifact: Some(diagnostic_artifact),
     })?;
-    let bundle = failure.into_prepared_commit_bundle()?;
+    let (bundle, settlement) = failure.into_prepared_commit_bundle()?;
     match store.append_prepared_commit_bundle(bundle).await {
-        Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
+        Ok(store::CommitOutcome::Appended(_)) => {
+            settle_runner_output(settlement);
             Ok(AttemptRunStatus::Advanced)
         }
+        Ok(store::CommitOutcome::Idempotent(_)) => Ok(AttemptRunStatus::Advanced),
         Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
             Err(RuntimeError::InvalidRunStream(format!(
                 "attempt failure commit was blocked by lane {}:{}",
@@ -422,6 +430,12 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
             Ok(AttemptRunStatus::StaleView)
         }
         Err(error) => Err(async_store_error(error)),
+    }
+}
+
+fn settle_runner_output(settlement: Option<crate::RunnerOutputSettlement>) {
+    if let Some(settlement) = settlement {
+        settlement.settle_appended();
     }
 }
 

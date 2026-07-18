@@ -23,7 +23,7 @@ use mfm_program::{
     StateRegistryBuilder, ValidatedConfig,
 };
 use mfm_program_derive::{PublicOutputs, StateInput};
-use mfm_runtime::{CapabilityImplementationId, ErasedRunnerRegistry};
+use mfm_runtime::ErasedRunnerRegistry;
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
     SigningProvider, SigningRequest, SigningResult, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
@@ -422,12 +422,21 @@ fn transaction_runners(
 ) -> ErasedRunnerRegistry {
     let mut runners = ErasedRunnerRegistry::new();
     let bind_session = Arc::clone(&session);
+    let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
+        "mfm.test.deterministic-signer",
+        move |_signer_ref| {
+            let signer = FixedSigner {
+                calls: Arc::clone(&signer_calls),
+            };
+            Box::pin(async move { Ok(Arc::new(signer) as Arc<dyn DeterministicSigningProvider>) })
+        },
+    )
+    .expect("signer binder");
     register_evm_transaction_runner(
         &mut runners,
         EvmTransactionRunnerCapabilities::new(
             Arc::new(store.clone()),
-            CapabilityImplementationId::new("mfm.test.deterministic-signer")
-                .expect("signing implementation"),
+            signer_binder,
             |binding, signer_ref| {
                 Box::pin(async move {
                     if binding.network_id().as_str() == "ethereum-mainnet"
@@ -450,14 +459,6 @@ fn transaction_runners(
                     }
                     Ok(session as Arc<dyn EvmTransactionSession>)
                 })
-            },
-            move |_signer_ref| {
-                let signer = FixedSigner {
-                    calls: Arc::clone(&signer_calls),
-                };
-                Box::pin(
-                    async move { Ok(Arc::new(signer) as Arc<dyn DeterministicSigningProvider>) },
-                )
             },
         ),
     )
@@ -513,8 +514,10 @@ impl TransactionSession {
         EvmReceipt {
             transaction_hash: EXPECTED_HASH,
             transaction_index: U256::from(3),
-            block_number: U256::from(100),
-            block_hash: RECEIPT_BLOCK_HASH,
+            block: EvmBlock {
+                number: U256::from(100),
+                hash: RECEIPT_BLOCK_HASH,
+            },
             from: EXPECTED_SENDER,
             to: Some(DESTINATION),
             contract_address: None,
@@ -635,6 +638,10 @@ impl SigningProvider for FixedSigner {
 }
 
 impl DeterministicSigningProvider for FixedSigner {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.deterministic-signer"
+    }
+
     fn deterministic_profile_id(&self) -> &'static str {
         SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }

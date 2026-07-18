@@ -22,9 +22,10 @@ use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerRegistry, MaterializedInputs, PreInvocationRunCtx, PreInvocationRunnerFuture,
     RunnerCapabilityBinding, RunnerExecutableIdentityTemplate, RunnerIngressContext,
-    RunnerIngressFuture, RunnerRegistrationBuilder, SideEffectAdapter, SideEffectDriver,
-    SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
+    RunnerIngressFuture, RunnerOutputSettlement, RunnerRegistrationBuilder, SideEffectAdapter,
+    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence,
+    SideEffectPreparedInvocation, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
 use mfm_states_evm::{
@@ -55,15 +56,6 @@ pub type EvmTransactionSessionBindFuture = Pin<
     >,
 >;
 
-/// Future returned by the application-owned exact signer binder.
-pub type EvmSigningProviderBindFuture = Pin<
-    Box<
-        dyn Future<Output = mfm_signing::Result<Arc<dyn mfm_signing::DeterministicSigningProvider>>>
-            + Send
-            + 'static,
-    >,
->;
-
 /// Future returned by application-owned mutation ingress validation.
 pub type EvmMutationValidationFuture =
     Pin<Box<dyn Future<Output = mfm_runtime::Result<()>> + Send + 'static>>;
@@ -72,27 +64,22 @@ type ValidateMutation =
     dyn Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> EvmMutationValidationFuture + Send + Sync;
 type BindTransactionSession =
     dyn Fn(EvmNetworkBinding) -> EvmTransactionSessionBindFuture + Send + Sync;
-type BindSigningProvider =
-    dyn Fn(mfm_signing::SignerRef) -> EvmSigningProviderBindFuture + Send + Sync;
-
 /// Process assembly required by the generic EVM transaction runner.
 #[derive(Clone)]
 pub struct EvmTransactionRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    signing_implementation_id: CapabilityImplementationId,
+    signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
     validate_mutation: Arc<ValidateMutation>,
     bind_transaction_session: Arc<BindTransactionSession>,
-    bind_signing_provider: Arc<BindSigningProvider>,
 }
 
 impl EvmTransactionRunnerCapabilities {
     /// Creates lazy, exact-bound transaction and signer capabilities.
-    pub fn new<V, T, S>(
+    pub fn new<V, T>(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-        signing_implementation_id: CapabilityImplementationId,
+        signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
         validate_mutation: V,
         bind_transaction_session: T,
-        bind_signing_provider: S,
     ) -> Self
     where
         V: Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> EvmMutationValidationFuture
@@ -100,14 +87,12 @@ impl EvmTransactionRunnerCapabilities {
             + Sync
             + 'static,
         T: Fn(EvmNetworkBinding) -> EvmTransactionSessionBindFuture + Send + Sync + 'static,
-        S: Fn(mfm_signing::SignerRef) -> EvmSigningProviderBindFuture + Send + Sync + 'static,
     {
         Self {
             artifacts,
-            signing_implementation_id,
+            signing_provider_binder,
             validate_mutation: Arc::new(validate_mutation),
             bind_transaction_session: Arc::new(bind_transaction_session),
-            bind_signing_provider: Arc::new(bind_signing_provider),
         }
     }
 
@@ -141,9 +126,18 @@ impl EvmTransactionRunnerCapabilities {
         &self,
         signer_ref: mfm_signing::SignerRef,
     ) -> mfm_runtime::Result<Arc<dyn mfm_signing::DeterministicSigningProvider>> {
-        (self.bind_signing_provider)(signer_ref)
+        let provider = self
+            .signing_provider_binder
+            .bind(signer_ref)
             .await
-            .map_err(signing_error)
+            .map_err(signing_error)?;
+        if provider.implementation_id() != self.signing_provider_binder.implementation_id().as_str()
+        {
+            return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                "bound deterministic signer violated implementation authority".to_owned(),
+            ));
+        }
+        Ok(provider)
     }
 }
 
@@ -158,7 +152,12 @@ pub fn register_evm_transaction_runner(
         CapabilityImplementationId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)?,
     )?;
     registry.register_capability_spec::<mfm_signing::SigningCapability>(
-        capabilities.signing_implementation_id.clone(),
+        CapabilityImplementationId::new(
+            capabilities
+                .signing_provider_binder
+                .implementation_id()
+                .as_str(),
+        )?,
     )?;
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-evm",
@@ -250,21 +249,21 @@ impl ErasedNodeRunner for EvmTransactionVerifyRunner {
 
 struct EvmTransactionAdapter {
     capabilities: EvmTransactionRunnerCapabilities,
-    signed_envelopes: SignedEnvelopeCache,
+    signed_envelopes: Arc<SignedEnvelopeCache>,
 }
 
 impl EvmTransactionAdapter {
     fn new(capabilities: EvmTransactionRunnerCapabilities) -> Self {
         Self {
             capabilities,
-            signed_envelopes: SignedEnvelopeCache::default(),
+            signed_envelopes: Arc::new(SignedEnvelopeCache::default()),
         }
     }
 
-    async fn sign_prepared_transaction<'a>(
-        &'a self,
+    async fn sign_prepared_transaction(
+        &self,
         prepared: &EvmPreparedTransaction,
-    ) -> mfm_runtime::Result<SignedEnvelopeLease<'a>> {
+    ) -> mfm_runtime::Result<SignedEnvelopeLease> {
         prepared.validate().map_err(state_error)?;
         let reservation = self.signed_envelopes.reserve()?;
         let signer_ref = prepared.intent().signer_reference().map_err(state_error)?;
@@ -297,7 +296,7 @@ impl EvmTransactionAdapter {
     async fn prepare_transaction(
         &self,
         intent: &EvmTransactionIntent,
-    ) -> mfm_runtime::Result<EvmPreparedTransaction> {
+    ) -> mfm_runtime::Result<SideEffectPreparedInvocation<EvmPreparedTransaction>> {
         intent.validate().map_err(state_error)?;
         let reservation = self.signed_envelopes.reserve()?;
         let session = self
@@ -336,8 +335,13 @@ impl EvmTransactionAdapter {
             session.evidence(),
         )
         .map_err(state_error)?;
-        reservation.commit(prepared.expected_transaction_hash().to_owned(), signed)?;
-        Ok(prepared)
+        let transaction_hash = prepared.expected_transaction_hash().to_owned();
+        let settlement = RunnerOutputSettlement::on_appended(move || {
+            reservation.commit(transaction_hash, signed, SignedEnvelopeState::Fresh);
+        });
+        Ok(SideEffectPreparedInvocation::with_settlement(
+            prepared, settlement,
+        ))
     }
 
     async fn submit_transaction(
@@ -348,7 +352,7 @@ impl EvmTransactionAdapter {
     > {
         prepared.validate().map_err(state_error)?;
         let session = self.session_for(&prepared).await?;
-        let signed = match self
+        let mut signed = match self
             .signed_envelopes
             .take(prepared.expected_transaction_hash())?
         {
@@ -369,6 +373,24 @@ impl EvmTransactionAdapter {
                 self.sign_prepared_transaction(&prepared).await?
             }
         };
+        if signed.state()? == SignedEnvelopeState::Uncertain {
+            match lookup_submission(session.as_ref(), &prepared).await {
+                LookupSubmission::Observed(submission) => {
+                    signed.discard()?;
+                    return Ok(SideEffectSubmissionDecision::Observed(*submission));
+                }
+                LookupSubmission::Mismatched => {
+                    let evidence = recovery_evidence(&prepared, session.as_ref())?;
+                    signed.discard()?;
+                    return Ok(SideEffectSubmissionDecision::Ambiguous {
+                        ambiguity_code: transaction_mismatch_code()?,
+                        evidence,
+                    });
+                }
+                LookupSubmission::MissingOrUnavailable => {}
+            }
+        }
+        signed.mark_uncertain()?;
         let signed_envelope = signed.envelope()?;
         ensure_signed_hash(&prepared, signed_envelope)?;
         match broadcast_and_lookup(session.as_ref(), &prepared, signed_envelope).await {
@@ -417,13 +439,14 @@ impl EvmTransactionAdapter {
             }
             LookupSubmission::MissingOrUnavailable => {}
         }
-        let signed = match self
+        let mut signed = match self
             .signed_envelopes
             .take(prepared.expected_transaction_hash())?
         {
             Some(signed) => signed,
             None => self.sign_prepared_transaction(&prepared).await?,
         };
+        signed.mark_uncertain()?;
         let signed_envelope = signed.envelope()?;
         ensure_signed_hash(&prepared, signed_envelope)?;
         match broadcast_and_lookup(session.as_ref(), &prepared, signed_envelope).await {
@@ -452,8 +475,20 @@ struct SignedEnvelopeCache {
 
 #[derive(Default)]
 struct SignedEnvelopeCacheState {
-    entries: VecDeque<(String, TransientSignedEip1559Envelope)>,
+    entries: VecDeque<SignedEnvelopeEntry>,
     reservations: usize,
+}
+
+struct SignedEnvelopeEntry {
+    transaction_hash: String,
+    envelope: TransientSignedEip1559Envelope,
+    state: SignedEnvelopeState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignedEnvelopeState {
+    Fresh,
+    Uncertain,
 }
 
 impl Default for SignedEnvelopeCache {
@@ -465,7 +500,7 @@ impl Default for SignedEnvelopeCache {
 }
 
 impl SignedEnvelopeCache {
-    fn reserve(&self) -> mfm_runtime::Result<SignedEnvelopeReservation<'_>> {
+    fn reserve(self: &Arc<Self>) -> mfm_runtime::Result<SignedEnvelopeReservation> {
         let mut state = self.state.lock().map_err(|_| cache_error())?;
         if state.entries.len() + state.reservations >= SIGNED_ENVELOPE_CACHE_CAPACITY {
             return Err(mfm_runtime::RuntimeError::Blocked(
@@ -474,30 +509,32 @@ impl SignedEnvelopeCache {
         }
         state.reservations += 1;
         Ok(SignedEnvelopeReservation {
-            cache: self,
+            cache: Arc::clone(self),
             active: true,
         })
     }
 
-    fn take(&self, transaction_hash: &str) -> mfm_runtime::Result<Option<SignedEnvelopeLease<'_>>> {
+    fn take(
+        self: &Arc<Self>,
+        transaction_hash: &str,
+    ) -> mfm_runtime::Result<Option<SignedEnvelopeLease>> {
         let mut state = self.state.lock().map_err(|_| cache_error())?;
         let Some(index) = state
             .entries
             .iter()
-            .position(|(key, _)| key == transaction_hash)
+            .position(|entry| entry.transaction_hash == transaction_hash)
         else {
             return Ok(None);
         };
-        let (transaction_hash, envelope) = state.entries.remove(index).ok_or_else(cache_error)?;
+        let entry = state.entries.remove(index).ok_or_else(cache_error)?;
         state.reservations += 1;
         Ok(Some(SignedEnvelopeLease {
-            cache: self,
-            transaction_hash,
-            envelope: Some(envelope),
+            cache: Arc::clone(self),
+            entry: Some(entry),
         }))
     }
 
-    fn discard_one(&self, transaction_hash: &str) -> mfm_runtime::Result<()> {
+    fn discard_one(self: &Arc<Self>, transaction_hash: &str) -> mfm_runtime::Result<()> {
         if let Some(envelope) = self.take(transaction_hash)? {
             envelope.discard()?;
         }
@@ -514,54 +551,66 @@ impl SignedEnvelopeCache {
         }
     }
 
-    fn restore(&self, transaction_hash: String, envelope: TransientSignedEip1559Envelope) {
+    fn restore(&self, entry: SignedEnvelopeEntry) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.reservations > 0 {
             state.reservations -= 1;
-            state.entries.push_back((transaction_hash, envelope));
+            state.entries.push_back(entry);
         }
     }
 }
 
-struct SignedEnvelopeReservation<'a> {
-    cache: &'a SignedEnvelopeCache,
+struct SignedEnvelopeReservation {
+    cache: Arc<SignedEnvelopeCache>,
     active: bool,
 }
 
-impl<'a> SignedEnvelopeReservation<'a> {
+impl SignedEnvelopeReservation {
     fn commit(
         mut self,
         transaction_hash: String,
         envelope: TransientSignedEip1559Envelope,
-    ) -> mfm_runtime::Result<()> {
-        let mut state = self.cache.state.lock().map_err(|_| cache_error())?;
+        envelope_state: SignedEnvelopeState,
+    ) {
+        let mut state = self
+            .cache
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.reservations == 0 {
-            return Err(cache_error());
+            self.active = false;
+            return;
         }
         state.reservations -= 1;
-        state.entries.push_back((transaction_hash, envelope));
+        state.entries.push_back(SignedEnvelopeEntry {
+            transaction_hash,
+            envelope,
+            state: envelope_state,
+        });
         self.active = false;
-        Ok(())
     }
 
     fn into_lease(
         mut self,
         transaction_hash: String,
         envelope: TransientSignedEip1559Envelope,
-    ) -> SignedEnvelopeLease<'a> {
+    ) -> SignedEnvelopeLease {
         self.active = false;
         SignedEnvelopeLease {
-            cache: self.cache,
-            transaction_hash,
-            envelope: Some(envelope),
+            cache: Arc::clone(&self.cache),
+            entry: Some(SignedEnvelopeEntry {
+                transaction_hash,
+                envelope,
+                state: SignedEnvelopeState::Fresh,
+            }),
         }
     }
 }
 
-impl Drop for SignedEnvelopeReservation<'_> {
+impl Drop for SignedEnvelopeReservation {
     fn drop(&mut self) {
         if self.active {
             self.cache.release_reservation();
@@ -569,15 +618,29 @@ impl Drop for SignedEnvelopeReservation<'_> {
     }
 }
 
-struct SignedEnvelopeLease<'a> {
-    cache: &'a SignedEnvelopeCache,
-    transaction_hash: String,
-    envelope: Option<TransientSignedEip1559Envelope>,
+struct SignedEnvelopeLease {
+    cache: Arc<SignedEnvelopeCache>,
+    entry: Option<SignedEnvelopeEntry>,
 }
 
-impl SignedEnvelopeLease<'_> {
+impl SignedEnvelopeLease {
     fn envelope(&self) -> mfm_runtime::Result<&TransientSignedEip1559Envelope> {
-        self.envelope.as_ref().ok_or_else(cache_error)
+        self.entry
+            .as_ref()
+            .map(|entry| &entry.envelope)
+            .ok_or_else(cache_error)
+    }
+
+    fn state(&self) -> mfm_runtime::Result<SignedEnvelopeState> {
+        self.entry
+            .as_ref()
+            .map(|entry| entry.state)
+            .ok_or_else(cache_error)
+    }
+
+    fn mark_uncertain(&mut self) -> mfm_runtime::Result<()> {
+        self.entry.as_mut().ok_or_else(cache_error)?.state = SignedEnvelopeState::Uncertain;
+        Ok(())
     }
 
     fn discard(mut self) -> mfm_runtime::Result<()> {
@@ -586,16 +649,15 @@ impl SignedEnvelopeLease<'_> {
             return Err(cache_error());
         }
         state.reservations -= 1;
-        self.envelope.take();
+        self.entry.take();
         Ok(())
     }
 }
 
-impl Drop for SignedEnvelopeLease<'_> {
+impl Drop for SignedEnvelopeLease {
     fn drop(&mut self) {
-        if let Some(envelope) = self.envelope.take() {
-            self.cache
-                .restore(std::mem::take(&mut self.transaction_hash), envelope);
+        if let Some(entry) = self.entry.take() {
+            self.cache.restore(entry);
         }
     }
 }
@@ -635,7 +697,7 @@ impl SideEffectAdapter for EvmTransactionAdapter {
         _ctx: &'a ErasedRunCtx<'ctx>,
         intent: &'a Self::Intent,
         _idempotency: &'a Self::Idempotency,
-    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocation<Self::PreparedInvocation>> {
         Box::pin(async move { self.prepare_transaction(intent).await })
     }
 
@@ -1167,7 +1229,7 @@ impl replay::SideEffectReplayVerifier for EvmTransactionReplayVerifier {
         &self,
         input: &replay::SideEffectSubmissionReplayInput,
     ) -> replay::Result<()> {
-        let (intent, prepared) =
+        let (_, prepared) =
             replay_intent_and_prepared(&input.intent, input.prepared_invocation.as_ref())?;
         ensure_replay_schema::<EvmTransactionSubmission>(
             &input.submission.submission.submission_schema_id,
@@ -1176,18 +1238,13 @@ impl replay::SideEffectReplayVerifier for EvmTransactionReplayVerifier {
             "submission",
             &input.submission.artifact_bytes,
         )?;
-        if prepared.intent() != &intent {
-            return Err(replay_mismatch(
-                "prepared intent differed from retained intent",
-            ));
-        }
         submission
             .validate_against(&prepared)
             .map_err(replay_state_error)
     }
 
     fn verify_receipt(&self, input: &replay::SideEffectReceiptReplayInput) -> replay::Result<()> {
-        let (intent, prepared) =
+        let (_, prepared) =
             replay_intent_and_prepared(&input.intent, input.prepared_invocation.as_ref())?;
         let submission = input
             .submission
@@ -1201,11 +1258,6 @@ impl replay::SideEffectReplayVerifier for EvmTransactionReplayVerifier {
         ensure_replay_schema::<EvmTransactionReceipt>(&input.receipt.receipt.receipt_schema_id)?;
         let receipt =
             decode_replay::<EvmTransactionReceipt>("receipt", &input.receipt.artifact_bytes)?;
-        if prepared.intent() != &intent {
-            return Err(replay_mismatch(
-                "prepared intent differed from retained intent",
-            ));
-        }
         receipt
             .validate_with_submission(&prepared, &submission)
             .map_err(replay_state_error)
@@ -1215,7 +1267,7 @@ impl replay::SideEffectReplayVerifier for EvmTransactionReplayVerifier {
         &self,
         input: &replay::SideEffectConfirmationReplayInput,
     ) -> replay::Result<()> {
-        let (intent, prepared) =
+        let (_, prepared) =
             replay_intent_and_prepared(&input.intent, input.prepared_invocation.as_ref())?;
         let submission = input
             .submission
@@ -1239,11 +1291,6 @@ impl replay::SideEffectReplayVerifier for EvmTransactionReplayVerifier {
             "confirmation",
             &input.confirmation.artifact_bytes,
         )?;
-        if prepared.intent() != &intent {
-            return Err(replay_mismatch(
-                "prepared intent differed from retained intent",
-            ));
-        }
         receipt
             .validate_with_submission(&prepared, &submission)
             .map_err(replay_state_error)?;
@@ -1273,7 +1320,21 @@ fn replay_intent_and_prepared(
     let prepared =
         decode_replay::<EvmPreparedTransaction>("prepared invocation", &prepared.artifact_bytes)?;
     prepared.validate().map_err(replay_state_error)?;
+    verify_prepared_intent(&intent_value, &prepared)?;
     Ok((intent_value, prepared))
+}
+
+fn verify_prepared_intent(
+    retained_intent: &EvmTransactionIntent,
+    prepared: &EvmPreparedTransaction,
+) -> replay::Result<()> {
+    if prepared.intent() == retained_intent {
+        Ok(())
+    } else {
+        Err(replay_mismatch(
+            "prepared intent differed from retained intent",
+        ))
+    }
 }
 
 fn ensure_replay_schema<T: MfmValue>(actual: &mfm_ids::SchemaId) -> replay::Result<()> {
@@ -1349,37 +1410,24 @@ pub fn verify_evm_transaction_replay(broker: &replay::ReplayBroker) -> replay::R
         let context =
             replay::load_node_context::<mfm_program::NoContext>(broker, pair.submit_node)?;
         let authored = state.intent(&input, &context).map_err(replay_state_error)?;
-        if authored.intent() != &intent || authored.idempotency() != &intent {
-            return Err(replay_mismatch(
-                "certified EVM transaction state authored a different intent",
-            ));
-        }
-        let idempotency_key =
-            side_effect_idempotency_key(authored.idempotency()).map_err(replay_state_error)?;
-        if frame.intent.idempotency_key != idempotency_key {
-            return Err(replay_mismatch(
-                "EVM transaction idempotency key differed from the certified state",
-            ));
-        }
+        verify_authored_transaction_replay(
+            authored.intent(),
+            authored.idempotency(),
+            &intent,
+            &frame.intent.idempotency_key,
+        )?;
         let prepared = match frame.prepared_request() {
             Some(request) => {
                 let prepared_evidence = broker.side_effect_prepared_invocation(&request)?;
-                let (prepared_intent, prepared) =
+                let (_, prepared) =
                     replay_intent_and_prepared(&intent_evidence, Some(&prepared_evidence))?;
-                if prepared_intent != intent {
-                    return Err(replay_mismatch(
-                        "prepared transaction intent changed during replay",
-                    ));
-                }
                 let expected_resource_key =
                     sender_lane_resource_key(pair.submit_node, &authored.intent().sender_lane())
                         .map_err(replay_state_error)?;
-                if prepared_evidence.prepared.resource_key.as_ref() != Some(&expected_resource_key)
-                {
-                    return Err(replay_mismatch(
-                        "prepared EVM transaction used a different certified sender lane",
-                    ));
-                }
+                verify_prepared_sender_lane(
+                    prepared_evidence.prepared.resource_key.as_ref(),
+                    &expected_resource_key,
+                )?;
                 Some(prepared)
             }
             None => None,
@@ -1431,6 +1479,39 @@ pub fn verify_evm_transaction_replay(broker: &replay::ReplayBroker) -> replay::R
         verify_evm_transaction_output(broker, &frame, prepared.as_ref(), &state, &input, &context)?;
     }
     Ok(())
+}
+
+fn verify_authored_transaction_replay(
+    authored_intent: &EvmTransactionIntent,
+    authored_idempotency: &EvmTransactionIntent,
+    retained_intent: &EvmTransactionIntent,
+    retained_idempotency_key: &events::IdempotencyKeyRef,
+) -> replay::Result<()> {
+    if authored_intent != retained_intent || authored_idempotency != retained_intent {
+        return Err(replay_mismatch(
+            "certified EVM transaction state authored a different intent",
+        ));
+    }
+    let expected = side_effect_idempotency_key(authored_idempotency).map_err(replay_state_error)?;
+    if retained_idempotency_key != &expected {
+        return Err(replay_mismatch(
+            "EVM transaction idempotency key differed from the certified state",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_prepared_sender_lane(
+    retained: Option<&events::ResourceKeyEvidence>,
+    expected: &events::ResourceKeyEvidence,
+) -> replay::Result<()> {
+    if retained == Some(expected) {
+        Ok(())
+    } else {
+        Err(replay_mismatch(
+            "prepared EVM transaction used a different certified sender lane",
+        ))
+    }
 }
 
 fn replay_frame_intent_request(

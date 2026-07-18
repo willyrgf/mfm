@@ -232,12 +232,10 @@ fn canonical_goldens_match_expected_values() {
         sortable_result_field("result.height"),
     ])
     .expect("descriptor");
-    let material = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
-        FactFieldId::new("subject.chain").expect("field"),
-        FactFieldValueType::String,
-        FactCanonicalScalar::string("bitcoin"),
+    let material = FactSubjectMaterialV2::new(
+        CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
+            .expect("subject"),
     )
-    .expect("value")])
     .expect("material");
     let namespace_hash = fact_subject_namespace_hash(&descriptor).expect("namespace hash");
     let material_hash = subject_material_hash(&material).expect("material hash");
@@ -261,21 +259,21 @@ fn canonical_goldens_match_expected_values() {
     );
     assert_eq!(
         namespace_hash.as_str(),
-        "content:sha256-jcs-v1:4a7e09033d1106f765d2995eaad05e49e358430516e541b1ad6f803a8fd464e1"
+        "content:sha256-jcs-v1:800f4a88fe8f1abd02ffe2003ada8c6707cc1741b76a9dfb1410dd4b426771c7"
     );
     assert_eq!(
         canonical_fact_subject_material_bytes(&material)
             .expect("material bytes")
             .as_str(),
-        r#"{"values":[{"field_id":"subject.chain","value":"bitcoin","value_type":"string"}],"version":"mfm.fact-subject-material.v1"}"#
+        r#"{"subject":{"chain":"bitcoin"},"version":"mfm.fact-subject-material.v2"}"#
     );
     assert_eq!(
         material_hash.as_str(),
-        "content:sha256-jcs-v1:b0fafb9b373281b4c3fad4c39cc691551d305ec5e744b928e48466782e1cc736"
+        "content:sha256-jcs-v1:d91032a4c9c5214904481c31292838586c89adf182d4bb857b6dc527efcd06a8"
     );
     assert_eq!(
         fact_key.as_str(),
-        "content:sha256-jcs-v1:09c665bf288b20e41297b36b39adda099b2ad87948414c60fba3024f95f62455"
+        "content:sha256-jcs-v1:589b21a8ebc2e6b76e79c74777b01a0dbf05d1beebb9be88a6f0bfa95165fcd7"
     );
     assert_eq!(
         canonical_fact_claim_id_bytes(&claim_id)

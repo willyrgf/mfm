@@ -9,15 +9,16 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 use alloy_primitives::{Address, Bytes, U256};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding,
-    EvmReadCapability, EvmReadSession, ProviderDiagnosticCode,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding, EvmReadCapability,
+    EvmReadSession, ProviderDiagnosticCode, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
+use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{ManagedWriteState, StateSpec};
 use mfm_runtime::{
@@ -278,7 +279,7 @@ async fn collect_evm_network(
         .read_block(&EvmBlockSelector::Latest)
         .await
         .map_err(evm_capability_runtime_error)?;
-    let anchor = EvmBlockAnchor::from_block(&latest);
+    let anchor = EvmBlockAnchor::new(latest.number, latest.hash);
     let exact = EvmBlockSelector::ExactHash(latest.hash);
 
     let token_decimals = read_token_decimals(plan, Arc::clone(&session), exact.clone()).await?;
@@ -287,7 +288,7 @@ async fn collect_evm_network(
         .read_block(&EvmBlockSelector::Number(latest.number))
         .await
         .map_err(evm_capability_runtime_error)?;
-    let final_canonical_block = EvmBlockAnchor::from_block(&final_block);
+    let final_canonical_block = EvmBlockAnchor::new(final_block.number, final_block.hash);
     Ok(CollectEvmNetworkEvidence::new(
         session.evidence(),
         anchor,
@@ -305,43 +306,43 @@ async fn read_token_decimals(
     let contracts = plan.token_contracts();
     let mut evidence = Vec::with_capacity(contracts.len());
     for chunk in contracts.chunks(EVM_READ_CONCURRENCY_LIMIT) {
-        let mut tasks = tokio::task::JoinSet::new();
-        for contract in chunk {
-            let contract = contract.clone();
-            let session = Arc::clone(&session);
-            let selector = selector.clone();
-            tasks.spawn(async move {
-                let contract_address = contract.as_str().parse::<Address>().map_err(|_| {
-                    mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                        "certified ERC-20 contract address was invalid".to_owned(),
+        let reads = chunk
+            .iter()
+            .map(|contract| {
+                let contract = contract.clone();
+                let session = Arc::clone(&session);
+                let selector = selector.clone();
+                async move {
+                    let contract_address = contract.as_str().parse::<Address>().map_err(|_| {
+                        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                            "certified ERC-20 contract address was invalid".to_owned(),
+                        )
+                    })?;
+                    let call = EvmCall::new(
+                        Address::ZERO,
+                        contract_address,
+                        U256::ZERO,
+                        Bytes::copy_from_slice(&ERC20_DECIMALS_SELECTOR),
+                        U256::from(100_000_u64),
+                        Default::default(),
+                        selector,
                     )
-                })?;
-                let call = EvmCall::new(
-                    Address::ZERO,
-                    contract_address,
-                    U256::ZERO,
-                    Bytes::copy_from_slice(&ERC20_DECIMALS_SELECTOR),
-                    U256::from(100_000_u64),
-                    Default::default(),
-                    selector,
-                )
-                .map_err(evm_capability_runtime_error)?;
-                let result = session
-                    .call(&call)
-                    .await
                     .map_err(evm_capability_runtime_error)?;
-                let decimals = u8::try_from(decode_abi_word(&result)?).map_err(|_| {
-                    mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                        "ERC-20 decimals result exceeded u8".to_owned(),
-                    )
-                })?;
-                EvmTokenDecimalsEvidence::new(contract, decimals)
-                    .map_err(portfolio_evm_state_runtime_error)
-            });
-        }
-        while let Some(result) = tasks.join_next().await {
-            evidence.push(result.map_err(joined_evm_read_error)??);
-        }
+                    let result = session
+                        .call(&call)
+                        .await
+                        .map_err(evm_capability_runtime_error)?;
+                    let decimals = u8::try_from(decode_abi_word(&result)?).map_err(|_| {
+                        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                            "ERC-20 decimals result exceeded u8".to_owned(),
+                        )
+                    })?;
+                    EvmTokenDecimalsEvidence::new(contract, decimals)
+                        .map_err(portfolio_evm_state_runtime_error)
+                }
+            })
+            .collect::<Vec<_>>();
+        evidence.extend(try_join_ordered(reads).await?);
     }
     evidence.sort();
     Ok(evidence)
@@ -354,50 +355,52 @@ async fn read_balances(
 ) -> mfm_runtime::Result<Vec<EvmBalanceReadEvidence>> {
     let mut evidence = Vec::with_capacity(plan.sources().len());
     for chunk in plan.sources().chunks(EVM_READ_CONCURRENCY_LIMIT) {
-        let mut tasks = tokio::task::JoinSet::new();
-        for source in chunk {
-            let source = source.clone();
-            let session = Arc::clone(&session);
-            let selector = selector.clone();
-            tasks.spawn(async move {
-                let account = source
-                    .account_address()
-                    .map_err(portfolio_evm_state_runtime_error)?;
-                let raw_units = match source.asset() {
-                    HoldingSourceConfig::Native => session
-                        .read_balance(account, &selector)
-                        .await
-                        .map_err(evm_capability_runtime_error)?,
-                    HoldingSourceConfig::Erc20 { contract_address } => {
-                        let contract =
-                            contract_address.as_str().parse::<Address>().map_err(|_| {
-                                mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                                    "certified ERC-20 contract address was invalid".to_owned(),
-                                )
-                            })?;
-                        let call = EvmCall::new(
-                            Address::ZERO,
-                            contract,
-                            U256::ZERO,
-                            erc20_balance_of_calldata(account),
-                            U256::from(100_000_u64),
-                            Default::default(),
-                            selector,
-                        )
-                        .map_err(evm_capability_runtime_error)?;
-                        let result = session
-                            .call(&call)
+        let reads = chunk
+            .iter()
+            .map(|source| {
+                let source = source.clone();
+                let session = Arc::clone(&session);
+                let selector = selector.clone();
+                async move {
+                    let account = source
+                        .account_address()
+                        .map_err(portfolio_evm_state_runtime_error)?;
+                    let raw_units = match source.asset() {
+                        HoldingSourceConfig::Native => session
+                            .read_balance(account, &selector)
                             .await
+                            .map_err(evm_capability_runtime_error)?,
+                        HoldingSourceConfig::Erc20 { contract_address } => {
+                            let contract =
+                                contract_address.as_str().parse::<Address>().map_err(|_| {
+                                    mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                                        "certified ERC-20 contract address was invalid".to_owned(),
+                                    )
+                                })?;
+                            let call = EvmCall::new(
+                                Address::ZERO,
+                                contract,
+                                U256::ZERO,
+                                erc20_balance_of_calldata(account),
+                                U256::from(100_000_u64),
+                                Default::default(),
+                                selector,
+                            )
                             .map_err(evm_capability_runtime_error)?;
-                        decode_abi_word(&result)?
-                    }
-                };
-                Ok::<_, mfm_runtime::RuntimeError>(EvmBalanceReadEvidence::new(source, raw_units))
-            });
-        }
-        while let Some(result) = tasks.join_next().await {
-            evidence.push(result.map_err(joined_evm_read_error)??);
-        }
+                            let result = session
+                                .call(&call)
+                                .await
+                                .map_err(evm_capability_runtime_error)?;
+                            decode_abi_word(&result)?
+                        }
+                    };
+                    Ok::<_, mfm_runtime::RuntimeError>(EvmBalanceReadEvidence::new(
+                        source, raw_units,
+                    ))
+                }
+            })
+            .collect::<Vec<_>>();
+        evidence.extend(try_join_ordered(reads).await?);
     }
     evidence.sort();
     Ok(evidence)
@@ -420,10 +423,44 @@ fn decode_abi_word(bytes: &Bytes) -> mfm_runtime::Result<U256> {
     Ok(U256::from_be_slice(bytes.as_ref()))
 }
 
-fn joined_evm_read_error(_error: tokio::task::JoinError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(
-        "bounded EVM collection task did not complete".to_owned(),
-    )
+async fn try_join_ordered<T, F>(reads: Vec<F>) -> mfm_runtime::Result<Vec<T>>
+where
+    F: Future<Output = mfm_runtime::Result<T>>,
+{
+    let mut reads = reads
+        .into_iter()
+        .map(|read| Some(Box::pin(read)))
+        .collect::<Vec<_>>();
+    let mut outputs = (0..reads.len()).map(|_| None).collect::<Vec<_>>();
+    std::future::poll_fn(|context| {
+        for (read, output) in reads.iter_mut().zip(outputs.iter_mut()) {
+            let Some(future) = read.as_mut() else {
+                continue;
+            };
+            match future.as_mut().poll(context) {
+                Poll::Ready(Ok(value)) => {
+                    *output = Some(value);
+                    *read = None;
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => {}
+            }
+        }
+        if reads.iter().any(Option::is_some) {
+            return Poll::Pending;
+        }
+        let mut ordered = Vec::with_capacity(outputs.len());
+        for output in std::mem::take(&mut outputs) {
+            let Some(output) = output else {
+                return Poll::Ready(Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "ordered EVM read completed without output".to_owned(),
+                )));
+            };
+            ordered.push(output);
+        }
+        Poll::Ready(Ok(ordered))
+    })
+    .await
 }
 
 struct PublishEvmHoldingsRunner {

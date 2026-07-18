@@ -88,10 +88,14 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
         ctx: &'a ErasedRunCtx<'ctx>,
         _intent: &'a Self::Intent,
         _idempotency: &'a Self::Idempotency,
-    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocation<Self::PreparedInvocation>> {
         let node_id = ctx.node().node_id.as_str().to_owned();
         let attempt_id = ctx.attempt_id().as_str().to_owned();
-        Box::pin(async move { Ok(fixture_side_effect_evidence(35, node_id, attempt_id)) })
+        Box::pin(async move {
+            Ok(SideEffectPreparedInvocation::new(
+                fixture_side_effect_evidence(35, node_id, attempt_id),
+            ))
+        })
     }
 
     fn load_prepared<'a, 'ctx>(

@@ -262,8 +262,40 @@ impl From<RunnerEventPayload> for events::KernelEventPayload {
     }
 }
 
+/// One-shot process-local settlement carried with a runner output until its append outcome.
+///
+/// Dropping this value discards the transient authority captured by the callback. The runtime
+/// invokes the callback only after the corresponding commit is durably appended.
+pub struct RunnerOutputSettlement {
+    on_appended: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl RunnerOutputSettlement {
+    /// Creates a one-shot settlement callback for transient runner authority.
+    pub fn on_appended(callback: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            on_appended: Some(Box::new(callback)),
+        }
+    }
+
+    /// Executes the callback after the associated commit was durably appended.
+    pub fn settle_appended(mut self) {
+        if let Some(callback) = self.on_appended.take() {
+            callback();
+        }
+    }
+}
+
+impl std::fmt::Debug for RunnerOutputSettlement {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunnerOutputSettlement")
+            .field("pending", &self.on_appended.is_some())
+            .finish()
+    }
+}
+
 /// Typed payload batch returned by an erased runner.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErasedRunnerOutput {
     /// Staged artifacts or sealed finalized handles referenced by payloads.
     staged_artifacts: Vec<StagedArtifact>,
@@ -271,6 +303,20 @@ pub struct ErasedRunnerOutput {
     staged_retention_refs: Vec<StagedRetentionRefs>,
     /// Runner-owned typed payloads to validate before runtime lifecycle derivation.
     payloads: Vec<RunnerEventPayload>,
+    /// Process-local authority settled only after a successful durable append.
+    settlement: Option<RunnerOutputSettlement>,
+}
+
+impl std::fmt::Debug for ErasedRunnerOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ErasedRunnerOutput")
+            .field("staged_artifacts", &self.staged_artifacts)
+            .field("staged_retention_refs", &self.staged_retention_refs)
+            .field("payloads", &self.payloads)
+            .field("settlement", &self.settlement)
+            .finish()
+    }
 }
 
 impl ErasedRunnerOutput {
@@ -283,7 +329,13 @@ impl ErasedRunnerOutput {
             staged_artifacts,
             staged_retention_refs,
             payloads,
+            settlement: None,
         }
+    }
+
+    pub(crate) fn with_settlement(mut self, settlement: RunnerOutputSettlement) -> Self {
+        self.settlement = Some(settlement);
+        self
     }
 
     /// Creates an output batch from payloads with no additional artifact evidence.
@@ -317,11 +369,13 @@ impl ErasedRunnerOutput {
         Vec<StagedArtifact>,
         Vec<StagedRetentionRefs>,
         Vec<RunnerEventPayload>,
+        Option<RunnerOutputSettlement>,
     ) {
         (
             self.staged_artifacts,
             self.staged_retention_refs,
             self.payloads,
+            self.settlement,
         )
     }
 }

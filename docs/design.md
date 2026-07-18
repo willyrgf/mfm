@@ -157,6 +157,22 @@ Persisted and public surfaces are inventoried in `docs/persisted-public-surfaces
 is the review checklist for applying this no-secret invariant to app, CLI, REST, storage, artifact,
 and diagnostic boundaries.
 
+## Fact Identity And Query Terms
+
+Fact identity retains the complete canonical typed subject object. `FactSubjectMaterialV2` wraps
+that object under `mfm.fact-subject-material.v2`; it never projects identity down to a configured
+list of scalar paths. The v2 subject namespace binds the fact kind and subject schema id. `FactKey`
+then binds that namespace hash to the full subject-material hash, so an undeclared nested subject
+field, optional tagged-enum payload, account, asset, or contract address cannot disappear from
+identity merely because it is not indexed.
+
+Descriptor-declared subject fields validate typed scalar paths and define query-term extraction.
+They are searchable projections, not identity declarations. `fact_index_terms` may omit optional
+terms, but rebuild, signed query evidence, replay, and content-identity verification must rehydrate
+the retained full subject, validate every declared required term, and derive terms again. No
+flattened path list, delimiter-joined asset key, or term cache can substitute for canonical subject
+material.
+
 ## Current Semantic Configuration And Launch Boundary
 
 Semantic configuration has a strict pre-admission path and a separate process-local runtime path.
@@ -815,6 +831,13 @@ submit-time bytes inside the mutation adapter. They are neither serializable typ
 cloneable service results. The explicit user-selected `keystore tx-sign --out` file is the only
 non-run bearer-output boundary; CLI output reports distinct `signing_digest` and
 `transaction_hash` metadata and never the raw bytes, signature, or local path.
+
+Process-local authority that becomes usable only after a runner commit uses a non-cloneable
+one-shot `RunnerOutputSettlement`. Runtime executes its callback only for
+`CommitOutcome::Appended`. Idempotent, admission-blocked, stale, failed, or dropped outputs destroy
+the captured authority without promotion, including the case where an append returned an error but
+another read later observes that the commit exists. Durable events remain the only recovery
+authority.
 
 Submission observed, submission unknown, and not-submitted-proven evidence share one logical
 submission-result slot for an invocation epoch. Unknown submission can be superseded only by the

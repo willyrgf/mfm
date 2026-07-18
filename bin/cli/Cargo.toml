@@ -10,7 +10,6 @@ category = "binary"
 parity-tests = ["mfm-app/test-support"]
 
 [dependencies]
-alloy-primitives = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 mfm-app = { path = "../../crates/app" }
@@ -30,9 +29,11 @@ rpassword = "7.0"
 zeroize = "1.7"
 
 [dev-dependencies]
+alloy-primitives = { workspace = true }
 axum = "0.7"
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-events = { path = "../../crates/kernel/events" }
+mfm-evm-signing = { path = "../../crates/evm-signing" }
 mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
 mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }

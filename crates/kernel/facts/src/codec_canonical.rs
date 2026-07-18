@@ -114,57 +114,33 @@ fn canonical_ordering_descriptor_value(ordering: &FactOrderingPolicy) -> Result<
 }
 
 pub(super) fn canonical_subject_namespace_value(
-    namespace: &FactSubjectNamespaceV1,
+    namespace: &FactSubjectNamespaceV2,
 ) -> Result<CanonicalValue> {
-    let fields = namespace
-        .fields
-        .iter()
-        .map(canonical_subject_namespace_field_value)
-        .collect::<Result<Vec<_>>>()?;
     canonical_object([
         (
             "version",
-            CanonicalValue::String(FactSubjectNamespaceV1::VERSION.to_owned()),
+            CanonicalValue::String(FactSubjectNamespaceV2::VERSION.to_owned()),
         ),
         (
             "fact_kind",
             CanonicalValue::String(namespace.fact_kind.as_str().to_owned()),
         ),
-        ("fields", CanonicalValue::Array(fields)),
-    ])
-}
-
-fn canonical_subject_namespace_field_value(
-    field: &FactSubjectNamespaceFieldV1,
-) -> Result<CanonicalValue> {
-    canonical_object([
         (
-            "field_id",
-            CanonicalValue::String(field.field_id.as_str().to_owned()),
+            "subject_schema_id",
+            CanonicalValue::String(namespace.subject_schema_id.as_str().to_owned()),
         ),
-        (
-            "value_type",
-            CanonicalValue::String(field.value_type.as_str().to_owned()),
-        ),
-        ("unit", optional_display_value(field.unit.as_ref())),
-        ("scale", optional_scale_value(field.scale)),
     ])
 }
 
 pub(super) fn canonical_subject_material_value(
-    material: &FactSubjectMaterialV1,
+    material: &FactSubjectMaterialV2,
 ) -> Result<CanonicalValue> {
-    let values = material
-        .values
-        .iter()
-        .map(canonical_fact_field_value)
-        .collect::<Result<Vec<_>>>()?;
     canonical_object([
         (
             "version",
-            CanonicalValue::String(FactSubjectMaterialV1::VERSION.to_owned()),
+            CanonicalValue::String(FactSubjectMaterialV2::VERSION.to_owned()),
         ),
-        ("values", CanonicalValue::Array(values)),
+        ("subject", material.subject.clone()),
     ])
 }
 

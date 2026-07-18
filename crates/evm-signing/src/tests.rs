@@ -70,6 +70,10 @@ impl SigningProvider for FixedProvider {
 }
 
 impl DeterministicSigningProvider for FixedProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.fixed-signer"
+    }
+
     fn deterministic_profile_id(&self) -> &'static str {
         SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }
@@ -84,6 +88,10 @@ impl SigningProvider for WrongProfileProvider {
 }
 
 impl DeterministicSigningProvider for WrongProfileProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.wrong-profile-signer"
+    }
+
     fn deterministic_profile_id(&self) -> &'static str {
         "secp256k1.other.deterministic.v1"
     }

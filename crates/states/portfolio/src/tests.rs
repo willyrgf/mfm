@@ -3,10 +3,9 @@ use super::*;
 use std::collections::BTreeMap;
 
 use alloy_primitives::U256;
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
-};
+use mfm_evm_capabilities::{EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID};
 use mfm_ids::LocalPublicId;
+use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::{
     NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioReport, PortfolioSnapshot,
@@ -291,10 +290,17 @@ fn reducer_deduplicates_metadata_and_publishes_one_unified_fact_per_source() {
         descriptor.fact_kind().as_str(),
         "portfolio.evm_balance_snapshot"
     );
-    assert!(!descriptor
+    assert!(descriptor
         .fields()
         .iter()
-        .any(|field| field.field_id().as_str() == "subject.asset"));
+        .any(|field| field.field_id().as_str() == "subject.asset.kind"));
+    assert!(descriptor.fields().iter().any(|field| {
+        field.field_id().as_str() == "subject.asset.contract_address" && !field.required()
+    }));
+    assert!(descriptor
+        .fields()
+        .iter()
+        .any(|field| field.field_id().as_str() == "result.anchor.hash"));
     let fact_json = serde_json::to_value(&facts).expect("fact JSON");
     assert_eq!(fact_json[0]["response"]["anchor"]["hash"], EVM_HASH);
     assert_eq!(
@@ -307,6 +313,23 @@ fn reducer_deduplicates_metadata_and_publishes_one_unified_fact_per_source() {
                 .expect("asset kind"))
             .collect::<Vec<_>>(),
         vec!["erc20", "native", "erc20",]
+    );
+    let fact_keys = fact_json
+        .as_array()
+        .expect("fact array")
+        .iter()
+        .map(|fact| {
+            mfm_facts::typed_fact_subject_evidence(&descriptor, &fact["subject"])
+                .expect("subject evidence")
+                .fact_key()
+                .as_str()
+                .to_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        fact_keys.len(),
+        3,
+        "every configured asset has one fact key"
     );
 }
 

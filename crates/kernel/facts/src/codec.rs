@@ -12,7 +12,7 @@ use crate::extraction::{
     validate_extracted_scalar, validate_ordering, FactJsonPathContext,
 };
 use crate::scalar::ScalarJsonContext;
-use crate::subject::{FactSubjectNamespaceFieldV1, FactSubjectNamespaceV1};
+use crate::subject::FactSubjectNamespaceV2;
 use crate::*;
 
 #[path = "codec_canonical.rs"]
@@ -30,14 +30,15 @@ mod parse;
 pub(crate) use self::parse::parse_canonical_scalar_value;
 use self::parse::{
     descriptor_fields_by_id, json_object, json_required, parse_canonical_fact_query_plan,
-    parse_fact_field_value, parse_fact_query_receipt, parse_fact_selection_evidence,
-    require_query_exposed, require_version, required_query_field, CompiledQueryWire,
+    parse_fact_query_receipt, parse_fact_selection_evidence, require_query_exposed,
+    require_version, required_query_field, CompiledQueryWire,
 };
 
 /// Validates a fact descriptor.
 pub fn validate_descriptor(descriptor: &FactDescriptor) -> Result<()> {
     let mut fields_by_id = BTreeMap::new();
     let mut subject_fields = 0usize;
+    let mut required_subject_fields = 0usize;
 
     for field in &descriptor.fields {
         field.validate()?;
@@ -50,18 +51,18 @@ pub fn validate_descriptor(descriptor: &FactDescriptor) -> Result<()> {
 
         if matches!(field.extraction, FactFieldExtraction::Subject(_)) {
             subject_fields += 1;
-            if !field.required {
-                return Err(FactError::field(
-                    field.field_id.clone(),
-                    "subject fields must be required in v1",
-                ));
-            }
+            required_subject_fields += usize::from(field.required);
         }
     }
 
     if subject_fields == 0 {
         return Err(FactError::descriptor(
             "descriptor must contain at least one subject field",
+        ));
+    }
+    if required_subject_fields == 0 {
+        return Err(FactError::descriptor(
+            "descriptor must contain at least one required subject field",
         ));
     }
 
@@ -126,31 +127,21 @@ pub fn fact_descriptor_hash(descriptor: &FactDescriptor) -> Result<ContentDigest
     Ok(canonical_fact_descriptor_bytes(descriptor)?.content_digest())
 }
 
-fn fact_subject_namespace(descriptor: &FactDescriptor) -> Result<FactSubjectNamespaceV1> {
+fn fact_subject_namespace(descriptor: &FactDescriptor) -> Result<FactSubjectNamespaceV2> {
     validate_descriptor(descriptor)?;
-    let fields = descriptor
-        .fields
-        .iter()
-        .filter(|field| matches!(field.extraction, FactFieldExtraction::Subject(_)))
-        .map(|field| {
-            FactSubjectNamespaceFieldV1::new(
-                field.field_id.clone(),
-                field.value_type,
-                field.unit.clone(),
-                field.scale,
-            )
-        })
-        .collect();
-    FactSubjectNamespaceV1::new(descriptor.fact_kind.clone(), fields)
+    Ok(FactSubjectNamespaceV2::new(
+        descriptor.fact_kind.clone(),
+        descriptor.subject_schema_id.clone(),
+    ))
 }
 
 fn canonical_fact_subject_namespace_bytes(
-    namespace: &FactSubjectNamespaceV1,
+    namespace: &FactSubjectNamespaceV2,
 ) -> Result<CanonicalJsonBytes> {
     canonical_subject_namespace_value(namespace).map(|value| CanonicalJsonBytes::from_value(&value))
 }
 
-fn subject_namespace_hash(namespace: &FactSubjectNamespaceV1) -> Result<ContentDigest> {
+fn subject_namespace_hash(namespace: &FactSubjectNamespaceV2) -> Result<ContentDigest> {
     Ok(canonical_fact_subject_namespace_bytes(namespace)?.content_digest())
 }
 
@@ -162,13 +153,15 @@ pub fn fact_subject_namespace_hash(descriptor: &FactDescriptor) -> Result<Conten
 
 /// Returns canonical subject material bytes.
 pub fn canonical_fact_subject_material_bytes(
-    material: &FactSubjectMaterialV1,
+    material: &FactSubjectMaterialV2,
 ) -> Result<CanonicalJsonBytes> {
     canonical_subject_material_value(material).map(|value| CanonicalJsonBytes::from_value(&value))
 }
 
 /// Decodes and validates canonical subject material bytes.
-pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactSubjectMaterialV1> {
+pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactSubjectMaterialV2> {
+    PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let value = serde_json::from_slice::<serde_json::Value>(bytes)
         .map_err(|error| FactError::canonical(error.to_string()))?;
     let object = value
@@ -178,19 +171,17 @@ pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactS
         .get("version")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| FactError::descriptor("subject material version is required"))?;
-    if version != FactSubjectMaterialV1::VERSION {
+    if version != FactSubjectMaterialV2::VERSION {
         return Err(FactError::descriptor(format!(
             "unsupported subject material version {version:?}"
         )));
     }
-    let values = object
-        .get("values")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| FactError::descriptor("subject material values are required"))?
-        .iter()
-        .map(|value| parse_fact_field_value(value, "subject material value"))
-        .collect::<Result<Vec<_>>>()?;
-    let material = FactSubjectMaterialV1::new(values)?;
+    let subject = object
+        .get("subject")
+        .ok_or_else(|| FactError::descriptor("subject material subject is required"))?;
+    let subject =
+        json_to_fact_canonical_value(subject, "", &BTreeMap::new(), FactJsonPathContext::Subject)?;
+    let material = FactSubjectMaterialV2::new(subject)?;
     let canonical = canonical_fact_subject_material_bytes(&material)?;
     if canonical.as_bytes() != bytes {
         return Err(FactError::descriptor(
@@ -201,7 +192,7 @@ pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactS
 }
 
 /// Derives the content digest for subject material.
-pub fn subject_material_hash(material: &FactSubjectMaterialV1) -> Result<ContentDigest> {
+pub fn subject_material_hash(material: &FactSubjectMaterialV2) -> Result<ContentDigest> {
     Ok(canonical_fact_subject_material_bytes(material)?.content_digest())
 }
 
@@ -500,29 +491,30 @@ pub fn selected_returned_field_summaries_digest(
     Ok(CanonicalJsonBytes::from_value(&value).content_digest())
 }
 
-/// Extracts canonical subject material using the descriptor's subject fields.
+/// Validates descriptor-declared subject fields and retains the complete canonical subject object.
 pub fn extract_subject_material(
     descriptor: &FactDescriptor,
     subject: &CanonicalValue,
-) -> Result<FactSubjectMaterialV1> {
+) -> Result<FactSubjectMaterialV2> {
     validate_descriptor(descriptor)?;
-    let mut values = Vec::new();
     for field in &descriptor.fields {
         if !matches!(field.extraction, FactFieldExtraction::Subject(_)) {
             continue;
         }
-        let scalar = extract_field_scalar(field, subject, &CanonicalValue::Null, None)?
-            .ok_or_else(|| {
-                FactError::field(field.field_id.clone(), "required subject field missing")
-            })?;
-        validate_extracted_scalar(field, &scalar)?;
-        values.push(FactFieldValue::new(
-            field.field_id.clone(),
-            field.value_type,
-            scalar,
-        )?);
+        match extract_field_scalar(field, subject, &CanonicalValue::Null, None)? {
+            Some(scalar) => {
+                validate_extracted_scalar(field, &scalar)?;
+            }
+            None if field.required => {
+                return Err(FactError::field(
+                    field.field_id.clone(),
+                    "required subject field missing",
+                ));
+            }
+            None => {}
+        }
     }
-    FactSubjectMaterialV1::new(values)
+    FactSubjectMaterialV2::new(subject.clone())
 }
 
 /// Builds descriptor-derived subject evidence from an already-canonical subject value.
@@ -537,7 +529,7 @@ pub fn fact_subject_evidence(
 /// Builds descriptor-derived subject evidence from already-extracted subject material.
 pub fn fact_subject_evidence_from_material(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV1,
+    subject_material: &FactSubjectMaterialV2,
 ) -> Result<FactSubjectEvidence> {
     let subject_namespace = fact_subject_namespace(descriptor)?;
     let subject_namespace_hash = subject_namespace_hash(&subject_namespace)?;
@@ -608,53 +600,22 @@ pub fn parse_canonical_fact_response_bytes(
 /// Extracts index terms from persisted subject material plus canonical response material.
 pub fn extract_terms_from_material(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV1,
+    subject_material: &FactSubjectMaterialV2,
     response: &CanonicalValue,
     metadata: &FactExtractionMetadata,
 ) -> Result<Vec<FactIndexTerm>> {
-    validate_descriptor(descriptor)?;
-    let subject_values = subject_material
-        .values()
-        .iter()
-        .map(|value| (value.field_id().clone(), value))
-        .collect::<BTreeMap<_, _>>();
-    let mut terms = Vec::new();
-    for field in &descriptor.fields {
-        let scalar = match field.extraction() {
-            FactFieldExtraction::Subject(_) => {
-                let Some(value) = subject_values.get(field.field_id()) else {
-                    if field.required() {
-                        return Err(FactError::field(
-                            field.field_id.clone(),
-                            "required subject field missing",
-                        ));
-                    }
-                    continue;
-                };
-                if value.value_type() != field.value_type() {
-                    return Err(FactError::field(
-                        field.field_id.clone(),
-                        "subject material value type does not match descriptor field",
-                    ));
-                }
-                Some(value.value().clone())
-            }
-            FactFieldExtraction::Response(_) | FactFieldExtraction::Metadata(_) => {
-                extract_field_scalar(field, &CanonicalValue::Null, response, Some(metadata))?
-            }
-        };
-        match scalar {
-            Some(scalar) => terms.push(FactIndexTerm::from_field(field, scalar)?),
-            None if field.required() => {
-                return Err(FactError::field(
-                    field.field_id.clone(),
-                    "required field missing",
-                ));
-            }
-            None => {}
-        }
-    }
-    Ok(terms)
+    let subject = typed_subject_from_material(descriptor, subject_material)?;
+    extract_terms(descriptor, &subject, response, metadata)
+}
+
+pub(crate) fn typed_subject_from_material(
+    descriptor: &FactDescriptor,
+    subject_material: &FactSubjectMaterialV2,
+) -> Result<CanonicalValue> {
+    let bytes = CanonicalJsonBytes::from_value(subject_material.subject());
+    let subject = serde_json::from_slice::<serde_json::Value>(bytes.as_bytes())
+        .map_err(|error| FactError::canonical(error.to_string()))?;
+    typed_fact_subject_value(descriptor, &subject)
 }
 
 pub(crate) fn canonical_object(

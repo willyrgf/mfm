@@ -5,9 +5,7 @@
 //! before this module projects a hydrated, identity-matching fact into an observation.
 
 use std::collections::BTreeMap;
-use std::str::FromStr;
 
-use alloy_primitives::U256;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
@@ -310,37 +308,7 @@ fn execution_anchor_from_anchored_holding_source(
     network_id: &str,
 ) -> Result<ExecutionAnchor, PortfolioHoldingSelectionError> {
     match &source.anchor {
-        ExecutionAnchor::Evm {
-            block_number,
-            block_hash,
-            ..
-        } => {
-            let parsed_number = U256::from_str(block_number).map_err(|_| {
-                PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    "observation EVM block_number must be canonical U256 decimal",
-                    None,
-                    Some(network_id.to_owned()),
-                )
-            })?;
-            if block_hash.trim().is_empty() {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    "observation EVM block_hash is required",
-                    None,
-                    Some(network_id.to_owned()),
-                ));
-            }
-            if parsed_number.to_string() != *block_number {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    "observation EVM block_number must be canonical U256 decimal",
-                    None,
-                    Some(network_id.to_owned()),
-                ));
-            }
-            Ok(source.anchor.clone())
-        }
+        ExecutionAnchor::Evm { .. } => Ok(source.anchor.clone()),
         ExecutionAnchor::Bitcoin { block_hash, .. } => {
             if block_hash.trim().is_empty() {
                 return Err(PortfolioHoldingSelectionError::new(

@@ -27,6 +27,7 @@ enum Mode {
     HttpFailure,
     JsonError,
     Oversized,
+    OversizedChunked,
     Stall,
 }
 
@@ -198,7 +199,7 @@ async fn transaction_view_uses_u256_checked_fees_and_strict_observations() {
     assert_eq!(transaction.chain_id, U256::from(1));
     assert_eq!(transaction.to, TxKind::Call(ACCOUNT));
     assert_eq!(
-        transaction.placement.expect("placement").block_number,
+        transaction.placement.expect("placement").block.number,
         U256::from(42)
     );
     let receipt = session
@@ -299,6 +300,21 @@ async fn oversized_bind_response_fails_before_body_read() {
     assert_eq!(error, EvmTransportError::ResponseTooLarge);
 }
 
+#[tokio::test]
+async fn chunked_bind_response_without_content_length_obeys_body_bound() {
+    let server = TestServer::spawn(Mode::OversizedChunked).await;
+    let error = EvmJsonRpcSession::bind(
+        binding(1),
+        LocalPublicId::new("primary").expect("source"),
+        server.url,
+        None,
+    )
+    .await
+    .expect_err("oversized chunked response");
+
+    assert_eq!(error, EvmTransportError::ResponseTooLarge);
+}
+
 #[tokio::test(start_paused = true)]
 async fn stalled_bind_response_obeys_request_timeout() {
     let server = TestServer::spawn(Mode::Stall).await;
@@ -392,6 +408,14 @@ fn response(mode: Mode, request: &Value) -> String {
         return format!(
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             MAX_RESPONSE_BYTES + 1
+        );
+    }
+    if matches!(mode, Mode::OversizedChunked) {
+        let body = "x".repeat(MAX_RESPONSE_BYTES + 1);
+        return format!(
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+            body.len(),
+            body
         );
     }
     let method = request["method"].as_str().expect("method");

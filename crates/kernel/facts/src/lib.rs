@@ -111,7 +111,7 @@ pub use receipt::{
     StoreReadFrontierType,
 };
 pub use scalar::FactCanonicalScalar;
-pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV1};
+pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV2};
 pub use tags::{
     FactAudience, FactFieldExposure, FactFieldExtraction, FactFieldSource, FactFieldValueType,
     FactMetadataField, FactQueryOperator, FactScale, FactVisibility, FactVisibilityScope,

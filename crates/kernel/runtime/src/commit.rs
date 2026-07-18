@@ -24,7 +24,9 @@ use crate::history::{
     store_seed_artifact, validate_certificate_artifact, validate_config_artifacts,
     validate_seed_cells, validate_spec_artifact, RuntimeRunView,
 };
-use crate::runners::{ContextOutputExtractor, ErasedRunnerOutput, RunnerEventPayload};
+use crate::runners::{
+    ContextOutputExtractor, ErasedRunnerOutput, RunnerEventPayload, RunnerOutputSettlement,
+};
 use crate::side_effect_lifecycle::{
     side_effect_projection_for_attempt, standalone_interruption_allowed, validate_resume_output,
     validate_terminal_batch_evidence,
@@ -168,6 +170,7 @@ pub(crate) struct SealedTerminalCommitValidation<'a> {
 pub(crate) struct PreparedRunnerOutput {
     commit: store::PreparedCommitPlan,
     artifact_admissions: Vec<PreparedArtifactAdmission>,
+    settlement: Option<RunnerOutputSettlement>,
 }
 
 impl PreparedRunnerOutput {
@@ -175,8 +178,11 @@ impl PreparedRunnerOutput {
         self.commit.request()
     }
 
-    pub(crate) fn into_prepared_commit_bundle(self) -> Result<store::PreparedCommitBundle> {
-        prepared_commit_bundle_with_admissions(self.commit, self.artifact_admissions)
+    pub(crate) fn into_prepared_commit_bundle(
+        self,
+    ) -> Result<(store::PreparedCommitBundle, Option<RunnerOutputSettlement>)> {
+        let bundle = prepared_commit_bundle_with_admissions(self.commit, self.artifact_admissions)?;
+        Ok((bundle, self.settlement))
     }
 }
 
@@ -428,7 +434,8 @@ impl CommitPlanner {
     pub(crate) fn prepare_runner_output(
         input: RunnerOutputCommitInput<'_>,
     ) -> Result<PreparedRunnerOutput> {
-        let (staged_artifacts, staged_retention_refs, runner_payloads) = input.output.into_parts();
+        let (staged_artifacts, staged_retention_refs, runner_payloads, settlement) =
+            input.output.into_parts();
         let runner_payloads = runner_payloads_with_derived_lifecycle(
             input.runtime_spec,
             input.node,
@@ -572,6 +579,7 @@ impl CommitPlanner {
         Ok(PreparedRunnerOutput {
             commit,
             artifact_admissions,
+            settlement,
         })
     }
 
@@ -716,6 +724,7 @@ impl CommitPlanner {
         Ok(PreparedRunnerOutput {
             commit,
             artifact_admissions: artifacts_to_stage,
+            settlement: None,
         })
     }
 

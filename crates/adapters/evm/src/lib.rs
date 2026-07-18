@@ -29,8 +29,8 @@ mod transaction;
 
 pub use transaction::{
     is_evm_transaction_replay_intent, register_evm_transaction_runner,
-    verify_evm_transaction_replay, EvmMutationValidationFuture, EvmSigningProviderBindFuture,
-    EvmTransactionRunnerCapabilities, EvmTransactionSessionBindFuture,
+    verify_evm_transaction_replay, EvmMutationValidationFuture, EvmTransactionRunnerCapabilities,
+    EvmTransactionSessionBindFuture,
 };
 
 pub(crate) const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";
@@ -241,3 +241,7 @@ fn evm_state_runtime_error(error: mfm_states_evm::EvmStateError) -> mfm_runtime:
 pub(crate) fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }
+
+#[cfg(test)]
+#[path = "validation_tests.rs"]
+mod validation_tests;

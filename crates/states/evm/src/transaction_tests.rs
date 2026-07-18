@@ -80,8 +80,10 @@ fn observed_transaction(prepared: &EvmPreparedTransaction) -> CapabilityTransact
         max_priority_fee_per_gas: unsigned.max_priority_fee_per_gas(),
         access_list: unsigned.access_list().clone(),
         placement: Some(CapabilityPlacement {
-            block_number: U256::from(100),
-            block_hash: B256::from([0x55; 32]),
+            block: EvmBlock {
+                number: U256::from(100),
+                hash: B256::from([0x55; 32]),
+            },
             transaction_index: U256::from(3),
         }),
     }
@@ -95,8 +97,10 @@ fn capability_receipt(
     EvmReceipt {
         transaction_hash: prepared.expected_hash().expect("hash"),
         transaction_index: U256::from(3),
-        block_number: U256::from(100),
-        block_hash: B256::from([0x55; 32]),
+        block: EvmBlock {
+            number: U256::from(100),
+            hash: B256::from([0x55; 32]),
+        },
         from: sender(),
         to: prepared.intent().action().call_destination().expect("to"),
         contract_address,
@@ -107,8 +111,10 @@ fn capability_receipt(
             address: destination(),
             topics: vec![B256::from([0x66; 32])],
             data: vec![0xaa, 0xbb].into(),
-            block_number: U256::from(100),
-            block_hash: B256::from([0x55; 32]),
+            block: EvmBlock {
+                number: U256::from(100),
+                hash: B256::from([0x55; 32]),
+            },
             transaction_hash: prepared.expected_hash().expect("hash"),
             transaction_index: U256::from(3),
             log_index: U256::from(7),
@@ -267,7 +273,7 @@ fn receipt_logs_fail_closed_on_removed_or_moved_identity() {
     );
 
     let mut moved = capability_receipt(&prepared, CapabilityReceiptStatus::Success, None);
-    moved.logs[0].block_hash = B256::from([0x88; 32]);
+    moved.logs[0].block.hash = B256::from([0x88; 32]);
     assert!(
         EvmTransactionReceipt::from_observation(&prepared, &moved, &session("receipt")).is_err()
     );
@@ -426,10 +432,11 @@ fn confirmation_rejects_moved_receipt_and_wrong_canonical_block() {
     .expect("retained");
     let mut moved_capability =
         capability_receipt(&prepared, CapabilityReceiptStatus::Success, None);
-    moved_capability.block_number = U256::from(101);
-    moved_capability.block_hash = B256::from([0x77; 32]);
-    moved_capability.logs[0].block_number = U256::from(101);
-    moved_capability.logs[0].block_hash = B256::from([0x77; 32]);
+    moved_capability.block = EvmBlock {
+        number: U256::from(101),
+        hash: B256::from([0x77; 32]),
+    };
+    moved_capability.logs[0].block = moved_capability.block.clone();
     let moved = EvmTransactionReceipt::from_observation(
         &prepared,
         &moved_capability,

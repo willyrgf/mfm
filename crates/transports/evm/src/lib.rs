@@ -297,8 +297,10 @@ impl EvmJsonRpcSession {
         let receipt = EvmReceipt {
             transaction_hash: observed_hash,
             transaction_index: quantity_field(object, "transactionIndex")?,
-            block_number: quantity_field(object, "blockNumber")?,
-            block_hash: hash_field(object, "blockHash")?,
+            block: EvmBlock {
+                number: quantity_field(object, "blockNumber")?,
+                hash: hash_field(object, "blockHash")?,
+            },
             from: address_field(object, "from")?,
             to: optional_address_field(object, "to")?,
             contract_address: optional_address_field(object, "contractAddress")?,
@@ -675,16 +677,18 @@ fn transaction_placement(
         return Err(EvmTransportError::InvalidResponse);
     }
     Ok(Some(EvmTransactionPlacement {
-        block_number: parse_quantity(
-            block_number
-                .as_str()
-                .ok_or(EvmTransportError::InvalidResponse)?,
-        )?,
-        block_hash: parse_hash(
-            block_hash
-                .as_str()
-                .ok_or(EvmTransportError::InvalidResponse)?,
-        )?,
+        block: EvmBlock {
+            number: parse_quantity(
+                block_number
+                    .as_str()
+                    .ok_or(EvmTransportError::InvalidResponse)?,
+            )?,
+            hash: parse_hash(
+                block_hash
+                    .as_str()
+                    .ok_or(EvmTransportError::InvalidResponse)?,
+            )?,
+        },
         transaction_index: parse_quantity(
             transaction_index
                 .as_str()
@@ -706,8 +710,10 @@ fn parse_receipt_log(value: &Value) -> TransportResult<EvmReceiptLog> {
         address: address_field(object, "address")?,
         topics,
         data: bytes_field(object, "data")?,
-        block_number: quantity_field(object, "blockNumber")?,
-        block_hash: hash_field(object, "blockHash")?,
+        block: EvmBlock {
+            number: quantity_field(object, "blockNumber")?,
+            hash: hash_field(object, "blockHash")?,
+        },
         transaction_hash: hash_field(object, "transactionHash")?,
         transaction_index: quantity_field(object, "transactionIndex")?,
         log_index: quantity_field(object, "logIndex")?,

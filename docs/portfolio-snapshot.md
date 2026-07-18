@@ -34,6 +34,8 @@ shared anchor per demanded network, proves an exact Bitcoin receipt, and selects
 content and anchor match that receipt. Each EVM network instead uses one external-read state and one
 atomic publication state. One checked session resolves latest once, reads deduplicated token
 metadata and every native/ERC-20 balance at the exact hash, and rechecks that hash by block number.
+The bounded concurrent scheduler issues each chunk in certified plan order and preserves that order
+independently of response completion order.
 The publication attempt records the complete `portfolio.evm_balance_snapshot` fact batch and a
 direct network snapshot together. Assembly consumes that snapshot directly; token-only runs make no
 fact-index request. Collection plans, evidence, snapshots, and fact subjects reuse the configured
@@ -44,6 +46,11 @@ canonical decimal strings.
 A wallet with no configured symbols is retained with empty observations and zero quote totals, but
 creates no collection work or network pin; the aggregate remains valid only when another explicit
 wallet-to-symbol edge exists.
+
+Every persisted `WalletSnapshot` retains the checked `WalletSubject` algebra directly rather than a
+parallel address string. EVM execution pins use the shared checked `EvmBlockAnchor` nested under a
+non-zero chain id; transaction receipts, logs, validation evidence, collection evidence, and public
+portfolio pins reuse the same number/hash value.
 
 The root returns `PortfolioPublicOutputs` with exactly `snapshot` and `report`. It preserves zero
 holdings, exposes direct quote totals, and does not expose receipt entries, source keys, fact

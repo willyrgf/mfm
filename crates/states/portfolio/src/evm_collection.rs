@@ -6,12 +6,12 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, U256};
 use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_facts::{FactAudience, FactVisibility};
 use mfm_ids::LocalPublicId;
+use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
@@ -846,6 +846,35 @@ pub struct EvmBalanceSnapshotResponse {
     exposure = "returnable"
 ))]
 #[mfm_fact(field(
+    id = "subject.asset.kind",
+    source = "subject",
+    path = "asset.kind",
+    value_type = "string",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "subject.asset.contract_address",
+    source = "subject",
+    path = "asset.contract_address",
+    value_type = "string",
+    exposure = "returnable",
+    optional
+))]
+#[mfm_fact(field(
+    id = "result.anchor.number",
+    source = "result",
+    path = "anchor.number",
+    value_type = "string",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "result.anchor.hash",
+    source = "result",
+    path = "anchor.hash",
+    value_type = "string",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
     id = "result.raw_units",
     source = "result",
     path = "raw_units",
@@ -921,8 +950,7 @@ fn validate_session(
 
 fn validate_anchor(anchor: &EvmBlockAnchor) -> Result<(), PortfolioEvmError> {
     anchor
-        .to_block()
-        .map(|_| ())
+        .validate()
         .map_err(|_| invalid("EVM collection block anchor was invalid"))
 }
 

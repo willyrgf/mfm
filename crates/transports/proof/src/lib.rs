@@ -26,8 +26,9 @@ use mfm_runtime::{
     ExternalReadPlanExecutor, ExternalReadRunner, MaterializedCellTerminal, MaterializedInputNode,
     MaterializedInputs, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
     RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectAdapter, SideEffectDriver,
-    SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
+    SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectPreparedInvocation,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision,
+    SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -281,7 +282,7 @@ impl SideEffectAdapter for ProofSideEffectCallbacks {
         _ctx: &'a ErasedRunCtx<'ctx>,
         intent: &'a Self::Intent,
         _idempotency: &'a Self::Idempotency,
-    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocation<Self::PreparedInvocation>> {
         let prepared = intent.clone();
         let expected_action = self.action.clone();
         Box::pin(async move {
@@ -290,7 +291,7 @@ impl SideEffectAdapter for ProofSideEffectCallbacks {
                     "proof prepared action differs from configured intent".to_owned(),
                 ));
             }
-            Ok(prepared)
+            Ok(SideEffectPreparedInvocation::new(prepared))
         })
     }
 

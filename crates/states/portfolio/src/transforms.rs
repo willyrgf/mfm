@@ -301,11 +301,13 @@ fn observations_from_evm_snapshots(
                 source: AnchoredHoldingSource {
                     holding: symbol.source.clone(),
                     anchor: ExecutionAnchor::Evm {
-                        chain_id: network.chain_id_u64().ok_or_else(|| {
-                            StateError::Message("EVM network chain id was missing".to_owned())
+                        chain_id: std::num::NonZeroU64::new(network.chain_id_u64().ok_or_else(
+                            || StateError::Message("EVM network chain id was missing".to_owned()),
+                        )?)
+                        .ok_or_else(|| {
+                            StateError::Message("EVM network chain id was zero".to_owned())
                         })?,
-                        block_number: anchor.number().to_owned(),
-                        block_hash: anchor.hash().to_owned(),
+                        block: anchor,
                     },
                 },
                 coverage: "complete_at_anchor".to_owned(),
@@ -394,8 +396,7 @@ pub fn assemble_snapshot(
             .unwrap_or_default();
         let mut wallet = WalletSnapshot {
             wallet_id: wallet_cfg.wallet_id.to_string(),
-            address: wallet_cfg.subject.address_str().to_owned(),
-            subject_kind: wallet_cfg.subject.kind(),
+            subject: wallet_cfg.subject.clone(),
             network_id: wallet_cfg.network_id.to_string(),
             observations,
         };

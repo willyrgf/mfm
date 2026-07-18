@@ -10,6 +10,7 @@ use mfm_evm_capabilities::{
     EvmNetworkBinding, EvmReadSession, EvmSessionEvidence, EvmSessionFuture,
     EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
+use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, RootBuilder, ScopeKey,
     SeedKey, StateKey, StateRegistryBuilder,
@@ -17,7 +18,7 @@ use mfm_program::{
 use mfm_program_derive::PublicOutputs;
 use mfm_runtime::ErasedRunnerRegistry;
 use mfm_states_evm::{
-    EvmBlockAnchor, EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
+    EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
     ValidateEvmContractState, VerifiedEvmContract,
 };
 use mfm_store::v1::{self as store, StoreScopeStore as _};

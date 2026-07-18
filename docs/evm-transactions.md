@@ -47,11 +47,13 @@ adapter then binds the exact configured signer, signs once, verifies the profile
 sender, and computes the expected hash from the exact signed EIP-2718 bytes.
 
 The binding accepts `DeterministicSigningProvider`, not the unconstrained signing-provider trait.
-The keystore binding registers implementation `mfm.signing.keystore.rfc6979.v1` and must report the
-certified `secp256k1.rfc6979.recoverable.low_s.v1` profile before it can be called. A remote,
-hardware, or other provider cannot bind to this transaction path merely because it can return a
-valid secp256k1 signature; it must satisfy the byte-identical reconstruction contract or use a
-different durable bearer-material design.
+The identity-bearing binder owns implementation `mfm.signing.keystore.rfc6979.v1`; transaction
+capability registration derives its implementation identity from that binder rather than accepting
+an unrelated label. A bound provider must report the same implementation id before any signature
+request and must report the certified `secp256k1.rfc6979.recoverable.low_s.v1` profile before it can
+sign. A remote, hardware, or other provider cannot bind to this transaction path merely because it
+can return a valid secp256k1 signature; it must satisfy the byte-identical reconstruction contract
+or use a different durable bearer-material design.
 
 `EvmPreparedTransaction` retains:
 
@@ -65,14 +67,18 @@ different durable bearer-material design.
 It never retains signature scalars, a signed envelope, raw transaction bytes, endpoint, auth header,
 provider body, keystore path, unlock path, password, private key, or mnemonic.
 
-The ordinary path keeps the signed bearer in a bounded process-local cache between prepare and
-submit. Every preparation reserves capacity before nonce, fee, gas, or signer access. Saturation
-blocks the attempt without evicting or deduplicating an active envelope. Submission leases the same
-bytes; uncertainty returns the lease to the cache, while observation or ambiguity destroys it. If
-the process is lost, recovery reconstructs the retained envelope and asks the certified
-deterministic signer to regenerate it; the resulting hash must equal prepared authority before any
-rebroadcast. Runtime route reads, keystore reads, unlock/KDF work, and signer validation execute on
-a blocking worker rather than an async runtime worker.
+The ordinary path reserves bounded process-local cache capacity before nonce, fee, gas, or signer
+access. Preparation captures that reservation and the signed bearer in a non-cloneable output
+settlement. Only a durable `SideEffectInvocationPrepared` append promotes it to a fresh cache entry;
+idempotent, admission-blocked, stale, failed, or dropped outputs destroy it. Saturation blocks the
+attempt without evicting or deduplicating an active envelope. Submission leases those exact bytes
+and marks them uncertain before broadcast. A same-process retry of an uncertain lease performs
+exact-hash lookup before any rebroadcast; observation or ambiguity destroys the lease, while an
+inconclusive result retains only uncertain transient state. If the process is lost, recovery
+reconstructs the retained envelope and asks the certified deterministic signer to regenerate it;
+the resulting hash must equal prepared authority before any rebroadcast. Runtime route reads,
+keystore reads, unlock/KDF work, and signer validation execute on a blocking worker rather than an
+async runtime worker.
 
 ## Submission and recovery
 

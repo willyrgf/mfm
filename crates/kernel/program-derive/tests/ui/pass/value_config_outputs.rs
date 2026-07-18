@@ -72,6 +72,7 @@ struct PublicReport {
 )]
 struct ChainHeadSubject {
     chain: String,
+    network: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, MfmValue)]
@@ -100,6 +101,14 @@ struct ChainHeadResponse {
     path = "chain",
     value_type = "string",
     exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "subject.network",
+    source = "subject",
+    path = "network",
+    value_type = "string",
+    exposure = "returnable",
+    optional
 ))]
 #[mfm_fact(field(
     id = "result.height",
@@ -131,6 +140,7 @@ fn main() {
     let fact = ChainHeadFact {
         subject: ChainHeadSubject {
             chain: "bitcoin".to_owned(),
+            network: None,
         },
         response: ChainHeadResponse { height: 850_000 },
     };

@@ -318,12 +318,13 @@ pub(super) fn replay_stream_other_fact_descriptor() -> mfm_facts::FactDescriptor
 pub(super) fn replay_stream_fact_subject_evidence(
     descriptor: &mfm_facts::FactDescriptor,
 ) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
-        mfm_facts::FactFieldId::new("subject.account").expect("field id"),
-        mfm_facts::FactFieldValueType::String,
-        mfm_facts::FactCanonicalScalar::string("same-subject"),
+    let material = mfm_facts::FactSubjectMaterialV2::new(
+        mfm_canonical::CanonicalValue::object([(
+            "account",
+            mfm_canonical::CanonicalValue::String("same-subject".into()),
+        )])
+        .expect("subject"),
     )
-    .expect("subject value")])
     .expect("subject material");
     let namespace_hash =
         mfm_facts::fact_subject_namespace_hash(descriptor).expect("subject namespace hash");

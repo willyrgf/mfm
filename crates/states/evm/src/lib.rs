@@ -41,7 +41,6 @@ pub use contract_validation::{
     EVM_CONTRACT_VALIDATION_MAX_CALLS, EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES,
 };
 pub use identity::{evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version};
-pub use mfm_evm_capabilities::EvmBlockAnchor;
 pub use transaction::{
     evm_sender_lane_resource_claim, EvmAccessListEntry, EvmExecutionStatus, EvmPreparedTransaction,
     EvmSenderLane, EvmTransactionAction, EvmTransactionActionKind, EvmTransactionConfig,

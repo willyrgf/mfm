@@ -73,13 +73,14 @@ pub use runners::{
     AdapterExecutableBinding, CapabilityImplementationBinding, CapabilityImplementationId,
     ContextOutputExtractor, ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload,
-    RunnerFactRecorded, RunnerIngressContext, RunnerIngressFuture,
+    RunnerFactRecorded, RunnerIngressContext, RunnerIngressFuture, RunnerOutputSettlement,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
     preclaim_side_effect_resource_lane, side_effect_idempotency_key, SideEffectAdapter,
-    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
+    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence,
+    SideEffectPreparedInvocation, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
 pub use spec_authority::CertifiedRuntimeSpec;
 

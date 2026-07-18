@@ -4,11 +4,12 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_effects::ApplySideEffect;
 use mfm_evm_capabilities::{
-    EvmBlock, EvmBlockAnchor, EvmFeeInputs, EvmNetworkBinding,
-    EvmObservedTransaction as CapabilityTransaction, EvmReceipt as CapabilityReceipt,
-    EvmReceiptStatus as CapabilityReceiptStatus, EvmSessionEvidence, EvmTransactionEstimate,
+    EvmBlock, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction as CapabilityTransaction,
+    EvmReceipt as CapabilityReceipt, EvmReceiptStatus as CapabilityReceiptStatus,
+    EvmSessionEvidence, EvmTransactionEstimate,
 };
 use mfm_ids::LocalPublicId;
+use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_program::{
     AdapterBindingSpec, NoContext, ResourceClaim, ResourceNamespace, SideEffectIntent,
     SideEffectState, StateResult, StateSpec, ValidatedConfig,
@@ -19,8 +20,8 @@ use mfm_values::MfmValue as _;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{
-    block_anchor_number, canonical_address, canonical_bytes, canonical_hash, invalid,
-    parse_address, parse_bytes, parse_hash, parse_quantity, validate_block_anchor,
+    block_anchor_hash, block_anchor_number, canonical_address, canonical_bytes, canonical_hash,
+    invalid, parse_address, parse_bytes, parse_hash, parse_quantity, validate_block_anchor,
     validate_session,
 };
 use crate::identity::{adapter_binding, state_kind, state_version};
@@ -967,8 +968,7 @@ pub struct EvmTransactionLog {
     address: String,
     topics: Vec<String>,
     data: String,
-    block_number: String,
-    block_hash: String,
+    block: EvmBlockAnchor,
     transaction_hash: String,
     transaction_index: String,
     log_index: String,
@@ -987,8 +987,7 @@ pub struct EvmTransactionLog {
 pub struct EvmTransactionReceipt {
     transaction_hash: String,
     transaction_index: String,
-    block_number: String,
-    block_hash: String,
+    block: EvmBlockAnchor,
     from: String,
     to: Option<String>,
     contract_address: Option<String>,
@@ -1016,8 +1015,7 @@ impl EvmTransactionReceipt {
         let converted = Self {
             transaction_hash: canonical_hash(receipt.transaction_hash),
             transaction_index: receipt.transaction_index.to_string(),
-            block_number: receipt.block_number.to_string(),
-            block_hash: canonical_hash(receipt.block_hash),
+            block: EvmBlockAnchor::new(receipt.block.number, receipt.block.hash),
             from: canonical_address(receipt.from),
             to: receipt.to.map(canonical_address),
             contract_address: receipt.contract_address.map(canonical_address),
@@ -1031,8 +1029,7 @@ impl EvmTransactionReceipt {
                     address: canonical_address(log.address),
                     topics: log.topics.iter().copied().map(canonical_hash).collect(),
                     data: canonical_bytes(&log.data),
-                    block_number: log.block_number.to_string(),
-                    block_hash: canonical_hash(log.block_hash),
+                    block: EvmBlockAnchor::new(log.block.number, log.block.hash),
                     transaction_hash: canonical_hash(log.transaction_hash),
                     transaction_index: log.transaction_index.to_string(),
                     log_index: log.log_index.to_string(),
@@ -1066,21 +1063,18 @@ impl EvmTransactionReceipt {
     }
 
     /// Returns the inclusion anchor.
-    pub fn block_anchor(&self) -> Result<EvmBlockAnchor, EvmStateError> {
-        Ok(EvmBlockAnchor::new(
-            self.block_number_quantity()?,
-            self.block_hash_value()?,
-        ))
+    pub const fn block_anchor(&self) -> &EvmBlockAnchor {
+        &self.block
     }
 
     /// Returns the inclusion block number as U256.
     pub fn block_number_quantity(&self) -> Result<U256, EvmStateError> {
-        parse_quantity(&self.block_number)
+        block_anchor_number(&self.block)
     }
 
     /// Returns the inclusion block hash.
     pub fn block_hash_value(&self) -> Result<B256, EvmStateError> {
-        parse_hash(&self.block_hash)
+        block_anchor_hash(&self.block)
     }
 
     /// Returns whether another observation has identical on-chain receipt fields.
@@ -1098,8 +1092,7 @@ impl EvmTransactionReceipt {
         )?;
         parse_hash(&self.transaction_hash)?;
         parse_quantity(&self.transaction_index)?;
-        parse_quantity(&self.block_number)?;
-        parse_hash(&self.block_hash)?;
+        validate_block_anchor(&self.block)?;
         parse_address(&self.from)?;
         if let Some(to) = &self.to {
             parse_address(to)?;
@@ -1184,8 +1177,7 @@ impl EvmTransactionReceipt {
     fn same_chain_receipt(&self, other: &Self) -> bool {
         self.transaction_hash == other.transaction_hash
             && self.transaction_index == other.transaction_index
-            && self.block_number == other.block_number
-            && self.block_hash == other.block_hash
+            && self.block == other.block
             && self.from == other.from
             && self.to == other.to
             && self.contract_address == other.contract_address
@@ -1206,14 +1198,12 @@ impl EvmTransactionLog {
             parse_hash(topic)?;
         }
         parse_bytes(&self.data, EVM_TRANSACTION_DATA_MAX_BYTES)?;
-        parse_quantity(&self.block_number)?;
-        parse_hash(&self.block_hash)?;
+        validate_block_anchor(&self.block)?;
         parse_hash(&self.transaction_hash)?;
         parse_quantity(&self.transaction_index)?;
         parse_quantity(&self.log_index)?;
         if self.removed
-            || self.block_number != receipt.block_number
-            || self.block_hash != receipt.block_hash
+            || self.block != receipt.block
             || self.transaction_hash != receipt.transaction_hash
             || self.transaction_index != receipt.transaction_index
         {
@@ -1253,7 +1243,7 @@ impl EvmTransactionConfirmation {
         required_depth: u64,
         session: &EvmSessionEvidence,
     ) -> Result<Self, EvmStateError> {
-        let receipt_number = parse_quantity(&retained_receipt.block_number)?;
+        let receipt_number = retained_receipt.block_number_quantity()?;
         let confirmations = head
             .number
             .checked_sub(receipt_number)
@@ -1261,8 +1251,8 @@ impl EvmTransactionConfirmation {
             .ok_or_else(|| invalid("confirmation head preceded receipt block"))?;
         let confirmation = Self {
             fresh_receipt,
-            canonical_block: EvmBlockAnchor::from_block(canonical_block),
-            head: EvmBlockAnchor::from_block(head),
+            canonical_block: EvmBlockAnchor::new(canonical_block.number, canonical_block.hash),
+            head: EvmBlockAnchor::new(head.number, head.hash),
             required_depth,
             confirmations: confirmations.to_string(),
             session: session.clone(),
@@ -1309,10 +1299,10 @@ impl EvmTransactionConfirmation {
                 "fresh receipt provenance differed from confirmation session",
             ));
         }
-        if self.canonical_block != retained_receipt.block_anchor()? {
+        if &self.canonical_block != retained_receipt.block_anchor() {
             return Err(invalid("canonical block did not match receipt anchor"));
         }
-        let receipt_number = parse_quantity(&retained_receipt.block_number)?;
+        let receipt_number = retained_receipt.block_number_quantity()?;
         let head_number = block_anchor_number(&self.head)?;
         let recomputed = head_number
             .checked_sub(receipt_number)
