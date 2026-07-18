@@ -10,14 +10,14 @@ use mfm_evm_capabilities::{
     EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
-use mfm_facts::{FactAudience, FactVisibility};
+use mfm_facts::{FactAudience, FactContentIdentityEvidence, FactVisibility};
 use mfm_ids::LocalPublicId;
 use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
-    fact_descriptor_ref, ExternalReadEvidenceSet, FactDescriptorRef, ManagedWriteState, NoContext,
-    ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, ExternalReadEvidenceSet, FactDescriptorRef, ManagedWriteState,
+    MfmFactType, NoContext, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType as DeriveMfmFactType, MfmValue, StateInput};
 use mfm_values::ConfigError;
@@ -635,22 +635,112 @@ pub struct PublishEvmHoldingsInput {
     pub batch: EvmCollectionBatch,
 }
 
-/// Direct typed output consumed by portfolio snapshot assembly.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+/// Checked receipt for one atomic EVM balance-fact publication.
+///
+/// The receipt carries only collection authority. Balance material remains in the fact store and
+/// must be hydrated and reverified against the corresponding content-identity evidence before use.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_network_snapshot",
-    schema = "mfm.portfolio.evm.network_snapshot"
+    namespace = "mfm.evm",
+    name = "balance_collection_receipt",
+    schema = "mfm.evm.balance_collection_receipt"
 )]
-pub struct EvmNetworkSnapshot {
+pub struct EvmBalanceCollectionReceipt {
     network_id: String,
     chain_id: u64,
-    anchor: EvmBlockAnchor,
-    balances: Vec<EvmCollectedBalance>,
+    block_anchor: EvmBlockAnchor,
+    sources: Vec<EvmBalanceSource>,
+    fact_content_identities: Vec<FactContentIdentityEvidence>,
 }
 
-impl EvmNetworkSnapshot {
+impl EvmBalanceCollectionReceipt {
+    fn from_verified_publication(
+        batch: &EvmCollectionBatch,
+        facts: &[EvmBalanceSnapshotFact],
+    ) -> Result<Self, PortfolioEvmError> {
+        if facts.len() != batch.balances.len() {
+            return Err(invalid(
+                "EVM balance publication fact coverage did not match the reduced batch",
+            ));
+        }
+        let descriptor =
+            EvmBalanceSnapshotFact::descriptor().map_err(|error| invalid(error.to_string()))?;
+        let mut sources = Vec::with_capacity(facts.len());
+        let mut fact_content_identities = Vec::with_capacity(facts.len());
+        for (balance, fact) in batch.balances.iter().zip(facts) {
+            if fact.subject.network_id != batch.network_id
+                || fact.subject.chain_id != batch.chain_id
+                || fact.subject.account != balance.source.account
+                || fact.subject.asset != balance.source.asset
+                || fact.response.block_anchor != batch.anchor
+                || fact.response.raw_units != balance.raw_units
+                || fact.response.decimals != balance.decimals
+            {
+                return Err(invalid(
+                    "EVM balance publication fact did not match the reduced batch",
+                ));
+            }
+            let identity = mfm_facts::derive_fact_content_identity_from_typed_values(
+                &descriptor,
+                fact.subject(),
+                fact.response(),
+            )
+            .map_err(|error| invalid(error.to_string()))?;
+            sources.push(balance.source.clone());
+            fact_content_identities.push(FactContentIdentityEvidence::from_verified(&identity));
+        }
+        Self::from_evidence(
+            batch.network_id.clone(),
+            batch.chain_id,
+            batch.anchor.clone(),
+            sources,
+            fact_content_identities,
+        )
+    }
+
+    fn from_evidence(
+        network_id: String,
+        chain_id: u64,
+        block_anchor: EvmBlockAnchor,
+        sources: Vec<EvmBalanceSource>,
+        fact_content_identities: Vec<FactContentIdentityEvidence>,
+    ) -> Result<Self, PortfolioEvmError> {
+        LocalPublicId::new(&network_id)
+            .map_err(|_| invalid("EVM balance receipt network id was invalid"))?;
+        if chain_id == 0 {
+            return Err(invalid("EVM balance receipt chain id must be non-zero"));
+        }
+        validate_anchor(&block_anchor)?;
+        if sources.is_empty() || sources.len() > EVM_NETWORK_HOLDING_SOURCE_LIMIT {
+            return Err(invalid(format!(
+                "EVM balance receipt sources must contain between 1 and {EVM_NETWORK_HOLDING_SOURCE_LIMIT} entries"
+            )));
+        }
+        if sources.len() != fact_content_identities.len() {
+            return Err(invalid(
+                "EVM balance receipt source and content-identity counts differed",
+            ));
+        }
+        let mut previous = None;
+        for source in &sources {
+            source.validate()?;
+            if previous.is_some_and(|prior: &EvmBalanceSource| prior >= source) {
+                return Err(invalid(
+                    "EVM balance receipt sources were not strictly sorted and unique",
+                ));
+            }
+            previous = Some(source);
+        }
+        Ok(Self {
+            network_id,
+            chain_id,
+            block_anchor,
+            sources,
+            fact_content_identities,
+        })
+    }
+
     /// Returns the semantic network id.
     pub fn network_id(&self) -> &str {
         &self.network_id
@@ -661,53 +751,50 @@ impl EvmNetworkSnapshot {
         self.chain_id
     }
 
-    /// Returns the common exact canonical anchor.
-    pub const fn anchor(&self) -> &EvmBlockAnchor {
-        &self.anchor
+    /// Returns the common exact canonical block anchor.
+    pub const fn block_anchor(&self) -> &EvmBlockAnchor {
+        &self.block_anchor
     }
 
-    /// Returns every direct collected balance in source order.
-    pub fn balances(&self) -> &[EvmCollectedBalance] {
-        &self.balances
+    /// Returns every published source in strict canonical order.
+    pub fn sources(&self) -> &[EvmBalanceSource] {
+        &self.sources
     }
 
-    /// Revalidates this output against the exact certified network demand.
-    pub fn validate_against(
-        &self,
-        config: &EvmNetworkCollectionConfig,
-    ) -> Result<(), PortfolioEvmError> {
-        EvmCollectionBatch {
-            network_id: self.network_id.clone(),
-            chain_id: self.chain_id,
-            anchor: self.anchor.clone(),
-            balances: self.balances.clone(),
-        }
-        .validate_against(config)
-    }
-
-    /// Returns the unified facts published atomically with this output.
-    pub fn facts(&self) -> Vec<EvmBalanceSnapshotFact> {
-        self.balances
-            .iter()
-            .map(|balance| {
-                EvmBalanceSnapshotFact::new(
-                    EvmBalanceSnapshotSubject::from_source(
-                        &self.network_id,
-                        self.chain_id,
-                        &balance.source,
-                    ),
-                    EvmBalanceSnapshotResponse {
-                        anchor: self.anchor.clone(),
-                        raw_units: balance.raw_units.clone(),
-                        decimals: balance.decimals,
-                    },
-                )
-            })
-            .collect()
+    /// Returns content-identity evidence in the same order as [`Self::sources`].
+    pub fn fact_content_identities(&self) -> &[FactContentIdentityEvidence] {
+        &self.fact_content_identities
     }
 }
 
-/// State that atomically records a complete EVM fact batch and returns its direct snapshot.
+impl<'de> Deserialize<'de> for EvmBalanceCollectionReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            network_id: String,
+            chain_id: u64,
+            block_anchor: EvmBlockAnchor,
+            sources: Vec<EvmBalanceSource>,
+            fact_content_identities: Vec<FactContentIdentityEvidence>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::from_evidence(
+            wire.network_id,
+            wire.chain_id,
+            wire.block_anchor,
+            wire.sources,
+            wire.fact_content_identities,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// State that atomically records a complete EVM fact batch and returns its checked receipt.
 pub struct PublishEvmHoldingsState {
     config: EvmNetworkCollectionConfig,
 }
@@ -716,7 +803,7 @@ impl StateSpec for PublishEvmHoldingsState {
     type Config = EvmNetworkCollectionConfig;
     type Context = NoContext;
     type Input = PublishEvmHoldingsInput;
-    type Output = EvmNetworkSnapshot;
+    type Output = EvmBalanceCollectionReceipt;
     type Effect = mfm_effects::ManagedPlatformWrite;
     type Caps = (FactRecordCapability,);
 
@@ -756,35 +843,51 @@ impl ManagedWriteState for PublishEvmHoldingsState {
         _caps: &'a Self::Caps,
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
-        let result = publish_evm_holdings(&self.config, input.batch).map_err(StateError::from);
+        let result = publish_evm_holdings(&self.config, input.batch)
+            .map(|(receipt, _facts)| receipt)
+            .map_err(StateError::from);
         future::ready(result)
     }
 }
 
-/// Validates a complete batch and projects the direct network snapshot.
+/// Validates a complete batch and prepares its checked receipt and exact fact records.
 pub fn publish_evm_holdings(
     config: &EvmNetworkCollectionConfig,
     batch: EvmCollectionBatch,
-) -> Result<EvmNetworkSnapshot, PortfolioEvmError> {
+) -> Result<(EvmBalanceCollectionReceipt, Vec<EvmBalanceSnapshotFact>), PortfolioEvmError> {
     batch.validate_against(config)?;
-    Ok(EvmNetworkSnapshot {
-        network_id: batch.network_id,
-        chain_id: batch.chain_id,
-        anchor: batch.anchor,
-        balances: batch.balances,
-    })
+    let facts = batch
+        .balances
+        .iter()
+        .map(|balance| {
+            EvmBalanceSnapshotFact::new(
+                EvmBalanceSnapshotSubject::from_source(
+                    &batch.network_id,
+                    batch.chain_id,
+                    &balance.source,
+                ),
+                EvmBalanceSnapshotResponse {
+                    block_anchor: batch.anchor.clone(),
+                    raw_units: balance.raw_units.clone(),
+                    decimals: balance.decimals,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let receipt = EvmBalanceCollectionReceipt::from_verified_publication(&batch, &facts)?;
+    Ok((receipt, facts))
 }
 
 /// Subject identity for the unified portfolio-owned EVM balance fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_balance_snapshot_subject",
-    schema = "mfm.portfolio.fact.evm_balance_snapshot.subject"
+    namespace = "mfm.evm",
+    name = "balance_snapshot_subject",
+    schema = "mfm.evm.fact.balance_snapshot.subject"
 )]
 pub struct EvmBalanceSnapshotSubject {
-    network: String,
+    network_id: String,
     chain_id: u64,
     account: NormalizedEvmAddress,
     asset: HoldingSourceConfig,
@@ -793,11 +896,31 @@ pub struct EvmBalanceSnapshotSubject {
 impl EvmBalanceSnapshotSubject {
     fn from_source(network: &str, chain_id: u64, source: &EvmBalanceSource) -> Self {
         Self {
-            network: network.to_owned(),
+            network_id: network.to_owned(),
             chain_id,
             account: source.account.clone(),
             asset: source.asset.clone(),
         }
+    }
+
+    /// Returns the semantic network id.
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+
+    /// Returns the non-zero chain id.
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Returns the observed account.
+    pub const fn account(&self) -> &NormalizedEvmAddress {
+        &self.account
+    }
+
+    /// Returns the observed asset.
+    pub const fn asset(&self) -> &HoldingSourceConfig {
+        &self.asset
     }
 }
 
@@ -805,29 +928,46 @@ impl EvmBalanceSnapshotSubject {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_balance_snapshot_response",
-    schema = "mfm.portfolio.fact.evm_balance_snapshot.response"
+    namespace = "mfm.evm",
+    name = "balance_snapshot_response",
+    schema = "mfm.evm.fact.balance_snapshot.response"
 )]
 pub struct EvmBalanceSnapshotResponse {
-    anchor: EvmBlockAnchor,
+    block_anchor: EvmBlockAnchor,
     raw_units: String,
     decimals: u8,
+}
+
+impl EvmBalanceSnapshotResponse {
+    /// Returns the exact canonical block anchor.
+    pub const fn block_anchor(&self) -> &EvmBlockAnchor {
+        &self.block_anchor
+    }
+
+    /// Returns the canonical decimal quantity.
+    pub fn raw_units(&self) -> &str {
+        &self.raw_units
+    }
+
+    /// Returns the exact asset decimal scale.
+    pub const fn decimals(&self) -> u8 {
+        self.decimals
+    }
 }
 
 /// Unified native/ERC-20 EVM balance fact recorded by the portfolio vertical slice.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, DeriveMfmFactType)]
 #[allow(clippy::duplicated_attributes)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_balance_snapshot_fact",
-    schema = "mfm.portfolio.fact.evm_balance_snapshot"
+    namespace = "mfm.evm",
+    name = "balance_snapshot_fact",
+    schema = "mfm.evm.fact.balance_snapshot"
 )]
-#[mfm_fact(kind = "portfolio.evm_balance_snapshot")]
+#[mfm_fact(kind = "evm.balance_snapshot")]
 #[mfm_fact(field(
-    id = "subject.network",
+    id = "subject.network_id",
     source = "subject",
-    path = "network",
+    path = "network_id",
     value_type = "string",
     exposure = "returnable"
 ))]
@@ -861,16 +1001,16 @@ pub struct EvmBalanceSnapshotResponse {
     optional
 ))]
 #[mfm_fact(field(
-    id = "result.anchor.number",
+    id = "result.block_anchor.number",
     source = "result",
-    path = "anchor.number",
+    path = "block_anchor.number",
     value_type = "string",
     exposure = "returnable"
 ))]
 #[mfm_fact(field(
-    id = "result.anchor.hash",
+    id = "result.block_anchor.hash",
     source = "result",
-    path = "anchor.hash",
+    path = "block_anchor.hash",
     value_type = "string",
     exposure = "returnable"
 ))]
@@ -903,6 +1043,14 @@ pub struct EvmBalanceSnapshotResponse {
     exposure = "returnable",
     sortable
 ))]
+#[mfm_fact(ordering(
+    name = "metadata.store_commit_order.desc",
+    term(
+        field = "metadata.store_commit_order",
+        direction = "descending",
+        nulls = "last"
+    )
+))]
 pub struct EvmBalanceSnapshotFact {
     subject: EvmBalanceSnapshotSubject,
     response: EvmBalanceSnapshotResponse,
@@ -915,6 +1063,16 @@ impl EvmBalanceSnapshotFact {
         response: EvmBalanceSnapshotResponse,
     ) -> Self {
         Self { subject, response }
+    }
+
+    /// Returns the typed subject material.
+    pub const fn subject(&self) -> &EvmBalanceSnapshotSubject {
+        &self.subject
+    }
+
+    /// Returns the typed response material.
+    pub const fn response(&self) -> &EvmBalanceSnapshotResponse {
+        &self.response
     }
 }
 

@@ -86,11 +86,14 @@ Its single aggregate evidence value retains the checked session, requests/result
 canonicality observation. The state-owned reducer enforces exact order and coverage for both live
 execution and replay.
 
-`PublishEvmHoldingsState` then records one `portfolio.evm_balance_snapshot` fact per source and a
-direct `EvmNetworkSnapshot` in one atomic managed-write attempt. Portfolio assembly consumes that
-snapshot handle directly; it never queries the same run's EVM facts from the fact index. An all-EVM
-portfolio therefore makes no fact-index call. Replay reconstructs the collection and publication
-from retained evidence without runtime config or network access.
+`PublishEvmHoldingsState` then records one `evm.balance_snapshot` fact per source and a checked
+`EvmBalanceCollectionReceipt` in one atomic managed-write attempt. The receipt carries the exact
+anchor, sorted sources, and verified content identities without copying balance response material.
+Portfolio selection consumes the typed EVM receipt vector directly, queries the same-run facts
+through the shared BTC/EVM fact-index snapshot, rehydrates response artifacts, and rederives exact
+content identity before assembly. All-EVM portfolios use this same store path. Replay reconstructs
+the collection, publication, receipt-pinned query evidence, and selected holdings without runtime
+config or network access.
 
 ## Signing
 

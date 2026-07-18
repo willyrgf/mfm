@@ -3,9 +3,9 @@
 //!
 //! Each demanded EVM network uses one [`CollectEvmNetworkState`] followed by one
 //! [`PublishEvmHoldingsState`]. The latter atomically records a complete batch of unified native
-//! and ERC-20 facts while returning a direct [`EvmNetworkSnapshot`]. Bitcoin alone retains the
-//! receipt-pinned [`SelectHoldingsState`] path; assembly joins those selected Bitcoin observations
-//! with the direct EVM snapshots before report projection.
+//! and ERC-20 facts and returns a checked [`EvmBalanceCollectionReceipt`].
+//! [`SelectHoldingsState`] consumes Bitcoin and EVM family receipts directly, then reads and
+//! reverifies every selected balance from the fact store before snapshot assembly.
 //!
 //! # Examples
 //!
@@ -27,27 +27,25 @@ mod decimal;
 use self::decimal::{multiply_decimal_strings, DecimalValue};
 
 pub use collection_receipt::{
-    manifest_identity, validate_receipt_against_portfolio, CollectedHoldingReceipt,
-    HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey, PortfolioCollectionReceipt,
-    SelectHoldingsInput, SelectHoldingsInputHandles,
+    HoldingRequirementKey, SelectHoldingsInput, SelectHoldingsInputHandles,
 };
 pub use evm_collection::{
     evm_balance_fact_visibility, publish_evm_holdings, reduce_evm_network_collection,
     validate_evm_network_collection_config, CollectEvmNetworkEvidence, CollectEvmNetworkPlan,
-    CollectEvmNetworkState, EvmBalanceReadEvidence, EvmBalanceSnapshotFact,
-    EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject, EvmBalanceSource, EvmCollectedBalance,
-    EvmCollectionBatch, EvmNetworkCollectionConfig, EvmNetworkSnapshot, EvmTokenDecimalsEvidence,
-    PortfolioEvmError, PublishEvmHoldingsInput, PublishEvmHoldingsInputHandles,
-    PublishEvmHoldingsState, EVM_NETWORK_HOLDING_SOURCE_LIMIT,
+    CollectEvmNetworkState, EvmBalanceCollectionReceipt, EvmBalanceReadEvidence,
+    EvmBalanceSnapshotFact, EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject,
+    EvmBalanceSource, EvmCollectedBalance, EvmCollectionBatch, EvmNetworkCollectionConfig,
+    EvmTokenDecimalsEvidence, PortfolioEvmError, PublishEvmHoldingsInput,
+    PublishEvmHoldingsInputHandles, PublishEvmHoldingsState, EVM_NETWORK_HOLDING_SOURCE_LIMIT,
 };
 pub use holding_read::{
     PortfolioHoldingFactResponse, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
 };
 pub use selection::{
     portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
-    project_network_pins_from_observations, HoldingAnchor, HoldingCandidate,
-    PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, SelectedHolding,
-    SelectedHoldingMaterial, PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
+    project_network_pins_from_observations, HoldingCandidate, PortfolioHoldingErrorCode,
+    PortfolioHoldingSelectionError, SelectedHolding, SelectedHoldingMaterial,
+    PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -133,7 +131,7 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-/// Selected Bitcoin holdings emitted by fact selection (without valuation join).
+/// Selected receipt-authorized holdings emitted by fact selection (without valuation join).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
 #[mfm(
     namespace = "mfm.portfolio",
@@ -149,12 +147,8 @@ pub struct SelectedHoldings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
 #[mfm(schema = "mfm.portfolio.input.assemble_snapshot")]
 pub struct AssembleSnapshotInput {
-    /// Selected Bitcoin holdings from Platform fact selection.
+    /// Selected Bitcoin and EVM holdings from Platform fact selection.
     pub holdings: SelectedHoldings,
-    /// Exact Bitcoin collection receipt that must match selected Bitcoin anchors.
-    pub receipt: PortfolioCollectionReceipt,
-    /// Direct EVM network snapshots produced by atomic fact-publication states.
-    pub evm_snapshots: Vec<EvmNetworkSnapshot>,
 }
 
 /// Input consumed by report projection.

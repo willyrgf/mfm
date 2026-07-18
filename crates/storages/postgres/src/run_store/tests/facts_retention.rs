@@ -146,7 +146,7 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
 }
 
 #[tokio::test]
-async fn fact_descriptor_catalog_deduplicates_across_runs() {
+async fn fact_descriptor_catalog_and_response_artifacts_deduplicate_across_runs() {
     let (store, schema) = test_store().await;
     let first_run = fact_run_id(11);
     let second_run = fact_run_id(12);
@@ -180,14 +180,14 @@ async fn fact_descriptor_catalog_deduplicates_across_runs() {
     .await
     .expect("first fact commit");
 
-    let second_response_ref = fact_artifact_ref_with_height(12_346);
+    let second_response_ref = fact_artifact_ref_with_height(12_345);
     let second_fact_request =
         fact_commit_request(second_run.clone(), 3, "second-fact", &second_response_ref);
     append_fact_commit_with_response_bytes(
         &store,
         second_fact_request,
         &second_response_ref,
-        fact_response_bytes_with_height(12_346),
+        fact_response_bytes_with_height(12_345),
     )
     .await
     .expect("second fact commit");
@@ -202,6 +202,14 @@ async fn fact_descriptor_catalog_deduplicates_across_runs() {
         .await
         .expect("fact query execution");
     assert_eq!(query_result.rows().len(), 2);
+    let first_ref = query_result.rows()[0].fact_ref();
+    let second_ref = query_result.rows()[1].fact_ref();
+    assert_ne!(first_ref.fact_claim_id(), second_ref.fact_claim_id());
+    assert_eq!(first_ref.artifact_id(), second_ref.artifact_id());
+    assert_eq!(
+        first_ref.artifact_evidence_hash(),
+        second_ref.artifact_evidence_hash()
+    );
     assert_fact_query_receipt(
         &store,
         &query_plan,

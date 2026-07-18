@@ -9,20 +9,22 @@ binds one checked `EvmReadSession`. It resolves latest once, executes every bala
 token-metadata call against that exact block hash with EIP-1898 `requireCanonical: true`, then
 reads the original block number once to prove the hash is still canonical. Metadata and balance
 reads are concurrent with a hard limit of 16 tasks. The state-owned reducer admits the evidence;
-the managed-write runner then records every unified fact and the direct network snapshot in one
-output commit.
+the managed-write runner then records every `evm.balance_snapshot` fact and its checked collection
+receipt in one output commit.
 
-Bitcoin remains fact-backed. `SelectHoldings` consumes the exact Bitcoin receipt, performs the
-bounded query/hydration/identity checks, and records query evidence. When the request batch is
-empty, as for an all-EVM portfolio, the adapter does not call the fact index.
+`SelectHoldings` consumes the typed Bitcoin and EVM receipt vectors directly. The adapter submits
+all receipt-derived requests in one fact-index batch, requires one shared snapshot frontier,
+hydrates each returned response artifact, and records the state-produced query evidence. Portfolio
+assembly therefore receives only store-reread and identity-reverified observations; an all-EVM
+portfolio follows exactly the same path.
 
 ## Replay path
 
 `verify_portfolio_replay` uses only certified configs, the append-only stream, and retained
-artifacts. It invokes the same EVM collection reducer, recomputes every published fact and direct
-snapshot, verifies exact same-attempt `FactRecorded` batch coverage, and proves assembly consumed
-those snapshots unchanged. Bitcoin selection is recomputed from retained fact-query evidence, and
-the pure snapshot/report outputs are compared byte-for-byte.
+artifacts. It invokes the same EVM collection reducer, recomputes every published fact and checked
+receipt, verifies exact same-attempt `FactRecorded` coverage, and proves `SelectHoldings` consumed
+the published receipt vector. BTC/EVM selection is recomputed from retained fact-query evidence,
+and the pure snapshot/report outputs are compared byte-for-byte.
 
 This crate binds capabilities and records evidence. It does not create workflow topology, select
 runtime routes, implement JSON-RPC, or own state semantics.

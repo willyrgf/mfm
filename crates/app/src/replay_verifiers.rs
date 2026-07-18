@@ -34,9 +34,6 @@ impl ReplayVerifierRegistry {
             registrations: &[
                 ReplayVerifierRegistration {
                     state_keys: &[
-                        state_key::<
-                            mfm_op_portfolio_snapshot::AssemblePortfolioCollectionReceiptState,
-                        >,
                         state_key::<mfm_state_portfolio::SelectHoldingsState>,
                         state_key::<mfm_state_portfolio::CollectEvmNetworkState>,
                         state_key::<mfm_state_portfolio::PublishEvmHoldingsState>,
@@ -127,8 +124,7 @@ fn replay_registration_error(error: impl std::fmt::Display) -> mfm_replay::v1::R
 }
 
 fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    let receipt = crate::portfolio_snapshot::verify_portfolio_collection_receipt_replay(broker)?;
-    mfm_adapters_portfolio::verify_portfolio_replay(broker, &receipt)
+    mfm_adapters_portfolio::verify_portfolio_replay(broker)
 }
 
 fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {

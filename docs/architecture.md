@@ -49,11 +49,12 @@ runtime or replay authority.
 
 The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
 normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
-Bitcoin collection resolves one shared tip per required network and emits content-bound receipts for
-receipt-pinned selection. Each EVM network instead expands to one portfolio-owned external-read
-state and one atomic managed-write state; its direct typed network snapshot flows to assembly
-without a same-run fact-index query. The complete snapshot graph is the sole public objective,
-`mfm.portfolio/snapshot@1`.
+Bitcoin collection resolves one shared tip per required network and emits checked receipts. Each
+EVM network currently expands to one portfolio-owned external-read state and one atomic
+managed-write state that records `evm.balance_snapshot` facts and returns a checked collection
+receipt. The typed BTC/EVM receipt vectors flow directly into one store-backed selection state;
+assembly receives only rehydrated and identity-reverified facts. The complete snapshot graph is the
+sole public objective, `mfm.portfolio/snapshot@1`.
 
 `mfm-op-portfolio-snapshot` owns that complete internal graph from normalized
 `PortfolioConfig` through Bitcoin collection/selection and EVM collection/publication to snapshot
@@ -153,15 +154,12 @@ certified artifacts and the append-only run stream only.
 
 Two v1 decisions are deliberate:
 
-- `AssemblePortfolioCollectionReceiptState` remains operation-local. It is the pure fan-in state
-  for sorted Bitcoin network receipts and the compiled Bitcoin logical manifest, not reusable
-  portfolio domain behavior. It proves exact source completion, number/hash anchors, admissible
-  status/coverage, and fact-content identities; an all-EVM portfolio produces a valid empty
-  Bitcoin receipt. The app registers its runner, while `mfm-op-portfolio-snapshot` owns receipt
-  assembly semantics, the complete graph topology, and its single root binding. Because operations
-  cannot decide replay, the app's private portfolio snapshot replay binding recomputes this fan-in
-  before delegating Bitcoin selection and direct EVM snapshot verification to the portfolio
-  adapter; it adds no workflow topology or receipt semantics.
+- Family managed-write outputs are the completion authority for portfolio selection. The operation
+  passes typed Bitcoin and EVM receipt vectors directly to `SelectHoldingsState`; it has no generic
+  receipt entry, logical-manifest wrapper, count/readiness value, or fan-in state. Selection checks
+  exact portfolio demand and both family receipt contracts before issuing one shared-snapshot query
+  batch. The portfolio state package's dependency on the Bitcoin state package is the explicit
+  downstream typed-output edge; neither package gains runner, transport, or workflow ownership.
 - Runtime TOML remains a process-local routing and signer boundary rather than semantic
   configuration data. Live assembly selectively resolves only the requested EVM route or requested
   signer plus its referenced keystore, so malformed unrelated entries do not block that resource.

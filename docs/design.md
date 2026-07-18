@@ -206,16 +206,14 @@ selectively resolves only the requested EVM route or the requested signer plus i
 keystore; unrelated malformed entries do not block that resource. Evidence-only reads do not load
 runtime TOML. There is no fallback or compatibility surface.
 
-`AssemblePortfolioCollectionReceiptState` is also an accepted placement decision. It remains an
-operation-local pure fan-in state because its semantics are specific to the composed workflow's
-sorted Bitcoin network receipts and exact Bitcoin logical manifest. The app registers its runner,
-while the `mfm-op-portfolio-snapshot` operation owns the receipt node, complete graph topology, and
-one `PortfolioPublicOutputs` root binding. It is not a general portfolio state or an excuse for
-app-owned workflow behavior. The app's private replay binding recomputes the operation-local fan-in
-before it calls the portfolio adapter verifier; this is replay dispatch, not operation replay
-policy or app-owned workflow behavior. The receipt, rather than a count, is the authority consumed
-by Bitcoin holding selection and snapshot assembly. For an all-EVM portfolio the exact Bitcoin
-manifest and receipt are empty.
+Portfolio selection consumes family completion authority without a generic fan-in value. The
+operation passes typed Bitcoin and EVM receipt vectors directly into `SelectHoldingsState`; their
+managed-write input edges are the readiness barrier. The state validates exact portfolio demand,
+receipt family/chain/source coverage, and receipt uniqueness before it authors any query. There is
+no portfolio manifest identity, generic receipt entry, count/readiness value, app-only fan-in
+runner, or separate replay verifier. This explicit downstream state-to-state contract is the sole
+approved reason for `mfm-state-portfolio` to depend on the Bitcoin state package; state packages
+remain independent of adapters, transports, app assembly, and runtime config.
 
 ## Typed Program Authoring
 
@@ -412,19 +410,24 @@ Each demanded EVM network has exactly one `CollectEvmNetworkState` and one
 reducer. One checked source-bound session resolves latest once, reads deduplicated token metadata
 and every balance at the exact EIP-1898 hash with canonicality required, and finishes with one
 number-to-hash recheck. Reads use bounded concurrency. The managed-write state publishes one
-`portfolio.evm_balance_snapshot` fact per source and its direct `EvmNetworkSnapshot` in one atomic
-attempt. The fact subject uses the typed `HoldingSourceConfig` algebra: `Native` or `Erc20` with its
-`NormalizedEvmAddress`, so token contracts cannot share identity. Collection plans, retained
-evidence, direct snapshots, and fact subjects use that same address/asset algebra; there is no
+`evm.balance_snapshot` fact per source and one checked `EvmBalanceCollectionReceipt` in the same
+atomic attempt. The fact subject uses the typed `HoldingSourceConfig` algebra: `Native` or `Erc20`
+with its `NormalizedEvmAddress`, so token contracts cannot share identity. Collection plans,
+retained evidence, receipts, and fact subjects use that same address/asset algebra; there is no
 collection-only or flattened asset vocabulary. Their shared EVM block anchor persists the full
-U256 number as canonical decimal plus canonical hash.
+U256 number as canonical decimal plus canonical hash. The receipt retains only the network/chain,
+anchor, sorted sources, and verified content identities; it does not duplicate response material.
 
-Portfolio assembly consumes those direct EVM snapshots with exact config-derived network/source
-coverage. Only Bitcoin holdings use receipt-pinned fact-index selection; an all-EVM run issues no
-fact-index request. Replay invokes the same EVM reducer, verifies exact same-attempt fact-batch
-authority, and proves the direct snapshots reached assembly unchanged without constructing a live
-route. The complete collection-to-report graph is internal to the sole public snapshot entry point.
-Public-facts CLI/REST is not portfolio selection authority.
+Portfolio selection receives the typed Bitcoin and EVM receipt vectors directly and compiles one
+exact query per demanded holding. The fact-index provider evaluates the complete batch over one
+store snapshot. Selection rehydrates every returned response, rederives full descriptor/subject/
+response identity and fact refs, filters different-content same-subject history, and only then
+applies deterministic last-write ordering. Content identity intentionally treats byte-identical
+append occurrences as equivalent. Missing receipt content, mixed frontiers, non-exact cardinality,
+tampering, unexpected receipts, or incomplete coverage fail closed. Portfolio assembly consumes
+only the selected store material and rechecks exact config-derived coverage. Replay invokes the
+same reducers and verifies the exact receipt vectors and retained query evidence without a live
+route. Public-facts CLI/REST is not portfolio selection authority.
 
 ## Certified Saga Semantics
 
@@ -766,9 +769,11 @@ session identity: `network_id`, chain id, `source_ref`, and transport `implement
 native balance, ERC-20 metadata, ERC-20 balance, and number-to-hash re-verification uses that same
 session. The canonical capability evidence is carried directly in the aggregate EVM collection
 evidence; the shared block anchor and typed address/asset algebra are likewise retained without
-portfolio-specific mirrors. The direct network snapshot carries the checked semantic network,
-chain, and anchor, while source provenance remains only in read evidence. One live attempt keeps
-one fixed source-bound session. Its checked `source_ref` is audit provenance explaining which
+portfolio-specific mirrors. The checked collection receipt carries the semantic network, chain,
+anchor, sorted sources, and verified fact content identities, while source provenance remains only
+in read evidence. Balance responses remain solely in retained facts and are reread before portfolio
+assembly. One live attempt keeps one fixed source-bound session. Its checked `source_ref` is audit
+provenance explaining which
 process-local route served that attempt; it may differ on a later attempt or resume after runtime
 routing changes. Replay never resolves it against current runtime config or compares it with a
 current route. Post-commit changes remain detectable through ordinary artifact digest and stream

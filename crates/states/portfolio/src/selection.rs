@@ -1,8 +1,9 @@
 //! Receipt-pinned holding projection helpers for fact-backed portfolio reports.
 //!
 //! Policy id: `mfm.portfolio.holding.collection-receipt-anchor.v1`.
-//! The collection receipt fixes every source, anchor, status, coverage, and fact-content identity
-//! before this module projects a hydrated, identity-matching fact into an observation.
+//! The typed family receipts fix every source, anchor, and fact-content identity before this module
+//! projects hydrated, identity-matching facts into observations. Family status/coverage semantics
+//! are normalized only after exact identity has been established.
 
 use std::collections::BTreeMap;
 
@@ -101,41 +102,13 @@ impl PortfolioHoldingSelectionError {
     }
 }
 
-/// Anchor identity for cutover holding kinds: mandatory height + hash.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HoldingAnchor {
-    /// Block height / number.
-    pub height: u64,
-    /// Block hash (normalized opaque string).
-    pub hash: String,
-}
-
-impl HoldingAnchor {
-    /// Creates an anchor; hash must be non-empty.
-    pub fn new(
-        height: u64,
-        hash: impl Into<String>,
-    ) -> Result<Self, PortfolioHoldingSelectionError> {
-        let hash = hash.into();
-        if hash.trim().is_empty() {
-            return Err(PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::MissingFact,
-                "holding anchor hash is required",
-                None,
-                None,
-            ));
-        }
-        Ok(Self { height, hash })
-    }
-}
-
 /// One acceptable candidate fact for a required holding (post coverage/status filter).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoldingCandidate {
     /// Network id of the holding.
     pub network_id: String,
     /// Anchor at which the balance was proven.
-    pub anchor: HoldingAnchor,
+    pub anchor: ExecutionAnchor,
     /// Primary LWW ordering for candidates at the same subject and anchor.
     pub store_commit_order: u64,
     /// Claim identity for deterministic LWW tie-breaking and evidence binding.
@@ -210,11 +183,10 @@ pub(crate) fn holding_candidate_from_bitcoin(
             Some(key.network_id.clone()),
         ));
     }
-    let anchor = HoldingAnchor::new(fields.height, &fields.block_hash).map_err(|mut error| {
-        error.holding_key = Some(key.as_key_str());
-        error.network_id = Some(key.network_id.clone());
-        error
-    })?;
+    let anchor = ExecutionAnchor::Bitcoin {
+        height: fields.height,
+        block_hash: fields.block_hash.clone(),
+    };
     Ok(HoldingCandidate {
         network_id: key.network_id.clone(),
         anchor,
@@ -256,7 +228,7 @@ pub struct SelectedHolding {
     /// Required holding key.
     pub key: crate::HoldingRequirementKey,
     /// Anchor verified against the exact receipt entry.
-    pub anchor: HoldingAnchor,
+    pub anchor: ExecutionAnchor,
     /// Store commit order of the winning candidate.
     pub store_commit_order: u64,
     /// Fact claim id of the winning candidate.

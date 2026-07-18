@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::{Json, Router};
 use mfm_fact_capabilities::{
-    FactIndexReadBatchFuture, FactIndexReadProvider, FactIndexReadRequest,
+    FactIndexReadBatchFuture, FactIndexReadError, FactIndexReadProvider, FactIndexReadRequest,
 };
 use mfm_integration_tests::test_support::write_portfolio_runtime_config_for_test;
 use mfm_op_portfolio_snapshot::portfolio_snapshot_program_draft;
@@ -73,6 +73,127 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
     }
 }
 
+/// Repeated collection proves that receipt authority is content based: byte-identical publication
+/// remains usable across append occurrences, while a later different-content receipt filters the
+/// otherwise newer stale candidates before last-write ordering.
+#[tokio::test]
+async fn snapshot_root_selects_only_the_exact_evm_receipt_content_from_store_history() {
+    let first_server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path =
+        write_portfolio_runtime_config_for_test(runtime_dir.path(), &first_server.url);
+    let store = store::AsyncInMemoryRunStore::default();
+    let first_index = Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone()));
+    let services = snapshot_services(&store, first_index.clone(), Some(&runtime_path));
+    let config = snapshot_config(SnapshotDemand::EvmNative);
+
+    launch_snapshot_completed(&services, &config, "exact-content-first").await;
+    launch_snapshot_completed(&services, &config, "exact-content-identical").await;
+    assert_eq!(
+        first_index.returned_row_counts(),
+        vec![1, 2],
+        "the second receipt must accept both byte-identical append occurrences"
+    );
+    drop(services);
+
+    let changed_raw_units = 2_000_000_000_000_000_000_u128;
+    let changed_server = start_snapshot_rpc_mock(SnapshotRpcConfig {
+        evm_native_wei: changed_raw_units,
+        ..SnapshotRpcConfig::default()
+    })
+    .await;
+    write_portfolio_runtime_config_for_test(runtime_dir.path(), &changed_server.url);
+    let changed_index = Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone()));
+    let changed_services = snapshot_services(&store, changed_index.clone(), Some(&runtime_path));
+    let request =
+        prepare_snapshot_request(&changed_services, config, "exact-content-different").await;
+    let report = changed_services
+        .launch_run_and_render(request)
+        .await
+        .expect("different-content snapshot launch and render");
+    assert_eq!(
+        report.run.as_ref().expect("different-content run").run_mode,
+        mfm_app::RunModeStatus::Completed
+    );
+    let rendered = report
+        .public_output
+        .expect("different-content public output")
+        .json
+        .expect("different-content public JSON")
+        .to_string();
+    let rendered: Value = serde_json::from_str(&rendered).expect("public output JSON value");
+    assert_eq!(
+        rendered["snapshot"]["wallets"][0]["observations"][0]["quantity"]["raw_dec"],
+        json!(changed_raw_units.to_string()),
+        "selection must discard older different-content facts despite their matching subject"
+    );
+    assert_eq!(
+        changed_index.returned_row_counts(),
+        vec![3],
+        "the exact receipt filter must run after all same-subject history is reread"
+    );
+}
+
+/// A receipt cannot authorize a report when its exact fact is absent from the read result, even
+/// though the managed write committed that fact to the store immediately beforehand.
+#[tokio::test]
+async fn snapshot_root_fails_when_the_receipt_authorized_evm_fact_is_missing() {
+    let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let store = store::AsyncInMemoryRunStore::default();
+    let fact_index = Arc::new(AdversarialSnapshotFactIndex::new(
+        store.clone(),
+        FactIndexMutation::OmitRows,
+    ));
+    let services = snapshot_services(&store, fact_index.clone(), Some(&runtime_path));
+    let response = launch_snapshot(
+        &services,
+        snapshot_config(SnapshotDemand::EvmNative),
+        "missing-receipt-fact",
+    )
+    .await;
+
+    assert_eq!(
+        response.run_mode,
+        mfm_app::RunModeStatus::FailedWithoutAcdcClaim
+    );
+    assert_eq!(fact_index.batch_widths(), vec![1]);
+    let run_id = response.run_id.parse().expect("failed snapshot run id");
+    assert_atomic_evm_fact_publication(&store, &run_id, 1).await;
+}
+
+/// Every family query must be evaluated over one shared snapshot frontier before any candidate is
+/// hydrated or reduced.
+#[tokio::test]
+async fn snapshot_root_rejects_mixed_fact_read_frontiers() {
+    let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let store = store::AsyncInMemoryRunStore::default();
+    let fact_index = Arc::new(AdversarialSnapshotFactIndex::new(
+        store.clone(),
+        FactIndexMutation::SplitFrontier,
+    ));
+    let services = snapshot_services(&store, fact_index.clone(), Some(&runtime_path));
+    let response = launch_snapshot(
+        &services,
+        snapshot_config(SnapshotDemand::Mixed),
+        "mixed-read-frontiers",
+    )
+    .await;
+
+    assert_eq!(
+        response.run_mode,
+        mfm_app::RunModeStatus::FailedWithoutAcdcClaim
+    );
+    assert_eq!(
+        fact_index.batch_widths(),
+        vec![3],
+        "Bitcoin and both EVM holding reads must be issued as one batch"
+    );
+}
+
 async fn assert_atomic_evm_fact_publication(
     store: &store::AsyncInMemoryRunStore,
     run_id: &mfm_ids::RunId,
@@ -83,8 +204,7 @@ async fn assert_atomic_evm_fact_publication(
         projection
             .fact_index_entries()
             .filter(|(_, entry)| {
-                entry.fact_kind.as_str() == "portfolio.evm_balance_snapshot"
-                    && &entry.source_run_id == run_id
+                entry.fact_kind.as_str() == "evm.balance_snapshot" && &entry.source_run_id == run_id
             })
             .count(),
         expected_count,
@@ -101,7 +221,7 @@ async fn assert_atomic_evm_fact_publication(
             matches!(
                 event.payload(),
                 mfm_events::v1::KernelEventPayload::FactRecorded(payload)
-                    if payload.claim.fact_kind().as_str() == "portfolio.evm_balance_snapshot"
+                    if payload.claim.fact_kind().as_str() == "evm.balance_snapshot"
             )
         })
         .collect::<Vec<_>>();
@@ -132,7 +252,7 @@ async fn assert_atomic_evm_fact_publication(
                         && event.store_commit_order() == first.store_commit_order()
             )
         }),
-        "the direct EVM snapshot and every fact must share one atomic commit"
+        "the EVM collection receipt and every fact must share one atomic commit"
     );
 }
 
@@ -174,6 +294,10 @@ async fn snapshot_root_replay_rejects_tampered_retained_projection_evidence() {
     );
 
     for (label, tamper) in [
+        (
+            "evm-collection-receipt",
+            SnapshotArtifactTamper::EvmCollectionReceipt,
+        ),
         ("query-evidence", SnapshotArtifactTamper::FactQueryEvidence),
         ("evm-fact-response", SnapshotArtifactTamper::EvmFactResponse),
         (
@@ -725,6 +849,97 @@ async fn launch_snapshot(
         .expect("snapshot launch response")
 }
 
+#[derive(Clone, Copy)]
+enum FactIndexMutation {
+    OmitRows,
+    SplitFrontier,
+}
+
+struct AdversarialSnapshotFactIndex {
+    projection: mfm_app::ProjectionFactIndexProvider,
+    mutation: FactIndexMutation,
+    batch_widths: Mutex<Vec<usize>>,
+}
+
+impl AdversarialSnapshotFactIndex {
+    fn new(store: store::AsyncInMemoryRunStore, mutation: FactIndexMutation) -> Self {
+        Self {
+            projection: mfm_app::ProjectionFactIndexProvider::new(store),
+            mutation,
+            batch_widths: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn batch_widths(&self) -> Vec<usize> {
+        self.batch_widths.lock().expect("batch widths").clone()
+    }
+}
+
+impl FactIndexReadProvider for AdversarialSnapshotFactIndex {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.integration.snapshot.adversarial-fact-index.v1"
+    }
+
+    fn read_fact_index_batch<'a>(
+        &'a self,
+        requests: &'a [FactIndexReadRequest],
+    ) -> FactIndexReadBatchFuture<'a> {
+        Box::pin(async move {
+            self.batch_widths
+                .lock()
+                .expect("batch widths")
+                .push(requests.len());
+            let mut responses = self.projection.read_fact_index_batch(requests).await?;
+            match self.mutation {
+                FactIndexMutation::OmitRows => {
+                    for (request, response) in requests.iter().zip(&mut responses) {
+                        let rows = Vec::new();
+                        let receipt = mfm_facts::FactQueryReceipt::from_rows(
+                            response.receipt().read_frontier().clone(),
+                            response.receipt().frontier_type(),
+                            &rows,
+                            response.receipt().returned_field_summaries().is_some(),
+                            request.plan().limit(),
+                        )
+                        .map_err(FactIndexReadError::redacted_provider_failure)?;
+                        *response = mfm_facts::FactQueryResult::new(rows, receipt)
+                            .map_err(FactIndexReadError::redacted_provider_failure)?;
+                    }
+                }
+                FactIndexMutation::SplitFrontier => {
+                    if let Some((request, response)) = requests.get(1).zip(responses.get_mut(1)) {
+                        let current = response.receipt().read_frontier();
+                        let store_commit_order =
+                            current.store_commit_order().checked_next().ok_or_else(|| {
+                                FactIndexReadError::redacted_provider_failure(
+                                    "test read frontier overflowed",
+                                )
+                            })?;
+                        let frontier = mfm_facts::StoreReadFrontier::new(
+                            current.store_scope().clone(),
+                            current.query_scope().clone(),
+                            current.descriptor_catalog_watermark(),
+                            store_commit_order,
+                        );
+                        let rows = response.rows().to_vec();
+                        let receipt = mfm_facts::FactQueryReceipt::from_rows(
+                            frontier,
+                            response.receipt().frontier_type(),
+                            &rows,
+                            response.receipt().returned_field_summaries().is_some(),
+                            request.plan().limit(),
+                        )
+                        .map_err(FactIndexReadError::redacted_provider_failure)?;
+                        *response = mfm_facts::FactQueryResult::new(rows, receipt)
+                            .map_err(FactIndexReadError::redacted_provider_failure)?;
+                    }
+                }
+            }
+            Ok(responses)
+        })
+    }
+}
+
 struct BlockingSnapshotFactIndex {
     entered: Mutex<Option<oneshot::Sender<()>>>,
     projection: mfm_app::ProjectionFactIndexProvider,
@@ -828,6 +1043,7 @@ struct TamperedSnapshotArtifactProvider {
 
 #[derive(Clone, Copy)]
 enum SnapshotArtifactTamper {
+    EvmCollectionReceipt,
     FactQueryEvidence,
     EvmFactResponse,
     SelectedHoldings,
@@ -861,8 +1077,17 @@ impl store::RetainedArtifactReadProvider for TamperedSnapshotArtifactProvider {
                     .schema_id
                     .as_ref()
                     .and_then(|schema| schema.canonical_name())
-                    == Some("mfm.portfolio.fact.evm_balance_snapshot.response");
+                    == Some("mfm.evm.fact.balance_snapshot.response");
+            let evm_collection_receipt = artifact.evidence().artifact_role
+                == mfm_events::v1::ArtifactRole::StateOutput
+                && artifact
+                    .evidence()
+                    .schema_id
+                    .as_ref()
+                    .and_then(|schema| schema.canonical_name())
+                    == Some("mfm.evm.balance_collection_receipt");
             let applies = match self.tamper {
+                SnapshotArtifactTamper::EvmCollectionReceipt => evm_collection_receipt,
                 SnapshotArtifactTamper::FactQueryEvidence => {
                     artifact.evidence().artifact_role
                         == mfm_events::v1::ArtifactRole::FactQueryEvidence
@@ -875,6 +1100,11 @@ impl store::RetainedArtifactReadProvider for TamperedSnapshotArtifactProvider {
             }
 
             let tampered_bytes = match self.tamper {
+                SnapshotArtifactTamper::EvmCollectionReceipt => {
+                    let mut bytes = artifact.bytes().to_vec();
+                    bytes.push(b'\n');
+                    bytes
+                }
                 SnapshotArtifactTamper::FactQueryEvidence => {
                     let mut bytes = artifact.bytes().to_vec();
                     bytes.push(b'\n');

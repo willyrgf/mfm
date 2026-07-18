@@ -66,7 +66,6 @@ mod entry_point;
 mod evm_runtime;
 mod fact_index;
 mod live_transports;
-mod portfolio_snapshot;
 mod public_facts;
 mod replay_verifiers;
 #[path = "responses.rs"]
@@ -252,7 +251,6 @@ pub fn production_runner_registry(
         },
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
-    portfolio_snapshot::register_portfolio_snapshot_runners(&mut registry, artifacts.clone())?;
     btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),

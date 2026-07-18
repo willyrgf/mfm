@@ -1,10 +1,10 @@
 use super::*;
 
-/// Certified Bitcoin holding fact descriptor consumed by selection.
+/// Certified family holding fact descriptors consumed by selection.
 ///
-/// Descriptors are carried as canonical JSON so the portfolio state can own query planning and
-/// descriptor-checked hydration without depending on another state crate. The portfolio operation
-/// supplies the concrete registered descriptors when it authors the state config.
+/// Descriptors are carried as canonical JSON so certified config fixes the exact query and
+/// hydration authority. The portfolio operation supplies the concrete registered descriptors when
+/// it authors the state config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -14,55 +14,68 @@ use super::*;
 )]
 pub struct SelectHoldingsFactDescriptors {
     bitcoin_native: String,
+    evm_balance: String,
 }
 
 impl SelectHoldingsFactDescriptors {
     /// Canonicalizes and admits the registered descriptors used by the portfolio operation.
-    pub fn new(bitcoin_native: &mfm_facts::FactDescriptor) -> Result<Self, ConfigError> {
+    pub fn new(
+        bitcoin_native: &mfm_facts::FactDescriptor,
+        evm_balance: &mfm_facts::FactDescriptor,
+    ) -> Result<Self, ConfigError> {
         let descriptors = Self {
             bitcoin_native: canonical_descriptor_json(bitcoin_native)?,
+            evm_balance: canonical_descriptor_json(evm_balance)?,
         };
         descriptors.validate().map_err(ConfigError::new)?;
         Ok(descriptors)
     }
 
-    pub(crate) fn descriptor_for_source(
+    pub(crate) fn bitcoin_native(
         &self,
-        source: &HoldingSourceKey,
     ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
-        let HoldingSourceKey::BitcoinNative { .. } = source;
-        let (canonical, expected_kind) = (
-            self.bitcoin_native.as_str(),
+        self.descriptor(
+            &self.bitcoin_native,
             "bitcoin.address_balance_snapshot",
-        );
+            "Bitcoin",
+        )
+    }
+
+    pub(crate) fn evm_balance(
+        &self,
+    ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
+        self.descriptor(&self.evm_balance, "evm.balance_snapshot", "EVM")
+    }
+
+    fn descriptor(
+        &self,
+        canonical: &str,
+        expected_kind: &str,
+        family: &str,
+    ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
         let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(canonical.as_bytes())
             .map_err(|error| {
                 PortfolioHoldingSelectionError::new(
                     PortfolioHoldingErrorCode::ReceiptMismatch,
                     error.to_string(),
                     None,
-                    Some(source.network_id().to_owned()),
+                    None,
                 )
             })?;
         if descriptor.fact_kind().as_str() != expected_kind {
             return Err(PortfolioHoldingSelectionError::new(
                 PortfolioHoldingErrorCode::ReceiptMismatch,
-                "holding fact descriptor kind did not match its configured source family",
+                format!("{family} fact descriptor kind did not match its source family"),
                 None,
-                Some(source.network_id().to_owned()),
+                None,
             ));
         }
         Ok(descriptor)
     }
 
     fn validate(&self) -> Result<(), String> {
-        self.descriptor_for_source(&HoldingSourceKey::BitcoinNative {
-            network_id: "descriptor-validation".to_owned(),
-            bitcoin_network: "main".to_owned(),
-            semantic_source_identity: "descriptor-validation".to_owned(),
-            address: "descriptor-validation".to_owned(),
-        })
-        .map_err(|error| error.to_string())?;
+        self.bitcoin_native().map_err(|error| error.to_string())?;
+        self.evm_balance().map_err(|error| error.to_string())?;
         Ok(())
     }
 }

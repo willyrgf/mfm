@@ -39,7 +39,6 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
         .map(|node| node.state_descriptor_name.as_str())
         .collect::<Vec<_>>();
     for required in [
-        "mfm.portfolio.assemble_collection_receipt",
         "mfm.portfolio.select_holdings",
         "mfm.portfolio.collect_evm_network",
         "mfm.portfolio.publish_evm_holdings",
@@ -51,6 +50,7 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
             "complete snapshot graph omitted {required}"
         );
     }
+    assert!(!descriptors.contains(&"mfm.portfolio.assemble_collection_receipt"));
     let operations = draft
         .operation_lineage()
         .iter()

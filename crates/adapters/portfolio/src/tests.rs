@@ -15,20 +15,10 @@ use mfm_fact_capabilities::{
     FactIndexReadBatchFuture, FactIndexReadProvider, FactIndexReadRequest,
 };
 use mfm_ids::LocalPublicId;
-use mfm_portfolio_model::metadata::PublicMetadata;
-use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig, PortfolioConfig};
-use mfm_portfolio_model::symbol::{
-    HoldingSourceConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolValuationConfig,
-};
-use mfm_portfolio_model::wallet::{
-    WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
-};
-use mfm_program::{MfmFactType, ReadState, StateSpec, ValidatedConfig};
-use mfm_state_portfolio::{
-    reduce_evm_network_collection, EvmBalanceSource, PortfolioCollectionReceipt,
-    SelectHoldingsFactDescriptors,
-};
-use mfm_states_btc::BtcAddressBalanceSnapshotFact;
+use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
+use mfm_portfolio_model::symbol::HoldingSourceConfig;
+use mfm_program::{ReadState, StateSpec, ValidatedConfig};
+use mfm_state_portfolio::{reduce_evm_network_collection, EvmBalanceSource};
 
 const ACCOUNT: Address = address!("000000000000000000000000000000000000dead");
 const TOKEN: Address = address!("0000000000000000000000000000000000000001");
@@ -519,63 +509,4 @@ async fn wrong_chain_session_is_rejected_before_any_network_read() {
         .await
         .expect_err("wrong-chain session must fail binding");
     assert!(session.records().is_empty());
-}
-
-#[tokio::test]
-async fn all_evm_portfolios_do_not_call_the_fact_index() {
-    let portfolio = PortfolioConfig {
-        portfolio_id: "evm-only".parse().expect("portfolio id"),
-        quote_codes: vec![QuoteCode::Usd],
-        networks: vec![network()],
-        wallets: vec![WalletConfig {
-            wallet_id: "wallet_eth".parse().expect("wallet id"),
-            subject: WalletSubject::new(format!("{ACCOUNT:#x}"), WalletSubjectKind::EvmAddress)
-                .expect("wallet subject"),
-            network_id: "ethereum-mainnet".parse().expect("network id"),
-            implementation: WalletImplementationConfig::AddressOnly {},
-            symbol_ids: vec!["eth.native.ethereum-mainnet".parse().expect("symbol id")],
-            metadata: PublicMetadata::default(),
-        }],
-        symbol_configs: vec![SymbolConfig {
-            symbol_id: "eth.native.ethereum-mainnet".parse().expect("symbol id"),
-            display_symbol: Some("ETH".to_owned()),
-            network_id: "ethereum-mainnet".parse().expect("network id"),
-            source: HoldingSourceConfig::Native,
-            valuation: SymbolValuationConfig {
-                quotes: vec![QuoteValuationConfig {
-                    quote: QuoteCode::Usd,
-                    priced_symbol_id: "eth.native.ethereum-mainnet"
-                        .parse()
-                        .expect("priced symbol id"),
-                    unit_price_dec: "1".parse().expect("unit price"),
-                }],
-            },
-            metadata: PublicMetadata::default(),
-        }],
-        metadata: PublicMetadata::default(),
-    };
-    let config = SelectHoldingsConfig::new(
-        portfolio,
-        SelectHoldingsFactDescriptors::new(
-            &BtcAddressBalanceSnapshotFact::descriptor().expect("Bitcoin descriptor"),
-        )
-        .expect("selection descriptors"),
-    )
-    .expect("selection config");
-    let receipt = PortfolioCollectionReceipt::new(&[], Vec::new(), Vec::new())
-        .expect("empty Bitcoin receipt");
-    let artifacts = store::AsyncInMemoryRunStore::default();
-    let fact_index = EmptyFactIndex::new();
-
-    let (selected, evidence) = select_holdings(
-        ValidatedConfig::new(config).expect("validated config"),
-        SelectHoldingsInput { receipt },
-        &artifacts,
-        &fact_index,
-    )
-    .await
-    .expect("empty selection");
-    assert!(selected.observations.is_empty());
-    assert!(evidence.is_empty());
-    assert_eq!(fact_index.calls.load(Ordering::SeqCst), 0);
 }

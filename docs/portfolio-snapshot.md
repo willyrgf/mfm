@@ -30,15 +30,23 @@ snapshot operation. Admission also enforces the configured network, wallet, symb
 wallet-to-symbol, and per-EVM-network source limits before graph expansion.
 
 The operation derives only explicit wallet-to-symbol demand. Bitcoin collection resolves one
-shared anchor per demanded network, proves an exact Bitcoin receipt, and selects only facts whose
-content and anchor match that receipt. Each EVM network instead uses one external-read state and one
-atomic publication state. One checked session resolves latest once, reads deduplicated token
-metadata and every native/ERC-20 balance at the exact hash, and rechecks that hash by block number.
-The bounded concurrent scheduler issues each chunk in certified plan order and preserves that order
-independently of response completion order.
-The publication attempt records the complete `portfolio.evm_balance_snapshot` fact batch and a
-direct network snapshot together. Assembly consumes that snapshot directly; token-only runs make no
-fact-index request. Collection plans, evidence, snapshots, and fact subjects reuse the configured
+shared anchor per demanded network and emits checked network receipts. Each EVM network uses one
+external-read state and one atomic publication state. One checked session resolves latest once,
+reads deduplicated token metadata and every native/ERC-20 balance at the exact hash, and rechecks
+that hash by block number. The bounded concurrent scheduler issues each chunk in certified plan
+order and preserves that order independently of response completion order.
+
+The publication attempt records the complete `evm.balance_snapshot` fact batch and a checked
+`EvmBalanceCollectionReceipt` together. That receipt contains the network/chain, exact anchor,
+sorted sources, and verified fact content identities, but no duplicate balance response material.
+The typed Bitcoin and EVM receipt vectors flow directly into `SelectHoldingsState`; their input
+edges are the managed-write completion barrier. Selection issues all family queries over one store
+snapshot, rehydrates every candidate response, rederives fact identity, and admits only the exact
+receipt-authorized content. Byte-identical append occurrences are equivalent; same-subject facts
+with different response content are filtered before ordering. Assembly consumes only these
+store-reread observations, including for token-only and all-EVM portfolios.
+
+Collection plans, evidence, receipts, and fact subjects reuse the configured
 `NormalizedEvmAddress` plus `HoldingSourceConfig` values directly. Session evidence and the shared
 checked `EvmBlockAnchor` come from the EVM capability contract; the block number retains the full
 U256 range as a canonical decimal string in persisted values.
@@ -58,7 +66,9 @@ identities, artifact references, provider evidence, scan bounds, or runtime rout
 Both public values emit `schema_version: 1`; snapshot and report version selection is not a
 request or certified-state policy.
 
-After admission current configuration is not run authority. Resume, replay, status, stream inspection, and
-public-output rendering use the certified spec and retained evidence. Live capability routes remain
+After admission current configuration is not run authority. Resume, replay, status, stream
+inspection, and public-output rendering use the certified spec and retained evidence. Replay
+recomputes EVM facts and receipts, verifies that selection consumed the exact family vectors, and
+replays selection from retained query and response evidence. Live capability routes remain
 process-local runtime configuration. Evidence-only replay does not load them; a live resume loads
 them only when verified unfinished external nodes still require a live capability.

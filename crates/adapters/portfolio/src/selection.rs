@@ -9,7 +9,8 @@ pub(crate) async fn hydrate_holding_responses(
     responses: &[FactQueryResult],
     artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<Vec<Vec<PortfolioHoldingFactResponse>>> {
-    if responses.len() != plan.receipt().holdings().len() {
+    let holding_count = plan.holding_count().map_err(hydration_error)?;
+    if responses.len() != holding_count {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
             "fact-index batch response count does not match receipt demand".to_owned(),
         ));
@@ -39,48 +40,4 @@ fn hydration_error(error: impl std::fmt::Display) -> mfm_runtime::RuntimeError {
 
 fn runtime_artifact_read_error(error: store::StoreError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-}
-
-#[cfg(test)]
-pub(crate) async fn select_holdings(
-    config: mfm_program::ValidatedConfig<mfm_state_portfolio::SelectHoldingsConfig>,
-    input: mfm_state_portfolio::SelectHoldingsInput,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-    fact_index: &dyn mfm_fact_capabilities::FactIndexReadProvider,
-) -> mfm_runtime::Result<(
-    mfm_state_portfolio::SelectedHoldings,
-    Vec<mfm_facts::FactQueryEvidence>,
-)> {
-    use mfm_program::{ReadState, StateSpec};
-
-    let state = mfm_state_portfolio::SelectHoldingsState::new(config)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let context = mfm_program::CertifiedContext::no_context();
-    let plan = state
-        .plan(&input, &context)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let requests = plan
-        .requests()
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let responses = if requests.is_empty() {
-        Vec::new()
-    } else {
-        fact_index
-            .read_fact_index_batch(&requests)
-            .await
-            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?
-    };
-    plan.validate_query_results(&responses)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let hydrated = hydrate_holding_responses(&plan, &responses, artifacts).await?;
-    let queries = plan
-        .query_evidence(&responses, &hydrated)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let primary = mfm_state_portfolio::SelectHoldingsReadEvidence::new(&queries, hydrated)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let evidence = mfm_program::ExternalReadEvidenceSet::new(primary, queries.clone());
-    let selected = state
-        .reduce(&input, &evidence, &context)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    Ok((selected, queries))
 }

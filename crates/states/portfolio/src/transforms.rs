@@ -86,20 +86,44 @@ fn apply_configured_valuations_to_observations(
     Ok(observations)
 }
 
-/// Proves that selected observations exactly realize the collection receipt.
+/// Proves that selected observations exactly realize normalized portfolio demand.
 ///
-/// Selection is the primary receipt consumer, but snapshot assembly independently rejects
-/// missing, duplicated, unexpected, source-mismatched, or anchor-mismatched observations so a
-/// substituted runner output cannot become a public snapshot.
-fn require_receipt_holding_observations(
-    receipt: &PortfolioCollectionReceipt,
+/// Receipt identity and anchor checks belong to selection. Assembly independently protects its
+/// public output against a substituted selection runner by rejecting missing, duplicate,
+/// unexpected, family-mismatched, or config-mismatched observations.
+fn require_exact_portfolio_observations(
+    portfolio: &PortfolioConfig,
     observations: &[Observation],
 ) -> Result<(), PortfolioHoldingSelectionError> {
-    let expected = receipt
-        .holdings()
+    let networks = portfolio
+        .networks
         .iter()
-        .map(|entry| (entry.requirement().clone(), entry))
+        .map(|network| (network.network_id().as_str(), network))
         .collect::<BTreeMap<_, _>>();
+    let symbols = symbols_by_id(&portfolio.symbol_configs)?;
+    let mut expected = BTreeMap::new();
+    for wallet in &portfolio.wallets {
+        let network = networks
+            .get(wallet.network_id.as_str())
+            .copied()
+            .ok_or_else(|| observation_error(None, "wallet network was missing"))?;
+        for symbol_id in &wallet.symbol_ids {
+            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
+                observation_error(None, "wallet symbol was missing from portfolio config")
+            })?;
+            let key = HoldingRequirementKey {
+                wallet_id: wallet.wallet_id.to_string(),
+                symbol_id: symbol.symbol_id.to_string(),
+                network_id: wallet.network_id.to_string(),
+            };
+            if expected.insert(key.clone(), (network, symbol)).is_some() {
+                return Err(observation_error(
+                    Some(&key),
+                    "portfolio demand contained a duplicate holding requirement",
+                ));
+            }
+        }
+    }
     let mut actual = BTreeMap::new();
     for observation in observations {
         let key = HoldingRequirementKey {
@@ -107,222 +131,81 @@ fn require_receipt_holding_observations(
             symbol_id: observation.symbol_id.clone(),
             network_id: observation.network_id.clone(),
         };
-        let Some(entry) = expected.get(&key).copied() else {
-            return Err(receipt_observation_error(
-                &key,
-                "selected observations contained a holding absent from the collection receipt",
+        let Some((network, symbol)) = expected.get(&key).copied() else {
+            return Err(observation_error(
+                Some(&key),
+                "selected observations contained an unexpected holding",
             ));
         };
         if actual.insert(key.clone(), observation).is_some() {
-            return Err(receipt_observation_error(
-                &key,
-                "selected observations contained a duplicate collection receipt holding",
+            return Err(observation_error(
+                Some(&key),
+                "selected observations contained a duplicate holding",
             ));
         }
-        if !observation_source_matches_receipt(entry.source(), &observation.source.holding) {
-            return Err(receipt_observation_error(
-                &key,
-                "selected observation source did not match the collection receipt",
+        if observation.source.holding != symbol.source {
+            return Err(observation_error(
+                Some(&key),
+                "selected observation source did not match portfolio config",
             ));
         }
-        if observation.source.anchor != *entry.anchor() {
-            return Err(receipt_observation_error(
-                &key,
-                "selected observation anchor did not match the collection receipt",
-            ));
-        }
-        if observation.coverage != entry.coverage() {
-            return Err(receipt_observation_error(
-                &key,
-                "selected observation coverage did not match the collection receipt",
-            ));
+        match (network, &observation.source.anchor) {
+            (NetworkConfig::Bitcoin { .. }, ExecutionAnchor::Bitcoin { .. }) => {
+                if observation.quantity.decimals != 8 {
+                    return Err(observation_error(
+                        Some(&key),
+                        "Bitcoin selected observation did not use the fixed decimal scale",
+                    ));
+                }
+            }
+            (
+                NetworkConfig::Evm {
+                    chain_id,
+                    native_decimals,
+                    ..
+                },
+                ExecutionAnchor::Evm {
+                    chain_id: observed_chain,
+                    ..
+                },
+            ) if chain_id == observed_chain => {
+                if matches!(symbol.source, HoldingSourceConfig::Native)
+                    && observation.quantity.decimals != *native_decimals
+                {
+                    return Err(observation_error(
+                        Some(&key),
+                        "native EVM selected observation did not match the configured scale",
+                    ));
+                }
+            }
+            _ => {
+                return Err(observation_error(
+                    Some(&key),
+                    "selected observation anchor did not match its network family",
+                ));
+            }
         }
     }
-    for key in expected.keys() {
-        if !actual.contains_key(key) {
-            return Err(receipt_observation_error(
-                key,
-                "collection receipt holding was missing from selected observations",
-            ));
-        }
+    if actual.len() != expected.len() {
+        let missing = expected.keys().find(|key| !actual.contains_key(*key));
+        return Err(observation_error(
+            missing,
+            "selected observations did not exactly cover portfolio demand",
+        ));
     }
     Ok(())
 }
 
-fn receipt_observation_error(
-    key: &HoldingRequirementKey,
+fn observation_error(
+    key: Option<&HoldingRequirementKey>,
     message: impl Into<String>,
 ) -> PortfolioHoldingSelectionError {
     PortfolioHoldingSelectionError::new(
         PortfolioHoldingErrorCode::ReceiptMismatch,
         message,
-        Some(key.as_key_str()),
-        Some(key.network_id.clone()),
+        key.map(HoldingRequirementKey::as_key_str),
+        key.map(|key| key.network_id.clone()),
     )
-}
-
-fn observation_source_matches_receipt(
-    source: &HoldingSourceKey,
-    observation_source: &HoldingSourceConfig,
-) -> bool {
-    matches!(
-        (source, observation_source),
-        (
-            HoldingSourceKey::BitcoinNative { .. },
-            HoldingSourceConfig::Native
-        )
-    )
-}
-
-fn observations_from_evm_snapshots(
-    portfolio: &PortfolioConfig,
-    snapshots: Vec<EvmNetworkSnapshot>,
-) -> StateResult<Vec<Observation>> {
-    let networks = portfolio
-        .networks
-        .iter()
-        .map(|network| (network.network_id().as_str(), network))
-        .collect::<BTreeMap<_, _>>();
-    let symbols = symbols_by_id(&portfolio.symbol_configs)
-        .map_err(|error| StateError::Message(error.to_string()))?;
-    let mut expected_sources = BTreeMap::<String, BTreeSet<EvmBalanceSource>>::new();
-    for wallet in &portfolio.wallets {
-        let network = networks
-            .get(wallet.network_id.as_str())
-            .copied()
-            .ok_or_else(|| StateError::Message("wallet network was missing".to_owned()))?;
-        if !matches!(network, NetworkConfig::Evm { .. }) {
-            continue;
-        }
-        let account = wallet.subject.evm_address().ok_or_else(|| {
-            StateError::Message("EVM wallet did not contain an EVM address".to_owned())
-        })?;
-        for symbol_id in &wallet.symbol_ids {
-            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
-                StateError::Message("wallet symbol was missing from portfolio config".to_owned())
-            })?;
-            let source = EvmBalanceSource::new(account.clone(), symbol.source.clone())
-                .map_err(|error| StateError::Message(error.to_string()))?;
-            if !expected_sources
-                .entry(wallet.network_id.to_string())
-                .or_default()
-                .insert(source)
-            {
-                return Err(StateError::Message(
-                    "portfolio EVM demand contained an aliased balance source".to_owned(),
-                ));
-            }
-        }
-    }
-
-    let mut snapshots_by_network = BTreeMap::new();
-    for snapshot in snapshots {
-        let network_id = snapshot.network_id().to_owned();
-        if snapshots_by_network.insert(network_id, snapshot).is_some() {
-            return Err(StateError::Message(
-                "portfolio input contained duplicate EVM network snapshots".to_owned(),
-            ));
-        }
-    }
-    if snapshots_by_network.len() != expected_sources.len()
-        || snapshots_by_network
-            .keys()
-            .any(|network_id| !expected_sources.contains_key(network_id))
-    {
-        return Err(StateError::Message(
-            "portfolio input EVM network snapshot coverage was not exact".to_owned(),
-        ));
-    }
-
-    let mut actual = BTreeMap::new();
-    for (network_id, sources) in &expected_sources {
-        let network = networks
-            .get(network_id.as_str())
-            .copied()
-            .ok_or_else(|| StateError::Message("EVM snapshot network was missing".to_owned()))?;
-        let config = EvmNetworkCollectionConfig::new(network, sources.iter().cloned().collect())
-            .map_err(|error| StateError::Message(error.to_string()))?;
-        let snapshot = snapshots_by_network.get(network_id).ok_or_else(|| {
-            StateError::Message("required EVM network snapshot was missing".to_owned())
-        })?;
-        snapshot
-            .validate_against(&config)
-            .map_err(|error| StateError::Message(error.to_string()))?;
-        for balance in snapshot.balances() {
-            let key = (network_id.clone(), balance.source().clone());
-            if actual
-                .insert(key, (snapshot.anchor().clone(), balance.clone()))
-                .is_some()
-            {
-                return Err(StateError::Message(
-                    "EVM network snapshots contained a duplicate source".to_owned(),
-                ));
-            }
-        }
-    }
-
-    let mut observations = Vec::new();
-    for wallet in &portfolio.wallets {
-        let network = networks
-            .get(wallet.network_id.as_str())
-            .copied()
-            .ok_or_else(|| StateError::Message("wallet network was missing".to_owned()))?;
-        if !matches!(network, NetworkConfig::Evm { .. }) {
-            continue;
-        }
-        let account = wallet.subject.evm_address().ok_or_else(|| {
-            StateError::Message("EVM wallet did not contain an EVM address".to_owned())
-        })?;
-        for symbol_id in &wallet.symbol_ids {
-            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
-                StateError::Message("wallet symbol was missing from portfolio config".to_owned())
-            })?;
-            let source = EvmBalanceSource::new(account.clone(), symbol.source.clone())
-                .map_err(|error| StateError::Message(error.to_string()))?;
-            let (anchor, balance) = actual
-                .remove(&(wallet.network_id.to_string(), source))
-                .ok_or_else(|| {
-                    StateError::Message(
-                        "required EVM holding was missing from direct network snapshots".to_owned(),
-                    )
-                })?;
-            let mut observation = Observation {
-                wallet_id: wallet.wallet_id.to_string(),
-                symbol_id: symbol.symbol_id.to_string(),
-                display_symbol: symbol.display_symbol.clone(),
-                network_id: wallet.network_id.to_string(),
-                quantity: ObservationQuantity {
-                    raw_dec: balance.raw_units().to_owned(),
-                    decimals: balance.decimals(),
-                    amount_dec: amount_dec_from_raw(balance.raw_units(), balance.decimals())
-                        .map_err(|error| StateError::Message(error.to_string()))?,
-                },
-                values: Vec::new(),
-                source: AnchoredHoldingSource {
-                    holding: symbol.source.clone(),
-                    anchor: ExecutionAnchor::Evm {
-                        chain_id: std::num::NonZeroU64::new(network.chain_id_u64().ok_or_else(
-                            || StateError::Message("EVM network chain id was missing".to_owned()),
-                        )?)
-                        .ok_or_else(|| {
-                            StateError::Message("EVM network chain id was zero".to_owned())
-                        })?,
-                        block: anchor,
-                    },
-                },
-                coverage: "complete_at_anchor".to_owned(),
-                metadata: symbol.metadata.clone(),
-            };
-            observation.normalize();
-            observations.push(observation);
-        }
-    }
-    if !actual.is_empty() {
-        return Err(StateError::Message(
-            "EVM network snapshots contained unexpected holdings".to_owned(),
-        ));
-    }
-    Ok(observations)
 }
 
 /// Assembles the canonical portfolio snapshot (hard-fail; pins from selected observations).
@@ -330,22 +213,8 @@ pub fn assemble_snapshot(
     config: &AssembleSnapshotConfig,
     input: AssembleSnapshotInput,
 ) -> StateResult<PortfolioSnapshot> {
-    validate_receipt_against_portfolio(&input.receipt, &config.portfolio).map_err(|error| {
-        StateError::Message(format!(
-            "{code}: {message}",
-            code = error.code,
-            message = error.message
-        ))
-    })?;
-    require_receipt_holding_observations(&input.receipt, &input.holdings.observations).map_err(
-        |error| {
-            StateError::Message(format!(
-                "{code}: {message}",
-                code = error.code,
-                message = error.message
-            ))
-        },
-    )?;
+    require_exact_portfolio_observations(&config.portfolio, &input.holdings.observations)
+        .map_err(|error| StateError::Message(error.to_string()))?;
     let symbols = symbols_by_id(&config.portfolio.symbol_configs).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -353,19 +222,7 @@ pub fn assemble_snapshot(
             message = error.message
         ))
     })?;
-    let bitcoin_pins = project_network_pins_from_observations(&input.holdings.observations)
-        .map_err(|error| StateError::Message(error.to_string()))?;
-    if bitcoin_pins.as_slice() != input.receipt.network_anchors() {
-        return Err(StateError::Message(
-            "receipt_mismatch: selected Bitcoin pins did not equal collection receipt anchors"
-                .to_owned(),
-        ));
-    }
     let mut observations = input.holdings.observations;
-    observations.extend(observations_from_evm_snapshots(
-        &config.portfolio,
-        input.evm_snapshots,
-    )?);
     observations.sort_by(|left, right| {
         (&left.wallet_id, &left.symbol_id, &left.network_id).cmp(&(
             &right.wallet_id,

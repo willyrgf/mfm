@@ -25,6 +25,7 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
 
 const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
     ("mfm", "mfm_core"),
+    ("mfm-state-portfolio", "mfm-states-btc"),
     ("mfm-transports-proof", "mfm-collectors-proof"),
 ];
 
@@ -516,8 +517,10 @@ fn configured_target_source_boundaries_are_enforced() {
         "portfolio composition must take the aggregate PortfolioConfig as its only authority"
     );
     assert!(
-        composed_source.contains("struct AssemblePortfolioCollectionReceiptState"),
-        "composition must own its operation-local exact receipt fan-in state"
+        composed_source.contains("SelectHoldingsInputHandles")
+            && composed_source.contains("bitcoin_receipts,")
+            && composed_source.contains("evm_receipts,"),
+        "portfolio selection must consume the typed family receipt vectors directly"
     );
     assert!(
         composed_source.contains("struct PortfolioSnapshotOperation"),
@@ -541,12 +544,18 @@ fn configured_target_source_boundaries_are_enforced() {
             .exists(),
         "portfolio operation must not retain a replay module"
     );
-    let app_portfolio_snapshot_source =
-        fs::read_to_string(root.join("crates/app/src/portfolio_snapshot_replay.rs"))
-            .expect("read private app portfolio replay binding");
     assert!(
-        app_portfolio_snapshot_source.contains("verify_portfolio_collection_receipt_replay"),
-        "app replay dispatch must own the operation-local receipt verification binding"
+        !root.join("crates/app/src/portfolio_snapshot.rs").exists()
+            && !root
+                .join("crates/app/src/portfolio_snapshot_replay.rs")
+                .exists(),
+        "the deleted app-only portfolio runners and replay verifier must not remain"
+    );
+    let app_replay_source = fs::read_to_string(root.join("crates/app/src/replay_verifiers.rs"))
+        .expect("read app replay dispatch");
+    assert!(
+        app_replay_source.contains("verify_portfolio_replay(broker)"),
+        "app replay dispatch must call the portfolio adapter verifier directly"
     );
     let portfolio_state_root = root.join("crates/states/portfolio/src");
     for path in sources
@@ -554,12 +563,25 @@ fn configured_target_source_boundaries_are_enforced() {
         .filter(|path| path.starts_with(&portfolio_state_root))
     {
         let source = fs::read_to_string(path).expect("read portfolio state source");
-        assert!(
-            !source.contains("AssemblePortfolioCollectionReceiptState"),
-            "portfolio state source must not duplicate operation-local receipt fan-in: {}",
-            path.display()
-        );
+        for forbidden in [
+            "AssemblePortfolioCollectionReceiptState",
+            "PortfolioCollectionReceipt",
+            "CollectedHoldingReceipt",
+            "EvmNetworkSnapshot",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "portfolio state source {} retains deleted fan-in/direct material: {forbidden}",
+                path.display()
+            );
+        }
     }
+    assert!(
+        !composed_source.contains("AssemblePortfolioCollectionReceiptState")
+            && !composed_source.contains("PortfolioCollectionReceipt")
+            && !composed_source.contains("EvmNetworkSnapshot"),
+        "portfolio composition must not retain a generic receipt fan-in or direct EVM path"
+    );
 }
 
 #[derive(Debug)]

@@ -3,8 +3,8 @@
 //!
 //! This crate binds one checked source-stable EVM read session per demanded network, executes
 //! exact-hash balance reads with bounded concurrency, and atomically records each unified fact
-//! batch with its direct network snapshot. It also retains the Platform fact-index binding used
-//! only by the Bitcoin receipt-pinned selection path.
+//! batch with its checked collection receipt. The Platform fact-index binding rereads and verifies
+//! both Bitcoin and EVM facts before portfolio assembly.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -20,7 +20,7 @@ use mfm_evm_capabilities::{
 };
 use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
-use mfm_program::{ManagedWriteState, StateSpec};
+use mfm_program::StateSpec;
 use mfm_runtime::{
     load_materialized_struct_input, load_runner_config_for_node, CapabilityImplementationId,
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
@@ -29,14 +29,13 @@ use mfm_runtime::{
     RunnerIngressContext, RunnerOutputBuilder, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version,
-    validate_receipt_against_portfolio, AssembleSnapshotConfig, AssembleSnapshotInput,
-    AssembleSnapshotState, CollectEvmNetworkEvidence, CollectEvmNetworkPlan,
-    CollectEvmNetworkState, EvmBalanceReadEvidence, EvmNetworkCollectionConfig,
-    EvmTokenDecimalsEvidence, PortfolioCollectionReceipt, ProjectReportConfig, ProjectReportInput,
-    ProjectReportState, PublishEvmHoldingsInput, PublishEvmHoldingsState, SelectHoldingsConfig,
-    SelectHoldingsInput, SelectHoldingsReadEvidence, SelectHoldingsReadPlan, SelectHoldingsState,
-    SelectedHoldings,
+    assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version, publish_evm_holdings,
+    AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState,
+    CollectEvmNetworkEvidence, CollectEvmNetworkPlan, CollectEvmNetworkState,
+    EvmBalanceReadEvidence, EvmNetworkCollectionConfig, EvmTokenDecimalsEvidence,
+    ProjectReportConfig, ProjectReportInput, ProjectReportState, PublishEvmHoldingsInput,
+    PublishEvmHoldingsState, SelectHoldingsConfig, SelectHoldingsInput, SelectHoldingsReadEvidence,
+    SelectHoldingsReadPlan, SelectHoldingsState, SelectedHoldings,
 };
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -46,8 +45,6 @@ mod replay;
 #[path = "selection.rs"]
 mod selection;
 pub use self::replay::verify_portfolio_replay;
-#[cfg(test)]
-pub(crate) use self::selection::select_holdings;
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
@@ -478,30 +475,22 @@ impl ErasedNodeRunner for PublishEvmHoldingsRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let state = PublishEvmHoldingsState::new(config).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
             let input = load_materialized_struct_input::<PublishEvmHoldingsInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let context = ctx.certified_context::<mfm_program::NoContext>()?;
-            let snapshot = state
-                .run(input, &(FactRecordCapability,), &context)
-                .await
-                .map_err(|error| {
-                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-                })?;
+            let (receipt, facts) = publish_evm_holdings(config.as_ref(), input.batch)
+                .map_err(portfolio_evm_state_runtime_error)?;
             let mut output = RunnerOutputBuilder::new(&ctx);
             let producer = portfolio_fact_record_binding()?;
-            for fact in snapshot.facts() {
+            for fact in facts {
                 output.record_fact(
                     FactRecordInput::new(fact, mfm_state_portfolio::evm_balance_fact_visibility()),
                     producer.clone(),
                 )?;
             }
-            output.state_output(&snapshot)?;
+            output.state_output(&receipt)?;
             Ok(output.finish())
         })
     }

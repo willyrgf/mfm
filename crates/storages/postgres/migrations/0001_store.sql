@@ -219,8 +219,7 @@ CREATE TABLE fact_index (
   CONSTRAINT fact_index_store_commit_order_positive CHECK (store_commit_order >= 1),
   CONSTRAINT fact_index_audience_v1 CHECK (audience IN ('control', 'platform')),
   CONSTRAINT fact_index_visibility_scope_v1 CHECK (visibility_scope = 'default'),
-  CONSTRAINT fact_index_request_pair CHECK ((request_schema_id IS NULL) = (request_hash IS NULL)),
-  CONSTRAINT fact_index_response_artifact_unique UNIQUE (response_artifact_id, response_artifact_evidence_hash)
+  CONSTRAINT fact_index_request_pair CHECK ((request_schema_id IS NULL) = (request_hash IS NULL))
 );
 
 CREATE TABLE fact_index_terms (

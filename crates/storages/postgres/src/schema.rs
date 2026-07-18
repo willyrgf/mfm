@@ -495,7 +495,6 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "fact_index_audience_v1",
     "fact_index_visibility_scope_v1",
     "fact_index_request_pair",
-    "fact_index_response_artifact_unique",
     "fact_index_terms_claim_fk",
     "fact_index_terms_descriptor_fk",
     "fact_index_terms_seq_positive",
