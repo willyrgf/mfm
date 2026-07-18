@@ -4,7 +4,7 @@ impl SideEffectVerifyDriver {
     /// Drives one verification step for a certified side-effect verify framework node.
     pub async fn drive<C>(ctx: ErasedRunCtx<'_>, callbacks: &C) -> Result<ErasedRunnerOutput>
     where
-        C: SideEffectVerifyCallbacks + ?Sized,
+        C: SideEffectAdapter + ?Sized,
     {
         let verify = match &ctx.node().framework {
             Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => verify,
@@ -42,6 +42,12 @@ impl SideEffectVerifyDriver {
             .ledger_state()
             .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
         let submit_inputs = ctx.materialize_node_inputs(submit_node)?;
+        let plan = authored_plan(&ctx, callbacks, submit_node, &submit_inputs).await?;
+        verify_authored_plan(projection, &plan)?;
+        let prepared = projection
+            .prepared_invocation
+            .as_ref()
+            .ok_or_else(|| missing_driver_projection("prepared invocation"))?;
         let phase = state.phase();
         let side_effect = RunnerSideEffectBinding {
             ledger_key: projection.ledger_key.clone(),
@@ -55,7 +61,7 @@ impl SideEffectVerifyDriver {
                 ..
             } => {
                 let receipt = callbacks
-                    .read_receipt(&ctx, submit_node, &submit_inputs, submission)
+                    .observe_receipt(&ctx, submit_node, &submit_inputs, prepared, submission)
                     .await?;
                 let builder = SideEffectEvidenceBuilder::new(&ctx);
                 match &submit_contract.verification {
@@ -99,13 +105,9 @@ impl SideEffectVerifyDriver {
                 status: store::SideEffectSubmissionState::Unknown,
                 ..
             } => {
+                let prepared = callbacks.load_prepared(&ctx, submit_node, prepared).await?;
                 let decision = callbacks
-                    .recover_unknown_submission(
-                        &ctx,
-                        submit_node,
-                        &submit_inputs,
-                        projection.prepared_invocation.as_ref(),
-                    )
+                    .recover_unknown(&ctx, submit_node, &submit_inputs, prepared)
                     .await?;
                 let builder = SideEffectEvidenceBuilder::new(&ctx);
                 match decision {
@@ -142,40 +144,57 @@ impl SideEffectVerifyDriver {
                     ),
                 }
             }
-            store::SideEffectLedgerPhase::ReceiptObserved { receipt, .. } => {
-                match &submit_contract.verification {
-                    spec::SideEffectVerificationSpec::Receipt => {
-                        let output = callbacks
-                            .map_receipt_to_output(&ctx, submit_node, &submit_inputs, receipt)
-                            .await?;
-                        ErasedRunnerOutput::state_output(&ctx, &output)
-                    }
-                    spec::SideEffectVerificationSpec::Finalized { .. } => {
-                        let confirmation = callbacks
-                            .build_confirmation(&ctx, submit_node, &submit_inputs, receipt)
-                            .await?;
-                        SideEffectEvidenceBuilder::new(&ctx).confirmation_observed(
-                            side_effect,
-                            &confirmation.evidence,
-                            confirmation.replay,
-                        )
-                    }
+            store::SideEffectLedgerPhase::ReceiptObserved {
+                submission,
+                receipt,
+                ..
+            } => match &submit_contract.verification {
+                spec::SideEffectVerificationSpec::Receipt => {
+                    let output = callbacks
+                        .output_from_receipt(&ctx, &submit_inputs, prepared, submission, receipt)
+                        .await?;
+                    ErasedRunnerOutput::state_output(&ctx, &output)
                 }
-            }
+                spec::SideEffectVerificationSpec::Finalized { .. } => {
+                    let confirmation = callbacks
+                        .observe_confirmation(
+                            &ctx,
+                            submit_node,
+                            &submit_inputs,
+                            prepared,
+                            submission,
+                            receipt,
+                        )
+                        .await?;
+                    SideEffectEvidenceBuilder::new(&ctx).confirmation_observed(
+                        side_effect,
+                        &confirmation.evidence,
+                        confirmation.replay,
+                    )
+                }
+            },
             store::SideEffectLedgerPhase::Confirmed {
+                submission,
                 receipt,
                 confirmation,
                 ..
             } => match &submit_contract.verification {
                 spec::SideEffectVerificationSpec::Receipt => {
                     let output = callbacks
-                        .map_receipt_to_output(&ctx, submit_node, &submit_inputs, receipt)
+                        .output_from_receipt(&ctx, &submit_inputs, prepared, submission, receipt)
                         .await?;
                     ErasedRunnerOutput::state_output(&ctx, &output)
                 }
                 spec::SideEffectVerificationSpec::Finalized { .. } => {
                     let output = callbacks
-                        .map_confirmation_to_output(&ctx, submit_node, &submit_inputs, confirmation)
+                        .output_from_confirmation(
+                            &ctx,
+                            &submit_inputs,
+                            prepared,
+                            submission,
+                            receipt,
+                            confirmation,
+                        )
                         .await?;
                     ErasedRunnerOutput::state_output(&ctx, &output)
                 }

@@ -134,12 +134,14 @@ pub struct InvocationPrepared {
     pub claim_fencing_token: ClaimFencingToken,
     /// Optional exclusive resource lane key evidence echoed from the held lane.
     pub resource_key: Option<ResourceKeyEvidence>,
-    /// Optional prepared artifact id.
-    pub prepared_artifact_id: Option<ArtifactId>,
-    /// Optional prepared artifact content hash.
-    pub prepared_hash: Option<ContentDigest>,
-    /// Exact retained-artifact evidence identity for the prepared artifact, when any.
-    pub prepared_artifact_evidence_hash: Option<ContentDigest>,
+    /// Prepared invocation schema id.
+    pub prepared_schema_id: SchemaId,
+    /// Prepared artifact id.
+    pub prepared_artifact_id: ArtifactId,
+    /// Prepared artifact content hash.
+    pub prepared_hash: ContentDigest,
+    /// Exact retained-artifact evidence identity for the prepared artifact.
+    pub prepared_artifact_evidence_hash: ContentDigest,
 }
 
 /// Side-effect invocation started event payload.

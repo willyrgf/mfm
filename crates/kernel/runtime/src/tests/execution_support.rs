@@ -65,7 +65,7 @@ pub(super) async fn drive_side_effect_driver_empty<C>(
     callbacks: &C,
 ) -> Result<ErasedRunnerOutput>
 where
-    C: SideEffectDriverCallbacks + ?Sized,
+    C: SideEffectAdapter + ?Sized,
 {
     let node = node_by_output(fixture, cell_id);
     let attempt_id = attempt_id(
@@ -89,7 +89,7 @@ pub(super) async fn drive_side_effect_driver_from_store<C>(
     callbacks: &C,
 ) -> Result<ErasedRunnerOutput>
 where
-    C: SideEffectDriverCallbacks + ?Sized,
+    C: SideEffectAdapter + ?Sized,
 {
     with_prepared_runner_ctx!(
         fixture,
@@ -109,7 +109,7 @@ pub(super) async fn drive_side_effect_verify_driver_from_store<C>(
     callbacks: &C,
 ) -> Result<ErasedRunnerOutput>
 where
-    C: SideEffectVerifyCallbacks + ?Sized,
+    C: SideEffectAdapter + ?Sized,
 {
     with_prepared_runner_ctx!(
         fixture,

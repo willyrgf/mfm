@@ -16,7 +16,7 @@ use mfm_ids::{
     StateKind, StateVersion,
 };
 use mfm_program::{
-    AdapterBindingSpec, IdempotencyKey, NoContext, PureState, ReadState, SideEffectState,
+    AdapterBindingSpec, NoContext, PureState, ReadState, SideEffectIntent, SideEffectState,
     StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
@@ -557,51 +557,32 @@ impl StateSpec for ProofApplySideEffectState {
 impl SideEffectState for ProofApplySideEffectState {
     type Intent = ProofIntent;
     type IdempotencyInput = ProofIdempotencyInput;
+    type PreparedInvocation = ProofIntent;
     type Submission = ProofSubmission;
+    type RecoveryEvidence = ProofSideEffectResult;
     type Receipt = ProofReceipt;
     type Confirmation = ProofConfirmation;
-    type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
-
-    fn prepare_intent(
+    fn intent(
         &self,
         input: &Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Intent> {
-        Ok(ProofIntent {
+    ) -> StateResult<SideEffectIntent<Self::Intent, Self::IdempotencyInput>> {
+        let intent = ProofIntent {
             fact_n: input.n,
             action: self.config.action.to_string(),
-        })
-    }
-
-    fn idempotency_input(
-        &self,
-        _input: &Self::Input,
-        intent: &Self::Intent,
-        _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::IdempotencyInput> {
-        Ok(ProofIdempotencyInput {
+        };
+        let idempotency = ProofIdempotencyInput {
             fact_n: intent.fact_n,
             action: intent.action.clone(),
-        })
-    }
-
-    fn submit<'a>(
-        &'a self,
-        intent: &'a Self::Intent,
-        key: &'a IdempotencyKey<Self::IdempotencyInput>,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::SubmitFuture<'a> {
-        future::ready(Ok(ProofSubmission {
-            submission_id: format!("proof-submission-{}-{}", intent.action, intent.fact_n),
-            idempotency_digest: key.digest().as_str().to_owned(),
-        }))
+        };
+        Ok(SideEffectIntent::new(intent, idempotency))
     }
 
     fn output_from_receipt(
         &self,
         _input: &Self::Input,
-        _intent: &Self::Intent,
+        _prepared: &Self::PreparedInvocation,
+        _submission: &Self::Submission,
         receipt: &Self::Receipt,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
@@ -615,7 +596,9 @@ impl SideEffectState for ProofApplySideEffectState {
     fn output_from_confirmation(
         &self,
         _input: &Self::Input,
-        _intent: &Self::Intent,
+        _prepared: &Self::PreparedInvocation,
+        _submission: &Self::Submission,
+        _receipt: &Self::Receipt,
         confirmation: &Self::Confirmation,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {

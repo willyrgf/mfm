@@ -310,25 +310,19 @@ pub(super) fn event_artifact_requirements(
             });
         }
         KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            if let (Some(artifact_id), Some(hash), Some(evidence_hash)) = (
-                &payload.prepared_artifact_id,
-                &payload.prepared_hash,
-                &payload.prepared_artifact_evidence_hash,
-            ) {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::PreparedInvocation,
-                    artifact_id: artifact_id.clone(),
-                    evidence_hash: evidence_hash.clone(),
-                    digest: Some(hash.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: None,
-                    semantic_type_id: None,
-                    producer_node_id: Some(payload.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::PreparedInvocation),
-                });
-            }
+            requirements.push(EventArtifactRequirement {
+                source: EventArtifactReferenceSource::PreparedInvocation,
+                artifact_id: payload.prepared_artifact_id.clone(),
+                evidence_hash: payload.prepared_artifact_evidence_hash.clone(),
+                digest: Some(payload.prepared_hash.clone()),
+                byte_len: None,
+                media_type: None,
+                schema_id: Some(payload.prepared_schema_id.clone()),
+                semantic_type_id: None,
+                producer_node_id: Some(payload.node_id.clone()),
+                producer_seed_id: None,
+                artifact_role: Some(ArtifactRole::PreparedInvocation),
+            });
         }
         KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
             requirements.push(EventArtifactRequirement {

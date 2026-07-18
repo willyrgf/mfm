@@ -132,7 +132,17 @@ pub(super) fn side_effect_claim() -> KernelEventPayload {
     })
 }
 
+pub(super) fn prepared_artifact_ref() -> ArtifactEvidenceRef {
+    side_effect_artifact_ref(
+        artifact_id(181),
+        content_digest(181),
+        schema_id("mfm.test.side_effect_prepared", 180),
+        ArtifactRole::PreparedInvocation,
+    )
+}
+
 pub(super) fn side_effect_prepared() -> KernelEventPayload {
+    let evidence = prepared_artifact_ref();
     KernelEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -145,9 +155,10 @@ pub(super) fn side_effect_prepared() -> KernelEventPayload {
         claim_generation: 1,
         claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1").expect("token"),
         resource_key: None,
-        prepared_artifact_id: None,
-        prepared_hash: None,
-        prepared_artifact_evidence_hash: None,
+        prepared_schema_id: evidence.schema_id.clone().expect("prepared schema"),
+        prepared_artifact_id: evidence.artifact_id.clone(),
+        prepared_hash: evidence.digest.clone(),
+        prepared_artifact_evidence_hash: evidence.evidence_hash().expect("prepared evidence hash"),
     })
 }
 

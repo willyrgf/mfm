@@ -644,7 +644,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
     let expected_summary = [
         "committed run_state=Started commits=6 events=12 next_seq=7".to_owned(),
         format!(
-            "side_effect pair={} phase=invocation_prepared prepared=false resource_key=true touched_set=false",
+            "side_effect pair={} phase=invocation_prepared prepared=true resource_key=true touched_set=false",
             side_effect_pair_id()
         ),
         format!(

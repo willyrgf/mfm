@@ -41,12 +41,15 @@ async fn saga_projection_rebuilds_from_events() {
             ],
             saga_policy.clone(),
         ),
-        vec![side_effect_artifact_ref(
-            intent_artifact,
-            intent_digest,
-            schema_id("mfm.test.side_effect_intent", 70),
-            ArtifactRole::SideEffectIntent,
-        )],
+        vec![
+            side_effect_artifact_ref(
+                intent_artifact,
+                intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            ),
+            prepared_artifact_ref(),
+        ],
     )
     .await
     .expect("side-effect prepare");
@@ -211,12 +214,15 @@ async fn saga_projection_rebuilds_from_events() {
             ],
             terminal_policy.clone(),
         ),
-        vec![side_effect_artifact_ref(
-            terminal_intent_artifact,
-            terminal_intent_digest,
-            schema_id("mfm.test.side_effect_intent", 70),
-            ArtifactRole::SideEffectIntent,
-        )],
+        vec![
+            side_effect_artifact_ref(
+                terminal_intent_artifact,
+                terminal_intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            ),
+            prepared_artifact_ref(),
+        ],
     )
     .await
     .expect("terminal side-effect prepare");

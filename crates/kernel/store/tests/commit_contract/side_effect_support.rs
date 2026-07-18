@@ -5,6 +5,65 @@ pub(super) struct SideEffectPrepareFixture {
     pub(super) required_artifacts: Vec<ArtifactEvidenceRef>,
 }
 
+fn prepared_schema() -> SchemaId {
+    schema_id("mfm.test.side_effect_prepared", 83)
+}
+
+pub(super) fn prepared_artifact_ref_for_node(producer_node_id: NodeId) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id: artifact_id(83),
+        digest: content_digest(84),
+        byte_len: 256,
+        media_type: media_type("application/json"),
+        schema_id: Some(prepared_schema()),
+        semantic_type_id: None,
+        producer_node_id: Some(producer_node_id),
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::PreparedInvocation,
+    }
+}
+
+pub(super) fn prepared_artifact_ref() -> ArtifactEvidenceRef {
+    prepared_artifact_ref_for_node(submit_node_id())
+}
+
+fn bind_prepared_artifact(payload: &mut KernelEventPayload, evidence: &ArtifactEvidenceRef) {
+    let KernelEventPayload::SideEffectInvocationPrepared(prepared) = payload else {
+        panic!("expected prepared payload");
+    };
+    prepared.prepared_schema_id = evidence.schema_id.clone().expect("prepared schema");
+    prepared.prepared_artifact_id = evidence.artifact_id.clone();
+    prepared.prepared_hash = evidence.digest.clone();
+    prepared.prepared_artifact_evidence_hash =
+        evidence.evidence_hash().expect("prepared evidence hash");
+}
+
+pub(super) fn add_prepared_artifact_requirements(
+    payloads: &[KernelEventPayload],
+    required_artifacts: &mut Vec<ArtifactEvidenceRef>,
+) {
+    for payload in payloads {
+        let KernelEventPayload::SideEffectInvocationPrepared(prepared) = payload else {
+            continue;
+        };
+        let evidence = prepared_artifact_ref_for_node(prepared.node_id.clone());
+        let evidence_hash = evidence.evidence_hash().expect("prepared evidence hash");
+        if prepared.prepared_schema_id != evidence.schema_id.clone().expect("prepared schema")
+            || prepared.prepared_artifact_id != evidence.artifact_id
+            || prepared.prepared_hash != evidence.digest
+            || prepared.prepared_artifact_evidence_hash != evidence_hash
+        {
+            continue;
+        }
+        if required_artifacts.iter().any(|candidate| {
+            candidate.evidence_hash().expect("required artifact hash") == evidence_hash
+        }) {
+            continue;
+        }
+        required_artifacts.push(evidence);
+    }
+}
+
 pub(super) fn side_effect_prepare_fixture_for_ledger(
     ledger_key: events::SideEffectLedgerKey,
     resource_key: events::ResourceKeyEvidence,
@@ -33,9 +92,11 @@ pub(super) fn side_effect_prepare_fixture_for_ledger(
             .evidence_hash()
             .expect("intent evidence hash for prepare fixture");
     }
+    let prepared_evidence = prepared_artifact_ref_for_node(node_id);
+    bind_prepared_artifact(&mut prepared, &prepared_evidence);
     SideEffectPrepareFixture {
         payloads: vec![intent, claim, lane, prepared],
-        required_artifacts: vec![intent_evidence],
+        required_artifacts: vec![intent_evidence, prepared_evidence],
     }
 }
 
@@ -394,6 +455,7 @@ pub(super) fn side_effect_prepared_with_resource_key_for_epoch(
     resource_key: Option<events::ResourceKeyEvidence>,
 ) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
+    let evidence = prepared_artifact_ref();
     KernelEventPayload::SideEffectInvocationPrepared(side_effect::InvocationPrepared {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -406,9 +468,10 @@ pub(super) fn side_effect_prepared_with_resource_key_for_epoch(
         claim_generation,
         claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
         resource_key,
-        prepared_artifact_id: None,
-        prepared_hash: None,
-        prepared_artifact_evidence_hash: None,
+        prepared_schema_id: evidence.schema_id.clone().expect("prepared schema"),
+        prepared_artifact_id: evidence.artifact_id.clone(),
+        prepared_hash: evidence.digest.clone(),
+        prepared_artifact_evidence_hash: evidence.evidence_hash().expect("prepared evidence hash"),
     })
 }
 

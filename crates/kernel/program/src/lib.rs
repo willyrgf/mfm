@@ -892,25 +892,35 @@ pub trait ManagedWriteState: StateSpec<Effect = ManagedPlatformWrite> {
     ) -> Self::RunFuture<'a>;
 }
 
-/// Typed idempotency key for side-effect submission protocols.
+/// Deterministic state-authored mutation intent and idempotency material.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdempotencyKey<T: MfmValue> {
-    digest: ContentDigest,
-    _input: PhantomData<fn(T) -> T>,
+pub struct SideEffectIntent<Intent, Idempotency> {
+    intent: Intent,
+    idempotency: Idempotency,
 }
 
-impl<T: MfmValue> IdempotencyKey<T> {
-    /// Creates an idempotency key from a typed digest.
-    pub fn new(digest: ContentDigest) -> Self {
+impl<Intent, Idempotency> SideEffectIntent<Intent, Idempotency> {
+    /// Creates one immutable authored side-effect intent.
+    pub const fn new(intent: Intent, idempotency: Idempotency) -> Self {
         Self {
-            digest,
-            _input: PhantomData,
+            intent,
+            idempotency,
         }
     }
 
-    /// Returns the idempotency digest.
-    pub fn digest(&self) -> &ContentDigest {
-        &self.digest
+    /// Returns the mutation intent.
+    pub const fn intent(&self) -> &Intent {
+        &self.intent
+    }
+
+    /// Returns the material from which the adapter derives the idempotency key.
+    pub const fn idempotency(&self) -> &Idempotency {
+        &self.idempotency
+    }
+
+    /// Splits the authored intent into its typed parts.
+    pub fn into_parts(self) -> (Intent, Idempotency) {
+        (self.intent, self.idempotency)
     }
 }
 
@@ -920,46 +930,29 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
     type Intent: MfmValue;
     /// Deterministic idempotency input.
     type IdempotencyInput: MfmValue;
+    /// Immutable public invocation authority prepared before submission starts.
+    type PreparedInvocation: MfmValue;
     /// Submission result value.
     type Submission: MfmValue;
+    /// Public evidence retained when submission recovery is not yet terminal.
+    type RecoveryEvidence: MfmValue;
     /// Receipt value observed after submission.
     type Receipt: MfmValue;
     /// Confirmation value used to produce terminal output.
     type Confirmation: MfmValue;
-    /// Future returned by [`SideEffectState::submit`].
-    type SubmitFuture<'a>: Future<Output = StateResult<Self::Submission>> + Send + 'a
-    where
-        Self: 'a;
-
-    /// Builds a deterministic mutation intent from materialized input.
-    fn prepare_intent(
+    /// Builds the one deterministic authored intent from materialized state input.
+    fn intent(
         &self,
         input: &Self::Input,
         context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Intent>;
-
-    /// Builds deterministic idempotency input from materialized input and intent.
-    fn idempotency_input(
-        &self,
-        input: &Self::Input,
-        intent: &Self::Intent,
-        context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::IdempotencyInput>;
-
-    /// Submits the intent through declared capabilities.
-    fn submit<'a>(
-        &'a self,
-        intent: &'a Self::Intent,
-        key: &'a IdempotencyKey<Self::IdempotencyInput>,
-        caps: &'a Self::Caps,
-        context: &'a CertifiedContext<Self::Context>,
-    ) -> Self::SubmitFuture<'a>;
+    ) -> StateResult<SideEffectIntent<Self::Intent, Self::IdempotencyInput>>;
 
     /// Constructs terminal output from receipt-level side-effect evidence.
     fn output_from_receipt(
         &self,
         input: &Self::Input,
-        intent: &Self::Intent,
+        prepared: &Self::PreparedInvocation,
+        submission: &Self::Submission,
         receipt: &Self::Receipt,
         context: &CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output>;
@@ -968,7 +961,9 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
     fn output_from_confirmation(
         &self,
         input: &Self::Input,
-        intent: &Self::Intent,
+        prepared: &Self::PreparedInvocation,
+        submission: &Self::Submission,
+        receipt: &Self::Receipt,
         confirmation: &Self::Confirmation,
         context: &CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output>;
@@ -1027,6 +1022,12 @@ where
                 .map_err(|error| PlanError::Value(error.to_string()))?
                 .as_str(),
             "intent_semantic_type_id": S::Intent::semantic_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "prepared_invocation_schema_id": S::PreparedInvocation::schema_id()
+                .map_err(|error| PlanError::Value(error.to_string()))?
+                .as_str(),
+            "prepared_invocation_semantic_type_id": S::PreparedInvocation::semantic_id()
                 .map_err(|error| PlanError::Value(error.to_string()))?
                 .as_str(),
             "receipt_schema_id": S::Receipt::schema_id()

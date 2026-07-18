@@ -565,46 +565,31 @@ macro_rules! impl_runtime_side_effect_state {
         impl SideEffectState for $state {
             type Intent = FixtureSideEffectEvidence;
             type IdempotencyInput = FixtureSideEffectEvidence;
+            type PreparedInvocation = FixtureSideEffectEvidence;
             type Submission = FixtureSideEffectEvidence;
+            type RecoveryEvidence = FixtureSideEffectEvidence;
             type Receipt = FixtureSideEffectEvidence;
             type Confirmation = FixtureSideEffectEvidence;
-            type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
 
-            fn prepare_intent(
+            fn intent(
                 &self,
                 input: &Self::Input,
                 _context: &mfm_program::CertifiedContext<Self::Context>,
-            ) -> StateResult<Self::Intent> {
+            ) -> StateResult<mfm_program::SideEffectIntent<Self::Intent, Self::IdempotencyInput>>
+            {
                 let amount = serde_json::to_value(input)
                     .ok()
                     .and_then(|value| value.get("amount").and_then(serde_json::Value::as_u64))
                     .unwrap_or(self.config.multiplier);
-                Ok(fixture_side_effect_evidence(amount, $name, "typed-intent"))
-            }
-
-            fn idempotency_input(
-                &self,
-                _input: &Self::Input,
-                intent: &Self::Intent,
-                _context: &mfm_program::CertifiedContext<Self::Context>,
-            ) -> StateResult<Self::IdempotencyInput> {
-                Ok(intent.clone())
-            }
-
-            fn submit<'a>(
-                &'a self,
-                intent: &'a Self::Intent,
-                _key: &'a IdempotencyKey<Self::IdempotencyInput>,
-                _caps: &'a Self::Caps,
-                _context: &'a mfm_program::CertifiedContext<Self::Context>,
-            ) -> Self::SubmitFuture<'a> {
-                std::future::ready(Ok(intent.clone()))
+                let intent = fixture_side_effect_evidence(amount, $name, "typed-intent");
+                Ok(mfm_program::SideEffectIntent::new(intent.clone(), intent))
             }
 
             fn output_from_receipt(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
                 receipt: &Self::Receipt,
                 _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
@@ -614,7 +599,9 @@ macro_rules! impl_runtime_side_effect_state {
             fn output_from_confirmation(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
+                _receipt: &Self::Receipt,
                 confirmation: &Self::Confirmation,
                 _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {

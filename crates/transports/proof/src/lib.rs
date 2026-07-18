@@ -16,16 +16,17 @@ use mfm_collectors_proof::{
     ProofSubmission, RecordedProofFacts, MANUAL_RESOLUTION_PROOF_ACTION,
 };
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{short_stable_id_fragment, ContentDigest};
+use mfm_ids::ContentDigest;
+use mfm_program::{SideEffectState, StateSpec};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    MaterializedInputs, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
-    RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
-    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
-    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    load_materialized_struct_input, load_runner_config_for_node,
+    load_side_effect_artifact_for_node, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
+    MaterializedInputNode, MaterializedInputs, RunnerArtifactBuilder, RunnerCapabilityBinding,
+    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectAdapter,
+    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -43,6 +44,7 @@ const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.proof.runtime.deterministic.v1";
 /// Registers deterministic typed proof runners.
 pub fn register_deterministic_proof_runners(
     registry: &mut ErasedRunnerRegistry,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
@@ -73,13 +75,15 @@ pub fn register_deterministic_proof_runners(
         side_effect.descriptor_id().clone(),
         side_effect_factory.clone(),
         executable(side_effect_factory)?,
-        Arc::new(ProofSideEffectRunner),
+        Arc::new(ProofSideEffectRunner {
+            artifacts: artifacts.clone(),
+        }),
     )?;
     registrations.register_side_effect_verify_runner(
         side_effect.descriptor_id().clone(),
         read_factory.clone(),
         executable(read_factory)?,
-        Arc::new(ProofSideEffectRunner),
+        Arc::new(ProofSideEffectRunner { artifacts }),
     )?;
     let assemble_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
     registrations.register_runner(
@@ -118,11 +122,13 @@ impl ErasedNodeRunner for ProofReadRunner {
     }
 }
 
-struct ProofSideEffectRunner;
+struct ProofSideEffectRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+}
 
 impl ErasedNodeRunner for ProofSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move { run_side_effect(ctx).await })
+        Box::pin(async move { run_side_effect(ctx, self.artifacts.clone()).await })
     }
 }
 
@@ -147,7 +153,10 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
     Ok(output.finish())
 }
 
-async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
+async fn run_side_effect(
+    ctx: ErasedRunCtx<'_>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config_node = proof_side_effect_config_node(&ctx)?;
     let accept = ProofApplyConfig::new(ACCEPT_PROOF_ACTION)
         .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
@@ -160,7 +169,11 @@ async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRun
             ensure_config::<ProofApplyConfig>(&config_node.config_ref, &manual_resolution)?;
             (MANUAL_RESOLUTION_PROOF_ACTION, true)
         };
-    let callbacks = ProofSideEffectCallbacks { action, ambiguous };
+    let callbacks = ProofSideEffectCallbacks {
+        action: action.to_owned(),
+        ambiguous,
+        artifacts,
+    };
     if matches!(
         &ctx.node().framework,
         Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
@@ -194,107 +207,148 @@ fn proof_side_effect_config_node<'a>(
 }
 
 struct ProofSideEffectCallbacks {
-    action: &'static str,
+    action: String,
     ambiguous: bool,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
-impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
+async fn proof_state_material(
+    ctx: &ErasedRunCtx<'_>,
+    submit_node: &spec::NodeSpec,
+    submit_inputs: &MaterializedInputs,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> mfm_runtime::Result<(
+    ProofApplySideEffectState,
+    ProofFact,
+    mfm_program::CertifiedContext<mfm_program::NoContext>,
+)> {
+    let config = load_runner_config_for_node::<ProofApplyConfig>(submit_node, artifacts).await?;
+    let state = ProofApplySideEffectState::new(config)
+        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let input = load_materialized_struct_input::<ProofFact>(submit_inputs, artifacts).await?;
+    let context = ctx
+        .invocation_context_for_node(submit_node)?
+        .certified_context::<mfm_program::NoContext>()?;
+    Ok((state, input, context))
+}
+
+async fn load_proof_side_effect_artifact<T>(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    producer_node: &spec::NodeSpec,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> mfm_runtime::Result<T>
+where
+    T: mfm_values::MfmValue + serde::de::DeserializeOwned,
+{
+    load_side_effect_artifact_for_node::<T>(artifact, role, &producer_node.node_id, artifacts)
+        .await
+        .map(|(value, _)| value)
+}
+
+impl SideEffectAdapter for ProofSideEffectCallbacks {
     type Intent = ProofIntent;
     type Idempotency = ProofIdempotencyInput;
-    type PreparedInvocation = serde_json::Value;
+    type PreparedInvocation = ProofIntent;
     type Submission = ProofSubmission;
-    type SubmissionUnknownEvidence = ProofSideEffectResult;
-    type NotSubmittedProof = ProofSideEffectResult;
-    type AmbiguityEvidence = ProofSideEffectResult;
+    type RecoveryEvidence = ProofSideEffectResult;
+    type Receipt = ProofReceipt;
+    type Confirmation = ProofConfirmation;
+    type Output = ProofSideEffectResult;
 
-    fn intent_and_idempotency<'a, 'ctx>(
+    fn capability_binding(&self) -> mfm_runtime::Result<RunnerCapabilityBinding> {
+        proof_mutation_binding()
+    }
+
+    fn authored_intent<'a, 'ctx>(
         &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
-        let action = self.action;
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+    ) -> SideEffectDriverFuture<'a, mfm_program::SideEffectIntent<Self::Intent, Self::Idempotency>>
+    {
+        let artifacts = self.artifacts.clone();
         Box::pin(async move {
-            let idempotency = proof_idempotency_input(action);
-            let idem_hash = digest_value(&idempotency)?;
-            Ok(SideEffectIntentPlan::new(
-                proof_intent(action),
-                idempotency,
-                events::IdempotencyKeyRef::new(format!(
-                    "idem-{}",
-                    short_stable_id_fragment(idem_hash.as_str(), 16)
-                ))?,
-                proof_mutation_binding()?,
-            ))
+            let (state, input, context) =
+                proof_state_material(ctx, submit_node, submit_inputs, artifacts.as_ref()).await?;
+            state
+                .intent(&input, &context)
+                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
         })
     }
 
-    fn prepare_invocation<'a, 'ctx>(
+    fn prepare<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
-        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
-        Box::pin(async { Ok(None) })
-    }
-
-    fn reconstruct_prepared_invocation<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _prepared: &'a store::SideEffectArtifactProjection,
+        intent: &'a Self::Intent,
+        _idempotency: &'a Self::Idempotency,
     ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
-        Box::pin(async {
-            Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "deterministic proof side effect does not use prepared invocation evidence"
-                    .to_owned(),
-            ))
+        let prepared = intent.clone();
+        let expected_action = self.action.clone();
+        Box::pin(async move {
+            if prepared.action != expected_action {
+                return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "proof prepared action differs from configured intent".to_owned(),
+                ));
+            }
+            Ok(prepared)
         })
     }
 
-    fn submit_or_recover_submission<'a, 'ctx>(
+    fn load_prepared<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
-        _action: SideEffectProtocolAction,
-        _prepared: Option<Self::PreparedInvocation>,
+        submit_node: &'a spec::NodeSpec,
+        prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        let artifacts = self.artifacts.clone();
+        let expected_action = self.action.clone();
+        Box::pin(async move {
+            let prepared = load_proof_side_effect_artifact::<ProofIntent>(
+                prepared,
+                events::ArtifactRole::PreparedInvocation,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            if prepared.action != expected_action {
+                return Err(mfm_runtime::RuntimeError::InvalidRunStream(
+                    "retained proof prepared action differs from configured intent".to_owned(),
+                ));
+            }
+            Ok(prepared)
+        })
+    }
+
+    fn submit_prepared<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        prepared: Self::PreparedInvocation,
     ) -> SideEffectDriverFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        SideEffectSubmissionDecision<Self::Submission, Self::RecoveryEvidence>,
     > {
         Box::pin(async move {
             if self.ambiguous {
                 Ok(SideEffectSubmissionDecision::Unknown(
-                    proof_side_effect_result()?,
+                    proof_side_effect_result_for(&prepared, 0, "submission_unknown"),
                 ))
             } else {
-                Ok(SideEffectSubmissionDecision::Observed(proof_submission()?))
+                Ok(SideEffectSubmissionDecision::Observed(
+                    proof_submission_for(&prepared)?,
+                ))
             }
         })
     }
-}
-
-impl SideEffectVerifyCallbacks for ProofSideEffectCallbacks {
-    type Submission = ProofSubmission;
-    type Receipt = ProofReceipt;
-    type Confirmation = ProofConfirmation;
-    type Output = ProofSideEffectResult;
-    type NotSubmittedProof = ProofSideEffectResult;
-    type AmbiguityEvidence = ProofSideEffectResult;
-
-    fn recover_unknown_submission<'a, 'ctx>(
+    fn recover_unknown<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
         _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        _prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
+        prepared: Self::PreparedInvocation,
     ) -> SideEffectDriverFuture<
         'a,
-        SideEffectUnknownSubmissionDecision<
-            Self::Submission,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        SideEffectUnknownSubmissionDecision<Self::Submission, Self::RecoveryEvidence>,
     > {
         Box::pin(async move {
             if self.ambiguous {
@@ -303,64 +357,191 @@ impl SideEffectVerifyCallbacks for ProofSideEffectCallbacks {
                         .map_err(|error| {
                             mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
                         })?,
-                    evidence: proof_side_effect_result()?,
+                    evidence: proof_side_effect_result_for(&prepared, 1, "confirmed"),
                 })
             } else {
                 Ok(SideEffectUnknownSubmissionDecision::Observed(
-                    proof_submission()?,
+                    proof_submission_for(&prepared)?,
                 ))
             }
         })
     }
 
-    fn read_receipt<'a, 'ctx>(
+    fn observe_receipt<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
+        submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        _submission: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
-        Box::pin(async {
+        let artifacts = self.artifacts.clone();
+        Box::pin(async move {
+            let prepared = load_proof_side_effect_artifact::<ProofIntent>(
+                prepared,
+                events::ArtifactRole::PreparedInvocation,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            let submission = load_proof_side_effect_artifact::<ProofSubmission>(
+                submission,
+                events::ArtifactRole::Submission,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_submission(&prepared, &submission)?;
             Ok(SideEffectObservedEvidence::new(
-                proof_receipt()?,
+                proof_receipt_for(&submission),
                 proof_replay_evidence()?,
             ))
         })
     }
 
-    fn build_confirmation<'a, 'ctx>(
+    fn observe_confirmation<'a, 'ctx>(
         &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        _receipt: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
+        receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
-        Box::pin(async {
+        let artifacts = self.artifacts.clone();
+        Box::pin(async move {
+            let prepared = load_proof_side_effect_artifact::<ProofIntent>(
+                prepared,
+                events::ArtifactRole::PreparedInvocation,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            let submission = load_proof_side_effect_artifact::<ProofSubmission>(
+                submission,
+                events::ArtifactRole::Submission,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_submission(&prepared, &submission)?;
+            let receipt = load_proof_side_effect_artifact::<ProofReceipt>(
+                receipt,
+                events::ArtifactRole::Receipt,
+                ctx.node(),
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_receipt(&submission, &receipt)?;
             Ok(SideEffectObservedEvidence::new(
-                proof_confirmation()?,
+                proof_confirmation_for(&receipt),
                 proof_replay_evidence()?,
             ))
         })
     }
 
-    fn map_receipt_to_output<'a, 'ctx>(
+    fn output_from_receipt<'a, 'ctx>(
         &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
-        _submit_inputs: &'a MaterializedInputs,
-        _receipt: &'a store::SideEffectArtifactProjection,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_inputs: &'a MaterializedInputs,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
+        receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
-        Box::pin(async { proof_side_effect_result() })
+        let artifacts = self.artifacts.clone();
+        Box::pin(async move {
+            let submit_node = proof_side_effect_config_node(ctx)?;
+            let (state, input, context) =
+                proof_state_material(ctx, submit_node, submit_inputs, artifacts.as_ref()).await?;
+            let authored = state.intent(&input, &context).map_err(proof_state_error)?;
+            let prepared = load_proof_side_effect_artifact::<ProofIntent>(
+                prepared,
+                events::ArtifactRole::PreparedInvocation,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_prepared(authored.intent(), &prepared)?;
+            let submission = load_proof_side_effect_artifact::<ProofSubmission>(
+                submission,
+                events::ArtifactRole::Submission,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_submission(&prepared, &submission)?;
+            let receipt = load_proof_side_effect_artifact::<ProofReceipt>(
+                receipt,
+                events::ArtifactRole::Receipt,
+                ctx.node(),
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_receipt(&submission, &receipt)?;
+            state
+                .output_from_receipt(&input, &prepared, &submission, &receipt, &context)
+                .map_err(proof_state_error)
+        })
     }
 
-    fn map_confirmation_to_output<'a, 'ctx>(
+    fn output_from_confirmation<'a, 'ctx>(
         &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
-        _submit_inputs: &'a MaterializedInputs,
-        _confirmation: &'a store::SideEffectArtifactProjection,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_inputs: &'a MaterializedInputs,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
+        receipt: &'a store::SideEffectArtifactProjection,
+        confirmation: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
-        Box::pin(async { proof_side_effect_result() })
+        let artifacts = self.artifacts.clone();
+        Box::pin(async move {
+            let submit_node = proof_side_effect_config_node(ctx)?;
+            let (state, input, context) =
+                proof_state_material(ctx, submit_node, submit_inputs, artifacts.as_ref()).await?;
+            let authored = state.intent(&input, &context).map_err(proof_state_error)?;
+            let prepared = load_proof_side_effect_artifact::<ProofIntent>(
+                prepared,
+                events::ArtifactRole::PreparedInvocation,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_prepared(authored.intent(), &prepared)?;
+            let submission = load_proof_side_effect_artifact::<ProofSubmission>(
+                submission,
+                events::ArtifactRole::Submission,
+                submit_node,
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_submission(&prepared, &submission)?;
+            let receipt = load_proof_side_effect_artifact::<ProofReceipt>(
+                receipt,
+                events::ArtifactRole::Receipt,
+                ctx.node(),
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_receipt(&submission, &receipt)?;
+            let confirmation = load_proof_side_effect_artifact::<ProofConfirmation>(
+                confirmation,
+                events::ArtifactRole::Confirmation,
+                ctx.node(),
+                artifacts.as_ref(),
+            )
+            .await?;
+            ensure_proof_confirmation(&receipt, &confirmation)?;
+            state
+                .output_from_confirmation(
+                    &input,
+                    &prepared,
+                    &submission,
+                    &receipt,
+                    &confirmation,
+                    &context,
+                )
+                .map_err(proof_state_error)
+        })
     }
 }
 
@@ -492,37 +673,121 @@ fn proof_idempotency_input(action: &str) -> ProofIdempotencyInput {
     }
 }
 
-fn proof_submission() -> mfm_runtime::Result<ProofSubmission> {
-    let idempotency_digest = digest_value(&proof_idempotency_input(ACCEPT_PROOF_ACTION))?
-        .as_str()
-        .to_owned();
+fn proof_submission_for(intent: &ProofIntent) -> mfm_runtime::Result<ProofSubmission> {
+    let idempotency = ProofIdempotencyInput {
+        fact_n: intent.fact_n,
+        action: intent.action.clone(),
+    };
+    let idempotency_digest = digest_value(&idempotency)?.as_str().to_owned();
     Ok(ProofSubmission {
-        submission_id: "proof-submission-accept-1".to_owned(),
+        submission_id: format!("proof-submission-{}-{}", intent.action, intent.fact_n),
         idempotency_digest,
     })
 }
 
+fn proof_submission() -> mfm_runtime::Result<ProofSubmission> {
+    proof_submission_for(&proof_intent(ACCEPT_PROOF_ACTION))
+}
+
+fn proof_receipt_for(submission: &ProofSubmission) -> ProofReceipt {
+    ProofReceipt {
+        tx_hash: submission
+            .submission_id
+            .replacen("proof-submission-", "0xproof", 1)
+            .replace('-', ""),
+        submission_id: submission.submission_id.clone(),
+    }
+}
+
 fn proof_receipt() -> mfm_runtime::Result<ProofReceipt> {
-    Ok(ProofReceipt {
-        tx_hash: "0xproofaccept1".to_owned(),
-        submission_id: proof_submission()?.submission_id,
-    })
+    Ok(proof_receipt_for(&proof_submission()?))
+}
+
+fn proof_confirmation_for(receipt: &ProofReceipt) -> ProofConfirmation {
+    ProofConfirmation {
+        tx_hash: receipt.tx_hash.clone(),
+        confirmations: 1,
+    }
 }
 
 fn proof_confirmation() -> mfm_runtime::Result<ProofConfirmation> {
-    Ok(ProofConfirmation {
-        tx_hash: proof_receipt()?.tx_hash,
-        confirmations: 1,
-    })
+    Ok(proof_confirmation_for(&proof_receipt()?))
+}
+
+fn proof_side_effect_result_for(
+    intent: &ProofIntent,
+    confirmations: u64,
+    status: &str,
+) -> ProofSideEffectResult {
+    let submission_id = format!("proof-submission-{}-{}", intent.action, intent.fact_n);
+    ProofSideEffectResult {
+        tx_hash: submission_id
+            .replacen("proof-submission-", "0xproof", 1)
+            .replace('-', ""),
+        confirmations,
+        status: status.to_owned(),
+    }
 }
 
 fn proof_side_effect_result() -> mfm_runtime::Result<ProofSideEffectResult> {
-    let confirmation = proof_confirmation()?;
-    Ok(ProofSideEffectResult {
-        tx_hash: confirmation.tx_hash,
-        confirmations: confirmation.confirmations,
-        status: "confirmed".to_owned(),
-    })
+    Ok(proof_side_effect_result_for(
+        &proof_intent(ACCEPT_PROOF_ACTION),
+        1,
+        "confirmed",
+    ))
+}
+
+fn ensure_proof_prepared(intent: &ProofIntent, prepared: &ProofIntent) -> mfm_runtime::Result<()> {
+    if intent == prepared {
+        Ok(())
+    } else {
+        Err(mfm_runtime::RuntimeError::InvalidRunStream(
+            "proof prepared invocation differs from authored intent".to_owned(),
+        ))
+    }
+}
+
+fn ensure_proof_submission(
+    prepared: &ProofIntent,
+    submission: &ProofSubmission,
+) -> mfm_runtime::Result<()> {
+    if submission == &proof_submission_for(prepared)? {
+        Ok(())
+    } else {
+        Err(mfm_runtime::RuntimeError::InvalidRunStream(
+            "proof submission differs from prepared invocation".to_owned(),
+        ))
+    }
+}
+
+fn ensure_proof_receipt(
+    submission: &ProofSubmission,
+    receipt: &ProofReceipt,
+) -> mfm_runtime::Result<()> {
+    if receipt == &proof_receipt_for(submission) {
+        Ok(())
+    } else {
+        Err(mfm_runtime::RuntimeError::InvalidRunStream(
+            "proof receipt differs from submission evidence".to_owned(),
+        ))
+    }
+}
+
+fn ensure_proof_confirmation(
+    receipt: &ProofReceipt,
+    confirmation: &ProofConfirmation,
+) -> mfm_runtime::Result<()> {
+    if confirmation == &proof_confirmation_for(receipt) {
+        Ok(())
+    } else {
+        Err(mfm_runtime::RuntimeError::InvalidRunStream(
+            "proof confirmation differs from receipt evidence".to_owned(),
+        ))
+    }
+}
+
+fn proof_state_error(error: mfm_program::StateError) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn replay_verifier_id() -> mfm_runtime::Result<events::ReplayVerifierId> {

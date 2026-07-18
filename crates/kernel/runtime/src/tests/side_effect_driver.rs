@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn side_effect_driver_prepares_and_starts_one_step() {
+async fn side_effect_driver_persists_intent_before_preparation() {
     let fixture = fixture_with_first_side_effect_state();
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
 
@@ -9,8 +9,8 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
         .await
         .expect("driver output");
 
-    assert_eq!(output.staged_artifacts().len(), 2);
-    assert_eq!(output.payloads().len(), 4);
+    assert_eq!(output.staged_artifacts().len(), 1);
+    assert_eq!(output.payloads().len(), 2);
     assert!(matches!(
         output.payloads()[0],
         RunnerEventPayload::SideEffectIntentPersisted(_)
@@ -18,14 +18,6 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
     assert!(matches!(
         output.payloads()[1],
         RunnerEventPayload::SideEffectClaimed(_)
-    ));
-    assert!(matches!(
-        output.payloads()[2],
-        RunnerEventPayload::SideEffectInvocationPrepared(_)
-    ));
-    assert!(matches!(
-        output.payloads()[3],
-        RunnerEventPayload::SideEffectInvocationStarted(_)
     ));
     match &output.payloads()[0] {
         RunnerEventPayload::SideEffectIntentPersisted(payload) => {
@@ -505,7 +497,7 @@ async fn side_effect_driver_rejects_ambiguous_projection() {
 }
 
 #[tokio::test]
-async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
+async fn side_effect_driver_starts_prepared_projection_before_submission() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -525,21 +517,14 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
             .await
             .expect("driver output");
 
-    assert_eq!(output.staged_artifacts().len(), 1);
-    assert_eq!(output.payloads().len(), 2);
+    assert_eq!(output.staged_artifacts().len(), 0);
+    assert_eq!(output.payloads().len(), 1);
     match &output.payloads()[0] {
         RunnerEventPayload::SideEffectInvocationStarted(payload) => {
             assert_side_effect_binding!(payload, ledger_key, 1);
         }
         other => panic!("expected invocation started payload: {other:?}"),
     }
-    match &output.payloads()[1] {
-        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
-            assert_side_effect_binding!(payload, ledger_key, 1);
-        }
-        other => panic!("expected submission payload: {other:?}"),
-    }
-
     let required_artifacts = output
         .staged_artifacts()
         .iter()
@@ -582,9 +567,6 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
         .expect("side-effect projection");
     assert!(matches!(
         projection.phase(),
-        store::SideEffectLedgerPhase::SubmissionKnown {
-            status: store::SideEffectSubmissionState::Observed { .. },
-            ..
-        }
+        store::SideEffectLedgerPhase::Started { .. }
     ));
 }

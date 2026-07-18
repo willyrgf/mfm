@@ -301,12 +301,15 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
                 side_effect_prepared(),
             ],
         ),
-        vec![side_effect_artifact_ref(
-            intent_artifact,
-            intent_digest,
-            schema_id("mfm.test.side_effect_intent", 70),
-            ArtifactRole::SideEffectIntent,
-        )],
+        vec![
+            side_effect_artifact_ref(
+                intent_artifact,
+                intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            ),
+            prepared_artifact_ref(),
+        ],
     )
     .await
     .expect("prepare");

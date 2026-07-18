@@ -240,12 +240,10 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
             "resource_key": payload.resource_key.as_ref().map(resource_key_evidence_json),
-            "prepared_artifact_evidence_hash": payload
-                .prepared_artifact_evidence_hash
-                .as_ref()
-                .map(ContentDigest::as_str),
-            "prepared_artifact_id": payload.prepared_artifact_id.as_ref().map(ArtifactId::as_str),
-            "prepared_hash": payload.prepared_hash.as_ref().map(ContentDigest::as_str),
+            "prepared_schema_id": payload.prepared_schema_id.as_str(),
+            "prepared_artifact_evidence_hash": payload.prepared_artifact_evidence_hash.as_str(),
+            "prepared_artifact_id": payload.prepared_artifact_id.as_str(),
+            "prepared_hash": payload.prepared_hash.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectInvocationPrepared",
         }),

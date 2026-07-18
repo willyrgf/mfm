@@ -382,45 +382,29 @@ macro_rules! impl_side_effect_state {
         impl SideEffectState for $state {
             type Intent = LaunchValue;
             type IdempotencyInput = LaunchValue;
+            type PreparedInvocation = LaunchValue;
             type Submission = LaunchValue;
+            type RecoveryEvidence = LaunchValue;
             type Receipt = LaunchValue;
             type Confirmation = LaunchValue;
-            type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
 
-            fn prepare_intent(
+            fn intent(
                 &self,
                 input: &Self::Input,
                 _context: &CertifiedContext<Self::Context>,
-            ) -> StateResult<Self::Intent> {
-                Ok(LaunchValue {
+            ) -> StateResult<SideEffectIntent<Self::Intent, Self::IdempotencyInput>> {
+                let intent = LaunchValue {
                     amount: input.amount + self.config.multiplier,
                     label: input.label.clone(),
-                })
-            }
-
-            fn idempotency_input(
-                &self,
-                _input: &Self::Input,
-                intent: &Self::Intent,
-                _context: &CertifiedContext<Self::Context>,
-            ) -> StateResult<Self::IdempotencyInput> {
-                Ok(intent.clone())
-            }
-
-            fn submit<'a>(
-                &'a self,
-                intent: &'a Self::Intent,
-                _key: &'a IdempotencyKey<Self::IdempotencyInput>,
-                _caps: &'a Self::Caps,
-                _context: &'a CertifiedContext<Self::Context>,
-            ) -> Self::SubmitFuture<'a> {
-                std::future::ready(Ok(intent.clone()))
+                };
+                Ok(SideEffectIntent::new(intent.clone(), intent))
             }
 
             fn output_from_receipt(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
                 receipt: &Self::Receipt,
                 _context: &CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
@@ -430,7 +414,9 @@ macro_rules! impl_side_effect_state {
             fn output_from_confirmation(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
+                _receipt: &Self::Receipt,
                 confirmation: &Self::Confirmation,
                 _context: &CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {

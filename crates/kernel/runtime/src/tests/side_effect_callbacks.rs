@@ -33,85 +33,90 @@ impl TestSideEffectDriverCallbacks {
         self
     }
 
-    pub(super) fn intent_plan_for(
+    pub(super) fn authored_intent_for(
         &self,
         node_id: String,
         attempt_id: String,
-    ) -> Result<SideEffectIntentPlan<FixtureSideEffectEvidence, FixtureSideEffectEvidence>> {
-        Ok(SideEffectIntentPlan::new(
+    ) -> mfm_program::SideEffectIntent<FixtureSideEffectEvidence, FixtureSideEffectEvidence> {
+        mfm_program::SideEffectIntent::new(
             fixture_side_effect_evidence(21, node_id.clone(), attempt_id.clone()),
             fixture_side_effect_evidence(34, node_id, attempt_id),
-            events::IdempotencyKeyRef::new("mfm.test.driver.idem").expect("idempotency key"),
-            RunnerCapabilityBinding {
-                capability_kind: self.cap_kind.clone(),
-                capability_version: self.cap_version.clone(),
-                adapter_kind: self.adapter_kind.clone(),
-                adapter_version: self.adapter_version.clone(),
-            },
-        ))
+        )
     }
 }
 
-impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
+impl SideEffectAdapter for TestSideEffectDriverCallbacks {
     type Intent = FixtureSideEffectEvidence;
     type Idempotency = FixtureSideEffectEvidence;
-    type PreparedInvocation = serde_json::Value;
+    type PreparedInvocation = FixtureSideEffectEvidence;
     type Submission = FixtureSideEffectEvidence;
-    type SubmissionUnknownEvidence = FixtureSideEffectEvidence;
-    type NotSubmittedProof = FixtureSideEffectEvidence;
-    type AmbiguityEvidence = FixtureSideEffectEvidence;
+    type RecoveryEvidence = FixtureSideEffectEvidence;
+    type Receipt = FixtureSideEffectEvidence;
+    type Confirmation = FixtureSideEffectEvidence;
+    type Output = FixtureOutputValue;
 
-    fn intent_and_idempotency<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
-        let node_id = ctx.node().node_id.as_str().to_owned();
-        let attempt_id = ctx.attempt_id().as_str().to_owned();
-        Box::pin(async move { self.intent_plan_for(node_id, attempt_id) })
-    }
-
-    fn prepare_invocation<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
-        let node_id = ctx.node().node_id.as_str().to_owned();
-        let attempt_id = ctx.attempt_id().as_str().to_owned();
-        Box::pin(async move {
-            Ok(Some(serde_json::json!({
-                "attempt_id": attempt_id,
-                "node_id": node_id,
-                "prepared": true
-            })))
+    fn capability_binding(&self) -> Result<RunnerCapabilityBinding> {
+        Ok(RunnerCapabilityBinding {
+            capability_kind: self.cap_kind.clone(),
+            capability_version: self.cap_version.clone(),
+            adapter_kind: self.adapter_kind.clone(),
+            adapter_version: self.adapter_version.clone(),
         })
     }
 
-    fn reconstruct_prepared_invocation<'a, 'ctx>(
+    fn authored_intent<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+    ) -> SideEffectDriverFuture<'a, mfm_program::SideEffectIntent<Self::Intent, Self::Idempotency>>
+    {
+        let node_id = submit_node.node_id.as_str().to_owned();
+        let attempt_id = match &ctx.node().framework {
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => ctx
+                .projections()
+                .side_effect_for_pair(ctx.run_id(), &verify.pair_id)
+                .map(|projection| projection.intent.attempt_id.as_str().to_owned())
+                .unwrap_or_else(|| ctx.attempt_id().as_str().to_owned()),
+            _ => ctx.attempt_id().as_str().to_owned(),
+        };
+        Box::pin(async move { Ok(self.authored_intent_for(node_id, attempt_id)) })
+    }
+
+    fn prepare<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _intent: &'a Self::Intent,
+        _idempotency: &'a Self::Idempotency,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move { Ok(fixture_side_effect_evidence(35, node_id, attempt_id)) })
+    }
+
+    fn load_prepared<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
         prepared: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
         let prepared_artifact_id = prepared.artifact_id.clone();
         Box::pin(async move {
-            Ok(serde_json::json!({
-                "prepared_artifact_id": prepared_artifact_id.as_str()
-            }))
+            Ok(fixture_side_effect_evidence(
+                35,
+                prepared_artifact_id.as_str().to_owned(),
+                "reconstructed".to_owned(),
+            ))
         })
     }
 
-    fn submit_or_recover_submission<'a, 'ctx>(
+    fn submit_prepared<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-        _action: SideEffectProtocolAction,
-        _prepared: Option<Self::PreparedInvocation>,
+        _prepared: Self::PreparedInvocation,
     ) -> SideEffectDriverFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        SideEffectSubmissionDecision<Self::Submission, Self::RecoveryEvidence>,
     > {
         let decision = self.submission_decision.clone();
         let node_id = ctx.node().node_id.as_str().to_owned();
@@ -135,29 +140,15 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
             })
         })
     }
-}
-
-impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
-    type Submission = FixtureSideEffectEvidence;
-    type Receipt = FixtureSideEffectEvidence;
-    type Confirmation = FixtureSideEffectEvidence;
-    type Output = FixtureOutputValue;
-    type NotSubmittedProof = FixtureSideEffectEvidence;
-    type AmbiguityEvidence = FixtureSideEffectEvidence;
-
-    fn recover_unknown_submission<'a, 'ctx>(
+    fn recover_unknown<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        _prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
+        _prepared: Self::PreparedInvocation,
     ) -> SideEffectDriverFuture<
         'a,
-        SideEffectUnknownSubmissionDecision<
-            Self::Submission,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        SideEffectUnknownSubmissionDecision<Self::Submission, Self::RecoveryEvidence>,
     > {
         let decision = self.submission_decision.clone();
         let node_id = ctx.node().node_id.as_str().to_owned();
@@ -188,11 +179,12 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         })
     }
 
-    fn read_receipt<'a, 'ctx>(
+    fn observe_receipt<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
+        _prepared: &'a store::SideEffectArtifactProjection,
         _submission: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
         let evidence = fixture_side_effect_evidence_for_ctx(ctx, 89);
@@ -204,11 +196,13 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         })
     }
 
-    fn build_confirmation<'a, 'ctx>(
+    fn observe_confirmation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
+        _prepared: &'a store::SideEffectArtifactProjection,
+        _submission: &'a store::SideEffectArtifactProjection,
         _receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         let evidence = fixture_side_effect_evidence_for_ctx(ctx, 144);
@@ -220,11 +214,12 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         })
     }
 
-    fn map_receipt_to_output<'a, 'ctx>(
+    fn output_from_receipt<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
+        _prepared: &'a store::SideEffectArtifactProjection,
+        _submission: &'a store::SideEffectArtifactProjection,
         _receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         let output =
@@ -232,11 +227,13 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         Box::pin(async move { Ok(output) })
     }
 
-    fn map_confirmation_to_output<'a, 'ctx>(
+    fn output_from_confirmation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
+        _prepared: &'a store::SideEffectArtifactProjection,
+        _submission: &'a store::SideEffectArtifactProjection,
+        _receipt: &'a store::SideEffectArtifactProjection,
         _confirmation: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         let output =

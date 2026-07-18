@@ -241,18 +241,13 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 resource_key: optional_obj(json, "resource_key")?
                     .map(parse_resource_key_evidence)
                     .transpose()?,
-                prepared_artifact_id: optional_str(json, "prepared_artifact_id")?
-                    .map(parse_identity)
-                    .transpose()?,
-                prepared_hash: optional_str(json, "prepared_hash")?
-                    .map(parse_identity)
-                    .transpose()?,
-                prepared_artifact_evidence_hash: optional_str(
+                prepared_schema_id: parse_identity(required_str(json, "prepared_schema_id")?)?,
+                prepared_artifact_id: parse_identity(required_str(json, "prepared_artifact_id")?)?,
+                prepared_hash: parse_identity(required_str(json, "prepared_hash")?)?,
+                prepared_artifact_evidence_hash: parse_identity(required_str(
                     json,
                     "prepared_artifact_evidence_hash",
-                )?
-                .map(parse_identity)
-                .transpose()?,
+                )?)?,
             },
         )),
         "SideEffectInvocationStarted" => Ok(KernelEventPayload::SideEffectInvocationStarted(

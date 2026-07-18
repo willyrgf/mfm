@@ -66,11 +66,11 @@ use self::fact_support::{
 #[path = "side_effect_support.rs"]
 mod side_effect_support;
 use self::side_effect_support::{
-    default_side_effect_contract, resource_key, resource_lane_claim_intent, resource_lane_key,
-    side_effect_ambiguous, side_effect_attempt_failed, side_effect_attempt_started,
-    side_effect_claim, side_effect_failed, side_effect_intent, side_effect_ledger_key,
-    side_effect_output_cell, side_effect_pair_id, side_effect_prepared, side_effect_started,
-    side_effect_submission_observed, side_effect_submission_unknown,
+    default_side_effect_contract, prepared_artifact_ref, resource_key, resource_lane_claim_intent,
+    resource_lane_key, side_effect_ambiguous, side_effect_attempt_failed,
+    side_effect_attempt_started, side_effect_claim, side_effect_failed, side_effect_intent,
+    side_effect_ledger_key, side_effect_output_cell, side_effect_pair_id, side_effect_prepared,
+    side_effect_started, side_effect_submission_observed, side_effect_submission_unknown,
     side_effect_submit_attempt_completed, side_effect_submit_boundary_output_skipped,
     side_effect_verify_attempt_started, submission_schema, submit_node_id, unknown_schema,
     verify_node_id,

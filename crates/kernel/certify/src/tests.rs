@@ -5,10 +5,9 @@ use mfm_ids::{
     ContextResourceKind, ContextStage, OperationKind, OperationVersion,
 };
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, IdempotencyKey, MfmContext, MfmFactType as _,
-    NoContext, Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState,
-    ResourceClaim, RootBuilder, ScopeKey, SideEffectState, StateKey, StateRegistryBuilder,
-    StateResult, StateSpec,
+    build_root_with_registries, CanonicalSeed, MfmContext, MfmFactType as _, NoContext, Operation,
+    OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim, RootBuilder,
+    ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs};
 use serde::{Deserialize, Serialize};
@@ -430,44 +429,28 @@ impl_test_state_spec!(
 impl SideEffectState for MutatingState {
     type Intent = TestValue;
     type IdempotencyInput = TestValue;
+    type PreparedInvocation = TestValue;
     type Submission = TestValue;
+    type RecoveryEvidence = TestValue;
     type Receipt = TestValue;
     type Confirmation = TestValue;
-    type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
 
-    fn prepare_intent(
+    fn intent(
         &self,
         input: &Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Intent> {
-        Ok(TestValue {
+    ) -> StateResult<mfm_program::SideEffectIntent<Self::Intent, Self::IdempotencyInput>> {
+        let intent = TestValue {
             amount: input.amount * self.config.multiplier,
-        })
-    }
-
-    fn idempotency_input(
-        &self,
-        _input: &Self::Input,
-        intent: &Self::Intent,
-        _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::IdempotencyInput> {
-        Ok(intent.clone())
-    }
-
-    fn submit<'a>(
-        &'a self,
-        intent: &'a Self::Intent,
-        _key: &'a IdempotencyKey<Self::IdempotencyInput>,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::SubmitFuture<'a> {
-        std::future::ready(Ok(intent.clone()))
+        };
+        Ok(mfm_program::SideEffectIntent::new(intent.clone(), intent))
     }
 
     fn output_from_receipt(
         &self,
         _input: &Self::Input,
-        _intent: &Self::Intent,
+        _prepared: &Self::PreparedInvocation,
+        _submission: &Self::Submission,
         receipt: &Self::Receipt,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
@@ -477,7 +460,9 @@ impl SideEffectState for MutatingState {
     fn output_from_confirmation(
         &self,
         _input: &Self::Input,
-        _intent: &Self::Intent,
+        _prepared: &Self::PreparedInvocation,
+        _submission: &Self::Submission,
+        _receipt: &Self::Receipt,
         confirmation: &Self::Confirmation,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {

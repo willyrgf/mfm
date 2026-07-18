@@ -33,23 +33,26 @@ fn proof_side_effect_outputs_reflect_terminal_evidence_level() {
     .expect("state");
     let input = ProofFact { n: 7 };
     let context = mfm_program::CertifiedContext::no_context();
-    let intent = state.prepare_intent(&input, &context).expect("intent");
+    let authored = state.intent(&input, &context).expect("intent");
+    let prepared = authored.intent().clone();
+    let submission = ProofSubmission {
+        submission_id: "proof-submission-accept-7".to_owned(),
+        idempotency_digest: "proof-idempotency-7".to_owned(),
+    };
+    let receipt_evidence = ProofReceipt {
+        tx_hash: "0xreceipt".to_owned(),
+        submission_id: submission.submission_id.clone(),
+    };
 
     let receipt = state
-        .output_from_receipt(
-            &input,
-            &intent,
-            &ProofReceipt {
-                tx_hash: "0xreceipt".to_owned(),
-                submission_id: "proof-submission-accept-7".to_owned(),
-            },
-            &context,
-        )
+        .output_from_receipt(&input, &prepared, &submission, &receipt_evidence, &context)
         .expect("receipt output");
     let confirmation = state
         .output_from_confirmation(
             &input,
-            &intent,
+            &prepared,
+            &submission,
+            &receipt_evidence,
             &ProofConfirmation {
                 tx_hash: "0xconfirmed".to_owned(),
                 confirmations: 3,

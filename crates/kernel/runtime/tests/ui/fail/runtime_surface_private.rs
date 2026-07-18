@@ -33,7 +33,6 @@ fn side_effect_payload_builder_helpers() {
 }
 
 fn side_effect_callback_dto_fields() {
-    let _ = mfm_runtime::SideEffectIntentPlan::<(), ()> {};
     let _ = mfm_runtime::SideEffectReplayEvidence {};
     let _ = mfm_runtime::SideEffectObservedEvidence::<()> {};
 }

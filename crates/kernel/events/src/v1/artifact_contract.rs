@@ -452,7 +452,7 @@ impl ArtifactRole {
             Self::PreparedInvocation => ArtifactRoleContract {
                 role: self,
                 tag: "prepared_invocation",
-                schema: ArtifactSchemaPolicy::Absent,
+                schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
                 semantic: ArtifactSemanticPolicy::Absent,
                 producer: ArtifactProducerScope::NodeRequired,
                 staging: ArtifactStagingClass::SideEffectPreparedInvocation,

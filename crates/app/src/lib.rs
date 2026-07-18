@@ -251,8 +251,12 @@ pub fn production_runner_registry(
         fact_index,
         runtime_config.clone(),
     )?;
-    evm_collector::register_evm_collector_runners(&mut registry, artifacts, runtime_config)?;
-    mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
+    evm_collector::register_evm_collector_runners(
+        &mut registry,
+        artifacts.clone(),
+        runtime_config,
+    )?;
+    mfm_transports_proof::register_deterministic_proof_runners(&mut registry, artifacts)?;
     Ok(registry)
 }
 

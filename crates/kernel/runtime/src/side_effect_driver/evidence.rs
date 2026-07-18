@@ -20,71 +20,77 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         &self,
         side_effect: RunnerSideEffectBinding,
         claim: RuntimeSideEffectClaimAuthority,
-        prepared_invocation: Option<&Prepared>,
+        prepared_invocation: &Prepared,
     ) -> Result<ErasedRunnerOutput>
     where
-        Prepared: Serialize,
+        Prepared: MfmValue,
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let payloads = RunnerPayloadBuilder::new(self.ctx);
-        let prepared_artifact = prepared_invocation
-            .map(|prepared| artifacts.prepared_invocation(prepared))
-            .transpose()?;
+        let prepared_artifact = artifacts.prepared_invocation(prepared_invocation)?;
         let mut output = RunnerOutputBuilder::new(self.ctx);
-        if let Some(prepared_artifact) = &prepared_artifact {
-            output.stage_side_effect_artifact(
-                prepared_artifact,
-                side_effect.ledger_key.clone(),
-                side_effect.invocation_epoch,
-            )?;
-            let prepared_key = (
-                prepared_artifact.evidence().artifact_id.clone(),
-                prepared_artifact.evidence().evidence_hash()?,
-            );
-            if !self
-                .ctx
-                .projections()
-                .retention(self.ctx.run_id())
-                .is_some_and(|retention| retention.refs.contains_key(&prepared_key))
-            {
-                output.retain_runtime_evidence(prepared_artifact)?;
-            }
+        output.stage_side_effect_artifact(
+            &prepared_artifact,
+            side_effect.ledger_key.clone(),
+            side_effect.invocation_epoch,
+        )?;
+        let prepared_key = (
+            prepared_artifact.evidence().artifact_id.clone(),
+            prepared_artifact.evidence().evidence_hash()?,
+        );
+        if !self
+            .ctx
+            .projections()
+            .retention(self.ctx.run_id())
+            .is_some_and(|retention| retention.refs.contains_key(&prepared_key))
+        {
+            output.retain_runtime_evidence(&prepared_artifact)?;
         }
         output.payload(payloads.side_effect_invocation_prepared(
             side_effect.clone(),
-            prepared_artifact.as_ref(),
+            &prepared_artifact,
             claim.prepared_binding(),
         )?);
         output.payload(payloads.side_effect_invocation_started(side_effect, claim.claim_binding()));
         Ok(output.finish())
     }
 
-    /// Builds intent, claim, prepared-without-artifact, and started evidence.
-    pub(crate) fn prepare_and_start<Intent, Idempotency>(
+    /// Persists authored intent and claims the first invocation epoch.
+    pub(crate) fn claim_intent<Intent, Idempotency>(
         &self,
-        evidence: SideEffectPrepareEvidence<'_, Intent, Idempotency>,
+        evidence: SideEffectClaimEvidence<'_, Intent, Idempotency>,
     ) -> Result<ErasedRunnerOutput>
     where
         Intent: MfmValue,
         Idempotency: MfmValue,
-    {
-        self.prepare_and_start_with_artifact(evidence, None)
-    }
-
-    /// Builds intent, claim, prepared-with-artifact, and started evidence.
-    pub(crate) fn prepare_invocation_and_start<Intent, Idempotency, Prepared>(
-        &self,
-        evidence: SideEffectPrepareEvidence<'_, Intent, Idempotency>,
-        prepared_invocation: &Prepared,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Intent: MfmValue,
-        Idempotency: MfmValue,
-        Prepared: Serialize,
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
-        let prepared_artifact = artifacts.prepared_invocation(prepared_invocation)?;
-        self.prepare_and_start_with_artifact(evidence, Some(prepared_artifact))
+        let payloads = RunnerPayloadBuilder::new(self.ctx);
+        let intent_artifact = artifacts.side_effect_intent(evidence.intent)?;
+        let side_effect = evidence.side_effect;
+        let claim = evidence.claim;
+        let mut output = RunnerOutputBuilder::new(self.ctx);
+        output.stage_side_effect_runtime_evidence(&intent_artifact, &side_effect)?;
+        output.payload(payloads.side_effect_intent_persisted(
+            side_effect.clone(),
+            &intent_artifact,
+            evidence.idempotency,
+            side_effect_idempotency_key(evidence.idempotency)?,
+            evidence.capability_binding,
+        )?);
+        output.payload(payloads.side_effect_claimed(side_effect, claim.claim_binding()));
+        Ok(output.finish())
+    }
+
+    /// Crosses the durable started boundary without performing external IO.
+    pub(crate) fn start_prepared(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        claim: RunnerClaimBinding,
+    ) -> ErasedRunnerOutput {
+        let payload =
+            RunnerPayloadBuilder::new(self.ctx).side_effect_invocation_started(side_effect, claim);
+        ErasedRunnerOutput::new(vec![payload])
     }
 
     /// Builds not-submitted proof evidence.
@@ -269,43 +275,6 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
                 payloads.side_effect_ambiguous(side_effect, pair_role, ambiguity_code, artifact)
             },
         )
-    }
-
-    fn prepare_and_start_with_artifact<Intent, Idempotency>(
-        &self,
-        evidence: SideEffectPrepareEvidence<'_, Intent, Idempotency>,
-        prepared_artifact: Option<RunnerJsonArtifact>,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Intent: MfmValue,
-        Idempotency: MfmValue,
-    {
-        let artifacts = RunnerArtifactBuilder::new(self.ctx);
-        let payloads = RunnerPayloadBuilder::new(self.ctx);
-        let intent_artifact = artifacts.side_effect_intent(evidence.intent)?;
-        let side_effect = evidence.side_effect;
-        let claim = evidence.claim;
-
-        let mut output = RunnerOutputBuilder::new(self.ctx);
-        output.stage_side_effect_runtime_evidence(&intent_artifact, &side_effect)?;
-        if let Some(prepared_artifact) = &prepared_artifact {
-            output.stage_side_effect_runtime_evidence(prepared_artifact, &side_effect)?;
-        }
-        output.payload(payloads.side_effect_intent_persisted(
-            side_effect.clone(),
-            &intent_artifact,
-            evidence.idempotency,
-            evidence.idempotency_key,
-            evidence.capability_binding,
-        )?);
-        output.payload(payloads.side_effect_claimed(side_effect.clone(), claim.claim_binding()));
-        output.payload(payloads.side_effect_invocation_prepared(
-            side_effect.clone(),
-            prepared_artifact.as_ref(),
-            claim.prepared_binding(),
-        )?);
-        output.payload(payloads.side_effect_invocation_started(side_effect, claim.claim_binding()));
-        Ok(output.finish())
     }
 
     fn single_artifact_output<F>(

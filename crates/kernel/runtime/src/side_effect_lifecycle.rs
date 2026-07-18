@@ -160,11 +160,8 @@ pub(crate) fn open_attempt_disposition(
         store::SideEffectLedgerPhase::IntentPersisted { .. } => {
             Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
         }
-        store::SideEffectLedgerPhase::Claimed { .. } if projection.resource_key.is_some() => {
-            Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
-        }
         store::SideEffectLedgerPhase::Claimed { .. } => {
-            Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
+            Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
         }
         store::SideEffectLedgerPhase::Prepared { .. }
         | store::SideEffectLedgerPhase::Started { .. }

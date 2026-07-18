@@ -2,46 +2,39 @@ use super::*;
 
 impl SideEffectDriver {
     /// Drives one side-effect protocol step for a prepared runner context.
-    pub async fn drive<C>(ctx: ErasedRunCtx<'_>, callbacks: &C) -> Result<ErasedRunnerOutput>
+    pub async fn drive<A>(ctx: ErasedRunCtx<'_>, adapter: &A) -> Result<ErasedRunnerOutput>
     where
-        C: SideEffectDriverCallbacks + ?Sized,
+        A: SideEffectAdapter + ?Sized,
     {
         let view = SideEffectAttemptView::from_erased_context(&ctx)?;
-        let action = SideEffectProtocolAction::from_attempt_view(&view)?;
-        match action {
-            SideEffectProtocolAction::PrepareAndStart => {
-                Self::prepare_and_start(&ctx, callbacks).await
+        match SideEffectStep::from_attempt_view(&view)? {
+            SideEffectStep::Claim => Self::claim(&ctx, adapter).await,
+            SideEffectStep::Prepare { invocation_epoch } => {
+                Self::prepare(&ctx, adapter, &view, invocation_epoch).await
             }
-            SideEffectProtocolAction::PrepareAndStartClaimed { invocation_epoch } => {
-                Self::prepare_and_start_claimed(&ctx, callbacks, &view, invocation_epoch).await
+            SideEffectStep::Start { invocation_epoch } => {
+                Self::start(&ctx, &view, invocation_epoch)
             }
-            SideEffectProtocolAction::SubmitOrRecoverSubmission { invocation_epoch }
-            | SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
-                invocation_epoch,
-            } => {
-                Self::submit_or_recover_submission(&ctx, callbacks, &view, action, invocation_epoch)
-                    .await
+            SideEffectStep::Submit { invocation_epoch } => {
+                Self::submit(&ctx, adapter, &view, invocation_epoch).await
             }
-            SideEffectProtocolAction::CompleteSubmissionBoundary { invocation_epoch } => {
+            SideEffectStep::CompleteSubmissionBoundary { invocation_epoch } => {
                 side_effect_binding(&view, invocation_epoch)?;
-                let payloads = RunnerPayloadBuilder::new(&ctx);
                 let skip_reason = events::SkipReason {
                     code: events::ErrorCode::new("side_effect_submission_boundary")?,
                     safe_message: "side-effect submit boundary recorded; verification is delegated to the paired verify node".to_owned(),
                 };
-                Ok(ErasedRunnerOutput::new(vec![
-                    payloads.cell_skipped(skip_reason)
-                ]))
+                Ok(ErasedRunnerOutput::new(vec![RunnerPayloadBuilder::new(
+                    &ctx,
+                )
+                .cell_skipped(skip_reason)]))
             }
         }
     }
 
-    async fn prepare_and_start<C>(
-        ctx: &ErasedRunCtx<'_>,
-        callbacks: &C,
-    ) -> Result<ErasedRunnerOutput>
+    async fn claim<A>(ctx: &ErasedRunCtx<'_>, adapter: &A) -> Result<ErasedRunnerOutput>
     where
-        C: SideEffectDriverCallbacks + ?Sized,
+        A: SideEffectAdapter + ?Sized,
     {
         if matches!(
             ctx.node()
@@ -55,7 +48,7 @@ impl SideEffectDriver {
                 ctx.node().node_id
             )));
         }
-        let plan = callbacks.intent_and_idempotency(ctx).await?;
+        let plan = authored_plan(ctx, adapter, ctx.node(), ctx.inputs()).await?;
         let side_effect = runtime_side_effect_binding(ctx)?;
         let claim = claim_authority_for(
             ctx.run_id(),
@@ -65,33 +58,30 @@ impl SideEffectDriver {
             1,
             None,
         )?;
-        let prepared = callbacks.prepare_invocation(ctx, &plan).await?;
-        let builder = SideEffectEvidenceBuilder::new(ctx);
-        let evidence = SideEffectPrepareEvidence {
+        SideEffectEvidenceBuilder::new(ctx).claim_intent(SideEffectClaimEvidence {
             side_effect,
             claim,
             intent: &plan.intent,
             idempotency: &plan.idempotency,
-            idempotency_key: plan.idempotency_key,
             capability_binding: plan.capability_binding,
-        };
-        if let Some(prepared) = prepared {
-            builder.prepare_invocation_and_start(evidence, &prepared)
-        } else {
-            builder.prepare_and_start(evidence)
-        }
+        })
     }
 
-    async fn prepare_and_start_claimed<C>(
+    async fn prepare<A>(
         ctx: &ErasedRunCtx<'_>,
-        callbacks: &C,
+        adapter: &A,
         view: &SideEffectAttemptView<'_>,
         invocation_epoch: u32,
     ) -> Result<ErasedRunnerOutput>
     where
-        C: SideEffectDriverCallbacks + ?Sized,
+        A: SideEffectAdapter + ?Sized,
     {
-        let plan = callbacks.intent_and_idempotency(ctx).await?;
+        let plan = authored_plan(ctx, adapter, ctx.node(), ctx.inputs()).await?;
+        verify_authored_plan(
+            view.projection()
+                .ok_or_else(|| missing_driver_projection("side-effect projection"))?,
+            &plan,
+        )?;
         let side_effect = side_effect_binding(view, invocation_epoch)?;
         let expected = runtime_side_effect_binding(ctx)?;
         if expected.ledger_key != side_effect.ledger_key
@@ -102,7 +92,9 @@ impl SideEffectDriver {
                 ctx.node().node_id
             )));
         }
-        let prepared = callbacks.prepare_invocation(ctx, &plan).await?;
+        let prepared = adapter
+            .prepare(ctx, &plan.intent, &plan.idempotency)
+            .await?;
         let projection = view
             .projection()
             .ok_or_else(|| missing_driver_projection("claimed side-effect projection"))?;
@@ -120,67 +112,66 @@ impl SideEffectDriver {
         SideEffectEvidenceBuilder::new(ctx).prepare_claimed_invocation_and_start(
             side_effect,
             claim,
-            prepared.as_ref(),
+            &prepared,
         )
     }
 
-    async fn submit_or_recover_submission<C>(
+    fn start(
         ctx: &ErasedRunCtx<'_>,
-        callbacks: &C,
         view: &SideEffectAttemptView<'_>,
-        action: SideEffectProtocolAction,
+        invocation_epoch: u32,
+    ) -> Result<ErasedRunnerOutput> {
+        let claim = match view.phase() {
+            Some(store::SideEffectLedgerPhase::Prepared { claim, .. }) => RunnerClaimBinding {
+                claim_owner: claim.claim_owner.clone(),
+                claim_generation: claim.claim_generation,
+                claim_fencing_token: claim.claim_fencing_token.clone(),
+            },
+            _ => return Err(missing_driver_projection("prepared claim")),
+        };
+        Ok(SideEffectEvidenceBuilder::new(ctx)
+            .start_prepared(side_effect_binding(view, invocation_epoch)?, claim))
+    }
+
+    async fn submit<A>(
+        ctx: &ErasedRunCtx<'_>,
+        adapter: &A,
+        view: &SideEffectAttemptView<'_>,
         invocation_epoch: u32,
     ) -> Result<ErasedRunnerOutput>
     where
-        C: SideEffectDriverCallbacks + ?Sized,
+        A: SideEffectAdapter + ?Sized,
     {
-        let prepared = match view
+        let plan = authored_plan(ctx, adapter, ctx.node(), ctx.inputs()).await?;
+        verify_authored_plan(
+            view.projection()
+                .ok_or_else(|| missing_driver_projection("side-effect projection"))?,
+            &plan,
+        )?;
+        let prepared = view
             .projection()
             .and_then(|projection| projection.prepared_invocation.as_ref())
-        {
-            Some(prepared) => Some(
-                callbacks
-                    .reconstruct_prepared_invocation(ctx, prepared)
-                    .await?,
-            ),
-            None => None,
-        };
-        let decision = callbacks
-            .submit_or_recover_submission(ctx, action, prepared)
-            .await?;
+            .ok_or_else(|| missing_driver_projection("prepared invocation"))?;
+        let prepared = adapter.load_prepared(ctx, ctx.node(), prepared).await?;
+        let decision = adapter.submit_prepared(ctx, prepared).await?;
         let side_effect = side_effect_binding(view, invocation_epoch)?;
         let builder = SideEffectEvidenceBuilder::new(ctx);
-        let start_claim = match action {
-            SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission { .. } => {
-                match view.phase() {
-                    Some(store::SideEffectLedgerPhase::Prepared { claim, .. }) => {
-                        Some(RunnerClaimBinding {
-                            claim_owner: claim.claim_owner.clone(),
-                            claim_generation: claim.claim_generation,
-                            claim_fencing_token: claim.claim_fencing_token.clone(),
-                        })
-                    }
-                    _ => return Err(missing_driver_projection("prepared claim")),
-                }
-            }
-            _ => None,
-        };
         match decision {
             SideEffectSubmissionDecision::Observed(submission) => builder
                 .submission_observed_with_role(
                     side_effect,
                     events::SideEffectPairRole::Submit,
-                    start_claim,
+                    None,
                     &submission,
                 ),
             SideEffectSubmissionDecision::Unknown(evidence) => {
-                builder.submission_unknown(side_effect, start_claim, &evidence)
+                builder.submission_unknown(side_effect, None, &evidence)
             }
             SideEffectSubmissionDecision::NotSubmitted(proof) => builder
                 .not_submitted_proven_with_role(
                     side_effect,
                     events::SideEffectPairRole::Submit,
-                    start_claim,
+                    None,
                     &proof,
                 ),
             SideEffectSubmissionDecision::Ambiguous {
@@ -189,10 +180,60 @@ impl SideEffectDriver {
             } => builder.ambiguous(
                 side_effect,
                 events::SideEffectPairRole::Submit,
-                start_claim,
+                None,
                 ambiguity_code,
                 &evidence,
             ),
         }
     }
+}
+
+pub(crate) async fn authored_plan<A>(
+    ctx: &ErasedRunCtx<'_>,
+    adapter: &A,
+    submit_node: &spec::NodeSpec,
+    submit_inputs: &MaterializedInputs,
+) -> Result<AuthoredSideEffect<A::Intent, A::Idempotency>>
+where
+    A: SideEffectAdapter + ?Sized,
+{
+    let (intent, idempotency) = adapter
+        .authored_intent(ctx, submit_node, submit_inputs)
+        .await?
+        .into_parts();
+    AuthoredSideEffect::new(intent, idempotency, adapter.capability_binding()?)
+}
+
+pub(crate) fn verify_authored_plan<Intent, Idempotency>(
+    projection: &store::SideEffectProjection,
+    plan: &AuthoredSideEffect<Intent, Idempotency>,
+) -> Result<()>
+where
+    Intent: MfmValue,
+    Idempotency: MfmValue,
+{
+    let intent = &projection.intent;
+    let intent_schema_id = Intent::schema_id()
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let idempotency_schema_id = Idempotency::schema_id()
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let intent_hash = canonical_mfm_value(&plan.intent)?.content_digest();
+    let idempotency_hash = canonical_mfm_value(&plan.idempotency)?.content_digest();
+    let binding = &plan.capability_binding;
+    if intent.intent_schema_id != intent_schema_id
+        || intent.intent_hash != intent_hash
+        || intent.idempotency_input_schema_id != idempotency_schema_id
+        || intent.idempotency_input_hash != idempotency_hash
+        || intent.idempotency_key != plan.idempotency_key
+        || intent.capability_kind != binding.capability_kind
+        || intent.capability_version != binding.capability_version
+        || intent.adapter_kind != binding.adapter_kind
+        || intent.adapter_version != binding.adapter_version
+    {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} recomputed authored authority that differs from retained intent",
+            intent.node_id
+        )));
+    }
+    Ok(())
 }

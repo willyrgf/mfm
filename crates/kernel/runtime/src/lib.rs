@@ -76,10 +76,9 @@ pub use runners::{
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
-    preclaim_side_effect_resource_lane, SideEffectDriver, SideEffectDriverCallbacks,
-    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
-    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    preclaim_side_effect_resource_lane, SideEffectAdapter, SideEffectDriver,
+    SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
 pub use spec_authority::CertifiedRuntimeSpec;
 
@@ -98,7 +97,7 @@ use framework::{
 #[cfg(test)]
 use history::RuntimeRunView;
 #[cfg(test)]
-use runner_kit::{RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding};
+use runner_kit::{RunnerClaimBinding, RunnerSideEffectBinding};
 #[cfg(test)]
 use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemptView};
 

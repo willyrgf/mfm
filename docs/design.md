@@ -37,8 +37,9 @@ they do not own workflow semantics.
   executors over the store, and leases/claims are liveness coordination only.
 - Admission, drive, verify, and replay must not consult mutable registries or external policy
   oracles; outcome-affecting policy is resolved once into hash-defining certified spec material.
-- Side effects use typed intent, typed idempotency input, durable ledger events, and typed receipt
-  or recovery evidence.
+- Side effects use one state-authored typed intent plus idempotency input, required typed prepared
+  invocation authority, durable ledger events, and typed submission, receipt, confirmation, or
+  recovery evidence. State logic is pure; adapters alone prepare and submit external mutations.
 - Side-effect verification policy is hash-defining certified config. `RunAdmitted` may record
   launch audit evidence, but it is not independent finality or verification authority.
 - Certified saga decisions are derived from the certified spec plus append-only stream facts.
@@ -320,9 +321,10 @@ Replay and resume semantics follow the effect class:
 
 - Pure states replay by recomputing deterministic state behavior.
 - Read states replay from recorded read evidence. Replay must not call live transports.
-- Side-effect states resume from durable phase evidence such as intent, idempotency, preparation,
-  submission, receipt, confirmation, or recovery evidence. Resume must not duplicate external
-  mutations or infer mutation status from unstored state.
+- Side-effect states resume from durable phase evidence such as intent, idempotency, required
+  prepared invocation authority, submission, receipt, confirmation, or recovery evidence. Resume
+  must not duplicate external mutations or infer mutation status from unstored state. The kernel
+  derives the full schema-bound idempotency key; adapters cannot supply or truncate it.
 - Replay never constructs live transports or signer providers.
 
 Portfolio holding intent is direct and aggregate-validated: each symbol is a `Native` source or an
@@ -731,8 +733,9 @@ cleanup authority before interruption. `SideEffectInvocationPrepared` and every 
 owned by `SideEffectLifecycle`; recovery either resumes from the concrete ledger phase, records
 evidence-backed terminal side-effect outcome, or reports an operational block.
 
-Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
-signer references. Signed raw transactions are bearer mutation material and remain transient
+Prepared-invocation artifacts are required before the invocation-started boundary and may retain
+unsigned mutation plans, expected hashes, and non-secret signer references. Preparation runs only
+under a committed claim. Signed raw transactions are bearer mutation material and remain transient
 submit-time bytes inside the mutation adapter. They are neither serializable typed values nor
 cloneable service results. The explicit user-selected `keystore tx-sign --out` file is the only
 non-run bearer-output boundary; CLI output reports distinct `signing_digest` and

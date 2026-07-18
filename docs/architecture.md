@@ -646,8 +646,9 @@ Before merging a change, verify:
 - the crate name describes a durable abstraction
 - typed specs remain the only runtime contract
 - new public values/configs use typed descriptors and no floats/secrets
-- side effects have typed intent, idempotency, receipt/recovery, one mutation authority, and no
-  retained signed raw transactions
+- side effects have one state-authored intent/idempotency pair, required typed prepared authority,
+  typed submission and receipt/recovery evidence, adapter-only mutation IO, and no retained signed
+  raw transactions
 - deterministic signing requirements are explicit profile ids checked by callers and providers,
   with no unconstrained or fallback signer binding
 - certified saga and side-effect verification policy are hash-defining spec data, not policy
