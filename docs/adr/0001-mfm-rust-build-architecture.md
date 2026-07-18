@@ -1,7 +1,8 @@
 # ADR 0001: MFM Rust build architecture
 
-- Status: proposed for owner approval
+- Status: accepted
 - Date: 2026-07-18
+- Accepted: 2026-07-18
 - Decision owner: MFM platform owner
 - Evidence: [slow-build baseline](../slow-build-baseline.md), R2-01 through R2-09
 - Governing plan: [RFC_SLOW_BUILDS.md](../../RFC_SLOW_BUILDS.md)

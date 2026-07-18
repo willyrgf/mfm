@@ -1,6 +1,6 @@
 # RFC: evidence-led Rust build architecture for MFM
 
-Status: architecture selected; owner approval pending
+Status: architecture accepted; Nixfied handoff under final review
 
 Date: 2026-07-18
 
@@ -11,9 +11,8 @@ reverted, and the old Phases 09–17 are withdrawn.
 ## Executive decision
 
 MFM selects the existing Cargo/Nix/Nixfied boundary and adds no new compiler
-cache. The decision is recorded in
-[ADR 0001](docs/adr/0001-mfm-rust-build-architecture.md) and remains proposed
-until the owner accepts R2-10.
+cache. The owner accepted the decision on 2026-07-18; it is recorded in
+[ADR 0001](docs/adr/0001-mfm-rust-build-architecture.md).
 
 MFM uses one pinned build environment with three explicit artifact lanes:
 
@@ -995,7 +994,7 @@ This phase defines rollout prerequisites but does not silently enable the
 winner. Implementation and rollout require a new, small, reviewable plan after
 the architecture and any upstream dependencies are accepted.
 
-Decision proposed for owner approval:
+Decision accepted by the owner on 2026-07-18:
 
 - keep direct incremental Cargo in a worktree-local target for development;
 - keep the compact Cargo target as the broad local verification mechanism,
