@@ -485,6 +485,7 @@ pub(super) async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
             request.evidence,
             store.expected_next_seq(&run_id).await.expect("next seq"),
         )
+        .await
         .expect("prepare fact run launch");
     scheduler
         .start_run(&store, launch)

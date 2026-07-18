@@ -170,15 +170,13 @@ async fn launch_rejects_context_bound_output_runner_without_extractor() {
     let scheduler = test_scheduler(registry);
     let store = TestTypedRunStore::new();
 
-    let error = match prepare_fixture_launch(
-        &scheduler,
-        &store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    ) {
-        Ok(_) => panic!("context-bound output runner without extractor must reject launch"),
-        Err(error) => error,
-    };
+    let error =
+        match prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+            .await
+        {
+            Ok(_) => panic!("context-bound output runner without extractor must reject launch"),
+            Err(error) => error,
+        };
     assert!(matches!(
         error,
         RuntimeError::RunnerBinding(message)

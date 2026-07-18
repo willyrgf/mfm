@@ -29,8 +29,8 @@ mod transaction;
 
 pub use transaction::{
     is_evm_transaction_replay_intent, register_evm_transaction_runner,
-    verify_evm_transaction_replay, EvmSigningProviderBindFuture, EvmTransactionRunnerCapabilities,
-    EvmTransactionSessionBindFuture,
+    verify_evm_transaction_replay, EvmMutationValidationFuture, EvmSigningProviderBindFuture,
+    EvmTransactionRunnerCapabilities, EvmTransactionSessionBindFuture,
 };
 
 pub(crate) const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";

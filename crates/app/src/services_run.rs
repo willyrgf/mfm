@@ -92,6 +92,7 @@ where
                     req.evidence.clone(),
                     expected_next_seq,
                 )
+                .await
                 .map_err(|error| {
                     runtime_error_with_launch_context(error, &req.evidence.entry_point)
                 })?;
@@ -285,6 +286,7 @@ where
                 context.read.view().projection_snapshot(),
                 &launch_evidence,
             )
+            .await
             .map_err(|error| {
                 runtime_error_with_launch_context(error, &launch_evidence.entry_point)
             })?;

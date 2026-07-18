@@ -830,7 +830,11 @@ where
     canonical_json(value)
 }
 
-pub(crate) fn side_effect_idempotency_key<T>(value: &T) -> Result<events::IdempotencyKeyRef>
+/// Derives the canonical runtime idempotency key for typed side-effect input.
+///
+/// Domain replay verifiers use this helper to recompute the exact key authored by the live
+/// side-effect driver rather than maintaining a second hashing formula.
+pub fn side_effect_idempotency_key<T>(value: &T) -> Result<events::IdempotencyKeyRef>
 where
     T: MfmValue,
 {

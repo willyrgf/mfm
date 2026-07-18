@@ -7,6 +7,7 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
     let mut store = TestTypedRunStore::new();
     let launch =
         prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+            .await
             .expect("prepare launch");
 
     let authority =
@@ -80,8 +81,8 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         .expect("binding validation");
 }
 
-#[test]
-fn run_start_rejects_invalid_capability_implementation_bindings() {
+#[tokio::test]
+async fn run_start_rejects_invalid_capability_implementation_bindings() {
     #[derive(Clone, Copy, Debug)]
     enum Case {
         MissingImplementation,
@@ -134,6 +135,7 @@ fn run_start_rejects_invalid_capability_implementation_bindings() {
         let store = TestTypedRunStore::new();
         let error =
             prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+                .await
                 .err()
                 .expect("invalid capability implementation binding must reject launch");
         assert!(

@@ -30,7 +30,12 @@ pub(crate) fn register_evm_runners(
             mfm_signers_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID,
         )?,
         move |binding, signer_ref| {
-            validate_runtime.validate_evm_mutation_binding(binding, signer_ref)
+            let runtime = Arc::clone(&validate_runtime);
+            Box::pin(async move {
+                runtime
+                    .validate_evm_mutation_binding(binding, signer_ref)
+                    .await
+            })
         },
         move |binding| {
             let runtime = Arc::clone(&bind_transaction_runtime);

@@ -196,6 +196,7 @@ async fn admit_configured_target_without_driving(
                 .await
                 .expect("expected next sequence"),
         )
+        .await
         .expect("prepare admission");
     assert!(matches!(
         scheduler

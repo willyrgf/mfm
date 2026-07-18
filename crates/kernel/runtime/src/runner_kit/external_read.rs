@@ -99,11 +99,16 @@ where
     S::Input: DeserializeOwned,
     E: ExternalReadPlanExecutor<S> + 'static,
 {
-    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> Result<()> {
-        let config = load_launch_config_for_node::<S::Config>(&ctx, ctx.node())?;
-        let state =
-            S::new(config).map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
-        self.executor.validate_ingress(ctx, &state)
+    fn validate_ingress<'a>(
+        &'a self,
+        ctx: RunnerIngressContext<'a>,
+    ) -> crate::RunnerIngressFuture<'a> {
+        Box::pin(async move {
+            let config = load_launch_config_for_node::<S::Config>(&ctx, ctx.node())?;
+            let state =
+                S::new(config).map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
+            self.executor.validate_ingress(ctx, &state)
+        })
     }
 
     fn context_output_extractor(&self) -> Option<&dyn ContextOutputExtractor> {

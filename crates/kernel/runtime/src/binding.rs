@@ -213,7 +213,7 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
-    pub(crate) fn validate_launch_ingress(
+    pub(crate) async fn validate_launch_ingress(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         launch: &RunLaunchEvidence,
@@ -222,7 +222,7 @@ impl BoundRuntimeContext {
         for node in runtime_spec.executable_nodes() {
             if node.framework.is_none() {
                 collect_runtime_config_requirement(
-                    self.validate_node_ingress(runtime_spec, node, launch),
+                    self.validate_node_ingress(runtime_spec, node, launch).await,
                     &mut required,
                 )?;
             }
@@ -236,7 +236,7 @@ impl BoundRuntimeContext {
     /// completed node cannot regain work, so revalidating its process-local provider would make
     /// later deterministic work depend on configuration it no longer needs. Pending domain nodes
     /// retain the same ingress check before the scheduler acquires a claim.
-    pub(crate) fn validate_pending_launch_ingress(
+    pub(crate) async fn validate_pending_launch_ingress(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &mfm_ids::RunId,
@@ -251,7 +251,7 @@ impl BoundRuntimeContext {
                     .is_none()
             {
                 collect_runtime_config_requirement(
-                    self.validate_node_ingress(runtime_spec, node, launch),
+                    self.validate_node_ingress(runtime_spec, node, launch).await,
                     &mut required,
                 )?;
             }
@@ -309,7 +309,7 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
-    fn validate_node_ingress(
+    async fn validate_node_ingress(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         node: &spec::NodeSpec,
@@ -319,6 +319,7 @@ impl BoundRuntimeContext {
         binding
             .runner
             .validate_ingress(RunnerIngressContext::new(runtime_spec, node, launch))
+            .await
     }
 }
 

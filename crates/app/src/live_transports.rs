@@ -67,7 +67,7 @@ impl LiveTransportRuntime {
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmReadSession>> {
-        let route = self.evm_route(&binding)?;
+        let route = self.evm_route_async(&binding).await?;
         mfm_transports_evm::EvmJsonRpcSession::bind(
             binding.clone(),
             route.source_ref().clone(),
@@ -85,7 +85,7 @@ impl LiveTransportRuntime {
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmTransactionSession>> {
-        let route = self.evm_route(&binding)?;
+        let route = self.evm_route_async(&binding).await?;
         mfm_transports_evm::EvmJsonRpcSession::bind(
             binding.clone(),
             route.source_ref().clone(),
@@ -99,16 +99,28 @@ impl LiveTransportRuntime {
         .map_err(|error| evm_transport_capability_error(&binding, error))
     }
 
-    pub(crate) fn validate_evm_mutation_binding(
+    pub(crate) async fn validate_evm_mutation_binding(
         &self,
-        binding: &EvmNetworkBinding,
-        signer_ref: &SignerRef,
+        binding: EvmNetworkBinding,
+        signer_ref: SignerRef,
     ) -> mfm_runtime::Result<()> {
-        self.validate_evm_network_binding(binding)
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-        self.assemble_evm_signer(signer_ref.clone())
-            .map(|_| ())
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))
+        let runtime_config = self.runtime_config.clone();
+        tokio::task::spawn_blocking(move || {
+            let runtime = Self::new(runtime_config);
+            runtime
+                .validate_evm_network_binding(&binding)
+                .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+            runtime
+                .assemble_evm_signer(signer_ref)
+                .map(|_| ())
+                .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))
+        })
+        .await
+        .map_err(|_| {
+            mfm_runtime::RuntimeError::RunnerBinding(
+                "EVM mutation ingress validation task failed".to_owned(),
+            )
+        })?
     }
 
     pub(crate) async fn bind_evm_signer(
@@ -160,6 +172,23 @@ impl LiveTransportRuntime {
                 evm_provider_failure(binding, code)
             },
         )
+    }
+
+    async fn evm_route_async(
+        &self,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<mfm_runtime_config::EvmRpcRoute> {
+        let runtime_config = self.runtime_config.clone();
+        let binding = binding.clone();
+        let diagnostic_binding = binding.clone();
+        tokio::task::spawn_blocking(move || Self::new(runtime_config).evm_route(&binding))
+            .await
+            .map_err(|_| {
+                evm_provider_failure(
+                    &diagnostic_binding,
+                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                )
+            })?
     }
 
     fn btc_router_optional(

@@ -61,10 +61,14 @@ different durable bearer-material design.
 It never retains signature scalars, a signed envelope, raw transaction bytes, endpoint, auth header,
 provider body, keystore path, unlock path, password, private key, or mnemonic.
 
-The ordinary path keeps the signed bearer in a bounded process-local one-shot cache between prepare
-and submit. Submission consumes the same bytes. If the process is lost, recovery reconstructs the
-retained envelope and asks the certified deterministic signer to regenerate it; the resulting hash
-must equal prepared authority before any rebroadcast.
+The ordinary path keeps the signed bearer in a bounded process-local cache between prepare and
+submit. Every preparation reserves capacity before nonce, fee, gas, or signer access. Saturation
+blocks the attempt without evicting or deduplicating an active envelope. Submission leases the same
+bytes; uncertainty returns the lease to the cache, while observation or ambiguity destroys it. If
+the process is lost, recovery reconstructs the retained envelope and asks the certified
+deterministic signer to regenerate it; the resulting hash must equal prepared authority before any
+rebroadcast. Runtime route reads, keystore reads, unlock/KDF work, and signer validation execute on
+a blocking worker rather than an async runtime worker.
 
 ## Submission and recovery
 
@@ -72,8 +76,10 @@ must equal prepared authority before any rebroadcast.
 transaction lookup must then match chain id, nonce, sender, destination/creation kind, value, input,
 gas, fees, and access list. Persisted observation omits signatures and raw bytes.
 
-Recovery first performs exact-hash lookup. If absent, it may rebroadcast only the identical prepared
-envelope and look up the same hash again. Empty lookup, transport uncertainty, an external writer
+Recovery first performs exact-hash lookup, including when a restarted process resumes an invocation
+already recorded as started. Only when lookup is missing or unavailable may it regenerate and
+rebroadcast the identical prepared envelope, then look up the same hash again. Empty lookup,
+transport uncertainty, an external writer
 occupying the nonce, or an inconclusive rebroadcast remains `SubmissionUnknown`. Standard JSON-RPC
 cannot prove that a transaction was never submitted, so this path never emits
 `NotSubmittedProven` and never chooses a replacement nonce under the same prepared invocation.
@@ -103,10 +109,12 @@ evidence retains the fresh receipt, canonical block, head, checked depth, and re
 
 ## Replay and secret boundary
 
-The EVM transaction replay verifier decodes retained typed intent, prepared invocation, transaction,
-receipt, and confirmation artifacts. It recomputes the unsigned plan, fee relation, signing digest,
-CREATE address, lookup equality, receipt/log coherence, canonical block equality, and confirmation
-depth. Replay never loads current runtime config, opens a route, calls JSON-RPC, constructs a signer,
-or opens a keystore. Since signature material is deliberately absent, replay verifies the retained
-expected-hash authority and its downstream relations; it does not claim an offline proof of an
-omitted signature.
+The EVM transaction replay verifier reconstructs the submit state from certified config, input, and
+context. It reauthors the intent, runtime idempotency key, and sender-lane resource key, then decodes
+the retained prepared invocation, transaction, receipt, and confirmation artifacts and invokes the
+same state output reducer used live. It also recomputes the unsigned plan, fee relation, signing
+digest, CREATE address, lookup equality, receipt/log coherence, canonical block equality, and
+confirmation depth. Replay never loads current runtime config, opens a route, calls JSON-RPC,
+constructs a signer, or opens a keystore. Since signature material is deliberately absent, replay
+verifies the retained expected-hash authority and its downstream relations; it does not claim an
+offline proof of an omitted signature.

@@ -27,6 +27,9 @@ pub type ErasedRunnerFuture<'a> =
 pub type PreInvocationRunnerFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ErasedRunnerOutput>> + Send + 'a>>;
 
+/// Boxed future returned by a runner ingress validator.
+pub type RunnerIngressFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
 /// Type-aware validator for context-bound state-output artifacts.
 pub trait ContextOutputExtractor: Send + Sync {
     /// Validates decoded output context metadata against the certified output-cell context.
@@ -114,8 +117,8 @@ impl<'a> RunnerIngressContext<'a> {
 /// store-verified input cell evidence and certified capability descriptors.
 pub trait ErasedNodeRunner: Send + Sync {
     /// Validates process-local capability required to admit this certified node.
-    fn validate_ingress(&self, _ctx: RunnerIngressContext<'_>) -> Result<()> {
-        Ok(())
+    fn validate_ingress<'a>(&'a self, _ctx: RunnerIngressContext<'a>) -> RunnerIngressFuture<'a> {
+        Box::pin(async { Ok(()) })
     }
 
     /// Returns type-aware output context validation for context-bound state outputs.

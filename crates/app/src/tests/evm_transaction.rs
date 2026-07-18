@@ -316,7 +316,7 @@ async fn certified_transaction_resumes_unknown_submission_and_replays_without_li
             event.payload(),
             KernelEventPayload::SideEffectSubmissionUnknown(_)
         )));
-    assert_eq!(signer_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
     drop(launch_services);
     assert!(store
         .expire_execution_claim_for_test(&run_id)
@@ -336,7 +336,7 @@ async fn certified_transaction_resumes_unknown_submission_and_replays_without_li
         .await
         .expect("resume unknown transaction");
     assert_eq!(resumed.run_mode, RunModeStatus::Completed);
-    assert_eq!(signer_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(signer_calls.load(Ordering::SeqCst), 2);
     {
         let submissions = session.submitted.lock().expect("submitted bytes");
         assert_eq!(submissions.len(), 3);
@@ -429,16 +429,18 @@ fn transaction_runners(
             CapabilityImplementationId::new("mfm.test.deterministic-signer")
                 .expect("signing implementation"),
             |binding, signer_ref| {
-                if binding.network_id().as_str() == "ethereum-mainnet"
-                    && binding.expected_chain_id() == 1
-                    && signer_ref.as_str() == "deployer"
-                {
-                    Ok(())
-                } else {
-                    Err(mfm_runtime::RuntimeError::RunnerBinding(
-                        "unexpected transaction binding".to_owned(),
-                    ))
-                }
+                Box::pin(async move {
+                    if binding.network_id().as_str() == "ethereum-mainnet"
+                        && binding.expected_chain_id() == 1
+                        && signer_ref.as_str() == "deployer"
+                    {
+                        Ok(())
+                    } else {
+                        Err(mfm_runtime::RuntimeError::RunnerBinding(
+                            "unexpected transaction binding".to_owned(),
+                        ))
+                    }
+                })
             },
             move |binding| {
                 let session = Arc::clone(&bind_session);

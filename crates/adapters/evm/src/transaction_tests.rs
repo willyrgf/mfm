@@ -241,7 +241,7 @@ fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTra
     EvmTransactionAdapter::new(EvmTransactionRunnerCapabilities::new(
         Arc::new(MissingArtifacts),
         CapabilityImplementationId::new("mfm.test.deterministic-signer").expect("implementation"),
-        |_binding, _signer_ref| Ok(()),
+        |_binding, _signer_ref| Box::pin(async { Ok(()) }),
         move |_binding| {
             let session = Arc::clone(&bind_session);
             Box::pin(async move { Ok(session as Arc<dyn EvmTransactionSession>) })
@@ -298,11 +298,61 @@ async fn external_nonce_conflict_stays_unknown_and_rebroadcasts_only_the_prepare
         recovery,
         SideEffectUnknownSubmissionDecision::StillUnknown
     ));
-    assert_eq!(signer.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
     assert_eq!(session.pending_nonce_calls.load(Ordering::SeqCst), 1);
     let submissions = session.submitted.lock().expect("submitted");
     assert_eq!(submissions.len(), 2);
     assert_eq!(submissions[0], submissions[1]);
+}
+
+#[tokio::test]
+async fn resumed_started_submission_looks_up_before_signing_or_broadcasting() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let preparation_signer = Arc::new(FixedProvider::new());
+    let prepared = make_adapter(Arc::clone(&session), preparation_signer)
+        .prepare_transaction(&intent())
+        .await
+        .expect("prepare");
+    session.set_lookup_mode(LookupMode::Observed);
+    let resumed_signer = Arc::new(FixedProvider::new());
+    let resumed_adapter = make_adapter(Arc::clone(&session), Arc::clone(&resumed_signer));
+
+    let decision = resumed_adapter
+        .submit_transaction(prepared)
+        .await
+        .expect("resume started submission");
+
+    assert!(matches!(
+        decision,
+        SideEffectSubmissionDecision::Observed(_)
+    ));
+    assert_eq!(resumed_signer.calls.load(Ordering::SeqCst), 0);
+    assert!(session.submitted.lock().expect("submitted").is_empty());
+}
+
+#[tokio::test]
+async fn signed_envelope_capacity_blocks_before_preparation_reads_or_signing() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
+
+    for _ in 0..SIGNED_ENVELOPE_CACHE_CAPACITY {
+        adapter
+            .prepare_transaction(&intent())
+            .await
+            .expect("reserved preparation");
+    }
+    let result = adapter.prepare_transaction(&intent()).await;
+
+    assert!(matches!(result, Err(mfm_runtime::RuntimeError::Blocked(_))));
+    assert_eq!(
+        session.pending_nonce_calls.load(Ordering::SeqCst),
+        SIGNED_ENVELOPE_CACHE_CAPACITY
+    );
+    assert_eq!(
+        signer.calls.load(Ordering::SeqCst),
+        SIGNED_ENVELOPE_CACHE_CAPACITY
+    );
 }
 
 #[tokio::test]

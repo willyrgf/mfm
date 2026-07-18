@@ -438,16 +438,18 @@ fn composition_runners(
             CapabilityImplementationId::new("mfm.test.composition-signer")
                 .expect("signing implementation"),
             move |binding, signer_ref| {
-                if binding.network_id().as_str() == "ethereum-mainnet"
-                    && binding.expected_chain_id() == 1
-                    && signer_ref.as_str() == "composition-signer"
-                {
-                    Ok(())
-                } else {
-                    Err(mfm_runtime::RuntimeError::RunnerBinding(
-                        "unexpected composition transaction binding".to_owned(),
-                    ))
-                }
+                Box::pin(async move {
+                    if binding.network_id().as_str() == "ethereum-mainnet"
+                        && binding.expected_chain_id() == 1
+                        && signer_ref.as_str() == "composition-signer"
+                    {
+                        Ok(())
+                    } else {
+                        Err(mfm_runtime::RuntimeError::RunnerBinding(
+                            "unexpected composition transaction binding".to_owned(),
+                        ))
+                    }
+                })
             },
             move |binding| {
                 let transaction_session = Arc::clone(&bind_transaction_session);

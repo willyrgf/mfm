@@ -264,6 +264,7 @@ where
                 .await
                 .unwrap_or_else(|error| panic!("expected next seq: {error}")),
         )
+        .await
         .expect("prepared launch");
     scheduler
         .start_run(store, launch)
