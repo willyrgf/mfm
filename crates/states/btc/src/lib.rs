@@ -14,9 +14,8 @@ mod external_read;
 
 pub use address_balance::{
     address_balance_fact_visibility, normalize_btc_address_balance,
-    normalize_btc_address_balance_fact, platform_address_balance_at_anchor_plan,
-    BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact, BtcAddressBalanceSubject,
-    NormalizedBtcAddressHolding,
+    normalize_btc_address_balance_fact, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
+    BtcAddressBalanceSubject, NormalizedBtcAddressHolding,
 };
 pub use address_balance_collect::{
     address_balance_record_visibility, assemble_btc_network_collection_receipt,

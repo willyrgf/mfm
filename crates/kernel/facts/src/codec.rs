@@ -256,6 +256,14 @@ pub fn compile_fact_query_plan(
 ) -> Result<CanonicalFactQueryPlan> {
     validate_descriptor(descriptor)?;
     let descriptor_hash = fact_descriptor_hash(descriptor)?;
+    if input
+        .content_identity()
+        .is_some_and(|identity| !identity.matches_descriptor_hash(&descriptor_hash))
+    {
+        return Err(FactError::descriptor(
+            "fact query content identity does not match resolved descriptor",
+        ));
+    }
     let fields_by_id = descriptor_fields_by_id(descriptor)?;
     let ordering_descriptor = descriptor
         .orderings()
@@ -309,6 +317,7 @@ pub fn compile_fact_query_plan(
         input.return_fields(),
         ordering.name(),
         input.limit(),
+        input.content_identity(),
     )
     .canonical_bytes()?;
     CanonicalFactQueryPlan::new(

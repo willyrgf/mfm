@@ -44,7 +44,7 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
     let plan = CanonicalFactQueryPlan::new(
         StoreScopeRef::new("default").expect("store scope"),
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
+        FactQueryCompilerVersion::new("mfm.facts.query.v2").expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
         ScopeDecisionEvidence::new(digest(2)),
@@ -285,11 +285,11 @@ fn canonical_goldens_match_expected_values() {
         canonical_fact_query_plan_bytes(&plan)
             .expect("plan bytes")
             .as_str(),
-        r#"{"canonical_query":"{\"kind\":\"chain.head\"}","canonical_query_hash":"content:sha256-jcs-v1:63dccff9320cdcc68affe1e82a03834050ecbef8210854d4ed865721b8f03020","canonicalizer_version":"mfm.canonical.v1","limit":10,"ordering":{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]},"query_compiler_version":"mfm.facts.query.v1","query_scope":{"audience":"platform","scope":"default"},"resolved_descriptor":"content:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","scope_decision_evidence":{"decision_hash":"content:sha256-jcs-v1:0202020202020202020202020202020202020202020202020202020202020202"},"store_scope":"default","version":"mfm.fact-query-plan.v1"}"#
+        r#"{"canonical_query":"{\"kind\":\"chain.head\"}","canonical_query_hash":"content:sha256-jcs-v1:63dccff9320cdcc68affe1e82a03834050ecbef8210854d4ed865721b8f03020","canonicalizer_version":"mfm.canonical.v1","limit":10,"ordering":{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]},"query_compiler_version":"mfm.facts.query.v2","query_scope":{"audience":"platform","scope":"default"},"resolved_descriptor":"content:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","scope_decision_evidence":{"decision_hash":"content:sha256-jcs-v1:0202020202020202020202020202020202020202020202020202020202020202"},"store_scope":"default","version":"mfm.fact-query-plan.v1"}"#
     );
     assert_eq!(
         plan_hash.as_str(),
-        "content:sha256-jcs-v1:9282f7eb855fd79a7f907f2745fbf49f3f39b54dfb80a1e51a92444f4f0981a9"
+        "content:sha256-jcs-v1:2895b3220cb3e98e2ad55ecac2667f96cad79875a80e2bfc5b791f2077ca2f59"
     );
     let evidence_bytes = canonical_fact_query_evidence_bytes(&evidence)
         .expect("evidence bytes")
@@ -301,7 +301,7 @@ fn canonical_goldens_match_expected_values() {
         fact_query_evidence_hash(&evidence)
             .expect("evidence hash")
             .as_str(),
-        "content:sha256-jcs-v1:b09c0a5fca6a439105f56dd54c38c221b15b42515ed038241c7079c45bdaa302"
+        "content:sha256-jcs-v1:e0ea64fc5f0321935bcc76f14bc178b10635d6fdec9db059c2a531af97039943"
     );
 }
 

@@ -143,7 +143,6 @@ pub struct SelectHoldingsReadPlan {
     portfolio: PortfolioConfig,
     store_scope: String,
     selection_policy_id: String,
-    candidate_scan_limit: u64,
     fact_descriptors: SelectHoldingsFactDescriptors,
     bitcoin_receipts: Vec<BtcNetworkCollectionReceipt>,
     evm_receipts: Vec<EvmBalanceCollectionReceipt>,
@@ -159,7 +158,6 @@ impl SelectHoldingsReadPlan {
             portfolio: config.portfolio().clone(),
             store_scope: config.store_scope().to_owned(),
             selection_policy_id: config.selection_policy_id().to_owned(),
-            candidate_scan_limit: config.candidate_scan_limit(),
             fact_descriptors: config.fact_descriptors().clone(),
             bitcoin_receipts: input.bitcoin_receipts.clone(),
             evm_receipts: input.evm_receipts.clone(),
@@ -229,7 +227,7 @@ impl SelectHoldingsReadPlan {
                 .map(|response| response.receipt().frontier_type()),
         )?;
         for (entry, response) in entries.iter().zip(responses) {
-            require_exact_bounded_cardinality(response, &self.config(), entry)?;
+            require_identity_pinned_cardinality(response, entry)?;
         }
         Ok(())
     }
@@ -348,8 +346,6 @@ impl SelectHoldingsReadPlan {
             portfolio: self.portfolio.clone(),
             store_scope: self.store_scope.clone(),
             selection_policy_id: self.selection_policy_id.clone(),
-            candidate_scan_limit: NonZeroU64::new(self.candidate_scan_limit)
-                .expect("validated portfolio read plans have a non-zero scan limit"),
             fact_descriptors: self.fact_descriptors.clone(),
         }
     }
@@ -1050,9 +1046,10 @@ fn holding_fact_index_request(
         return_fields,
         FactOrderingName::new("metadata.store_commit_order.desc")
             .map_err(|error| receipt_selection_error(entry, error.to_string()))?,
-        Some(config.candidate_scan_limit()),
+        Some(1),
     )
-    .map_err(|error| receipt_selection_error(entry, error.to_string()))?;
+    .map_err(|error| receipt_selection_error(entry, error.to_string()))?
+    .with_content_identity(entry.source.fact_content_identity().clone());
     let plan = compile_fact_query_plan(&descriptor, input)
         .map_err(|error| receipt_selection_error(entry, error.to_string()))?;
     FactIndexReadRequest::new(plan)
@@ -1123,28 +1120,28 @@ fn query_eq_u64(
     ))
 }
 
-fn require_exact_bounded_cardinality(
+fn require_identity_pinned_cardinality(
     response: &FactQueryResult,
-    config: &SelectHoldingsConfig,
     entry: &ReceiptHolding,
 ) -> Result<(), PortfolioHoldingSelectionError> {
     let rows = response.rows();
-    match response.receipt().result_cardinality() {
-        QueryResultCardinality::Exact(count)
-            if count == rows.len() as u64 && count <= config.candidate_bound() =>
+    match (response.receipt().result_cardinality(), rows.len()) {
+        (QueryResultCardinality::Exact(0), 0) => Err(selection_error(
+            PortfolioHoldingErrorCode::MissingFact,
+            "the receipt-pinned fact content was absent from the store snapshot",
+            Some(entry),
+        )),
+        (QueryResultCardinality::Exact(1) | QueryResultCardinality::AtLeast(1), 1)
+            if entry
+                .source
+                .fact_content_identity()
+                .matches_internal_ref(rows[0].fact_ref()) =>
         {
             Ok(())
         }
-        QueryResultCardinality::AtLeast(count) if count >= config.candidate_scan_limit() => {
-            Err(selection_error(
-                PortfolioHoldingErrorCode::CandidateBoundExhausted,
-                "receipt-pinned fact query saturated before candidate exhaustion was proven",
-                Some(entry),
-            ))
-        }
         _ => Err(receipt_selection_error(
             entry,
-            "receipt-pinned fact query did not provide an exact bounded result set",
+            "receipt-pinned fact query did not provide one bounded content-identity match",
         )),
     }
 }

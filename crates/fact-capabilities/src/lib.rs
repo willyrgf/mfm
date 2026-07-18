@@ -102,6 +102,9 @@ pub trait FactIndexReadProvider: Send + Sync {
 
     /// Executes an already-compiled canonical fact query plan.
     ///
+    /// Providers must apply the complete canonical query shape, including any exact fact-content
+    /// identity narrowing evidence, before ordering and limiting returned rows.
+    ///
     /// Default path runs a one-element [`Self::read_fact_index_batch`] so single and multi
     /// reads share one provider implementation.
     fn read_fact_index<'a>(&'a self, request: &'a FactIndexReadRequest) -> FactIndexReadFuture<'a> {

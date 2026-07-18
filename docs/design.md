@@ -173,6 +173,13 @@ the retained full subject, validate every declared required term, and derive ter
 flattened path list, delimiter-joined asset key, or term cache can substitute for canonical subject
 material.
 
+Canonical fact-query v2 may carry one opaque `FactContentIdentityEvidence` narrowing value. The
+compiler binds its descriptor component to the resolved descriptor, and providers compare all four
+compact components against trusted indexed references before ordering and limiting. This filter is
+only a bounded candidate-narrowing mechanism: the consumer must still hydrate canonical subject and
+response material and rederive the full content identity before trusting a returned fact. Query v1
+has no reader.
+
 ## Current Semantic Configuration And Launch Boundary
 
 Semantic configuration has a strict pre-admission path and a separate process-local runtime path.
@@ -431,11 +438,13 @@ does not duplicate response material.
 `PortfolioReportOperation` call; it constructs no state directly. The report operation receives
 the typed Bitcoin and EVM receipt vectors and passes the same structured binding to selection,
 which compiles one exact query per demanded holding. The fact-index provider evaluates the complete
-batch over one store snapshot. Selection rehydrates every returned response, rederives full
-descriptor/subject/response identity and fact refs, filters different-content same-subject history,
-and only then applies deterministic last-write ordering. Content identity intentionally treats
-byte-identical append occurrences as equivalent. Missing receipt content, mixed frontiers,
-non-exact cardinality, tampering, unexpected receipts, or incomplete coverage fail closed. The
+batch over one store snapshot and applies receipt content identity before the one-row limit. The
+production Postgres provider reconstructs append-only fact authority once for that batch, not once
+per holding. Selection rehydrates the returned response and rederives full
+descriptor/subject/response identity and fact refs before accepting it. Content identity
+intentionally treats any number of byte-identical append occurrences as equivalent; deterministic
+last-write ordering selects one occurrence without scaling hydration with history. Missing receipt
+content, mixed frontiers, malformed cardinality, tampering, unexpected receipts, or incomplete coverage fail closed. The
 report operation assembles only the selected store material, rechecks exact config-derived
 coverage, and projects the structured report. EVM collection replay belongs only to
 `mfm-adapters-evm`; portfolio replay verifies selection, snapshot, and report. Both use retained

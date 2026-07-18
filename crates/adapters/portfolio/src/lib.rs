@@ -214,7 +214,14 @@ where
 fn fact_index_runtime_error(
     error: mfm_fact_capabilities::FactIndexReadError,
 ) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+    match error {
+        mfm_fact_capabilities::FactIndexReadError::Provider { .. } => {
+            mfm_runtime::RuntimeError::Blocked("fact-index provider is unavailable".to_owned())
+        }
+        mfm_fact_capabilities::FactIndexReadError::InvalidRequest { .. } => {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+        }
+    }
 }
 
 fn portfolio_state_runtime_error(
@@ -229,4 +236,28 @@ fn portfolio_state_runtime_error(
     )
     .expect("portfolio failure metadata is a checked public contract");
     mfm_runtime::RuntimeError::Failure(failure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fact_index_provider_failures_block_without_terminalizing_the_attempt() {
+        let provider = mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+            "private backend detail",
+        );
+        assert_eq!(
+            fact_index_runtime_error(provider),
+            mfm_runtime::RuntimeError::Blocked("fact-index provider is unavailable".to_owned())
+        );
+
+        let invalid = mfm_fact_capabilities::FactIndexReadError::InvalidRequest {
+            reason: mfm_fact_capabilities::FactIndexInvalidRequest::UnsupportedAudience,
+        };
+        assert!(matches!(
+            fact_index_runtime_error(invalid),
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+        ));
+    }
 }

@@ -12,6 +12,26 @@ struct AuthoritativeFactQueryRow {
     row: PostgresFactQueryRow,
 }
 
+struct AuthoritativeFactQuerySnapshot {
+    projection: ProjectionSnapshot,
+    descriptor_catalog_watermark: mfm_facts::DescriptorCatalogWatermark,
+    store_commit_order: mfm_facts::StoreCommitOrder,
+}
+
+impl AuthoritativeFactQuerySnapshot {
+    fn read_frontier(
+        &self,
+        plan: &mfm_facts::CanonicalFactQueryPlan,
+    ) -> mfm_facts::StoreReadFrontier {
+        mfm_facts::StoreReadFrontier::new(
+            plan.store_scope().clone(),
+            plan.query_scope().clone(),
+            self.descriptor_catalog_watermark,
+            self.store_commit_order,
+        )
+    }
+}
+
 impl PostgresStore {
     /// Executes a descriptor-scoped canonical fact query plan from authoritative run evidence.
     pub async fn execute_fact_query(
@@ -50,9 +70,18 @@ async fn execute_fact_queries_client(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_error("failed to set fact query transaction mode", error))?;
+    let authority_events = load_fact_authority_events_tx(&mut tx).await?;
+    let snapshot = AuthoritativeFactQuerySnapshot {
+        projection: load_authoritative_fact_projection_snapshot_tx(&mut tx, &authority_events)
+            .await?,
+        descriptor_catalog_watermark: descriptor_catalog_watermark(&authority_events)?,
+        store_commit_order: mfm_facts::StoreCommitOrder::new(
+            load_store_commit_order_tx(&mut tx).await?,
+        ),
+    };
     let mut results = Vec::with_capacity(plans.len());
     for plan in plans {
-        results.push(execute_fact_query_tx(&mut tx, plan).await?);
+        results.push(execute_fact_query(plan, &snapshot)?);
     }
     tx.commit()
         .await
@@ -60,50 +89,30 @@ async fn execute_fact_queries_client(
     Ok(results)
 }
 
-async fn execute_fact_query_tx(
-    tx: &mut Transaction<'_, Postgres>,
+fn execute_fact_query(
     plan: &mfm_facts::CanonicalFactQueryPlan,
+    snapshot: &AuthoritativeFactQuerySnapshot,
 ) -> Result<PostgresFactQueryResult> {
     let shape = mfm_facts::parse_canonical_fact_query_shape(plan).map_err(fact_error)?;
-    let authority_events = load_fact_authority_events_tx(tx).await?;
-    let result_rows =
-        load_authoritative_fact_query_rows_tx(tx, plan, &shape, &authority_events).await?;
-    let receipt =
-        build_fact_query_receipt_tx(tx, plan, &shape, &result_rows, &authority_events).await?;
+    let result_rows = load_authoritative_fact_query_rows(plan, &shape, &snapshot.projection)?;
+    let receipt = build_fact_query_receipt(plan, &shape, &result_rows, snapshot)?;
     PostgresFactQueryResult::new(result_rows, receipt).map_err(fact_error)
 }
 
-async fn build_fact_query_receipt_tx(
-    tx: &mut Transaction<'_, Postgres>,
+fn build_fact_query_receipt(
     plan: &mfm_facts::CanonicalFactQueryPlan,
     shape: &mfm_facts::CompiledFactQueryShape,
     rows: &[PostgresFactQueryRow],
-    authority_events: &[KernelEventEnvelope],
+    snapshot: &AuthoritativeFactQuerySnapshot,
 ) -> Result<mfm_facts::FactQueryReceipt> {
-    let read_frontier = load_store_read_frontier_tx(tx, plan, authority_events).await?;
     mfm_facts::FactQueryReceipt::from_rows(
-        read_frontier,
+        snapshot.read_frontier(plan),
         mfm_facts::StoreReadFrontierType::Snapshot,
         rows,
         !shape.return_fields().is_empty(),
         plan.limit(),
     )
     .map_err(fact_error)
-}
-
-async fn load_store_read_frontier_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    plan: &mfm_facts::CanonicalFactQueryPlan,
-    authority_events: &[KernelEventEnvelope],
-) -> Result<mfm_facts::StoreReadFrontier> {
-    let descriptor_catalog_watermark = descriptor_catalog_watermark(authority_events)?;
-    let store_commit_order = load_store_commit_order_tx(tx).await?;
-    Ok(mfm_facts::StoreReadFrontier::new(
-        plan.store_scope().clone(),
-        plan.query_scope().clone(),
-        descriptor_catalog_watermark,
-        mfm_facts::StoreCommitOrder::new(store_commit_order),
-    ))
 }
 
 fn descriptor_catalog_watermark(
@@ -254,70 +263,56 @@ fn event_schema_id(schema_name: &str) -> Result<String> {
     Ok(descriptor.schema_id()?.to_string())
 }
 
-async fn load_authoritative_fact_query_rows_tx(
-    tx: &mut Transaction<'_, Postgres>,
+fn load_authoritative_fact_query_rows(
     plan: &mfm_facts::CanonicalFactQueryPlan,
     shape: &mfm_facts::CompiledFactQueryShape,
-    authority_events: &[KernelEventEnvelope],
+    snapshot: &ProjectionSnapshot,
 ) -> Result<Vec<PostgresFactQueryRow>> {
-    let run_ids = authority_events
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::FactRecorded(_) => Some(event.run_id().clone()),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    let mut snapshots = BTreeMap::new();
-    for run_id in run_ids {
-        let stream = load_run_stream_tx(tx, &run_id).await?;
-        let artifact_bytes = load_fact_rebuild_artifact_bytes_tx(tx, &stream).await?;
-        let snapshot = ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
-            &stream,
-            &artifact_bytes,
-        )?;
-        snapshots.insert(run_id, snapshot);
-    }
-
     let mut rows = Vec::new();
-    for snapshot in snapshots.values() {
-        for (claim_id, index) in snapshot.fact_index_entries() {
-            if index.fact_descriptor_hash != *plan.resolved_descriptor()
-                || index.audience != plan.query_scope().audience()
-                || index.visibility_scope != plan.query_scope().scope()
-            {
-                continue;
-            }
-            let terms = snapshot
-                .fact_terms_for_claim(claim_id)
-                .map(|term| (term.field_id.clone(), term.value.clone()))
-                .collect::<BTreeMap<_, _>>();
-            if !shape.predicates().iter().all(|predicate| {
-                terms
-                    .get(predicate.field_id())
-                    .is_some_and(|value| predicate.matches_scalar(value))
-            }) {
-                continue;
-            }
-            let returned_fields = shape
-                .return_fields()
-                .iter()
-                .filter_map(|field_id| {
-                    terms.get(field_id).map(|value| {
-                        mfm_facts::FactFieldValue::new(
-                            field_id.clone(),
-                            value.value_type(),
-                            value.clone(),
-                        )
-                        .map_err(fact_error)
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            rows.push(AuthoritativeFactQueryRow {
-                index: index.clone(),
-                terms,
-                row: PostgresFactQueryRow::new(index.internal_ref()?, returned_fields),
-            });
+    for (claim_id, index) in snapshot.fact_index_entries() {
+        if index.fact_descriptor_hash != *plan.resolved_descriptor()
+            || index.audience != plan.query_scope().audience()
+            || index.visibility_scope != plan.query_scope().scope()
+        {
+            continue;
         }
+        let fact_ref = index.internal_ref()?;
+        if shape
+            .content_identity()
+            .is_some_and(|identity| !identity.matches_internal_ref(&fact_ref))
+        {
+            continue;
+        }
+        let terms = snapshot
+            .fact_terms_for_claim(claim_id)
+            .map(|term| (term.field_id.clone(), term.value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if !shape.predicates().iter().all(|predicate| {
+            terms
+                .get(predicate.field_id())
+                .is_some_and(|value| predicate.matches_scalar(value))
+        }) {
+            continue;
+        }
+        let returned_fields = shape
+            .return_fields()
+            .iter()
+            .filter_map(|field_id| {
+                terms.get(field_id).map(|value| {
+                    mfm_facts::FactFieldValue::new(
+                        field_id.clone(),
+                        value.value_type(),
+                        value.clone(),
+                    )
+                    .map_err(fact_error)
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        rows.push(AuthoritativeFactQueryRow {
+            index: index.clone(),
+            terms,
+            row: PostgresFactQueryRow::new(fact_ref, returned_fields),
+        });
     }
     rows.sort_by(|left, right| compare_authoritative_fact_rows(left, right, plan));
     if let Some(limit) = plan.limit() {

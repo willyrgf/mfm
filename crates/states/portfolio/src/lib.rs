@@ -36,7 +36,6 @@ pub use selection::{
 };
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
@@ -64,8 +63,6 @@ const NAMESPACE: &str = "mfm.portfolio";
 const ADAPTER_NAME: &str = "typed-portfolio";
 const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v1";
 const PORTFOLIO_STORE_SCOPE: &str = "mfm.store.default";
-const PORTFOLIO_FACT_CANDIDATE_BOUND: u64 = 10;
-const PORTFOLIO_FACT_SCAN_LIMIT: u64 = PORTFOLIO_FACT_CANDIDATE_BOUND + 1;
 
 #[path = "config.rs"]
 mod config;

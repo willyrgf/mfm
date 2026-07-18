@@ -15,7 +15,7 @@ use mfm_portfolio_model::symbol::{
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
 };
-use mfm_program::{MfmFactType, ValidatedConfig};
+use mfm_program::MfmFactType;
 use mfm_states_btc::BtcAddressBalanceSnapshotFact;
 use mfm_states_evm::EvmBalanceSnapshotFact;
 
@@ -164,12 +164,12 @@ fn selection_config_carries_both_family_descriptors() {
         config.selection_policy_id(),
         PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID
     );
-    assert_eq!(config.candidate_bound(), 10);
-    assert_eq!(config.candidate_scan_limit(), 11);
     let mut value = serde_json::to_value(config).expect("config value");
-    value["candidate_scan_limit"] = serde_json::json!(12);
-    let tampered: SelectHoldingsConfig = serde_json::from_value(value).expect("decode config");
-    assert!(ValidatedConfig::new(tampered).is_err());
+    value["candidate_scan_limit"] = serde_json::json!(11);
+    assert_unknown_field_rejected::<SelectHoldingsConfig>(
+        &serde_json::to_string(&value).expect("config JSON"),
+        "select holdings config",
+    );
 }
 
 #[test]

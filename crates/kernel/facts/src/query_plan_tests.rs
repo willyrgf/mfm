@@ -20,7 +20,7 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
     let plan = CanonicalFactQueryPlan::new(
         StoreScopeRef::new("default").expect("store scope"),
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
+        FactQueryCompilerVersion::new("mfm.facts.query.v2").expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
         ScopeDecisionEvidence::new(digest(2)),
@@ -37,7 +37,7 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
     assert!(CanonicalFactQueryPlan::new(
         StoreScopeRef::new("default").expect("store scope"),
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
+        FactQueryCompilerVersion::new("mfm.facts.query.v2").expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
         ScopeDecisionEvidence::new(digest(2)),
@@ -97,11 +97,12 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
     );
     let query: serde_json::Value =
         serde_json::from_slice(plan.canonical_query().as_bytes()).expect("query json");
-    assert_eq!(query["version"], "mfm.fact-query.v1");
+    assert_eq!(query["version"], "mfm.fact-query.v2");
     assert_eq!(query["fact_kind"], "chain.head");
     assert_eq!(query["resolved_descriptor"], descriptor_hash.as_str());
     assert_eq!(query["limit"], 25);
     assert_eq!(query["ordering"], "result.height.desc");
+    assert!(query["content_identity"].is_null());
     let predicates = query["predicates"].as_array().expect("predicates");
     assert_eq!(predicates[0]["field_id"], "result.height");
     assert_eq!(predicates[0]["operator"], "greater_than");
@@ -113,6 +114,50 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
     let parsed = parse_canonical_fact_query_shape(&plan).expect("parsed query shape");
     assert_eq!(parsed.predicates().len(), 2);
     assert_eq!(parsed.return_fields().len(), 2);
+    assert!(parsed.content_identity().is_none());
+}
+
+#[test]
+fn query_compiler_binds_exact_content_identity_to_the_descriptor() {
+    let descriptor = descriptor(vec![
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
+    ])
+    .expect("descriptor");
+    let descriptor_hash = fact_descriptor_hash(&descriptor).expect("descriptor hash");
+    let evidence: FactContentIdentityEvidence = serde_json::from_value(serde_json::json!({
+        "fact_descriptor_hash": descriptor_hash.as_str(),
+        "subject_material_hash": digest(41).as_str(),
+        "response_schema_id": schema_id("mfm.test.response").as_str(),
+        "response_hash": digest(42).as_str(),
+    }))
+    .expect("content identity evidence");
+    let input = default_query_input(Vec::new(), &["result.height"], Some(1))
+        .with_content_identity(evidence.clone());
+
+    let plan = compile_fact_query_plan(&descriptor, input).expect("identity-pinned plan");
+    let query: serde_json::Value =
+        serde_json::from_slice(plan.canonical_query().as_bytes()).expect("query json");
+    assert_eq!(
+        query["content_identity"]["response_hash"],
+        digest(42).as_str()
+    );
+    let shape = parse_canonical_fact_query_shape(&plan).expect("query shape");
+    assert_eq!(shape.content_identity(), Some(&evidence));
+
+    let mismatched: FactContentIdentityEvidence = serde_json::from_value(serde_json::json!({
+        "fact_descriptor_hash": digest(99).as_str(),
+        "subject_material_hash": digest(41).as_str(),
+        "response_schema_id": schema_id("mfm.test.response").as_str(),
+        "response_hash": digest(42).as_str(),
+    }))
+    .expect("mismatched evidence");
+    let input = default_query_input(Vec::new(), &["result.height"], Some(1))
+        .with_content_identity(mismatched);
+    let error = compile_fact_query_plan(&descriptor, input).expect_err("descriptor mismatch");
+    assert!(error
+        .to_string()
+        .contains("does not match resolved descriptor"));
 }
 
 #[test]

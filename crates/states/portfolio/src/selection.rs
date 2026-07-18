@@ -43,8 +43,6 @@ pub enum PortfolioHoldingErrorCode {
     AmbiguousFacts,
     /// The receipt, queried source, anchor, or fact identity did not match exactly.
     ReceiptMismatch,
-    /// The fixed N + 1 candidate query saturated before exhaustion was proven.
-    CandidateBoundExhausted,
     /// Residual same-network selected anchors disagree (guard).
     InconsistentNetworkAnchors,
     /// A portfolio requirement could not be projected into a report observation.
@@ -58,7 +56,6 @@ impl PortfolioHoldingErrorCode {
             Self::MissingFact => "missing_fact",
             Self::AmbiguousFacts => "ambiguous_facts",
             Self::ReceiptMismatch => "receipt_mismatch",
-            Self::CandidateBoundExhausted => "candidate_bound_exhausted",
             Self::InconsistentNetworkAnchors => "inconsistent_network_anchors",
             Self::UnsupportedRequirement => "unsupported_requirement",
         }

@@ -164,6 +164,43 @@ impl FactContentIdentityEvidence {
             derive_fact_content_identity_from_typed_values(descriptor, subject, response)?;
         Ok((Self::from_verified(&identity) == *self).then_some(identity))
     }
+
+    /// Returns whether an indexed reference carries the same compact content components.
+    ///
+    /// This is a bounded query-narrowing check only. Consumers must still hydrate the response
+    /// artifact and call [`Self::verify_against_typed_values`] before trusting the content.
+    pub fn matches_internal_ref(&self, reference: &InternalFactRef) -> bool {
+        self.fact_descriptor_hash == reference.fact_descriptor_hash().as_str()
+            && self.subject_material_hash == reference.subject_material_hash().as_str()
+            && self.response_schema_id == reference.response_schema_id().as_str()
+            && self.response_hash == reference.response_hash().as_str()
+    }
+
+    pub(crate) fn matches_descriptor_hash(&self, descriptor_hash: &ContentDigest) -> bool {
+        self.fact_descriptor_hash == descriptor_hash.as_str()
+    }
+
+    pub(crate) fn canonical_query_value(&self) -> Result<CanonicalValue> {
+        CanonicalValue::object([
+            (
+                "fact_descriptor_hash",
+                CanonicalValue::String(self.fact_descriptor_hash.clone()),
+            ),
+            (
+                "subject_material_hash",
+                CanonicalValue::String(self.subject_material_hash.clone()),
+            ),
+            (
+                "response_schema_id",
+                CanonicalValue::String(self.response_schema_id.clone()),
+            ),
+            (
+                "response_hash",
+                CanonicalValue::String(self.response_hash.clone()),
+            ),
+        ])
+        .map_err(|error| FactError::canonical(error.to_string()))
+    }
 }
 
 impl<'de> Deserialize<'de> for FactContentIdentityEvidence {

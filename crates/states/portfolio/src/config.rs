@@ -91,6 +91,7 @@ fn canonical_descriptor_json(
 
 /// Config for Platform fact-backed holding selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     schema = "mfm.portfolio.config.select_holdings",
     validate = "validate_select_holdings_config"
@@ -102,8 +103,6 @@ pub struct SelectHoldingsConfig {
     pub(super) store_scope: String,
     /// Fixed certified selection policy id.
     pub(super) selection_policy_id: String,
-    /// Fixed N + 1 scan limit used to prove candidate exhaustion.
-    pub(super) candidate_scan_limit: NonZeroU64,
     /// Registered fact descriptors that define query and hydration authority.
     pub(super) fact_descriptors: SelectHoldingsFactDescriptors,
 }
@@ -118,8 +117,6 @@ impl SelectHoldingsConfig {
             portfolio,
             store_scope: PORTFOLIO_STORE_SCOPE.to_owned(),
             selection_policy_id: PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID.to_owned(),
-            candidate_scan_limit: NonZeroU64::new(PORTFOLIO_FACT_SCAN_LIMIT)
-                .expect("portfolio receipt scan limit is non-zero"),
             fact_descriptors,
         };
         validate_select_holdings_config(&config).map_err(ConfigError::new)?;
@@ -139,16 +136,6 @@ impl SelectHoldingsConfig {
     /// Returns the certified selection policy id.
     pub fn selection_policy_id(&self) -> &str {
         &self.selection_policy_id
-    }
-
-    /// Returns the fixed N + 1 candidate scan limit.
-    pub const fn candidate_scan_limit(&self) -> u64 {
-        self.candidate_scan_limit.get()
-    }
-
-    /// Returns the fixed number of candidates permitted before exhaustion proof fails.
-    pub const fn candidate_bound(&self) -> u64 {
-        PORTFOLIO_FACT_CANDIDATE_BOUND
     }
 
     /// Returns the certified holding fact descriptor set.
@@ -200,11 +187,6 @@ fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), 
             "unsupported selection policy id `{}`",
             config.selection_policy_id
         ));
-    }
-    if config.candidate_scan_limit.get() != PORTFOLIO_FACT_SCAN_LIMIT {
-        return Err(
-            "portfolio candidate scan limit did not match the closed version-1 policy".to_owned(),
-        );
     }
     config.fact_descriptors.validate()?;
     Ok(())

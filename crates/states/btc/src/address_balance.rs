@@ -1,11 +1,7 @@
 //! Bitcoin address balance snapshot fact (`bitcoin.address_balance_snapshot`).
 
 use mfm_btc_capabilities::BtcBlockHash;
-use mfm_facts::{
-    compile_fact_query_plan, CanonicalFactQueryPlan, FactAudience, FactCanonicalScalar,
-    FactFieldId, FactOrderingName, FactQueryInput, FactQueryOperator, FactQueryPredicate,
-    FactQueryScope, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
-};
+use mfm_facts::{FactAudience, FactVisibility};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program_derive::{MfmFactType, MfmValue};
 use serde::{Deserialize, Serialize};
@@ -370,87 +366,6 @@ pub fn normalize_btc_address_balance_fact(
     fact: &BtcAddressBalanceSnapshotFact,
 ) -> Result<NormalizedBtcAddressHolding, BtcStateError> {
     normalize_btc_address_balance(fact.subject(), fact.response())
-}
-
-/// Builds the receipt-pinned Platform fact-index plan for one Bitcoin balance source.
-///
-/// The receipt fixes subject, anchor, coverage, status, and the closed N + 1 scan limit. The
-/// resulting `Exact(n)` response proves exhaustion only when `n` stays below that limit.
-#[allow(clippy::too_many_arguments)]
-pub fn platform_address_balance_at_anchor_plan(
-    store_scope: &StoreScopeRef,
-    scope_decision: ScopeDecisionEvidence,
-    subject: &BtcAddressBalanceSubject,
-    anchor_height: u64,
-    anchor_hash: &str,
-    coverage: &str,
-    source_status: &str,
-    limit: u64,
-) -> Result<CanonicalFactQueryPlan, BtcStateError> {
-    use mfm_program::MfmFactType;
-
-    let descriptor = BtcAddressBalanceSnapshotFact::descriptor().map_err(|error| {
-        BtcStateError::InvalidInput {
-            reason: error.to_string(),
-        }
-    })?;
-    let field = |id: &str| -> Result<FactFieldId, BtcStateError> {
-        FactFieldId::new(id).map_err(|error| BtcStateError::InvalidInput {
-            reason: error.to_string(),
-        })
-    };
-    let eq = |id: &str, value: &str| -> Result<FactQueryPredicate, BtcStateError> {
-        Ok(FactQueryPredicate::new(
-            field(id)?,
-            FactQueryOperator::Equal,
-            FactCanonicalScalar::string(value),
-        ))
-    };
-    let eq_u64 = |id: &str, value: u64| -> Result<FactQueryPredicate, BtcStateError> {
-        Ok(FactQueryPredicate::new(
-            field(id)?,
-            FactQueryOperator::Equal,
-            FactCanonicalScalar::UnsignedInteger(value),
-        ))
-    };
-    let input = FactQueryInput::new(
-        store_scope.clone(),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        scope_decision,
-        vec![
-            eq("subject.network", subject.network())?,
-            eq("subject.bitcoin_network", subject.bitcoin_network())?,
-            eq(
-                "subject.semantic_source_identity",
-                subject.semantic_source_identity(),
-            )?,
-            eq("subject.address", subject.address())?,
-            eq_u64("result.anchor_height", anchor_height)?,
-            eq("result.anchor_hash", anchor_hash)?,
-            eq("result.coverage", coverage)?,
-            eq("result.source_status", source_status)?,
-        ],
-        vec![
-            field("result.anchor_height")?,
-            field("result.anchor_hash")?,
-            field("result.balance_sats")?,
-            field("result.coverage")?,
-            field("result.source_status")?,
-            field("metadata.store_commit_order")?,
-        ],
-        FactOrderingName::new("metadata.store_commit_order.desc").map_err(|error| {
-            BtcStateError::InvalidInput {
-                reason: error.to_string(),
-            }
-        })?,
-        Some(limit),
-    )
-    .map_err(|error| BtcStateError::InvalidInput {
-        reason: error.to_string(),
-    })?;
-    compile_fact_query_plan(&descriptor, input).map_err(|error| BtcStateError::InvalidInput {
-        reason: error.to_string(),
-    })
 }
 
 /// Pure normalize from subject + response material.

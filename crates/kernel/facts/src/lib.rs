@@ -129,8 +129,8 @@ pub const FACTS_KERNEL_CONTRACT_VERSION: &str = "mfm.facts.v1";
 /// V2 fact-query evidence wire contract with deterministic unsigned receipt metadata.
 pub const FACT_QUERY_EVIDENCE_CONTRACT_VERSION: &str = "mfm.fact-query-evidence.v2";
 
-/// V1 fact query compiler version recorded in canonical query plans.
-pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v1";
+/// V2 fact query compiler version recorded in canonical query plans.
+pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v2";
 
 /// V1 canonicalizer version recorded in canonical query plans.
 pub const FACT_QUERY_CANONICALIZER_VERSION: &str = "mfm.canonical.v1";

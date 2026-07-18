@@ -73,9 +73,9 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
     }
 }
 
-/// Repeated collection proves that receipt authority is content based: byte-identical publication
-/// remains usable across append occurrences, while a later different-content receipt filters the
-/// otherwise newer stale candidates before last-write ordering.
+/// Repeated collection proves that receipt authority is content based: eleven byte-identical
+/// publications remain selectable with one retained row, while a later different-content receipt
+/// filters stale history inside the provider before limiting.
 #[tokio::test]
 async fn snapshot_root_selects_only_the_exact_evm_receipt_content_from_store_history() {
     let first_server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
@@ -88,11 +88,18 @@ async fn snapshot_root_selects_only_the_exact_evm_receipt_content_from_store_his
     let config = snapshot_config(SnapshotDemand::EvmNative);
 
     launch_snapshot_completed(&services, &config, "exact-content-first").await;
-    launch_snapshot_completed(&services, &config, "exact-content-identical").await;
+    for occurrence in 2..=11 {
+        launch_snapshot_completed(
+            &services,
+            &config,
+            &format!("exact-content-identical-{occurrence}"),
+        )
+        .await;
+    }
     assert_eq!(
         first_index.returned_row_counts(),
-        vec![1, 2],
-        "the second receipt must accept both byte-identical append occurrences"
+        vec![1; 11],
+        "exact content identity must narrow every query before its one-row limit"
     );
     drop(services);
 
@@ -129,8 +136,8 @@ async fn snapshot_root_selects_only_the_exact_evm_receipt_content_from_store_his
     );
     assert_eq!(
         changed_index.returned_row_counts(),
-        vec![3],
-        "the exact receipt filter must run after all same-subject history is reread"
+        vec![1],
+        "the exact receipt filter must run inside the provider before limiting"
     );
 }
 
@@ -192,6 +199,44 @@ async fn snapshot_root_rejects_mixed_fact_read_frontiers() {
         vec![3],
         "Bitcoin and both EVM holding reads must be issued as one batch"
     );
+}
+
+/// A temporary fact-index outage blocks the read attempt for resume and never records a terminal
+/// state failure after the collectors have committed their facts.
+#[tokio::test]
+async fn snapshot_root_blocks_when_the_fact_index_provider_is_unavailable() {
+    let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let store = store::AsyncInMemoryRunStore::default();
+    let fact_index = Arc::new(AdversarialSnapshotFactIndex::new(
+        store.clone(),
+        FactIndexMutation::ProviderFailure,
+    ));
+    let services = snapshot_services(&store, fact_index.clone(), Some(&runtime_path));
+    let response = launch_snapshot(
+        &services,
+        snapshot_config(SnapshotDemand::EvmNative),
+        "fact-index-provider-unavailable",
+    )
+    .await;
+
+    assert_eq!(response.run_mode, mfm_app::RunModeStatus::Forward);
+    assert_eq!(response.scheduler_status, "blocked");
+    assert!(!response
+        .attempt_dispositions
+        .iter()
+        .any(|attempt| attempt.disposition == "failed"));
+    assert_eq!(fact_index.batch_widths(), vec![1]);
+    let run_id = response.run_id.parse().expect("blocked snapshot run id");
+    let stream = store
+        .load_run_stream(&run_id)
+        .await
+        .expect("blocked snapshot stream");
+    assert!(!stream.iter().any(|event| matches!(
+        event.payload(),
+        mfm_events::v1::KernelEventPayload::StateAttemptFailed(_)
+    )));
 }
 
 async fn assert_atomic_evm_fact_publication(
@@ -853,6 +898,7 @@ async fn launch_snapshot(
 enum FactIndexMutation {
     OmitRows,
     SplitFrontier,
+    ProviderFailure,
 }
 
 struct AdversarialSnapshotFactIndex {
@@ -889,6 +935,11 @@ impl FactIndexReadProvider for AdversarialSnapshotFactIndex {
                 .lock()
                 .expect("batch widths")
                 .push(requests.len());
+            if matches!(self.mutation, FactIndexMutation::ProviderFailure) {
+                return Err(FactIndexReadError::redacted_provider_failure(
+                    "private temporary provider failure",
+                ));
+            }
             let mut responses = self.projection.read_fact_index_batch(requests).await?;
             match self.mutation {
                 FactIndexMutation::OmitRows => {
@@ -934,6 +985,7 @@ impl FactIndexReadProvider for AdversarialSnapshotFactIndex {
                             .map_err(FactIndexReadError::redacted_provider_failure)?;
                     }
                 }
+                FactIndexMutation::ProviderFailure => unreachable!("handled before provider read"),
             }
             Ok(responses)
         })

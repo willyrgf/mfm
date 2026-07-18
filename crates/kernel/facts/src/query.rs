@@ -90,7 +90,7 @@ impl FactQueryPredicate {
     }
 }
 
-/// Descriptor-scoped fact query request accepted by the v1 compiler.
+/// Descriptor-scoped fact query request accepted by the v2 compiler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryInput {
     pub(crate) store_scope: StoreScopeRef,
@@ -100,6 +100,7 @@ pub struct FactQueryInput {
     pub(crate) return_fields: Vec<FactFieldId>,
     pub(crate) ordering: FactOrderingName,
     pub(crate) limit: Option<u64>,
+    pub(crate) content_identity: Option<FactContentIdentityEvidence>,
 }
 
 impl FactQueryInput {
@@ -154,7 +155,17 @@ impl FactQueryInput {
             return_fields,
             ordering,
             limit,
+            content_identity: None,
         })
+    }
+
+    /// Narrows this query to indexed references carrying one verified fact-content identity.
+    ///
+    /// The compiler binds the evidence to the resolved descriptor. Providers apply the compact
+    /// filter before ordering and limiting; consumers must still hydrate and reverify the result.
+    pub fn with_content_identity(mut self, content_identity: FactContentIdentityEvidence) -> Self {
+        self.content_identity = Some(content_identity);
+        self
     }
 
     /// Returns the store scope.
@@ -191,6 +202,11 @@ impl FactQueryInput {
     pub const fn limit(&self) -> Option<u64> {
         self.limit
     }
+
+    /// Returns the optional fact-content identity narrowing evidence.
+    pub const fn content_identity(&self) -> Option<&FactContentIdentityEvidence> {
+        self.content_identity.as_ref()
+    }
 }
 
 /// Parsed descriptor-scoped query shape from canonical query bytes.
@@ -198,12 +214,14 @@ impl FactQueryInput {
 pub struct CompiledFactQueryShape {
     pub(crate) predicates: Vec<FactQueryPredicate>,
     pub(crate) return_fields: Vec<FactFieldId>,
+    pub(crate) content_identity: Option<FactContentIdentityEvidence>,
 }
 
 impl CompiledFactQueryShape {
     pub(crate) fn new(
         predicates: Vec<FactQueryPredicate>,
         return_fields: Vec<FactFieldId>,
+        content_identity: Option<FactContentIdentityEvidence>,
     ) -> Result<Self> {
         if return_fields.is_empty() {
             return Err(FactError::descriptor(
@@ -213,6 +231,7 @@ impl CompiledFactQueryShape {
         Ok(Self {
             predicates,
             return_fields,
+            content_identity,
         })
     }
 
@@ -224,6 +243,11 @@ impl CompiledFactQueryShape {
     /// Returns requested return fields.
     pub fn return_fields(&self) -> &[FactFieldId] {
         &self.return_fields
+    }
+
+    /// Returns the optional exact fact-content identity filter.
+    pub const fn content_identity(&self) -> Option<&FactContentIdentityEvidence> {
+        self.content_identity.as_ref()
     }
 }
 
