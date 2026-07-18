@@ -6,7 +6,7 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_effects::ReadExternal;
 use mfm_evm_capabilities::{
     EvmBlock, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
-    EvmSessionEvidence,
+    EvmSessionEvidence, EVM_CALL_MAX_RESPONSE_BYTES,
 };
 use mfm_ids::LocalPublicId;
 use mfm_portfolio_model::evm::EvmBlockAnchor;
@@ -18,9 +18,9 @@ use mfm_program_derive::{MfmConfig, MfmValue};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{
-    block_anchor_hash, block_anchor_number, canonical_address, canonical_bytes, canonical_hash,
-    invalid, parse_address, parse_bytes, parse_hash, parse_quantity, validate_block_anchor,
-    validate_session,
+    block_anchor_hash, block_anchor_number, canonical_address, canonical_bytes,
+    canonical_bytes_len, canonical_hash, invalid, parse_address, parse_bytes, parse_hash,
+    parse_quantity, validate_block_anchor, validate_session,
 };
 use crate::identity::{adapter_binding, state_kind, state_version};
 use crate::{EvmAccessListEntry, EvmStateError, EVM_TRANSACTION_DATA_MAX_BYTES};
@@ -31,9 +31,19 @@ pub const EVM_CONTRACT_VALIDATION_MAX_CALLS: usize = 64;
 pub const EVM_CONTRACT_CODE_MAX_BYTES: usize = 128 * 1024;
 /// Maximum aggregate code and call-return bytes retained by one validation node.
 pub const EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
-
+/// Maximum aggregate call-return bytes admitted while reserving the full code allowance.
+pub const EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES: usize =
+    EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES - EVM_CONTRACT_CODE_MAX_BYTES;
+/// Maximum aggregate authored calldata bytes retained by one validation policy.
+pub const EVM_CONTRACT_VALIDATION_MAX_TOTAL_CALLDATA_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum aggregate authored access-list addresses retained by one validation policy.
+pub const EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_ENTRIES: usize = 256;
+/// Maximum aggregate authored access-list storage keys retained by one validation policy.
+pub const EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_STORAGE_KEYS: usize = 4_096;
 const MAX_ACCESS_LIST_ENTRIES: usize = 256;
 const MAX_ACCESS_LIST_STORAGE_KEYS: usize = 4_096;
+#[cfg(test)]
+const MAX_CANONICAL_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Fully specified read-only call context independent of its expected return.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
@@ -105,8 +115,11 @@ impl EvmContractCallContext {
         &self.access_list
     }
 
-    /// Creates the exact source-bound capability request at `anchor`.
-    pub fn capability_request(&self, anchor: &EvmBlockAnchor) -> Result<EvmCall, EvmStateError> {
+    fn capability_request(
+        &self,
+        anchor: &EvmBlockAnchor,
+        max_response_bytes: usize,
+    ) -> Result<EvmCall, EvmStateError> {
         self.validate()?;
         validate_block_anchor(anchor)?;
         EvmCall::new(
@@ -117,38 +130,16 @@ impl EvmContractCallContext {
             parse_quantity(&self.gas_limit)?,
             access_list_to_alloy(&self.access_list)?,
             EvmBlockSelector::ExactHash(block_anchor_hash(anchor)?),
+            max_response_bytes,
         )
         .map_err(|_| invalid("contract validation call request was invalid"))
-    }
-
-    pub(crate) fn from_capability_request(
-        request: &EvmCall,
-    ) -> Result<(Self, B256), EvmStateError> {
-        let EvmBlockSelector::ExactHash(anchor_hash) = request.block() else {
-            return Err(invalid(
-                "contract validation call did not use an exact hash selector",
-            ));
-        };
-        let context = Self::new(
-            request.from(),
-            request.to(),
-            request.value(),
-            request.input(),
-            request.gas_limit(),
-            request
-                .access_list()
-                .iter()
-                .map(|entry| EvmAccessListEntry::new(entry.address, entry.storage_keys.clone()))
-                .collect(),
-        )?;
-        Ok((context, *anchor_hash))
     }
 
     fn validate(&self) -> Result<(), EvmStateError> {
         parse_address(&self.caller)?;
         parse_address(&self.target)?;
         parse_quantity(&self.value)?;
-        parse_bytes(&self.calldata, EVM_TRANSACTION_DATA_MAX_BYTES)?;
+        canonical_bytes_len(&self.calldata, EVM_TRANSACTION_DATA_MAX_BYTES)?;
         if parse_quantity(&self.gas_limit)?.is_zero() {
             return Err(invalid("contract validation call gas limit was zero"));
         }
@@ -241,13 +232,18 @@ impl EvmContractCallCheck {
     /// Creates the exact source-bound capability request at `anchor`.
     pub fn capability_request(&self, anchor: &EvmBlockAnchor) -> Result<EvmCall, EvmStateError> {
         self.validate()?;
-        self.context.capability_request(anchor)
+        self.context
+            .capability_request(anchor, self.expected_return_len()?)
     }
 
     fn validate(&self) -> Result<(), EvmStateError> {
         self.context.validate()?;
-        parse_bytes(&self.expected_return, EVM_TRANSACTION_DATA_MAX_BYTES)?;
+        self.expected_return_len()?;
         Ok(())
+    }
+
+    fn expected_return_len(&self) -> Result<usize, EvmStateError> {
+        canonical_bytes_len(&self.expected_return, EVM_CALL_MAX_RESPONSE_BYTES)
     }
 }
 
@@ -315,23 +311,12 @@ impl EvmContractValidationConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        LocalPublicId::new(&self.network_id)
-            .map_err(|_| "contract validation network id was invalid".to_owned())?;
-        if self.chain_id == 0 {
-            return Err("contract validation chain id must be non-zero".to_owned());
-        }
-        let expected =
-            parse_hash(&self.expected_runtime_code_hash).map_err(|error| error.to_string())?;
-        if expected == keccak256([]) {
-            return Err("expected runtime-code hash must not be the empty-code hash".to_owned());
-        }
-        if self.calls.len() > EVM_CONTRACT_VALIDATION_MAX_CALLS {
-            return Err("contract validation contained too many calls".to_owned());
-        }
-        for call in &self.calls {
-            call.validate().map_err(|error| error.to_string())?;
-        }
-        Ok(())
+        validate_validation_policy(
+            &self.network_id,
+            self.chain_id,
+            &self.expected_runtime_code_hash,
+            &self.calls,
+        )
     }
 }
 
@@ -452,15 +437,6 @@ impl EvmContractValidationPlan {
         ))
     }
 
-    /// Returns every exact call request in deterministic order.
-    pub fn call_requests(&self) -> Result<Vec<EvmCall>, EvmStateError> {
-        self.validate()?;
-        self.calls
-            .iter()
-            .map(|call| call.capability_request(&self.anchor))
-            .collect()
-    }
-
     /// Returns the final block-number selector used for canonicality.
     pub fn canonicality_selector(&self) -> Result<EvmBlockSelector, EvmStateError> {
         self.validate()?;
@@ -468,13 +444,13 @@ impl EvmContractValidationPlan {
     }
 
     fn validate(&self) -> Result<(), EvmStateError> {
-        let config = EvmContractValidationConfig {
-            network_id: self.network_id.clone(),
-            chain_id: self.chain_id,
-            expected_runtime_code_hash: self.expected_runtime_code_hash.clone(),
-            calls: self.calls.clone(),
-        };
-        config.validate().map_err(EvmStateError::invalid)?;
+        validate_validation_policy(
+            &self.network_id,
+            self.chain_id,
+            &self.expected_runtime_code_hash,
+            &self.calls,
+        )
+        .map_err(EvmStateError::invalid)?;
         parse_address(&self.address)?;
         validate_block_anchor(&self.anchor)
     }
@@ -501,10 +477,10 @@ pub enum EvmContractValidationObservation {
     },
     /// Exact-hash call and return.
     Call {
-        /// Complete call context.
-        context: EvmContractCallContext,
-        /// Exact canonical anchor hash selector.
-        anchor_hash: String,
+        /// Zero-based position in the immutable validation plan.
+        call_index: u64,
+        /// Canonical digest of the exact source-bound capability request.
+        request_digest: String,
         /// Raw return bytes.
         return_data: String,
     },
@@ -530,49 +506,116 @@ pub struct EvmContractValidationEvidence {
 }
 
 impl EvmContractValidationEvidence {
-    /// Builds checked evidence from the exact live requests and responses.
-    pub fn from_observations(
-        code_address: Address,
-        code_selector: &EvmBlockSelector,
-        code: &EvmCode,
-        calls: &[(EvmCall, Bytes)],
-        final_canonical_block: &EvmBlock,
-        session: &EvmSessionEvidence,
-    ) -> Result<Self, EvmStateError> {
-        let EvmBlockSelector::ExactHash(code_anchor_hash) = code_selector else {
-            return Err(invalid(
-                "contract code read did not use an exact hash selector",
-            ));
-        };
-        if keccak256(&code.bytes) != code.hash {
-            return Err(invalid("contract code capability hash was inconsistent"));
-        }
-        let mut observations = Vec::with_capacity(calls.len() + 2);
-        observations.push(EvmContractValidationObservation::Code {
-            address: canonical_address(code_address),
-            anchor_hash: canonical_hash(*code_anchor_hash),
-            code: canonical_bytes(&code.bytes),
-        });
-        for (request, response) in calls {
-            let (context, anchor_hash) = EvmContractCallContext::from_capability_request(request)?;
-            observations.push(EvmContractValidationObservation::Call {
-                context,
-                anchor_hash: canonical_hash(anchor_hash),
-                return_data: canonical_bytes(response),
-            });
-        }
-        observations.push(EvmContractValidationObservation::AnchorByNumber {
-            block: EvmBlockAnchor::new(final_canonical_block.number, final_canonical_block.hash),
-        });
-        Ok(Self {
-            observations,
-            session: session.clone(),
-        })
-    }
-
     /// Returns the retained source binding.
     pub const fn session(&self) -> &EvmSessionEvidence {
         &self.session
+    }
+}
+
+/// Non-serializable, single-pass constructor for bounded live validation evidence.
+///
+/// Code and call results are consumed one at a time. Each raw result is checked and converted into
+/// its one compact observation before the caller can issue the next request.
+pub struct EvmContractValidationEvidenceBuilder<'a> {
+    plan: &'a EvmContractValidationPlan,
+    observations: Vec<EvmContractValidationObservation>,
+    session: EvmSessionEvidence,
+    budget: EvmContractValidationEvidenceBudget,
+    next_call_index: usize,
+}
+
+impl<'a> EvmContractValidationEvidenceBuilder<'a> {
+    /// Admits and consumes the runtime-code response before any contract call is issued.
+    pub fn new(
+        plan: &'a EvmContractValidationPlan,
+        code: EvmCode,
+        session: &EvmSessionEvidence,
+    ) -> Result<Self, EvmStateError> {
+        plan.validate()?;
+        validate_session(session, &plan.network_id, plan.chain_id)?;
+
+        let EvmCode { bytes, hash } = code;
+        if keccak256(&bytes) != hash {
+            return Err(invalid("contract code capability hash was inconsistent"));
+        }
+        let budget = validate_runtime_code(plan, &bytes)?;
+        let observations = vec![EvmContractValidationObservation::Code {
+            address: plan.address.clone(),
+            anchor_hash: plan.anchor.hash().to_owned(),
+            code: canonical_bytes(&bytes),
+        }];
+
+        Ok(Self {
+            plan,
+            observations,
+            session: session.clone(),
+            budget,
+            next_call_index: 0,
+        })
+    }
+
+    /// Returns the next exact call request, or `None` after every planned response was admitted.
+    pub fn next_call_request(&self) -> Result<Option<EvmCall>, EvmStateError> {
+        self.plan
+            .calls
+            .get(self.next_call_index)
+            .map(|call| call.capability_request(&self.plan.anchor))
+            .transpose()
+    }
+
+    /// Admits and consumes the next call result in immutable plan order.
+    pub fn push_call_response(&mut self, response: Bytes) -> Result<(), EvmStateError> {
+        let call =
+            self.plan.calls.get(self.next_call_index).ok_or_else(|| {
+                invalid("contract validation received an unexpected call response")
+            })?;
+        let expected_len = call.expected_return_len()?;
+        if response.len() > expected_len {
+            return Err(invalid(
+                "contract validation call response exceeded its request bound",
+            ));
+        }
+        let expected = parse_bytes(&call.expected_return, EVM_CALL_MAX_RESPONSE_BYTES)?;
+        if response.as_ref() != expected.as_slice() {
+            return Err(invalid("contract call return bytes differed"));
+        }
+        self.budget.admit_return(response.len())?;
+
+        let call_index = u64::try_from(self.next_call_index)
+            .map_err(|_| invalid("contract validation call index overflowed"))?;
+        self.observations
+            .push(EvmContractValidationObservation::Call {
+                call_index,
+                request_digest: validation_call_request_digest(call, &self.plan.anchor)?,
+                return_data: canonical_bytes(&response),
+            });
+        self.next_call_index += 1;
+        Ok(())
+    }
+
+    /// Finishes evidence with the number-to-hash canonicality response.
+    pub fn finish(
+        mut self,
+        final_canonical_block: EvmBlock,
+    ) -> Result<EvmContractValidationEvidence, EvmStateError> {
+        if self.next_call_index != self.plan.calls.len() {
+            return Err(invalid(
+                "contract validation evidence was missing call responses",
+            ));
+        }
+        let block = EvmBlockAnchor::new(final_canonical_block.number, final_canonical_block.hash);
+        validate_block_anchor(&block)?;
+        if block != self.plan.anchor {
+            return Err(invalid(
+                "final block-by-number result did not preserve the authored anchor",
+            ));
+        }
+        self.observations
+            .push(EvmContractValidationObservation::AnchorByNumber { block });
+        Ok(EvmContractValidationEvidence {
+            observations: self.observations,
+            session: self.session,
+        })
     }
 }
 
@@ -639,19 +682,13 @@ pub fn validate_evm_contract(
     }
 
     let code = parse_bytes(code, EVM_CONTRACT_CODE_MAX_BYTES)?;
-    if code.is_empty() {
-        return Err(invalid("observed contract runtime code was empty"));
-    }
+    let mut budget = validate_runtime_code(plan, &code)?;
     let observed_code_hash = keccak256(&code);
-    if canonical_hash(observed_code_hash) != plan.expected_runtime_code_hash {
-        return Err(invalid("observed contract runtime-code hash differed"));
-    }
 
-    let mut retained_bytes = code.len();
-    for expected in &plan.calls {
+    for (expected_index, expected) in plan.calls.iter().enumerate() {
         let Some(EvmContractValidationObservation::Call {
-            context,
-            anchor_hash,
+            call_index,
+            request_digest,
             return_data,
         }) = observations.next()
         else {
@@ -659,23 +696,21 @@ pub fn validate_evm_contract(
                 "contract call evidence was missing, reordered, or changed",
             ));
         };
-        if context != expected.context() || anchor_hash != plan.anchor.hash() {
+        let expected_index = u64::try_from(expected_index)
+            .map_err(|_| invalid("contract validation call index overflowed"))?;
+        if *call_index != expected_index
+            || request_digest != &validation_call_request_digest(expected, &plan.anchor)?
+        {
             return Err(invalid(
                 "contract call evidence was missing, reordered, or changed",
             ));
         }
-        let returned = parse_bytes(return_data, EVM_TRANSACTION_DATA_MAX_BYTES)?;
-        let expected_return =
-            parse_bytes(&expected.expected_return, EVM_TRANSACTION_DATA_MAX_BYTES)?;
+        let returned = parse_bytes(return_data, EVM_CALL_MAX_RESPONSE_BYTES)?;
+        let expected_return = parse_bytes(&expected.expected_return, EVM_CALL_MAX_RESPONSE_BYTES)?;
         if returned != expected_return {
             return Err(invalid("contract call return bytes differed"));
         }
-        retained_bytes = retained_bytes
-            .checked_add(returned.len())
-            .ok_or_else(|| invalid("contract validation evidence size overflowed"))?;
-        if retained_bytes > EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES {
-            return Err(invalid("contract validation evidence exceeded its bound"));
-        }
+        budget.admit_return(returned.len())?;
     }
 
     let Some(EvmContractValidationObservation::AnchorByNumber { block }) = observations.next()
@@ -790,6 +825,158 @@ impl ReadState for ValidateEvmContractState {
         self.reduce(input, evidence.primary_evidence())
             .map_err(StateError::from)
     }
+}
+
+fn validate_validation_policy(
+    network_id: &str,
+    chain_id: u64,
+    expected_runtime_code_hash: &str,
+    calls: &[EvmContractCallCheck],
+) -> Result<(), String> {
+    LocalPublicId::new(network_id)
+        .map_err(|_| "contract validation network id was invalid".to_owned())?;
+    if chain_id == 0 {
+        return Err("contract validation chain id must be non-zero".to_owned());
+    }
+    let expected = parse_hash(expected_runtime_code_hash).map_err(|error| error.to_string())?;
+    if expected == keccak256([]) {
+        return Err("expected runtime-code hash must not be the empty-code hash".to_owned());
+    }
+    if calls.len() > EVM_CONTRACT_VALIDATION_MAX_CALLS {
+        return Err("contract validation contained too many calls".to_owned());
+    }
+
+    let mut total_returns = 0usize;
+    let mut total_calldata = 0usize;
+    let mut total_access_list_entries = 0usize;
+    let mut total_access_list_storage_keys = 0usize;
+    for call in calls {
+        call.validate().map_err(|error| error.to_string())?;
+        total_returns = checked_policy_sum(
+            total_returns,
+            call.expected_return_len()
+                .map_err(|error| error.to_string())?,
+            "contract validation expected-return size overflowed",
+        )?;
+        total_calldata = checked_policy_sum(
+            total_calldata,
+            canonical_bytes_len(call.calldata(), EVM_TRANSACTION_DATA_MAX_BYTES)
+                .map_err(|error| error.to_string())?,
+            "contract validation calldata size overflowed",
+        )?;
+        total_access_list_entries = checked_policy_sum(
+            total_access_list_entries,
+            call.access_list().len(),
+            "contract validation access-list size overflowed",
+        )?;
+        for entry in call.access_list() {
+            total_access_list_storage_keys = checked_policy_sum(
+                total_access_list_storage_keys,
+                entry.storage_keys().len(),
+                "contract validation access-list storage-key size overflowed",
+            )?;
+        }
+    }
+
+    if total_returns > EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES {
+        return Err(
+            "contract validation expected returns exceeded their aggregate bound".to_owned(),
+        );
+    }
+    if total_calldata > EVM_CONTRACT_VALIDATION_MAX_TOTAL_CALLDATA_BYTES {
+        return Err("contract validation calldata exceeded its aggregate bound".to_owned());
+    }
+    if total_access_list_entries > EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_ENTRIES {
+        return Err(
+            "contract validation access-list addresses exceeded their aggregate bound".to_owned(),
+        );
+    }
+    if total_access_list_storage_keys > EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_STORAGE_KEYS {
+        return Err(
+            "contract validation access-list storage keys exceeded their aggregate bound"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn checked_policy_sum(current: usize, added: usize, reason: &str) -> Result<usize, String> {
+    current.checked_add(added).ok_or_else(|| reason.to_owned())
+}
+
+struct EvmContractValidationEvidenceBudget {
+    retained_bytes: usize,
+}
+
+impl EvmContractValidationEvidenceBudget {
+    fn from_code(code_len: usize) -> Result<Self, EvmStateError> {
+        if code_len == 0 {
+            return Err(invalid("observed contract runtime code was empty"));
+        }
+        if code_len > EVM_CONTRACT_CODE_MAX_BYTES {
+            return Err(invalid("observed contract runtime code exceeded its bound"));
+        }
+        if code_len > EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES {
+            return Err(invalid("contract validation evidence exceeded its bound"));
+        }
+        Ok(Self {
+            retained_bytes: code_len,
+        })
+    }
+
+    fn admit_return(&mut self, return_len: usize) -> Result<(), EvmStateError> {
+        if return_len > EVM_CALL_MAX_RESPONSE_BYTES {
+            return Err(invalid(
+                "contract validation call response exceeded its request bound",
+            ));
+        }
+        let retained_bytes = self
+            .retained_bytes
+            .checked_add(return_len)
+            .ok_or_else(|| invalid("contract validation evidence size overflowed"))?;
+        if retained_bytes > EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES {
+            return Err(invalid("contract validation evidence exceeded its bound"));
+        }
+        self.retained_bytes = retained_bytes;
+        Ok(())
+    }
+}
+
+fn validate_runtime_code(
+    plan: &EvmContractValidationPlan,
+    code: &[u8],
+) -> Result<EvmContractValidationEvidenceBudget, EvmStateError> {
+    let budget = EvmContractValidationEvidenceBudget::from_code(code.len())?;
+    if canonical_hash(keccak256(code)) != plan.expected_runtime_code_hash {
+        return Err(invalid("observed contract runtime-code hash differed"));
+    }
+    Ok(budget)
+}
+
+fn validation_call_request_digest(
+    call: &EvmContractCallCheck,
+    anchor: &EvmBlockAnchor,
+) -> Result<String, EvmStateError> {
+    #[derive(Serialize)]
+    struct DigestMaterial<'a> {
+        context: &'a EvmContractCallContext,
+        anchor_hash: &'a str,
+        max_response_bytes: u64,
+    }
+
+    validate_block_anchor(anchor)?;
+    let max_response_bytes = u64::try_from(call.expected_return_len()?)
+        .map_err(|_| invalid("contract validation response bound overflowed"))?;
+    let material = DigestMaterial {
+        context: call.context(),
+        anchor_hash: anchor.hash(),
+        max_response_bytes,
+    };
+    let json = serde_json::to_string(&material)
+        .map_err(|_| invalid("contract validation call request could not be serialized"))?;
+    PlainCanonicalJsonBytes::from_json_str(&json)
+        .map(|bytes| bytes.content_digest().as_str().to_owned())
+        .map_err(|_| invalid("contract validation call request could not be canonicalized"))
 }
 
 fn access_list_to_alloy(entries: &[EvmAccessListEntry]) -> Result<AccessList, EvmStateError> {

@@ -43,6 +43,8 @@ pub type EvmSessionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send
 pub const EVM_JSONRPC_SESSION_IMPLEMENTATION_ID: &str = "mfm.evm.jsonrpc.session.v1";
 /// EIP-2718 transaction type used by the one admitted EVM transaction flow.
 pub const EVM_EIP1559_TRANSACTION_TYPE: u8 = 2;
+/// Maximum decoded result bytes admitted by one read-only contract call.
+pub const EVM_CALL_MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
 macro_rules! evm_capability {
     ($(#[$meta:meta])* $ty:ident, $role:ty, $name:literal) => {
@@ -234,10 +236,15 @@ pub struct EvmCall {
     gas_limit: U256,
     access_list: AccessList,
     block: EvmBlockSelector,
+    max_response_bytes: usize,
 }
 
 impl EvmCall {
-    /// Creates a fully specified call request. A zero gas limit is rejected.
+    /// Creates a fully specified call request with an explicit decoded-result bound.
+    ///
+    /// A zero gas limit and a result bound above [`EVM_CALL_MAX_RESPONSE_BYTES`] are rejected. A
+    /// zero-byte result bound is valid for calls whose protocol contract requires an empty result.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         from: Address,
         to: Address,
@@ -246,10 +253,16 @@ impl EvmCall {
         gas_limit: U256,
         access_list: AccessList,
         block: EvmBlockSelector,
+        max_response_bytes: usize,
     ) -> Result<Self> {
         if gas_limit.is_zero() {
             return Err(EvmCapabilityError::InvalidRequest {
                 reason: EvmInvalidRequest::ZeroCallGasLimit,
+            });
+        }
+        if max_response_bytes > EVM_CALL_MAX_RESPONSE_BYTES {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::CallResponseLimitExceeded,
             });
         }
         Ok(Self {
@@ -260,6 +273,7 @@ impl EvmCall {
             gas_limit,
             access_list,
             block,
+            max_response_bytes,
         })
     }
 
@@ -296,6 +310,11 @@ impl EvmCall {
     /// Returns the block selector.
     pub const fn block(&self) -> &EvmBlockSelector {
         &self.block
+    }
+
+    /// Returns the maximum decoded result bytes admitted for this call.
+    pub const fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
     }
 }
 
@@ -667,6 +686,8 @@ pub enum EvmInvalidRequest {
     PriorityFeeExceedsMaxFee,
     /// A read-only call supplied a zero gas limit.
     ZeroCallGasLimit,
+    /// A read-only call requested more decoded result bytes than the capability maximum.
+    CallResponseLimitExceeded,
     /// Signed transaction bytes were empty.
     EmptySignedTransaction,
     /// Receipt/log identities were inconsistent, a log was removed, or a reverted receipt had

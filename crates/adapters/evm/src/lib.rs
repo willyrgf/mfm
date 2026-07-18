@@ -21,7 +21,7 @@ use mfm_runtime::{
 };
 use mfm_states_evm::{
     evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, EvmContractValidationEvidence,
-    EvmContractValidationPlan, ValidateEvmContractState,
+    EvmContractValidationEvidenceBuilder, EvmContractValidationPlan, ValidateEvmContractState,
 };
 use mfm_store::v1 as store;
 
@@ -162,39 +162,46 @@ impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExec
                 .bind(binding)
                 .await
                 .map_err(evm_read_runtime_error)?;
-            let (code_address, code_selector) =
-                plan.code_request().map_err(evm_state_runtime_error)?;
-            let code = session
-                .read_code(code_address, &code_selector)
+            collect_contract_validation_evidence(plan, session)
                 .await
-                .map_err(evm_read_runtime_error)?;
-            let mut calls = Vec::with_capacity(plan.calls().len());
-            for request in plan.call_requests().map_err(evm_state_runtime_error)? {
-                let response = session
-                    .call(&request)
-                    .await
-                    .map_err(evm_read_runtime_error)?;
-                calls.push((request, response));
-            }
-            let canonicality_selector = plan
-                .canonicality_selector()
-                .map_err(evm_state_runtime_error)?;
-            let canonical_block = session
-                .read_block(&canonicality_selector)
-                .await
-                .map_err(evm_read_runtime_error)?;
-            EvmContractValidationEvidence::from_observations(
-                code_address,
-                &code_selector,
-                &code,
-                &calls,
-                &canonical_block,
-                session.evidence(),
-            )
-            .map(ExternalReadExecution::primary)
-            .map_err(evm_state_runtime_error)
+                .map(ExternalReadExecution::primary)
         })
     }
+}
+
+async fn collect_contract_validation_evidence(
+    plan: &EvmContractValidationPlan,
+    session: Arc<dyn EvmReadSession>,
+) -> mfm_runtime::Result<EvmContractValidationEvidence> {
+    let (code_address, code_selector) = plan.code_request().map_err(evm_state_runtime_error)?;
+    let code = session
+        .read_code(code_address, &code_selector)
+        .await
+        .map_err(evm_read_runtime_error)?;
+    let mut evidence = EvmContractValidationEvidenceBuilder::new(plan, code, session.evidence())
+        .map_err(evm_state_runtime_error)?;
+    while let Some(request) = evidence
+        .next_call_request()
+        .map_err(evm_state_runtime_error)?
+    {
+        let response = session
+            .call(&request)
+            .await
+            .map_err(evm_read_runtime_error)?;
+        evidence
+            .push_call_response(response)
+            .map_err(evm_state_runtime_error)?;
+    }
+    let canonicality_selector = plan
+        .canonicality_selector()
+        .map_err(evm_state_runtime_error)?;
+    let canonical_block = session
+        .read_block(&canonicality_selector)
+        .await
+        .map_err(evm_read_runtime_error)?;
+    evidence
+        .finish(canonical_block)
+        .map_err(evm_state_runtime_error)
 }
 
 /// Verifies exact-anchor validation from retained evidence only.

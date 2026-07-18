@@ -325,6 +325,7 @@ async fn read_token_decimals(
                         U256::from(100_000_u64),
                         Default::default(),
                         selector,
+                        32,
                     )
                     .map_err(evm_read_runtime_error)?;
                     let result = session.call(&call).await.map_err(evm_read_runtime_error)?;
@@ -381,6 +382,7 @@ async fn read_balances(
                                 U256::from(100_000_u64),
                                 Default::default(),
                                 selector,
+                                32,
                             )
                             .map_err(evm_read_runtime_error)?;
                             let result =

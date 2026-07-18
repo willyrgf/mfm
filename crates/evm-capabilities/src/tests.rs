@@ -232,12 +232,48 @@ fn call_request_requires_an_explicit_nonzero_gas_bound() {
         U256::ZERO,
         AccessList::default(),
         selector,
+        0,
     )
     .expect_err("zero gas bound");
     assert_eq!(
         error,
         EvmCapabilityError::InvalidRequest {
             reason: EvmInvalidRequest::ZeroCallGasLimit,
+        }
+    );
+}
+
+#[test]
+fn call_request_requires_a_bounded_result() {
+    let selector = EvmBlockSelector::ExactHash(B256::from([3; 32]));
+    let empty = EvmCall::new(
+        Address::ZERO,
+        Address::from([4; 20]),
+        U256::ZERO,
+        Bytes::new(),
+        U256::from(1),
+        AccessList::default(),
+        selector.clone(),
+        0,
+    )
+    .expect("empty result bound");
+    assert_eq!(empty.max_response_bytes(), 0);
+
+    let error = EvmCall::new(
+        Address::ZERO,
+        Address::from([4; 20]),
+        U256::ZERO,
+        Bytes::new(),
+        U256::from(1),
+        AccessList::default(),
+        selector,
+        EVM_CALL_MAX_RESPONSE_BYTES + 1,
+    )
+    .expect_err("oversized result bound");
+    assert_eq!(
+        error,
+        EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::CallResponseLimitExceeded,
         }
     );
 }

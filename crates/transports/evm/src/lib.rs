@@ -229,7 +229,10 @@ impl EvmJsonRpcSession {
                 }, selector_param(request.block())]),
             )
             .await?;
-        parse_bytes(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
+        parse_bounded_bytes(
+            value.as_str().ok_or(EvmTransportError::InvalidResponse)?,
+            request.max_response_bytes(),
+        )
     }
 
     async fn pending_nonce_value(&self, account: Address) -> TransportResult<U256> {
@@ -658,6 +661,19 @@ fn parse_bytes(raw: &str) -> TransportResult<Bytes> {
         .map_err(|_| EvmTransportError::InvalidResponse)
 }
 
+fn parse_bounded_bytes(raw: &str, maximum: usize) -> TransportResult<Bytes> {
+    let digits = raw
+        .strip_prefix("0x")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if !digits.len().is_multiple_of(2) {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    if digits.len() / 2 > maximum {
+        return Err(EvmTransportError::ResponseTooLarge);
+    }
+    parse_bytes(raw)
+}
+
 fn parse_hash(raw: &str) -> TransportResult<B256> {
     if raw.len() != 66 || !raw.starts_with("0x") {
         return Err(EvmTransportError::InvalidResponse);
@@ -896,7 +912,7 @@ pub enum EvmTransportError {
         /// Redaction-safe operation id.
         operation: LocalPublicId,
     },
-    /// Response exceeded the configured body bound.
+    /// Response exceeded the configured HTTP-body or decoded method-result bound.
     #[error("EVM JSON-RPC response exceeded size bound")]
     ResponseTooLarge,
 }

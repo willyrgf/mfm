@@ -36,17 +36,27 @@ pub(crate) fn parse_quantity(value: &str) -> Result<U256, EvmStateError> {
 }
 
 pub(crate) fn parse_bytes(value: &str, maximum: usize) -> Result<Vec<u8>, EvmStateError> {
+    canonical_bytes_len(value, maximum)?;
+    let body = value
+        .strip_prefix("0x")
+        .ok_or_else(|| invalid("EVM bytes lacked canonical prefix"))?;
+    hex::decode(body).map_err(|_| invalid("EVM bytes were invalid hex"))
+}
+
+pub(crate) fn canonical_bytes_len(value: &str, maximum: usize) -> Result<usize, EvmStateError> {
     let body = value
         .strip_prefix("0x")
         .ok_or_else(|| invalid("EVM bytes lacked canonical prefix"))?;
     if body.len() % 2 != 0 || body.len() / 2 > maximum {
         return Err(invalid("EVM bytes had invalid or excessive length"));
     }
-    let bytes = hex::decode(body).map_err(|_| invalid("EVM bytes were invalid hex"))?;
-    if canonical_bytes(&bytes) != value {
-        return Err(invalid("EVM bytes were not canonical"));
+    if !body
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid("EVM bytes were not canonical lower-case hex"));
     }
-    Ok(bytes)
+    Ok(body.len() / 2)
 }
 
 pub(crate) fn canonical_address(value: Address) -> String {

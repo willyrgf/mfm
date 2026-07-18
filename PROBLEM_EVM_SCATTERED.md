@@ -478,8 +478,9 @@ deployment must first supply an explicit concrete anchor; the validator never si
 3. one final block-by-number read whose hash must still equal the authored anchor hash.
 
 One state-owned reducer is used by live execution and replay. It checks evidence completeness and
-order, source/network/chain/anchor coherence, non-empty runtime-code hash, full call context, exact
-return bytes, and final canonicality. The compact output is one `VerifiedEvmContract` containing
+order, source/network/chain/anchor coherence, non-empty runtime-code hash, each plan-bound call
+index/request digest against the full authored context, exact return bytes, and final canonicality.
+The compact output is one `VerifiedEvmContract` containing
 the address, anchor, observed code hash, and validation-plan digest; it does not duplicate every
 derived boolean and report entry. Retained evidence contains the bounded raw code and call-return
 bytes needed to run the reducer again, not provider prose or endpoints.

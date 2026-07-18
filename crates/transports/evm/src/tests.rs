@@ -32,6 +32,7 @@ enum Mode {
     Stall,
     SlowBalance,
     SubmitHttpFailure,
+    HostileCallResult,
 }
 
 struct TestServer {
@@ -148,6 +149,7 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
                 U256::from(50_000),
                 Default::default(),
                 selector,
+                2,
             )
             .expect("call request"),
         )
@@ -195,6 +197,40 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
             "gas": "0xc350",
             "accessList": [],
         }, {"blockHash": BLOCK_HASH, "requireCanonical": true}])
+    );
+}
+
+#[tokio::test]
+async fn call_result_obeys_its_semantic_bound_below_the_http_body_bound() {
+    let server = TestServer::spawn(Mode::HostileCallResult).await;
+    let session = session(&server).await;
+    let request = EvmCall::new(
+        ACCOUNT,
+        Address::from([2; 20]),
+        U256::ZERO,
+        Bytes::new(),
+        U256::from(50_000),
+        Default::default(),
+        EvmBlockSelector::ExactHash(BLOCK_HASH.parse().expect("hash")),
+        2,
+    )
+    .expect("call request");
+
+    let error = session
+        .call(&request)
+        .await
+        .expect_err("near-body-limit result must fail the two-byte call bound");
+    assert_eq!(
+        error.redacted_diagnostic().expect("diagnostic").code(),
+        ProviderDiagnosticCode::ResponseInvalid
+    );
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request["method"] == "eth_call")
+            .count(),
+        1
     );
 }
 
@@ -766,6 +802,10 @@ fn rpc_result(mode: Mode, request: &Value, method: &str) -> Value {
         "eth_getBlockByHash" => json!({"number": "0x2a", "hash": BLOCK_HASH}),
         "eth_getBalance" => json!("0xde0b6b3a7640000"),
         "eth_getCode" => json!("0xdeadbeef"),
+        "eth_call" if matches!(mode, Mode::HostileCallResult) => {
+            let decoded_len = (MAX_RESPONSE_BYTES - 128) / 2;
+            json!(format!("0x{}", "ab".repeat(decoded_len)))
+        }
         "eth_call" => json!("0x1234"),
         "eth_getTransactionCount" => json!("0x7"),
         "eth_maxPriorityFeePerGas" => json!("0x2"),

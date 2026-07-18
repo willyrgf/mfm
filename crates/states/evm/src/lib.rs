@@ -36,9 +36,14 @@ mod transaction;
 pub use contract_validation::{
     validate_evm_contract, validate_evm_contract_validation_config, EvmContractCallCheck,
     EvmContractCallContext, EvmContractValidationConfig, EvmContractValidationEvidence,
-    EvmContractValidationObservation, EvmContractValidationPlan, EvmContractValidationTarget,
-    ValidateEvmContractState, VerifiedEvmContract, EVM_CONTRACT_CODE_MAX_BYTES,
-    EVM_CONTRACT_VALIDATION_MAX_CALLS, EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES,
+    EvmContractValidationEvidenceBuilder, EvmContractValidationObservation,
+    EvmContractValidationPlan, EvmContractValidationTarget, ValidateEvmContractState,
+    VerifiedEvmContract, EVM_CONTRACT_CODE_MAX_BYTES, EVM_CONTRACT_VALIDATION_MAX_CALLS,
+    EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES,
+    EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_ENTRIES,
+    EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_STORAGE_KEYS,
+    EVM_CONTRACT_VALIDATION_MAX_TOTAL_CALLDATA_BYTES,
+    EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES,
 };
 pub use identity::{evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version};
 pub use transaction::{
