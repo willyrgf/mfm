@@ -1,4 +1,4 @@
-//! Portfolio-owned EVM network collection state contracts.
+//! Reusable EVM balance collection state contracts.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future;
@@ -12,9 +12,6 @@ use mfm_evm_capabilities::{
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_facts::{FactAudience, FactContentIdentityEvidence, FactVisibility};
 use mfm_ids::LocalPublicId;
-use mfm_portfolio_model::ids::NormalizedEvmAddress;
-use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
-use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
     fact_descriptor_ref, ExternalReadEvidenceSet, FactDescriptorRef, ManagedWriteState,
     MfmFactType, NoContext, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
@@ -23,129 +20,238 @@ use mfm_program_derive::{MfmConfig, MfmFactType as DeriveMfmFactType, MfmValue, 
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
-use crate::{adapter_binding, state_kind, state_version};
+use crate::canonical::{canonical_address, parse_address};
+use crate::identity::{adapter_binding, state_kind, state_version};
 
-pub use mfm_portfolio_model::portfolio::EVM_NETWORK_HOLDING_SOURCE_LIMIT;
+/// Maximum source demand admitted by one EVM balance collection.
+pub const EVM_BALANCE_COLLECTION_SOURCE_LIMIT: usize = 1_024;
 
-/// Redaction-safe portfolio EVM state failure.
+/// Redaction-safe EVM balance-collection state failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum PortfolioEvmError {
+pub enum EvmBalanceCollectionError {
     /// Certified config, state input, or retained evidence was invalid.
-    #[error("portfolio EVM collection material was invalid: {reason}")]
+    #[error("EVM balance collection material was invalid: {reason}")]
     Invalid {
         /// Stable redaction-safe reason.
         reason: String,
     },
 }
 
-impl From<PortfolioEvmError> for StateError {
-    fn from(error: PortfolioEvmError) -> Self {
+impl From<EvmBalanceCollectionError> for StateError {
+    fn from(error: EvmBalanceCollectionError) -> Self {
         Self::Message(error.to_string())
     }
 }
 
-fn invalid(reason: impl Into<String>) -> PortfolioEvmError {
-    PortfolioEvmError::Invalid {
+fn invalid(reason: impl Into<String>) -> EvmBalanceCollectionError {
+    EvmBalanceCollectionError::Invalid {
         reason: reason.into(),
     }
 }
 
-/// One unique account/asset balance source collected for a portfolio.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
-#[serde(deny_unknown_fields)]
+/// Asset identity for one reusable EVM balance source.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_balance_source",
-    schema = "mfm.portfolio.evm.balance_source"
+    namespace = "mfm.evm",
+    name = "balance_asset",
+    schema = "mfm.evm.balance_asset"
 )]
-pub struct EvmBalanceSource {
-    account: NormalizedEvmAddress,
-    asset: HoldingSourceConfig,
+pub enum EvmBalanceAsset {
+    /// The native balance for the configured account and network.
+    Native,
+    /// An ERC-20 balance for the configured account and network.
+    Erc20 {
+        /// Canonical non-zero ERC-20 contract address.
+        contract_address: String,
+    },
 }
 
-impl EvmBalanceSource {
-    /// Creates one checked balance source.
-    pub fn new(
-        account: NormalizedEvmAddress,
-        asset: HoldingSourceConfig,
-    ) -> Result<Self, PortfolioEvmError> {
-        let source = Self { account, asset };
-        source.validate()?;
-        Ok(source)
-    }
-
-    /// Returns the canonical account address.
-    pub const fn account(&self) -> &NormalizedEvmAddress {
-        &self.account
-    }
-
-    /// Returns the collected asset.
-    pub const fn asset(&self) -> &HoldingSourceConfig {
-        &self.asset
-    }
-
-    /// Returns the parsed account address for adapter execution.
-    pub fn account_address(&self) -> Result<Address, PortfolioEvmError> {
-        parse_address(self.account.as_str())
-    }
-
-    /// Returns the parsed token contract address when this is an ERC-20 source.
-    pub fn contract_address_value(&self) -> Result<Option<Address>, PortfolioEvmError> {
-        self.asset
-            .contract_address()
-            .map(|address| parse_address(address.as_str()))
-            .transpose()
-    }
-
-    fn validate(&self) -> Result<(), PortfolioEvmError> {
-        if self
-            .asset
-            .contract_address()
-            .is_some_and(|address| address.is_zero())
-        {
+impl EvmBalanceAsset {
+    /// Creates a checked ERC-20 balance asset.
+    pub fn erc20(contract_address: Address) -> Result<Self, EvmBalanceCollectionError> {
+        if contract_address.is_zero() {
             return Err(invalid("ERC-20 contract address must be non-zero"));
+        }
+        Ok(Self::Erc20 {
+            contract_address: canonical_address(contract_address),
+        })
+    }
+
+    /// Returns the token contract for an ERC-20 asset.
+    pub fn contract_address(&self) -> Option<&str> {
+        match self {
+            Self::Native => None,
+            Self::Erc20 { contract_address } => Some(contract_address.as_str()),
+        }
+    }
+
+    fn validate(&self) -> Result<(), EvmBalanceCollectionError> {
+        if let Some(contract_address) = self.contract_address() {
+            let contract_address = parse_address(contract_address)
+                .map_err(|_| invalid("EVM contract address was invalid"))?;
+            if contract_address.is_zero() {
+                return Err(invalid("ERC-20 contract address must be non-zero"));
+            }
         }
         Ok(())
     }
 }
 
-/// Certified demand for one portfolio-owned EVM network collection.
+struct PresentOptional<T> {
+    value: Option<T>,
+    is_present: bool,
+}
+
+impl<T> Default for PresentOptional<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            is_present: false,
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for PresentOptional<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self {
+            value: Option::<T>::deserialize(deserializer)?,
+            is_present: true,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmBalanceAsset {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: String,
+            #[serde(default)]
+            contract_address: PresentOptional<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        match wire.kind.as_str() {
+            "native" => {
+                if wire.contract_address.is_present {
+                    return Err(serde::de::Error::custom(
+                        "native EVM balance assets do not accept contract_address",
+                    ));
+                }
+                Ok(Self::Native)
+            }
+            "erc20" => {
+                let contract_address = wire.contract_address.value.ok_or_else(|| {
+                    serde::de::Error::custom("erc20 EVM balance assets require contract_address")
+                })?;
+                let contract_address =
+                    parse_address(&contract_address).map_err(serde::de::Error::custom)?;
+                Self::erc20(contract_address).map_err(serde::de::Error::custom)
+            }
+            _ => Err(serde::de::Error::custom(
+                "EVM balance asset kind must be native or erc20",
+            )),
+        }
+    }
+}
+
+/// One unique account/asset balance source collected on an EVM network.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "evm_balance_source",
+    schema = "mfm.evm.balance_source"
+)]
+pub struct EvmBalanceSource {
+    account: String,
+    asset: EvmBalanceAsset,
+}
+
+impl EvmBalanceSource {
+    /// Creates one checked balance source.
+    pub fn new(
+        account: Address,
+        asset: EvmBalanceAsset,
+    ) -> Result<Self, EvmBalanceCollectionError> {
+        let source = Self {
+            account: canonical_address(account),
+            asset,
+        };
+        source.validate()?;
+        Ok(source)
+    }
+
+    /// Returns the canonical account address.
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    /// Returns the collected asset.
+    pub const fn asset(&self) -> &EvmBalanceAsset {
+        &self.asset
+    }
+
+    /// Returns the parsed account address for adapter execution.
+    pub fn account_address(&self) -> Result<Address, EvmBalanceCollectionError> {
+        parse_address(&self.account).map_err(|_| invalid("EVM account address was invalid"))
+    }
+
+    /// Returns the parsed token contract address when this is an ERC-20 source.
+    pub fn contract_address_value(&self) -> Result<Option<Address>, EvmBalanceCollectionError> {
+        self.asset
+            .contract_address()
+            .map(parse_address)
+            .transpose()
+            .map_err(|_| invalid("EVM contract address was invalid"))
+    }
+
+    fn validate(&self) -> Result<(), EvmBalanceCollectionError> {
+        parse_address(&self.account).map_err(|_| invalid("EVM account address was invalid"))?;
+        self.asset.validate()
+    }
+}
+
+/// Certified demand for one reusable EVM network balance collection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    schema = "mfm.portfolio.config.collect_evm_network",
-    validate = "validate_evm_network_collection_config"
+    schema = "mfm.evm.config.balance_collection",
+    validate = "validate_evm_balance_collection_config"
 )]
-pub struct EvmNetworkCollectionConfig {
+pub struct EvmBalanceCollectionConfig {
     network_id: String,
     chain_id: u64,
     native_decimals: u8,
     sources: Vec<EvmBalanceSource>,
 }
 
-impl EvmNetworkCollectionConfig {
-    /// Creates a checked, sorted collection config from one EVM network.
+impl EvmBalanceCollectionConfig {
+    /// Creates a checked, sorted collection config for one EVM network.
     pub fn new(
-        network: &NetworkConfig,
+        network_id: impl Into<String>,
+        chain_id: u64,
+        native_decimals: u8,
         mut sources: Vec<EvmBalanceSource>,
     ) -> Result<Self, ConfigError> {
-        if network.family() != NetworkFamilyConfig::Evm {
-            return Err(ConfigError::new(
-                "EVM collection config requires an EVM network",
-            ));
-        }
         sources.sort();
         let config = Self {
-            network_id: network.network_id().to_string(),
-            chain_id: network
-                .chain_id_u64()
-                .ok_or_else(|| ConfigError::new("EVM network chain id was missing"))?,
-            native_decimals: network
-                .native_decimals()
-                .ok_or_else(|| ConfigError::new("EVM network native decimals were missing"))?,
+            network_id: network_id.into(),
+            chain_id,
+            native_decimals,
             sources,
         };
-        validate_evm_network_collection_config(&config).map_err(ConfigError::new)?;
+        validate_evm_balance_collection_config(&config).map_err(ConfigError::new)?;
         Ok(config)
     }
 
@@ -170,22 +276,22 @@ impl EvmNetworkCollectionConfig {
     }
 
     /// Returns the checked capability binding for this semantic network.
-    pub fn binding(&self) -> Result<EvmNetworkBinding, PortfolioEvmError> {
+    pub fn binding(&self) -> Result<EvmNetworkBinding, EvmBalanceCollectionError> {
         network_binding(&self.network_id, self.chain_id)
     }
 }
 
 /// Validates bounded, sorted, unique EVM network collection demand.
-pub fn validate_evm_network_collection_config(
-    config: &EvmNetworkCollectionConfig,
+pub fn validate_evm_balance_collection_config(
+    config: &EvmBalanceCollectionConfig,
 ) -> Result<(), String> {
     LocalPublicId::new(&config.network_id).map_err(|error| error.to_string())?;
     if config.chain_id == 0 {
         return Err("EVM collection chain id must be non-zero".to_owned());
     }
-    if config.sources.is_empty() || config.sources.len() > EVM_NETWORK_HOLDING_SOURCE_LIMIT {
+    if config.sources.is_empty() || config.sources.len() > EVM_BALANCE_COLLECTION_SOURCE_LIMIT {
         return Err(format!(
-            "EVM collection sources must contain between 1 and {EVM_NETWORK_HOLDING_SOURCE_LIMIT} entries"
+            "EVM collection sources must contain between 1 and {EVM_BALANCE_COLLECTION_SOURCE_LIMIT} entries"
         ));
     }
     let mut previous: Option<&EvmBalanceSource> = None;
@@ -203,20 +309,20 @@ pub fn validate_evm_network_collection_config(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "collect_evm_network_plan",
-    schema = "mfm.portfolio.external_read.collect_evm_network.plan"
+    namespace = "mfm.evm",
+    name = "balance_collection_plan",
+    schema = "mfm.evm.external_read.balance_collection.plan"
 )]
-pub struct CollectEvmNetworkPlan {
+pub struct EvmBalanceCollectionPlan {
     network_id: String,
     chain_id: u64,
     native_decimals: u8,
     sources: Vec<EvmBalanceSource>,
 }
 
-impl CollectEvmNetworkPlan {
+impl EvmBalanceCollectionPlan {
     /// Returns the checked source-stable session binding.
-    pub fn binding(&self) -> Result<EvmNetworkBinding, PortfolioEvmError> {
+    pub fn binding(&self) -> Result<EvmNetworkBinding, EvmBalanceCollectionError> {
         network_binding(&self.network_id, self.chain_id)
     }
 
@@ -236,17 +342,17 @@ impl CollectEvmNetworkPlan {
     }
 
     /// Returns distinct token contracts in canonical order.
-    pub fn token_contracts(&self) -> Vec<NormalizedEvmAddress> {
+    pub fn token_contracts(&self) -> Vec<String> {
         self.sources
             .iter()
-            .filter_map(|source| source.asset.contract_address().cloned())
+            .filter_map(|source| source.asset.contract_address().map(str::to_owned))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
     }
 
-    fn config(&self) -> EvmNetworkCollectionConfig {
-        EvmNetworkCollectionConfig {
+    fn config(&self) -> EvmBalanceCollectionConfig {
+        EvmBalanceCollectionConfig {
             network_id: self.network_id.clone(),
             chain_id: self.chain_id,
             native_decimals: self.native_decimals,
@@ -259,32 +365,29 @@ impl CollectEvmNetworkPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
+    namespace = "mfm.evm",
     name = "evm_token_decimals_evidence",
-    schema = "mfm.portfolio.evm.token_decimals_evidence"
+    schema = "mfm.evm.token_decimals_evidence"
 )]
 pub struct EvmTokenDecimalsEvidence {
-    contract_address: NormalizedEvmAddress,
+    contract_address: String,
     decimals: u8,
 }
 
 impl EvmTokenDecimalsEvidence {
     /// Creates checked token metadata evidence.
-    pub fn new(
-        contract_address: NormalizedEvmAddress,
-        decimals: u8,
-    ) -> Result<Self, PortfolioEvmError> {
+    pub fn new(contract_address: Address, decimals: u8) -> Result<Self, EvmBalanceCollectionError> {
         if contract_address.is_zero() {
             return Err(invalid("ERC-20 contract address must be non-zero"));
         }
         Ok(Self {
-            contract_address,
+            contract_address: canonical_address(contract_address),
             decimals,
         })
     }
 
     /// Returns the canonical token contract address.
-    pub const fn contract_address(&self) -> &NormalizedEvmAddress {
+    pub fn contract_address(&self) -> &str {
         &self.contract_address
     }
 
@@ -298,9 +401,9 @@ impl EvmTokenDecimalsEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
+    namespace = "mfm.evm",
     name = "evm_balance_read_evidence",
-    schema = "mfm.portfolio.evm.balance_read_evidence"
+    schema = "mfm.evm.balance_read_evidence"
 )]
 pub struct EvmBalanceReadEvidence {
     source: EvmBalanceSource,
@@ -331,11 +434,11 @@ impl EvmBalanceReadEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "collect_evm_network_evidence",
-    schema = "mfm.portfolio.external_read.collect_evm_network.evidence"
+    namespace = "mfm.evm",
+    name = "balance_collection_evidence",
+    schema = "mfm.evm.external_read.balance_collection.evidence"
 )]
-pub struct CollectEvmNetworkEvidence {
+pub struct EvmBalanceCollectionEvidence {
     session: EvmSessionEvidence,
     anchor: EvmBlockAnchor,
     token_decimals: Vec<EvmTokenDecimalsEvidence>,
@@ -343,7 +446,7 @@ pub struct CollectEvmNetworkEvidence {
     final_canonical_block: EvmBlockAnchor,
 }
 
-impl CollectEvmNetworkEvidence {
+impl EvmBalanceCollectionEvidence {
     /// Creates canonical evidence from one live checked session attempt.
     pub fn new(
         session: &EvmSessionEvidence,
@@ -368,17 +471,17 @@ impl CollectEvmNetworkEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_collected_balance",
-    schema = "mfm.portfolio.evm.collected_balance"
+    namespace = "mfm.evm",
+    name = "balance_observation",
+    schema = "mfm.evm.balance_observation"
 )]
-pub struct EvmCollectedBalance {
+pub struct EvmBalanceObservation {
     source: EvmBalanceSource,
     raw_units: String,
     decimals: u8,
 }
 
-impl EvmCollectedBalance {
+impl EvmBalanceObservation {
     /// Returns the exact source.
     pub const fn source(&self) -> &EvmBalanceSource {
         &self.source
@@ -399,18 +502,18 @@ impl EvmCollectedBalance {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm_collection_batch",
-    schema = "mfm.portfolio.evm.collection_batch"
+    namespace = "mfm.evm",
+    name = "balance_observation_batch",
+    schema = "mfm.evm.balance_observation_batch"
 )]
-pub struct EvmCollectionBatch {
+pub struct EvmBalanceObservationBatch {
     network_id: String,
     chain_id: u64,
     anchor: EvmBlockAnchor,
-    balances: Vec<EvmCollectedBalance>,
+    balances: Vec<EvmBalanceObservation>,
 }
 
-impl EvmCollectionBatch {
+impl EvmBalanceObservationBatch {
     /// Returns the semantic network id.
     pub fn network_id(&self) -> &str {
         &self.network_id
@@ -427,15 +530,15 @@ impl EvmCollectionBatch {
     }
 
     /// Returns every collected balance in source order.
-    pub fn balances(&self) -> &[EvmCollectedBalance] {
+    pub fn balances(&self) -> &[EvmBalanceObservation] {
         &self.balances
     }
 
     fn validate_against(
         &self,
-        config: &EvmNetworkCollectionConfig,
-    ) -> Result<(), PortfolioEvmError> {
-        validate_evm_network_collection_config(config).map_err(invalid)?;
+        config: &EvmBalanceCollectionConfig,
+    ) -> Result<(), EvmBalanceCollectionError> {
+        validate_evm_balance_collection_config(config).map_err(invalid)?;
         validate_anchor(&self.anchor)?;
         if self.network_id != config.network_id
             || self.chain_id != config.chain_id
@@ -453,7 +556,7 @@ impl EvmCollectionBatch {
                     .source
                     .asset
                     .contract_address()
-                    .map(|contract| (contract, balance.decimals))
+                    .map(|contract| (contract.to_owned(), balance.decimals))
             })
             .collect::<BTreeMap<_, _>>();
         for (expected, balance) in config.sources.iter().zip(&self.balances) {
@@ -465,12 +568,12 @@ impl EvmCollectionBatch {
                 ));
             }
             match balance.source.asset() {
-                HoldingSourceConfig::Native if balance.decimals != config.native_decimals => {
+                EvmBalanceAsset::Native if balance.decimals != config.native_decimals => {
                     return Err(invalid(
                         "native balance decimals did not match network config",
                     ));
                 }
-                HoldingSourceConfig::Erc20 { contract_address }
+                EvmBalanceAsset::Erc20 { contract_address }
                     if token_decimals.get(contract_address) != Some(&balance.decimals) =>
                 {
                     return Err(invalid(
@@ -485,35 +588,35 @@ impl EvmCollectionBatch {
 }
 
 /// State that collects every configured EVM holding at one exact canonical anchor.
-pub struct CollectEvmNetworkState {
-    config: EvmNetworkCollectionConfig,
+pub struct CollectEvmBalancesState {
+    config: EvmBalanceCollectionConfig,
 }
 
-impl CollectEvmNetworkState {
+impl CollectEvmBalancesState {
     /// Returns the certified collection config.
-    pub const fn config(&self) -> &EvmNetworkCollectionConfig {
+    pub const fn config(&self) -> &EvmBalanceCollectionConfig {
         &self.config
     }
 }
 
-impl StateSpec for CollectEvmNetworkState {
-    type Config = EvmNetworkCollectionConfig;
+impl StateSpec for CollectEvmBalancesState {
+    type Config = EvmBalanceCollectionConfig;
     type Context = NoContext;
     type Input = ();
-    type Output = EvmCollectionBatch;
+    type Output = EvmBalanceObservationBatch;
     type Effect = mfm_effects::ReadExternal;
     type Caps = (EvmReadCapability,);
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
-        state_kind("collect_evm_network")
+        state_kind("collect_balances")
     }
 
     fn version() -> mfm_program::Result<mfm_ids::StateVersion> {
-        state_version("collect_evm_network")
+        state_version("collect_balances")
     }
 
     fn name() -> &'static str {
-        "mfm.portfolio.collect_evm_network"
+        "mfm.evm.collect_balances"
     }
 
     fn adapter_bindings() -> mfm_program::Result<Vec<mfm_program::AdapterBindingSpec>> {
@@ -527,17 +630,17 @@ impl StateSpec for CollectEvmNetworkState {
     }
 }
 
-impl ReadState for CollectEvmNetworkState {
-    type Plan = CollectEvmNetworkPlan;
-    type Evidence = CollectEvmNetworkEvidence;
+impl ReadState for CollectEvmBalancesState {
+    type Plan = EvmBalanceCollectionPlan;
+    type Evidence = EvmBalanceCollectionEvidence;
 
     fn plan(
         &self,
         _input: &Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Plan> {
-        validate_evm_network_collection_config(&self.config).map_err(StateError::Message)?;
-        Ok(CollectEvmNetworkPlan {
+        validate_evm_balance_collection_config(&self.config).map_err(StateError::Message)?;
+        Ok(EvmBalanceCollectionPlan {
             network_id: self.config.network_id.clone(),
             chain_id: self.config.chain_id,
             native_decimals: self.config.native_decimals,
@@ -557,16 +660,16 @@ impl ReadState for CollectEvmNetworkState {
             ));
         }
         let plan = self.plan(input, context)?;
-        reduce_evm_network_collection(&plan, evidence.primary_evidence()).map_err(StateError::from)
+        reduce_evm_balance_collection(&plan, evidence.primary_evidence()).map_err(StateError::from)
     }
 }
 
 /// Reduces live or replay evidence through the one deterministic collection contract.
-pub fn reduce_evm_network_collection(
-    plan: &CollectEvmNetworkPlan,
-    evidence: &CollectEvmNetworkEvidence,
-) -> Result<EvmCollectionBatch, PortfolioEvmError> {
-    validate_evm_network_collection_config(&plan.config()).map_err(invalid)?;
+pub fn reduce_evm_balance_collection(
+    plan: &EvmBalanceCollectionPlan,
+    evidence: &EvmBalanceCollectionEvidence,
+) -> Result<EvmBalanceObservationBatch, EvmBalanceCollectionError> {
+    validate_evm_balance_collection_config(&plan.config()).map_err(invalid)?;
     validate_session(&evidence.session, plan)?;
     if evidence.anchor != evidence.final_canonical_block {
         return Err(invalid(
@@ -604,19 +707,19 @@ pub fn reduce_evm_network_collection(
         }
         parse_quantity(&observed.raw_units)?;
         let decimals = match observed.source.asset() {
-            HoldingSourceConfig::Native => plan.native_decimals,
-            HoldingSourceConfig::Erc20 { contract_address } => *decimals
+            EvmBalanceAsset::Native => plan.native_decimals,
+            EvmBalanceAsset::Erc20 { contract_address } => *decimals
                 .get(contract_address)
                 .ok_or_else(|| invalid("ERC-20 balance lacked token metadata"))?,
         };
-        balances.push(EvmCollectedBalance {
+        balances.push(EvmBalanceObservation {
             source: observed.source.clone(),
             raw_units: observed.raw_units.clone(),
             decimals,
         });
     }
 
-    let batch = EvmCollectionBatch {
+    let batch = EvmBalanceObservationBatch {
         network_id: plan.network_id.clone(),
         chain_id: plan.chain_id,
         anchor: evidence.anchor.clone(),
@@ -629,10 +732,10 @@ pub fn reduce_evm_network_collection(
 /// Input for the atomic EVM fact-publication state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
 #[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.portfolio.input.publish_evm_holdings")]
-pub struct PublishEvmHoldingsInput {
+#[mfm(schema = "mfm.evm.input.record_balance_facts")]
+pub struct RecordEvmBalanceFactsInput {
     /// Complete reduced collection batch.
-    pub batch: EvmCollectionBatch,
+    pub batch: EvmBalanceObservationBatch,
 }
 
 /// Checked receipt for one atomic EVM balance-fact publication.
@@ -656,9 +759,9 @@ pub struct EvmBalanceCollectionReceipt {
 
 impl EvmBalanceCollectionReceipt {
     fn from_verified_publication(
-        batch: &EvmCollectionBatch,
+        batch: &EvmBalanceObservationBatch,
         facts: &[EvmBalanceSnapshotFact],
-    ) -> Result<Self, PortfolioEvmError> {
+    ) -> Result<Self, EvmBalanceCollectionError> {
         if facts.len() != batch.balances.len() {
             return Err(invalid(
                 "EVM balance publication fact coverage did not match the reduced batch",
@@ -705,16 +808,16 @@ impl EvmBalanceCollectionReceipt {
         block_anchor: EvmBlockAnchor,
         sources: Vec<EvmBalanceSource>,
         fact_content_identities: Vec<FactContentIdentityEvidence>,
-    ) -> Result<Self, PortfolioEvmError> {
+    ) -> Result<Self, EvmBalanceCollectionError> {
         LocalPublicId::new(&network_id)
             .map_err(|_| invalid("EVM balance receipt network id was invalid"))?;
         if chain_id == 0 {
             return Err(invalid("EVM balance receipt chain id must be non-zero"));
         }
         validate_anchor(&block_anchor)?;
-        if sources.is_empty() || sources.len() > EVM_NETWORK_HOLDING_SOURCE_LIMIT {
+        if sources.is_empty() || sources.len() > EVM_BALANCE_COLLECTION_SOURCE_LIMIT {
             return Err(invalid(format!(
-                "EVM balance receipt sources must contain between 1 and {EVM_NETWORK_HOLDING_SOURCE_LIMIT} entries"
+                "EVM balance receipt sources must contain between 1 and {EVM_BALANCE_COLLECTION_SOURCE_LIMIT} entries"
             )));
         }
         if sources.len() != fact_content_identities.len() {
@@ -795,28 +898,28 @@ impl<'de> Deserialize<'de> for EvmBalanceCollectionReceipt {
 }
 
 /// State that atomically records a complete EVM fact batch and returns its checked receipt.
-pub struct PublishEvmHoldingsState {
-    config: EvmNetworkCollectionConfig,
+pub struct RecordEvmBalanceFactsState {
+    config: EvmBalanceCollectionConfig,
 }
 
-impl StateSpec for PublishEvmHoldingsState {
-    type Config = EvmNetworkCollectionConfig;
+impl StateSpec for RecordEvmBalanceFactsState {
+    type Config = EvmBalanceCollectionConfig;
     type Context = NoContext;
-    type Input = PublishEvmHoldingsInput;
+    type Input = RecordEvmBalanceFactsInput;
     type Output = EvmBalanceCollectionReceipt;
     type Effect = mfm_effects::ManagedPlatformWrite;
     type Caps = (FactRecordCapability,);
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
-        state_kind("publish_evm_holdings")
+        state_kind("record_balance_facts")
     }
 
     fn version() -> mfm_program::Result<mfm_ids::StateVersion> {
-        state_version("publish_evm_holdings")
+        state_version("record_balance_facts")
     }
 
     fn name() -> &'static str {
-        "mfm.portfolio.publish_evm_holdings"
+        "mfm.evm.record_balance_facts"
     }
 
     fn adapter_bindings() -> mfm_program::Result<Vec<mfm_program::AdapterBindingSpec>> {
@@ -834,7 +937,7 @@ impl StateSpec for PublishEvmHoldingsState {
     }
 }
 
-impl ManagedWriteState for PublishEvmHoldingsState {
+impl ManagedWriteState for RecordEvmBalanceFactsState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
     fn run<'a>(
@@ -843,7 +946,7 @@ impl ManagedWriteState for PublishEvmHoldingsState {
         _caps: &'a Self::Caps,
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
-        let result = publish_evm_holdings(&self.config, input.batch)
+        let result = record_evm_balance_facts(&self.config, input.batch)
             .map(|(receipt, _facts)| receipt)
             .map_err(StateError::from);
         future::ready(result)
@@ -851,10 +954,10 @@ impl ManagedWriteState for PublishEvmHoldingsState {
 }
 
 /// Validates a complete batch and prepares its checked receipt and exact fact records.
-pub fn publish_evm_holdings(
-    config: &EvmNetworkCollectionConfig,
-    batch: EvmCollectionBatch,
-) -> Result<(EvmBalanceCollectionReceipt, Vec<EvmBalanceSnapshotFact>), PortfolioEvmError> {
+pub fn record_evm_balance_facts(
+    config: &EvmBalanceCollectionConfig,
+    batch: EvmBalanceObservationBatch,
+) -> Result<(EvmBalanceCollectionReceipt, Vec<EvmBalanceSnapshotFact>), EvmBalanceCollectionError> {
     batch.validate_against(config)?;
     let facts = batch
         .balances
@@ -878,7 +981,7 @@ pub fn publish_evm_holdings(
     Ok((receipt, facts))
 }
 
-/// Subject identity for the unified portfolio-owned EVM balance fact.
+/// Subject identity for the reusable EVM balance fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -889,8 +992,8 @@ pub fn publish_evm_holdings(
 pub struct EvmBalanceSnapshotSubject {
     network_id: String,
     chain_id: u64,
-    account: NormalizedEvmAddress,
-    asset: HoldingSourceConfig,
+    account: String,
+    asset: EvmBalanceAsset,
 }
 
 impl EvmBalanceSnapshotSubject {
@@ -914,17 +1017,17 @@ impl EvmBalanceSnapshotSubject {
     }
 
     /// Returns the observed account.
-    pub const fn account(&self) -> &NormalizedEvmAddress {
+    pub fn account(&self) -> &str {
         &self.account
     }
 
     /// Returns the observed asset.
-    pub const fn asset(&self) -> &HoldingSourceConfig {
+    pub const fn asset(&self) -> &EvmBalanceAsset {
         &self.asset
     }
 }
 
-/// Response material for the unified portfolio-owned EVM balance fact.
+/// Response material for the reusable EVM balance fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -955,7 +1058,7 @@ impl EvmBalanceSnapshotResponse {
     }
 }
 
-/// Unified native/ERC-20 EVM balance fact recorded by the portfolio vertical slice.
+/// Unified native/ERC-20 EVM balance fact recorded by reusable collectors.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, DeriveMfmFactType)]
 #[allow(clippy::duplicated_attributes)]
 #[mfm(
@@ -1084,7 +1187,7 @@ pub fn evm_balance_fact_visibility() -> FactVisibility {
 fn network_binding(
     network_id: &str,
     chain_id: u64,
-) -> Result<EvmNetworkBinding, PortfolioEvmError> {
+) -> Result<EvmNetworkBinding, EvmBalanceCollectionError> {
     let network_id = LocalPublicId::new(network_id)
         .map_err(|_| invalid("EVM collection network id was invalid"))?;
     EvmNetworkBinding::new(network_id, chain_id)
@@ -1093,8 +1196,8 @@ fn network_binding(
 
 fn validate_session(
     session: &EvmSessionEvidence,
-    plan: &CollectEvmNetworkPlan,
-) -> Result<(), PortfolioEvmError> {
+    plan: &EvmBalanceCollectionPlan,
+) -> Result<(), EvmBalanceCollectionError> {
     if session.network_id() != plan.network_id
         || session.chain_id() != plan.chain_id
         || session.implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
@@ -1106,21 +1209,13 @@ fn validate_session(
     Ok(())
 }
 
-fn validate_anchor(anchor: &EvmBlockAnchor) -> Result<(), PortfolioEvmError> {
+fn validate_anchor(anchor: &EvmBlockAnchor) -> Result<(), EvmBalanceCollectionError> {
     anchor
         .validate()
         .map_err(|_| invalid("EVM collection block anchor was invalid"))
 }
 
-fn parse_address(value: &str) -> Result<Address, PortfolioEvmError> {
-    let address = Address::from_str(value).map_err(|_| invalid("EVM address was invalid"))?;
-    if format!("{address:#x}") != value {
-        return Err(invalid("EVM address was not canonical"));
-    }
-    Ok(address)
-}
-
-fn parse_quantity(value: &str) -> Result<U256, PortfolioEvmError> {
+fn parse_quantity(value: &str) -> Result<U256, EvmBalanceCollectionError> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(invalid("EVM balance was not canonical decimal"));
     }

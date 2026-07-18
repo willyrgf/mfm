@@ -2278,6 +2278,7 @@ dependencies = [
  "mfm-events",
  "mfm-evm-capabilities",
  "mfm-evm-signing",
+ "mfm-fact-capabilities",
  "mfm-ids",
  "mfm-program",
  "mfm-replay",
@@ -2297,26 +2298,18 @@ dependencies = [
 name = "mfm-adapters-portfolio"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "mfm-artifact-capabilities",
- "mfm-canonical",
  "mfm-events",
- "mfm-evm-capabilities",
  "mfm-fact-capabilities",
  "mfm-facts",
- "mfm-ids",
- "mfm-portfolio-model",
  "mfm-program",
  "mfm-replay",
  "mfm-runtime",
- "mfm-spec",
  "mfm-state-portfolio",
- "mfm-states-btc",
  "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2342,6 +2335,7 @@ dependencies = [
  "mfm-ids",
  "mfm-manual-auth",
  "mfm-op-btc-collectors",
+ "mfm-op-evm-collectors",
  "mfm-op-portfolio-snapshot",
  "mfm-op-proof",
  "mfm-portfolio-model",
@@ -2624,6 +2618,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-evm-collectors"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-canonical",
+ "mfm-certify",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-states-evm",
+ "mfm-values",
+]
+
+[[package]]
 name = "mfm-op-portfolio-snapshot"
 version = "0.1.0"
 dependencies = [
@@ -2634,11 +2642,13 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-op-btc-collectors",
+ "mfm-op-evm-collectors",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
  "mfm-state-portfolio",
  "mfm-states-btc",
+ "mfm-states-evm",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2849,6 +2859,7 @@ dependencies = [
  "mfm-program",
  "mfm-program-derive",
  "mfm-states-btc",
+ "mfm-states-evm",
  "mfm-values",
  "num-bigint",
  "num-traits",
@@ -2888,6 +2899,8 @@ dependencies = [
  "mfm-effects",
  "mfm-evm-capabilities",
  "mfm-evm-signing",
+ "mfm-fact-capabilities",
+ "mfm-facts",
  "mfm-ids",
  "mfm-program",
  "mfm-program-derive",

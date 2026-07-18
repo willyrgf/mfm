@@ -44,6 +44,7 @@ members = [
 	"crates/transports/evm",
 	"crates/transports/proof",
 	"crates/ops/btc-collectors-op",
+	"crates/ops/evm-collectors-op",
 	"crates/ops/portfolio-snapshot-op",
 	"crates/ops/proof-op",
 ]

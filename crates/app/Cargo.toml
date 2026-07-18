@@ -34,6 +34,7 @@ mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }
+mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
 mfm-op-portfolio-snapshot = { path = "../ops/portfolio-snapshot-op" }
 mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-op-proof = { path = "../ops/proof-op" }

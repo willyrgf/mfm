@@ -657,6 +657,31 @@ fn production_registry_certifies_btc_collector_descriptors() {
     assert!(!request.evidence.seed_cells.is_empty());
 }
 
+#[test]
+fn production_registry_certifies_internal_evm_collector_descriptors() {
+    use alloy_primitives::address;
+
+    let config = mfm_op_evm_collectors::EvmBalanceCollectionConfig::new(
+        "ethereum-mainnet",
+        1,
+        18,
+        vec![mfm_op_evm_collectors::EvmBalanceSource::new(
+            address!("000000000000000000000000000000000000dead"),
+            mfm_op_evm_collectors::EvmBalanceAsset::Native,
+        )
+        .expect("EVM source")],
+    )
+    .expect("EVM collection config");
+    let plan = mfm_op_evm_collectors::evm_balance_collection_cycle_program_launch_plan(config)
+        .expect("internal EVM cycle launch plan");
+    assert_eq!(plan.draft.state_nodes().len(), 2);
+    assert_eq!(plan.draft.public_output_spec().outputs().len(), 1);
+
+    let registry = production_certification_registry().expect("production registry");
+    certify_launch_plan(&plan, &registry)
+        .expect("production registry certifies the internal EVM collector cycle");
+}
+
 #[tokio::test]
 async fn btc_collector_launch_defers_runtime_config_to_ingress() {
     let store = store::AsyncInMemoryRunStore::default();

@@ -2,9 +2,8 @@
 //! Deterministic end-to-end portfolio snapshot composition.
 //!
 //! The operation accepts exactly one normalized [`PortfolioConfig`] authority. It compiles Bitcoin
-//! demand into receipt-pinned collection and selection, and EVM demand into exactly one
-//! [`CollectEvmNetworkState`] plus one [`PublishEvmHoldingsState`] per network. The family receipt
-//! handles flow directly into store-backed selection before snapshot and report projection.
+//! demand into reusable family collection operation calls. The family receipt handles flow
+//! directly into store-backed selection before snapshot and report projection.
 //!
 //! # Examples
 //!
@@ -24,6 +23,10 @@ use mfm_op_btc_collectors::{
     BtcNativeBalancesAtAnchorConfig, BtcNetworkCollectionConfig, BtcNetworkCollectionOperation,
     BtcNetworkCollectionReceipt,
 };
+use mfm_op_evm_collectors::{
+    EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceCollectionOperation,
+    EvmBalanceCollectionReceipt, EvmBalanceSource,
+};
 use mfm_portfolio_model::domain_key::{HoldingsDomainKey, ReportDomainKey};
 use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig, ValidatedPortfolioConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
@@ -35,13 +38,12 @@ use mfm_program::{
 use mfm_program_derive::OperationOutput;
 use mfm_state_portfolio::{
     AssembleSnapshotConfig, AssembleSnapshotInputHandles, AssembleSnapshotState,
-    CollectEvmNetworkState, EvmBalanceCollectionReceipt, EvmBalanceSnapshotFact, EvmBalanceSource,
-    EvmNetworkCollectionConfig, PortfolioPublicOutputs, ProjectReportConfig,
-    ProjectReportInputHandles, ProjectReportState, PublishEvmHoldingsInputHandles,
-    PublishEvmHoldingsState, SelectHoldingsConfig, SelectHoldingsFactDescriptors,
-    SelectHoldingsInputHandles, SelectHoldingsState,
+    PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
+    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInputHandles,
+    SelectHoldingsState,
 };
 use mfm_states_btc::BtcAddressBalanceSnapshotFact;
+use mfm_states_evm::EvmBalanceSnapshotFact;
 use mfm_values::ConfigError;
 
 const OP_NAMESPACE: &str = "mfm.portfolio";
@@ -136,21 +138,15 @@ impl Operation for PortfolioSnapshotOperation {
             evm_receipts.push(builder.child_scope(
                 ScopeKey::new(format!("evm_collection_{index}"))?,
                 |child| {
-                    let batch = child.scope().state::<CollectEvmNetworkState, _>(
-                        mfm_program::StateKey::new("collect_network")?,
-                        NoContext,
-                        child_config.clone(),
-                        (),
-                    )?;
-                    let receipt = child.scope().state::<PublishEvmHoldingsState, _>(
-                        mfm_program::StateKey::new("publish_holdings")?,
-                        NoContext,
+                    let output = child.scope().call::<EvmBalanceCollectionOperation, _>(
+                        OperationKey::new("evm_balance_collection")?,
+                        EvmBalanceCollectionOperation,
                         child_config,
-                        PublishEvmHoldingsInputHandles { batch },
+                        (),
                     )?;
                     let receipt = child.export_to_parent(
                         BridgeKey::new("collection_receipt")?,
-                        receipt,
+                        output.receipt,
                         BridgePolicy::same_run_same_value(),
                     )?;
                     child.bridge_to_parent(receipt)
@@ -265,7 +261,7 @@ pub fn portfolio_snapshot_program_launch_plan(
 
 struct CompiledCollection {
     bitcoin_collections: Vec<BtcNetworkCollectionConfig>,
-    evm_collections: Vec<EvmNetworkCollectionConfig>,
+    evm_collections: Vec<EvmBalanceCollectionConfig>,
 }
 
 #[derive(Default)]
@@ -308,8 +304,13 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                         ConfigError::new("EVM wallet did not contain an EVM address")
                     })?;
                     network_demand.evm_sources.insert(
-                        EvmBalanceSource::new(account.clone(), HoldingSourceConfig::Native)
-                            .map_err(|error| ConfigError::new(error.to_string()))?,
+                        EvmBalanceSource::new(
+                            account
+                                .to_address()
+                                .map_err(|error| ConfigError::new(error.to_string()))?,
+                            EvmBalanceAsset::Native,
+                        )
+                        .map_err(|error| ConfigError::new(error.to_string()))?,
                     );
                 }
                 (NetworkConfig::Evm { .. }, HoldingSourceConfig::Erc20 { contract_address }) => {
@@ -318,10 +319,15 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                     })?;
                     network_demand.evm_sources.insert(
                         EvmBalanceSource::new(
-                            account.clone(),
-                            HoldingSourceConfig::Erc20 {
-                                contract_address: contract_address.clone(),
-                            },
+                            account
+                                .to_address()
+                                .map_err(|error| ConfigError::new(error.to_string()))?,
+                            EvmBalanceAsset::erc20(
+                                contract_address
+                                    .to_address()
+                                    .map_err(|error| ConfigError::new(error.to_string()))?,
+                            )
+                            .map_err(|error| ConfigError::new(error.to_string()))?,
                         )
                         .map_err(|error| ConfigError::new(error.to_string()))?,
                     );
@@ -363,14 +369,20 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                     },
                 });
             }
-            NetworkConfig::Evm { .. } => {
+            NetworkConfig::Evm {
+                chain_id,
+                native_decimals,
+                ..
+            } => {
                 if !network_demand.bitcoin_addresses.is_empty()
                     || network_demand.evm_sources.is_empty()
                 {
                     return Err(ConfigError::new("EVM demand did not match source shape"));
                 }
-                evm_collections.push(EvmNetworkCollectionConfig::new(
-                    network,
+                evm_collections.push(EvmBalanceCollectionConfig::new(
+                    network_id,
+                    chain_id.get(),
+                    *native_decimals,
                     network_demand.evm_sources.into_iter().collect(),
                 )?);
             }
@@ -394,13 +406,14 @@ mfm_certify::define_program_descriptor_registry! {
         mfm_op_btc_collectors::ObserveBtcAddressBalanceState,
         mfm_op_btc_collectors::RecordBtcAddressBalanceFactState,
         mfm_op_btc_collectors::AssembleBtcNetworkCollectionReceiptState,
-        mfm_state_portfolio::CollectEvmNetworkState,
-        mfm_state_portfolio::PublishEvmHoldingsState,
+        mfm_states_evm::CollectEvmBalancesState,
+        mfm_states_evm::RecordEvmBalanceFactsState,
     ],
     operations: [
         PortfolioSnapshotOperation,
         BtcNetworkCollectionOperation,
         mfm_op_btc_collectors::BtcNativeBalancesAtAnchorOperation,
+        EvmBalanceCollectionOperation,
     ],
 }
 
@@ -424,11 +437,11 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert!(sources
             .iter()
-            .any(|source| matches!(source.asset(), HoldingSourceConfig::Native)));
+            .any(|source| matches!(source.asset(), EvmBalanceAsset::Native)));
         assert!(sources.iter().any(|source| {
             matches!(
                 source.asset(),
-                HoldingSourceConfig::Erc20 { contract_address }
+                EvmBalanceAsset::Erc20 { contract_address }
                     if contract_address.as_str() == TOKEN
             )
         }));
@@ -443,7 +456,7 @@ mod tests {
         assert_eq!(compiled.evm_collections[0].sources().len(), 1);
         assert!(matches!(
             compiled.evm_collections[0].sources()[0].asset(),
-            HoldingSourceConfig::Erc20 { contract_address }
+            EvmBalanceAsset::Erc20 { contract_address }
                 if contract_address.as_str() == TOKEN
         ));
     }
@@ -510,9 +523,9 @@ mod tests {
             .iter()
             .any(|operation| operation.operation_name == "mfm.portfolio.snapshot"));
         let collect_kind =
-            mfm_state_portfolio::CollectEvmNetworkState::kind().expect("collect state kind");
+            mfm_states_evm::CollectEvmBalancesState::kind().expect("collect state kind");
         let publish_kind =
-            mfm_state_portfolio::PublishEvmHoldingsState::kind().expect("publish state kind");
+            mfm_states_evm::RecordEvmBalanceFactsState::kind().expect("publish state kind");
         assert_eq!(
             first
                 .state_nodes()

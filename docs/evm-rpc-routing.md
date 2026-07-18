@@ -79,21 +79,22 @@ an EIP-1898 selector with `requireCanonical: true`. After the anchored reads, th
 the anchor by number and requires the returned hash to equal the original hash. Asking for the old
 hash again is not a canonicality check and is forbidden.
 
-For each demanded portfolio network, `CollectEvmNetworkState` resolves latest once, deduplicates
-ERC-20 metadata by contract, reads every sorted native/token source at that exact hash, and performs
-one final number-to-hash check. Metadata and balance reads have a hard concurrency limit of 16.
-Its single aggregate evidence value retains the checked session, requests/results, and final
-canonicality observation. The state-owned reducer enforces exact order and coverage for both live
-execution and replay.
+For each `EvmBalanceCollectionOperation` call, `CollectEvmBalancesState` resolves latest once,
+deduplicates ERC-20 metadata by contract, reads every sorted native/token source at that exact hash,
+and performs one final number-to-hash check. Metadata and balance reads have a hard concurrency
+limit of 16. Its single aggregate evidence value retains the checked session, requests/results,
+and final canonicality observation. The state-owned reducer enforces exact order and coverage for
+both live execution and replay.
 
-`PublishEvmHoldingsState` then records one `evm.balance_snapshot` fact per source and a checked
+`RecordEvmBalanceFactsState` then records one `evm.balance_snapshot` fact per source and a checked
 `EvmBalanceCollectionReceipt` in one atomic managed-write attempt. The receipt carries the exact
 anchor, sorted sources, and verified content identities without copying balance response material.
-Portfolio selection consumes the typed EVM receipt vector directly, queries the same-run facts
+The live runner, atomic publication, and evidence-only replay live in `mfm-adapters-evm`. Portfolio
+selection consumes the typed EVM receipt vector directly, queries the same-run facts
 through the shared BTC/EVM fact-index snapshot, rehydrates response artifacts, and rederives exact
-content identity before assembly. All-EVM portfolios use this same store path. Replay reconstructs
-the collection, publication, receipt-pinned query evidence, and selected holdings without runtime
-config or network access.
+content identity before assembly. All-EVM portfolios use this same store path. EVM replay
+reconstructs collection and publication in the EVM adapter; portfolio replay reconstructs only the
+receipt-pinned selection and report path. Neither requires runtime config or network access.
 
 ## Signing
 
@@ -130,8 +131,9 @@ Contributor ownership:
 - `mfm-runtime-config` parses and selectively resolves routes and signers;
 - app assembly selects runtime resources and binds sessions;
 - `mfm-transports-evm` owns bounded JSON-RPC and typed protocol decoding;
-- `mfm-adapters-portfolio` binds portfolio balance plans to one read session and records aggregate
-  evidence and atomic fact/snapshot output;
-- `mfm-adapters-evm` owns only the reusable transaction and exact contract-validation bindings;
-- portfolio and EVM states own their deterministic validation/reduction semantics; binaries only
-  pass paths and render results.
+- `mfm-adapters-evm` owns reusable balance collection/publication, transaction, validation, and
+  evidence-only replay bindings;
+- `mfm-adapters-portfolio` owns receipt-pinned fact-index selection and snapshot/report projection
+  bindings only;
+- portfolio and reusable EVM states own their deterministic validation/reduction semantics;
+  binaries only pass paths and render results.

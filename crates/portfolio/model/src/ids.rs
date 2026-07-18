@@ -340,6 +340,14 @@ impl NormalizedEvmAddress {
         self.raw.as_bytes() == b"0x0000000000000000000000000000000000000000"
     }
 
+    /// Returns the parsed EVM address represented by this normalized authority.
+    pub fn to_address(&self) -> Result<Address, PortfolioScalarError> {
+        Address::from_str(&self.raw).map_err(|_| PortfolioScalarError::InvalidEvmAddress {
+            kind: "evm_address",
+            value: self.raw.clone(),
+        })
+    }
+
     /// Consumes this authority into its canonical normalized address string.
     pub fn into_string(self) -> String {
         self.raw

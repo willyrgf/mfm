@@ -1,0 +1,22 @@
+[package]
+name = "mfm-op-evm-collectors"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic reusable EVM balance collection operation"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "operation"
+
+[dependencies]
+mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
+mfm-certify = { path = "../../kernel/certify", version = "0.1.0" }
+mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
+mfm-program = { path = "../../kernel/program", version = "0.1.0" }
+mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
+mfm-states-evm = { path = "../../states/evm", version = "0.1.0" }
+mfm-values = { path = "../../kernel/values", version = "0.1.0" }
+
+[dev-dependencies]
+alloy-primitives = { workspace = true }

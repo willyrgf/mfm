@@ -50,15 +50,15 @@ runtime or replay authority.
 The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
 normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
 Bitcoin collection resolves one shared tip per required network and emits checked receipts. Each
-EVM network currently expands to one portfolio-owned external-read state and one atomic
-managed-write state that records `evm.balance_snapshot` facts and returns a checked collection
-receipt. The typed BTC/EVM receipt vectors flow directly into one store-backed selection state;
-assembly receives only rehydrated and identity-reverified facts. The complete snapshot graph is the
-sole public objective, `mfm.portfolio/snapshot@1`.
+EVM network becomes one child call to the reusable `EvmBalanceCollectionOperation`, whose read and
+atomic-record states return a checked receipt after recording `evm.balance_snapshot` facts. The
+typed BTC/EVM receipt vectors flow directly into one store-backed selection state; assembly
+receives only rehydrated and identity-reverified facts. The complete snapshot graph is the sole
+public objective, `mfm.portfolio/snapshot@1`.
 
 `mfm-op-portfolio-snapshot` owns that complete internal graph from normalized
-`PortfolioConfig` through Bitcoin collection/selection and EVM collection/publication to snapshot
-assembly and report projection. Its one production draft helper binds exactly one
+`PortfolioConfig` through child family-operation calls, receipt-pinned selection, snapshot
+assembly, and report projection. Its one production draft helper binds exactly one
 `PortfolioPublicOutputs` root. Portfolio admission bounds networks, wallets, symbols,
 wallet-to-symbol relations, and distinct EVM sources per network before graph expansion. The app
 registers the needed runners and certification descriptors, strictly resolves one target-keyed
@@ -158,8 +158,9 @@ Two v1 decisions are deliberate:
   passes typed Bitcoin and EVM receipt vectors directly to `SelectHoldingsState`; it has no generic
   receipt entry, logical-manifest wrapper, count/readiness value, or fan-in state. Selection checks
   exact portfolio demand and both family receipt contracts before issuing one shared-snapshot query
-  batch. The portfolio state package's dependency on the Bitcoin state package is the explicit
-  downstream typed-output edge; neither package gains runner, transport, or workflow ownership.
+  batch. The portfolio state package's dependencies on the Bitcoin and EVM state packages are the
+  explicit downstream typed-output/fact contracts; it owns neither family's runner, transport,
+  fact publication, replay, or workflow topology.
 - Runtime TOML remains a process-local routing and signer boundary rather than semantic
   configuration data. Live assembly selectively resolves only the requested EVM route or requested
   signer plus its referenced keystore, so malformed unrelated entries do not block that resource.
@@ -506,11 +507,12 @@ hash, and finishes with a number-to-hash canonicality read. Live execution and e
 both use the state reducer; replay never binds a route or session.
 
 The reusable EVM package surface is deliberately exact: `mfm-evm-capabilities`,
-`mfm-evm-signing`, `mfm-states-evm`, `mfm-adapters-evm`, and `mfm-transports-evm`.
-`mfm-states-evm` contains only `SubmitEvmTransactionState` and
-`ValidateEvmContractState`; `mfm-adapters-evm` contains only their transaction and validation
-bindings. Portfolio balance reads, facts, reducers, publication, replay, and runner bindings live
-in the portfolio state/adapter vertical slice.
+`mfm-evm-signing`, `mfm-states-evm`, `mfm-adapters-evm`, `mfm-transports-evm`, and
+`mfm-op-evm-collectors`. `mfm-states-evm` contains exactly four state kinds: balance collection,
+balance recording, transaction submission, and exact-anchor contract validation.
+`mfm-adapters-evm` owns their runtime/replay bindings. `mfm-op-evm-collectors` owns the sole
+two-state receipt-producing balance topology and an internal scheduler-cycle wrapper around that
+same operation. The wrapper has no app entry point, target resolver, discovery id, or renderer.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 

@@ -3,10 +3,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 use alloy_primitives::U256;
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
-};
-use mfm_ids::LocalPublicId;
+use mfm_evm_capabilities::EvmBlockAnchor;
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioReport,
@@ -18,13 +15,12 @@ use mfm_portfolio_model::symbol::{
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
 };
-use mfm_program::{MfmFactType, ReadState, StateSpec, ValidatedConfig};
+use mfm_program::{MfmFactType, ValidatedConfig};
 use mfm_states_btc::BtcAddressBalanceSnapshotFact;
+use mfm_states_evm::EvmBalanceSnapshotFact;
 
 const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
-const REORG_HASH: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
-const SECOND_ACCOUNT: &str = "0x000000000000000000000000000000000000beef";
 const TOKEN: &str = "0x0000000000000000000000000000000000000001";
 
 fn test_network(network_id: &str, chain_id: u64) -> NetworkConfig {
@@ -84,70 +80,6 @@ fn sample_portfolio() -> PortfolioConfig {
         symbol_configs: vec![test_symbol("ethereum-mainnet")],
         metadata: PublicMetadata::default(),
     }
-}
-
-fn native_source(account: &str) -> EvmBalanceSource {
-    EvmBalanceSource::new(
-        account.parse().expect("normalized account"),
-        HoldingSourceConfig::Native,
-    )
-    .expect("native source")
-}
-
-fn token_source(account: &str) -> EvmBalanceSource {
-    EvmBalanceSource::new(
-        account.parse().expect("normalized account"),
-        HoldingSourceConfig::Erc20 {
-            contract_address: TOKEN.parse().expect("normalized token"),
-        },
-    )
-    .expect("token source")
-}
-
-fn collection_config(sources: Vec<EvmBalanceSource>) -> EvmNetworkCollectionConfig {
-    EvmNetworkCollectionConfig::new(&test_network("ethereum-mainnet", 1), sources)
-        .expect("collection config")
-}
-
-fn collection_plan(config: &EvmNetworkCollectionConfig) -> CollectEvmNetworkPlan {
-    let state = <CollectEvmNetworkState as StateSpec>::new(
-        ValidatedConfig::new(config.clone()).expect("validated collection config"),
-    )
-    .expect("collection state");
-    state
-        .plan(&(), &mfm_program::CertifiedContext::no_context())
-        .expect("collection plan")
-}
-
-fn session(config: &EvmNetworkCollectionConfig) -> EvmSessionEvidence {
-    EvmSessionEvidence::new(
-        &config.binding().expect("network binding"),
-        LocalPublicId::new("primary").expect("source ref"),
-        LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID).expect("implementation id"),
-    )
-}
-
-fn evidence_for(config: &EvmNetworkCollectionConfig, values: &[u64]) -> CollectEvmNetworkEvidence {
-    assert_eq!(config.sources().len(), values.len());
-    let token_decimals = collection_plan(config)
-        .token_contracts()
-        .into_iter()
-        .map(|contract| EvmTokenDecimalsEvidence::new(contract, 6).expect("token decimals"))
-        .collect();
-    let balances = config
-        .sources()
-        .iter()
-        .cloned()
-        .zip(values.iter().copied())
-        .map(|(source, value)| EvmBalanceReadEvidence::new(source, U256::from(value)))
-        .collect();
-    CollectEvmNetworkEvidence::new(
-        &session(config),
-        EvmBlockAnchor::new(U256::from(10), EVM_HASH.parse().expect("anchor hash")),
-        token_decimals,
-        balances,
-        EvmBlockAnchor::new(U256::from(10), EVM_HASH.parse().expect("final anchor hash")),
-    )
 }
 
 fn selected_native(raw_units: &str) -> SelectedHoldings {
@@ -238,160 +170,6 @@ fn selection_config_carries_both_family_descriptors() {
     value["candidate_scan_limit"] = serde_json::json!(12);
     let tampered: SelectHoldingsConfig = serde_json::from_value(value).expect("decode config");
     assert!(ValidatedConfig::new(tampered).is_err());
-}
-
-#[test]
-fn collection_config_is_sorted_unique_and_bounded() {
-    let token = token_source(EVM_ACCOUNT);
-    let native = native_source(EVM_ACCOUNT);
-    let config = collection_config(vec![token.clone(), native.clone()]);
-    assert_eq!(config.sources(), &[native, token]);
-    assert_eq!(collection_plan(&config).sources(), config.sources());
-
-    assert!(
-        EvmNetworkCollectionConfig::new(&test_network("ethereum-mainnet", 1), Vec::new()).is_err()
-    );
-    assert!(EvmNetworkCollectionConfig::new(
-        &test_network("ethereum-mainnet", 1),
-        vec![native_source(EVM_ACCOUNT), native_source(EVM_ACCOUNT)]
-    )
-    .is_err());
-
-    let excessive = (1..=EVM_NETWORK_HOLDING_SOURCE_LIMIT + 1)
-        .map(|index| native_source(&format!("0x{index:040x}")))
-        .collect();
-    assert!(
-        EvmNetworkCollectionConfig::new(&test_network("ethereum-mainnet", 1), excessive).is_err()
-    );
-}
-
-#[test]
-fn reducer_deduplicates_metadata_and_publishes_one_unified_fact_per_source() {
-    let config = collection_config(vec![
-        token_source(SECOND_ACCOUNT),
-        native_source(EVM_ACCOUNT),
-        token_source(EVM_ACCOUNT),
-    ]);
-    let plan = collection_plan(&config);
-    assert_eq!(
-        plan.token_contracts()
-            .iter()
-            .map(|address| address.as_str())
-            .collect::<Vec<_>>(),
-        vec![TOKEN]
-    );
-
-    let evidence = evidence_for(&config, &[10, 20, 30]);
-    let batch = reduce_evm_network_collection(&plan, &evidence).expect("reduced collection");
-    assert_eq!(batch.anchor().number(), "10");
-    assert_eq!(batch.balances().len(), 3);
-    assert_eq!(
-        batch
-            .balances()
-            .iter()
-            .filter(|balance| {
-                matches!(balance.source().asset(), HoldingSourceConfig::Erc20 { .. })
-            })
-            .map(EvmCollectedBalance::decimals)
-            .collect::<Vec<_>>(),
-        vec![6, 6]
-    );
-
-    let (receipt, facts) = publish_evm_holdings(&config, batch).expect("published facts");
-    assert_eq!(facts.len(), 3);
-    assert_eq!(receipt.sources().len(), 3);
-    assert_eq!(receipt.fact_content_identities().len(), 3);
-    assert_eq!(receipt.block_anchor().hash(), EVM_HASH);
-    let descriptor = EvmBalanceSnapshotFact::descriptor().expect("unified descriptor");
-    assert_eq!(descriptor.fact_kind().as_str(), "evm.balance_snapshot");
-    assert!(descriptor
-        .fields()
-        .iter()
-        .any(|field| field.field_id().as_str() == "subject.asset.kind"));
-    assert!(descriptor.fields().iter().any(|field| {
-        field.field_id().as_str() == "subject.asset.contract_address" && !field.required()
-    }));
-    assert!(descriptor
-        .fields()
-        .iter()
-        .any(|field| field.field_id().as_str() == "result.block_anchor.hash"));
-    let fact_json = serde_json::to_value(&facts).expect("fact JSON");
-    assert_eq!(fact_json[0]["response"]["block_anchor"]["hash"], EVM_HASH);
-    assert_eq!(
-        fact_json
-            .as_array()
-            .expect("fact array")
-            .iter()
-            .map(|fact| fact["subject"]["asset"]["kind"]
-                .as_str()
-                .expect("asset kind"))
-            .collect::<Vec<_>>(),
-        vec!["erc20", "native", "erc20",]
-    );
-    let fact_keys = fact_json
-        .as_array()
-        .expect("fact array")
-        .iter()
-        .map(|fact| {
-            mfm_facts::typed_fact_subject_evidence(&descriptor, &fact["subject"])
-                .expect("subject evidence")
-                .fact_key()
-                .as_str()
-                .to_owned()
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        fact_keys.len(),
-        3,
-        "every configured asset has one fact key"
-    );
-}
-
-#[test]
-fn reducer_rejects_reorg_session_order_coverage_and_decimal_tampering() {
-    let config = collection_config(vec![native_source(EVM_ACCOUNT), token_source(EVM_ACCOUNT)]);
-    let plan = collection_plan(&config);
-    let evidence = evidence_for(&config, &[10, 20]);
-
-    let mut reorg = serde_json::to_value(&evidence).expect("evidence JSON");
-    reorg["final_canonical_block"]["hash"] = serde_json::json!(REORG_HASH);
-    let reorg = serde_json::from_value(reorg).expect("reorg evidence");
-    assert!(reduce_evm_network_collection(&plan, &reorg)
-        .expect_err("reorg must fail")
-        .to_string()
-        .contains("no longer canonical"));
-
-    let mut wrong_session = serde_json::to_value(&evidence).expect("evidence JSON");
-    wrong_session["session"]["chain_id"] = serde_json::json!(2);
-    let wrong_session = serde_json::from_value(wrong_session).expect("session evidence");
-    assert!(reduce_evm_network_collection(&plan, &wrong_session).is_err());
-
-    let mut wrong_order = serde_json::to_value(&evidence).expect("evidence JSON");
-    wrong_order["balances"]
-        .as_array_mut()
-        .expect("balance array")
-        .swap(0, 1);
-    let wrong_order = serde_json::from_value(wrong_order).expect("ordered evidence");
-    assert!(reduce_evm_network_collection(&plan, &wrong_order).is_err());
-
-    let mut duplicated = serde_json::to_value(&evidence).expect("evidence JSON");
-    let duplicate = duplicated["balances"][0].clone();
-    duplicated["balances"]
-        .as_array_mut()
-        .expect("balance array")
-        .push(duplicate);
-    let duplicated = serde_json::from_value(duplicated).expect("duplicated evidence");
-    assert!(reduce_evm_network_collection(&plan, &duplicated).is_err());
-
-    let mut missing_metadata = serde_json::to_value(&evidence).expect("evidence JSON");
-    missing_metadata["token_decimals"] = serde_json::json!([]);
-    let missing_metadata = serde_json::from_value(missing_metadata).expect("metadata evidence");
-    assert!(reduce_evm_network_collection(&plan, &missing_metadata).is_err());
-
-    let mut noncanonical = serde_json::to_value(&evidence).expect("evidence JSON");
-    noncanonical["balances"][0]["raw_units"] = serde_json::json!("010");
-    let noncanonical = serde_json::from_value(noncanonical).expect("quantity evidence");
-    assert!(reduce_evm_network_collection(&plan, &noncanonical).is_err());
 }
 
 #[test]

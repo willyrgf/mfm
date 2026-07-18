@@ -35,8 +35,6 @@ impl ReplayVerifierRegistry {
                 ReplayVerifierRegistration {
                     state_keys: &[
                         state_key::<mfm_state_portfolio::SelectHoldingsState>,
-                        state_key::<mfm_state_portfolio::CollectEvmNetworkState>,
-                        state_key::<mfm_state_portfolio::PublishEvmHoldingsState>,
                         state_key::<mfm_state_portfolio::AssembleSnapshotState>,
                         state_key::<mfm_state_portfolio::ProjectReportState>,
                     ],
@@ -55,9 +53,17 @@ impl ReplayVerifierRegistry {
                     verifier: verify_btc,
                 },
                 ReplayVerifierRegistration {
+                    state_keys: &[
+                        state_key::<mfm_states_evm::CollectEvmBalancesState>,
+                        state_key::<mfm_states_evm::RecordEvmBalanceFactsState>,
+                    ],
+                    intent_matcher: None,
+                    verifier: verify_evm_balance_collection,
+                },
+                ReplayVerifierRegistration {
                     state_keys: &[state_key::<mfm_states_evm::ValidateEvmContractState>],
                     intent_matcher: None,
-                    verifier: verify_evm,
+                    verifier: verify_evm_validation,
                 },
                 ReplayVerifierRegistration {
                     state_keys: &[],
@@ -131,7 +137,14 @@ fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Resul
     mfm_adapters_btc_jsonrpc::verify_btc_jsonrpc_replay(broker)
 }
 
-fn verify_evm(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
+fn verify_evm_balance_collection(
+    broker: &ReplayBroker,
+    _registry: &CertificationRegistry,
+) -> Result<()> {
+    mfm_adapters_evm::verify_evm_balance_collection_replay(broker)
+}
+
+fn verify_evm_validation(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
     mfm_adapters_evm::verify_evm_validation_replay(broker)
 }
 

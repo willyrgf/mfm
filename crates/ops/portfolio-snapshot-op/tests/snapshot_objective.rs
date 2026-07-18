@@ -40,8 +40,8 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
         .collect::<Vec<_>>();
     for required in [
         "mfm.portfolio.select_holdings",
-        "mfm.portfolio.collect_evm_network",
-        "mfm.portfolio.publish_evm_holdings",
+        "mfm.evm.collect_balances",
+        "mfm.evm.record_balance_facts",
         "mfm.portfolio.assemble_snapshot",
         "mfm.portfolio.project_report",
     ] {
@@ -58,7 +58,7 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
         .collect::<Vec<_>>();
     assert!(operations.contains(&"mfm.portfolio.snapshot"));
     assert!(operations.contains(&"mfm.bitcoin.btc_network_collection"));
-    assert!(!operations.iter().any(|name| name.starts_with("mfm.evm.")));
+    assert!(operations.contains(&"mfm.evm.balance_collection"));
 
     mfm_certify::certify_program_draft(&draft).expect("complete snapshot draft certifies");
     let launch = portfolio_snapshot_program_launch_plan(config).expect("snapshot launch plan");
@@ -88,7 +88,6 @@ fn aggregate_snapshot_topology_matches_demand_without_inert_collection_nodes() {
     assert_two_state_evm_slice(&evm_native_only, 1);
     assert_eq!(evm_collection_config(&evm_native_only).sources().len(), 1);
     assert_no_state_prefix(&evm_native_only, "mfm.bitcoin.");
-    assert_no_state_prefix(&evm_native_only, "mfm.evm.");
 
     let evm_token_only =
         deterministic_snapshot_draft(topology_config(false, false, true, false, false));
@@ -98,12 +97,10 @@ fn aggregate_snapshot_topology_matches_demand_without_inert_collection_nodes() {
     );
     assert_two_state_evm_slice(&evm_token_only, 1);
     assert_eq!(evm_collection_config(&evm_token_only).sources().len(), 1);
-    assert_no_state_prefix(&evm_token_only, "mfm.evm.");
 
     let mixed = deterministic_snapshot_draft(topology_config(false, true, true, false, false));
     assert_two_state_evm_slice(&mixed, 1);
     assert_eq!(evm_collection_config(&mixed).sources().len(), 2);
-    assert_no_state_prefix(&mixed, "mfm.evm.");
 
     let repeated_token =
         deterministic_snapshot_draft(topology_config(false, false, true, false, true));
@@ -121,11 +118,11 @@ fn aggregate_snapshot_topology_matches_demand_without_inert_collection_nodes() {
 
 fn assert_two_state_evm_slice(draft: &TypedProgramDraft, network_count: usize) {
     assert_eq!(
-        state_count(draft, "mfm.portfolio.collect_evm_network"),
+        state_count(draft, "mfm.evm.collect_balances"),
         network_count
     );
     assert_eq!(
-        state_count(draft, "mfm.portfolio.publish_evm_holdings"),
+        state_count(draft, "mfm.evm.record_balance_facts"),
         network_count
     );
     assert_eq!(
@@ -134,17 +131,15 @@ fn assert_two_state_evm_slice(draft: &TypedProgramDraft, network_count: usize) {
             .iter()
             .filter(|operation| operation.operation_name.starts_with("mfm.evm."))
             .count(),
-        0
+        network_count
     );
 }
 
-fn evm_collection_config(
-    draft: &TypedProgramDraft,
-) -> mfm_state_portfolio::EvmNetworkCollectionConfig {
+fn evm_collection_config(draft: &TypedProgramDraft) -> mfm_states_evm::EvmBalanceCollectionConfig {
     let node = draft
         .state_nodes()
         .iter()
-        .find(|node| node.state_descriptor_name == "mfm.portfolio.collect_evm_network")
+        .find(|node| node.state_descriptor_name == "mfm.evm.collect_balances")
         .expect("EVM collection node");
     serde_json::from_slice(node.config.canonical_json.as_bytes()).expect("EVM collection config")
 }

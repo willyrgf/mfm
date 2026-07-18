@@ -30,11 +30,12 @@ snapshot operation. Admission also enforces the configured network, wallet, symb
 wallet-to-symbol, and per-EVM-network source limits before graph expansion.
 
 The operation derives only explicit wallet-to-symbol demand. Bitcoin collection resolves one
-shared anchor per demanded network and emits checked network receipts. Each EVM network uses one
-external-read state and one atomic publication state. One checked session resolves latest once,
-reads deduplicated token metadata and every native/ERC-20 balance at the exact hash, and rechecks
-that hash by block number. The bounded concurrent scheduler issues each chunk in certified plan
-order and preserves that order independently of response completion order.
+shared anchor per demanded network and emits checked network receipts. Each EVM network becomes one
+child call to `EvmBalanceCollectionOperation`; that reusable operation contains one external-read
+state and one atomic publication state. One checked session resolves latest once, reads
+deduplicated token metadata and every native/ERC-20 balance at the exact hash, and rechecks that
+hash by block number. The bounded concurrent scheduler issues each chunk in certified plan order
+and preserves that order independently of response completion order.
 
 The publication attempt records the complete `evm.balance_snapshot` fact batch and a checked
 `EvmBalanceCollectionReceipt` together. That receipt contains the network/chain, exact anchor,
@@ -46,10 +47,11 @@ receipt-authorized content. Byte-identical append occurrences are equivalent; sa
 with different response content are filtered before ordering. Assembly consumes only these
 store-reread observations, including for token-only and all-EVM portfolios.
 
-Collection plans, evidence, receipts, and fact subjects reuse the configured
-`NormalizedEvmAddress` plus `HoldingSourceConfig` values directly. Session evidence and the shared
-checked `EvmBlockAnchor` come from the EVM capability contract; the block number retains the full
-U256 range as a canonical decimal string in persisted values.
+Portfolio planning projects configured `NormalizedEvmAddress` and `HoldingSourceConfig` values
+into generic `EvmBalanceSource` and `EvmBalanceAsset` demand before the child call. Collection
+plans, evidence, receipts, and facts contain only those EVM-domain source identities. Session
+evidence and the shared checked `EvmBlockAnchor` come from the EVM capability contract; the block
+number retains the full U256 range as a canonical decimal string in persisted values.
 
 A wallet with no configured symbols is retained with empty observations and zero quote totals, but
 creates no collection work or network pin; the aggregate remains valid only when another explicit
@@ -67,8 +69,9 @@ Both public values emit `schema_version: 1`; snapshot and report version selecti
 request or certified-state policy.
 
 After admission current configuration is not run authority. Resume, replay, status, stream
-inspection, and public-output rendering use the certified spec and retained evidence. Replay
-recomputes EVM facts and receipts, verifies that selection consumed the exact family vectors, and
-replays selection from retained query and response evidence. Live capability routes remain
-process-local runtime configuration. Evidence-only replay does not load them; a live resume loads
-them only when verified unfinished external nodes still require a live capability.
+inspection, and public-output rendering use the certified spec and retained evidence. EVM-adapter
+replay recomputes EVM facts and receipts. Portfolio replay independently verifies receipt-pinned
+selection from retained query/response evidence and recomputes snapshot/report outputs. Live
+capability routes remain process-local runtime configuration. Evidence-only replay does not load
+them; a live resume loads them only when verified unfinished external nodes still require a live
+capability.

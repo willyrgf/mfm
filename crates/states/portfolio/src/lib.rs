@@ -1,11 +1,8 @@
 #![warn(missing_docs)]
 //! Typed portfolio-domain state contracts for certified portfolio snapshots.
 //!
-//! Each demanded EVM network uses one [`CollectEvmNetworkState`] followed by one
-//! [`PublishEvmHoldingsState`]. The latter atomically records a complete batch of unified native
-//! and ERC-20 facts and returns a checked [`EvmBalanceCollectionReceipt`].
-//! [`SelectHoldingsState`] consumes Bitcoin and EVM family receipts directly, then reads and
-//! reverifies every selected balance from the fact store before snapshot assembly.
+//! [`SelectHoldingsState`] consumes Bitcoin and generic EVM collection receipts directly, then
+//! reads and reverifies every selected balance from the fact store before snapshot assembly.
 //!
 //! # Examples
 //!
@@ -18,7 +15,6 @@
 //! ```
 
 mod collection_receipt;
-mod evm_collection;
 mod holding_read;
 mod selection;
 
@@ -28,15 +24,6 @@ use self::decimal::{multiply_decimal_strings, DecimalValue};
 
 pub use collection_receipt::{
     HoldingRequirementKey, SelectHoldingsInput, SelectHoldingsInputHandles,
-};
-pub use evm_collection::{
-    evm_balance_fact_visibility, publish_evm_holdings, reduce_evm_network_collection,
-    validate_evm_network_collection_config, CollectEvmNetworkEvidence, CollectEvmNetworkPlan,
-    CollectEvmNetworkState, EvmBalanceCollectionReceipt, EvmBalanceReadEvidence,
-    EvmBalanceSnapshotFact, EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject,
-    EvmBalanceSource, EvmCollectedBalance, EvmCollectionBatch, EvmNetworkCollectionConfig,
-    EvmTokenDecimalsEvidence, PortfolioEvmError, PublishEvmHoldingsInput,
-    PublishEvmHoldingsInputHandles, PublishEvmHoldingsState, EVM_NETWORK_HOLDING_SOURCE_LIMIT,
 };
 pub use holding_read::{
     PortfolioHoldingFactResponse, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,

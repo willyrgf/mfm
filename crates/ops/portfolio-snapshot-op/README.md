@@ -5,7 +5,7 @@ This operation crate owns the complete internal portfolio objective:
 ```text
 normalized PortfolioConfig
   → Bitcoin collection children → typed Bitcoin receipt vector ─┐
-  → one EVM read + atomic publication pair per network → typed EVM receipt vector ─┤
+  → EVM balance collection children → typed EVM receipt vector ─┤
   → receipt-pinned BTC/EVM store selection ←───────────────────────────────────────┘
   → snapshot assembly → report projection → one PortfolioPublicOutputs root binding
 ```
@@ -16,7 +16,8 @@ target-keyed current `PortfolioConfig`; the app has no parallel graph builder. T
 receipt vectors flow directly into `SelectHoldingsState`, so managed-write completion is the
 selection barrier without a generic fan-in state. Assembly consumes no direct family observation.
 
-EVM planning is private to this operation for now. It compiles normalized wallet/symbol demand into
-one sorted, unique `EvmNetworkCollectionConfig` per network. Portfolio config validation enforces
-all collection cardinality limits before graph expansion. The crate performs no live IO; family and
-portfolio adapters supply runners for certified state descriptors.
+Portfolio planning compiles normalized wallet/symbol demand into one sorted, unique generic
+`EvmBalanceCollectionConfig` per network, then calls `EvmBalanceCollectionOperation` in a child
+scope and bridges only its receipt. Portfolio config validation enforces collection cardinality
+limits before graph expansion. The crate performs no live IO and constructs no EVM state directly;
+family and portfolio adapters supply runners for certified descriptors.

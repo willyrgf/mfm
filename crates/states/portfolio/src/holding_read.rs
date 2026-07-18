@@ -18,16 +18,16 @@ use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig, NetworkPin,
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program_derive::MfmValue;
 use mfm_states_btc::BtcNetworkCollectionReceipt;
+use mfm_states_evm::{EvmBalanceAsset, EvmBalanceCollectionReceipt, EvmBalanceSource};
 use serde::{Deserialize, Serialize};
 
 use crate::selection::{holding_candidate_from_bitcoin, BitcoinHoldingCandidateFields};
 use crate::{
     observations_from_selected_holdings, portfolio_holding_select_scope_decision_hash,
     portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
-    symbols_by_id_map, EvmBalanceCollectionReceipt, EvmBalanceSource, HoldingCandidate,
-    HoldingRequirementKey, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
-    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput, SelectedHolding,
-    SelectedHoldingMaterial, SelectedHoldings,
+    symbols_by_id_map, HoldingCandidate, HoldingRequirementKey, PortfolioHoldingErrorCode,
+    PortfolioHoldingSelectionError, SelectHoldingsConfig, SelectHoldingsFactDescriptors,
+    SelectHoldingsInput, SelectedHolding, SelectedHoldingMaterial, SelectedHoldings,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -483,8 +483,23 @@ fn receipt_holdings(
                             "EVM wallet did not contain an EVM address",
                         )
                     })?;
-                    let balance_source = EvmBalanceSource::new(account.clone(), holding.clone())
-                        .map_err(|error| {
+                    let account = account.to_address().map_err(|error| {
+                        receipt_selection_error_message(&requirement, error.to_string())
+                    })?;
+                    let asset = match holding {
+                        HoldingSourceConfig::Native => EvmBalanceAsset::Native,
+                        HoldingSourceConfig::Erc20 { contract_address } => {
+                            let contract_address =
+                                contract_address.to_address().map_err(|error| {
+                                    receipt_selection_error_message(&requirement, error.to_string())
+                                })?;
+                            EvmBalanceAsset::erc20(contract_address).map_err(|error| {
+                                receipt_selection_error_message(&requirement, error.to_string())
+                            })?
+                        }
+                    };
+                    let balance_source =
+                        EvmBalanceSource::new(account, asset).map_err(|error| {
                             receipt_selection_error_message(&requirement, error.to_string())
                         })?;
                     let source_key = DemandedSourceKey::Evm {
@@ -992,19 +1007,19 @@ fn holding_fact_index_request(
             let mut predicates = vec![
                 query_eq_string(entry, "subject.network_id", network_id)?,
                 query_eq_u64(entry, "subject.chain_id", *chain_id)?,
-                query_eq_string(entry, "subject.account", source.account().as_str())?,
+                query_eq_string(entry, "subject.account", source.account())?,
                 query_eq_string(
                     entry,
                     "subject.asset.kind",
                     match source.asset() {
-                        HoldingSourceConfig::Native => "native",
-                        HoldingSourceConfig::Erc20 { .. } => "erc20",
+                        EvmBalanceAsset::Native => "native",
+                        EvmBalanceAsset::Erc20 { .. } => "erc20",
                     },
                 )?,
                 query_eq_string(entry, "result.block_anchor.number", block_anchor.number())?,
                 query_eq_string(entry, "result.block_anchor.hash", block_anchor.hash())?,
             ];
-            if let HoldingSourceConfig::Erc20 { contract_address } = source.asset() {
+            if let EvmBalanceAsset::Erc20 { contract_address } = source.asset() {
                 predicates.push(query_eq_string(
                     entry,
                     "subject.asset.contract_address",

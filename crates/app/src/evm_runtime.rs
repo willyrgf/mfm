@@ -11,7 +11,7 @@ pub(crate) fn register_evm_runners(
 ) -> Result<(), PublicError> {
     let validate_runtime = Arc::clone(&runtime_config);
     let bind_runtime = Arc::clone(&runtime_config);
-    let capabilities = mfm_adapters_evm::EvmValidationRunnerCapabilities::new(
+    let capabilities = mfm_adapters_evm::EvmReadRunnerCapabilities::new(
         artifacts.clone(),
         move |binding| validate_runtime.validate_evm_network_binding(binding),
         move |binding| {
@@ -19,7 +19,7 @@ pub(crate) fn register_evm_runners(
             Box::pin(async move { runtime.bind_evm_read_session(binding).await })
         },
     );
-    mfm_adapters_evm::register_evm_validation_runner(registry, capabilities)?;
+    mfm_adapters_evm::register_evm_read_runners(registry, capabilities)?;
 
     let validate_runtime = Arc::clone(&runtime_config);
     let bind_transaction_runtime = Arc::clone(&runtime_config);

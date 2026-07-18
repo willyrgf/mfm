@@ -2,9 +2,8 @@
 
 use mfm_program_derive::{MfmValue, StateInput};
 use mfm_states_btc::BtcNetworkCollectionReceipt;
+use mfm_states_evm::EvmBalanceCollectionReceipt;
 use serde::{Deserialize, Serialize};
-
-use crate::EvmBalanceCollectionReceipt;
 
 /// Stable logical portfolio holding requirement.
 ///

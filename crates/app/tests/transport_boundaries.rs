@@ -139,10 +139,12 @@ fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
     let app_evm = include_str!("../src/evm_runtime.rs");
     assert!(
         evm_adapter.contains("register_evm_transaction_runner")
-            && evm_adapter.contains("register_evm_validation_runner")
+            && evm_adapter.contains("register_evm_read_runners")
+            && evm_adapter.contains("CollectEvmBalancesState")
+            && evm_adapter.contains("ValidateEvmContractState")
             && app_evm.contains("bind_evm_read_session")
             && app_evm.contains("bind_evm_transaction_session"),
-        "adapter and app must register both retained EVM bindings over direct sessions"
+        "adapter and app must register shared read and transaction bindings over direct sessions"
     );
 
     let btc_transport = include_str!("../../transports/btc-jsonrpc-http/src/lib.rs");

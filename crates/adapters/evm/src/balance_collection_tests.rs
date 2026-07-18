@@ -1,24 +1,26 @@
-//! Adapter tests for the portfolio-owned EVM vertical slice.
+//! Adapter tests for reusable EVM balance collection.
 
 use super::*;
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use alloy_primitives::{address, b256, Address, B256};
+use alloy_primitives::{address, b256, Address, Bytes, B256, U256};
 use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBlockAnchor, EvmCode, EvmSessionEvidence, EvmSessionFuture,
-    ProviderDiagnosticCode,
-};
-use mfm_fact_capabilities::{
-    FactIndexReadBatchFuture, FactIndexReadProvider, FactIndexReadRequest,
+    evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence,
+    EvmSessionFuture, ProviderDiagnosticCode,
 };
 use mfm_ids::LocalPublicId;
-use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
-use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{ReadState, StateSpec, ValidatedConfig};
-use mfm_state_portfolio::{reduce_evm_network_collection, EvmBalanceSource};
+use mfm_states_evm::{
+    reduce_evm_balance_collection, CollectEvmBalancesState, EvmBalanceAsset,
+    EvmBalanceCollectionConfig, EvmBalanceCollectionPlan, EvmBalanceSource,
+};
+
+use crate::balance_collection::{
+    collect_evm_balances, ERC20_BALANCE_OF_SELECTOR, ERC20_DECIMALS_SELECTOR,
+    EVM_READ_CONCURRENCY_LIMIT,
+};
 
 const ACCOUNT: Address = address!("000000000000000000000000000000000000dead");
 const TOKEN: Address = address!("0000000000000000000000000000000000000001");
@@ -189,32 +191,6 @@ impl EvmReadSession for RecordingSession {
     }
 }
 
-struct EmptyFactIndex {
-    calls: AtomicUsize,
-}
-
-impl EmptyFactIndex {
-    fn new() -> Self {
-        Self {
-            calls: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl FactIndexReadProvider for EmptyFactIndex {
-    fn implementation_id(&self) -> &'static str {
-        "mfm.adapters.portfolio.test.empty-fact-index"
-    }
-
-    fn read_fact_index_batch<'a>(
-        &'a self,
-        _requests: &'a [FactIndexReadRequest],
-    ) -> FactIndexReadBatchFuture<'a> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(std::future::ready(Ok(Vec::new())))
-    }
-}
-
 fn provider_failure() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(evm_diagnostic(
         ProviderDiagnosticCode::ProviderConfigurationInvalid,
@@ -225,30 +201,14 @@ fn temporary_provider_failure() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(evm_diagnostic(ProviderDiagnosticCode::TransportFailed))
 }
 
-fn network() -> NetworkConfig {
-    NetworkConfig::new(
-        "ethereum-mainnet".to_owned(),
-        NetworkFamilyConfig::Evm,
-        Some(1),
-        Some(18),
-        None,
-        None,
-        BTreeMap::new(),
-    )
-    .expect("EVM network")
+fn source(account: Address, asset: EvmBalanceAsset) -> EvmBalanceSource {
+    EvmBalanceSource::new(account, asset).expect("EVM source")
 }
 
-fn source(account: Address, asset: HoldingSourceConfig) -> EvmBalanceSource {
-    EvmBalanceSource::new(
-        format!("{account:#x}").parse().expect("normalized account"),
-        asset,
-    )
-    .expect("EVM source")
-}
-
-fn plan_for(sources: Vec<EvmBalanceSource>) -> CollectEvmNetworkPlan {
-    let config = EvmNetworkCollectionConfig::new(&network(), sources).expect("collection config");
-    let state = <CollectEvmNetworkState as StateSpec>::new(
+fn plan_for(sources: Vec<EvmBalanceSource>) -> EvmBalanceCollectionPlan {
+    let config = EvmBalanceCollectionConfig::new("ethereum-mainnet", 1, 18, sources)
+        .expect("collection config");
+    let state = <CollectEvmBalancesState as StateSpec>::new(
         ValidatedConfig::new(config).expect("validated config"),
     )
     .expect("collection state");
@@ -260,13 +220,11 @@ fn plan_for(sources: Vec<EvmBalanceSource>) -> CollectEvmNetworkPlan {
 fn capabilities(
     session: Arc<RecordingSession>,
     binds: Arc<AtomicUsize>,
-    fact_index: Arc<EmptyFactIndex>,
-) -> PortfolioRunnerCapabilities {
+) -> EvmReadRunnerCapabilities {
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
         Arc::new(store::AsyncInMemoryRunStore::default());
-    PortfolioRunnerCapabilities::new(
+    EvmReadRunnerCapabilities::new(
         artifacts,
-        fact_index,
         |binding| {
             if binding.network_id().as_str() == "ethereum-mainnet"
                 && binding.expected_chain_id() == 1
@@ -288,34 +246,26 @@ fn capabilities(
 }
 
 #[test]
-fn portfolio_runner_registration_keeps_factory_identity_explicit() {
-    assert_eq!(PURE_FACTORY, "pure");
+fn balance_runner_registration_keeps_factory_identity_explicit() {
     assert_eq!(READ_FACTORY, "read_external");
-    assert_eq!(MANAGED_WRITE_FACTORY, "managed_platform_write");
-    assert_eq!(ADAPTER_FACTORY, "portfolio_adapter");
+    assert_eq!(ADAPTER_FACTORY, "evm_jsonrpc_adapter");
 }
 
 #[tokio::test]
 async fn one_session_uses_latest_then_exact_hash_reads_then_number_recheck() {
     let plan = plan_for(vec![
-        source(ACCOUNT, HoldingSourceConfig::Native),
-        source(
-            ACCOUNT,
-            HoldingSourceConfig::Erc20 {
-                contract_address: format!("{TOKEN:#x}").parse().expect("normalized token"),
-            },
-        ),
+        source(ACCOUNT, EvmBalanceAsset::Native),
+        source(ACCOUNT, EvmBalanceAsset::erc20(TOKEN).expect("token asset")),
     ]);
     let binding = plan.binding().expect("binding");
     let session = Arc::new(RecordingSession::new(&binding, ANCHOR_HASH));
     let binds = Arc::new(AtomicUsize::new(0));
-    let fact_index = Arc::new(EmptyFactIndex::new());
-    let capabilities = capabilities(Arc::clone(&session), Arc::clone(&binds), fact_index);
+    let capabilities = capabilities(Arc::clone(&session), Arc::clone(&binds));
 
-    let evidence = collect_evm_network(&plan, &capabilities)
+    let evidence = collect_evm_balances(&plan, &capabilities)
         .await
         .expect("collection evidence");
-    let batch = reduce_evm_network_collection(&plan, &evidence).expect("reduced evidence");
+    let batch = reduce_evm_balance_collection(&plan, &evidence).expect("reduced evidence");
     assert_eq!(batch.balances().len(), 2);
     assert_eq!(binds.load(Ordering::SeqCst), 1);
 
@@ -351,20 +301,16 @@ async fn one_session_uses_latest_then_exact_hash_reads_then_number_recheck() {
 
 #[tokio::test]
 async fn final_number_recheck_exposes_reorg_to_the_deterministic_reducer() {
-    let plan = plan_for(vec![source(ACCOUNT, HoldingSourceConfig::Native)]);
+    let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
     let session = Arc::new(RecordingSession::new(
         &plan.binding().expect("binding"),
         REORG_HASH,
     ));
-    let capabilities = capabilities(
-        session,
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(EmptyFactIndex::new()),
-    );
-    let evidence = collect_evm_network(&plan, &capabilities)
+    let capabilities = capabilities(session, Arc::new(AtomicUsize::new(0)));
+    let evidence = collect_evm_balances(&plan, &capabilities)
         .await
         .expect("retained evidence");
-    assert!(reduce_evm_network_collection(&plan, &evidence)
+    assert!(reduce_evm_balance_collection(&plan, &evidence)
         .expect_err("reorg must fail reduction")
         .to_string()
         .contains("no longer canonical"));
@@ -372,13 +318,12 @@ async fn final_number_recheck_exposes_reorg_to_the_deterministic_reducer() {
 
 #[tokio::test]
 async fn temporary_provider_outage_blocks_the_balance_collector() {
-    let plan = plan_for(vec![source(ACCOUNT, HoldingSourceConfig::Native)]);
+    let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
     let session = Arc::new(UnavailableSession::new(&plan.binding().expect("binding")));
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
         Arc::new(store::AsyncInMemoryRunStore::default());
-    let capabilities = PortfolioRunnerCapabilities::new(
+    let capabilities = EvmReadRunnerCapabilities::new(
         artifacts,
-        Arc::new(EmptyFactIndex::new()),
         |_| Ok(()),
         move |_| {
             let session = Arc::clone(&session);
@@ -386,7 +331,7 @@ async fn temporary_provider_outage_blocks_the_balance_collector() {
         },
     );
 
-    let error = collect_evm_network(&plan, &capabilities)
+    let error = collect_evm_balances(&plan, &capabilities)
         .await
         .expect_err("temporary outage must block collection");
 
@@ -399,7 +344,7 @@ async fn balance_reads_never_exceed_the_hard_concurrency_limit() {
         .map(|index| {
             source(
                 Address::from_word(U256::from(index).into()),
-                HoldingSourceConfig::Native,
+                EvmBalanceAsset::Native,
             )
         })
         .collect();
@@ -408,12 +353,8 @@ async fn balance_reads_never_exceed_the_hard_concurrency_limit() {
         &plan.binding().expect("binding"),
         ANCHOR_HASH,
     ));
-    let capabilities = capabilities(
-        Arc::clone(&session),
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(EmptyFactIndex::new()),
-    );
-    collect_evm_network(&plan, &capabilities)
+    let capabilities = capabilities(Arc::clone(&session), Arc::new(AtomicUsize::new(0)));
+    collect_evm_balances(&plan, &capabilities)
         .await
         .expect("bounded collection");
     let max_active = session.max_active.load(Ordering::SeqCst);
@@ -428,36 +369,28 @@ async fn concurrent_reads_are_issued_in_certified_plan_order() {
     let plan = plan_for(vec![
         source(
             Address::from_word(U256::from(3).into()),
-            HoldingSourceConfig::Native,
+            EvmBalanceAsset::Native,
         ),
         source(
             Address::from_word(U256::from(2).into()),
-            HoldingSourceConfig::Native,
+            EvmBalanceAsset::Native,
         ),
         source(
             Address::from_word(U256::from(1).into()),
-            HoldingSourceConfig::Erc20 {
-                contract_address: format!("{second_token:#x}").parse().expect("second token"),
-            },
+            EvmBalanceAsset::erc20(second_token).expect("second token"),
         ),
         source(
             Address::from_word(U256::from(1).into()),
-            HoldingSourceConfig::Erc20 {
-                contract_address: format!("{first_token:#x}").parse().expect("first token"),
-            },
+            EvmBalanceAsset::erc20(first_token).expect("first token"),
         ),
     ]);
     let session = Arc::new(RecordingSession::new(
         &plan.binding().expect("binding"),
         ANCHOR_HASH,
     ));
-    let capabilities = capabilities(
-        Arc::clone(&session),
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(EmptyFactIndex::new()),
-    );
+    let capabilities = capabilities(Arc::clone(&session), Arc::new(AtomicUsize::new(0)));
 
-    collect_evm_network(&plan, &capabilities)
+    collect_evm_balances(&plan, &capabilities)
         .await
         .expect("ordered collection");
     let records = session.records();
@@ -492,20 +425,16 @@ async fn concurrent_reads_are_issued_in_certified_plan_order() {
 
 #[tokio::test]
 async fn wrong_chain_session_is_rejected_before_any_network_read() {
-    let plan = plan_for(vec![source(ACCOUNT, HoldingSourceConfig::Native)]);
+    let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
     let wrong_binding = EvmNetworkBinding::new(
         LocalPublicId::new("ethereum-mainnet").expect("network id"),
         2,
     )
     .expect("wrong binding");
     let session = Arc::new(RecordingSession::new(&wrong_binding, ANCHOR_HASH));
-    let capabilities = capabilities(
-        Arc::clone(&session),
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(EmptyFactIndex::new()),
-    );
+    let capabilities = capabilities(Arc::clone(&session), Arc::new(AtomicUsize::new(0)));
 
-    collect_evm_network(&plan, &capabilities)
+    collect_evm_balances(&plan, &capabilities)
         .await
         .expect_err("wrong-chain session must fail binding");
     assert!(session.records().is_empty());

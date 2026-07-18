@@ -8,8 +8,8 @@ use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B2
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
 use mfm_adapters_evm::{
-    register_evm_transaction_runner, register_evm_validation_runner,
-    EvmTransactionRunnerCapabilities, EvmValidationRunnerCapabilities,
+    register_evm_read_runners, register_evm_transaction_runner, EvmReadRunnerCapabilities,
+    EvmTransactionRunnerCapabilities,
 };
 use mfm_certify::CertificationRegistry;
 use mfm_events::v1 as events;
@@ -712,21 +712,17 @@ fn composition_runners(
     )
     .expect("register transaction runner");
 
-    register_evm_validation_runner(
+    register_evm_read_runners(
         &mut runners,
-        EvmValidationRunnerCapabilities::new(
-            artifacts,
-            validate_composition_binding,
-            move |binding| {
-                let world = Arc::clone(&world);
-                let reads = Arc::clone(&live_validation_reads);
-                Box::pin(async move {
-                    validate_composition_binding(&binding)?;
-                    Ok(Arc::new(CompositionReadSession::new(binding, world, reads))
-                        as Arc<dyn EvmReadSession>)
-                })
-            },
-        ),
+        EvmReadRunnerCapabilities::new(artifacts, validate_composition_binding, move |binding| {
+            let world = Arc::clone(&world);
+            let reads = Arc::clone(&live_validation_reads);
+            Box::pin(async move {
+                validate_composition_binding(&binding)?;
+                Ok(Arc::new(CompositionReadSession::new(binding, world, reads))
+                    as Arc<dyn EvmReadSession>)
+            })
+        }),
     )
     .expect("register validation runner");
     runners

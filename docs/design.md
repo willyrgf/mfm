@@ -405,18 +405,23 @@ EVM `Erc20` source with a normalized non-zero contract address, and EVM native s
 the semantic network. Admission rejects excessive networks, wallets, symbols, wallet-symbol
 relations, or distinct sources for one EVM network before graph expansion or provider work.
 
-Each demanded EVM network has exactly one `CollectEvmNetworkState` and one
-`PublishEvmHoldingsState`. The read state owns the sorted native/ERC-20 source plan and deterministic
-reducer. One checked source-bound session resolves latest once, reads deduplicated token metadata
-and every balance at the exact EIP-1898 hash with canonicality required, and finishes with one
-number-to-hash recheck. Reads use bounded concurrency. The managed-write state publishes one
-`evm.balance_snapshot` fact per source and one checked `EvmBalanceCollectionReceipt` in the same
-atomic attempt. The fact subject uses the typed `HoldingSourceConfig` algebra: `Native` or `Erc20`
-with its `NormalizedEvmAddress`, so token contracts cannot share identity. Collection plans,
-retained evidence, receipts, and fact subjects use that same address/asset algebra; there is no
-collection-only or flattened asset vocabulary. Their shared EVM block anchor persists the full
-U256 number as canonical decimal plus canonical hash. The receipt retains only the network/chain,
-anchor, sorted sources, and verified content identities; it does not duplicate response material.
+Each demanded EVM network is one child call to `EvmBalanceCollectionOperation`. The reusable
+operation expands to exactly `CollectEvmBalancesState` followed by `RecordEvmBalanceFactsState` and
+exports only an `EvmBalanceCollectionReceipt`. The read state owns the sorted native/ERC-20 source
+plan and deterministic reducer. One checked source-bound session resolves latest once, reads
+deduplicated token metadata and every balance at the exact EIP-1898 hash with canonicality
+required, and finishes with one number-to-hash recheck. Reads use bounded concurrency. The
+managed-write state publishes one `evm.balance_snapshot` fact per source and the checked receipt in
+the same atomic attempt.
+
+The generic source contract is `EvmBalanceSource { account, asset }`, where `EvmBalanceAsset` is
+`Native` or `Erc20` with a non-zero contract address. Typed constructors accept checked EVM
+addresses and persisted values retain their canonical lowercase representation. The fact subject,
+collection plan, evidence, observation batch, and receipt use this one EVM-domain algebra; they
+contain no portfolio, wallet, symbol, route, endpoint, schedule, or invocation identity. Their
+shared EVM block anchor persists the full U256 number as canonical decimal plus canonical hash. The
+receipt retains only network/chain, anchor, sorted sources, and verified content identities; it
+does not duplicate response material.
 
 Portfolio selection receives the typed Bitcoin and EVM receipt vectors directly and compiles one
 exact query per demanded holding. The fact-index provider evaluates the complete batch over one
@@ -425,9 +430,10 @@ response identity and fact refs, filters different-content same-subject history,
 applies deterministic last-write ordering. Content identity intentionally treats byte-identical
 append occurrences as equivalent. Missing receipt content, mixed frontiers, non-exact cardinality,
 tampering, unexpected receipts, or incomplete coverage fail closed. Portfolio assembly consumes
-only the selected store material and rechecks exact config-derived coverage. Replay invokes the
-same reducers and verifies the exact receipt vectors and retained query evidence without a live
-route. Public-facts CLI/REST is not portfolio selection authority.
+only the selected store material and rechecks exact config-derived coverage. EVM collection replay
+belongs only to `mfm-adapters-evm`; portfolio replay verifies selection, snapshot, and report. Both
+use retained evidence without a live route. Public-facts CLI/REST is not portfolio selection
+authority.
 
 ## Certified Saga Semantics
 

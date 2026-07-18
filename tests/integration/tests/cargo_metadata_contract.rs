@@ -26,6 +26,7 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
 const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
     ("mfm", "mfm_core"),
     ("mfm-state-portfolio", "mfm-states-btc"),
+    ("mfm-state-portfolio", "mfm-states-evm"),
     ("mfm-transports-proof", "mfm-collectors-proof"),
 ];
 
@@ -313,8 +314,8 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
     let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
     assert_eq!(
         packages.len(),
-        43,
-        "the configured-target portfolio snapshot workspace has 43 packages"
+        44,
+        "the configured-target portfolio snapshot workspace has 44 packages"
     );
 
     for removed in [
@@ -345,10 +346,11 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
             "mfm-adapters-evm",
             "mfm-evm-capabilities",
             "mfm-evm-signing",
+            "mfm-op-evm-collectors",
             "mfm-states-evm",
             "mfm-transports-evm",
         ]),
-        "the reusable EVM surface must contain exactly five packages"
+        "the reusable EVM surface must contain exactly six packages"
     );
 
     let by_name = packages
@@ -382,6 +384,24 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
             .iter()
             .all(|dependency| dependency.name != "mfm-portfolio-model"),
         "the EVM state package must not depend on the portfolio model"
+    );
+    let evm_operation_dependencies =
+        path_dependencies(&metadata, "mfm-op-evm-collectors", &by_name);
+    assert!(
+        evm_operation_dependencies
+            .iter()
+            .any(|dependency| dependency.name == "mfm-states-evm")
+            && evm_operation_dependencies.iter().all(|dependency| {
+                !matches!(
+                    dependency.name,
+                    "mfm-state-portfolio"
+                        | "mfm-app"
+                        | "mfm-runtime"
+                        | "mfm-store"
+                        | "mfm-transports-evm"
+                )
+            }),
+        "the EVM collector operation must depend on reusable states without app/runtime/storage/transport or portfolio ownership"
     );
     let portfolio_model_dependencies =
         path_dependencies(&metadata, "mfm-portfolio-model", &by_name);
@@ -527,6 +547,12 @@ fn configured_target_source_boundaries_are_enforced() {
         "one operation must own the complete portfolio snapshot objective"
     );
     assert!(
+        composed_source.contains("call::<EvmBalanceCollectionOperation")
+            && !composed_source.contains("state::<CollectEvmBalancesState")
+            && !composed_source.contains("state::<RecordEvmBalanceFactsState"),
+        "portfolio composition must call the reusable EVM operation instead of constructing its states"
+    );
+    assert!(
         composed_source.contains("portfolio_snapshot_program_draft"),
         "the snapshot operation must expose its single production root-draft helper"
     );
@@ -568,6 +594,11 @@ fn configured_target_source_boundaries_are_enforced() {
             "PortfolioCollectionReceipt",
             "CollectedHoldingReceipt",
             "EvmNetworkSnapshot",
+            "struct EvmBalanceSnapshotFact",
+            "struct EvmBalanceCollectionReceipt",
+            "struct EvmBalanceSource",
+            "CollectEvmBalancesState",
+            "RecordEvmBalanceFactsState",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -581,6 +612,38 @@ fn configured_target_source_boundaries_are_enforced() {
             && !composed_source.contains("PortfolioCollectionReceipt")
             && !composed_source.contains("EvmNetworkSnapshot"),
         "portfolio composition must not retain a generic receipt fan-in or direct EVM path"
+    );
+
+    let portfolio_adapter_root = root.join("crates/adapters/portfolio/src");
+    for path in sources
+        .iter()
+        .filter(|path| path.starts_with(&portfolio_adapter_root))
+    {
+        let source = fs::read_to_string(path).expect("read portfolio adapter source");
+        for forbidden in [
+            "EvmReadSession",
+            "EvmCall",
+            "ERC20_",
+            "FactRecordInput",
+            "record_evm_balance_facts",
+            "verify_evm_balance_collection_replay",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "portfolio adapter source {} retains EVM collection implementation: {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    let evm_operation_source =
+        fs::read_to_string(root.join("crates/ops/evm-collectors-op/src/lib.rs"))
+            .expect("read EVM collector operation source");
+    assert!(
+        evm_operation_source.contains("state::<CollectEvmBalancesState")
+            && evm_operation_source.contains("state::<RecordEvmBalanceFactsState")
+            && evm_operation_source.contains("EvmBalanceCollectionOperation"),
+        "the EVM collector operation must own exactly the reusable read-to-record topology"
     );
 }
 

@@ -239,16 +239,9 @@ pub fn production_runner_registry(
             MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID,
         )?,
     )?;
-    let validate_evm_runtime = Arc::clone(&runtime_config);
-    let bind_evm_runtime = Arc::clone(&runtime_config);
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         artifacts.clone(),
         fact_index.clone(),
-        move |binding| validate_evm_runtime.validate_evm_network_binding(binding),
-        move |binding| {
-            let runtime = Arc::clone(&bind_evm_runtime);
-            Box::pin(async move { runtime.bind_evm_read_session(binding).await })
-        },
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     btc_collector::register_btc_collector_runners(
@@ -350,7 +343,8 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, Publ
     registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
     registry.register_state::<mfm_states_evm::SubmitEvmTransactionState>()?;
     registry.register_state::<mfm_states_evm::ValidateEvmContractState>()?;
-    registry.register_fact_type::<mfm_state_portfolio::EvmBalanceSnapshotFact>()?;
+    mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut registry)?;
+    registry.register_fact_type::<mfm_states_evm::EvmBalanceSnapshotFact>()?;
     mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
         &mut registry,
     )?;

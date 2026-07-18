@@ -102,7 +102,7 @@ async fn wrong_session_binding_fails_before_using_validation_authority() {
     .expect("requested binding");
     let session = Arc::new(CountingReadSession::with_chain_id(2));
     let bound_session = Arc::clone(&session);
-    let capabilities = EvmValidationRunnerCapabilities::new(
+    let capabilities = EvmReadRunnerCapabilities::new(
         Arc::new(MissingArtifacts),
         |_| Ok(()),
         move |_| {

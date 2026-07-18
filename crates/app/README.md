@@ -35,9 +35,11 @@ once at admission, records its target/schema/digest in `RunAdmitted`, and passes
 the complete snapshot operation. Resume, replay, status, stream, and public-output reads never
 consult current configuration.
 
-Domain runner behavior lives in adapter crates. `mfm-app` registers the portfolio EVM runner family
-and the reusable EVM transaction and exact-anchor validation bindings; public discovery remains the
-single certified portfolio objective.
+Domain runner behavior lives in adapter crates. `mfm-app` registers the shared reusable EVM read
+assembly for balance collection and exact-anchor validation, plus the reusable EVM transaction
+binding. It also registers the EVM collector operation/fact descriptors needed by composed and
+internal runs. Public discovery remains the single certified portfolio objective; the internal EVM
+collector cycle has no app target, resolver, renderer, or discovery id.
 
 The standalone signing facade is not a second mutation workflow. It accepts raw command fields,
 canonically parses and constructs the checked unsigned envelope, resolves exactly the requested

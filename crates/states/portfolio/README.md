@@ -2,23 +2,9 @@
 
 Typed portfolio state contracts for certified portfolio snapshots.
 
-The portfolio slice currently owns EVM balance collection. For each demanded EVM network it
-defines exactly two states:
-
-```text
-CollectEvmNetworkState → PublishEvmHoldingsState → EvmBalanceCollectionReceipt
-```
-
-`CollectEvmNetworkState` plans one sorted, unique batch of native and ERC-20 sources. Its reducer
-requires one source-bound session, one latest number/hash anchor, exact EIP-1898 hash-selected
-reads, one deduplicated `decimals()` result per token contract, exact source coverage and order,
-canonical uint256 decimals, and one final number-to-hash canonicality check.
-
-`PublishEvmHoldingsState` records the complete batch as `evm.balance_snapshot` facts and returns a
-checked receipt in the same atomic managed-write attempt. The receipt contains only network/chain,
-the common anchor, sorted sources, and fact content-identity evidence; it does not duplicate balance
-responses. Every fact retains the complete typed subject object using the same
-`HoldingSourceConfig` native/ERC-20 algebra as configuration and collection.
+Family collectors are external reusable operations. This crate consumes their typed Bitcoin and
+EVM receipts plus registered fact descriptors; it defines no family read, RPC, fact-publication,
+or collection-replay implementation.
 
 The remaining snapshot projection is:
 
@@ -37,5 +23,6 @@ wallet/symbol/source coverage before deriving totals and network pins. All-EVM p
 same fact-index path.
 
 Portfolio admission bounds networks, wallets, symbols, wallet-symbol relations, and distinct EVM
-sources per network before graph expansion. The crate does not own live IO, runner registration,
+sources per network before graph expansion. Generic EVM collection contracts live in
+`mfm-states-evm`. This crate does not own live IO, family fact publication, runner registration,
 store commits, CLI/REST rendering, or the complete graph/root binding.

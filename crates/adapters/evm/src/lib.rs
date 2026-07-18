@@ -1,9 +1,5 @@
 #![warn(missing_docs)]
-//! Runtime bindings for one EVM transaction and exact-anchor contract validation.
-//!
-//! Portfolio collection is intentionally absent; it is owned by
-//! `mfm-adapters-portfolio`. This crate binds only the two reusable state kinds
-//! retained by `mfm-states-evm`.
+//! Runtime and replay bindings for reusable EVM balance, transaction, and validation states.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -20,13 +16,16 @@ use mfm_runtime::{
     RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
 };
 use mfm_states_evm::{
-    evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, EvmContractValidationEvidence,
-    EvmContractValidationEvidenceBuilder, EvmContractValidationPlan, ValidateEvmContractState,
+    evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, CollectEvmBalancesState,
+    EvmContractValidationEvidence, EvmContractValidationEvidenceBuilder, EvmContractValidationPlan,
+    RecordEvmBalanceFactsState, ValidateEvmContractState,
 };
 use mfm_store::v1 as store;
 
+mod balance_collection;
 mod transaction;
 
+pub use balance_collection::verify_evm_balance_collection_replay;
 pub use transaction::{
     is_evm_transaction_replay_intent, register_evm_transaction_runner,
     verify_evm_transaction_replay, EvmMutationValidationFuture, EvmTransactionRunnerCapabilities,
@@ -36,8 +35,8 @@ pub use transaction::{
 pub(crate) const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";
 const READ_FACTORY: &str = "read_external";
 
-/// Future returned by the application-owned validation-session binder.
-pub type EvmValidationSessionBindFuture = Pin<
+/// Future returned by the application-owned EVM read-session binder.
+pub type EvmReadSessionBindFuture = Pin<
     Box<
         dyn Future<Output = mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>>> + Send + 'static,
     >,
@@ -45,18 +44,18 @@ pub type EvmValidationSessionBindFuture = Pin<
 
 type ValidateEvmBinding =
     dyn Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync;
-type BindEvmReadSession = dyn Fn(EvmNetworkBinding) -> EvmValidationSessionBindFuture + Send + Sync;
+type BindEvmReadSession = dyn Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync;
 
-/// Process resources required by exact-anchor contract validation.
+/// Shared process resources required by reusable EVM read states.
 #[derive(Clone)]
-pub struct EvmValidationRunnerCapabilities {
+pub struct EvmReadRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     validate_evm_binding: Arc<ValidateEvmBinding>,
     bind_evm_read_session: Arc<BindEvmReadSession>,
 }
 
-impl EvmValidationRunnerCapabilities {
-    /// Creates lazy, exact-bound validation capability assembly.
+impl EvmReadRunnerCapabilities {
+    /// Creates one lazy source-bound capability assembly for all EVM reads.
     pub fn new<V, B>(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         validate_evm_binding: V,
@@ -64,7 +63,7 @@ impl EvmValidationRunnerCapabilities {
     ) -> Self
     where
         V: Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync + 'static,
-        B: Fn(EvmNetworkBinding) -> EvmValidationSessionBindFuture + Send + Sync + 'static,
+        B: Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync + 'static,
     {
         Self {
             artifacts,
@@ -73,11 +72,11 @@ impl EvmValidationRunnerCapabilities {
         }
     }
 
-    fn validate(&self, binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
+    pub(crate) fn validate(&self, binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
         (self.validate_evm_binding)(binding)
     }
 
-    async fn bind(
+    pub(crate) async fn bind(
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>> {
@@ -93,10 +92,10 @@ impl EvmValidationRunnerCapabilities {
     }
 }
 
-/// Registers the one exact-anchor validation read binding.
-pub fn register_evm_validation_runner(
+/// Registers reusable EVM balance collection, publication, and validation read bindings.
+pub fn register_evm_read_runners(
     registry: &mut ErasedRunnerRegistry,
-    capabilities: EvmValidationRunnerCapabilities,
+    capabilities: EvmReadRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
     registry.register_capability_spec::<EvmReadCapability>(CapabilityImplementationId::new(
         EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
@@ -120,14 +119,32 @@ pub fn register_evm_validation_runner(
         &read_factory,
         Arc::new(ExternalReadRunner::<ValidateEvmContractState, _>::new(
             Arc::clone(&capabilities.artifacts),
-            ValidateContractExecutor { capabilities },
+            ValidateContractExecutor {
+                capabilities: capabilities.clone(),
+            },
         )),
+    )?;
+    registrations.register_state_runner_with_factory::<CollectEvmBalancesState>(
+        &read_factory,
+        Arc::new(ExternalReadRunner::<CollectEvmBalancesState, _>::new(
+            Arc::clone(&capabilities.artifacts),
+            balance_collection::CollectEvmBalancesExecutor {
+                capabilities: capabilities.clone(),
+            },
+        )),
+    )?;
+    registrations.register_state_runner_with_factory::<RecordEvmBalanceFactsState>(
+        &executable_identities
+            .factory_binding(events::RunnerFactoryId::new("managed_platform_write")?),
+        Arc::new(balance_collection::RecordEvmBalanceFactsRunner {
+            artifacts: Arc::clone(&capabilities.artifacts),
+        }),
     )?;
     Ok(())
 }
 
 struct ValidateContractExecutor {
-    capabilities: EvmValidationRunnerCapabilities,
+    capabilities: EvmReadRunnerCapabilities,
 }
 
 impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExecutor {
@@ -248,6 +265,8 @@ pub(crate) fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runti
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }
 
+#[cfg(test)]
+mod balance_collection_tests;
 #[cfg(test)]
 #[path = "validation_tests.rs"]
 mod validation_tests;

@@ -1,10 +1,9 @@
 #![warn(missing_docs)]
-//! Reusable EVM transaction and exact-anchor contract-validation states.
+//! Reusable EVM balance, transaction, and exact-anchor validation states.
 //!
-//! This package deliberately owns only two state kinds:
-//! [`SubmitEvmTransactionState`] for one `Create` or `Call` transaction and
-//! [`ValidateEvmContractState`] for exact code/call checks at one canonical anchor.
-//! Portfolio balance collection belongs to `mfm-state-portfolio`.
+//! This package owns exactly four state kinds: [`CollectEvmBalancesState`],
+//! [`RecordEvmBalanceFactsState`], [`SubmitEvmTransactionState`], and
+//! [`ValidateEvmContractState`].
 //!
 //! # Examples
 //!
@@ -28,11 +27,25 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod balance_collection;
 mod canonical;
 mod contract_validation;
 mod identity;
 mod transaction;
 
+#[cfg(test)]
+mod balance_collection_tests;
+
+pub use balance_collection::{
+    evm_balance_fact_visibility, record_evm_balance_facts, reduce_evm_balance_collection,
+    validate_evm_balance_collection_config, CollectEvmBalancesState, EvmBalanceAsset,
+    EvmBalanceCollectionConfig, EvmBalanceCollectionError, EvmBalanceCollectionEvidence,
+    EvmBalanceCollectionPlan, EvmBalanceCollectionReceipt, EvmBalanceObservation,
+    EvmBalanceObservationBatch, EvmBalanceReadEvidence, EvmBalanceSnapshotFact,
+    EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject, EvmBalanceSource,
+    EvmTokenDecimalsEvidence, RecordEvmBalanceFactsInput, RecordEvmBalanceFactsInputHandles,
+    RecordEvmBalanceFactsState, EVM_BALANCE_COLLECTION_SOURCE_LIMIT,
+};
 pub use contract_validation::{
     validate_evm_contract, validate_evm_contract_validation_config, EvmContractCallCheck,
     EvmContractCallContext, EvmContractValidationConfig, EvmContractValidationEvidence,

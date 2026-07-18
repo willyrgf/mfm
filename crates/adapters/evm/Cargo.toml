@@ -2,7 +2,7 @@
 name = "mfm-adapters-evm"
 version = "0.1.0"
 edition = "2021"
-description = "EVM single-transaction and exact-anchor validation adapter runners for MFM"
+description = "EVM balance, transaction, and exact-anchor validation adapter runners for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -21,6 +21,7 @@ mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-evm-signing = { path = "../../evm-signing" }
+mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-replay = { path = "../../kernel/replay" }
@@ -35,3 +36,4 @@ serde_json = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true }
+mfm-store = { path = "../../kernel/store", features = ["test-support"] }
