@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use alloy_primitives::{Address, Bytes, U256};
 use mfm_evm_capabilities::{
     EvmBlock, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence, EvmSessionFuture,
+    ProviderDiagnosticCode,
 };
 
 struct MissingArtifacts;
@@ -106,8 +107,29 @@ async fn wrong_session_binding_fails_before_using_validation_authority() {
     };
 
     assert_eq!(
-        error.redacted_diagnostic().expect("diagnostic").code(),
-        ProviderDiagnosticCode::ProviderConfigurationInvalid
+        error,
+        EvmCapabilityError::InvalidRequest {
+            reason: mfm_evm_capabilities::EvmInvalidRequest::SessionAuthorityMismatch,
+        }
     );
     assert_eq!(session.uses.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn validation_provider_availability_blocks_while_contract_failures_terminalize() {
+    let unavailable = EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+        ProviderDiagnosticCode::TransportFailed,
+    ));
+    assert!(matches!(
+        evm_read_runtime_error(unavailable),
+        mfm_runtime::RuntimeError::Blocked(_)
+    ));
+
+    let malformed = EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+        ProviderDiagnosticCode::ResponseInvalid,
+    ));
+    assert!(matches!(
+        evm_read_runtime_error(malformed),
+        mfm_runtime::RuntimeError::Failure(_)
+    ));
 }

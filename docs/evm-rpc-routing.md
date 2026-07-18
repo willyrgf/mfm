@@ -110,6 +110,12 @@ unreadable, malformed, or invalid selected route is invalid provider configurati
 carry the certified network, expected chain id, source ref, closed operation id, and reviewed
 numeric codes, but never endpoints, authorization, provider messages, response bodies, or paths.
 
+Read-only and pre-mutation availability/resource failures block the attempt so process-local routing
+can be repaired. Deterministic request and response-contract violations remain terminal. After
+transaction submission is durably possible, every provider/session failure blocks: it cannot prove
+the transaction failed and cannot authorize rebroadcast. Classification uses typed capability
+variants and closed diagnostic codes only, never provider messages.
+
 Replay uses the certified spec, append-only stream, retained typed artifacts, and replay verifiers.
 It must not open an RPC connection, resolve a current route, or construct a signer.
 

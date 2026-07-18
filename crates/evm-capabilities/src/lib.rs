@@ -580,6 +580,28 @@ pub enum EvmInvalidRequest {
     IncoherentReceipt,
     /// A persisted block anchor was malformed or non-canonical.
     InvalidBlockAnchor,
+    /// A bound session violated the requested semantic or implementation authority.
+    SessionAuthorityMismatch,
+}
+
+/// Execution phase used to classify a typed EVM capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvmCapabilityPhase {
+    /// A read-only request with no external mutation authority.
+    ReadOnly,
+    /// Transaction preparation or guarded observation before a submission exchange.
+    BeforeSubmission,
+    /// Transaction observation or recovery after submission is durably possible.
+    AfterSubmission,
+}
+
+/// Closed runtime disposition of a typed EVM capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvmCapabilityFailureDisposition {
+    /// Process-local provider authority can be repaired and the same attempt resumed.
+    OperationalBlock,
+    /// The request or response violated a deterministic certified contract.
+    TerminalValidation,
 }
 
 /// Redaction-safe EVM capability error.
@@ -616,6 +638,42 @@ impl EvmCapabilityError {
         match self {
             Self::Provider { diagnostic } | Self::SourceMismatch { diagnostic } => Some(diagnostic),
             Self::InvalidRequest { .. } => None,
+        }
+    }
+
+    /// Classifies this failure without inspecting provider text.
+    ///
+    /// Once submission is durably possible, no provider, route, transport,
+    /// response, or source-binding failure can prove that the transaction
+    /// failed or authorize another mutation. Invalid request material remains
+    /// terminal in every phase.
+    pub fn failure_disposition(
+        &self,
+        phase: EvmCapabilityPhase,
+    ) -> EvmCapabilityFailureDisposition {
+        use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+
+        match self {
+            Self::InvalidRequest { .. } => TerminalValidation,
+            Self::SourceMismatch { .. } => OperationalBlock,
+            Self::Provider { .. } if matches!(phase, EvmCapabilityPhase::AfterSubmission) => {
+                OperationalBlock
+            }
+            Self::Provider { diagnostic } => match diagnostic.code() {
+                ProviderDiagnosticCode::ProviderConfigurationMissing
+                | ProviderDiagnosticCode::ProviderConfigurationInvalid
+                | ProviderDiagnosticCode::RouteUnavailable
+                | ProviderDiagnosticCode::SourceUnavailable
+                | ProviderDiagnosticCode::TransportFailed
+                | ProviderDiagnosticCode::RpcHttpStatus
+                | ProviderDiagnosticCode::OperationIncomplete => OperationalBlock,
+                ProviderDiagnosticCode::SourceNotAllowed
+                | ProviderDiagnosticCode::RpcJsonError
+                | ProviderDiagnosticCode::ResponseInvalid
+                | ProviderDiagnosticCode::ResponseMissingResult
+                | ProviderDiagnosticCode::SourceMismatch
+                | ProviderDiagnosticCode::UnsupportedOperation => TerminalValidation,
+            },
         }
     }
 }

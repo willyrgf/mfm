@@ -63,6 +63,62 @@ fn source_ref_is_audit_provenance_not_semantic_binding() {
 }
 
 #[test]
+fn capability_failure_classification_is_closed_and_phase_aware() {
+    use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+    use EvmCapabilityPhase::{AfterSubmission, BeforeSubmission, ReadOnly};
+
+    let invalid = EvmCapabilityError::InvalidRequest {
+        reason: EvmInvalidRequest::SessionAuthorityMismatch,
+    };
+    for phase in [ReadOnly, BeforeSubmission, AfterSubmission] {
+        assert_eq!(invalid.failure_disposition(phase), TerminalValidation);
+    }
+
+    for code in [
+        ProviderDiagnosticCode::ProviderConfigurationMissing,
+        ProviderDiagnosticCode::ProviderConfigurationInvalid,
+        ProviderDiagnosticCode::RouteUnavailable,
+        ProviderDiagnosticCode::SourceUnavailable,
+        ProviderDiagnosticCode::TransportFailed,
+        ProviderDiagnosticCode::RpcHttpStatus,
+        ProviderDiagnosticCode::OperationIncomplete,
+    ] {
+        let error = EvmCapabilityError::provider_failure(evm_diagnostic(code));
+        assert_eq!(error.failure_disposition(ReadOnly), OperationalBlock);
+        assert_eq!(
+            error.failure_disposition(BeforeSubmission),
+            OperationalBlock
+        );
+        assert_eq!(error.failure_disposition(AfterSubmission), OperationalBlock);
+    }
+
+    for code in [
+        ProviderDiagnosticCode::SourceNotAllowed,
+        ProviderDiagnosticCode::RpcJsonError,
+        ProviderDiagnosticCode::ResponseInvalid,
+        ProviderDiagnosticCode::ResponseMissingResult,
+        ProviderDiagnosticCode::UnsupportedOperation,
+    ] {
+        let error = EvmCapabilityError::provider_failure(evm_diagnostic(code));
+        assert_eq!(error.failure_disposition(ReadOnly), TerminalValidation);
+        assert_eq!(
+            error.failure_disposition(BeforeSubmission),
+            TerminalValidation
+        );
+        assert_eq!(error.failure_disposition(AfterSubmission), OperationalBlock);
+    }
+
+    let mismatch = source_mismatch_error(
+        &binding(),
+        U256::from(2),
+        &LocalPublicId::new("replacement").expect("source"),
+    );
+    for phase in [ReadOnly, BeforeSubmission, AfterSubmission] {
+        assert_eq!(mismatch.failure_disposition(phase), OperationalBlock);
+    }
+}
+
+#[test]
 fn source_mismatch_diagnostic_is_closed_and_redacted() {
     let error = source_mismatch_error(
         &binding(),

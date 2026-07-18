@@ -33,6 +33,7 @@ struct MockSession {
     return_wrong_hash: AtomicBool,
     pending_nonce: AtomicU64,
     pending_nonce_calls: AtomicUsize,
+    lookup_unavailable: AtomicBool,
     submitted: Mutex<Vec<Vec<u8>>>,
 }
 
@@ -57,6 +58,7 @@ impl MockSession {
             return_wrong_hash: AtomicBool::new(false),
             pending_nonce: AtomicU64::new(0x42),
             pending_nonce_calls: AtomicUsize::new(0),
+            lookup_unavailable: AtomicBool::new(false),
             submitted: Mutex::new(Vec::new()),
         }
     }
@@ -67,6 +69,10 @@ impl MockSession {
 
     fn set_pending_nonce(&self, nonce: u64) {
         self.pending_nonce.store(nonce, Ordering::SeqCst);
+    }
+
+    fn set_lookup_unavailable(&self, unavailable: bool) {
+        self.lookup_unavailable.store(unavailable, Ordering::SeqCst);
     }
 
     fn observation(&self) -> EvmObservedTransaction {
@@ -144,6 +150,15 @@ impl EvmTransactionSession for MockSession {
         &self,
         _transaction_hash: B256,
     ) -> EvmSessionFuture<'_, Option<EvmObservedTransaction>> {
+        if self.lookup_unavailable.load(Ordering::SeqCst) {
+            return Box::pin(async {
+                Err(EvmCapabilityError::provider_failure(
+                    mfm_evm_capabilities::evm_diagnostic(
+                        mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
+                    ),
+                ))
+            });
+        }
         let observation = match self.lookup_mode.load(Ordering::SeqCst) {
             value if value == LookupMode::Missing as u8 => None,
             _ => Some(self.observation()),
@@ -430,6 +445,40 @@ async fn recovery_observes_expected_hash_before_any_rebroadcast() {
 }
 
 #[tokio::test]
+async fn unavailable_recovery_lookup_blocks_before_rebroadcast() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
+    let prepared = prepare_and_commit(&adapter).await;
+    let recovery_prepared = prepared.clone();
+    assert!(matches!(
+        adapter.submit_transaction(prepared).await.expect("submit"),
+        SideEffectSubmissionDecision::Unknown(_)
+    ));
+    assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
+
+    session.set_lookup_unavailable(true);
+    let error = match adapter.recover_transaction(recovery_prepared.clone()).await {
+        Ok(_) => panic!("unavailable lookup must block recovery"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
+    assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
+
+    session.set_lookup_unavailable(false);
+    session.set_lookup_mode(LookupMode::Observed);
+    let recovered = adapter
+        .recover_transaction(recovery_prepared)
+        .await
+        .expect("healthy lookup resumes recovery");
+    assert!(matches!(
+        recovered,
+        SideEffectUnknownSubmissionDecision::Observed(_)
+    ));
+    assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
+}
+
+#[tokio::test]
 async fn same_process_retry_looks_up_uncertain_envelope_before_rebroadcasting() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     let signer = Arc::new(FixedProvider::new());
@@ -506,6 +555,30 @@ async fn wrong_session_binding_fails_before_using_transaction_or_signing_authori
     assert_eq!(session.pending_nonce_calls.load(Ordering::SeqCst), 0);
     assert!(session.submitted.lock().expect("submitted").is_empty());
     assert_eq!(signer.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn regenerated_signed_hash_mismatch_remains_terminal() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(Arc::clone(&session), signer);
+    let prepared = prepare_and_commit(&adapter).await;
+    let mut value = serde_json::to_value(prepared).expect("prepared JSON");
+    value["expected_transaction_hash"] =
+        serde_json::json!(format!("{:#x}", B256::from([0xee; 32])));
+    let tampered: EvmPreparedTransaction =
+        serde_json::from_value(value).expect("structurally valid prepared transaction");
+
+    let error = match adapter.sign_prepared_transaction(&tampered).await {
+        Ok(_) => panic!("changed expected hash must fail signing authority"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+    ));
+    assert!(session.submitted.lock().expect("submitted").is_empty());
 }
 
 #[test]

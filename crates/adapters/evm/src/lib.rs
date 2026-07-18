@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
-    EvmCapabilityError, EvmNetworkBinding, EvmReadCapability, EvmReadSession,
-    ProviderDiagnosticCode, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmCapabilityError, EvmCapabilityFailureDisposition, EvmCapabilityPhase, EvmInvalidRequest,
+    EvmNetworkBinding, EvmReadCapability, EvmReadSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_runtime::{
     CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry, ExternalReadExecution,
@@ -85,11 +85,9 @@ impl EvmValidationRunnerCapabilities {
         if !session.evidence().matches_binding(&binding)
             || session.evidence().implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
         {
-            return Err(EvmCapabilityError::provider_failure(
-                mfm_evm_capabilities::evm_diagnostic(
-                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
-                ),
-            ));
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::SessionAuthorityMismatch,
+            });
         }
         Ok(session)
     }
@@ -144,7 +142,7 @@ impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExec
             .map_err(evm_state_runtime_error)?;
         self.capabilities
             .validate(&binding)
-            .map_err(evm_capability_runtime_error)
+            .map_err(evm_read_runtime_error)
     }
 
     fn execute<'a>(
@@ -158,24 +156,24 @@ impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExec
                     .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
                 plan.chain_id(),
             )
-            .map_err(evm_capability_runtime_error)?;
+            .map_err(evm_read_runtime_error)?;
             let session = self
                 .capabilities
                 .bind(binding)
                 .await
-                .map_err(evm_capability_runtime_error)?;
+                .map_err(evm_read_runtime_error)?;
             let (code_address, code_selector) =
                 plan.code_request().map_err(evm_state_runtime_error)?;
             let code = session
                 .read_code(code_address, &code_selector)
                 .await
-                .map_err(evm_capability_runtime_error)?;
+                .map_err(evm_read_runtime_error)?;
             let mut calls = Vec::with_capacity(plan.calls().len());
             for request in plan.call_requests().map_err(evm_state_runtime_error)? {
                 let response = session
                     .call(&request)
                     .await
-                    .map_err(evm_capability_runtime_error)?;
+                    .map_err(evm_read_runtime_error)?;
                 calls.push((request, response));
             }
             let canonicality_selector = plan
@@ -184,7 +182,7 @@ impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExec
             let canonical_block = session
                 .read_block(&canonicality_selector)
                 .await
-                .map_err(evm_capability_runtime_error)?;
+                .map_err(evm_read_runtime_error)?;
             EvmContractValidationEvidence::from_observations(
                 code_address,
                 &code_selector,
@@ -206,32 +204,33 @@ pub fn verify_evm_validation_replay(
     mfm_replay::v1::verify_external_read_state::<ValidateEvmContractState>(broker)
 }
 
-fn evm_capability_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
-    let Some(diagnostic) = error.redacted_diagnostic().cloned() else {
-        return mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "EVM capability request failed without provider diagnostics".to_owned(),
-        );
-    };
-    let (code, message) = match diagnostic.code() {
-        ProviderDiagnosticCode::ProviderConfigurationMissing
-        | ProviderDiagnosticCode::RouteUnavailable => (
-            "RuntimeConfigRequired",
-            "EVM runtime configuration is required",
+fn evm_read_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
+    evm_capability_runtime_error(error, EvmCapabilityPhase::ReadOnly)
+}
+
+fn evm_capability_runtime_error(
+    error: EvmCapabilityError,
+    phase: EvmCapabilityPhase,
+) -> mfm_runtime::RuntimeError {
+    match error.failure_disposition(phase) {
+        EvmCapabilityFailureDisposition::OperationalBlock => mfm_runtime::RuntimeError::Blocked(
+            "EVM runtime provider capability is unavailable".to_owned(),
         ),
-        ProviderDiagnosticCode::ProviderConfigurationInvalid => (
-            "RuntimeConfigInvalid",
-            "EVM runtime configuration is invalid",
-        ),
-        _ => ("EvmProviderFailure", "EVM provider capability failed"),
-    };
-    let failure = mfm_runtime::RuntimeFailure::new(
-        events::ErrorCode::new(code).expect("EVM runtime failure code is checked public text"),
-        events::ErrorCategory::Capability,
-        message,
-        vec![diagnostic],
-    )
-    .expect("EVM runtime failure metadata is a checked public contract");
-    mfm_runtime::RuntimeError::Failure(failure)
+        EvmCapabilityFailureDisposition::TerminalValidation => {
+            let Some(diagnostic) = error.redacted_diagnostic().cloned() else {
+                return mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string());
+            };
+            let failure = mfm_runtime::RuntimeFailure::new(
+                events::ErrorCode::new("EvmProviderContractInvalid")
+                    .expect("EVM runtime failure code is checked public text"),
+                events::ErrorCategory::Validation,
+                "EVM provider response violated the request contract",
+                vec![diagnostic],
+            )
+            .expect("EVM runtime failure metadata is a checked public contract");
+            mfm_runtime::RuntimeError::Failure(failure)
+        }
+    }
 }
 
 fn evm_state_runtime_error(error: mfm_states_evm::EvmStateError) -> mfm_runtime::RuntimeError {

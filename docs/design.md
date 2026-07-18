@@ -324,10 +324,11 @@ raw signed envelope, endpoint, credential, keystore path, or provider body.
 The adapter signs once during an ordinary preparation and holds the resulting bearer envelope only
 in a bounded process-local one-shot cache. Submission consumes those exact bytes. After process loss,
 recovery reconstructs the retained unsigned envelope, requests the certified deterministic signature
-again, requires the same expected hash, and may rebroadcast only the byte-identical envelope. An
-empty exact-hash lookup remains `SubmissionUnknown`; EVM nonce observations never mint a
-non-submission proof. The sender lane serializes MFM attempts only and cannot reserve a nonce against
-another wallet, operator, or process.
+again, requires the same expected hash, and may rebroadcast only the byte-identical envelope after
+an explicit successful exact-hash lookup returned no transaction. Provider unavailability blocks
+before rebroadcast; it is never treated as absence. An empty exact-hash lookup remains
+`SubmissionUnknown`; EVM nonce observations never mint a non-submission proof. The sender lane
+serializes MFM attempts only and cannot reserve a nonce against another wallet, operator, or process.
 
 The mutation runner binds a `DeterministicSigningProvider` and records the concrete signing
 capability implementation independently from the transaction-session implementation. The keystore
@@ -340,8 +341,12 @@ contract address, and complete coherent logs. Only a successful direct `Create` 
 address, and it must be the sender/nonce-derived address; reverted creation and every `Call` forbid
 one. Revert is a terminal external effect. Finalized evidence re-reads the unchanged receipt, checks
 its number/hash against a block-by-number result, and proves the certified depth against a fresh
-head. Replay decodes the same typed intent, preparation, transaction, receipt, and confirmation
-artifacts and recomputes their relations without network, signer, keystore, or current runtime config.
+head. Provider, route, transport, HTTP/RPC, response, and source-binding failures after submission
+block the open attempt and resume observation from durable ledger evidence; they never terminalize
+trusted on-chain success or authorize another broadcast. Deterministic request, retained-evidence,
+signed-hash, reducer, and certified-authority violations remain terminal. Replay decodes the same
+typed intent, preparation, transaction, receipt, and confirmation artifacts and recomputes their
+relations without network, signer, keystore, or current runtime config.
 
 The retained transaction-signing foundation is one canonical path in `mfm-evm-signing`. It admits
 one opaque Alloy `TxEip1559`, obtains its signing digest from Alloy, builds one generic digest-sign

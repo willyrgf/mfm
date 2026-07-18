@@ -10,8 +10,9 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
-    EvmBlockSelector, EvmCapabilityError, EvmNetworkBinding, EvmTransactionCapability,
-    EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmBlockSelector, EvmCapabilityError, EvmCapabilityFailureDisposition, EvmCapabilityPhase,
+    EvmNetworkBinding, EvmTransactionCapability, EvmTransactionSession,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_evm_signing::TransientSignedEip1559Envelope;
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
@@ -40,7 +41,7 @@ use mfm_values::MfmValue;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use super::{adapter_identity_error, ADAPTER_FACTORY};
+use super::{adapter_identity_error, evm_capability_runtime_error, ADAPTER_FACTORY};
 
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const VERIFY_FACTORY: &str = "read_external";
@@ -107,10 +108,11 @@ impl EvmTransactionRunnerCapabilities {
     async fn bind_session(
         &self,
         binding: EvmNetworkBinding,
+        phase: EvmCapabilityPhase,
     ) -> mfm_runtime::Result<Arc<dyn EvmTransactionSession>> {
         let session = (self.bind_transaction_session)(binding.clone())
             .await
-            .map_err(capability_error)?;
+            .map_err(|error| evm_capability_runtime_error(error, phase))?;
         let evidence = session.evidence();
         if !evidence.matches_binding(&binding)
             || evidence.implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
@@ -293,9 +295,13 @@ impl EvmTransactionAdapter {
     async fn session_for(
         &self,
         prepared: &EvmPreparedTransaction,
+        phase: EvmCapabilityPhase,
     ) -> mfm_runtime::Result<Arc<dyn EvmTransactionSession>> {
         self.capabilities
-            .bind_session(prepared.intent().network_binding().map_err(state_error)?)
+            .bind_session(
+                prepared.intent().network_binding().map_err(state_error)?,
+                phase,
+            )
             .await
     }
 
@@ -307,19 +313,25 @@ impl EvmTransactionAdapter {
         let reservation = self.signed_envelopes.reserve()?;
         let session = self
             .capabilities
-            .bind_session(intent.network_binding().map_err(state_error)?)
+            .bind_session(
+                intent.network_binding().map_err(state_error)?,
+                EvmCapabilityPhase::BeforeSubmission,
+            )
             .await?;
         let sender = intent.expected_sender_address().map_err(state_error)?;
         let pending_nonce = session
             .pending_nonce(sender)
             .await
-            .map_err(capability_error)?;
-        let fees = session.fee_inputs().await.map_err(capability_error)?;
+            .map_err(pre_submission_capability_error)?;
+        let fees = session
+            .fee_inputs()
+            .await
+            .map_err(pre_submission_capability_error)?;
         let estimate = intent.transaction_estimate().map_err(state_error)?;
         let gas_estimate = session
             .estimate_gas(&estimate)
             .await
-            .map_err(capability_error)?;
+            .map_err(pre_submission_capability_error)?;
         let unsigned =
             EvmUnsignedTransaction::from_observations(intent, pending_nonce, &fees, gas_estimate)
                 .map_err(state_error)?;
@@ -391,14 +403,19 @@ impl EvmTransactionAdapter {
         SideEffectSubmissionDecision<EvmTransactionSubmission, EvmTransactionRecoveryEvidence>,
     > {
         prepared.validate().map_err(state_error)?;
-        let session = self.session_for(&prepared).await?;
+        let session = self
+            .session_for(&prepared, EvmCapabilityPhase::BeforeSubmission)
+            .await?;
         let mut signed = match self
             .signed_envelopes
             .take(prepared.expected_transaction_hash())?
         {
             Some(signed) => signed,
             None => {
-                match lookup_submission(session.as_ref(), &prepared).await {
+                match lookup_submission(session.as_ref(), &prepared)
+                    .await
+                    .map_err(pre_submission_capability_error)?
+                {
                     LookupSubmission::Observed(submission) => {
                         return Ok(SideEffectSubmissionDecision::Observed(*submission));
                     }
@@ -408,13 +425,16 @@ impl EvmTransactionAdapter {
                             evidence: recovery_evidence(&prepared, session.as_ref())?,
                         });
                     }
-                    LookupSubmission::MissingOrUnavailable => {}
+                    LookupSubmission::Missing => {}
                 }
                 self.sign_prepared_transaction(&prepared).await?
             }
         };
         if signed.state()? == SignedEnvelopeState::Uncertain {
-            match lookup_submission(session.as_ref(), &prepared).await {
+            match lookup_submission(session.as_ref(), &prepared)
+                .await
+                .map_err(post_submission_capability_error)?
+            {
                 LookupSubmission::Observed(submission) => {
                     signed.discard()?;
                     return Ok(SideEffectSubmissionDecision::Observed(*submission));
@@ -427,13 +447,13 @@ impl EvmTransactionAdapter {
                         evidence,
                     });
                 }
-                LookupSubmission::MissingOrUnavailable => {}
+                LookupSubmission::Missing => {}
             }
         }
         signed.mark_uncertain()?;
         let signed_envelope = signed.envelope()?;
         ensure_signed_hash(&prepared, signed_envelope)?;
-        match broadcast_and_lookup(session.as_ref(), &prepared, signed_envelope).await {
+        match broadcast_and_lookup(session.as_ref(), &prepared, signed_envelope).await? {
             LookupSubmission::Observed(submission) => {
                 signed.discard()?;
                 Ok(SideEffectSubmissionDecision::Observed(*submission))
@@ -446,7 +466,7 @@ impl EvmTransactionAdapter {
                     evidence,
                 })
             }
-            LookupSubmission::MissingOrUnavailable => Ok(SideEffectSubmissionDecision::Unknown(
+            LookupSubmission::Missing => Ok(SideEffectSubmissionDecision::Unknown(
                 recovery_evidence(&prepared, session.as_ref())?,
             )),
         }
@@ -462,8 +482,13 @@ impl EvmTransactionAdapter {
         >,
     > {
         prepared.validate().map_err(state_error)?;
-        let session = self.session_for(&prepared).await?;
-        match lookup_submission(session.as_ref(), &prepared).await {
+        let session = self
+            .session_for(&prepared, EvmCapabilityPhase::AfterSubmission)
+            .await?;
+        match lookup_submission(session.as_ref(), &prepared)
+            .await
+            .map_err(post_submission_capability_error)?
+        {
             LookupSubmission::Observed(submission) => {
                 self.signed_envelopes
                     .discard_one(prepared.expected_transaction_hash())?;
@@ -477,7 +502,7 @@ impl EvmTransactionAdapter {
                     evidence: recovery_evidence(&prepared, session.as_ref())?,
                 });
             }
-            LookupSubmission::MissingOrUnavailable => {}
+            LookupSubmission::Missing => {}
         }
         let mut signed = match self
             .signed_envelopes
@@ -489,7 +514,7 @@ impl EvmTransactionAdapter {
         signed.mark_uncertain()?;
         let signed_envelope = signed.envelope()?;
         ensure_signed_hash(&prepared, signed_envelope)?;
-        match broadcast_and_lookup(session.as_ref(), &prepared, signed_envelope).await {
+        match broadcast_and_lookup(session.as_ref(), &prepared, signed_envelope).await? {
             LookupSubmission::Observed(submission) => {
                 signed.discard()?;
                 Ok(SideEffectUnknownSubmissionDecision::Observed(*submission))
@@ -502,9 +527,7 @@ impl EvmTransactionAdapter {
                     evidence,
                 })
             }
-            LookupSubmission::MissingOrUnavailable => {
-                Ok(SideEffectUnknownSubmissionDecision::StillUnknown)
-            }
+            LookupSubmission::Missing => Ok(SideEffectUnknownSubmissionDecision::StillUnknown),
         }
     }
 }
@@ -812,11 +835,13 @@ impl SideEffectAdapter for EvmTransactionAdapter {
             submission
                 .validate_against(&prepared)
                 .map_err(state_error)?;
-            let session = self.session_for(&prepared).await?;
+            let session = self
+                .session_for(&prepared, EvmCapabilityPhase::AfterSubmission)
+                .await?;
             let Some(receipt) = session
                 .receipt_by_hash(prepared.expected_hash().map_err(state_error)?)
                 .await
-                .map_err(capability_error)?
+                .map_err(post_submission_capability_error)?
             else {
                 return Err(transaction_pending("receipt is not yet available"));
             };
@@ -872,11 +897,13 @@ impl SideEffectAdapter for EvmTransactionAdapter {
                 .validate_with_submission(&prepared, &submission)
                 .map_err(state_error)?;
             let required_depth = finalized_depth(submit_node)?;
-            let session = self.session_for(&prepared).await?;
+            let session = self
+                .session_for(&prepared, EvmCapabilityPhase::AfterSubmission)
+                .await?;
             let Some(fresh_receipt) = session
                 .receipt_by_hash(prepared.expected_hash().map_err(state_error)?)
                 .await
-                .map_err(capability_error)?
+                .map_err(post_submission_capability_error)?
             else {
                 return Err(transaction_pending(
                     "receipt disappeared before confirmation",
@@ -897,7 +924,7 @@ impl SideEffectAdapter for EvmTransactionAdapter {
             let canonical_block = session
                 .read_block(&EvmBlockSelector::Number(receipt_number))
                 .await
-                .map_err(capability_error)?;
+                .map_err(post_submission_capability_error)?;
             if canonical_block.number != receipt_number
                 || canonical_block.hash
                     != retained_receipt.block_hash_value().map_err(state_error)?
@@ -907,7 +934,7 @@ impl SideEffectAdapter for EvmTransactionAdapter {
             let head = session
                 .read_block(&EvmBlockSelector::Latest)
                 .await
-                .map_err(capability_error)?;
+                .map_err(post_submission_capability_error)?;
             let confirmations = head
                 .number
                 .checked_sub(receipt_number)
@@ -1035,42 +1062,60 @@ impl SideEffectAdapter for EvmTransactionAdapter {
 enum LookupSubmission {
     Observed(Box<EvmTransactionSubmission>),
     Mismatched,
-    MissingOrUnavailable,
+    Missing,
 }
 
 async fn broadcast_and_lookup(
     session: &dyn EvmTransactionSession,
     prepared: &EvmPreparedTransaction,
     signed: &TransientSignedEip1559Envelope,
-) -> LookupSubmission {
+) -> mfm_runtime::Result<LookupSubmission> {
     let Ok(expected_hash) = prepared.expected_hash() else {
-        return LookupSubmission::Mismatched;
+        return Ok(LookupSubmission::Mismatched);
     };
-    if let Ok(returned_hash) = session
+    let submission_error = match session
         .submit_raw_transaction(signed.bytes(), expected_hash)
         .await
     {
-        if returned_hash != expected_hash {
-            return LookupSubmission::Mismatched;
+        Ok(returned_hash) if returned_hash != expected_hash => {
+            return Ok(LookupSubmission::Mismatched);
+        }
+        Ok(_) => None,
+        Err(error) => Some(error),
+    };
+    match lookup_submission(session, prepared).await {
+        Ok(LookupSubmission::Observed(submission)) => Ok(LookupSubmission::Observed(submission)),
+        Ok(LookupSubmission::Mismatched) => Ok(LookupSubmission::Mismatched),
+        Ok(LookupSubmission::Missing) | Err(_) => {
+            if let Some(error) = submission_error.filter(|error| {
+                error.failure_disposition(EvmCapabilityPhase::BeforeSubmission)
+                    == EvmCapabilityFailureDisposition::TerminalValidation
+            }) {
+                return Err(pre_submission_capability_error(error));
+            }
+            Ok(LookupSubmission::Missing)
         }
     }
-    lookup_submission(session, prepared).await
 }
 
 async fn lookup_submission(
     session: &dyn EvmTransactionSession,
     prepared: &EvmPreparedTransaction,
-) -> LookupSubmission {
+) -> mfm_evm_capabilities::Result<LookupSubmission> {
     let Ok(expected_hash) = prepared.expected_hash() else {
-        return LookupSubmission::Mismatched;
+        return Ok(LookupSubmission::Mismatched);
     };
     match session.transaction_by_hash(expected_hash).await {
-        Ok(Some(observation)) => {
-            EvmTransactionSubmission::from_observation(prepared, &observation, session.evidence())
-                .map(|submission| LookupSubmission::Observed(Box::new(submission)))
-                .unwrap_or(LookupSubmission::Mismatched)
-        }
-        Ok(None) | Err(_) => LookupSubmission::MissingOrUnavailable,
+        Ok(Some(observation)) => match EvmTransactionSubmission::from_observation(
+            prepared,
+            &observation,
+            session.evidence(),
+        ) {
+            Ok(submission) => Ok(LookupSubmission::Observed(Box::new(submission))),
+            Err(_) => Ok(LookupSubmission::Mismatched),
+        },
+        Ok(None) => Ok(LookupSubmission::Missing),
+        Err(error) => Err(error),
     }
 }
 
@@ -1229,8 +1274,12 @@ fn state_error(error: impl std::fmt::Display) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
-fn capability_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+fn pre_submission_capability_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
+    evm_capability_runtime_error(error, EvmCapabilityPhase::BeforeSubmission)
+}
+
+fn post_submission_capability_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
+    evm_capability_runtime_error(error, EvmCapabilityPhase::AfterSubmission)
 }
 
 fn signing_error(error: impl std::fmt::Display) -> mfm_runtime::RuntimeError {

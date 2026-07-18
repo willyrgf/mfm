@@ -1,6 +1,6 @@
 use super::*;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{
@@ -353,6 +353,93 @@ async fn certified_transaction_resumes_unknown_submission_and_replays_without_li
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
 }
 
+#[derive(Clone, Copy)]
+enum ObservationOutage {
+    Receipt = 1,
+    CanonicalBlock = 2,
+    Head = 3,
+}
+
+#[tokio::test]
+async fn post_submission_provider_outages_block_and_resume_without_rebroadcast() {
+    for outage in [
+        ObservationOutage::Receipt,
+        ObservationOutage::CanonicalBlock,
+        ObservationOutage::Head,
+    ] {
+        assert_post_submission_outage_resumes(outage).await;
+    }
+}
+
+async fn assert_post_submission_outage_resumes(outage: ObservationOutage) {
+    let store = store::AsyncInMemoryRunStore::default();
+    let session = Arc::new(TransactionSession::new());
+    session.make_visible_on_submit.store(true, Ordering::SeqCst);
+    session.fail_once(outage);
+    let signer_calls = Arc::new(AtomicUsize::new(0));
+    let certification = transaction_certification_registry();
+    let launch_services = make_run_services(
+        transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
+        store.clone(),
+        store.clone(),
+        certification.clone(),
+    );
+    let (draft, seed_material) = transaction_launch_material();
+    let request = crate::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        launch_services.certification_registry(),
+        store.load_store_scope_id().await.expect("store scope"),
+        None,
+    )
+    .expect("transaction launch request");
+    let run_id = request.run_id.clone();
+
+    let launch = launch_services
+        .launch_run(request)
+        .await
+        .expect("provider outage is an operational block");
+    let (_, launched, _) = launch.into_response_parts();
+    let launched = launched.expect("admitted transaction run");
+    assert_eq!(launched.run_mode, RunModeStatus::Forward);
+    assert_eq!(launched.scheduler_status, "blocked");
+    assert_eq!(session.submitted.lock().expect("submitted bytes").len(), 1);
+    assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
+    assert!(store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream")
+        .iter()
+        .any(|event| matches!(
+            event.payload(),
+            KernelEventPayload::SideEffectSubmissionObserved(_)
+        )));
+    assert!(!store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream")
+        .iter()
+        .any(|event| matches!(event.payload(), KernelEventPayload::StateAttemptFailed(_))));
+    drop(launch_services);
+    assert!(store
+        .expire_execution_claim_for_test(&run_id)
+        .expect("expire blocked execution claim"));
+
+    let resume_services = make_run_services(
+        transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
+        store.clone(),
+        store,
+        certification,
+    );
+    let resumed = resume_services
+        .resume_stored_run(&run_id)
+        .await
+        .expect("healthy provider resumes observation");
+    assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+    assert_eq!(session.submitted.lock().expect("submitted bytes").len(), 1);
+    assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
+}
+
 fn transaction_launch_material() -> (
     mfm_program::TypedProgramDraft,
     BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
@@ -470,6 +557,7 @@ struct TransactionSession {
     evidence: EvmSessionEvidence,
     visible: AtomicBool,
     make_visible_on_submit: AtomicBool,
+    observation_outage: AtomicU8,
     submitted: Mutex<Vec<Vec<u8>>>,
 }
 
@@ -489,8 +577,20 @@ impl TransactionSession {
             ),
             visible: AtomicBool::new(false),
             make_visible_on_submit: AtomicBool::new(false),
+            observation_outage: AtomicU8::new(0),
             submitted: Mutex::new(Vec::new()),
         }
+    }
+
+    fn fail_once(&self, outage: ObservationOutage) {
+        self.observation_outage
+            .store(outage as u8, Ordering::SeqCst);
+    }
+
+    fn take_outage(&self, outage: ObservationOutage) -> bool {
+        self.observation_outage
+            .compare_exchange(outage as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     fn transaction(&self) -> EvmObservedTransaction {
@@ -589,11 +689,22 @@ impl EvmTransactionSession for TransactionSession {
 
     fn receipt_by_hash(&self, transaction_hash: B256) -> EvmSessionFuture<'_, Option<EvmReceipt>> {
         assert_eq!(transaction_hash, EXPECTED_HASH);
+        if self.take_outage(ObservationOutage::Receipt) {
+            return Box::pin(async { Err(observation_provider_failure()) });
+        }
         let receipt = self.visible.load(Ordering::SeqCst).then(|| self.receipt());
         Box::pin(async move { Ok(receipt) })
     }
 
     fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+        let outage = match selector {
+            EvmBlockSelector::Number(_) => ObservationOutage::CanonicalBlock,
+            EvmBlockSelector::Latest => ObservationOutage::Head,
+            EvmBlockSelector::ExactHash(_) => panic!("unexpected exact-hash block selector"),
+        };
+        if self.take_outage(outage) {
+            return Box::pin(async { Err(observation_provider_failure()) });
+        }
         let block = match selector {
             EvmBlockSelector::Number(number) if *number == U256::from(100) => EvmBlock {
                 number: U256::from(100),
@@ -655,6 +766,14 @@ fn provider_failure() -> mfm_evm_capabilities::EvmCapabilityError {
     mfm_evm_capabilities::EvmCapabilityError::provider_failure(
         mfm_evm_capabilities::evm_diagnostic(
             mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
+        ),
+    )
+}
+
+fn observation_provider_failure() -> mfm_evm_capabilities::EvmCapabilityError {
+    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
+        mfm_evm_capabilities::evm_diagnostic(
+            mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
         ),
     )
 }

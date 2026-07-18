@@ -340,10 +340,17 @@ fn evm_transport_capability_error(
     binding: &EvmNetworkBinding,
     error: mfm_transports_evm::EvmTransportError,
 ) -> EvmCapabilityError {
-    EvmCapabilityError::provider_failure(enrich_evm_diagnostic(
-        binding,
-        error.into_provider_diagnostic(),
-    ))
+    match error {
+        mfm_transports_evm::EvmTransportError::SourceMismatch { diagnostic } => {
+            EvmCapabilityError::SourceMismatch {
+                diagnostic: enrich_evm_diagnostic(binding, diagnostic),
+            }
+        }
+        error => EvmCapabilityError::provider_failure(enrich_evm_diagnostic(
+            binding,
+            error.into_provider_diagnostic(),
+        )),
+    }
 }
 
 fn enrich_evm_diagnostic(
@@ -550,6 +557,29 @@ rpc_url = "http://127.0.0.1:8545"
         assert_eq!(
             serde_json::to_value(diagnostic).expect("diagnostic JSON")["fields"],
             serde_json::json!({"expected_chain_id": 1, "network_id": "test-evm"})
+        );
+    }
+
+    #[test]
+    fn transport_source_mismatch_stays_repairable_typed_authority() {
+        let binding = evm_binding();
+        let mismatch = mfm_evm_capabilities::source_mismatch_error(
+            &binding,
+            alloy_primitives::U256::from(2),
+            &LocalPublicId::new("wrong-route").expect("source"),
+        );
+        let EvmCapabilityError::SourceMismatch { diagnostic } = mismatch else {
+            panic!("source mismatch variant");
+        };
+        let error = evm_transport_capability_error(
+            &binding,
+            mfm_transports_evm::EvmTransportError::SourceMismatch { diagnostic },
+        );
+
+        assert!(matches!(error, EvmCapabilityError::SourceMismatch { .. }));
+        assert_eq!(
+            error.failure_disposition(mfm_evm_capabilities::EvmCapabilityPhase::ReadOnly),
+            mfm_evm_capabilities::EvmCapabilityFailureDisposition::OperationalBlock
         );
     }
 }

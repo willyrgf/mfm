@@ -87,12 +87,14 @@ transaction lookup must then match chain id, nonce, sender, destination/creation
 gas, fees, and access list. Persisted observation omits signatures and raw bytes.
 
 Recovery first performs exact-hash lookup, including when a restarted process resumes an invocation
-already recorded as started. Only when lookup is missing or unavailable may it regenerate and
-rebroadcast the identical prepared envelope, then look up the same hash again. Empty lookup,
-transport uncertainty, an external writer
-occupying the nonce, or an inconclusive rebroadcast remains `SubmissionUnknown`. Standard JSON-RPC
-cannot prove that a transaction was never submitted, so this path never emits
-`NotSubmittedProven` and never chooses a replacement nonce under the same prepared invocation.
+already recorded as started. Only an explicit, successful lookup returning no transaction permits
+one recovery invocation to regenerate and rebroadcast the identical prepared envelope, then look up
+the same hash again. Provider, route, transport, HTTP/RPC, response, or source-binding failure
+blocks recovery before any broadcast. An unavailable lookup is not absence evidence. Empty lookup,
+transport uncertainty during an explicit broadcast, an external writer occupying the nonce, or an
+inconclusive rebroadcast remains `SubmissionUnknown`. Standard JSON-RPC cannot prove that a
+transaction was never submitted, so this path never emits `NotSubmittedProven` and never chooses a
+replacement nonce under the same prepared invocation.
 
 `SubmissionUnknown` retains only the prepared transaction hash and redacted checked-session
 identity. A wrong provider submit hash or an exact-hash lookup whose public fields differ from the
@@ -118,6 +120,11 @@ A disappeared or moved receipt, wrong canonical block, or shallow head remains p
 evidence retains the fresh receipt, canonical block, head, checked depth, and redacted session.
 Transaction and contract-validation evidence use the same `EvmBlockAnchor`, which persists the
 full U256 block number as canonical decimal and never narrows it to u64.
+
+Provider unavailability while reading the receipt, canonical block, or head is also an operational
+block. Resume re-observes from the durable submission phase and never executes the submit node or
+broadcast again. Malformed retained evidence, a regenerated signed-hash mismatch, or a certified
+authority violation remains terminal validation failure.
 
 ## Replay and secret boundary
 

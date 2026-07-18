@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, b256, Address, B256};
 use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBlock, EvmCode, EvmSessionEvidence, EvmSessionFuture,
+    evm_diagnostic, EvmBlock, EvmCode, EvmSessionEvidence, EvmSessionFuture, ProviderDiagnosticCode,
 };
 use mfm_fact_capabilities::{
     FactIndexReadBatchFuture, FactIndexReadProvider, FactIndexReadRequest,
@@ -47,6 +47,57 @@ struct RecordingSession {
     active: AtomicUsize,
     max_active: AtomicUsize,
     final_hash: B256,
+}
+
+struct UnavailableSession {
+    evidence: EvmSessionEvidence,
+}
+
+impl UnavailableSession {
+    fn new(binding: &EvmNetworkBinding) -> Self {
+        Self {
+            evidence: EvmSessionEvidence::new(
+                binding,
+                LocalPublicId::new("primary").expect("source ref"),
+                LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
+                    .expect("implementation id"),
+            ),
+        }
+    }
+
+    fn unavailable<'a, T: Send + 'a>(&'a self) -> EvmSessionFuture<'a, T> {
+        Box::pin(std::future::ready(Err(temporary_provider_failure())))
+    }
+}
+
+impl EvmReadSession for UnavailableSession {
+    fn evidence(&self) -> &EvmSessionEvidence {
+        &self.evidence
+    }
+
+    fn read_block<'a>(&'a self, _selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+        self.unavailable()
+    }
+
+    fn read_balance<'a>(
+        &'a self,
+        _account: Address,
+        _block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, U256> {
+        self.unavailable()
+    }
+
+    fn read_code<'a>(
+        &'a self,
+        _address: Address,
+        _block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmCode> {
+        self.unavailable()
+    }
+
+    fn call<'a>(&'a self, _request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes> {
+        self.unavailable()
+    }
 }
 
 impl RecordingSession {
@@ -175,6 +226,10 @@ fn provider_failure() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(evm_diagnostic(
         ProviderDiagnosticCode::ProviderConfigurationInvalid,
     ))
+}
+
+fn temporary_provider_failure() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(evm_diagnostic(ProviderDiagnosticCode::TransportFailed))
 }
 
 fn network() -> NetworkConfig {
@@ -320,6 +375,29 @@ async fn final_number_recheck_exposes_reorg_to_the_deterministic_reducer() {
         .expect_err("reorg must fail reduction")
         .to_string()
         .contains("no longer canonical"));
+}
+
+#[tokio::test]
+async fn temporary_provider_outage_blocks_the_balance_collector() {
+    let plan = plan_for(vec![source(ACCOUNT, HoldingSourceConfig::Native)]);
+    let session = Arc::new(UnavailableSession::new(&plan.binding().expect("binding")));
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
+        Arc::new(store::AsyncInMemoryRunStore::default());
+    let capabilities = PortfolioRunnerCapabilities::new(
+        artifacts,
+        Arc::new(EmptyFactIndex::new()),
+        |_| Ok(()),
+        move |_| {
+            let session = Arc::clone(&session);
+            Box::pin(async move { Ok(session as Arc<dyn EvmReadSession>) })
+        },
+    );
+
+    let error = collect_evm_network(&plan, &capabilities)
+        .await
+        .expect_err("temporary outage must block collection");
+
+    assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
 }
 
 #[tokio::test]

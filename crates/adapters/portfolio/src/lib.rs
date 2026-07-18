@@ -14,8 +14,9 @@ use std::task::Poll;
 use alloy_primitives::{Address, Bytes, U256};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
-    EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding, EvmReadCapability,
-    EvmReadSession, ProviderDiagnosticCode, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCapabilityFailureDisposition,
+    EvmCapabilityPhase, EvmInvalidRequest, EvmNetworkBinding, EvmReadCapability, EvmReadSession,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
 use mfm_portfolio_model::evm::EvmBlockAnchor;
@@ -118,11 +119,9 @@ impl PortfolioRunnerCapabilities {
         if !session.evidence().matches_binding(&binding)
             || session.evidence().implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
         {
-            return Err(EvmCapabilityError::provider_failure(
-                mfm_evm_capabilities::evm_diagnostic(
-                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
-                ),
-            ));
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::SessionAuthorityMismatch,
+            });
         }
         Ok(session)
     }
@@ -251,7 +250,7 @@ impl ExternalReadPlanExecutor<CollectEvmNetworkState> for CollectEvmNetworkExecu
             .map_err(portfolio_evm_state_runtime_error)?;
         self.capabilities
             .validate_evm_binding(&binding)
-            .map_err(evm_capability_runtime_error)
+            .map_err(evm_read_runtime_error)
     }
 
     fn execute<'a>(
@@ -274,11 +273,11 @@ async fn collect_evm_network(
     let session = capabilities
         .bind_evm_read_session(binding)
         .await
-        .map_err(evm_capability_runtime_error)?;
+        .map_err(evm_read_runtime_error)?;
     let latest = session
         .read_block(&EvmBlockSelector::Latest)
         .await
-        .map_err(evm_capability_runtime_error)?;
+        .map_err(evm_read_runtime_error)?;
     let anchor = EvmBlockAnchor::new(latest.number, latest.hash);
     let exact = EvmBlockSelector::ExactHash(latest.hash);
 
@@ -287,7 +286,7 @@ async fn collect_evm_network(
     let final_block = session
         .read_block(&EvmBlockSelector::Number(latest.number))
         .await
-        .map_err(evm_capability_runtime_error)?;
+        .map_err(evm_read_runtime_error)?;
     let final_canonical_block = EvmBlockAnchor::new(final_block.number, final_block.hash);
     Ok(CollectEvmNetworkEvidence::new(
         session.evidence(),
@@ -327,11 +326,8 @@ async fn read_token_decimals(
                         Default::default(),
                         selector,
                     )
-                    .map_err(evm_capability_runtime_error)?;
-                    let result = session
-                        .call(&call)
-                        .await
-                        .map_err(evm_capability_runtime_error)?;
+                    .map_err(evm_read_runtime_error)?;
+                    let result = session.call(&call).await.map_err(evm_read_runtime_error)?;
                     let decimals = u8::try_from(decode_abi_word(&result)?).map_err(|_| {
                         mfm_runtime::RuntimeError::InvalidRunnerOutput(
                             "ERC-20 decimals result exceeded u8".to_owned(),
@@ -369,7 +365,7 @@ async fn read_balances(
                         HoldingSourceConfig::Native => session
                             .read_balance(account, &selector)
                             .await
-                            .map_err(evm_capability_runtime_error)?,
+                            .map_err(evm_read_runtime_error)?,
                         HoldingSourceConfig::Erc20 { contract_address } => {
                             let contract =
                                 contract_address.as_str().parse::<Address>().map_err(|_| {
@@ -386,11 +382,9 @@ async fn read_balances(
                                 Default::default(),
                                 selector,
                             )
-                            .map_err(evm_capability_runtime_error)?;
-                            let result = session
-                                .call(&call)
-                                .await
-                                .map_err(evm_capability_runtime_error)?;
+                            .map_err(evm_read_runtime_error)?;
+                            let result =
+                                session.call(&call).await.map_err(evm_read_runtime_error)?;
                             decode_abi_word(&result)?
                         }
                     };
@@ -577,32 +571,26 @@ fn fact_index_runtime_error(
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
-fn evm_capability_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
-    let Some(diagnostic) = error.redacted_diagnostic().cloned() else {
-        return mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "EVM capability request failed without provider diagnostics".to_owned(),
-        );
-    };
-    let (code, message) = match diagnostic.code() {
-        ProviderDiagnosticCode::ProviderConfigurationMissing
-        | ProviderDiagnosticCode::RouteUnavailable => (
-            "RuntimeConfigRequired",
-            "EVM runtime configuration is required",
+fn evm_read_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
+    match error.failure_disposition(EvmCapabilityPhase::ReadOnly) {
+        EvmCapabilityFailureDisposition::OperationalBlock => mfm_runtime::RuntimeError::Blocked(
+            "EVM runtime provider capability is unavailable".to_owned(),
         ),
-        ProviderDiagnosticCode::ProviderConfigurationInvalid => (
-            "RuntimeConfigInvalid",
-            "EVM runtime configuration is invalid",
-        ),
-        _ => ("EvmProviderFailure", "EVM provider capability failed"),
-    };
-    let failure = mfm_runtime::RuntimeFailure::new(
-        events::ErrorCode::new(code).expect("EVM runtime failure code is checked public text"),
-        events::ErrorCategory::Capability,
-        message,
-        vec![diagnostic],
-    )
-    .expect("EVM runtime failure metadata is a checked public contract");
-    mfm_runtime::RuntimeError::Failure(failure)
+        EvmCapabilityFailureDisposition::TerminalValidation => {
+            let Some(diagnostic) = error.redacted_diagnostic().cloned() else {
+                return mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string());
+            };
+            let failure = mfm_runtime::RuntimeFailure::new(
+                events::ErrorCode::new("EvmProviderContractInvalid")
+                    .expect("EVM runtime failure code is checked public text"),
+                events::ErrorCategory::Validation,
+                "EVM provider response violated the request contract",
+                vec![diagnostic],
+            )
+            .expect("EVM runtime failure metadata is a checked public contract");
+            mfm_runtime::RuntimeError::Failure(failure)
+        }
+    }
 }
 
 fn portfolio_evm_state_runtime_error(
