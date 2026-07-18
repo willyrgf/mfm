@@ -521,6 +521,7 @@ mfm_certify::define_program_descriptor_registry! {
     state_registry: pub btc_collectors_state_registry,
     operation_registry: pub btc_collectors_operation_registry,
     certification: pub register_btc_collectors_certification_descriptors,
+    includes: [],
     states: [
         QueryCollectorCheckpointState,
         ObserveBtcChainHeadState,

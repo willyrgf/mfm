@@ -67,6 +67,11 @@ registers the needed runners and certification descriptors, strictly resolves on
 `PortfolioConfig` at admission, and exposes that exact graph only through
 `mfm.portfolio/snapshot@1`.
 
+The snapshot operation registry composes the Bitcoin and EVM child registry functions, then adds
+only the report operation's own states and operations. Parent registries must never repeat a child
+crate's concrete inventory: child topology changes flow through the registry-composition primitive
+into authoring and certification together.
+
 ## Current EVM Inventory
 
 This is the exact current inventory. Cargo metadata, state registration, or app discovery changing

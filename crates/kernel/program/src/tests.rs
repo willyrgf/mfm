@@ -850,6 +850,50 @@ fn contextual_mutation_registries() -> (StateRegistrySnapshot, OperationRegistry
     (states.into_snapshot(), operations.into_snapshot())
 }
 
+#[test]
+fn registry_builders_compose_child_snapshots_idempotently() {
+    let (multiply_states, multiply_operations) = multiply_registries();
+    let (contextual_states, contextual_operations) = contextual_mutation_registries();
+
+    let mut states = StateRegistryBuilder::new();
+    states
+        .include(multiply_states.clone())
+        .expect("include multiply states");
+    states
+        .include(multiply_states)
+        .expect("reinclude multiply states");
+    states
+        .include(contextual_states)
+        .expect("include contextual states");
+    let states = states.into_snapshot();
+    assert_eq!(states.len(), 2);
+    states
+        .state_descriptor::<MultiplyState>()
+        .expect("composed multiply state");
+    states
+        .state_descriptor::<ContextualMutationState>()
+        .expect("composed contextual state");
+
+    let mut operations = OperationRegistryBuilder::new();
+    operations
+        .include(multiply_operations.clone())
+        .expect("include multiply operations");
+    operations
+        .include(multiply_operations)
+        .expect("reinclude multiply operations");
+    operations
+        .include(contextual_operations)
+        .expect("include contextual operations");
+    let operations = operations.into_snapshot();
+    assert_eq!(operations.len(), 2);
+    operations
+        .operation_descriptor::<MultiplyOperation>()
+        .expect("composed multiply operation");
+    operations
+        .operation_descriptor::<ContextualMutationOperation>()
+        .expect("composed contextual operation");
+}
+
 fn set_compensating_policy(root: &mut RootBuilder<'_, '_>) -> Result<()> {
     root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
         on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,

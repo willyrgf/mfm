@@ -256,6 +256,9 @@ A state type is executable only after framework registration validates:
 
 Planning requires state and operation membership in the builder registry. Runtime requires the
 certified descriptor identity and the registered runner identity to match the stored spec.
+Parent operation registries compose child state, operation, and certification registries as one
+unit, then register only parent-owned types. Repeating a child's concrete inventory in its parent
+is forbidden because it creates a second topology authority that can drift independently.
 
 ## Effects And Capabilities
 

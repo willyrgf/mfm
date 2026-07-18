@@ -452,23 +452,26 @@ mfm_certify::define_program_descriptor_registry! {
     state_registry: pub portfolio_snapshot_state_registry,
     operation_registry: pub portfolio_snapshot_operation_registry,
     certification: pub register_portfolio_snapshot_certification_descriptors,
+    includes: [
+        {
+            state_registry: mfm_op_btc_collectors::btc_collectors_state_registry,
+            operation_registry: mfm_op_btc_collectors::btc_collectors_operation_registry,
+            certification: mfm_op_btc_collectors::register_btc_collectors_certification_descriptors,
+        },
+        {
+            state_registry: mfm_op_evm_collectors::evm_collectors_state_registry,
+            operation_registry: mfm_op_evm_collectors::evm_collectors_operation_registry,
+            certification: mfm_op_evm_collectors::register_evm_collectors_certification_descriptors,
+        },
+    ],
     states: [
         mfm_state_portfolio::SelectHoldingsState,
         mfm_state_portfolio::AssembleSnapshotState,
         mfm_state_portfolio::ProjectReportState,
-        mfm_op_btc_collectors::ResolveBtcJointTipState,
-        mfm_op_btc_collectors::ObserveBtcAddressBalanceState,
-        mfm_op_btc_collectors::RecordBtcAddressBalanceFactState,
-        mfm_op_btc_collectors::AssembleBtcNetworkCollectionReceiptState,
-        mfm_states_evm::CollectEvmBalancesState,
-        mfm_states_evm::RecordEvmBalanceFactsState,
     ],
     operations: [
         PortfolioSnapshotOperation,
         PortfolioReportOperation,
-        BtcNetworkCollectionOperation,
-        mfm_op_btc_collectors::BtcNativeBalancesAtAnchorOperation,
-        EvmBalanceCollectionOperation,
     ],
 }
 
@@ -601,6 +604,63 @@ mod tests {
         let launch = portfolio_snapshot_program_launch_plan(config).expect("snapshot launch plan");
         assert_eq!(launch.draft, first);
         assert!(!launch.config_material.is_empty());
+    }
+
+    #[test]
+    fn snapshot_registries_compose_child_collector_inventories() {
+        let states = portfolio_snapshot_state_registry().expect("snapshot states");
+        let btc_states =
+            mfm_op_btc_collectors::btc_collectors_state_registry().expect("Bitcoin states");
+        let evm_states =
+            mfm_op_evm_collectors::evm_collectors_state_registry().expect("EVM states");
+        assert_eq!(states.len(), btc_states.len() + evm_states.len() + 3);
+        states
+            .state_descriptor::<mfm_op_btc_collectors::QueryCollectorCheckpointState>()
+            .expect("composed Bitcoin state");
+        states
+            .state_descriptor::<mfm_states_evm::CollectEvmBalancesState>()
+            .expect("composed EVM state");
+
+        let operations = portfolio_snapshot_operation_registry().expect("snapshot operations");
+        let btc_operations =
+            mfm_op_btc_collectors::btc_collectors_operation_registry().expect("Bitcoin operations");
+        let evm_operations =
+            mfm_op_evm_collectors::evm_collectors_operation_registry().expect("EVM operations");
+        assert_eq!(
+            operations.len(),
+            btc_operations.len() + evm_operations.len() + 2
+        );
+        operations
+            .operation_descriptor::<mfm_op_btc_collectors::BtcChainHeadCollectorCycleOperation>()
+            .expect("composed Bitcoin operation");
+        operations
+            .operation_descriptor::<EvmBalanceCollectionOperation>()
+            .expect("composed EVM operation");
+
+        let mut actual = mfm_certify::CertificationRegistry::new();
+        register_portfolio_snapshot_certification_descriptors(&mut actual)
+            .expect("snapshot certification descriptors");
+        let mut expected = mfm_certify::CertificationRegistry::new();
+        mfm_op_btc_collectors::register_btc_collectors_certification_descriptors(&mut expected)
+            .expect("Bitcoin certification descriptors");
+        mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut expected)
+            .expect("EVM certification descriptors");
+        expected
+            .register_state::<mfm_state_portfolio::SelectHoldingsState>()
+            .expect("selection state");
+        expected
+            .register_state::<mfm_state_portfolio::AssembleSnapshotState>()
+            .expect("assembly state");
+        expected
+            .register_state::<mfm_state_portfolio::ProjectReportState>()
+            .expect("report state");
+        expected
+            .register_operation::<PortfolioSnapshotOperation>()
+            .expect("snapshot operation");
+        expected
+            .register_operation::<PortfolioReportOperation>()
+            .expect("report operation");
+        assert_eq!(actual, expected);
     }
 
     #[test]
