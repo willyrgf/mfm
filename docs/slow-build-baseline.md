@@ -2229,10 +2229,10 @@ architecture selection and requests no additional measurement.
 
 Phase: R2-10
 
-Outcome: passed; owner approval pending
+Outcome: passed; owner approved on 2026-07-18
 
 R2-10 selects the existing Cargo/Nix/Nixfied boundary and adds no new compiler
-cache. The complete proposed decision is
+cache. The complete accepted decision is
 [ADR 0001](adr/0001-mfm-rust-build-architecture.md). The RFC executive decision,
 candidate table, answered questions, selected outcome, gate governance, and
 R2-10 stop condition now reflect that architecture.
@@ -2293,6 +2293,58 @@ never authoritative outputs or remotely trusted inputs.
 - A remote cache would introduce unmeasured transport, credential, poisoning,
   and failure contracts and therefore requires a separate decision.
 
-Recommendation: accept ADR 0001, then proceed only to R2-11's minimal Nixfied
-architect handoff. Implementation and rollout remain a separate reviewed plan
-after the framework contract is accepted.
+Recommendation: proceed only to R2-11's minimal Nixfied architect handoff.
+Implementation and rollout remain a separate reviewed plan after the framework
+contract is accepted.
+
+## R2-11 follow-up: final Nixfied architect handoff
+
+Phase: R2-11
+
+Outcome: passed; owner transmission approval pending
+
+R2-11 rewrites
+[the Nixfied capability handoff](nixfied-capability-gaps.md) from accepted ADR
+0001. It removes provisional Phase 06 language and all requests belonging only
+to rejected candidates. The handoff is self-contained and pins Nixfied
+revision `b0681e45ab76d5023d9c5e033087d34adf98e90b`, NAR hash
+`sha256-E2usrYJbA88cz1HgRo9TBvo5p2S6Mi6ke14g2/crk2M=`, runtime ABI
+`nixfied-runtime-abi:1-5ff3aa14f2bf`, model hash
+`d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84`,
+toolchain ID `nixfied-toolchain:1`, and the selected Cargo-target identity.
+
+### Required framework decisions
+
+Five P0 contracts block durable rollout:
+
+1. enforced worktree namespace plus exclusive writer ownership;
+2. inspectable identity/lifecycle evidence plus explicit bypass;
+3. configurable bounded retention and deterministic admission;
+4. cache-only cleanup with lease, marker, symlink, and confinement safety; and
+5. host-global, actionable slot/port collision diagnostics.
+
+Every P0 names its broad-verification consumer, observed failing MFM scenario,
+required semantics, framework fixture, acceptance sequence, and R2/ADR
+evidence. Shared security and lifecycle invariants require fail-closed process
+reconciliation, active-lease protection, path confinement, redacted public
+diagnostics, evidence preservation, idempotence, and execution of every test on
+every authoritative gate.
+
+Optional P1 work is limited to cross-slot retention planning, bounded
+historical capacity trends, and effective-policy diagnostics. Immutable
+verification closures, sccache/remote backends, granular Rust graphs, Cargo
+fingerprints, test-result caching, cross-user trust, hosted persistence, and
+unit-level target pruning are explicit non-requests.
+
+### Ownership and next boundary
+
+MFM retains ownership of tool pins, task/coverage graphs, Cargo inputs and
+semantics, profile and retention values, developer targets, packaging, trust,
+platform validation, rollback, and gate governance. It will not add a shell
+cleaner, cache traversal, lease registry, or other local P0 workaround.
+
+No build, task, cache, service, runtime, or workflow implementation changes in
+R2-11. No new performance claim is made. The handoff requires MFM owner review
+before transmission. After the Nixfied architects accept, revise, or decline
+each P0, MFM must create a separate implementation plan; this RFC does not
+authorize rollout.
