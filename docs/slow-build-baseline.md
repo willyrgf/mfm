@@ -2224,3 +2224,75 @@ complex long-term boundary, including no new compilation cache, while treating
 the scoped target's inspection, ownership, retention, cleanup, bypass, and
 writer-semantics gaps as explicit design requirements. R2-09 makes no
 architecture selection and requests no additional measurement.
+
+## R2-10 follow-up: MFM Rust build architecture decision
+
+Phase: R2-10
+
+Outcome: passed; owner approval pending
+
+R2-10 selects the existing Cargo/Nix/Nixfied boundary and adds no new compiler
+cache. The complete proposed decision is
+[ADR 0001](adr/0001-mfm-rust-build-architecture.md). The RFC executive decision,
+candidate table, answered questions, selected outcome, gate governance, and
+R2-10 stop condition now reflect that architecture.
+
+### Changed and deliberately unchanged
+
+- Development remains direct incremental Cargo in the Nix-pinned environment
+  with a worktree-local target.
+- Broad local verification retains the compact Cargo policy in a
+  Nixfied-owned target, conditional on first-class lifecycle support.
+- Release packaging remains the Nix `buildRustPackage` output and is not used
+  as a verification cache.
+- No `sccache`, Crane archive, crate2nix/cargo2nix graph, remote backend,
+  execution-topology change, cache cleaner, or rollout implementation was
+  added.
+- Current gate policy remains active. Exact-candidate `.#ci` equivalence is a
+  selected later simplification, not permission to skip the component gates
+  before the repository policy changes.
+
+### Verification
+
+The decision documents passed the current authoritative gates:
+
+| Gate | Run | Result |
+| --- | --- | --- |
+| `nix run .#check` | `run-2938609-1784374082289985792` | 4/4 leaves passed |
+| `nix run .#test` | `run-2938958-1784374094314973495` | 974/974 Nextest tests plus doctests passed |
+| `nix run .#test-db` | `run-2953458-1784374210968832990` | 6/6 database/parity leaves passed |
+| `nix run .#ci` | `run-2956293-1784374311276794236` | 13/13 leaves passed |
+
+R2-10 introduced no build or runtime implementation and performed no new
+performance measurement. It consumes the R2-09 qualification distribution,
+the frozen 99-binary/974-test identifier inventory, and the independent
+R2-03 through R2-08 screening decisions.
+
+### Acceptance and operational contract
+
+The selected verification target is performance-qualified only on the
+reference aarch64-linux host. Durable rollout requires Nixfied to provide
+enforced worktree/slot ownership, exclusive writer semantics, inspection,
+configurable bounded retention, cache-only cleanup, explicit bypass,
+cancellation recovery evidence, and actionable slot/port diagnostics.
+
+The initial MFM policy is 20 GiB per target identity, 32 GiB for the project
+Cargo-target family, and 14 days maximum idle age, with inactive LRU eviction.
+Cleanup must preserve services and run evidence and fail closed for active
+leases or unsafe paths. Mutable artifacts are local same-user accelerators,
+never authoritative outputs or remotely trusted inputs.
+
+### Risks and limitations
+
+- The selected target is not operationally complete in the pinned Nixfied
+  runtime; the current broad slot lifecycle remains provisional.
+- Hosted Linux and macOS retain correctness coverage, but neither environment
+  is performance-qualified by this RFC.
+- Cold full verification remains several minutes, stable targets occupy about
+  10.49 GB per active worktree, and execution/services dominate the warm gate.
+- A remote cache would introduce unmeasured transport, credential, poisoning,
+  and failure contracts and therefore requires a separate decision.
+
+Recommendation: accept ADR 0001, then proceed only to R2-11's minimal Nixfied
+architect handoff. Implementation and rollout remain a separate reviewed plan
+after the framework contract is accepted.

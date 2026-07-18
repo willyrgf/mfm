@@ -76,6 +76,7 @@ Crate docs:
 
 Design notes / planning:
 
+- Rust build architecture decision: [`docs/adr/0001-mfm-rust-build-architecture.md`](docs/adr/0001-mfm-rust-build-architecture.md)
 - Nixfied v2 project model: [`nixfied.nix`](nixfied.nix)
 - Framework upgrade notes: [`docs/UPGRADE.md`](docs/UPGRADE.md)
 
