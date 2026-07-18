@@ -46,6 +46,30 @@ impl<'a> RunnerRegistrationBuilder<'a> {
         Ok(descriptor)
     }
 
+    /// Registers a side-effect runner whose adapter evidence types exactly match its state.
+    pub fn register_side_effect_state_runner_with_factory<S, A>(
+        &mut self,
+        factory: &RunnerFactoryBinding,
+        _adapter: &A,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<mfm_program::StateDescriptorIdentity>
+    where
+        S: SideEffectState,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        A: SideEffectAdapter<
+            Intent = S::Intent,
+            Idempotency = S::IdempotencyInput,
+            PreparedInvocation = S::PreparedInvocation,
+            Submission = S::Submission,
+            RecoveryEvidence = S::RecoveryEvidence,
+            Receipt = S::Receipt,
+            Confirmation = S::Confirmation,
+            Output = S::Output,
+        >,
+    {
+        self.register_state_runner_with_factory::<S>(factory, runner)
+    }
+
     /// Registers the adapter-owned runner used by side-effect verify framework nodes
     /// for one certified side-effect submit descriptor.
     pub fn register_side_effect_verify_runner(

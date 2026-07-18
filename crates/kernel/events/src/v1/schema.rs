@@ -165,6 +165,10 @@ pub(super) const RUN_ADMITTED_SCHEMA: EventSchemaDescriptor = EventSchemaDescrip
         EventFieldDescriptor::repeated("descriptor_identities", "DescriptorIdentity"),
         EventFieldDescriptor::repeated("runner_executables", "ExecutableIdentity"),
         EventFieldDescriptor::repeated("adapter_executables", "ExecutableIdentity"),
+        EventFieldDescriptor::repeated(
+            "capability_implementations",
+            "CapabilityImplementationIdentity",
+        ),
         EventFieldDescriptor::required("admitted_binding_digest", "ContentDigest"),
         EventFieldDescriptor::required("canonicalizer_identity", "CanonicalizerIdentity"),
         EventFieldDescriptor::repeated("seed_cells", "SeedCellRef"),

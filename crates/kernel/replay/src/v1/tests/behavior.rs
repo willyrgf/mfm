@@ -411,6 +411,7 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
             .clone(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: Vec::new(),
         artifact_evidence: vec![
             stored_artifact_from_run_ref(&stream_run_admitted_spec_artifact_for_hash(
                 &certified_spec.spec_hash,

@@ -262,6 +262,16 @@ fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json
     })
 }
 
+fn capability_implementation_identity_json(
+    identity: &events::CapabilityImplementationIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "capability_kind": identity.capability_kind.as_str(),
+        "capability_version": identity.capability_version.as_str(),
+        "implementation_id": identity.implementation_id.as_str(),
+    })
+}
+
 fn config_ref_key(config_ref: &spec::ConfigRef) -> String {
     format!("{}:{}", config_ref.schema_id, config_ref.digest)
 }

@@ -159,7 +159,8 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         | "AmbiguityCode"
         | "ErrorCode"
         | "ClaimFencingToken"
-        | "EntryPointId" => visible_ascii_256_type(type_name),
+        | "EntryPointId"
+        | "RuntimeBindingId" => visible_ascii_256_type(type_name),
         "EntryPointLaunchEvidence" => struct_type(
             "EntryPointLaunchEvidence",
             vec![
@@ -594,6 +595,26 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
                     "nix_output_hash",
                     "NixOutputHash",
                     EventFieldCardinality::Optional,
+                ),
+            ],
+        ),
+        "CapabilityImplementationIdentity" => struct_type(
+            "CapabilityImplementationIdentity",
+            vec![
+                schema_field(
+                    "capability_kind",
+                    "CapabilityKind",
+                    EventFieldCardinality::Required,
+                ),
+                schema_field(
+                    "capability_version",
+                    "CapabilityVersion",
+                    EventFieldCardinality::Required,
+                ),
+                schema_field(
+                    "implementation_id",
+                    "RuntimeBindingId",
+                    EventFieldCardinality::Required,
                 ),
             ],
         ),

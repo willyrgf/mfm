@@ -418,6 +418,7 @@ pub async fn append_platform_holding_facts_for_test(
             descriptor_identities: Vec::new(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),
+            capability_implementations: Vec::new(),
             admitted_binding_digest: ContentDigest::from_digest(
                 DigestAlgorithm::Sha256JcsV1,
                 sha256_digest_bytes(b"mfm.test.fact_fixture.bindings.v1"),

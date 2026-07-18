@@ -73,6 +73,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
     match payload {
         KernelEventPayload::RunAdmitted(payload) => serde_json::json!({
             "admitted_binding_digest": payload.admitted_binding_digest.as_str(),
+            "capability_implementations": payload.capability_implementations.iter().map(capability_implementation_identity_json).collect::<Vec<_>>(),
             "canonicalizer_identity": payload.canonicalizer_identity.as_str(),
             "certificate_artifact": run_artifact_json(&payload.certificate_artifact),
             "config_artifacts": payload.config_artifacts.iter().map(run_artifact_json).collect::<Vec<_>>(),
@@ -692,6 +693,16 @@ fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json
         "factory_id": identity.factory_id.as_str(),
         "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
         "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
+    })
+}
+
+fn capability_implementation_identity_json(
+    identity: &events::CapabilityImplementationIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "capability_kind": identity.capability_kind.as_str(),
+        "capability_version": identity.capability_version.as_str(),
+        "implementation_id": identity.implementation_id.as_str(),
     })
 }
 

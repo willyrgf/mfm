@@ -4,8 +4,8 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterVersion, ArtifactId, AttemptId, CapabilityVersion, CellId, ContentDigest,
-    DigestAlgorithm, EffectKind, EffectVersion, LoweringVersion, NodeId, RunId, SchemaId, SeedId,
-    SideEffectPairId, SpecHash, SpecVersion, StableAuthorKey, StateVersion,
+    DigestAlgorithm, EffectKind, EffectVersion, LoweringVersion, NodeId, RunId, RuntimeBindingId,
+    SchemaId, SeedId, SideEffectPairId, SpecHash, SpecVersion, StableAuthorKey, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,

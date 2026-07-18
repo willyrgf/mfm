@@ -199,6 +199,7 @@ pub(super) fn fact_run_admitted() -> events::RunAdmitted {
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: Vec::new(),
         admitted_binding_digest: content_digest(0xcb),
         canonicalizer_identity: CanonicalizerIdentity::new("sha256-jcs-v1")
             .expect("canonicalizer identity"),
@@ -308,6 +309,7 @@ impl ReplayFactStreamFixture {
                 .clone(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),
+            capability_implementations: Vec::new(),
             artifact_evidence: self.artifact_evidence.clone(),
             artifact_bytes: self.artifact_bytes.clone(),
             additional_artifact_evidence: Vec::new(),

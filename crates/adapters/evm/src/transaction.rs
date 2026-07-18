@@ -43,7 +43,6 @@ use super::{adapter_identity_error, ADAPTER_FACTORY};
 
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const VERIFY_FACTORY: &str = "read_external";
-const TRANSACTION_CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm.transaction.runtime.v1";
 const REPLAY_VERIFIER_ID: &str = "mfm.evm.transaction.replay.v1";
 const SIGNED_ENVELOPE_CACHE_CAPACITY: usize = 32;
 
@@ -152,7 +151,7 @@ pub fn register_evm_transaction_runner(
     let descriptor = mfm_program::state_descriptor::<SubmitEvmTransactionState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     registry.register_capability_spec::<EvmTransactionCapability>(
-        CapabilityImplementationId::new(TRANSACTION_CAPABILITY_IMPLEMENTATION_ID)?,
+        CapabilityImplementationId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)?,
     )?;
     registry.register_capability_spec::<mfm_signing::SigningCapability>(
         capabilities.signing_implementation_id.clone(),
@@ -175,8 +174,12 @@ pub fn register_evm_transaction_runner(
         evm_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
         &adapter_factory,
     )?;
-    registrations.register_state_runner_with_factory::<SubmitEvmTransactionState>(
+    registrations.register_side_effect_state_runner_with_factory::<
+        SubmitEvmTransactionState,
+        EvmTransactionAdapter,
+    >(
         &side_effect_factory,
+        adapter.as_ref(),
         Arc::new(EvmTransactionSubmitRunner {
             adapter: Arc::clone(&adapter),
         }),

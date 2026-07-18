@@ -481,12 +481,25 @@ pub struct RunAdmitted {
     pub runner_executables: Vec<ExecutableIdentity>,
     /// Adapter executable identities.
     pub adapter_executables: Vec<ExecutableIdentity>,
-    /// Digest binding admitted runtime context and adapter executable identities.
+    /// Concrete capability implementation identities.
+    pub capability_implementations: Vec<CapabilityImplementationIdentity>,
+    /// Digest binding admitted runtime executables and capability implementations.
     pub admitted_binding_digest: ContentDigest,
     /// Canonicalizer identity used for the certified spec.
     pub canonicalizer_identity: CanonicalizerIdentity,
     /// Seed cells materialized at run start.
     pub seed_cells: Vec<SeedCellRef>,
+}
+
+/// One concrete non-secret capability implementation admitted for a run.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CapabilityImplementationIdentity {
+    /// Certified capability kind implemented by this binding.
+    pub capability_kind: CapabilityKind,
+    /// Certified capability contract version implemented by this binding.
+    pub capability_version: CapabilityVersion,
+    /// Stable process-local provider implementation identity.
+    pub implementation_id: RuntimeBindingId,
 }
 
 /// Public entry-point operation evidence bound into `RunAdmitted`.

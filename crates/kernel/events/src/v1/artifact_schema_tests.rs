@@ -37,6 +37,19 @@ pub(super) fn run_admitted_payload() -> KernelEventPayload {
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: vec![CapabilityImplementationIdentity {
+            capability_kind: CapabilityKind::new(
+                "mfm.test",
+                "capability",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(18),
+            )
+            .expect("capability kind"),
+            capability_version: CapabilityVersion::new("mfm.test.capability.v1")
+                .expect("capability version"),
+            implementation_id: RuntimeBindingId::new("mfm.test.capability.runtime.v1")
+                .expect("implementation id"),
+        }],
         admitted_binding_digest: content_digest(17),
         canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
         seed_cells: vec![SeedCellRef {
@@ -474,7 +487,7 @@ pub(super) fn event_schema_descriptor_requirement_sources_golden() {
 
     assert_eq!(
         rows,
-        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:e6f2a19c3f35479e6ba58a4e497469e0f1d34d983dfcf4129de74f4099ec63b4 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
+        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:cda48aaa4d423db38f798386851a3d91992801b524768ab69bc3c41cf3fd0850 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734 [FactResponse]
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:b60ebe4bc262799c154a596362ae57672801f54e1b18d703572848626ccef3f0 [ArtifactReferenced]

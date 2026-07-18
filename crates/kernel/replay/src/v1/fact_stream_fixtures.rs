@@ -484,7 +484,8 @@ pub(super) fn fact_run_admitted_for_stream_with_descriptors(
         descriptor_identities: certified_spec.spec.descriptor_identities.clone(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
-        admitted_binding_digest: admitted_binding_digest(&[], &[]).expect("binding digest"),
+        capability_implementations: Vec::new(),
+        admitted_binding_digest: admitted_binding_digest(&[], &[], &[]).expect("binding digest"),
         canonicalizer_identity: certified_spec
             .spec
             .public_outputs

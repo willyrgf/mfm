@@ -387,6 +387,10 @@ impl CapabilityImplementationId {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    pub(crate) fn runtime_binding_id(&self) -> &RuntimeBindingId {
+        &self.0
+    }
 }
 
 impl fmt::Display for CapabilityImplementationId {

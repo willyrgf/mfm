@@ -35,6 +35,11 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 })?,
                 runner_executables: parse_vec(json, "runner_executables", parse_executable)?,
                 adapter_executables: parse_vec(json, "adapter_executables", parse_executable)?,
+                capability_implementations: parse_vec(
+                    json,
+                    "capability_implementations",
+                    parse_capability_implementation_identity,
+                )?,
                 canonicalizer_identity: CanonicalizerIdentity::new(required_str(
                     json,
                     "canonicalizer_identity",
@@ -789,6 +794,17 @@ fn parse_executable(json: &serde_json::Value) -> Result<events::ExecutableIdenti
         nix_output_hash: optional_str(json, "nix_output_hash")?
             .map(events::NixOutputHash::new)
             .transpose()?,
+    })
+}
+
+fn parse_capability_implementation_identity(
+    json: &serde_json::Value,
+) -> Result<events::CapabilityImplementationIdentity> {
+    Ok(events::CapabilityImplementationIdentity {
+        capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
+        capability_version: parse_identity(required_str(json, "capability_version")?)?,
+        implementation_id: RuntimeBindingId::new(required_str(json, "implementation_id")?)
+            .map_err(|error| StoreError::Identity(error.to_string()))?,
     })
 }
 

@@ -318,6 +318,7 @@ impl CommitPlanner {
             descriptor_identities: runtime_spec.spec().descriptor_identities.clone(),
             runner_executables: bound_context.runner_executables().to_vec(),
             adapter_executables,
+            capability_implementations: bound_context.capability_implementations().to_vec(),
             admitted_binding_digest,
             canonicalizer_identity: runtime_spec
                 .spec()

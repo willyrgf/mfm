@@ -386,7 +386,7 @@ async fn snapshot_root_resumes_and_replays_after_live_inputs_disappear() {
 
     let resumed_services = snapshot_services(
         &store,
-        Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone())),
+        Arc::new(BlockingSnapshotFactIndex::resumed(store.clone())),
         None,
     );
     let resumed = resumed_services
@@ -727,14 +727,21 @@ async fn launch_snapshot(
 
 struct BlockingSnapshotFactIndex {
     entered: Mutex<Option<oneshot::Sender<()>>>,
-    store: store::AsyncInMemoryRunStore,
+    projection: mfm_app::ProjectionFactIndexProvider,
 }
 
 impl BlockingSnapshotFactIndex {
     fn new(store: store::AsyncInMemoryRunStore, entered: oneshot::Sender<()>) -> Self {
         Self {
             entered: Mutex::new(Some(entered)),
-            store,
+            projection: mfm_app::ProjectionFactIndexProvider::new(store),
+        }
+    }
+
+    fn resumed(store: store::AsyncInMemoryRunStore) -> Self {
+        Self {
+            entered: Mutex::new(None),
+            projection: mfm_app::ProjectionFactIndexProvider::new(store),
         }
     }
 }
@@ -746,20 +753,18 @@ impl FactIndexReadProvider for BlockingSnapshotFactIndex {
 
     fn read_fact_index_batch<'a>(
         &'a self,
-        _requests: &'a [FactIndexReadRequest],
+        requests: &'a [FactIndexReadRequest],
     ) -> FactIndexReadBatchFuture<'a> {
+        let entered = self
+            .entered
+            .lock()
+            .expect("blocking fact-index state")
+            .take();
+        let Some(entered) = entered else {
+            return self.projection.read_fact_index_batch(requests);
+        };
         Box::pin(async move {
-            let _ = self.store.projection_snapshot().map_err(|error| {
-                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
-            })?;
-            if let Some(entered) = self
-                .entered
-                .lock()
-                .expect("blocking fact-index state")
-                .take()
-            {
-                let _ = entered.send(());
-            }
+            let _ = entered.send(());
             future::pending().await
         })
     }
