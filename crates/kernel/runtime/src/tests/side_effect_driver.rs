@@ -32,7 +32,31 @@ async fn side_effect_driver_persists_intent_before_preparation() {
 }
 
 #[tokio::test]
-async fn uncertain_preparation_append_discards_side_effect_settlement() {
+async fn appended_preparation_settles_side_effect_authority_once() {
+    let fixture = fixture_with_first_side_effect_state();
+    let settled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        DriverSideEffectRunner::new(&fixture).with_preparation_settlement(Arc::clone(&settled)),
+    ));
+    let store = RecordingTypedRunStore::new();
+    start_fixture_run_async_store(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+        .await
+        .expect("start appended side-effect settlement run");
+
+    assert!(
+        drive_until_side_effect_preparation(&scheduler, &store, &fixture).await,
+        "the side-effect driver must carry settlement through preparation"
+    );
+    assert_eq!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a durably appended preparation must settle its process-local authority exactly once"
+    );
+}
+
+#[tokio::test]
+async fn uncertain_preparation_append_discards_side_effect_authority() {
     let fixture = fixture_with_first_side_effect_state();
     let settled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let scheduler = test_scheduler(registered_first_side_effect_runners_with(
@@ -44,25 +68,8 @@ async fn uncertain_preparation_append_discards_side_effect_settlement() {
         .await
         .expect("start side-effect settlement run");
 
-    let mut preparation_committed = false;
-    for _ in 0..8 {
-        drive_once_with_claim(&scheduler, &store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive through uncertain preparation append");
-        let stream = store
-            .load_committed_run_stream(&fixture.run_id)
-            .await
-            .expect("load side-effect settlement stream");
-        preparation_committed = stream.events().iter().any(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::SideEffectInvocationPrepared(_)
-            )
-        });
-        if preparation_committed {
-            break;
-        }
-    }
+    let preparation_committed =
+        drive_until_side_effect_preparation(&scheduler, &store, &fixture).await;
 
     assert!(
         preparation_committed,
@@ -73,6 +80,37 @@ async fn uncertain_preparation_append_discards_side_effect_settlement() {
         0,
         "the side-effect settlement token must be discarded when its append outcome is uncertain"
     );
+}
+
+async fn drive_until_side_effect_preparation<S>(
+    scheduler: &SerialTypedScheduler,
+    store: &S,
+    fixture: &Fixture,
+) -> bool
+where
+    S: store::RunEventStore<Error = store::StoreError>
+        + store::ExecutionClaimStore<Error = store::StoreError>
+        + ?Sized,
+{
+    for _ in 0..8 {
+        drive_once_with_claim(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive through preparation append");
+        let stream = store
+            .load_committed_run_stream(&fixture.run_id)
+            .await
+            .expect("load side-effect settlement stream");
+        let preparation_committed = stream.events().iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectInvocationPrepared(_)
+            )
+        });
+        if preparation_committed {
+            return true;
+        }
+    }
+    false
 }
 
 #[tokio::test]
