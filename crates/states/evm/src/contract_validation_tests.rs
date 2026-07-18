@@ -89,10 +89,7 @@ fn evidence(
             .expect("call response");
     }
     builder
-        .finish(EvmBlock {
-            number: U256::from(100),
-            hash: ANCHOR_HASH,
-        })
+        .finish(EvmBlockAnchor::new(U256::from(100), ANCHOR_HASH))
         .expect("validation evidence")
 }
 
@@ -363,10 +360,7 @@ fn maximum_policy_builds_reduces_and_fits_canonical_artifacts() {
             .expect("exact-bound response");
     }
     let evidence = builder
-        .finish(EvmBlock {
-            number: U256::MAX,
-            hash: ANCHOR_HASH,
-        })
+        .finish(EvmBlockAnchor::new(U256::MAX, ANCHOR_HASH))
         .expect("maximum evidence");
     let built = validate_evm_contract(&plan, &evidence).expect("maximum reduced evidence");
     assert_eq!(built.address(), plan.address());

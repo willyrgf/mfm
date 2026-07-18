@@ -4,12 +4,11 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_effects::ApplySideEffect;
 use mfm_evm_capabilities::{
-    EvmBlock, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction as CapabilityTransaction,
-    EvmReceipt as CapabilityReceipt, EvmReceiptStatus as CapabilityReceiptStatus,
-    EvmSessionEvidence, EvmTransactionEstimate,
+    EvmBlockAnchor, EvmFeeInputs, EvmNetworkBinding,
+    EvmObservedTransaction as CapabilityTransaction, EvmReceipt as CapabilityReceipt,
+    EvmReceiptStatus as CapabilityReceiptStatus, EvmSessionEvidence, EvmTransactionEstimate,
 };
 use mfm_ids::LocalPublicId;
-use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_program::{
     AdapterBindingSpec, NoContext, ResourceClaim, ResourceNamespace, SideEffectIntent,
     SideEffectState, StateResult, StateSpec, ValidatedConfig,
@@ -1086,7 +1085,7 @@ impl EvmTransactionReceipt {
         let converted = Self {
             transaction_hash: canonical_hash(receipt.transaction_hash),
             transaction_index: receipt.transaction_index.to_string(),
-            block: EvmBlockAnchor::new(receipt.block.number, receipt.block.hash),
+            block: receipt.block.clone(),
             from: canonical_address(receipt.from),
             to: receipt.to.map(canonical_address),
             contract_address: receipt.contract_address.map(canonical_address),
@@ -1100,7 +1099,7 @@ impl EvmTransactionReceipt {
                     address: canonical_address(log.address),
                     topics: log.topics.iter().copied().map(canonical_hash).collect(),
                     data: canonical_bytes(&log.data),
-                    block: EvmBlockAnchor::new(log.block.number, log.block.hash),
+                    block: log.block.clone(),
                     transaction_hash: canonical_hash(log.transaction_hash),
                     transaction_index: log.transaction_index.to_string(),
                     log_index: log.log_index.to_string(),
@@ -1382,21 +1381,22 @@ impl EvmTransactionConfirmation {
         prepared: &EvmPreparedTransaction,
         retained_receipt: &EvmTransactionReceipt,
         fresh_receipt: EvmTransactionReceipt,
-        canonical_block: &EvmBlock,
-        head: &EvmBlock,
+        canonical_block: &EvmBlockAnchor,
+        head: &EvmBlockAnchor,
         required_depth: u64,
         session: &EvmSessionEvidence,
     ) -> Result<Self, EvmStateError> {
         let receipt_number = retained_receipt.block_number_quantity()?;
         let confirmations = head
-            .number
+            .number_quantity()
+            .map_err(|_| invalid("confirmation head block number was invalid"))?
             .checked_sub(receipt_number)
             .and_then(|distance| distance.checked_add(U256::from(1)))
             .ok_or_else(|| invalid("confirmation head preceded receipt block"))?;
         let confirmation = Self {
             fresh_receipt,
-            canonical_block: EvmBlockAnchor::new(canonical_block.number, canonical_block.hash),
-            head: EvmBlockAnchor::new(head.number, head.hash),
+            canonical_block: canonical_block.clone(),
+            head: head.clone(),
             required_depth,
             confirmations: confirmations.to_string(),
             session: session.clone(),

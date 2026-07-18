@@ -78,10 +78,7 @@ fn observed_transaction(prepared: &EvmPreparedTransaction) -> CapabilityTransact
         max_priority_fee_per_gas: unsigned.max_priority_fee_per_gas(),
         access_list: unsigned.access_list().clone(),
         placement: Some(CapabilityPlacement {
-            block: EvmBlock {
-                number: U256::from(100),
-                hash: B256::from([0x55; 32]),
-            },
+            block: EvmBlockAnchor::new(U256::from(100), B256::from([0x55; 32])),
             transaction_index: U256::from(3),
         }),
     }
@@ -97,10 +94,7 @@ fn capability_receipt(
             address: destination(),
             topics: vec![B256::from([0x66; 32])],
             data: vec![0xaa, 0xbb].into(),
-            block: EvmBlock {
-                number: U256::from(100),
-                hash: B256::from([0x55; 32]),
-            },
+            block: EvmBlockAnchor::new(U256::from(100), B256::from([0x55; 32])),
             transaction_hash: prepared.expected_hash().expect("hash"),
             transaction_index: U256::from(3),
             log_index: U256::from(7),
@@ -112,10 +106,7 @@ fn capability_receipt(
     EvmReceipt {
         transaction_hash: prepared.expected_hash().expect("hash"),
         transaction_index: U256::from(3),
-        block: EvmBlock {
-            number: U256::from(100),
-            hash: B256::from([0x55; 32]),
-        },
+        block: EvmBlockAnchor::new(U256::from(100), B256::from([0x55; 32])),
         from: sender(),
         to: prepared.intent().action().call_destination().expect("to"),
         contract_address,
@@ -350,7 +341,10 @@ fn receipt_logs_fail_closed_on_removed_or_moved_identity() {
     );
 
     let mut moved = capability_receipt(&prepared, CapabilityReceiptStatus::Success, None);
-    moved.logs[0].block.hash = B256::from([0x88; 32]);
+    moved.logs[0].block = EvmBlockAnchor::new(
+        moved.logs[0].block.number_quantity().expect("block number"),
+        B256::from([0x88; 32]),
+    );
     assert!(
         EvmTransactionReceipt::from_observation(&prepared, &moved, &session("receipt")).is_err()
     );
@@ -367,7 +361,10 @@ fn receipt_log_accessors_preserve_complete_lossless_evidence() {
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     observation.transaction_index = U256::MAX;
-    observation.block.number = U256::MAX;
+    observation.block = EvmBlockAnchor::new(
+        U256::MAX,
+        observation.block.hash_value().expect("block hash"),
+    );
     observation.logs[0].data = data.clone().into();
     observation.logs[0].block = observation.block.clone();
     observation.logs[0].transaction_index = U256::MAX;
@@ -529,14 +526,8 @@ fn confirmation_rechecks_fresh_receipt_block_and_depth() {
         &session("confirmation"),
     )
     .expect("fresh");
-    let canonical_block = EvmBlock {
-        number: U256::from(100),
-        hash: B256::from([0x55; 32]),
-    };
-    let head = EvmBlock {
-        number: U256::from(111),
-        hash: B256::from([0x99; 32]),
-    };
+    let canonical_block = EvmBlockAnchor::new(U256::from(100), B256::from([0x55; 32]));
+    let head = EvmBlockAnchor::new(U256::from(111), B256::from([0x99; 32]));
     let confirmation = EvmTransactionConfirmation::new(
         &prepared,
         &retained,
@@ -549,10 +540,7 @@ fn confirmation_rechecks_fresh_receipt_block_and_depth() {
     .expect("confirmation");
     assert_eq!(confirmation.required_depth(), 12);
 
-    let shallow_head = EvmBlock {
-        number: U256::from(110),
-        hash: B256::from([0xaa; 32]),
-    };
+    let shallow_head = EvmBlockAnchor::new(U256::from(110), B256::from([0xaa; 32]));
     let fresh = EvmTransactionReceipt::from_observation(
         &prepared,
         &capability_receipt(&prepared, CapabilityReceiptStatus::Success, None),
@@ -585,10 +573,7 @@ fn confirmation_rejects_moved_receipt_and_wrong_canonical_block() {
     .expect("retained");
     let mut moved_capability =
         capability_receipt(&prepared, CapabilityReceiptStatus::Success, None);
-    moved_capability.block = EvmBlock {
-        number: U256::from(101),
-        hash: B256::from([0x77; 32]),
-    };
+    moved_capability.block = EvmBlockAnchor::new(U256::from(101), B256::from([0x77; 32]));
     moved_capability.logs[0].block = moved_capability.block.clone();
     let moved = EvmTransactionReceipt::from_observation(
         &prepared,
@@ -596,14 +581,8 @@ fn confirmation_rejects_moved_receipt_and_wrong_canonical_block() {
         &session("confirmation"),
     )
     .expect("moved observation");
-    let wrong_block = EvmBlock {
-        number: U256::from(100),
-        hash: B256::from([0x77; 32]),
-    };
-    let head = EvmBlock {
-        number: U256::from(120),
-        hash: B256::from([0x99; 32]),
-    };
+    let wrong_block = EvmBlockAnchor::new(U256::from(100), B256::from([0x77; 32]));
+    let head = EvmBlockAnchor::new(U256::from(120), B256::from([0x99; 32]));
     assert!(EvmTransactionConfirmation::new(
         &prepared,
         &retained,

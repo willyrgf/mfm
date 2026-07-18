@@ -6,7 +6,7 @@ use alloy_primitives::{
     address, b256, hex, keccak256, Address, PrimitiveSignature, TxKind, B256, U256,
 };
 use mfm_evm_capabilities::{
-    EvmBlock, EvmFeeInputs, EvmObservedTransaction, EvmSessionEvidence, EvmSessionFuture,
+    EvmBlockAnchor, EvmFeeInputs, EvmObservedTransaction, EvmSessionEvidence, EvmSessionFuture,
     EvmTransactionEstimate,
 };
 use mfm_ids::LocalPublicId;
@@ -183,13 +183,11 @@ impl EvmTransactionSession for MockSession {
         Box::pin(async { Ok(None) })
     }
 
-    fn read_block<'a>(&'a self, _selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
-        Box::pin(async {
-            Ok(EvmBlock {
-                number: U256::ZERO,
-                hash: B256::ZERO,
-            })
-        })
+    fn read_block<'a>(
+        &'a self,
+        _selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
+        Box::pin(async { Ok(EvmBlockAnchor::new(U256::ZERO, B256::ZERO)) })
     }
 }
 

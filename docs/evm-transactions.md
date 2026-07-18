@@ -129,8 +129,9 @@ For `Finalized { depth }`, verification fetches a fresh unchanged receipt, reads
 and requires the exact retained hash, then reads a fresh head and checks `head - receipt + 1 >= depth`.
 A disappeared or moved receipt, wrong canonical block, or shallow head remains pending. Confirmation
 evidence retains the fresh receipt, canonical block, head, checked depth, and redacted session.
-Transaction and contract-validation evidence use the same `EvmBlockAnchor`, which persists the
-full U256 block number as canonical decimal and never narrows it to u64.
+Transaction, validation, collection, and portfolio evidence use the same capability-owned
+`EvmBlockAnchor`, which persists the full U256 block number as canonical decimal and never narrows
+it to u64.
 
 Provider unavailability while reading the receipt, canonical block, or head is also an operational
 block. Resume re-observes from the durable submission phase and never executes the submit node or

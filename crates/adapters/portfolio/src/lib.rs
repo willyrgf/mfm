@@ -19,7 +19,6 @@ use mfm_evm_capabilities::{
     EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
-use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{ManagedWriteState, StateSpec};
 use mfm_runtime::{
@@ -278,22 +277,30 @@ async fn collect_evm_network(
         .read_block(&EvmBlockSelector::Latest)
         .await
         .map_err(evm_read_runtime_error)?;
-    let anchor = EvmBlockAnchor::new(latest.number, latest.hash);
-    let exact = EvmBlockSelector::ExactHash(latest.hash);
+    let block_number = latest.number_quantity().map_err(|_| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "EVM session returned an invalid block number".to_owned(),
+        )
+    })?;
+    let block_hash = latest.hash_value().map_err(|_| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "EVM session returned an invalid block hash".to_owned(),
+        )
+    })?;
+    let exact = EvmBlockSelector::ExactHash(block_hash);
 
     let token_decimals = read_token_decimals(plan, Arc::clone(&session), exact.clone()).await?;
     let balances = read_balances(plan, Arc::clone(&session), exact).await?;
     let final_block = session
-        .read_block(&EvmBlockSelector::Number(latest.number))
+        .read_block(&EvmBlockSelector::Number(block_number))
         .await
         .map_err(evm_read_runtime_error)?;
-    let final_canonical_block = EvmBlockAnchor::new(final_block.number, final_block.hash);
     Ok(CollectEvmNetworkEvidence::new(
         session.evidence(),
-        anchor,
+        latest,
         token_decimals,
         balances,
-        final_canonical_block,
+        final_block,
     ))
 }
 

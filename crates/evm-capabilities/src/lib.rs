@@ -7,15 +7,22 @@
 //! credentials never enter these contracts.
 //!
 //! ```rust
+//! use alloy_primitives::{B256, U256};
 //! use mfm_capabilities::CapabilitySpec;
-//! use mfm_evm_capabilities::{EvmNetworkBinding, EvmReadCapability};
+//! use mfm_evm_capabilities::{EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability};
 //! use mfm_ids::LocalPublicId;
 //!
 //! let binding = EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet")?, 1)?;
+//! let anchor = EvmBlockAnchor::new(U256::from(20_000_000), B256::from([0x11; 32]));
 //! assert_eq!(binding.network_id().as_str(), "ethereum-mainnet");
+//! assert_eq!(anchor.number(), "20000000");
 //! assert_eq!(EvmReadCapability::name(), "mfm.evm.read");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+
+mod block;
+
+pub use block::{EvmBlockAnchor, EvmBlockAnchorError};
 
 use std::future::Future;
 use std::num::NonZeroU64;
@@ -217,15 +224,6 @@ pub enum EvmBlockSelector {
     ExactHash(B256),
 }
 
-/// Minimal block identity returned by a session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvmBlock {
-    /// Block number.
-    pub number: U256,
-    /// Block hash.
-    pub hash: B256,
-}
-
 /// Checked call request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmCall {
@@ -333,7 +331,10 @@ pub trait EvmReadSession: Send + Sync {
     fn evidence(&self) -> &EvmSessionEvidence;
 
     /// Reads one block identity.
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock>;
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor>;
 
     /// Reads an account balance.
     fn read_balance<'a>(
@@ -518,7 +519,7 @@ impl EvmTransactionEstimate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmTransactionPlacement {
     /// Exact inclusion block identity.
-    pub block: EvmBlock,
+    pub block: EvmBlockAnchor,
     /// Transaction index within the block.
     pub transaction_index: U256,
 }
@@ -571,7 +572,7 @@ pub struct EvmReceiptLog {
     /// Unindexed log data.
     pub data: Bytes,
     /// Exact inclusion block identity.
-    pub block: EvmBlock,
+    pub block: EvmBlockAnchor,
     /// Enclosing transaction hash.
     pub transaction_hash: B256,
     /// Transaction index within the block.
@@ -590,7 +591,7 @@ pub struct EvmReceipt {
     /// Transaction index within the block.
     pub transaction_index: U256,
     /// Exact inclusion block identity.
-    pub block: EvmBlock,
+    pub block: EvmBlockAnchor,
     /// Sender.
     pub from: Address,
     /// Destination, or none for creation.
@@ -664,7 +665,10 @@ pub trait EvmTransactionSession: Send + Sync {
     fn receipt_by_hash(&self, transaction_hash: B256) -> EvmSessionFuture<'_, Option<EvmReceipt>>;
 
     /// Reads a block identity for confirmation checks.
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock>;
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor>;
 }
 
 /// Closed invalid-request reasons.

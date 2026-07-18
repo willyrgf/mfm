@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, b256, Address, B256};
 use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBlock, EvmCode, EvmSessionEvidence, EvmSessionFuture, ProviderDiagnosticCode,
+    evm_diagnostic, EvmBlockAnchor, EvmCode, EvmSessionEvidence, EvmSessionFuture,
+    ProviderDiagnosticCode,
 };
 use mfm_fact_capabilities::{
     FactIndexReadBatchFuture, FactIndexReadProvider, FactIndexReadRequest,
@@ -75,7 +76,10 @@ impl EvmReadSession for UnavailableSession {
         &self.evidence
     }
 
-    fn read_block<'a>(&'a self, _selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        _selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         self.unavailable()
     }
 
@@ -137,17 +141,16 @@ impl EvmReadSession for RecordingSession {
         &self.evidence
     }
 
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         self.record(ReadRecord::Block(selector.clone()));
         let result = match selector {
-            EvmBlockSelector::Latest => Ok(EvmBlock {
-                number: U256::from(100),
-                hash: ANCHOR_HASH,
-            }),
-            EvmBlockSelector::Number(number) if *number == U256::from(100) => Ok(EvmBlock {
-                number: U256::from(100),
-                hash: self.final_hash,
-            }),
+            EvmBlockSelector::Latest => Ok(EvmBlockAnchor::new(U256::from(100), ANCHOR_HASH)),
+            EvmBlockSelector::Number(number) if *number == U256::from(100) => {
+                Ok(EvmBlockAnchor::new(U256::from(100), self.final_hash))
+            }
             _ => Err(provider_failure()),
         };
         Box::pin(std::future::ready(result))

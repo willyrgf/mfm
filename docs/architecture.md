@@ -126,6 +126,10 @@ capability, public type, CLI command, REST route, or test fixture.
 | App assembly | Registry/store/artifact/capability wiring and typed run services | Workflow planning or state behavior |
 | Binary/API | Input decoding, routing, response envelopes | Domain semantics, runtime authority, direct state execution |
 
+Capability contracts are foundational protocol authority: they depend only on kernel or other
+capability contracts. Domain models may consume capability-owned checked protocol identities, but
+capability contracts never depend back on domain models.
+
 If a unit does not fit one category cleanly, the design is not ready.
 
 ### Current Configuration And Runtime-Config Boundary

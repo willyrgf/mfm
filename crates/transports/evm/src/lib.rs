@@ -35,10 +35,11 @@ use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
 use mfm_evm_capabilities::{
-    evm_diagnostic, source_mismatch_error, EvmBlock, EvmBlockSelector, EvmCall, EvmCapabilityError,
-    EvmCode, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction, EvmReadSession, EvmReceipt,
-    EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture, EvmTransactionEstimate,
-    EvmTransactionPlacement, EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    evm_diagnostic, source_mismatch_error, EvmBlockAnchor, EvmBlockSelector, EvmCall,
+    EvmCapabilityError, EvmCode, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
+    EvmReadSession, EvmReceipt, EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence,
+    EvmSessionFuture, EvmTransactionEstimate, EvmTransactionPlacement, EvmTransactionSession,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_ids::LocalPublicId;
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
@@ -161,7 +162,7 @@ pub struct EvmJsonRpcSession {
 }
 
 impl EvmJsonRpcSession {
-    async fn block(&self, selector: &EvmBlockSelector) -> TransportResult<EvmBlock> {
+    async fn block(&self, selector: &EvmBlockSelector) -> TransportResult<EvmBlockAnchor> {
         let value = match selector {
             EvmBlockSelector::ExactHash(hash) => {
                 self.rpc_call("eth_getBlockByHash", json!([format!("{hash:#x}"), false]))
@@ -176,18 +177,16 @@ impl EvmJsonRpcSession {
             }
         };
         let object = required_object(&value)?;
-        let block = EvmBlock {
-            number: quantity_field(object, "number")?,
-            hash: hash_field(object, "hash")?,
-        };
+        let number = quantity_field(object, "number")?;
+        let hash = hash_field(object, "hash")?;
         match selector {
-            EvmBlockSelector::Number(expected) if *expected != block.number => {
+            EvmBlockSelector::Number(expected) if *expected != number => {
                 Err(EvmTransportError::InvalidResponse)
             }
-            EvmBlockSelector::ExactHash(expected) if *expected != block.hash => {
+            EvmBlockSelector::ExactHash(expected) if *expected != hash => {
                 Err(EvmTransportError::InvalidResponse)
             }
-            _ => Ok(block),
+            _ => Ok(EvmBlockAnchor::new(number, hash)),
         }
     }
 
@@ -373,10 +372,10 @@ impl EvmJsonRpcSession {
         let receipt = EvmReceipt {
             transaction_hash: observed_hash,
             transaction_index: quantity_field(object, "transactionIndex")?,
-            block: EvmBlock {
-                number: quantity_field(object, "blockNumber")?,
-                hash: hash_field(object, "blockHash")?,
-            },
+            block: EvmBlockAnchor::new(
+                quantity_field(object, "blockNumber")?,
+                hash_field(object, "blockHash")?,
+            ),
             from: address_field(object, "from")?,
             to: optional_address_field(object, "to")?,
             contract_address: optional_address_field(object, "contractAddress")?,
@@ -468,7 +467,10 @@ impl EvmReadSession for EvmJsonRpcSession {
         &self.evidence
     }
 
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         Box::pin(async move { self.block(selector).await.map_err(capability_error) })
     }
 
@@ -548,7 +550,10 @@ impl EvmTransactionSession for EvmJsonRpcSession {
         })
     }
 
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         Box::pin(async move { self.block(selector).await.map_err(capability_error) })
     }
 }
@@ -787,18 +792,18 @@ fn transaction_placement(
         return Err(EvmTransportError::InvalidResponse);
     }
     Ok(Some(EvmTransactionPlacement {
-        block: EvmBlock {
-            number: parse_quantity(
+        block: EvmBlockAnchor::new(
+            parse_quantity(
                 block_number
                     .as_str()
                     .ok_or(EvmTransportError::InvalidResponse)?,
             )?,
-            hash: parse_hash(
+            parse_hash(
                 block_hash
                     .as_str()
                     .ok_or(EvmTransportError::InvalidResponse)?,
             )?,
-        },
+        ),
         transaction_index: parse_quantity(
             transaction_index
                 .as_str()
@@ -820,10 +825,10 @@ fn parse_receipt_log(value: &Value) -> TransportResult<EvmReceiptLog> {
         address: address_field(object, "address")?,
         topics,
         data: bytes_field(object, "data")?,
-        block: EvmBlock {
-            number: quantity_field(object, "blockNumber")?,
-            hash: hash_field(object, "blockHash")?,
-        },
+        block: EvmBlockAnchor::new(
+            quantity_field(object, "blockNumber")?,
+            hash_field(object, "blockHash")?,
+        ),
         transaction_hash: hash_field(object, "transactionHash")?,
         transaction_index: quantity_field(object, "transactionIndex")?,
         log_index: quantity_field(object, "logIndex")?,

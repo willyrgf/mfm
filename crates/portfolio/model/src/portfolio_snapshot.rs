@@ -1,7 +1,7 @@
 use super::*;
 use std::num::NonZeroU64;
 
-use crate::evm::EvmBlockAnchor;
+use mfm_evm_capabilities::EvmBlockAnchor;
 
 /// Concrete execution anchor captured for one pinned network.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]

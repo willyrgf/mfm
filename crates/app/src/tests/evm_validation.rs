@@ -6,11 +6,10 @@ use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
 use mfm_adapters_evm::{register_evm_validation_runner, EvmValidationRunnerCapabilities};
 use mfm_certify::CertificationRegistry;
 use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBlock, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
+    evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
     EvmNetworkBinding, EvmReadSession, EvmSessionEvidence, EvmSessionFuture,
     EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
-use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, RootBuilder, ScopeKey,
     SeedKey, StateKey, StateRegistryBuilder,
@@ -211,13 +210,15 @@ impl EvmReadSession for ValidationSession {
         &self.evidence
     }
 
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         self.record_read();
         let result = match selector {
-            EvmBlockSelector::Number(number) if *number == U256::from(100) => Ok(EvmBlock {
-                number: U256::from(100),
-                hash: ANCHOR_HASH,
-            }),
+            EvmBlockSelector::Number(number) if *number == U256::from(100) => {
+                Ok(EvmBlockAnchor::new(U256::from(100), ANCHOR_HASH))
+            }
             _ => Err(provider_failure()),
         };
         Box::pin(std::future::ready(result))

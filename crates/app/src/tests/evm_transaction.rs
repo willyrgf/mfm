@@ -12,7 +12,7 @@ use mfm_capabilities::NoCaps;
 use mfm_certify::CertificationRegistry;
 use mfm_events::v1::KernelEventPayload;
 use mfm_evm_capabilities::{
-    EvmBlock, EvmBlockSelector, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
+    EvmBlockAnchor, EvmBlockSelector, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
     EvmReceipt, EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture, EvmTransactionEstimate,
     EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
@@ -614,10 +614,7 @@ impl TransactionSession {
         EvmReceipt {
             transaction_hash: EXPECTED_HASH,
             transaction_index: U256::from(3),
-            block: EvmBlock {
-                number: U256::from(100),
-                hash: RECEIPT_BLOCK_HASH,
-            },
+            block: EvmBlockAnchor::new(U256::from(100), RECEIPT_BLOCK_HASH),
             from: EXPECTED_SENDER,
             to: Some(DESTINATION),
             contract_address: None,
@@ -696,7 +693,10 @@ impl EvmTransactionSession for TransactionSession {
         Box::pin(async move { Ok(receipt) })
     }
 
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         let outage = match selector {
             EvmBlockSelector::Number(_) => ObservationOutage::CanonicalBlock,
             EvmBlockSelector::Latest => ObservationOutage::Head,
@@ -706,14 +706,12 @@ impl EvmTransactionSession for TransactionSession {
             return Box::pin(async { Err(observation_provider_failure()) });
         }
         let block = match selector {
-            EvmBlockSelector::Number(number) if *number == U256::from(100) => EvmBlock {
-                number: U256::from(100),
-                hash: RECEIPT_BLOCK_HASH,
-            },
-            EvmBlockSelector::Latest => EvmBlock {
-                number: U256::from(101),
-                hash: B256::from([0x22; 32]),
-            },
+            EvmBlockSelector::Number(number) if *number == U256::from(100) => {
+                EvmBlockAnchor::new(U256::from(100), RECEIPT_BLOCK_HASH)
+            }
+            EvmBlockSelector::Latest => {
+                EvmBlockAnchor::new(U256::from(101), B256::from([0x22; 32]))
+            }
             _ => panic!("unexpected block selector"),
         };
         Box::pin(async move { Ok(block) })

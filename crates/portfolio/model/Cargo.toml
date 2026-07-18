@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }

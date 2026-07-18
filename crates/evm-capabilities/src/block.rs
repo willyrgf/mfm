@@ -1,4 +1,4 @@
-//! Canonical persisted EVM values shared by portfolio and reusable EVM state surfaces.
+//! Canonical checked EVM block identity shared by live protocol and persisted evidence.
 
 use std::str::FromStr;
 
@@ -6,7 +6,7 @@ use alloy_primitives::{B256, U256};
 use mfm_program_derive::MfmValue;
 use serde::{de, Deserialize, Serialize};
 
-/// Error returned when persisted EVM block-anchor material is not canonical.
+/// Error returned when EVM block identity material is not canonical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EvmBlockAnchorError {
     /// The block number is not a canonical U256 decimal string.
@@ -17,7 +17,7 @@ pub enum EvmBlockAnchorError {
     InvalidHash,
 }
 
-/// Canonical persisted EVM block number and hash pair.
+/// Canonical EVM block number and hash pair used by protocol reads and persisted evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm",
@@ -116,10 +116,22 @@ mod tests {
         let anchor = EvmBlockAnchor::new(number, hash);
         assert_eq!(anchor.number_quantity().expect("number"), number);
         assert_eq!(anchor.hash_value().expect("hash"), hash);
+        assert_eq!(
+            serde_json::to_value(&anchor).expect("block anchor JSON"),
+            serde_json::json!({
+                "number": U256::MAX.to_string(),
+                "hash": format!("{hash:#x}"),
+            })
+        );
 
         for invalid in [
             serde_json::json!({"number": "01", "hash": format!("{hash:#x}")}),
             serde_json::json!({"number": "1", "hash": "0xabc"}),
+            serde_json::json!({
+                "number": "1",
+                "hash": format!("{hash:#x}"),
+                "extra": false,
+            }),
         ] {
             assert!(serde_json::from_value::<EvmBlockAnchor>(invalid).is_err());
         }

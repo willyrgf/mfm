@@ -14,10 +14,10 @@ use mfm_adapters_evm::{
 use mfm_certify::CertificationRegistry;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBlock, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode, EvmFeeInputs,
-    EvmNetworkBinding, EvmObservedTransaction, EvmReadSession, EvmReceipt, EvmReceiptStatus,
-    EvmSessionEvidence, EvmSessionFuture, EvmTransactionEstimate, EvmTransactionSession,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
+    EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction, EvmReadSession, EvmReceipt,
+    EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture, EvmTransactionEstimate,
+    EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, PureState, RootBuilder,
@@ -892,17 +892,14 @@ impl TransactionCompositionWorld {
         statuses.into_iter().map(|(_, status)| status).collect()
     }
 
-    fn block_by_number(&self, number: U256) -> Option<EvmBlock> {
+    fn block_by_number(&self, number: U256) -> Option<EvmBlockAnchor> {
         self.chain
             .lock()
             .expect("composition chain")
             .included
             .values()
-            .find(|included| included.receipt.block.number == number)
-            .map(|included| EvmBlock {
-                number,
-                hash: included.receipt.block.hash,
-            })
+            .find(|included| included.receipt.block.number_quantity() == Ok(number))
+            .map(|included| included.receipt.block.clone())
     }
 
     fn has_block_hash(&self, hash: B256) -> bool {
@@ -911,7 +908,7 @@ impl TransactionCompositionWorld {
             .expect("composition chain")
             .included
             .values()
-            .any(|included| included.receipt.block.hash == hash)
+            .any(|included| included.receipt.block.hash_value() == Ok(hash))
     }
 }
 
@@ -1011,10 +1008,7 @@ impl EvmTransactionSession for CompositionTransactionSession {
         let receipt = EvmReceipt {
             transaction_hash: expected_hash,
             transaction_index: U256::from(transaction_index),
-            block: EvmBlock {
-                number: block_number,
-                hash: block_hash,
-            },
+            block: EvmBlockAnchor::new(block_number, block_hash),
             from: self.world.sender,
             to,
             contract_address,
@@ -1064,7 +1058,10 @@ impl EvmTransactionSession for CompositionTransactionSession {
         Box::pin(std::future::ready(Ok(receipt)))
     }
 
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         let result = match selector {
             EvmBlockSelector::Number(number) => self
                 .world
@@ -1110,7 +1107,10 @@ impl EvmReadSession for CompositionReadSession {
         &self.evidence
     }
 
-    fn read_block<'a>(&'a self, selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         self.record_read();
         let result = match selector {
             EvmBlockSelector::Number(number) => self

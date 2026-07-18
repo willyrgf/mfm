@@ -156,7 +156,10 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
         .await
         .expect("call");
 
-    assert_eq!(block.number, U256::from(42));
+    assert_eq!(
+        block.number_quantity().expect("block number"),
+        U256::from(42)
+    );
     assert_eq!(balance, U256::from(1_000_000_000_000_000_000_u128));
     assert_eq!(code.bytes, Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]));
     assert_eq!(code.hash, keccak256(&code.bytes));
@@ -257,7 +260,12 @@ async fn transaction_view_uses_u256_checked_fees_and_strict_observations() {
     assert_eq!(transaction.chain_id, U256::from(1));
     assert_eq!(transaction.to, TxKind::Call(ACCOUNT));
     assert_eq!(
-        transaction.placement.expect("placement").block.number,
+        transaction
+            .placement
+            .expect("placement")
+            .block
+            .number_quantity()
+            .expect("block number"),
         U256::from(42)
     );
     let receipt = session

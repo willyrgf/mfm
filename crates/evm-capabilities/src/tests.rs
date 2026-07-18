@@ -285,10 +285,7 @@ fn receipt_rejects_removed_incoherent_or_reverted_logs() {
     let mut receipt = EvmReceipt {
         transaction_hash,
         transaction_index: U256::from(3),
-        block: EvmBlock {
-            number: U256::from(4),
-            hash: block_hash,
-        },
+        block: EvmBlockAnchor::new(U256::from(4), block_hash),
         from: Address::ZERO,
         to: None,
         contract_address: None,
@@ -299,10 +296,7 @@ fn receipt_rejects_removed_incoherent_or_reverted_logs() {
             address: Address::ZERO,
             topics: vec![],
             data: Bytes::new(),
-            block: EvmBlock {
-                number: U256::from(4),
-                hash: block_hash,
-            },
+            block: EvmBlockAnchor::new(U256::from(4), block_hash),
             transaction_hash,
             transaction_index: U256::from(3),
             log_index: U256::ZERO,
@@ -325,10 +319,7 @@ fn receipt_rejects_removed_incoherent_or_reverted_logs() {
         address: Address::ZERO,
         topics: vec![],
         data: Bytes::new(),
-        block: EvmBlock {
-            number: U256::from(4),
-            hash: block_hash,
-        },
+        block: EvmBlockAnchor::new(U256::from(4), block_hash),
         transaction_hash,
         transaction_index: U256::from(3),
         log_index: U256::ZERO,

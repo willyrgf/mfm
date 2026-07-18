@@ -926,9 +926,18 @@ impl SideEffectAdapter for EvmTransactionAdapter {
                 .read_block(&EvmBlockSelector::Number(receipt_number))
                 .await
                 .map_err(post_submission_capability_error)?;
-            if canonical_block.number != receipt_number
-                || canonical_block.hash
-                    != retained_receipt.block_hash_value().map_err(state_error)?
+            let canonical_number = canonical_block.number_quantity().map_err(|_| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "EVM capability returned an invalid canonical block number".to_owned(),
+                )
+            })?;
+            let canonical_hash = canonical_block.hash_value().map_err(|_| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "EVM capability returned an invalid canonical block hash".to_owned(),
+                )
+            })?;
+            if canonical_number != receipt_number
+                || canonical_hash != retained_receipt.block_hash_value().map_err(state_error)?
             {
                 return Err(transaction_pending("receipt block is no longer canonical"));
             }
@@ -936,8 +945,12 @@ impl SideEffectAdapter for EvmTransactionAdapter {
                 .read_block(&EvmBlockSelector::Latest)
                 .await
                 .map_err(post_submission_capability_error)?;
-            let confirmations = head
-                .number
+            let head_number = head.number_quantity().map_err(|_| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                    "EVM capability returned an invalid head block number".to_owned(),
+                )
+            })?;
+            let confirmations = head_number
                 .checked_sub(receipt_number)
                 .and_then(|distance| distance.checked_add(U256::from(1)));
             if confirmations.is_none_or(|count| count < U256::from(required_depth)) {

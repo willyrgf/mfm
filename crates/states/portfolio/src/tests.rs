@@ -3,9 +3,10 @@ use super::*;
 use std::collections::BTreeMap;
 
 use alloy_primitives::U256;
-use mfm_evm_capabilities::{EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID};
+use mfm_evm_capabilities::{
+    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
 use mfm_ids::LocalPublicId;
-use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::{
     NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioReport, PortfolioSnapshot,

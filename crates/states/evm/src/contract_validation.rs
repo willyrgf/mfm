@@ -5,11 +5,10 @@ use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_effects::ReadExternal;
 use mfm_evm_capabilities::{
-    EvmBlock, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
+    EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
     EvmSessionEvidence, EVM_CALL_MAX_RESPONSE_BYTES,
 };
 use mfm_ids::LocalPublicId;
-use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_program::{
     AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, ReadState, StateError, StateResult,
     StateSpec, ValidatedConfig,
@@ -596,14 +595,14 @@ impl<'a> EvmContractValidationEvidenceBuilder<'a> {
     /// Finishes evidence with the number-to-hash canonicality response.
     pub fn finish(
         mut self,
-        final_canonical_block: EvmBlock,
+        final_canonical_block: EvmBlockAnchor,
     ) -> Result<EvmContractValidationEvidence, EvmStateError> {
         if self.next_call_index != self.plan.calls.len() {
             return Err(invalid(
                 "contract validation evidence was missing call responses",
             ));
         }
-        let block = EvmBlockAnchor::new(final_canonical_block.number, final_canonical_block.hash);
+        let block = final_canonical_block;
         validate_block_anchor(&block)?;
         if block != self.plan.anchor {
             return Err(invalid(

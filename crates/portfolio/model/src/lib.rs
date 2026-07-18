@@ -57,8 +57,6 @@
 
 /// Stable portfolio domain keys used by typed fanout/fanin planning.
 pub mod domain_key;
-/// Canonical persisted EVM values shared by portfolio and reusable EVM state surfaces.
-pub mod evm;
 /// Shared holding-observation status vocabulary and write-admission rules.
 pub mod holding;
 /// Strong portfolio scalar identifiers used by config authorities.

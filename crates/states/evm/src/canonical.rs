@@ -3,8 +3,9 @@
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
-use mfm_evm_capabilities::{EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID};
-use mfm_portfolio_model::evm::EvmBlockAnchor;
+use mfm_evm_capabilities::{
+    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
 
 use crate::EvmStateError;
 

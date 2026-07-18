@@ -6,12 +6,12 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, U256};
 use mfm_evm_capabilities::{
-    EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_facts::{FactAudience, FactVisibility};
 use mfm_ids::LocalPublicId;
-use mfm_portfolio_model::evm::EvmBlockAnchor;
 use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;

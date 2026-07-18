@@ -192,6 +192,14 @@ fn category_dependency_rules_reject_forbidden_edges() {
             "transport",
             "operation",
         ),
+        (
+            "capability contract to domain model",
+            "mfm-evm-capabilities",
+            "mfm-portfolio-model",
+            "crates/portfolio/model",
+            "capability-contract",
+            "domain-model",
+        ),
     ] {
         let mut metadata = base_metadata.clone();
         push_path_dependency(
@@ -366,6 +374,22 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
             CrateCategory::DomainModel | CrateCategory::DomainConfig
         ));
     }
+
+    let evm_state_dependencies = path_dependencies(&metadata, "mfm-states-evm", &by_name);
+    assert!(
+        evm_state_dependencies
+            .iter()
+            .all(|dependency| dependency.name != "mfm-portfolio-model"),
+        "the EVM state package must not depend on the portfolio model"
+    );
+    let portfolio_model_dependencies =
+        path_dependencies(&metadata, "mfm-portfolio-model", &by_name);
+    assert!(
+        portfolio_model_dependencies
+            .iter()
+            .any(|dependency| dependency.name == "mfm-evm-capabilities"),
+        "the portfolio model must consume the capability-owned EVM block identity"
+    );
 
     for package in packages.iter().filter(|package| {
         matches!(
@@ -904,8 +928,8 @@ fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory)
 
     match source {
         Kernel => dependency == Kernel,
-        CapabilityContract => matches!(dependency, Kernel | CapabilityContract | DomainModel),
-        DomainModel => matches!(dependency, Kernel | DomainModel),
+        CapabilityContract => matches!(dependency, Kernel | CapabilityContract),
+        DomainModel => matches!(dependency, Kernel | CapabilityContract | DomainModel),
         DomainConfig => matches!(
             dependency,
             Kernel | DomainModel | DomainConfig | SignerContract

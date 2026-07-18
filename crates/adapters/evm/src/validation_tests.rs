@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mfm_evm_capabilities::{
-    EvmBlock, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence, EvmSessionFuture,
+    EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence, EvmSessionFuture,
     ProviderDiagnosticCode,
 };
 use mfm_program::{StateSpec, ValidatedConfig};
@@ -65,7 +65,10 @@ impl EvmReadSession for CountingReadSession {
         &self.evidence
     }
 
-    fn read_block<'a>(&'a self, _selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        _selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         self.used()
     }
 
@@ -145,7 +148,7 @@ struct ScriptedValidationSession {
     evidence: EvmSessionEvidence,
     code: EvmCode,
     responses: Mutex<VecDeque<Bytes>>,
-    canonical_block: EvmBlock,
+    canonical_block: EvmBlockAnchor,
     code_reads: AtomicUsize,
     calls: AtomicUsize,
     block_reads: AtomicUsize,
@@ -170,10 +173,7 @@ impl ScriptedValidationSession {
                 bytes: code,
             },
             responses: Mutex::new(responses.into()),
-            canonical_block: EvmBlock {
-                number: U256::from(100),
-                hash: B256::from([0xaa; 32]),
-            },
+            canonical_block: EvmBlockAnchor::new(U256::from(100), B256::from([0xaa; 32])),
             code_reads: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             block_reads: AtomicUsize::new(0),
@@ -186,7 +186,10 @@ impl EvmReadSession for ScriptedValidationSession {
         &self.evidence
     }
 
-    fn read_block<'a>(&'a self, _selector: &'a EvmBlockSelector) -> EvmSessionFuture<'a, EvmBlock> {
+    fn read_block<'a>(
+        &'a self,
+        _selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
         self.block_reads.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(Ok(self.canonical_block.clone())))
     }
