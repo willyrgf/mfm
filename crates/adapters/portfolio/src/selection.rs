@@ -62,10 +62,14 @@ pub(crate) async fn select_holdings(
     let requests = plan
         .requests()
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let responses = fact_index
-        .read_fact_index_batch(&requests)
-        .await
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let responses = if requests.is_empty() {
+        Vec::new()
+    } else {
+        fact_index
+            .read_fact_index_batch(&requests)
+            .await
+            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?
+    };
     plan.validate_query_results(&responses)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let hydrated = hydrate_holding_responses(&plan, &responses, artifacts).await?;

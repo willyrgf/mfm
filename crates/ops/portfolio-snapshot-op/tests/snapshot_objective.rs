@@ -2,7 +2,7 @@ use mfm_op_portfolio_snapshot::{
     portfolio_snapshot_program_draft, portfolio_snapshot_program_launch_plan,
 };
 use mfm_portfolio_model::portfolio::{PortfolioConfig, ValidatedPortfolioConfig};
-use mfm_program::{InputBindingNodeRef, TypedProgramDraft};
+use mfm_program::TypedProgramDraft;
 use serde_json::json;
 
 const BTC_ADDRESS: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
@@ -41,6 +41,8 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
     for required in [
         "mfm.portfolio.assemble_collection_receipt",
         "mfm.portfolio.select_holdings",
+        "mfm.portfolio.collect_evm_network",
+        "mfm.portfolio.publish_evm_holdings",
         "mfm.portfolio.assemble_snapshot",
         "mfm.portfolio.project_report",
     ] {
@@ -56,7 +58,7 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
         .collect::<Vec<_>>();
     assert!(operations.contains(&"mfm.portfolio.snapshot"));
     assert!(operations.contains(&"mfm.bitcoin.btc_network_collection"));
-    assert!(operations.contains(&"mfm.evm.evm_network_collection"));
+    assert!(!operations.iter().any(|name| name.starts_with("mfm.evm.")));
 
     mfm_certify::certify_program_draft(&draft).expect("complete snapshot draft certifies");
     let launch = portfolio_snapshot_program_launch_plan(config).expect("snapshot launch plan");
@@ -74,10 +76,7 @@ fn aggregate_snapshot_topology_matches_demand_without_inert_collection_nodes() {
         operation_count(&bitcoin_only, "mfm.bitcoin.btc_network_collection"),
         1
     );
-    assert_eq!(
-        operation_count(&bitcoin_only, "mfm.evm.evm_network_collection"),
-        0
-    );
+    assert_two_state_evm_slice(&bitcoin_only, 0);
     assert_no_state_prefix(&bitcoin_only, "mfm.evm.");
 
     let evm_native_only =
@@ -86,28 +85,10 @@ fn aggregate_snapshot_topology_matches_demand_without_inert_collection_nodes() {
         operation_count(&evm_native_only, "mfm.bitcoin.btc_network_collection"),
         0
     );
-    assert_eq!(
-        operation_count(&evm_native_only, "mfm.evm.evm_network_collection"),
-        1
-    );
-    assert_eq!(
-        operation_count(&evm_native_only, "mfm.evm.evm_native_balances_at_anchor"),
-        1
-    );
-    assert_eq!(
-        operation_count(&evm_native_only, "mfm.evm.evm_erc20_balances_at_anchor"),
-        0
-    );
-    assert_eq!(
-        state_count(&evm_native_only, "mfm.evm.joint_tip.resolve"),
-        1
-    );
-    assert_eq!(
-        state_count(&evm_native_only, "mfm.evm.native_balance.observe"),
-        1
-    );
-    assert_no_state_fragment(&evm_native_only, "erc20");
+    assert_two_state_evm_slice(&evm_native_only, 1);
+    assert_eq!(evm_collection_config(&evm_native_only).sources().len(), 1);
     assert_no_state_prefix(&evm_native_only, "mfm.bitcoin.");
+    assert_no_state_prefix(&evm_native_only, "mfm.evm.");
 
     let evm_token_only =
         deterministic_snapshot_draft(topology_config(false, false, true, false, false));
@@ -115,94 +96,57 @@ fn aggregate_snapshot_topology_matches_demand_without_inert_collection_nodes() {
         operation_count(&evm_token_only, "mfm.bitcoin.btc_network_collection"),
         0
     );
-    assert_eq!(
-        operation_count(&evm_token_only, "mfm.evm.evm_network_collection"),
-        1
-    );
-    assert_eq!(
-        operation_count(&evm_token_only, "mfm.evm.evm_native_balances_at_anchor"),
-        0
-    );
-    assert_eq!(
-        operation_count(&evm_token_only, "mfm.evm.evm_erc20_balances_at_anchor"),
-        1
-    );
-    assert_eq!(state_count(&evm_token_only, "mfm.evm.joint_tip.resolve"), 1);
-    assert_eq!(
-        state_count(&evm_token_only, "mfm.evm.erc20_token_metadata.observe"),
-        1
-    );
-    assert_eq!(
-        state_count(&evm_token_only, "mfm.evm.erc20_balance.observe"),
-        1
-    );
-    assert_no_state_fragment(&evm_token_only, "native_balance");
+    assert_two_state_evm_slice(&evm_token_only, 1);
+    assert_eq!(evm_collection_config(&evm_token_only).sources().len(), 1);
+    assert_no_state_prefix(&evm_token_only, "mfm.evm.");
 
     let mixed = deterministic_snapshot_draft(topology_config(false, true, true, false, false));
-    assert_eq!(operation_count(&mixed, "mfm.evm.evm_network_collection"), 1);
-    assert_eq!(
-        operation_count(&mixed, "mfm.evm.evm_native_balances_at_anchor"),
-        1
-    );
-    assert_eq!(
-        operation_count(&mixed, "mfm.evm.evm_erc20_balances_at_anchor"),
-        1
-    );
-    assert_eq!(
-        state_count(&mixed, "mfm.evm.joint_tip.resolve"),
-        1,
-        "native and ERC-20 children must share the network coordinator's sole joint tip"
-    );
-    assert_eq!(state_count(&mixed, "mfm.evm.native_balance.observe"), 1);
-    assert_eq!(
-        state_count(&mixed, "mfm.evm.erc20_token_metadata.observe"),
-        1
-    );
-    assert_eq!(state_count(&mixed, "mfm.evm.erc20_balance.observe"), 1);
-    let tip_cell = mixed
-        .state_nodes()
-        .iter()
-        .find(|node| node.state_descriptor_name == "mfm.evm.joint_tip.resolve")
-        .expect("mixed graph joint-tip node")
-        .output_cell_id
-        .as_str();
-    for descriptor in [
-        "mfm.evm.native_balance.observe",
-        "mfm.evm.erc20_token_metadata.observe",
-        "mfm.evm.erc20_balance.observe",
-    ] {
-        for node in mixed
-            .state_nodes()
-            .iter()
-            .filter(|node| node.state_descriptor_name == descriptor)
-        {
-            assert!(
-                state_input_traces_to_cell(&mixed, node, tip_cell),
-                "{descriptor} must consume the sole EVM joint-tip lineage through certified bridges"
-            );
-        }
-    }
+    assert_two_state_evm_slice(&mixed, 1);
+    assert_eq!(evm_collection_config(&mixed).sources().len(), 2);
+    assert_no_state_prefix(&mixed, "mfm.evm.");
 
     let repeated_token =
         deterministic_snapshot_draft(topology_config(false, false, true, false, true));
-    assert_eq!(
-        state_count(&repeated_token, "mfm.evm.erc20_token_metadata.observe"),
-        1,
-        "one token contract receives one metadata read per network"
-    );
-    assert_eq!(
-        state_count(&repeated_token, "mfm.evm.erc20_balance.observe"),
-        2,
-        "each demanded token account receives one balance read"
-    );
+    assert_two_state_evm_slice(&repeated_token, 1);
+    assert_eq!(evm_collection_config(&repeated_token).sources().len(), 2);
 
     let unreferenced_token =
         deterministic_snapshot_draft(topology_config(false, true, false, true, false));
+    assert_two_state_evm_slice(&unreferenced_token, 1);
     assert_eq!(
-        operation_count(&unreferenced_token, "mfm.evm.evm_erc20_balances_at_anchor"),
+        evm_collection_config(&unreferenced_token).sources().len(),
+        1
+    );
+}
+
+fn assert_two_state_evm_slice(draft: &TypedProgramDraft, network_count: usize) {
+    assert_eq!(
+        state_count(draft, "mfm.portfolio.collect_evm_network"),
+        network_count
+    );
+    assert_eq!(
+        state_count(draft, "mfm.portfolio.publish_evm_holdings"),
+        network_count
+    );
+    assert_eq!(
+        draft
+            .operation_lineage()
+            .iter()
+            .filter(|operation| operation.operation_name.starts_with("mfm.evm."))
+            .count(),
         0
     );
-    assert_no_state_fragment(&unreferenced_token, "erc20");
+}
+
+fn evm_collection_config(
+    draft: &TypedProgramDraft,
+) -> mfm_state_portfolio::EvmNetworkCollectionConfig {
+    let node = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.state_descriptor_name == "mfm.portfolio.collect_evm_network")
+        .expect("EVM collection node");
+    serde_json::from_slice(node.config.canonical_json.as_bytes()).expect("EVM collection config")
 }
 
 fn deterministic_snapshot_draft(config: PortfolioConfig) -> TypedProgramDraft {
@@ -243,73 +187,6 @@ fn assert_no_state_prefix(draft: &TypedProgramDraft, prefix: &str) {
             .all(|node| !node.state_descriptor_name.starts_with(prefix)),
         "aggregate graph unexpectedly contained a {prefix} state"
     );
-}
-
-fn assert_no_state_fragment(draft: &TypedProgramDraft, fragment: &str) {
-    assert!(
-        draft
-            .state_nodes()
-            .iter()
-            .all(|node| !node.state_descriptor_name.contains(fragment)),
-        "aggregate graph unexpectedly contained a state matching {fragment}"
-    );
-}
-
-fn state_input_traces_to_cell(
-    draft: &TypedProgramDraft,
-    node: &mfm_program::StateNodeSpec,
-    source_cell: &str,
-) -> bool {
-    let mut cells = Vec::new();
-    collect_input_cells(node.input.root.as_ref(), &mut cells);
-    cells
-        .into_iter()
-        .any(|cell| bridge_lineage_traces_to_cell(draft, cell, source_cell))
-}
-
-fn bridge_lineage_traces_to_cell(
-    draft: &TypedProgramDraft,
-    input_cell: &str,
-    source_cell: &str,
-) -> bool {
-    let mut current = input_cell;
-    for _ in 0..=draft.bridge_nodes().len() {
-        if current == source_cell {
-            return true;
-        }
-        let Some(bridge) = draft
-            .bridge_nodes()
-            .iter()
-            .find(|bridge| bridge.target_cell_id.as_str() == current)
-        else {
-            return false;
-        };
-        current = bridge.source_cell_id.as_str();
-    }
-    false
-}
-
-fn collect_input_cells<'a>(node: InputBindingNodeRef<'a>, cells: &mut Vec<&'a str>) {
-    match node {
-        InputBindingNodeRef::Unit => {}
-        InputBindingNodeRef::Cell(cell) => cells.push(cell.cell_id().as_str()),
-        InputBindingNodeRef::Tuple(elements) => {
-            for element in elements {
-                collect_input_cells(element.as_ref(), cells);
-            }
-        }
-        InputBindingNodeRef::Struct(fields) => {
-            for field in fields {
-                collect_input_cells(field.node.as_ref(), cells);
-            }
-        }
-        InputBindingNodeRef::Vec { elements, .. }
-        | InputBindingNodeRef::NonEmptyVec { elements, .. } => {
-            for element in elements {
-                collect_input_cells(element.as_ref(), cells);
-            }
-        }
-    }
 }
 
 fn mixed_portfolio_config() -> PortfolioConfig {

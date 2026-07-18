@@ -1,10 +1,11 @@
-//! Portfolio-level receipt types shared by collection composition and report selection.
+//! Bitcoin receipt types shared by collection composition and portfolio report selection.
 //!
-//! Family collectors verify concrete fact material and emit checked
+//! Bitcoin collectors verify concrete fact material and emit checked
 //! [`mfm_facts::FactContentIdentity`] values. A portfolio receipt carries the fact layer's opaque
 //! [`mfm_facts::FactContentIdentityEvidence`]: it is not a usable identity after deserialization.
 //! Report selection re-derives every queried identity from hydrated material and obtains a checked
-//! identity only when that evidence matches, before any claim ordering occurs.
+//! identity only when that evidence matches, before any claim ordering occurs. EVM holdings bypass
+//! this receipt path and reach assembly through direct network snapshots.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,10 +44,7 @@ impl HoldingRequirementKey {
     }
 }
 
-/// Closed cross-family source key used only by the portfolio compiler and receipt.
-///
-/// Source-near collectors use family-specific source-key types. This wrapper exists only after
-/// those receipts have been verified so the compiler can map logical demand to physical work.
+/// Bitcoin source key used by the remaining fact-backed portfolio selection path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "family", rename_all = "snake_case")]
 #[mfm(
@@ -66,44 +64,18 @@ pub enum HoldingSourceKey {
         /// Canonical Bitcoin address.
         address: String,
     },
-    /// EVM native-account balance source.
-    EvmNative {
-        /// Semantic network id.
-        network_id: String,
-        /// EVM chain id.
-        chain_id: u64,
-        /// Canonical account address.
-        account: String,
-    },
-    /// EVM ERC-20 account balance source.
-    EvmErc20 {
-        /// Semantic network id.
-        network_id: String,
-        /// EVM chain id.
-        chain_id: u64,
-        /// Canonical non-zero token contract address.
-        contract_address: String,
-        /// Canonical account address.
-        account: String,
-    },
 }
 
 impl HoldingSourceKey {
     /// Returns the semantic network id bound to this source.
     pub fn network_id(&self) -> &str {
-        match self {
-            Self::BitcoinNative { network_id, .. }
-            | Self::EvmNative { network_id, .. }
-            | Self::EvmErc20 { network_id, .. } => network_id,
-        }
+        let Self::BitcoinNative { network_id, .. } = self;
+        network_id
     }
 
     /// Returns the exact successful coverage required by this source family.
     pub const fn required_coverage(&self) -> &'static str {
-        match self {
-            Self::BitcoinNative { .. } | Self::EvmNative { .. } => "configured_only",
-            Self::EvmErc20 { .. } => "complete_at_anchor",
-        }
+        "configured_only"
     }
 
     /// Returns the exact successful source status required by this source family.
@@ -112,46 +84,19 @@ impl HoldingSourceKey {
     }
 
     /// Returns Bitcoin-native source parts when this is a Bitcoin native source.
-    pub fn bitcoin_native_parts(&self) -> Option<(&str, &str, &str, &str)> {
-        match self {
-            Self::BitcoinNative {
-                network_id,
-                bitcoin_network,
-                semantic_source_identity,
-                address,
-            } => Some((
-                network_id,
-                bitcoin_network,
-                semantic_source_identity,
-                address,
-            )),
-            _ => None,
-        }
-    }
-
-    /// Returns EVM-native source parts when this is an EVM native source.
-    pub fn evm_native_parts(&self) -> Option<(&str, u64, &str)> {
-        match self {
-            Self::EvmNative {
-                network_id,
-                chain_id,
-                account,
-            } => Some((network_id, *chain_id, account)),
-            _ => None,
-        }
-    }
-
-    /// Returns EVM ERC-20 source parts when this is an EVM ERC-20 source.
-    pub fn evm_erc20_parts(&self) -> Option<(&str, u64, &str, &str)> {
-        match self {
-            Self::EvmErc20 {
-                network_id,
-                chain_id,
-                contract_address,
-                account,
-            } => Some((network_id, *chain_id, contract_address, account)),
-            _ => None,
-        }
+    pub fn bitcoin_native_parts(&self) -> (&str, &str, &str, &str) {
+        let Self::BitcoinNative {
+            network_id,
+            bitcoin_network,
+            semantic_source_identity,
+            address,
+        } = self;
+        (
+            network_id,
+            bitcoin_network,
+            semantic_source_identity,
+            address,
+        )
     }
 }
 
@@ -237,7 +182,7 @@ impl CollectedHoldingReceipt {
         &self.source_status
     }
 
-    /// Returns opaque fact-layer evidence copied from the verified family receipt.
+    /// Returns opaque fact-layer evidence copied from the verified Bitcoin receipt.
     ///
     /// Consumers must rederive against hydrated material before using it as an identity.
     pub const fn fact_content_identity_evidence(&self) -> &FactContentIdentityEvidence {
@@ -287,7 +232,7 @@ impl HoldingManifestEntry {
     }
 }
 
-/// Portfolio-wide exact receipt built from the logical manifest and family receipts.
+/// Exact receipt for the Bitcoin-backed portion of a portfolio snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -309,12 +254,6 @@ impl PortfolioCollectionReceipt {
         network_anchors: Vec<NetworkPin>,
     ) -> Result<Self, PortfolioHoldingSelectionError> {
         validate_manifest(manifest)?;
-        if holdings.is_empty() {
-            return Err(receipt_error(
-                "portfolio collection receipt was empty",
-                None,
-            ));
-        }
         let manifest_identity = manifest_identity(manifest)?;
         let expected = manifest
             .iter()
@@ -481,9 +420,9 @@ pub fn manifest_identity(
     Ok(canonical.content_digest().as_str().to_owned())
 }
 
-/// Verifies that an exact receipt is the complete logical demand of one normalized portfolio.
+/// Verifies that an exact receipt is the complete Bitcoin demand of one normalized portfolio.
 ///
-/// This is defense in depth for report selection: collection assembly proves family receipts
+/// This is defense in depth for report selection: collection assembly proves Bitcoin receipts
 /// against its certified manifest, and selection independently proves that the receipt still
 /// belongs to the certified aggregate portfolio config it was given.
 pub fn validate_receipt_against_portfolio(
@@ -506,6 +445,9 @@ pub fn validate_receipt_against_portfolio(
             .get(wallet.network_id.as_str())
             .copied()
             .ok_or_else(|| receipt_error("portfolio wallet referenced an unknown network", None))?;
+        if matches!(network, NetworkConfig::Evm { .. }) {
+            continue;
+        }
         for symbol_id in &wallet.symbol_ids {
             let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
                 receipt_error("portfolio wallet referenced an unknown symbol", None)
@@ -530,47 +472,6 @@ pub fn validate_receipt_against_portfolio(
                     semantic_source_identity: source_identity.to_string(),
                     address: wallet.subject.address_str().to_owned(),
                 },
-                (
-                    NetworkConfig::Evm {
-                        network_id,
-                        chain_id,
-                        ..
-                    },
-                    HoldingSourceConfig::Native,
-                ) => {
-                    let account = wallet.subject.evm_address().ok_or_else(|| {
-                        receipt_error(
-                            "EVM portfolio wallet did not contain an EVM address",
-                            Some(requirement.clone()),
-                        )
-                    })?;
-                    HoldingSourceKey::EvmNative {
-                        network_id: network_id.to_string(),
-                        chain_id: chain_id.get(),
-                        account: account.to_string(),
-                    }
-                }
-                (
-                    NetworkConfig::Evm {
-                        network_id,
-                        chain_id,
-                        ..
-                    },
-                    HoldingSourceConfig::Erc20 { contract_address },
-                ) => {
-                    let account = wallet.subject.evm_address().ok_or_else(|| {
-                        receipt_error(
-                            "EVM portfolio wallet did not contain an EVM address",
-                            Some(requirement.clone()),
-                        )
-                    })?;
-                    HoldingSourceKey::EvmErc20 {
-                        network_id: network_id.to_string(),
-                        chain_id: chain_id.get(),
-                        contract_address: contract_address.to_string(),
-                        account: account.to_string(),
-                    }
-                }
                 _ => {
                     return Err(receipt_error(
                         "portfolio holding source did not match network family",
@@ -610,12 +511,6 @@ pub fn validate_receipt_against_portfolio(
 fn validate_manifest(
     manifest: &[HoldingManifestEntry],
 ) -> Result<(), PortfolioHoldingSelectionError> {
-    if manifest.is_empty() {
-        return Err(receipt_error(
-            "portfolio collection manifest was empty",
-            None,
-        ));
-    }
     let mut requirements = BTreeSet::new();
     let mut sources = BTreeSet::new();
     let mut previous = None;
@@ -673,23 +568,8 @@ fn anchor_matches_source(anchor: &ExecutionAnchor, source: &HoldingSourceKey) ->
         (ExecutionAnchor::Bitcoin { block_hash, .. }, HoldingSourceKey::BitcoinNative { .. }) => {
             is_lower_hex(block_hash, 64)
         }
-        (
-            ExecutionAnchor::Evm {
-                chain_id: anchor_chain_id,
-                block_hash,
-                ..
-            },
-            HoldingSourceKey::EvmNative { chain_id, .. }
-            | HoldingSourceKey::EvmErc20 { chain_id, .. },
-        ) => anchor_chain_id == chain_id && *chain_id != 0 && is_evm_block_hash(block_hash),
         _ => false,
     }
-}
-
-fn is_evm_block_hash(value: &str) -> bool {
-    value
-        .strip_prefix("0x")
-        .is_some_and(|hex| is_lower_hex(hex, 64))
 }
 
 fn is_lower_hex(value: &str, expected_len: usize) -> bool {

@@ -38,6 +38,8 @@ impl ReplayVerifierRegistry {
                             mfm_op_portfolio_snapshot::AssemblePortfolioCollectionReceiptState,
                         >,
                         state_key::<mfm_state_portfolio::SelectHoldingsState>,
+                        state_key::<mfm_state_portfolio::CollectEvmNetworkState>,
+                        state_key::<mfm_state_portfolio::PublishEvmHoldingsState>,
                         state_key::<mfm_state_portfolio::AssembleSnapshotState>,
                         state_key::<mfm_state_portfolio::ProjectReportState>,
                     ],
@@ -56,18 +58,7 @@ impl ReplayVerifierRegistry {
                     verifier: verify_btc,
                 },
                 ReplayVerifierRegistration {
-                    state_keys: &[
-                        state_key::<mfm_states_evm::ResolveEvmJointTipState>,
-                        state_key::<mfm_states_evm::ObserveEvmNativeBalanceState>,
-                        state_key::<mfm_states_evm::RecordEvmNativeBalanceFactState>,
-                        state_key::<mfm_states_evm::AssembleEvmNativeBalanceBatchReceiptState>,
-                        state_key::<mfm_states_evm::ObserveErc20TokenMetadataState>,
-                        state_key::<mfm_states_evm::ObserveErc20BalanceState>,
-                        state_key::<mfm_states_evm::RecordErc20BalanceFactState>,
-                        state_key::<mfm_states_evm::AssembleEvmErc20BalanceBatchReceiptState>,
-                        state_key::<mfm_states_evm::AssembleEvmNetworkCollectionReceiptState>,
-                        state_key::<mfm_states_evm::ValidateEvmContractState>,
-                    ],
+                    state_keys: &[state_key::<mfm_states_evm::ValidateEvmContractState>],
                     intent_matcher: None,
                     verifier: verify_evm,
                 },
@@ -145,7 +136,7 @@ fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Resul
 }
 
 fn verify_evm(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_evm::verify_evm_collector_replay(broker)
+    mfm_adapters_evm::verify_evm_validation_replay(broker)
 }
 
 fn verify_evm_transaction(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {

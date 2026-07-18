@@ -185,21 +185,21 @@ files. Replay verifies retained evidence and recomputes pure behavior from certi
 
 Runtime TOML is intentionally outside this semantic boundary. It maps non-secret source and signer
 references to process-local routing and capability resources, is not semantic configuration data,
-and is never persisted in specs, events, artifacts, public outputs, or replay inputs. The v1 runtime loader may
-parse the whole file when a live capability family is requested; malformed unrelated family data
-can therefore reject that live request. Evidence-only reads do not load runtime TOML. This is an
-accepted v1 variance with no fallback or compatibility surface; selective family loading can be a
-future implementation improvement.
+and is never persisted in specs, events, artifacts, public outputs, or replay inputs. Live assembly
+selectively resolves only the requested EVM route or the requested signer plus its referenced
+keystore; unrelated malformed entries do not block that resource. Evidence-only reads do not load
+runtime TOML. There is no fallback or compatibility surface.
 
 `AssemblePortfolioCollectionReceiptState` is also an accepted placement decision. It remains an
 operation-local pure fan-in state because its semantics are specific to the composed workflow's
-sorted family receipts and exact logical manifest. The app registers its runner, while the
-`mfm-op-portfolio-snapshot` operation owns the receipt node, complete graph topology, and one
-`PortfolioPublicOutputs` root binding. It is not a general portfolio state or an excuse for
-app-owned workflow behavior. The app's private replay binding recomputes the operation-local
-fan-in before it calls the portfolio adapter verifier; this is replay dispatch, not operation
-replay policy or app-owned workflow behavior. The receipt, rather than a count, is the authority
-consumed by holding selection and snapshot assembly.
+sorted Bitcoin network receipts and exact Bitcoin logical manifest. The app registers its runner,
+while the `mfm-op-portfolio-snapshot` operation owns the receipt node, complete graph topology, and
+one `PortfolioPublicOutputs` root binding. It is not a general portfolio state or an excuse for
+app-owned workflow behavior. The app's private replay binding recomputes the operation-local fan-in
+before it calls the portfolio adapter verifier; this is replay dispatch, not operation replay
+policy or app-owned workflow behavior. The receipt, rather than a count, is the authority consumed
+by Bitcoin holding selection and snapshot assembly. For an all-EVM portfolio the exact Bitcoin
+manifest and receipt are empty.
 
 ## Typed Program Authoring
 
@@ -381,8 +381,24 @@ Replay and resume semantics follow the effect class:
 
 Portfolio holding intent is direct and aggregate-validated: each symbol is a `Native` source or an
 EVM `Erc20` source with a normalized non-zero contract address, and EVM native scale is owned by
-the semantic network. The complete collection-to-report snapshot graph remains internal until its
-public ingress is published. Public-facts CLI/REST is not portfolio selection authority.
+the semantic network. Admission rejects excessive networks, wallets, symbols, wallet-symbol
+relations, or distinct sources for one EVM network before graph expansion or provider work.
+
+Each demanded EVM network has exactly one `CollectEvmNetworkState` and one
+`PublishEvmHoldingsState`. The read state owns the sorted native/ERC-20 source plan and deterministic
+reducer. One checked source-bound session resolves latest once, reads deduplicated token metadata
+and every balance at the exact EIP-1898 hash with canonicality required, and finishes with one
+number-to-hash recheck. Reads use bounded concurrency. The managed-write state publishes one
+`portfolio.evm_balance_snapshot` fact per source and its direct `EvmNetworkSnapshot` in one atomic
+attempt. The required fact subject asset is `native` or
+`erc20:<canonical-contract-address>`, so token contracts cannot share identity.
+
+Portfolio assembly consumes those direct EVM snapshots with exact config-derived network/source
+coverage. Only Bitcoin holdings use receipt-pinned fact-index selection; an all-EVM run issues no
+fact-index request. Replay invokes the same EVM reducer, verifies exact same-attempt fact-batch
+authority, and proves the direct snapshots reached assembly unchanged without constructing a live
+route. The complete collection-to-report graph is internal to the sole public snapshot entry point.
+Public-facts CLI/REST is not portfolio selection authority.
 
 ## Certified Saga Semantics
 
@@ -722,11 +738,11 @@ semantic binding, such as EVM `network_id` plus expected chain id or Bitcoin `ne
 EVM collection attempt binds one direct route, probes its chain once, and persists one redacted
 session identity: `network_id`, chain id, `source_ref`, and transport `implementation_id`. Every
 native balance, ERC-20 metadata, ERC-20 balance, and number-to-hash re-verification uses that same
-session. The binding is
-also carried through the ERC-20 metadata and EVM resource/network receipts, so live execution and
-evidence-only replay reject source drift or substitution even when the network and chain match. A
-route that resolves but observes incompatible source evidence fails after `RunAdmitted` as an
-attempt/capability failure with a closed redacted provider diagnostic. Provider diagnostics carry a
+session. The binding is carried once in the aggregate EVM collection evidence and direct network
+snapshot; the state reducer and evidence-only replay reject source drift or substitution even when
+the network and chain match. A route that resolves but observes incompatible source evidence fails
+after `RunAdmitted` as an attempt/capability failure with a closed redacted provider diagnostic.
+Provider diagnostics carry a
 provider family, stable diagnostic code, optional redaction-safe operation id, and closed
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,
 response-shape failure, unsupported operation, operation incomplete, and source mismatch. They must

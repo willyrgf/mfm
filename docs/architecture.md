@@ -49,17 +49,21 @@ runtime or replay authority.
 
 The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
 normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
-Standalone BTC/EVM collectors, report-only roots, and contract workflows are absent. Internal
-network coordinators resolve one shared tip per required network and emit family-specific,
-content-bound source receipts. The complete snapshot graph is the sole public objective,
+Standalone collector roots, report-only roots, and contract workflows are absent. Bitcoin
+collection resolves one shared tip per required network and emits content-bound receipts for
+receipt-pinned selection. Each EVM network instead expands to one portfolio-owned external-read
+state and one atomic managed-write state; its direct typed network snapshot flows to assembly
+without a same-run fact-index query. The complete snapshot graph is the sole public objective,
 `mfm.portfolio/snapshot@1`.
 
 `mfm-op-portfolio-snapshot` owns that complete internal graph from normalized
-`PortfolioConfig` through family collection, exact receipt assembly, receipt-pinned selection,
-snapshot assembly, and report projection. Its one production draft helper binds exactly one
-`PortfolioPublicOutputs` root. The app registers the needed runners and certification descriptors,
-strictly resolves one target-keyed `PortfolioConfig` at admission, and exposes that exact graph
-only through `mfm.portfolio/snapshot@1`.
+`PortfolioConfig` through Bitcoin collection/selection and EVM collection/publication to snapshot
+assembly and report projection. Its one production draft helper binds exactly one
+`PortfolioPublicOutputs` root. Portfolio admission bounds networks, wallets, symbols,
+wallet-to-symbol relations, and distinct EVM sources per network before graph expansion. The app
+registers the needed runners and certification descriptors, strictly resolves one target-keyed
+`PortfolioConfig` at admission, and exposes that exact graph only through
+`mfm.portfolio/snapshot@1`.
 
 ## Authority Contract
 
@@ -147,19 +151,19 @@ certified artifacts and the append-only run stream only.
 Two v1 decisions are deliberate:
 
 - `AssemblePortfolioCollectionReceiptState` remains operation-local. It is the pure fan-in state
-  for sorted BTC/EVM family receipts and the compiled logical manifest, not reusable portfolio
-  domain behavior. It proves exact source completion, number/hash anchors, admissible
-  status/coverage, and fact-content identities; it does not retain count readiness. The app
-  registers its runner, while `mfm-op-portfolio-snapshot` owns receipt assembly semantics, the
-  complete graph topology, and its single root binding. Because operations cannot decide replay,
-  the app's private portfolio snapshot replay binding recomputes this fan-in before delegating the
-  receipt-pinned projection to the portfolio adapter; it adds no workflow topology or receipt
-  semantics.
+  for sorted Bitcoin network receipts and the compiled Bitcoin logical manifest, not reusable
+  portfolio domain behavior. It proves exact source completion, number/hash anchors, admissible
+  status/coverage, and fact-content identities; an all-EVM portfolio produces a valid empty
+  Bitcoin receipt. The app registers its runner, while `mfm-op-portfolio-snapshot` owns receipt
+  assembly semantics, the complete graph topology, and its single root binding. Because operations
+  cannot decide replay, the app's private portfolio snapshot replay binding recomputes this fan-in
+  before delegating Bitcoin selection and direct EVM snapshot verification to the portfolio
+  adapter; it adds no workflow topology or receipt semantics.
 - Runtime TOML remains a process-local routing and signer boundary rather than semantic
-  configuration data. The current loader may parse the whole file when a live capability family is requested, so
-  malformed unrelated family data can reject that live request. Read-only paths do not load it, and
-  it is never persisted or used by replay. Selective family loading is a future optimization, not a
-  compatibility path or a hidden fallback.
+  configuration data. Live assembly selectively resolves only the requested EVM route or requested
+  signer plus its referenced keystore, so malformed unrelated entries do not block that resource.
+  Read-only paths do not load it, and it is never persisted or used by replay. There is no
+  compatibility path or hidden fallback.
 
 ## Boundary Contract
 
@@ -498,6 +502,14 @@ plan fixes one address/number/hash anchor, mandatory non-empty runtime-code hash
 full-context calls. Its adapter binds one checked read session, executes code and calls at the exact
 hash, and finishes with a number-to-hash canonicality read. Live execution and evidence-only replay
 both use the state reducer; replay never binds a route or session.
+
+The reusable EVM package surface is deliberately exact: `mfm-evm-capabilities`,
+`mfm-evm-signing`, `mfm-states-evm`, `mfm-adapters-evm`, and `mfm-transports-evm`.
+`mfm-states-evm` contains only `SubmitEvmTransactionState` and
+`ValidateEvmContractState`; `mfm-adapters-evm` contains only their transaction and validation
+bindings. Portfolio balance reads, facts, reducers, publication, replay, and runner bindings live
+in the portfolio state/adapter vertical slice. There is no EVM core utility bag, collector
+operation package, fixed contract lifecycle package, or compatibility facade.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 

@@ -1,13 +1,17 @@
 use super::*;
 
+use std::collections::BTreeMap;
+
 use mfm_replay::v1::{self as replay, load_node_config as replay_node_config};
 
-/// Verifies the produced receipt-pinned portfolio projection prefix from retained evidence only.
+/// Verifies Bitcoin selection and direct EVM snapshot projection from retained evidence only.
 pub fn verify_portfolio_replay(
     broker: &replay::ReplayBroker,
     receipt: &PortfolioCollectionReceipt,
 ) -> replay::Result<()> {
     replay::verify_external_read_state::<SelectHoldingsState>(broker)?;
+    replay::verify_external_read_state::<CollectEvmNetworkState>(broker)?;
+    let published_evm_snapshots = verify_published_evm_snapshots(broker)?;
 
     let select_frame =
         optional_replay_single_state_frame::<SelectHoldingsState>(broker, "SelectHoldings")?;
@@ -65,6 +69,25 @@ pub fn verify_portfolio_replay(
             "AssembleSnapshot did not consume the exact selected holdings and receipt",
         ));
     }
+    let mut replay_snapshot_by_network = snapshot_input
+        .evm_snapshots
+        .iter()
+        .map(|snapshot| (snapshot.network_id(), snapshot))
+        .collect::<BTreeMap<_, _>>();
+    if replay_snapshot_by_network.len() != snapshot_input.evm_snapshots.len()
+        || replay_snapshot_by_network.len() != published_evm_snapshots.len()
+    {
+        return Err(replay_portfolio_mismatch(
+            "AssembleSnapshot EVM snapshot coverage was not exact",
+        ));
+    }
+    for published in &published_evm_snapshots {
+        if replay_snapshot_by_network.remove(published.network_id()) != Some(published) {
+            return Err(replay_portfolio_mismatch(
+                "AssembleSnapshot did not consume exact published EVM snapshots",
+            ));
+        }
+    }
     let snapshot =
         assemble_snapshot(&snapshot_config, snapshot_input).map_err(replay_adapter_error)?;
     verify_replay_output_bytes(&snapshot_frame, &snapshot, "assembled snapshot")?;
@@ -82,6 +105,36 @@ pub fn verify_portfolio_replay(
     let report = mfm_state_portfolio::project_report_from_snapshot(report_input.snapshot)
         .map_err(replay_adapter_error)?;
     verify_replay_output_bytes(&report_frame, &report, "project report")
+}
+
+fn verify_published_evm_snapshots(
+    broker: &replay::ReplayBroker,
+) -> replay::Result<Vec<mfm_state_portfolio::EvmNetworkSnapshot>> {
+    let kind = PublishEvmHoldingsState::kind().map_err(replay_adapter_error)?;
+    let version = PublishEvmHoldingsState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == kind && node.state_version == version)
+    })?;
+    let mut snapshots = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let config: EvmNetworkCollectionConfig = replay_node_config(broker, &frame.node)?;
+        let input = replay::load_node_input::<PublishEvmHoldingsInput>(broker, &frame.node)?;
+        let snapshot = mfm_state_portfolio::publish_evm_holdings(&config, input.batch)
+            .map_err(replay_adapter_error)?;
+        verify_replay_output_bytes(&frame, &snapshot, "published EVM network snapshot")?;
+        replay::verify_recorded_fact_batch_evidence(broker, &frame, &snapshot.facts())?;
+        snapshots.push(snapshot);
+    }
+    snapshots.sort_by(|left, right| left.network_id().cmp(right.network_id()));
+    if snapshots
+        .windows(2)
+        .any(|pair| pair[0].network_id() == pair[1].network_id())
+    {
+        return Err(replay_portfolio_mismatch(
+            "replay found duplicate published EVM network snapshots",
+        ));
+    }
+    Ok(snapshots)
 }
 
 fn optional_replay_single_state_frame<S>(

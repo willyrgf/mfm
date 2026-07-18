@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use mfm_portfolio_model::portfolio::{
     decode_portfolio_config, NetworkConfig, NetworkFamilyConfig, PortfolioConfigError,
+    EVM_NETWORK_HOLDING_SOURCE_LIMIT, PORTFOLIO_HOLDING_RELATION_LIMIT, PORTFOLIO_NETWORK_LIMIT,
+    PORTFOLIO_SYMBOL_LIMIT, PORTFOLIO_WALLET_LIMIT,
 };
 use mfm_portfolio_model::symbol::{QuoteCode, SymbolConfigError};
 use serde_json::{json, Value};
@@ -246,6 +248,62 @@ fn evm_native_scale_is_explicit_and_bitcoin_cannot_carry_one() {
             BTreeMap::new(),
         ),
         Err(PortfolioConfigError::UnexpectedBitcoinNativeDecimals { .. })
+    ));
+}
+
+#[test]
+fn portfolio_cardinality_bounds_fail_before_graph_expansion() {
+    for (field, limit, collection) in [
+        ("networks", PORTFOLIO_NETWORK_LIMIT, "network"),
+        ("wallets", PORTFOLIO_WALLET_LIMIT, "wallet"),
+        ("symbol_configs", PORTFOLIO_SYMBOL_LIMIT, "symbol"),
+    ] {
+        let mut config = canonical_config();
+        let values = config[field].as_array_mut().expect("bounded collection");
+        let fixture = values[0].clone();
+        values.resize(limit + 1, fixture);
+        assert!(matches!(
+            decode_portfolio_config(&config),
+            Err(PortfolioConfigError::CollectionLimitExceeded {
+                collection: actual_collection,
+                limit: actual_limit,
+                actual,
+            }) if actual_collection == collection && actual_limit == limit && actual == limit + 1
+        ));
+    }
+
+    let mut relations = canonical_config();
+    relations["wallets"][1]["symbol_ids"] = json!(std::iter::repeat_n(
+        "eth.native.ethereum-mainnet",
+        PORTFOLIO_HOLDING_RELATION_LIMIT + 1
+    )
+    .collect::<Vec<_>>());
+    assert!(matches!(
+        decode_portfolio_config(&relations),
+        Err(PortfolioConfigError::CollectionLimitExceeded {
+            collection: "holding relation",
+            limit: PORTFOLIO_HOLDING_RELATION_LIMIT,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn per_evm_network_holding_source_bound_is_admitted_once_in_portfolio_validation() {
+    let mut config = canonical_config();
+    config["wallets"][1]["symbol_ids"] = json!(std::iter::repeat_n(
+        "eth.native.ethereum-mainnet",
+        EVM_NETWORK_HOLDING_SOURCE_LIMIT + 1
+    )
+    .collect::<Vec<_>>());
+    assert!(matches!(
+        decode_portfolio_config(&config),
+        Err(PortfolioConfigError::EvmNetworkHoldingSourceLimitExceeded {
+            network_id,
+            limit: EVM_NETWORK_HOLDING_SOURCE_LIMIT,
+            actual,
+        }) if network_id == "ethereum-mainnet"
+            && actual == EVM_NETWORK_HOLDING_SOURCE_LIMIT + 1
     ));
 }
 

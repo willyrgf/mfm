@@ -444,7 +444,125 @@ where
             "replay fact output did not have exactly one FactRecorded event",
         ));
     }
-    let claim = &records[0].claim;
+    verify_fact_claim_evidence(
+        broker,
+        frame,
+        descriptor,
+        &records[0].claim,
+        subject,
+        response_value,
+    )
+}
+
+/// Verifies a homogeneous fact batch atomically recorded by one managed-write attempt.
+pub fn verify_recorded_fact_batch_evidence<F>(
+    broker: &ReplayBroker,
+    frame: &ProducedCellReplayFrame,
+    facts: &[F],
+) -> Result<()>
+where
+    F: mfm_program::MfmFactType,
+{
+    let output_events = broker
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::CellProduced(payload)
+                    if payload.node_id == frame.produced.node_id
+                        && payload.attempt_id == frame.produced.attempt_id
+                        && payload.cell_id == frame.produced.cell_id
+            )
+        })
+        .collect::<Vec<_>>();
+    if output_events.len() != 1 {
+        return Err(mismatch(
+            "replay fact batch did not have exactly one matching CellProduced event",
+        ));
+    }
+    let output_event = output_events[0];
+    let mut records = broker
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::FactRecorded(payload)
+                if payload.node_id == frame.produced.node_id
+                    && payload.attempt_id == frame.produced.attempt_id =>
+            {
+                Some((event, payload))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if records.len() != facts.len() {
+        return Err(mismatch(
+            "replay fact batch did not have exact FactRecorded coverage",
+        ));
+    }
+    let descriptor = F::descriptor().map_err(|error| mismatch(error.to_string()))?;
+    let descriptor_hash = mfm_facts::fact_descriptor_hash(&descriptor)
+        .map_err(|error| mismatch(error.to_string()))?;
+    for fact in facts {
+        let subject_json = serde_json::to_value(fact.subject()).map_err(json_error)?;
+        let expected_subject = mfm_facts::typed_fact_subject_evidence(&descriptor, &subject_json)
+            .map_err(|error| mismatch(error.to_string()))?;
+        let expected_response = canonical_value_bytes(fact.response())?;
+        let matches = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                let claim = &record.1.claim;
+                (claim.fact_descriptor_hash() == &descriptor_hash
+                    && claim.fact_kind() == descriptor.fact_kind()
+                    && claim.subject() == &expected_subject
+                    && claim.response().response_schema_id() == descriptor.response_schema_id()
+                    && claim.response().response_hash() == &expected_response.content_digest())
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(mismatch(
+                "replay fact batch contained missing or duplicate fact authority",
+            ));
+        }
+        let (record_event, record) = records.remove(matches[0]);
+        if record_event.commit_key() != output_event.commit_key()
+            || record_event.store_commit_order() != output_event.store_commit_order()
+        {
+            return Err(mismatch(
+                "replay fact batch and state output were not recorded atomically",
+            ));
+        }
+        verify_fact_claim_evidence(
+            broker,
+            frame,
+            &descriptor,
+            &record.claim,
+            fact.subject(),
+            fact.response(),
+        )?;
+    }
+    if !records.is_empty() {
+        return Err(mismatch(
+            "replay fact batch contained unexpected fact authority",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_fact_claim_evidence<S, R>(
+    broker: &ReplayBroker,
+    frame: &ProducedCellReplayFrame,
+    descriptor: &mfm_facts::FactDescriptor,
+    claim: &mfm_facts::FactClaim,
+    subject: &S,
+    response_value: &R,
+) -> Result<()>
+where
+    S: Serialize,
+    R: Serialize,
+{
     let descriptor_hash =
         mfm_facts::fact_descriptor_hash(descriptor).map_err(|error| mismatch(error.to_string()))?;
     if claim.fact_descriptor_hash() != &descriptor_hash

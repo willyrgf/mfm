@@ -19,13 +19,11 @@ mfm-effects = { path = "../../kernel/effects", version = "0.1.0" }
 mfm-facts = { path = "../../kernel/facts", version = "0.1.0" }
 mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
 mfm-op-btc-collectors = { path = "../btc-collectors-op", version = "0.1.0" }
-mfm-op-evm-collectors = { path = "../evm-collectors-op", version = "0.1.0" }
 mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }
 mfm-program = { path = "../../kernel/program", version = "0.1.0" }
 mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
 mfm-state-portfolio = { path = "../../states/portfolio", version = "0.1.0" }
 mfm-states-btc = { path = "../../states/btc", version = "0.1.0" }
-mfm-states-evm = { path = "../../states/evm", version = "0.1.0" }
 mfm-values = { path = "../../kernel/values", version = "0.1.0" }
 
 [dev-dependencies]

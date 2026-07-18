@@ -1,5 +1,5 @@
 use super::*;
-use mfm_portfolio_model::portfolio::ExecutionAnchor;
+use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 
 /// Builds quantity-only observations from selected holdings (valuation join deferred).
@@ -170,19 +170,7 @@ fn observation_source_matches_receipt(
         (
             HoldingSourceKey::BitcoinNative { .. },
             HoldingSourceConfig::Native
-        ) | (
-            HoldingSourceKey::EvmNative { .. },
-            HoldingSourceConfig::Native
         )
-    ) || matches!(
-        (source, observation_source),
-        (
-            HoldingSourceKey::EvmErc20 {
-                contract_address: expected,
-                ..
-            },
-            HoldingSourceConfig::Erc20 { contract_address: actual }
-        ) if expected == actual.as_str()
     )
 }
 
@@ -202,6 +190,169 @@ fn observation_execution_anchor(anchor: &ObservationAnchor) -> ExecutionAnchor {
             block_hash: block_hash.clone(),
         },
     }
+}
+
+fn observations_from_evm_snapshots(
+    portfolio: &PortfolioConfig,
+    snapshots: Vec<EvmNetworkSnapshot>,
+) -> StateResult<Vec<Observation>> {
+    let networks = portfolio
+        .networks
+        .iter()
+        .map(|network| (network.network_id().as_str(), network))
+        .collect::<BTreeMap<_, _>>();
+    let symbols = symbols_by_id(&portfolio.symbol_configs)
+        .map_err(|error| StateError::Message(error.to_string()))?;
+    let mut expected_sources = BTreeMap::<String, BTreeSet<EvmBalanceSource>>::new();
+    for wallet in &portfolio.wallets {
+        let network = networks
+            .get(wallet.network_id.as_str())
+            .copied()
+            .ok_or_else(|| StateError::Message("wallet network was missing".to_owned()))?;
+        if !matches!(network, NetworkConfig::Evm { .. }) {
+            continue;
+        }
+        let account = wallet.subject.evm_address().ok_or_else(|| {
+            StateError::Message("EVM wallet did not contain an EVM address".to_owned())
+        })?;
+        for symbol_id in &wallet.symbol_ids {
+            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
+                StateError::Message("wallet symbol was missing from portfolio config".to_owned())
+            })?;
+            let asset = match &symbol.source {
+                HoldingSourceConfig::Native => EvmBalanceAsset::Native,
+                HoldingSourceConfig::Erc20 { contract_address } => {
+                    EvmBalanceAsset::erc20(contract_address.to_string())
+                        .map_err(|error| StateError::Message(error.to_string()))?
+                }
+            };
+            let source = EvmBalanceSource::new(account.to_string(), asset)
+                .map_err(|error| StateError::Message(error.to_string()))?;
+            if !expected_sources
+                .entry(wallet.network_id.to_string())
+                .or_default()
+                .insert(source)
+            {
+                return Err(StateError::Message(
+                    "portfolio EVM demand contained an aliased balance source".to_owned(),
+                ));
+            }
+        }
+    }
+
+    let mut snapshots_by_network = BTreeMap::new();
+    for snapshot in snapshots {
+        let network_id = snapshot.network_id().to_owned();
+        if snapshots_by_network.insert(network_id, snapshot).is_some() {
+            return Err(StateError::Message(
+                "portfolio input contained duplicate EVM network snapshots".to_owned(),
+            ));
+        }
+    }
+    if snapshots_by_network.len() != expected_sources.len()
+        || snapshots_by_network
+            .keys()
+            .any(|network_id| !expected_sources.contains_key(network_id))
+    {
+        return Err(StateError::Message(
+            "portfolio input EVM network snapshot coverage was not exact".to_owned(),
+        ));
+    }
+
+    let mut actual = BTreeMap::new();
+    for (network_id, sources) in &expected_sources {
+        let network = networks
+            .get(network_id.as_str())
+            .copied()
+            .ok_or_else(|| StateError::Message("EVM snapshot network was missing".to_owned()))?;
+        let config = EvmNetworkCollectionConfig::new(network, sources.iter().cloned().collect())
+            .map_err(|error| StateError::Message(error.to_string()))?;
+        let snapshot = snapshots_by_network.get(network_id).ok_or_else(|| {
+            StateError::Message("required EVM network snapshot was missing".to_owned())
+        })?;
+        snapshot
+            .validate_against(&config)
+            .map_err(|error| StateError::Message(error.to_string()))?;
+        for balance in snapshot.balances() {
+            let key = (network_id.clone(), balance.source().clone());
+            if actual
+                .insert(key, (snapshot.anchor().clone(), balance.clone()))
+                .is_some()
+            {
+                return Err(StateError::Message(
+                    "EVM network snapshots contained a duplicate source".to_owned(),
+                ));
+            }
+        }
+    }
+
+    let mut observations = Vec::new();
+    for wallet in &portfolio.wallets {
+        let network = networks
+            .get(wallet.network_id.as_str())
+            .copied()
+            .ok_or_else(|| StateError::Message("wallet network was missing".to_owned()))?;
+        if !matches!(network, NetworkConfig::Evm { .. }) {
+            continue;
+        }
+        let account = wallet.subject.evm_address().ok_or_else(|| {
+            StateError::Message("EVM wallet did not contain an EVM address".to_owned())
+        })?;
+        for symbol_id in &wallet.symbol_ids {
+            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
+                StateError::Message("wallet symbol was missing from portfolio config".to_owned())
+            })?;
+            let asset = match &symbol.source {
+                HoldingSourceConfig::Native => EvmBalanceAsset::Native,
+                HoldingSourceConfig::Erc20 { contract_address } => {
+                    EvmBalanceAsset::erc20(contract_address.to_string())
+                        .map_err(|error| StateError::Message(error.to_string()))?
+                }
+            };
+            let source = EvmBalanceSource::new(account.to_string(), asset)
+                .map_err(|error| StateError::Message(error.to_string()))?;
+            let (anchor, balance) = actual
+                .remove(&(wallet.network_id.to_string(), source))
+                .ok_or_else(|| {
+                    StateError::Message(
+                        "required EVM holding was missing from direct network snapshots".to_owned(),
+                    )
+                })?;
+            let mut observation = Observation {
+                wallet_id: wallet.wallet_id.to_string(),
+                symbol_id: symbol.symbol_id.to_string(),
+                display_symbol: symbol.display_symbol.clone(),
+                network_id: wallet.network_id.to_string(),
+                quantity: ObservationQuantity {
+                    raw_dec: balance.raw_units().to_owned(),
+                    decimals: balance.decimals(),
+                    amount_dec: amount_dec_from_raw(balance.raw_units(), balance.decimals())
+                        .map_err(|error| StateError::Message(error.to_string()))?,
+                },
+                values: Vec::new(),
+                source: AnchoredHoldingSource {
+                    holding: symbol.source.clone(),
+                    anchor: ObservationAnchor::Evm {
+                        chain_id: network.chain_id_u64().ok_or_else(|| {
+                            StateError::Message("EVM network chain id was missing".to_owned())
+                        })?,
+                        block_number: anchor.block_number(),
+                        block_hash: anchor.block_hash().to_owned(),
+                    },
+                },
+                coverage: "complete_at_anchor".to_owned(),
+                metadata: symbol.metadata.clone(),
+            };
+            observation.normalize();
+            observations.push(observation);
+        }
+    }
+    if !actual.is_empty() {
+        return Err(StateError::Message(
+            "EVM network snapshots contained unexpected holdings".to_owned(),
+        ));
+    }
+    Ok(observations)
 }
 
 /// Assembles the canonical portfolio snapshot (hard-fail; pins from selected observations).
@@ -232,8 +383,27 @@ pub fn assemble_snapshot(
             message = error.message
         ))
     })?;
-    let observations =
-        apply_configured_valuations_to_observations(input.holdings.observations, &symbols)?;
+    let bitcoin_pins = project_network_pins_from_observations(&input.holdings.observations)
+        .map_err(|error| StateError::Message(error.to_string()))?;
+    if bitcoin_pins.as_slice() != input.receipt.network_anchors() {
+        return Err(StateError::Message(
+            "receipt_mismatch: selected Bitcoin pins did not equal collection receipt anchors"
+                .to_owned(),
+        ));
+    }
+    let mut observations = input.holdings.observations;
+    observations.extend(observations_from_evm_snapshots(
+        &config.portfolio,
+        input.evm_snapshots,
+    )?);
+    observations.sort_by(|left, right| {
+        (&left.wallet_id, &left.symbol_id, &left.network_id).cmp(&(
+            &right.wallet_id,
+            &right.symbol_id,
+            &right.network_id,
+        ))
+    });
+    let observations = apply_configured_valuations_to_observations(observations, &symbols)?;
     let network_pins = project_network_pins_from_observations(&observations).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -241,13 +411,6 @@ pub fn assemble_snapshot(
             message = error.message
         ))
     })?;
-    if network_pins.as_slice() != input.receipt.network_anchors() {
-        return Err(StateError::Message(
-            "receipt_mismatch: selected observation pins did not equal collection receipt anchors"
-                .to_owned(),
-        ));
-    }
-
     let mut observations_by_wallet: BTreeMap<String, Vec<Observation>> = BTreeMap::new();
     for observation in observations {
         observations_by_wallet

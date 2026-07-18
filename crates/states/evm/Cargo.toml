@@ -2,7 +2,7 @@
 name = "mfm-states-evm"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable EVM transaction and temporary portfolio collector state contracts for MFM"
+description = "Reusable single-transaction and exact-anchor EVM state contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -18,15 +18,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
-mfm-capabilities = { path = "../../kernel/capabilities", version = "0.1.0" }
 mfm-effects = { path = "../../kernel/effects", version = "0.1.0" }
-mfm-evm-core = { path = "../../evm-core", version = "0.1.0" }
 mfm-evm-capabilities = { path = "../../evm-capabilities", version = "0.1.0" }
 mfm-evm-signing = { path = "../../evm-signing", version = "0.1.0" }
-mfm-fact-capabilities = { path = "../../fact-capabilities", version = "0.1.0" }
-mfm-facts = { path = "../../kernel/facts", version = "0.1.0" }
 mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
-mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }
 mfm-program = { path = "../../kernel/program", version = "0.1.0" }
 mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
 mfm-signing = { path = "../../signing", version = "0.1.0" }

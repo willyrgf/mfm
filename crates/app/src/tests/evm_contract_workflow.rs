@@ -8,8 +8,8 @@ use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B2
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
 use mfm_adapters_evm::{
-    register_evm_collectors_runners, register_evm_transaction_runner, EvmRunnerCapabilities,
-    EvmTransactionRunnerCapabilities,
+    register_evm_transaction_runner, register_evm_validation_runner,
+    EvmTransactionRunnerCapabilities, EvmValidationRunnerCapabilities,
 };
 use mfm_certify::CertificationRegistry;
 use mfm_events::v1 as events;
@@ -469,17 +469,21 @@ fn workflow_runners(
     )
     .expect("register transaction runner");
 
-    register_evm_collectors_runners(
+    register_evm_validation_runner(
         &mut runners,
-        EvmRunnerCapabilities::new(artifacts, validate_workflow_binding, move |binding| {
-            let world = Arc::clone(&world);
-            let reads = Arc::clone(&live_validation_reads);
-            Box::pin(async move {
-                validate_workflow_binding(&binding)?;
-                Ok(Arc::new(WorkflowReadSession::new(binding, world, reads))
-                    as Arc<dyn EvmReadSession>)
-            })
-        }),
+        EvmValidationRunnerCapabilities::new(
+            artifacts,
+            validate_workflow_binding,
+            move |binding| {
+                let world = Arc::clone(&world);
+                let reads = Arc::clone(&live_validation_reads);
+                Box::pin(async move {
+                    validate_workflow_binding(&binding)?;
+                    Ok(Arc::new(WorkflowReadSession::new(binding, world, reads))
+                        as Arc<dyn EvmReadSession>)
+                })
+            },
+        ),
     )
     .expect("register validation runner");
     runners

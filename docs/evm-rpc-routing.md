@@ -73,9 +73,18 @@ an EIP-1898 selector with `requireCanonical: true`. After the anchored reads, th
 the anchor by number and requires the returned hash to equal the original hash. Asking for the old
 hash again is not a canonicality check and is forbidden.
 
-The current collector graph retains destination, exact calldata, raw return bytes, the final
-number/hash result, and one session evidence value. Replay reconstructs those typed values and runs
-the same deterministic state reducers without runtime config or network access.
+For each demanded portfolio network, `CollectEvmNetworkState` resolves latest once, deduplicates
+ERC-20 metadata by contract, reads every sorted native/token source at that exact hash, and performs
+one final number-to-hash check. Metadata and balance reads have a hard concurrency limit of 16.
+Its single aggregate evidence value retains the checked session, requests/results, and final
+canonicality observation. The state-owned reducer enforces exact order and coverage for both live
+execution and replay.
+
+`PublishEvmHoldingsState` then records one `portfolio.evm_balance_snapshot` fact per source and a
+direct `EvmNetworkSnapshot` in one atomic managed-write attempt. Portfolio assembly consumes that
+snapshot handle directly; it never queries the same run's EVM facts from the fact index. An all-EVM
+portfolio therefore makes no fact-index call. Replay reconstructs the collection and publication
+from retained evidence without runtime config or network access.
 
 ## Signing
 
@@ -106,5 +115,8 @@ Contributor ownership:
 - `mfm-runtime-config` parses and selectively resolves routes and signers;
 - app assembly selects runtime resources and binds sessions;
 - `mfm-transports-evm` owns bounded JSON-RPC and typed protocol decoding;
-- `mfm-adapters-evm` sequences state intent over a bound session and records redacted evidence;
-- states own deterministic validation and reduction; binaries only pass paths and render results.
+- `mfm-adapters-portfolio` binds portfolio balance plans to one read session and records aggregate
+  evidence and atomic fact/snapshot output;
+- `mfm-adapters-evm` owns only the reusable transaction and exact contract-validation bindings;
+- portfolio and EVM states own their deterministic validation/reduction semantics; binaries only
+  pass paths and render results.

@@ -1,33 +1,28 @@
 # mfm-adapters-portfolio
 
-Portfolio adapter runners for **fact-backed, receipt-pinned** portfolio snapshots.
-
-This crate binds certified portfolio state descriptors to executable typed runners. It receives
-store-verified input evidence, artifact-read capabilities, and a Platform `FactIndexReadProvider`
-from runtime/app assembly.
+Executable runner bindings for certified portfolio states.
 
 ## Live path
 
-1. `SelectHoldings` consumes one exact `PortfolioCollectionReceipt`, queries only its certified
-   source/descriptor/anchor/coverage/status predicates with the closed N + 1 bound, hydrates every
-   retained `FactResponse` artifact via the shared kit, rederives each identity, and orders only
-   identity-matching candidates. It records the bounded query evidence for replay.
-2. Downstream pure states derive wallet identity, symbol metadata, valuations, snapshot, and
-   report from certified config and the selected holdings.
+For each EVM network, the adapter validates the certified network/chain binding and asynchronously
+binds one checked `EvmReadSession`. It resolves latest once, executes every balance and deduplicated
+token-metadata call against that exact block hash with EIP-1898 `requireCanonical: true`, then
+reads the original block number once to prove the hash is still canonical. Metadata and balance
+reads are concurrent with a hard limit of 16 tasks. The state-owned reducer admits the evidence;
+the managed-write runner then records every unified fact and the direct network snapshot in one
+output commit.
 
-There is **no** live portfolio transport factory, pin/observe runners, or chain crawl path.
+Bitcoin remains fact-backed. `SelectHoldings` consumes the exact Bitcoin receipt, performs the
+bounded query/hydration/identity checks, and records query evidence. When the request batch is
+empty, as for an all-EVM portfolio, the adapter does not call the fact index.
 
 ## Replay path
 
-`verify_portfolio_replay` recomputes the full portfolio projection from certified node configs
-and verified fact-query evidence, then compares each produced cell byte-for-byte:
+`verify_portfolio_replay` uses only certified configs, the append-only stream, and retained
+artifacts. It invokes the same EVM collection reducer, recomputes every published fact and direct
+snapshot, verifies exact same-attempt `FactRecorded` batch coverage, and proves assembly consumed
+those snapshots unchanged. Bitcoin selection is recomputed from retained fact-query evidence, and
+the pure snapshot/report outputs are compared byte-for-byte.
 
-| State | Replay behavior |
-| --- | --- |
-| operation-local collection receipt | recompute exact manifest/family receipt fan-in and compare its output |
-| `SelectHoldings` | recompute bounded cardinality, hydration, identity filtering, and post-identity ordering from recorded query evidence |
-| `AssembleSnapshot` | derive identity, metadata, and valuations from certified config; recompute from selected holdings and prove it consumed the exact collection receipt |
-| `ProjectReport` | recompute from assembled snapshot + report config |
-
-Replay and resume authority remains with the certified spec and typed run stream. This crate does
-not create workflow topology or own collector source IO.
+This crate binds capabilities and records evidence. It does not create workflow topology, select
+runtime routes, implement JSON-RPC, or own state semantics.

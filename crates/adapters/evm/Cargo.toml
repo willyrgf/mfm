@@ -2,7 +2,7 @@
 name = "mfm-adapters-evm"
 version = "0.1.0"
 edition = "2021"
-description = "EVM transaction and temporary collector adapter runners for MFM"
+description = "EVM single-transaction and exact-anchor validation adapter runners for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -21,11 +21,8 @@ mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-evm-signing = { path = "../../evm-signing" }
-mfm-fact-capabilities = { path = "../../fact-capabilities" }
-mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
-mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-spec = { path = "../../kernel/spec" }

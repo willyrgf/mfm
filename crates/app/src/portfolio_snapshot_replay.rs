@@ -1,7 +1,6 @@
 //! Private evidence-only replay binding for the operation-local portfolio receipt fan-in.
 
 use mfm_op_btc_collectors::BtcNetworkCollectionReceipt;
-use mfm_op_evm_collectors::EvmNetworkCollectionReceipt;
 use mfm_op_portfolio_snapshot::{
     assemble_portfolio_collection_receipt, AssemblePortfolioCollectionReceiptConfig,
     AssemblePortfolioCollectionReceiptInput, AssemblePortfolioCollectionReceiptState,
@@ -32,13 +31,9 @@ pub(crate) fn verify_portfolio_collection_receipt_replay(
     )?;
     let config: AssemblePortfolioCollectionReceiptConfig = replay_node_config(broker, &frame.node)?;
     let bitcoin_receipts = replay_input_values::<BtcNetworkCollectionReceipt>(broker, &frame.node)?;
-    let evm_receipts = replay_input_values::<EvmNetworkCollectionReceipt>(broker, &frame.node)?;
     let receipt = assemble_portfolio_collection_receipt(
         &config,
-        AssemblePortfolioCollectionReceiptInput {
-            bitcoin_receipts,
-            evm_receipts,
-        },
+        AssemblePortfolioCollectionReceiptInput { bitcoin_receipts },
     )
     .map_err(replay_binding_error)?;
     verify_replay_output_bytes(&frame, &receipt, "portfolio collection receipt")?;

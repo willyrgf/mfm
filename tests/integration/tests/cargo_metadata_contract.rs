@@ -304,8 +304,8 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
     let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
     assert_eq!(
         packages.len(),
-        45,
-        "the configured-target portfolio snapshot workspace has 45 packages"
+        43,
+        "the configured-target portfolio snapshot workspace has 43 packages"
     );
 
     for removed in [
@@ -314,6 +314,8 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
         "mfm-stream-store-postgres",
         "mfm-op-portfolio-tracker",
         "mfm-catalog-model",
+        "mfm-evm-core",
+        "mfm-op-evm-collectors",
     ] {
         assert!(
             packages.iter().all(|package| package.name != removed),
@@ -325,6 +327,21 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
             .iter()
             .any(|package| package.name == "mfm-op-portfolio-snapshot"),
         "the complete portfolio snapshot operation must remain a workspace package"
+    );
+    assert_eq!(
+        packages
+            .iter()
+            .filter(|package| package.name.contains("evm"))
+            .map(|package| package.name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "mfm-adapters-evm",
+            "mfm-evm-capabilities",
+            "mfm-evm-signing",
+            "mfm-states-evm",
+            "mfm-transports-evm",
+        ]),
+        "the reusable EVM surface must contain exactly five packages"
     );
 
     let by_name = packages
@@ -849,7 +866,6 @@ fn validate_category_path(
         CrateCategory::DomainModel => {
             package.manifest_dir_rel.ends_with("-model")
                 || package.manifest_dir_rel.ends_with("/model")
-                || package.manifest_dir_rel == "crates/evm-core"
         }
         CrateCategory::DomainConfig => package.manifest_dir_rel.ends_with("-config"),
         CrateCategory::State => package.manifest_rel.starts_with("crates/states/"),

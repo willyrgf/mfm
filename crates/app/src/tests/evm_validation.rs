@@ -3,7 +3,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
-use mfm_adapters_evm::{register_evm_collectors_runners, EvmRunnerCapabilities};
+use mfm_adapters_evm::{register_evm_validation_runner, EvmValidationRunnerCapabilities};
 use mfm_certify::CertificationRegistry;
 use mfm_evm_capabilities::{
     evm_diagnostic, EvmBlock, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
@@ -149,16 +149,20 @@ fn validation_runners(
     live_reads: Arc<AtomicUsize>,
 ) -> ErasedRunnerRegistry {
     let mut runners = ErasedRunnerRegistry::new();
-    register_evm_collectors_runners(
+    register_evm_validation_runner(
         &mut runners,
-        EvmRunnerCapabilities::new(Arc::new(store.clone()), validate_binding, move |binding| {
-            let live_reads = Arc::clone(&live_reads);
-            Box::pin(async move {
-                validate_binding(&binding)?;
-                Ok(Arc::new(ValidationSession::new(binding, live_reads))
-                    as Arc<dyn EvmReadSession>)
-            })
-        }),
+        EvmValidationRunnerCapabilities::new(
+            Arc::new(store.clone()),
+            validate_binding,
+            move |binding| {
+                let live_reads = Arc::clone(&live_reads);
+                Box::pin(async move {
+                    validate_binding(&binding)?;
+                    Ok(Arc::new(ValidationSession::new(binding, live_reads))
+                        as Arc<dyn EvmReadSession>)
+                })
+            },
+        ),
     )
     .expect("register validation runner");
     runners

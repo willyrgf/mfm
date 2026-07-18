@@ -1,8 +1,11 @@
 #![warn(missing_docs)]
-//! Typed portfolio-domain state contracts for fact-backed receipt-pinned snapshots.
+//! Typed portfolio-domain state contracts for certified portfolio snapshots.
 //!
-//! After the collectors cutover, `portfolio_snapshot` is select-centric:
-//! `SelectHoldings → AssembleSnapshot → ProjectReport`.
+//! Each demanded EVM network uses one [`CollectEvmNetworkState`] followed by one
+//! [`PublishEvmHoldingsState`]. The latter atomically records a complete batch of unified native
+//! and ERC-20 facts while returning a direct [`EvmNetworkSnapshot`]. Bitcoin alone retains the
+//! receipt-pinned [`SelectHoldingsState`] path; assembly joins those selected Bitcoin observations
+//! with the direct EVM snapshots before report projection.
 //!
 //! # Examples
 //!
@@ -15,6 +18,7 @@
 //! ```
 
 mod collection_receipt;
+mod evm_collection;
 mod holding_read;
 mod selection;
 
@@ -26,6 +30,16 @@ pub use collection_receipt::{
     manifest_identity, validate_receipt_against_portfolio, CollectedHoldingReceipt,
     HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey, PortfolioCollectionReceipt,
     SelectHoldingsInput, SelectHoldingsInputHandles,
+};
+pub use evm_collection::{
+    evm_balance_fact_visibility, publish_evm_holdings, reduce_evm_network_collection,
+    validate_evm_network_collection_config, CollectEvmNetworkEvidence, CollectEvmNetworkInput,
+    CollectEvmNetworkInputHandles, CollectEvmNetworkPlan, CollectEvmNetworkState, EvmBalanceAsset,
+    EvmBalanceReadEvidence, EvmBalanceSnapshotFact, EvmBalanceSnapshotResponse,
+    EvmBalanceSnapshotSubject, EvmBalanceSource, EvmCollectedBalance, EvmCollectionAnchor,
+    EvmCollectionBatch, EvmCollectionSession, EvmNetworkCollectionConfig, EvmNetworkSnapshot,
+    EvmTokenDecimalsEvidence, PortfolioEvmError, PublishEvmHoldingsInput,
+    PublishEvmHoldingsInputHandles, PublishEvmHoldingsState, EVM_NETWORK_HOLDING_SOURCE_LIMIT,
 };
 pub use holding_read::{
     PortfolioHoldingFactResponse, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
@@ -121,7 +135,7 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-/// Selected holdings material emitted by SelectHoldings (observations without valuation join).
+/// Selected Bitcoin holdings emitted by fact selection (without valuation join).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
 #[mfm(
     namespace = "mfm.portfolio",
@@ -137,10 +151,12 @@ pub struct SelectedHoldings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
 #[mfm(schema = "mfm.portfolio.input.assemble_snapshot")]
 pub struct AssembleSnapshotInput {
-    /// Selected holdings from Platform fact selection.
+    /// Selected Bitcoin holdings from Platform fact selection.
     pub holdings: SelectedHoldings,
-    /// Exact collection receipt that must match all selected observation anchors.
+    /// Exact Bitcoin collection receipt that must match selected Bitcoin anchors.
     pub receipt: PortfolioCollectionReceipt,
+    /// Direct EVM network snapshots produced by atomic fact-publication states.
+    pub evm_snapshots: Vec<EvmNetworkSnapshot>,
 }
 
 /// Input consumed by report projection.

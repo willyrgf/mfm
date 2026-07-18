@@ -1,6 +1,6 @@
 use super::*;
 
-/// Certified descriptors for the three legacy holding fact families consumed by selection.
+/// Certified Bitcoin holding fact descriptor consumed by selection.
 ///
 /// Descriptors are carried as canonical JSON so the portfolio state can own query planning and
 /// descriptor-checked hydration without depending on another state crate. The portfolio operation
@@ -14,21 +14,13 @@ use super::*;
 )]
 pub struct SelectHoldingsFactDescriptors {
     bitcoin_native: String,
-    evm_native: String,
-    evm_erc20: String,
 }
 
 impl SelectHoldingsFactDescriptors {
     /// Canonicalizes and admits the registered descriptors used by the portfolio operation.
-    pub fn new(
-        bitcoin_native: &mfm_facts::FactDescriptor,
-        evm_native: &mfm_facts::FactDescriptor,
-        evm_erc20: &mfm_facts::FactDescriptor,
-    ) -> Result<Self, ConfigError> {
+    pub fn new(bitcoin_native: &mfm_facts::FactDescriptor) -> Result<Self, ConfigError> {
         let descriptors = Self {
             bitcoin_native: canonical_descriptor_json(bitcoin_native)?,
-            evm_native: canonical_descriptor_json(evm_native)?,
-            evm_erc20: canonical_descriptor_json(evm_erc20)?,
         };
         descriptors.validate().map_err(ConfigError::new)?;
         Ok(descriptors)
@@ -38,20 +30,11 @@ impl SelectHoldingsFactDescriptors {
         &self,
         source: &HoldingSourceKey,
     ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
-        let (canonical, expected_kind) = match source {
-            HoldingSourceKey::BitcoinNative { .. } => (
-                self.bitcoin_native.as_str(),
-                "bitcoin.address_balance_snapshot",
-            ),
-            HoldingSourceKey::EvmNative { .. } => (
-                self.evm_native.as_str(),
-                "evm.address_native_balance_snapshot",
-            ),
-            HoldingSourceKey::EvmErc20 { .. } => (
-                self.evm_erc20.as_str(),
-                "evm.address_erc20_balance_snapshot",
-            ),
-        };
+        let HoldingSourceKey::BitcoinNative { .. } = source;
+        let (canonical, expected_kind) = (
+            self.bitcoin_native.as_str(),
+            "bitcoin.address_balance_snapshot",
+        );
         let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(canonical.as_bytes())
             .map_err(|error| {
                 PortfolioHoldingSelectionError::new(
@@ -73,28 +56,13 @@ impl SelectHoldingsFactDescriptors {
     }
 
     fn validate(&self) -> Result<(), String> {
-        for source in [
-            HoldingSourceKey::BitcoinNative {
-                network_id: "descriptor-validation".to_owned(),
-                bitcoin_network: "main".to_owned(),
-                semantic_source_identity: "descriptor-validation".to_owned(),
-                address: "descriptor-validation".to_owned(),
-            },
-            HoldingSourceKey::EvmNative {
-                network_id: "descriptor-validation".to_owned(),
-                chain_id: 1,
-                account: "0x0000000000000000000000000000000000000001".to_owned(),
-            },
-            HoldingSourceKey::EvmErc20 {
-                network_id: "descriptor-validation".to_owned(),
-                chain_id: 1,
-                contract_address: "0x0000000000000000000000000000000000000001".to_owned(),
-                account: "0x0000000000000000000000000000000000000002".to_owned(),
-            },
-        ] {
-            self.descriptor_for_source(&source)
-                .map_err(|error| error.to_string())?;
-        }
+        self.descriptor_for_source(&HoldingSourceKey::BitcoinNative {
+            network_id: "descriptor-validation".to_owned(),
+            bitcoin_network: "main".to_owned(),
+            semantic_source_identity: "descriptor-validation".to_owned(),
+            address: "descriptor-validation".to_owned(),
+        })
+        .map_err(|error| error.to_string())?;
         Ok(())
     }
 }

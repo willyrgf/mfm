@@ -63,7 +63,7 @@ pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow
 mod btc_collector;
 mod config_setup;
 mod entry_point;
-mod evm_collector;
+mod evm_runtime;
 mod fact_index;
 mod live_transports;
 mod portfolio_snapshot;
@@ -239,9 +239,16 @@ pub fn production_runner_registry(
             MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID,
         )?,
     )?;
+    let validate_evm_runtime = Arc::clone(&runtime_config);
+    let bind_evm_runtime = Arc::clone(&runtime_config);
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         artifacts.clone(),
         fact_index.clone(),
+        move |binding| validate_evm_runtime.validate_evm_network_binding(binding),
+        move |binding| {
+            let runtime = Arc::clone(&bind_evm_runtime);
+            Box::pin(async move { runtime.bind_evm_read_session(binding).await })
+        },
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     portfolio_snapshot::register_portfolio_snapshot_runners(&mut registry, artifacts.clone())?;
@@ -251,11 +258,7 @@ pub fn production_runner_registry(
         fact_index,
         runtime_config.clone(),
     )?;
-    evm_collector::register_evm_collector_runners(
-        &mut registry,
-        artifacts.clone(),
-        runtime_config,
-    )?;
+    evm_runtime::register_evm_runners(&mut registry, artifacts.clone(), runtime_config)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry, artifacts)?;
     Ok(registry)
 }
@@ -346,11 +349,9 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, Publ
     registry.register_fact_type::<mfm_op_btc_collectors::BtcChainHeadFact>()?;
     registry.register_fact_type::<mfm_op_btc_collectors::CollectorCheckpointFact>()?;
     registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
-    mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut registry)?;
     registry.register_state::<mfm_states_evm::SubmitEvmTransactionState>()?;
     registry.register_state::<mfm_states_evm::ValidateEvmContractState>()?;
-    registry.register_fact_type::<mfm_op_evm_collectors::EvmAddressNativeBalanceSnapshotFact>()?;
-    registry.register_fact_type::<mfm_op_evm_collectors::EvmAddressErc20BalanceSnapshotFact>()?;
+    registry.register_fact_type::<mfm_state_portfolio::EvmBalanceSnapshotFact>()?;
     mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
         &mut registry,
     )?;

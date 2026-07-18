@@ -165,7 +165,7 @@ fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
     }
 
     let evm_adapter = include_str!("../../adapters/evm/src/lib.rs");
-    let app_evm = include_str!("../src/evm_collector.rs");
+    let app_evm = include_str!("../src/evm_runtime.rs");
     assert!(
         !evm_adapter.contains(concat!("EvmProvider", "Factory"))
             && !evm_adapter.contains(concat!("EvmBound", "Provider"))

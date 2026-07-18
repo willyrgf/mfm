@@ -19,6 +19,17 @@ use crate::wallet::{WalletConfig, WalletSubjectKind};
 mod portfolio_snapshot;
 pub use self::portfolio_snapshot::*;
 
+/// Maximum networks admitted by one portfolio config.
+pub const PORTFOLIO_NETWORK_LIMIT: usize = 64;
+/// Maximum wallets admitted by one portfolio config.
+pub const PORTFOLIO_WALLET_LIMIT: usize = 1_024;
+/// Maximum symbol configs admitted by one portfolio config.
+pub const PORTFOLIO_SYMBOL_LIMIT: usize = 2_048;
+/// Maximum explicit wallet-to-symbol relations admitted by one portfolio config.
+pub const PORTFOLIO_HOLDING_RELATION_LIMIT: usize = 4_096;
+/// Maximum distinct holding sources admitted for one EVM network.
+pub const EVM_NETWORK_HOLDING_SOURCE_LIMIT: usize = 1_024;
+
 /// Supported network families on the canonical portfolio config surface.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
@@ -452,6 +463,26 @@ pub enum PortfolioConfigError {
         /// Metadata key associated with the rejected content.
         key: String,
     },
+    /// A top-level portfolio collection exceeded its hard admission bound.
+    #[error("portfolio {collection} count {actual} exceeded limit {limit}")]
+    CollectionLimitExceeded {
+        /// Stable collection label.
+        collection: &'static str,
+        /// Hard admitted maximum.
+        limit: usize,
+        /// Supplied collection size.
+        actual: usize,
+    },
+    /// One EVM network exceeded its hard holding-source bound.
+    #[error("EVM network `{network_id}` holding source count {actual} exceeded limit {limit}")]
+    EvmNetworkHoldingSourceLimitExceeded {
+        /// Network whose explicit demand exceeded the bound.
+        network_id: String,
+        /// Hard admitted maximum.
+        limit: usize,
+        /// Supplied source count.
+        actual: usize,
+    },
     /// `network_id` did not satisfy the portfolio identifier grammar.
     #[error("network_id is invalid: {source}")]
     InvalidNetworkId {
@@ -718,6 +749,18 @@ fn validate_bitcoin_network(value: &str) -> Result<(), ()> {
 }
 
 fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
+    require_collection_limit("network", cfg.networks.len(), PORTFOLIO_NETWORK_LIMIT)?;
+    require_collection_limit("wallet", cfg.wallets.len(), PORTFOLIO_WALLET_LIMIT)?;
+    require_collection_limit("symbol", cfg.symbol_configs.len(), PORTFOLIO_SYMBOL_LIMIT)?;
+    let holding_relation_count = cfg.wallets.iter().fold(0_usize, |count, wallet| {
+        count.saturating_add(wallet.symbol_ids.len())
+    });
+    require_collection_limit(
+        "holding relation",
+        holding_relation_count,
+        PORTFOLIO_HOLDING_RELATION_LIMIT,
+    )?;
+
     let mut requested_quotes = BTreeSet::new();
     for quote in &cfg.quote_codes {
         if !requested_quotes.insert(*quote) {
@@ -735,6 +778,25 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
             });
         }
         networks_by_id.insert(network.network_id().clone(), network);
+    }
+
+    let mut evm_holding_sources_by_network = BTreeMap::<NetworkId, usize>::new();
+    for wallet in &cfg.wallets {
+        let Some(NetworkConfig::Evm { .. }) = networks_by_id.get(&wallet.network_id).copied()
+        else {
+            continue;
+        };
+        let count = evm_holding_sources_by_network
+            .entry(wallet.network_id.clone())
+            .or_default();
+        *count = count.saturating_add(wallet.symbol_ids.len());
+        if *count > EVM_NETWORK_HOLDING_SOURCE_LIMIT {
+            return Err(PortfolioConfigError::EvmNetworkHoldingSourceLimitExceeded {
+                network_id: wallet.network_id.to_string(),
+                limit: EVM_NETWORK_HOLDING_SOURCE_LIMIT,
+                actual: *count,
+            });
+        }
     }
 
     let mut symbol_ids = HashSet::new();
@@ -849,6 +911,21 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
         return Err(PortfolioConfigError::EmptyHoldingDemand);
     }
 
+    Ok(())
+}
+
+fn require_collection_limit(
+    collection: &'static str,
+    actual: usize,
+    limit: usize,
+) -> Result<(), PortfolioConfigError> {
+    if actual > limit {
+        return Err(PortfolioConfigError::CollectionLimitExceeded {
+            collection,
+            limit,
+            actual,
+        });
+    }
     Ok(())
 }
 

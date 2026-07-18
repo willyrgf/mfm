@@ -467,17 +467,8 @@ fn candidate_from_response(
         .descriptor_for_source(entry.source())?;
     let subject = holding_subject_value(entry)?;
     let response = material.value(entry)?;
-    let candidate = match entry.source() {
-        HoldingSourceKey::BitcoinNative { .. } => {
-            btc_candidate(entry, holding, fact_ref, &response, store_commit_order)
-        }
-        HoldingSourceKey::EvmNative { .. } => {
-            evm_native_candidate(entry, holding, fact_ref, &response, store_commit_order)
-        }
-        HoldingSourceKey::EvmErc20 { .. } => {
-            evm_erc20_candidate(entry, holding, fact_ref, &response, store_commit_order)
-        }
-    }?;
+    let HoldingSourceKey::BitcoinNative { .. } = entry.source();
+    let candidate = btc_candidate(entry, holding, fact_ref, &response, store_commit_order)?;
     if !identity_matches(entry, fact_ref, &descriptor, &subject, &response)? {
         return Ok(None);
     }
@@ -521,96 +512,6 @@ fn btc_candidate(
     .map(Some)
 }
 
-fn evm_native_candidate(
-    entry: &CollectedHoldingReceipt,
-    holding: HoldingSourceConfig,
-    fact_ref: &mfm_facts::InternalFactRef,
-    response: &serde_json::Value,
-    store_commit_order: u64,
-) -> Result<Option<HoldingCandidate>, PortfolioHoldingSelectionError> {
-    let Some((_, chain_id, _)) = entry.source().evm_native_parts() else {
-        return Err(receipt_selection_error(
-            entry,
-            "invalid EVM native source key",
-        ));
-    };
-    let block_number = response_u64(entry, response, "block_number")?;
-    let block_hash = response_string(entry, response, "block_hash")?;
-    let raw_wei = canonical_u256_decimal(entry, response_string(entry, response, "raw_wei")?)?;
-    let decimals = response_u8(entry, response, "decimals")?;
-    let coverage = response_string(entry, response, "coverage")?;
-    let source_status = response_string(entry, response, "source_status")?;
-    if !matches_evm_receipt(entry, block_number, block_hash, coverage, source_status) {
-        return Err(receipt_selection_error(
-            entry,
-            "hydrated EVM native response did not match receipt anchor/status",
-        ));
-    }
-    holding_candidate_from_normalized(
-        entry.requirement(),
-        store_commit_order,
-        fact_ref.fact_claim_id().clone(),
-        NormalizedHoldingFields {
-            holding,
-            raw_dec: raw_wei.to_owned(),
-            decimals,
-            observation_anchor: ObservationAnchor::Evm {
-                chain_id,
-                block_number,
-                block_hash: block_hash.to_owned(),
-            },
-            coverage: coverage.to_owned(),
-            source_status: source_status.to_owned(),
-        },
-    )
-    .map(Some)
-}
-
-fn evm_erc20_candidate(
-    entry: &CollectedHoldingReceipt,
-    holding: HoldingSourceConfig,
-    fact_ref: &mfm_facts::InternalFactRef,
-    response: &serde_json::Value,
-    store_commit_order: u64,
-) -> Result<Option<HoldingCandidate>, PortfolioHoldingSelectionError> {
-    let Some((_, chain_id, _, _)) = entry.source().evm_erc20_parts() else {
-        return Err(receipt_selection_error(
-            entry,
-            "invalid EVM ERC-20 source key",
-        ));
-    };
-    let block_number = response_u64(entry, response, "block_number")?;
-    let block_hash = response_string(entry, response, "block_hash")?;
-    let raw_units = canonical_u256_decimal(entry, response_string(entry, response, "raw_units")?)?;
-    let decimals = response_u8(entry, response, "decimals")?;
-    let coverage = response_string(entry, response, "coverage")?;
-    let source_status = response_string(entry, response, "source_status")?;
-    if !matches_evm_receipt(entry, block_number, block_hash, coverage, source_status) {
-        return Err(receipt_selection_error(
-            entry,
-            "hydrated EVM ERC-20 response did not match receipt anchor/status",
-        ));
-    }
-    holding_candidate_from_normalized(
-        entry.requirement(),
-        store_commit_order,
-        fact_ref.fact_claim_id().clone(),
-        NormalizedHoldingFields {
-            holding,
-            raw_dec: raw_units.to_owned(),
-            decimals,
-            observation_anchor: ObservationAnchor::Evm {
-                chain_id,
-                block_number,
-                block_hash: block_hash.to_owned(),
-            },
-            coverage: coverage.to_owned(),
-            source_status: source_status.to_owned(),
-        },
-    )
-    .map(Some)
-}
-
 fn holding_subject_value(
     entry: &CollectedHoldingReceipt,
 ) -> Result<serde_json::Value, PortfolioHoldingSelectionError> {
@@ -625,26 +526,6 @@ fn holding_subject_value(
             "bitcoin_network": bitcoin_network,
             "network": network_id,
             "semantic_source_identity": semantic_source_identity,
-        })),
-        HoldingSourceKey::EvmNative {
-            network_id,
-            chain_id,
-            account,
-        } => Ok(serde_json::json!({
-            "account": account,
-            "chain_id": chain_id,
-            "network": network_id,
-        })),
-        HoldingSourceKey::EvmErc20 {
-            network_id,
-            chain_id,
-            contract_address,
-            account,
-        } => Ok(serde_json::json!({
-            "account": account,
-            "chain_id": chain_id,
-            "contract_address": contract_address,
-            "network": network_id,
         })),
     }
 }
@@ -662,16 +543,6 @@ fn response_u64(
         })
 }
 
-fn response_u8(
-    entry: &CollectedHoldingReceipt,
-    response: &serde_json::Value,
-    field: &str,
-) -> Result<u8, PortfolioHoldingSelectionError> {
-    let value = response_u64(entry, response, field)?;
-    u8::try_from(value)
-        .map_err(|_| receipt_selection_error(entry, format!("response field {field} exceeded u8")))
-}
-
 fn response_string<'a>(
     entry: &CollectedHoldingReceipt,
     response: &'a serde_json::Value,
@@ -683,22 +554,6 @@ fn response_string<'a>(
         .ok_or_else(|| {
             receipt_selection_error(entry, format!("response field {field} was not a string"))
         })
-}
-
-fn canonical_u256_decimal<'a>(
-    entry: &CollectedHoldingReceipt,
-    value: &'a str,
-) -> Result<&'a str, PortfolioHoldingSelectionError> {
-    let parsed = num_bigint::BigUint::parse_bytes(value.as_bytes(), 10).ok_or_else(|| {
-        receipt_selection_error(entry, "holding amount was not an unsigned decimal integer")
-    })?;
-    if parsed.bits() > 256 || parsed.to_string() != value {
-        return Err(receipt_selection_error(
-            entry,
-            "holding amount was not a canonical unsigned 256-bit integer",
-        ));
-    }
-    Ok(value)
 }
 
 fn identity_matches<S, R>(
@@ -741,135 +596,39 @@ fn holding_fact_index_request(
     let descriptor = config
         .fact_descriptors()
         .descriptor_for_source(entry.source())?;
-    let (predicates, return_fields) = match entry.source() {
-        HoldingSourceKey::BitcoinNative { .. } => {
-            let Some((network, bitcoin_network, semantic_source_identity, address)) =
-                entry.source().bitcoin_native_parts()
-            else {
-                return Err(receipt_selection_error(entry, "invalid Bitcoin source key"));
-            };
-            let ExecutionAnchor::Bitcoin { height, block_hash } = entry.anchor() else {
-                return Err(receipt_selection_error(
-                    entry,
-                    "Bitcoin source did not carry a Bitcoin anchor",
-                ));
-            };
-            (
-                vec![
-                    query_eq_string(entry, "subject.network", network)?,
-                    query_eq_string(entry, "subject.bitcoin_network", bitcoin_network)?,
-                    query_eq_string(
-                        entry,
-                        "subject.semantic_source_identity",
-                        semantic_source_identity,
-                    )?,
-                    query_eq_string(entry, "subject.address", address)?,
-                    query_eq_u64(entry, "result.anchor_height", *height)?,
-                    query_eq_string(entry, "result.anchor_hash", block_hash)?,
-                    query_eq_string(entry, "result.coverage", entry.coverage())?,
-                    query_eq_string(entry, "result.source_status", entry.source_status())?,
-                ],
-                query_fields(
-                    entry,
-                    &[
-                        "result.anchor_height",
-                        "result.anchor_hash",
-                        "result.balance_sats",
-                        "result.coverage",
-                        "result.source_status",
-                        "metadata.store_commit_order",
-                    ],
-                )?,
-            )
-        }
-        HoldingSourceKey::EvmNative { .. } => {
-            let Some((network, chain_id, account)) = entry.source().evm_native_parts() else {
-                return Err(receipt_selection_error(
-                    entry,
-                    "invalid EVM native source key",
-                ));
-            };
-            let ExecutionAnchor::Evm {
-                block_number,
-                block_hash,
-                ..
-            } = entry.anchor()
-            else {
-                return Err(receipt_selection_error(
-                    entry,
-                    "EVM source did not carry an EVM anchor",
-                ));
-            };
-            (
-                vec![
-                    query_eq_string(entry, "subject.network", network)?,
-                    query_eq_u64(entry, "subject.chain_id", chain_id)?,
-                    query_eq_string(entry, "subject.account", account)?,
-                    query_eq_u64(entry, "result.block_number", *block_number)?,
-                    query_eq_string(entry, "result.block_hash", block_hash)?,
-                    query_eq_string(entry, "result.coverage", entry.coverage())?,
-                    query_eq_string(entry, "result.source_status", entry.source_status())?,
-                ],
-                query_fields(
-                    entry,
-                    &[
-                        "result.block_number",
-                        "result.block_hash",
-                        "result.raw_wei",
-                        "result.decimals",
-                        "result.coverage",
-                        "result.source_status",
-                        "metadata.store_commit_order",
-                    ],
-                )?,
-            )
-        }
-        HoldingSourceKey::EvmErc20 { .. } => {
-            let Some((network, chain_id, contract_address, account)) =
-                entry.source().evm_erc20_parts()
-            else {
-                return Err(receipt_selection_error(
-                    entry,
-                    "invalid EVM ERC-20 source key",
-                ));
-            };
-            let ExecutionAnchor::Evm {
-                block_number,
-                block_hash,
-                ..
-            } = entry.anchor()
-            else {
-                return Err(receipt_selection_error(
-                    entry,
-                    "ERC-20 source did not carry an EVM anchor",
-                ));
-            };
-            (
-                vec![
-                    query_eq_string(entry, "subject.network", network)?,
-                    query_eq_u64(entry, "subject.chain_id", chain_id)?,
-                    query_eq_string(entry, "subject.contract_address", contract_address)?,
-                    query_eq_string(entry, "subject.account", account)?,
-                    query_eq_u64(entry, "result.block_number", *block_number)?,
-                    query_eq_string(entry, "result.block_hash", block_hash)?,
-                    query_eq_string(entry, "result.coverage", entry.coverage())?,
-                    query_eq_string(entry, "result.source_status", entry.source_status())?,
-                ],
-                query_fields(
-                    entry,
-                    &[
-                        "result.block_number",
-                        "result.block_hash",
-                        "result.raw_units",
-                        "result.decimals",
-                        "result.coverage",
-                        "result.source_status",
-                        "metadata.store_commit_order",
-                    ],
-                )?,
-            )
-        }
+    let (network, bitcoin_network, semantic_source_identity, address) =
+        entry.source().bitcoin_native_parts();
+    let ExecutionAnchor::Bitcoin { height, block_hash } = entry.anchor() else {
+        return Err(receipt_selection_error(
+            entry,
+            "Bitcoin source did not carry a Bitcoin anchor",
+        ));
     };
+    let predicates = vec![
+        query_eq_string(entry, "subject.network", network)?,
+        query_eq_string(entry, "subject.bitcoin_network", bitcoin_network)?,
+        query_eq_string(
+            entry,
+            "subject.semantic_source_identity",
+            semantic_source_identity,
+        )?,
+        query_eq_string(entry, "subject.address", address)?,
+        query_eq_u64(entry, "result.anchor_height", *height)?,
+        query_eq_string(entry, "result.anchor_hash", block_hash)?,
+        query_eq_string(entry, "result.coverage", entry.coverage())?,
+        query_eq_string(entry, "result.source_status", entry.source_status())?,
+    ];
+    let return_fields = query_fields(
+        entry,
+        &[
+            "result.anchor_height",
+            "result.anchor_hash",
+            "result.balance_sats",
+            "result.coverage",
+            "result.source_status",
+            "metadata.store_commit_order",
+        ],
+    )?;
     let input = FactQueryInput::new(
         store_scope,
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
@@ -1026,23 +785,6 @@ fn matches_btc_receipt(
         ExecutionAnchor::Bitcoin { height, block_hash }
             if *height == anchor_height
                 && block_hash == anchor_hash
-                && entry.coverage() == coverage
-                && entry.source_status() == source_status
-    )
-}
-
-fn matches_evm_receipt(
-    entry: &CollectedHoldingReceipt,
-    block_number: u64,
-    block_hash: &str,
-    coverage: &str,
-    source_status: &str,
-) -> bool {
-    matches!(
-        entry.anchor(),
-        ExecutionAnchor::Evm { block_number: expected_number, block_hash: expected_hash, .. }
-            if *expected_number == block_number
-                && expected_hash == block_hash
                 && entry.coverage() == coverage
                 && entry.source_status() == source_status
     )

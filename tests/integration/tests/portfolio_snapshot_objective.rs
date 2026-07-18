@@ -9,10 +9,7 @@ use axum::{Json, Router};
 use mfm_fact_capabilities::{
     FactIndexReadBatchFuture, FactIndexReadProvider, FactIndexReadRequest,
 };
-use mfm_facts::{FactQueryResult, FactQueryResultRow, InternalFactRef};
-use mfm_integration_tests::test_support::{
-    fact_query_evidences, write_collectors_runtime_config_for_test,
-};
+use mfm_integration_tests::test_support::write_collectors_runtime_config_for_test;
 use mfm_op_portfolio_snapshot::portfolio_snapshot_program_draft;
 use mfm_portfolio_model::portfolio::{PortfolioConfig, ValidatedPortfolioConfig};
 use mfm_store::v1::{self as store, RunEventStore as _};
@@ -23,7 +20,6 @@ const BTC_ADDRESS: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
 const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
 const TOKEN: &str = "0x0000000000000000000000000000000000000001";
 const EVM_HASH_A: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const EVM_HASH_B: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BTC_HASH: &str = "abababababababababababababababababababababababababababababababab";
 
 /// Exercises the exact production snapshot root for every supported collection family. Replay
@@ -31,11 +27,11 @@ const BTC_HASH: &str = "abababababababababababababababababababababababababababab
 /// read-only service to verify the completed run.
 #[tokio::test]
 async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_replay() {
-    for (label, config) in [
-        ("btc", snapshot_config(SnapshotDemand::Bitcoin)),
-        ("native", snapshot_config(SnapshotDemand::EvmNative)),
-        ("erc20", snapshot_config(SnapshotDemand::Erc20)),
-        ("mixed", snapshot_config(SnapshotDemand::Mixed)),
+    for (label, config, expected_evm_facts) in [
+        ("btc", snapshot_config(SnapshotDemand::Bitcoin), 0),
+        ("native", snapshot_config(SnapshotDemand::EvmNative), 1),
+        ("erc20", snapshot_config(SnapshotDemand::Erc20), 1),
+        ("mixed", snapshot_config(SnapshotDemand::Mixed), 2),
     ] {
         let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
         let runtime_dir = tempfile::tempdir().expect("runtime config directory");
@@ -49,6 +45,7 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
         );
 
         let run_id = launch_snapshot_completed(&services, &config, label).await;
+        assert_atomic_evm_fact_publication(&store, &run_id, expected_evm_facts).await;
         let source_calls_before_replay = server.calls();
         drop(services);
         std::fs::remove_file(&runtime_path).expect("remove live runtime config after admission");
@@ -75,6 +72,69 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
             "{label} replay must not re-open a live provider"
         );
     }
+}
+
+async fn assert_atomic_evm_fact_publication(
+    store: &store::AsyncInMemoryRunStore,
+    run_id: &mfm_ids::RunId,
+    expected_count: usize,
+) {
+    let projection = store.projection_snapshot().expect("fact projection");
+    assert_eq!(
+        projection
+            .fact_index_entries()
+            .filter(|(_, entry)| {
+                entry.fact_kind.as_str() == "portfolio.evm_balance_snapshot"
+                    && &entry.source_run_id == run_id
+            })
+            .count(),
+        expected_count,
+        "the run must publish one unified EVM fact per demanded source"
+    );
+
+    let stream = store
+        .load_run_stream(run_id)
+        .await
+        .expect("completed snapshot stream");
+    let facts = stream
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                mfm_events::v1::KernelEventPayload::FactRecorded(payload)
+                    if payload.claim.fact_kind().as_str() == "portfolio.evm_balance_snapshot"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(facts.len(), expected_count);
+    let Some(first) = facts.first() else {
+        return;
+    };
+    let mfm_events::v1::KernelEventPayload::FactRecorded(first_payload) = first.payload() else {
+        unreachable!("filtered FactRecorded event")
+    };
+    assert!(facts.iter().all(|event| {
+        let mfm_events::v1::KernelEventPayload::FactRecorded(payload) = event.payload() else {
+            return false;
+        };
+        payload.node_id == first_payload.node_id
+            && payload.attempt_id == first_payload.attempt_id
+            && event.commit_key() == first.commit_key()
+            && event.store_commit_order() == first.store_commit_order()
+    }));
+    assert!(
+        stream.iter().any(|event| {
+            matches!(
+                event.payload(),
+                mfm_events::v1::KernelEventPayload::CellProduced(payload)
+                    if payload.node_id == first_payload.node_id
+                        && payload.attempt_id == first_payload.attempt_id
+                        && event.commit_key() == first.commit_key()
+                        && event.store_commit_order() == first.store_commit_order()
+            )
+        }),
+        "the direct EVM snapshot and every fact must share one atomic commit"
+    );
 }
 
 /// A complete mixed snapshot rejects retained query or selected-holdings substitutions before
@@ -116,6 +176,7 @@ async fn snapshot_root_replay_rejects_tampered_retained_projection_evidence() {
 
     for (label, tamper) in [
         ("query-evidence", SnapshotArtifactTamper::FactQueryEvidence),
+        ("evm-fact-response", SnapshotArtifactTamper::EvmFactResponse),
         (
             "selected-holdings",
             SnapshotArtifactTamper::SelectedHoldings,
@@ -265,161 +326,6 @@ async fn snapshot_root_keeps_zero_symbol_wallet_without_undemanded_network_work(
     assert!(
         methods.iter().any(|method| method == "eth_getBalance"),
         "the independently demanded EVM wallet still collects normally: {methods:?}"
-    );
-}
-
-/// A conflicting historical fact cannot replace the current receipt's fact identity, even when a
-/// malicious store-facing provider returns the old candidate first.
-#[tokio::test]
-async fn snapshot_root_filters_same_anchor_conflicts_before_candidate_ordering() {
-    let store = store::AsyncInMemoryRunStore::default();
-    let first_server = start_snapshot_rpc_mock(SnapshotRpcConfig {
-        evm_native_wei: 1,
-        ..SnapshotRpcConfig::default()
-    })
-    .await;
-    let first_dir = tempfile::tempdir().expect("first runtime config directory");
-    let first_path = write_collectors_runtime_config_for_test(first_dir.path(), &first_server.url);
-    let first_services = snapshot_services(
-        &store,
-        Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone())),
-        Some(&first_path),
-    );
-    launch_snapshot_completed(
-        &first_services,
-        &snapshot_config(SnapshotDemand::EvmNative),
-        "conflict-source",
-    )
-    .await;
-    drop(first_services);
-
-    let second_server = start_snapshot_rpc_mock(SnapshotRpcConfig {
-        evm_native_wei: 2,
-        ..SnapshotRpcConfig::default()
-    })
-    .await;
-    let second_dir = tempfile::tempdir().expect("second runtime config directory");
-    let second_path =
-        write_collectors_runtime_config_for_test(second_dir.path(), &second_server.url);
-    let services = snapshot_services(
-        &store,
-        Arc::new(SnapshotProjectionFactIndex::new(
-            store.clone(),
-            SnapshotQueryMode::Reverse,
-        )),
-        Some(&second_path),
-    );
-    let run_id = launch_snapshot_completed(
-        &services,
-        &snapshot_config(SnapshotDemand::EvmNative),
-        "conflict-target",
-    )
-    .await;
-
-    let stream = store
-        .load_run_stream(&run_id)
-        .await
-        .expect("conflict run stream");
-    let evidences = fact_query_evidences(&store, &stream).await;
-    assert_eq!(evidences.len(), 1);
-    assert_eq!(
-        evidences[0].selection().selected_indices(),
-        &[1],
-        "the current receipt identity must win after the deliberately reversed candidate order"
-    );
-}
-
-/// The full root fails closed when selection cannot prove N + 1 exhaustion or when a provider
-/// returns a fact from a different receipt anchor.
-#[tokio::test]
-async fn snapshot_root_rejects_saturated_queries_and_receipt_mismatches() {
-    let saturated_server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
-    let saturated_dir = tempfile::tempdir().expect("saturation runtime config directory");
-    let saturated_path =
-        write_collectors_runtime_config_for_test(saturated_dir.path(), &saturated_server.url);
-    let saturated_store = store::AsyncInMemoryRunStore::default();
-    let saturated_services = snapshot_services(
-        &saturated_store,
-        Arc::new(SnapshotProjectionFactIndex::new(
-            saturated_store.clone(),
-            SnapshotQueryMode::Saturate,
-        )),
-        Some(&saturated_path),
-    );
-    let saturated = launch_snapshot(
-        &saturated_services,
-        snapshot_config(SnapshotDemand::EvmNative),
-        "saturated",
-    )
-    .await;
-    assert_eq!(
-        saturated.run_mode,
-        mfm_app::RunModeStatus::FailedWithoutAcdcClaim
-    );
-    assert!(
-        saturated
-            .attempt_dispositions
-            .iter()
-            .any(|attempt| attempt.error_code.as_deref() == Some("candidate_bound_exhausted")),
-        "the root must surface receipt-query saturation as a closed selection failure: {saturated:?}"
-    );
-
-    let mismatch_store = store::AsyncInMemoryRunStore::default();
-    let old_server = start_snapshot_rpc_mock(SnapshotRpcConfig {
-        evm_hash: EVM_HASH_A,
-        ..SnapshotRpcConfig::default()
-    })
-    .await;
-    let old_dir = tempfile::tempdir().expect("old anchor runtime config directory");
-    let old_path = write_collectors_runtime_config_for_test(old_dir.path(), &old_server.url);
-    let old_services = snapshot_services(
-        &mismatch_store,
-        Arc::new(mfm_app::ProjectionFactIndexProvider::new(
-            mismatch_store.clone(),
-        )),
-        Some(&old_path),
-    );
-    launch_snapshot_completed(
-        &old_services,
-        &snapshot_config(SnapshotDemand::EvmNative),
-        "old-anchor",
-    )
-    .await;
-    let old_ref = evm_native_fact_ref(&mismatch_store);
-    drop(old_services);
-
-    let current_server = start_snapshot_rpc_mock(SnapshotRpcConfig {
-        evm_hash: EVM_HASH_B,
-        ..SnapshotRpcConfig::default()
-    })
-    .await;
-    let current_dir = tempfile::tempdir().expect("current anchor runtime config directory");
-    let current_path =
-        write_collectors_runtime_config_for_test(current_dir.path(), &current_server.url);
-    let mismatch_services = snapshot_services(
-        &mismatch_store,
-        Arc::new(SnapshotProjectionFactIndex::new(
-            mismatch_store.clone(),
-            SnapshotQueryMode::Replace(Box::new(old_ref)),
-        )),
-        Some(&current_path),
-    );
-    let mismatch = launch_snapshot(
-        &mismatch_services,
-        snapshot_config(SnapshotDemand::EvmNative),
-        "receipt-mismatch",
-    )
-    .await;
-    assert_eq!(
-        mismatch.run_mode,
-        mfm_app::RunModeStatus::FailedWithoutAcdcClaim
-    );
-    assert!(
-        mismatch
-            .attempt_dispositions
-            .iter()
-            .any(|attempt| attempt.error_code.as_deref() == Some("receipt_mismatch")),
-        "the report half must reject a candidate whose anchor differs from the current receipt: {mismatch:?}"
     );
 }
 
@@ -821,81 +727,6 @@ async fn launch_snapshot(
         .expect("snapshot launch response")
 }
 
-#[derive(Clone)]
-enum SnapshotQueryMode {
-    Reverse,
-    Saturate,
-    Replace(Box<InternalFactRef>),
-}
-
-struct SnapshotProjectionFactIndex {
-    store: store::AsyncInMemoryRunStore,
-    mode: SnapshotQueryMode,
-}
-
-impl SnapshotProjectionFactIndex {
-    fn new(store: store::AsyncInMemoryRunStore, mode: SnapshotQueryMode) -> Self {
-        Self { store, mode }
-    }
-}
-
-impl FactIndexReadProvider for SnapshotProjectionFactIndex {
-    fn implementation_id(&self) -> &'static str {
-        "mfm.integration.snapshot.projection-fact-index.v1"
-    }
-
-    fn read_fact_index_batch<'a>(
-        &'a self,
-        requests: &'a [FactIndexReadRequest],
-    ) -> FactIndexReadBatchFuture<'a> {
-        Box::pin(async move {
-            let projection = self.store.projection_snapshot().map_err(|error| {
-                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
-            })?;
-            let mut results = Vec::with_capacity(requests.len());
-            for request in requests {
-                let mut rows = store::test_support::execute_fact_query_projection_for_test(
-                    &projection,
-                    request.plan(),
-                )
-                .map_err(|error| {
-                    mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
-                })?;
-                match &self.mode {
-                    SnapshotQueryMode::Reverse => rows.reverse(),
-                    SnapshotQueryMode::Saturate => {
-                        let row = rows.first().cloned().ok_or_else(|| {
-                            mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-                                "snapshot saturation fixture had no collected fact",
-                            )
-                        })?;
-                        rows = (0..11).map(|_| row.clone()).collect();
-                    }
-                    SnapshotQueryMode::Replace(replacement) => {
-                        let fields = rows.first().map(|row| row.returned_fields().to_vec()).ok_or_else(
-                            || {
-                                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-                                    "snapshot receipt mismatch fixture had no collected fact",
-                                )
-                            },
-                        )?;
-                        rows = vec![FactQueryResultRow::new((**replacement).clone(), fields)];
-                    }
-                }
-                let receipt = store::test_support::fact_query_receipt_for_projection_for_test(
-                    request.plan(),
-                    &projection,
-                    &rows,
-                );
-                results.push(FactQueryResult::new(rows, receipt).map_err(|error| {
-                    mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
-                })?);
-            }
-            Ok(results)
-        })
-    }
-}
-
 struct BlockingSnapshotFactIndex {
     entered: Mutex<Option<oneshot::Sender<()>>>,
     store: store::AsyncInMemoryRunStore,
@@ -995,6 +826,7 @@ struct TamperedSnapshotArtifactProvider {
 #[derive(Clone, Copy)]
 enum SnapshotArtifactTamper {
     FactQueryEvidence,
+    EvmFactResponse,
     SelectedHoldings,
 }
 
@@ -1019,11 +851,20 @@ impl store::RetainedArtifactReadProvider for TamperedSnapshotArtifactProvider {
                     .as_ref()
                     .and_then(|schema| schema.canonical_name())
                     == Some("mfm.portfolio.selected_holdings");
+            let evm_fact_response = artifact.evidence().artifact_role
+                == mfm_events::v1::ArtifactRole::FactResponse
+                && artifact
+                    .evidence()
+                    .schema_id
+                    .as_ref()
+                    .and_then(|schema| schema.canonical_name())
+                    == Some("mfm.portfolio.fact.evm_balance_snapshot.response");
             let applies = match self.tamper {
                 SnapshotArtifactTamper::FactQueryEvidence => {
                     artifact.evidence().artifact_role
                         == mfm_events::v1::ArtifactRole::FactQueryEvidence
                 }
+                SnapshotArtifactTamper::EvmFactResponse => evm_fact_response,
                 SnapshotArtifactTamper::SelectedHoldings => selected_holdings,
             };
             if !applies {
@@ -1035,6 +876,12 @@ impl store::RetainedArtifactReadProvider for TamperedSnapshotArtifactProvider {
                     let mut bytes = artifact.bytes().to_vec();
                     bytes.push(b'\n');
                     bytes
+                }
+                SnapshotArtifactTamper::EvmFactResponse => {
+                    let mut value: Value =
+                        serde_json::from_slice(artifact.bytes()).expect("EVM fact response JSON");
+                    value["raw_units"] = json!("999");
+                    serde_json::to_vec(&value).expect("tampered EVM fact response JSON")
                 }
                 SnapshotArtifactTamper::SelectedHoldings => {
                     let mut value: Value = serde_json::from_slice(artifact.bytes())
@@ -1062,20 +909,6 @@ impl store::RetainedArtifactReadProvider for TamperedSnapshotArtifactProvider {
             )
         })
     }
-}
-
-fn evm_native_fact_ref(store: &store::AsyncInMemoryRunStore) -> InternalFactRef {
-    store
-        .projection_snapshot()
-        .expect("fact projection")
-        .fact_index_entries()
-        .find(|(_claim_id, entry)| {
-            entry.fact_kind.as_str() == "evm.address_native_balance_snapshot"
-        })
-        .expect("recorded EVM native fact")
-        .1
-        .internal_ref()
-        .expect("recorded EVM native internal ref")
 }
 
 #[derive(Clone)]

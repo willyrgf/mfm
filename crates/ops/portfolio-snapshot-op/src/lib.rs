@@ -1,10 +1,11 @@
 #![warn(missing_docs)]
 //! Deterministic end-to-end portfolio snapshot composition.
 //!
-//! The operation accepts exactly one normalized [`PortfolioConfig`] authority. It compiles the
-//! explicit logical wallet-to-symbol demand into family-specific physical work, then proves that
-//! every completed family receipt matches that manifest before receipt-pinned selection, snapshot
-//! assembly, and report projection may run.
+//! The operation accepts exactly one normalized [`PortfolioConfig`] authority. It compiles Bitcoin
+//! demand into receipt-pinned collection and selection, and EVM demand into exactly one
+//! [`CollectEvmNetworkState`] plus one [`PublishEvmHoldingsState`] per network. Snapshot assembly
+//! consumes selected Bitcoin observations and the direct EVM network snapshots before report
+//! projection.
 //!
 //! # Examples
 //!
@@ -24,12 +25,7 @@ use mfm_op_btc_collectors::{
     BtcNativeBalancesAtAnchorConfig, BtcNetworkCollectionConfig, BtcNetworkCollectionOperation,
     BtcNetworkCollectionReceipt,
 };
-use mfm_op_evm_collectors::{
-    EvmErc20BalanceSourceConfig, EvmNetworkCollectionConfig, EvmNetworkCollectionOperation,
-    EvmNetworkCollectionReceipt,
-};
 use mfm_portfolio_model::domain_key::{HoldingsDomainKey, ReportDomainKey};
-use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig, ValidatedPortfolioConfig,
 };
@@ -42,14 +38,15 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, OperationOutput, StateInput};
 use mfm_state_portfolio::{
     AssembleSnapshotConfig, AssembleSnapshotInputHandles, AssembleSnapshotState,
-    CollectedHoldingReceipt, HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey,
-    PortfolioCollectionReceipt, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
-    PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
-    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInputHandles,
-    SelectHoldingsState,
+    CollectEvmNetworkInputHandles, CollectEvmNetworkState, CollectedHoldingReceipt,
+    EvmBalanceAsset, EvmBalanceSource, EvmNetworkCollectionConfig, EvmNetworkSnapshot,
+    HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey, PortfolioCollectionReceipt,
+    PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, PortfolioPublicOutputs,
+    ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
+    PublishEvmHoldingsInputHandles, PublishEvmHoldingsState, SelectHoldingsConfig,
+    SelectHoldingsFactDescriptors, SelectHoldingsInputHandles, SelectHoldingsState,
 };
 use mfm_states_btc::BtcAddressBalanceSnapshotFact;
-use mfm_states_evm::{EvmAddressErc20BalanceSnapshotFact, EvmAddressNativeBalanceSnapshotFact};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +57,7 @@ const ROOT_SCOPE: &str = "portfolio_snapshot";
 const OPERATION_KEY: &str = "portfolio_snapshot";
 const PUBLIC_OUTPUT_KEY: &str = "portfolio_snapshot";
 
-/// Certified manifest config for the operation-local portfolio receipt assembler.
+/// Certified Bitcoin manifest config for the operation-local receipt assembler.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -68,11 +65,11 @@ const PUBLIC_OUTPUT_KEY: &str = "portfolio_snapshot";
     validate = "validate_assemble_portfolio_collection_receipt_config"
 )]
 pub struct AssemblePortfolioCollectionReceiptConfig {
-    /// Sorted exact logical-to-source manifest compiled from the sole portfolio config.
+    /// Sorted exact Bitcoin logical-to-source manifest compiled from the portfolio config.
     pub manifest: Vec<HoldingManifestEntry>,
 }
 
-/// Validates the operation-local exact receipt manifest.
+/// Validates the operation-local exact Bitcoin receipt manifest.
 pub fn validate_assemble_portfolio_collection_receipt_config(
     config: &AssemblePortfolioCollectionReceiptConfig,
 ) -> Result<(), String> {
@@ -81,17 +78,15 @@ pub fn validate_assemble_portfolio_collection_receipt_config(
         .map_err(|error| error.to_string())
 }
 
-/// Typed family receipt fan-in for the exact portfolio receipt assembler.
+/// Typed Bitcoin receipt fan-in for the exact portfolio receipt assembler.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
 #[mfm(schema = "mfm.portfolio.operation.input.assemble_collection_receipt")]
 pub struct AssemblePortfolioCollectionReceiptInput {
     /// One receipt for every demanded Bitcoin network, in deterministic child order.
     pub bitcoin_receipts: Vec<BtcNetworkCollectionReceipt>,
-    /// One receipt for every demanded EVM network, in deterministic child order.
-    pub evm_receipts: Vec<EvmNetworkCollectionReceipt>,
 }
 
-/// Operation-local pure state that proves exact logical receipt completion.
+/// Operation-local pure state that proves exact Bitcoin receipt completion.
 pub struct AssemblePortfolioCollectionReceiptState {
     config: AssemblePortfolioCollectionReceiptConfig,
 }
@@ -140,7 +135,7 @@ impl PureState for AssemblePortfolioCollectionReceiptState {
     }
 }
 
-/// Assembles a portfolio receipt only if typed family receipts exactly satisfy the manifest.
+/// Assembles a portfolio receipt only if typed Bitcoin receipts exactly satisfy the manifest.
 pub fn assemble_portfolio_collection_receipt(
     config: &AssemblePortfolioCollectionReceiptConfig,
     input: AssemblePortfolioCollectionReceiptInput,
@@ -189,58 +184,6 @@ pub fn assemble_portfolio_collection_receipt(
                     entry.fact_content_identity(),
                 ),
             )?;
-        }
-    }
-    for receipt in input.evm_receipts {
-        if !seen_networks.insert(receipt.network().to_owned()) {
-            return Err(receipt_state_error(
-                "portfolio collection receipt contained duplicate network receipts",
-                None,
-            ));
-        }
-        let anchor = ExecutionAnchor::Evm {
-            chain_id: receipt.chain_id(),
-            block_number: receipt.block_number(),
-            block_hash: receipt.block_hash().to_owned(),
-        };
-        if let Some(native) = receipt.native_balance_receipt() {
-            for entry in native.entries() {
-                let source = HoldingSourceKey::EvmNative {
-                    network_id: entry.source_key().network().to_owned(),
-                    chain_id: entry.source_key().chain_id(),
-                    account: entry.source_key().account().to_owned(),
-                };
-                insert_actual_receipt(
-                    &mut actual_by_source,
-                    source,
-                    anchor.clone(),
-                    entry.coverage().to_owned(),
-                    entry.source_status().to_owned(),
-                    mfm_facts::FactContentIdentityEvidence::from_verified(
-                        entry.fact_content_identity(),
-                    ),
-                )?;
-            }
-        }
-        if let Some(erc20) = receipt.erc20_balance_receipt() {
-            for entry in erc20.entries() {
-                let source = HoldingSourceKey::EvmErc20 {
-                    network_id: entry.source_key().network().to_owned(),
-                    chain_id: entry.source_key().chain_id(),
-                    contract_address: entry.source_key().contract_address().to_owned(),
-                    account: entry.source_key().account().to_owned(),
-                };
-                insert_actual_receipt(
-                    &mut actual_by_source,
-                    source,
-                    anchor.clone(),
-                    entry.coverage().to_owned(),
-                    entry.source_status().to_owned(),
-                    mfm_facts::FactContentIdentityEvidence::from_verified(
-                        entry.fact_content_identity(),
-                    ),
-                )?;
-            }
         }
     }
 
@@ -442,24 +385,30 @@ impl Operation for PortfolioSnapshotOperation {
                 },
             )?);
         }
-        let mut evm_receipts = Vec::with_capacity(compiled.evm_collections.len());
+        let mut evm_snapshots = Vec::with_capacity(compiled.evm_collections.len());
         for (index, child_config) in compiled.evm_collections.iter().enumerate() {
             let child_config = child_config.clone();
-            evm_receipts.push(builder.child_scope(
+            evm_snapshots.push(builder.child_scope(
                 ScopeKey::new(format!("evm_collection_{index}"))?,
                 |child| {
-                    let output = child.scope().call::<EvmNetworkCollectionOperation, _>(
-                        OperationKey::new("evm_network_collection")?,
-                        EvmNetworkCollectionOperation,
-                        child_config,
-                        (),
+                    let batch = child.scope().state::<CollectEvmNetworkState, _>(
+                        mfm_program::StateKey::new("collect_network")?,
+                        NoContext,
+                        child_config.clone(),
+                        CollectEvmNetworkInputHandles {},
                     )?;
-                    let receipt = child.export_to_parent(
-                        BridgeKey::new("network_receipt")?,
-                        output.receipt,
+                    let snapshot = child.scope().state::<PublishEvmHoldingsState, _>(
+                        mfm_program::StateKey::new("publish_holdings")?,
+                        NoContext,
+                        child_config,
+                        PublishEvmHoldingsInputHandles { batch },
+                    )?;
+                    let snapshot = child.export_to_parent(
+                        BridgeKey::new("network_snapshot")?,
+                        snapshot,
                         BridgePolicy::same_run_same_value(),
                     )?;
-                    child.bridge_to_parent(receipt)
+                    child.bridge_to_parent(snapshot)
                 },
             )?);
         }
@@ -469,12 +418,9 @@ impl Operation for PortfolioSnapshotOperation {
             AssemblePortfolioCollectionReceiptConfig {
                 manifest: compiled.manifest,
             },
-            AssemblePortfolioCollectionReceiptInputHandles {
-                bitcoin_receipts,
-                evm_receipts,
-            },
+            AssemblePortfolioCollectionReceiptInputHandles { bitcoin_receipts },
         )?;
-        expand_receipt_pinned_report(builder, portfolio, receipt)
+        expand_receipt_pinned_report(builder, portfolio, receipt, evm_snapshots)
     }
 }
 
@@ -486,6 +432,7 @@ fn expand_receipt_pinned_report<'program, 'scope>(
     builder: &mut OperationExpansion<'program, 'scope>,
     portfolio: PortfolioConfig,
     receipt: mfm_program::Handle<'program, 'scope, PortfolioCollectionReceipt>,
+    evm_snapshots: Vec<mfm_program::Handle<'program, 'scope, EvmNetworkSnapshot>>,
 ) -> mfm_program::Result<PortfolioSnapshotOperationOutputs<'program, 'scope>> {
     let normalized = ValidatedPortfolioConfig::new(portfolio.clone())
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?
@@ -516,7 +463,11 @@ fn expand_receipt_pinned_report<'program, 'scope>(
         NoContext,
         AssembleSnapshotConfig::new(portfolio.clone())
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        AssembleSnapshotInputHandles { holdings, receipt },
+        AssembleSnapshotInputHandles {
+            holdings,
+            receipt,
+            evm_snapshots,
+        },
     )?;
     let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
         mfm_program::StateKey::new("project_report")?,
@@ -534,10 +485,6 @@ fn expand_receipt_pinned_report<'program, 'scope>(
 fn holding_fact_descriptors() -> mfm_program::Result<SelectHoldingsFactDescriptors> {
     SelectHoldingsFactDescriptors::new(
         &BtcAddressBalanceSnapshotFact::descriptor()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        &EvmAddressNativeBalanceSnapshotFact::descriptor()
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        &EvmAddressErc20BalanceSnapshotFact::descriptor()
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
     )
     .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
@@ -589,8 +536,7 @@ struct CompiledCollection {
 #[derive(Default)]
 struct NetworkCollectionDemand {
     bitcoin_addresses: BTreeSet<String>,
-    evm_native_accounts: BTreeSet<NormalizedEvmAddress>,
-    erc20_sources: BTreeSet<EvmErc20BalanceSourceConfig>,
+    evm_sources: BTreeSet<EvmBalanceSource>,
 }
 
 fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection, ConfigError> {
@@ -618,12 +564,7 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                 .get(symbol_id.as_str())
                 .copied()
                 .ok_or_else(|| ConfigError::new("portfolio wallet referenced an unknown symbol"))?;
-            let requirement = HoldingRequirementKey {
-                wallet_id: wallet.wallet_id.to_string(),
-                symbol_id: symbol.symbol_id.to_string(),
-                network_id: wallet.network_id.to_string(),
-            };
-            let source = match (network, &symbol.source) {
+            match (network, &symbol.source) {
                 (
                     NetworkConfig::Bitcoin {
                         network_id,
@@ -635,73 +576,50 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                 ) => {
                     let address = wallet.subject.address_str().to_owned();
                     network_demand.bitcoin_addresses.insert(address.clone());
-                    HoldingSourceKey::BitcoinNative {
+                    let requirement = HoldingRequirementKey {
+                        wallet_id: wallet.wallet_id.to_string(),
+                        symbol_id: symbol.symbol_id.to_string(),
+                        network_id: wallet.network_id.to_string(),
+                    };
+                    let source = HoldingSourceKey::BitcoinNative {
                         network_id: network_id.to_string(),
                         bitcoin_network: bitcoin_network.clone(),
                         semantic_source_identity: source_identity.to_string(),
                         address,
-                    }
+                    };
+                    manifest.push(
+                        HoldingManifestEntry::new(requirement, source)
+                            .map_err(|error| ConfigError::new(error.to_string()))?,
+                    );
                 }
-                (
-                    NetworkConfig::Evm {
-                        network_id,
-                        chain_id,
-                        ..
-                    },
-                    HoldingSourceConfig::Native,
-                ) => {
-                    let account = wallet
-                        .subject
-                        .evm_address()
-                        .ok_or_else(|| {
-                            ConfigError::new("EVM wallet did not contain an EVM address")
-                        })?
-                        .clone();
-                    network_demand.evm_native_accounts.insert(account.clone());
-                    HoldingSourceKey::EvmNative {
-                        network_id: network_id.to_string(),
-                        chain_id: chain_id.get(),
-                        account: account.to_string(),
-                    }
+                (NetworkConfig::Evm { .. }, HoldingSourceConfig::Native) => {
+                    let account = wallet.subject.evm_address().ok_or_else(|| {
+                        ConfigError::new("EVM wallet did not contain an EVM address")
+                    })?;
+                    network_demand.evm_sources.insert(
+                        EvmBalanceSource::new(account.to_string(), EvmBalanceAsset::Native)
+                            .map_err(|error| ConfigError::new(error.to_string()))?,
+                    );
                 }
-                (
-                    NetworkConfig::Evm {
-                        network_id,
-                        chain_id,
-                        ..
-                    },
-                    HoldingSourceConfig::Erc20 { contract_address },
-                ) => {
-                    let account = wallet
-                        .subject
-                        .evm_address()
-                        .ok_or_else(|| {
-                            ConfigError::new("EVM wallet did not contain an EVM address")
-                        })?
-                        .clone();
-                    network_demand
-                        .erc20_sources
-                        .insert(EvmErc20BalanceSourceConfig {
-                            contract_address: contract_address.clone(),
-                            account: account.clone(),
-                        });
-                    HoldingSourceKey::EvmErc20 {
-                        network_id: network_id.to_string(),
-                        chain_id: chain_id.get(),
-                        contract_address: contract_address.to_string(),
-                        account: account.to_string(),
-                    }
+                (NetworkConfig::Evm { .. }, HoldingSourceConfig::Erc20 { contract_address }) => {
+                    let account = wallet.subject.evm_address().ok_or_else(|| {
+                        ConfigError::new("EVM wallet did not contain an EVM address")
+                    })?;
+                    network_demand.evm_sources.insert(
+                        EvmBalanceSource::new(
+                            account.to_string(),
+                            EvmBalanceAsset::erc20(contract_address.to_string())
+                                .map_err(|error| ConfigError::new(error.to_string()))?,
+                        )
+                        .map_err(|error| ConfigError::new(error.to_string()))?,
+                    );
                 }
                 _ => {
                     return Err(ConfigError::new(
                         "portfolio source did not match network family",
                     ))
                 }
-            };
-            manifest.push(
-                HoldingManifestEntry::new(requirement, source)
-                    .map_err(|error| ConfigError::new(error.to_string()))?,
-            );
+            }
         }
     }
     manifest.sort_by(|left, right| left.requirement().cmp(right.requirement()));
@@ -722,8 +640,7 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                 ..
             } => {
                 if network_demand.bitcoin_addresses.is_empty()
-                    || !network_demand.evm_native_accounts.is_empty()
-                    || !network_demand.erc20_sources.is_empty()
+                    || !network_demand.evm_sources.is_empty()
                 {
                     return Err(ConfigError::new(
                         "Bitcoin demand did not match native source shape",
@@ -740,16 +657,14 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
             }
             NetworkConfig::Evm { .. } => {
                 if !network_demand.bitcoin_addresses.is_empty()
-                    || (network_demand.evm_native_accounts.is_empty()
-                        && network_demand.erc20_sources.is_empty())
+                    || network_demand.evm_sources.is_empty()
                 {
                     return Err(ConfigError::new("EVM demand did not match source shape"));
                 }
-                evm_collections.push(EvmNetworkCollectionConfig {
-                    network: network.clone(),
-                    native_accounts: network_demand.evm_native_accounts.into_iter().collect(),
-                    erc20_sources: network_demand.erc20_sources.into_iter().collect(),
-                });
+                evm_collections.push(EvmNetworkCollectionConfig::new(
+                    network,
+                    network_demand.evm_sources.into_iter().collect(),
+                )?);
             }
         }
     }
@@ -773,23 +688,13 @@ mfm_certify::define_program_descriptor_registry! {
         mfm_op_btc_collectors::ObserveBtcAddressBalanceState,
         mfm_op_btc_collectors::RecordBtcAddressBalanceFactState,
         mfm_op_btc_collectors::AssembleBtcNetworkCollectionReceiptState,
-        mfm_op_evm_collectors::ResolveEvmJointTipState,
-        mfm_op_evm_collectors::ObserveEvmNativeBalanceState,
-        mfm_op_evm_collectors::RecordEvmNativeBalanceFactState,
-        mfm_op_evm_collectors::AssembleEvmNativeBalanceBatchReceiptState,
-        mfm_op_evm_collectors::ObserveErc20TokenMetadataState,
-        mfm_op_evm_collectors::ObserveErc20BalanceState,
-        mfm_op_evm_collectors::RecordErc20BalanceFactState,
-        mfm_op_evm_collectors::AssembleEvmErc20BalanceBatchReceiptState,
-        mfm_op_evm_collectors::AssembleEvmNetworkCollectionReceiptState,
+        mfm_state_portfolio::CollectEvmNetworkState,
+        mfm_state_portfolio::PublishEvmHoldingsState,
     ],
     operations: [
         PortfolioSnapshotOperation,
         BtcNetworkCollectionOperation,
         mfm_op_btc_collectors::BtcNativeBalancesAtAnchorOperation,
-        EvmNetworkCollectionOperation,
-        mfm_op_evm_collectors::EvmNativeBalancesAtAnchorOperation,
-        mfm_op_evm_collectors::EvmErc20BalancesAtAnchorOperation,
     ],
 }
 
@@ -797,30 +702,31 @@ mfm_certify::define_program_descriptor_registry! {
 mod tests {
     use super::*;
     use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
-    use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
     use mfm_values::NonEmpty;
     use serde_json::json;
 
     const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
     const TOKEN: &str = "0x0000000000000000000000000000000000000001";
     const BTC_ADDRESS: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
-    const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
     #[test]
     fn compiler_derives_sorted_logical_manifest_and_family_work() {
         let portfolio = portfolio_config(true, true, true);
         let compiled = compile_collection(&portfolio).expect("compile collection");
-        assert_eq!(compiled.manifest.len(), 3);
+        assert_eq!(compiled.manifest.len(), 1);
         assert_eq!(compiled.bitcoin_collections.len(), 1);
         assert_eq!(compiled.evm_collections.len(), 1);
-        assert_eq!(compiled.evm_collections[0].native_accounts.len(), 1);
-        assert_eq!(compiled.evm_collections[0].erc20_sources.len(), 1);
-        assert_eq!(
-            compiled.evm_collections[0].erc20_sources[0]
-                .contract_address
-                .as_str(),
-            TOKEN
-        );
+        let sources = compiled.evm_collections[0].sources();
+        assert_eq!(sources.len(), 2);
+        assert!(sources
+            .iter()
+            .any(|source| matches!(source.asset(), EvmBalanceAsset::Native)));
+        assert!(sources.iter().any(|source| {
+            matches!(
+                source.asset(),
+                EvmBalanceAsset::Erc20 { contract_address } if contract_address == TOKEN
+            )
+        }));
     }
 
     #[test]
@@ -829,8 +735,11 @@ mod tests {
             .expect("compile token-only collection");
         assert!(compiled.bitcoin_collections.is_empty());
         assert_eq!(compiled.evm_collections.len(), 1);
-        assert!(compiled.evm_collections[0].native_accounts.is_empty());
-        assert_eq!(compiled.evm_collections[0].erc20_sources.len(), 1);
+        assert_eq!(compiled.evm_collections[0].sources().len(), 1);
+        assert!(matches!(
+            compiled.evm_collections[0].sources()[0].asset(),
+            EvmBalanceAsset::Erc20 { contract_address } if contract_address == TOKEN
+        ));
     }
 
     #[test]
@@ -865,7 +774,7 @@ mod tests {
         .into_config();
 
         let compiled = compile_collection(&portfolio).expect("compile explicit demand only");
-        assert_eq!(compiled.manifest.len(), 1);
+        assert!(compiled.manifest.is_empty());
         assert!(compiled.bitcoin_collections.is_empty());
         assert_eq!(compiled.evm_collections.len(), 1);
         assert!(compiled
@@ -904,6 +813,40 @@ mod tests {
                 && !operation.operation_name.contains("collect_then_report")
         }));
 
+        let collect_kind =
+            mfm_state_portfolio::CollectEvmNetworkState::kind().expect("collect state kind");
+        let publish_kind =
+            mfm_state_portfolio::PublishEvmHoldingsState::kind().expect("publish state kind");
+        assert_eq!(
+            first
+                .state_nodes()
+                .iter()
+                .filter(|node| node.state_kind == collect_kind)
+                .count(),
+            1
+        );
+        assert_eq!(
+            first
+                .state_nodes()
+                .iter()
+                .filter(|node| node.state_kind == publish_kind)
+                .count(),
+            1
+        );
+        for deleted in [
+            "resolve_evm_joint_tip",
+            "observe_evm_native",
+            "observe_erc20",
+            "record_evm_native",
+            "record_erc20",
+            "assemble_evm_network_collection_receipt",
+        ] {
+            assert!(first
+                .state_nodes()
+                .iter()
+                .all(|node| !node.state_descriptor_name.contains(deleted)));
+        }
+
         mfm_certify::certify_program_draft(&first).expect("snapshot draft certifies");
         let launch = portfolio_snapshot_program_launch_plan(config).expect("snapshot launch plan");
         assert_eq!(launch.draft, first);
@@ -911,37 +854,21 @@ mod tests {
     }
 
     #[test]
-    fn receipt_assembler_requires_the_exact_family_completed_set() {
+    fn receipt_assembler_requires_the_exact_bitcoin_completed_set() {
         let compiled = compile_collection(&portfolio_config(true, true, true))
             .expect("compile mixed collection");
         let bitcoin = bitcoin_receipt(BTC_ADDRESS);
-        let evm = evm_receipt(EVM_ACCOUNT, true, true);
         let receipt = assemble_portfolio_collection_receipt(
             &AssemblePortfolioCollectionReceiptConfig {
                 manifest: compiled.manifest.clone(),
             },
             AssemblePortfolioCollectionReceiptInput {
                 bitcoin_receipts: vec![bitcoin.clone()],
-                evm_receipts: vec![evm.clone()],
             },
         )
-        .expect("exact family receipts");
-        assert_eq!(receipt.holdings().len(), 3);
-        assert_eq!(receipt.network_anchors().len(), 2);
-        let native_identity = evm
-            .native_balance_receipt()
-            .expect("native receipt")
-            .entries()[0]
-            .fact_content_identity();
-        let expected_evidence = serde_json::to_value(
-            mfm_facts::FactContentIdentityEvidence::from_verified(native_identity),
-        )
-        .expect("family identity evidence serializes");
-        assert!(receipt.holdings().iter().any(|entry| {
-            serde_json::to_value(entry.fact_content_identity_evidence())
-                .expect("receipt identity evidence serializes")
-                == expected_evidence
-        }));
+        .expect("exact Bitcoin receipt");
+        assert_eq!(receipt.holdings().len(), 1);
+        assert_eq!(receipt.network_anchors().len(), 1);
 
         let missing = assemble_portfolio_collection_receipt(
             &AssemblePortfolioCollectionReceiptConfig {
@@ -949,7 +876,6 @@ mod tests {
             },
             AssemblePortfolioCollectionReceiptInput {
                 bitcoin_receipts: Vec::new(),
-                evm_receipts: vec![evm.clone()],
             },
         )
         .expect_err("missing Bitcoin family receipt");
@@ -961,7 +887,6 @@ mod tests {
             },
             AssemblePortfolioCollectionReceiptInput {
                 bitcoin_receipts: vec![bitcoin.clone(), bitcoin],
-                evm_receipts: vec![evm],
             },
         )
         .expect_err("duplicate Bitcoin network receipt");
@@ -969,22 +894,26 @@ mod tests {
     }
 
     #[test]
-    fn receipt_assembler_rejects_unexpected_physical_source_and_empty_demand() {
+    fn all_evm_demand_produces_an_empty_bitcoin_receipt() {
         let native_only = compile_collection(&portfolio_config(false, true, false))
             .expect("compile native-only collection");
-        let unexpected = assemble_portfolio_collection_receipt(
+        let receipt = assemble_portfolio_collection_receipt(
             &AssemblePortfolioCollectionReceiptConfig {
                 manifest: native_only.manifest,
             },
             AssemblePortfolioCollectionReceiptInput {
                 bitcoin_receipts: Vec::new(),
-                evm_receipts: vec![evm_receipt(EVM_ACCOUNT, true, true)],
             },
         )
-        .expect_err("unexpected token source");
-        assert!(unexpected.to_string().contains("unexpected source"));
+        .expect("empty Bitcoin receipt");
+        assert!(receipt.holdings().is_empty());
+        assert!(receipt.network_anchors().is_empty());
 
-        assert!(compile_collection(&portfolio_config(false, false, false)).is_err());
+        let empty = compile_collection(&portfolio_config(false, false, false))
+            .expect("empty portfolio has no collection work");
+        assert!(empty.manifest.is_empty());
+        assert!(empty.bitcoin_collections.is_empty());
+        assert!(empty.evm_collections.is_empty());
     }
 
     fn bitcoin_receipt(address: &str) -> BtcNetworkCollectionReceipt {
@@ -1020,93 +949,6 @@ mod tests {
             },
         )
         .expect("Bitcoin receipt")
-    }
-
-    fn evm_receipt(
-        account: &str,
-        include_native: bool,
-        include_erc20: bool,
-    ) -> EvmNetworkCollectionReceipt {
-        let network = NetworkConfig::new(
-            "ethereum-mainnet".to_owned(),
-            NetworkFamilyConfig::Evm,
-            Some(1),
-            Some(18),
-            None,
-            None,
-            BTreeMap::new(),
-        )
-        .expect("EVM network");
-        let tip = mfm_states_evm::EvmJointTip::new(
-            "ethereum-mainnet",
-            1,
-            20,
-            EVM_HASH,
-            mfm_states_evm::RedactedEvmSessionEvidence::new(
-                "ethereum-mainnet",
-                1,
-                "primary",
-                "default",
-            )
-            .expect("source binding"),
-        )
-        .expect("EVM tip");
-        let native = include_native.then(|| {
-            let fact = mfm_states_evm::EvmAddressNativeBalanceSnapshotFact::try_new(
-                mfm_states_evm::EvmAddressNativeBalanceSubject::new("ethereum-mainnet", 1, account)
-                    .expect("native subject"),
-                20,
-                EVM_HASH,
-                "0",
-                18,
-                CoverageStatus::ConfiguredOnly,
-                HoldingSourceStatus::Ok,
-            )
-            .expect("native fact");
-            mfm_states_evm::assemble_evm_native_balance_batch_receipt(
-                mfm_states_evm::AssembleEvmNativeBalanceBatchReceiptInput {
-                    joint_tip: tip.clone(),
-                    balance_facts: NonEmpty::try_from_vec(vec![fact]).expect("one native fact"),
-                },
-            )
-            .expect("native receipt")
-        });
-        let erc20 = include_erc20.then(|| {
-            let fact = mfm_states_evm::EvmAddressErc20BalanceSnapshotFact::try_new(
-                mfm_states_evm::EvmAddressErc20BalanceSubject::new(
-                    "ethereum-mainnet",
-                    1,
-                    TOKEN,
-                    account,
-                )
-                .expect("token subject"),
-                20,
-                EVM_HASH,
-                "0",
-                6,
-            )
-            .expect("token fact");
-            mfm_states_evm::assemble_evm_erc20_balance_batch_receipt(
-                mfm_states_evm::AssembleEvmErc20BalanceBatchReceiptInput {
-                    joint_tip: tip.clone(),
-                    balance_facts: NonEmpty::try_from_vec(vec![fact]).expect("one token fact"),
-                },
-            )
-            .expect("token receipt")
-        });
-        mfm_states_evm::assemble_evm_network_collection_receipt(
-            &mfm_states_evm::AssembleEvmNetworkCollectionReceiptConfig {
-                network,
-                native_balance_required: include_native,
-                erc20_balance_required: include_erc20,
-            },
-            mfm_states_evm::AssembleEvmNetworkCollectionReceiptInput {
-                joint_tip: tip,
-                native_balance_receipts: native.into_iter().collect(),
-                erc20_balance_receipts: erc20.into_iter().collect(),
-            },
-        )
-        .expect("EVM network receipt")
     }
 
     fn portfolio_config(

@@ -1,26 +1,38 @@
 #![warn(missing_docs)]
-//! Portfolio adapter runners for fact-backed receipt-pinned portfolio snapshots.
+//! Portfolio adapter runners for certified portfolio snapshots.
 //!
-//! This crate binds certified portfolio state descriptors to typed runners over explicit artifact
-//! and Platform fact-index capability contracts. Live chain transports are not used by the report
-//! graph after the collectors cutover.
+//! This crate binds one checked source-stable EVM read session per demanded network, executes
+//! exact-hash balance reads with bounded concurrency, and atomically records each unified fact
+//! batch with its direct network snapshot. It also retains the Platform fact-index binding used
+//! only by the Bitcoin receipt-pinned selection path.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use alloy_primitives::{Address, Bytes, U256};
 use mfm_events::v1 as events;
-use mfm_fact_capabilities::FactIndexReadProvider;
-use mfm_program::StateSpec;
+use mfm_evm_capabilities::{
+    EvmBlockSelector, EvmCall, EvmCapabilityError, EvmNetworkBinding, EvmReadCapability,
+    EvmReadSession, ProviderDiagnosticCode, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
+use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
+use mfm_program::{ManagedWriteState, StateSpec};
 use mfm_runtime::{
-    load_materialized_struct_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, ExternalReadExecution,
-    ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
-    RunnerExecutableIdentityTemplate, RunnerRegistrationBuilder,
+    load_materialized_struct_input, load_runner_config_for_node, CapabilityImplementationId,
+    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
+    ExternalReadRunner, FactRecordInput, RunnerCapabilityBinding, RunnerExecutableIdentityTemplate,
+    RunnerIngressContext, RunnerOutputBuilder, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
     assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version,
     validate_receipt_against_portfolio, AssembleSnapshotConfig, AssembleSnapshotInput,
-    AssembleSnapshotState, PortfolioCollectionReceipt, ProjectReportConfig, ProjectReportInput,
-    ProjectReportState, SelectHoldingsConfig, SelectHoldingsInput, SelectHoldingsReadEvidence,
+    AssembleSnapshotState, CollectEvmNetworkEvidence, CollectEvmNetworkPlan,
+    CollectEvmNetworkState, EvmBalanceAsset, EvmBalanceReadEvidence, EvmCollectionAnchor,
+    EvmNetworkCollectionConfig, EvmTokenDecimalsEvidence, PortfolioCollectionReceipt,
+    ProjectReportConfig, ProjectReportInput, ProjectReportState, PublishEvmHoldingsInput,
+    PublishEvmHoldingsState, SelectHoldingsConfig, SelectHoldingsInput, SelectHoldingsReadEvidence,
     SelectHoldingsReadPlan, SelectHoldingsState, SelectedHoldings,
 };
 use mfm_store::v1 as store;
@@ -34,33 +46,49 @@ pub use self::replay::verify_portfolio_replay;
 #[cfg(test)]
 pub(crate) use self::selection::select_holdings;
 
-#[cfg(test)]
-use mfm_fact_capabilities::FactIndexReadRequest;
-#[cfg(test)]
-use mfm_facts::FactCanonicalScalar;
-#[cfg(test)]
-use mfm_state_portfolio::project_network_pins_from_observations;
-
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
+const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
 const ADAPTER_FACTORY: &str = "portfolio_adapter";
+
+/// Future returned by the application-owned EVM read-session binder.
+pub type PortfolioEvmReadSessionBindFuture = Pin<
+    Box<
+        dyn Future<Output = mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>>> + Send + 'static,
+    >,
+>;
+
+type ValidateEvmBinding =
+    dyn Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync;
+type BindEvmReadSession =
+    dyn Fn(EvmNetworkBinding) -> PortfolioEvmReadSessionBindFuture + Send + Sync;
 
 /// Runtime capabilities used by portfolio adapter runners.
 #[derive(Clone)]
 pub struct PortfolioRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn FactIndexReadProvider>,
+    validate_evm_binding: Arc<ValidateEvmBinding>,
+    bind_evm_read_session: Arc<BindEvmReadSession>,
 }
 
 impl PortfolioRunnerCapabilities {
     /// Creates portfolio runner capabilities from artifact and Platform fact-index providers.
-    pub fn new(
+    pub fn new<V, B>(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         fact_index: Arc<dyn FactIndexReadProvider>,
-    ) -> Self {
+        validate_evm_binding: V,
+        bind_evm_read_session: B,
+    ) -> Self
+    where
+        V: Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync + 'static,
+        B: Fn(EvmNetworkBinding) -> PortfolioEvmReadSessionBindFuture + Send + Sync + 'static,
+    {
         Self {
             artifacts,
             fact_index,
+            validate_evm_binding: Arc::new(validate_evm_binding),
+            bind_evm_read_session: Arc::new(bind_evm_read_session),
         }
     }
 
@@ -71,15 +99,43 @@ impl PortfolioRunnerCapabilities {
     fn fact_index(&self) -> Arc<dyn FactIndexReadProvider> {
         Arc::clone(&self.fact_index)
     }
+
+    fn validate_evm_binding(
+        &self,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<()> {
+        (self.validate_evm_binding)(binding)
+    }
+
+    async fn bind_evm_read_session(
+        &self,
+        binding: EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>> {
+        let session = (self.bind_evm_read_session)(binding.clone()).await?;
+        if !session.evidence().matches_binding(&binding)
+            || session.evidence().implementation_id().as_str()
+                != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+        {
+            return Err(EvmCapabilityError::provider_failure(
+                mfm_evm_capabilities::evm_diagnostic(
+                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                ),
+            ));
+        }
+        Ok(session)
+    }
 }
 
-/// Registers typed portfolio runners for receipt-pinned selection and pure snapshot projection.
+/// Registers EVM collection/publication, Bitcoin selection, and snapshot projection runners.
 pub fn register_portfolio_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: PortfolioRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
     let artifacts = capabilities.artifacts();
     let fact_index = capabilities.fact_index();
+    registry.register_capability_spec::<EvmReadCapability>(CapabilityImplementationId::new(
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    )?)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-portfolio",
@@ -90,6 +146,8 @@ pub fn register_portfolio_runners(
         executable_identities.factory_binding(events::RunnerFactoryId::new(PURE_FACTORY)?);
     let read_factory =
         executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
+    let managed_write_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(MANAGED_WRITE_FACTORY)?);
     let adapter_factory =
         executable_identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
     registrations.register_adapter_executable_with_factory(
@@ -106,6 +164,21 @@ pub fn register_portfolio_runners(
                 fact_index,
             },
         )),
+    )?;
+    registrations.register_state_runner_with_factory::<CollectEvmNetworkState>(
+        &read_factory,
+        Arc::new(ExternalReadRunner::<CollectEvmNetworkState, _>::new(
+            artifacts.clone(),
+            CollectEvmNetworkExecutor {
+                capabilities: capabilities.clone(),
+            },
+        )),
+    )?;
+    registrations.register_state_runner_with_factory::<PublishEvmHoldingsState>(
+        &managed_write_factory,
+        Arc::new(PublishEvmHoldingsRunner {
+            artifacts: artifacts.clone(),
+        }),
     )?;
     registrations.register_state_runner_with_factory::<AssembleSnapshotState>(
         &pure_factory,
@@ -133,11 +206,14 @@ impl ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor {
     ) -> ExternalReadExecutionFuture<'a, SelectHoldingsReadEvidence> {
         Box::pin(async move {
             let requests = plan.requests().map_err(portfolio_state_runtime_error)?;
-            let responses = self
-                .fact_index
-                .read_fact_index_batch(&requests)
-                .await
-                .map_err(fact_index_runtime_error)?;
+            let responses = if requests.is_empty() {
+                Vec::new()
+            } else {
+                self.fact_index
+                    .read_fact_index_batch(&requests)
+                    .await
+                    .map_err(fact_index_runtime_error)?
+            };
             plan.validate_query_results(&responses)
                 .map_err(portfolio_state_runtime_error)?;
             let hydrated =
@@ -151,6 +227,264 @@ impl ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor {
             Ok(ExternalReadExecution::new(primary, queries))
         })
     }
+}
+
+const EVM_READ_CONCURRENCY_LIMIT: usize = 16;
+const ERC20_DECIMALS_SELECTOR: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];
+const ERC20_BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
+
+struct CollectEvmNetworkExecutor {
+    capabilities: PortfolioRunnerCapabilities,
+}
+
+impl ExternalReadPlanExecutor<CollectEvmNetworkState> for CollectEvmNetworkExecutor {
+    fn validate_ingress(
+        &self,
+        _ctx: RunnerIngressContext<'_>,
+        state: &CollectEvmNetworkState,
+    ) -> mfm_runtime::Result<()> {
+        let binding = state
+            .config()
+            .binding()
+            .map_err(portfolio_evm_state_runtime_error)?;
+        self.capabilities
+            .validate_evm_binding(&binding)
+            .map_err(evm_capability_runtime_error)
+    }
+
+    fn execute<'a>(
+        &'a self,
+        plan: &'a CollectEvmNetworkPlan,
+        _ctx: &'a ErasedRunCtx<'_>,
+    ) -> ExternalReadExecutionFuture<'a, CollectEvmNetworkEvidence> {
+        Box::pin(async move {
+            let evidence = collect_evm_network(plan, &self.capabilities).await?;
+            Ok(ExternalReadExecution::primary(evidence))
+        })
+    }
+}
+
+async fn collect_evm_network(
+    plan: &CollectEvmNetworkPlan,
+    capabilities: &PortfolioRunnerCapabilities,
+) -> mfm_runtime::Result<CollectEvmNetworkEvidence> {
+    let binding = plan.binding().map_err(portfolio_evm_state_runtime_error)?;
+    let session = capabilities
+        .bind_evm_read_session(binding)
+        .await
+        .map_err(evm_capability_runtime_error)?;
+    let latest = session
+        .read_block(&EvmBlockSelector::Latest)
+        .await
+        .map_err(evm_capability_runtime_error)?;
+    let anchor_number = u64::try_from(latest.number).map_err(|_| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "EVM collection block number exceeded u64".to_owned(),
+        )
+    })?;
+    let anchor = EvmCollectionAnchor::new(anchor_number, format!("{:#x}", latest.hash))
+        .map_err(portfolio_evm_state_runtime_error)?;
+    let exact = EvmBlockSelector::ExactHash(latest.hash);
+
+    let token_decimals = read_token_decimals(plan, Arc::clone(&session), exact.clone()).await?;
+    let balances = read_balances(plan, Arc::clone(&session), exact).await?;
+    let final_block = session
+        .read_block(&EvmBlockSelector::Number(latest.number))
+        .await
+        .map_err(evm_capability_runtime_error)?;
+    let final_number = u64::try_from(final_block.number).map_err(|_| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "EVM canonicality block number exceeded u64".to_owned(),
+        )
+    })?;
+    let final_canonical_block =
+        EvmCollectionAnchor::new(final_number, format!("{:#x}", final_block.hash))
+            .map_err(portfolio_evm_state_runtime_error)?;
+    Ok(CollectEvmNetworkEvidence::new(
+        session.evidence(),
+        anchor,
+        token_decimals,
+        balances,
+        final_canonical_block,
+    ))
+}
+
+async fn read_token_decimals(
+    plan: &CollectEvmNetworkPlan,
+    session: Arc<dyn EvmReadSession>,
+    selector: EvmBlockSelector,
+) -> mfm_runtime::Result<Vec<EvmTokenDecimalsEvidence>> {
+    let contracts = plan.token_contracts();
+    let mut evidence = Vec::with_capacity(contracts.len());
+    for chunk in contracts.chunks(EVM_READ_CONCURRENCY_LIMIT) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for contract in chunk {
+            let contract = contract.clone();
+            let session = Arc::clone(&session);
+            let selector = selector.clone();
+            tasks.spawn(async move {
+                let contract_address = contract.parse::<Address>().map_err(|_| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                        "certified ERC-20 contract address was invalid".to_owned(),
+                    )
+                })?;
+                let call = EvmCall::new(
+                    Address::ZERO,
+                    contract_address,
+                    U256::ZERO,
+                    Bytes::copy_from_slice(&ERC20_DECIMALS_SELECTOR),
+                    U256::from(100_000_u64),
+                    Default::default(),
+                    selector,
+                )
+                .map_err(evm_capability_runtime_error)?;
+                let result = session
+                    .call(&call)
+                    .await
+                    .map_err(evm_capability_runtime_error)?;
+                let decimals = u8::try_from(decode_abi_word(&result)?).map_err(|_| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                        "ERC-20 decimals result exceeded u8".to_owned(),
+                    )
+                })?;
+                EvmTokenDecimalsEvidence::new(contract, decimals)
+                    .map_err(portfolio_evm_state_runtime_error)
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            evidence.push(result.map_err(joined_evm_read_error)??);
+        }
+    }
+    evidence.sort();
+    Ok(evidence)
+}
+
+async fn read_balances(
+    plan: &CollectEvmNetworkPlan,
+    session: Arc<dyn EvmReadSession>,
+    selector: EvmBlockSelector,
+) -> mfm_runtime::Result<Vec<EvmBalanceReadEvidence>> {
+    let mut evidence = Vec::with_capacity(plan.sources().len());
+    for chunk in plan.sources().chunks(EVM_READ_CONCURRENCY_LIMIT) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for source in chunk {
+            let source = source.clone();
+            let session = Arc::clone(&session);
+            let selector = selector.clone();
+            tasks.spawn(async move {
+                let account = source
+                    .account_address()
+                    .map_err(portfolio_evm_state_runtime_error)?;
+                let raw_units = match source.asset() {
+                    EvmBalanceAsset::Native => session
+                        .read_balance(account, &selector)
+                        .await
+                        .map_err(evm_capability_runtime_error)?,
+                    EvmBalanceAsset::Erc20 { contract_address } => {
+                        let contract = contract_address.parse::<Address>().map_err(|_| {
+                            mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                                "certified ERC-20 contract address was invalid".to_owned(),
+                            )
+                        })?;
+                        let call = EvmCall::new(
+                            Address::ZERO,
+                            contract,
+                            U256::ZERO,
+                            erc20_balance_of_calldata(account),
+                            U256::from(100_000_u64),
+                            Default::default(),
+                            selector,
+                        )
+                        .map_err(evm_capability_runtime_error)?;
+                        let result = session
+                            .call(&call)
+                            .await
+                            .map_err(evm_capability_runtime_error)?;
+                        decode_abi_word(&result)?
+                    }
+                };
+                Ok::<_, mfm_runtime::RuntimeError>(EvmBalanceReadEvidence::new(source, raw_units))
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            evidence.push(result.map_err(joined_evm_read_error)??);
+        }
+    }
+    evidence.sort();
+    Ok(evidence)
+}
+
+fn erc20_balance_of_calldata(account: Address) -> Bytes {
+    let mut calldata = Vec::with_capacity(36);
+    calldata.extend_from_slice(&ERC20_BALANCE_OF_SELECTOR);
+    calldata.extend_from_slice(&[0_u8; 12]);
+    calldata.extend_from_slice(account.as_slice());
+    Bytes::from(calldata)
+}
+
+fn decode_abi_word(bytes: &Bytes) -> mfm_runtime::Result<U256> {
+    if bytes.len() != 32 {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "ERC-20 call result was not one ABI word".to_owned(),
+        ));
+    }
+    Ok(U256::from_be_slice(bytes.as_ref()))
+}
+
+fn joined_evm_read_error(_error: tokio::task::JoinError) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::InvalidRunnerOutput(
+        "bounded EVM collection task did not complete".to_owned(),
+    )
+}
+
+struct PublishEvmHoldingsRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+}
+
+impl ErasedNodeRunner for PublishEvmHoldingsRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let config = load_runner_config_for_node::<EvmNetworkCollectionConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let state = PublishEvmHoldingsState::new(config).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
+            let input = load_materialized_struct_input::<PublishEvmHoldingsInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let context = ctx.certified_context::<mfm_program::NoContext>()?;
+            let snapshot = state
+                .run(input, &(FactRecordCapability,), &context)
+                .await
+                .map_err(|error| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                })?;
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            let producer = portfolio_fact_record_binding()?;
+            for fact in snapshot.facts() {
+                output.record_fact(
+                    FactRecordInput::new(fact, mfm_state_portfolio::evm_balance_fact_visibility()),
+                    producer.clone(),
+                )?;
+            }
+            output.state_output(&snapshot)?;
+            Ok(output.finish())
+        })
+    }
+}
+
+fn portfolio_fact_record_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    RunnerCapabilityBinding::for_capability::<FactRecordCapability>(
+        portfolio_adapter_kind()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
+        portfolio_adapter_version()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
+    )
 }
 
 struct AssembleSnapshotRunner {
@@ -213,6 +547,40 @@ where
 
 fn fact_index_runtime_error(
     error: mfm_fact_capabilities::FactIndexReadError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+fn evm_capability_runtime_error(error: EvmCapabilityError) -> mfm_runtime::RuntimeError {
+    let Some(diagnostic) = error.redacted_diagnostic().cloned() else {
+        return mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "EVM capability request failed without provider diagnostics".to_owned(),
+        );
+    };
+    let (code, message) = match diagnostic.code() {
+        ProviderDiagnosticCode::ProviderConfigurationMissing
+        | ProviderDiagnosticCode::RouteUnavailable => (
+            "RuntimeConfigRequired",
+            "EVM runtime configuration is required",
+        ),
+        ProviderDiagnosticCode::ProviderConfigurationInvalid => (
+            "RuntimeConfigInvalid",
+            "EVM runtime configuration is invalid",
+        ),
+        _ => ("EvmProviderFailure", "EVM provider capability failed"),
+    };
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("EVM runtime failure code is checked public text"),
+        events::ErrorCategory::Capability,
+        message,
+        vec![diagnostic],
+    )
+    .expect("EVM runtime failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::Failure(failure)
+}
+
+fn portfolio_evm_state_runtime_error(
+    error: mfm_state_portfolio::PortfolioEvmError,
 ) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }

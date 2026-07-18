@@ -2,7 +2,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 
-use mfm_evm_core::encoding::normalize_address;
+use alloy_primitives::Address;
 use mfm_ids::{CheckedStringError, LocalPublicId, StableAuthorKey};
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
@@ -314,12 +314,12 @@ impl NormalizedEvmAddress {
     /// Creates a checked normalized EVM address.
     pub fn new(value: impl Into<String>, kind: &'static str) -> Result<Self, PortfolioScalarError> {
         let raw = value.into();
-        let normalized =
-            normalize_address(&raw).map_err(|_| PortfolioScalarError::InvalidEvmAddress {
+        let address =
+            Address::from_str(&raw).map_err(|_| PortfolioScalarError::InvalidEvmAddress {
                 kind,
                 value: raw.clone(),
             })?;
-        if normalized != raw {
+        if format!("{address:#x}") != raw {
             return Err(PortfolioScalarError::InvalidEvmAddress { kind, value: raw });
         }
         Ok(Self { raw })
