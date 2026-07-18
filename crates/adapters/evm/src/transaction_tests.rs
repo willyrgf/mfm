@@ -302,15 +302,10 @@ fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTra
 }
 
 async fn prepare_and_commit(adapter: &EvmTransactionAdapter) -> EvmPreparedTransaction {
-    let prepared = adapter
-        .prepare_transaction(&intent())
+    adapter
+        .prepare_committed_transaction_for_test(&intent())
         .await
-        .expect("prepare");
-    let (prepared, settlement) = prepared.into_parts();
-    settlement
-        .expect("EVM preparation settlement")
-        .settle_appended();
-    prepared
+        .expect("prepare committed transaction")
 }
 
 #[tokio::test]

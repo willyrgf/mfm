@@ -15,6 +15,7 @@ pub(super) struct TestSideEffectDriverCallbacks {
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
     submission_decision: TestSubmissionDecision,
+    preparation_settled: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl TestSideEffectDriverCallbacks {
@@ -25,11 +26,20 @@ impl TestSideEffectDriverCallbacks {
             adapter_kind: fixture.adapter_kind.clone(),
             adapter_version: fixture.adapter_version.clone(),
             submission_decision: TestSubmissionDecision::Observed,
+            preparation_settled: None,
         }
     }
 
     pub(super) fn with_submission_decision(mut self, decision: TestSubmissionDecision) -> Self {
         self.submission_decision = decision;
+        self
+    }
+
+    pub(super) fn with_preparation_settlement(
+        mut self,
+        settled: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.preparation_settled = Some(settled);
         self
     }
 
@@ -91,10 +101,18 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
     ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocation<Self::PreparedInvocation>> {
         let node_id = ctx.node().node_id.as_str().to_owned();
         let attempt_id = ctx.attempt_id().as_str().to_owned();
+        let settled = self.preparation_settled.as_ref().map(Arc::clone);
         Box::pin(async move {
-            Ok(SideEffectPreparedInvocation::new(
-                fixture_side_effect_evidence(35, node_id, attempt_id),
-            ))
+            let prepared = fixture_side_effect_evidence(35, node_id, attempt_id);
+            Ok(match settled {
+                Some(settled) => SideEffectPreparedInvocation::with_settlement(
+                    prepared,
+                    RunnerOutputSettlement::on_appended(move || {
+                        settled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }),
+                ),
+                None => SideEffectPreparedInvocation::new(prepared),
+            })
         })
     }
 

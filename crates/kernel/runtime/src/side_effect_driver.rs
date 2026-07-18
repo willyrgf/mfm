@@ -56,7 +56,7 @@ impl<T> SideEffectPreparedInvocation<T> {
     }
 
     /// Separates persisted evidence from its optional process-local settlement.
-    pub fn into_parts(self) -> (T, Option<RunnerOutputSettlement>) {
+    pub(crate) fn into_parts(self) -> (T, Option<RunnerOutputSettlement>) {
         (self.evidence, self.settlement)
     }
 }

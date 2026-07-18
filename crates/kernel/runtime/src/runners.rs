@@ -279,7 +279,7 @@ impl RunnerOutputSettlement {
     }
 
     /// Executes the callback after the associated commit was durably appended.
-    pub fn settle_appended(mut self) {
+    pub(crate) fn settle_appended(mut self) {
         if let Some(callback) = self.on_appended.take() {
             callback();
         }

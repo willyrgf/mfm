@@ -16,6 +16,14 @@ impl DriverSideEffectRunner {
         self.callbacks = self.callbacks.with_submission_decision(decision);
         self
     }
+
+    pub(super) fn with_preparation_settlement(
+        mut self,
+        settled: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.callbacks = self.callbacks.with_preparation_settlement(settled);
+        self
+    }
 }
 
 impl ErasedNodeRunner for DriverSideEffectRunner {

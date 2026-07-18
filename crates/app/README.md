@@ -39,12 +39,13 @@ Domain runner behavior lives in adapter crates. `mfm-app` registers the portfoli
 and the reusable EVM transaction and exact-anchor validation bindings; public discovery remains the
 single certified portfolio objective.
 
-The standalone signing facade is not a second mutation workflow. It accepts an already checked
-unsigned envelope, resolves exactly the requested generic runtime signer and its referenced
-keystore, and invokes `mfm-evm-signing`. The returned signed envelope is transient bearer material;
-the app does not serialize, persist, clone, submit, or render its bytes. The CLI uses this facade
-for its explicit local bearer-output command, and the owned transaction adapter reuses the same
-canonical function during transaction preparation.
+The standalone signing facade is not a second mutation workflow. It accepts raw command fields,
+canonically parses and constructs the checked unsigned envelope, resolves exactly the requested
+generic runtime signer and its referenced keystore, and invokes `mfm-evm-signing`. The returned
+signed envelope is transient bearer material; the app does not serialize, persist, clone, submit,
+or render its bytes. The CLI uses this facade for its explicit local bearer-output command, and the
+owned transaction adapter calls the same canonical `mfm-evm-signing` primitive during transaction
+preparation.
 
 After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
 reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They

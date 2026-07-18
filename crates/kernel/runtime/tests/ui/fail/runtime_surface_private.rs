@@ -15,6 +15,14 @@ fn erased_runner_output_fields() {
     let _ = output.settlement;
 }
 
+fn append_settlement_authority_is_runtime_owned() {
+    let settlement = mfm_runtime::RunnerOutputSettlement::on_appended(|| {});
+    settlement.settle_appended();
+
+    let prepared = mfm_runtime::SideEffectPreparedInvocation::new(());
+    let _ = prepared.into_parts();
+}
+
 fn runner_capability_binding_fields(binding: mfm_runtime::RunnerCapabilityBinding) {
     let _ = binding.capability_kind;
     let _ = binding.capability_version;

@@ -252,6 +252,12 @@ struct EvmTransactionAdapter {
     signed_envelopes: Arc<SignedEnvelopeCache>,
 }
 
+struct PreparedTransactionAuthority {
+    prepared: EvmPreparedTransaction,
+    reservation: SignedEnvelopeReservation,
+    signed: TransientSignedEip1559Envelope,
+}
+
 impl EvmTransactionAdapter {
     fn new(capabilities: EvmTransactionRunnerCapabilities) -> Self {
         Self {
@@ -293,10 +299,10 @@ impl EvmTransactionAdapter {
             .await
     }
 
-    async fn prepare_transaction(
+    async fn author_prepared_transaction(
         &self,
         intent: &EvmTransactionIntent,
-    ) -> mfm_runtime::Result<SideEffectPreparedInvocation<EvmPreparedTransaction>> {
+    ) -> mfm_runtime::Result<PreparedTransactionAuthority> {
         intent.validate().map_err(state_error)?;
         let reservation = self.signed_envelopes.reserve()?;
         let session = self
@@ -335,6 +341,22 @@ impl EvmTransactionAdapter {
             session.evidence(),
         )
         .map_err(state_error)?;
+        Ok(PreparedTransactionAuthority {
+            prepared,
+            reservation,
+            signed,
+        })
+    }
+
+    async fn prepare_transaction(
+        &self,
+        intent: &EvmTransactionIntent,
+    ) -> mfm_runtime::Result<SideEffectPreparedInvocation<EvmPreparedTransaction>> {
+        let PreparedTransactionAuthority {
+            prepared,
+            reservation,
+            signed,
+        } = self.author_prepared_transaction(intent).await?;
         let transaction_hash = prepared.expected_transaction_hash().to_owned();
         let settlement = RunnerOutputSettlement::on_appended(move || {
             reservation.commit(transaction_hash, signed, SignedEnvelopeState::Fresh);
@@ -342,6 +364,24 @@ impl EvmTransactionAdapter {
         Ok(SideEffectPreparedInvocation::with_settlement(
             prepared, settlement,
         ))
+    }
+
+    #[cfg(test)]
+    async fn prepare_committed_transaction_for_test(
+        &self,
+        intent: &EvmTransactionIntent,
+    ) -> mfm_runtime::Result<EvmPreparedTransaction> {
+        let PreparedTransactionAuthority {
+            prepared,
+            reservation,
+            signed,
+        } = self.author_prepared_transaction(intent).await?;
+        reservation.commit(
+            prepared.expected_transaction_hash().to_owned(),
+            signed,
+            SignedEnvelopeState::Fresh,
+        );
+        Ok(prepared)
     }
 
     async fn submit_transaction(

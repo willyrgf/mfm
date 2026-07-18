@@ -1,4 +1,4 @@
-//! Canonical persisted EVM values shared by portfolio and capability surfaces.
+//! Canonical persisted EVM values shared by portfolio and reusable EVM state surfaces.
 
 use std::str::FromStr;
 
