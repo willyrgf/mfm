@@ -16,7 +16,7 @@ A deployment followed by configuration is `Create -> Call -> Call`. Each arrow i
 dependency and each node has its own side-effect ledger. A contract-side multicall, smart-wallet
 batch, factory deployment, CREATE2 deployment, swap, or flash-loan executor is one `Call` when it is
 one atomic chain transaction. Operation crates own byte encoding and typed interpretation of logs;
-the generic state owns no ABI JSON, function lookup, contract lifecycle, or multi-transaction loop.
+the generic state owns no ABI JSON, function lookup, or multi-transaction workflow topology.
 
 ## Authored authority
 

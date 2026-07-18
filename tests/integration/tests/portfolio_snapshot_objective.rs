@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use mfm_fact_capabilities::{
     FactIndexReadBatchFuture, FactIndexReadProvider, FactIndexReadRequest,
 };
-use mfm_integration_tests::test_support::write_collectors_runtime_config_for_test;
+use mfm_integration_tests::test_support::write_portfolio_runtime_config_for_test;
 use mfm_op_portfolio_snapshot::portfolio_snapshot_program_draft;
 use mfm_portfolio_model::portfolio::{PortfolioConfig, ValidatedPortfolioConfig};
 use mfm_store::v1::{self as store, RunEventStore as _};
@@ -35,8 +35,7 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
     ] {
         let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
         let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-        let runtime_path =
-            write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+        let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
         let store = store::AsyncInMemoryRunStore::default();
         let services = snapshot_services(
             &store,
@@ -143,7 +142,7 @@ async fn assert_atomic_evm_fact_publication(
 async fn snapshot_root_replay_rejects_tampered_retained_projection_evidence() {
     let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-    let runtime_path = write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
     let services = snapshot_services(
         &store,
@@ -208,7 +207,7 @@ async fn snapshot_root_preserves_zero_btc_native_and_erc20_values() {
     })
     .await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-    let runtime_path = write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
     let services = snapshot_services(
         &store,
@@ -256,7 +255,7 @@ async fn snapshot_root_preserves_zero_btc_native_and_erc20_values() {
 async fn snapshot_root_keeps_zero_symbol_wallet_without_undemanded_network_work() {
     let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-    let runtime_path = write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
     let services = snapshot_services(
         &store,
@@ -335,7 +334,7 @@ async fn snapshot_root_keeps_zero_symbol_wallet_without_undemanded_network_work(
 async fn snapshot_root_resumes_and_replays_after_live_inputs_disappear() {
     let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-    let runtime_path = write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
     let (entered_tx, entered_rx) = oneshot::channel();
     let initial_services = snapshot_services(
@@ -425,8 +424,7 @@ async fn snapshot_root_replay_verifies_each_downstream_output_prefix() {
     ] {
         let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
         let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-        let runtime_path =
-            write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+        let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
         let store = store::AsyncInMemoryRunStore::default();
         let (entered_tx, entered_rx) = oneshot::channel();
         let artifacts =
@@ -500,7 +498,7 @@ async fn snapshot_root_fails_closed_when_a_collection_source_fails() {
     })
     .await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-    let runtime_path = write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
     let services = snapshot_services(
         &store,
@@ -1017,7 +1015,6 @@ async fn snapshot_rpc_handler(
     }
     let result = match method {
         "eth_chainId" => json!("0x1"),
-        "web3_clientVersion" => json!("mfm-snapshot-test-rpc"),
         "eth_getBlockByNumber" | "eth_getBlockByHash" => json!({
             "number": "0x1406f40",
             "hash": state.config.evm_hash,

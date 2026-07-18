@@ -6,8 +6,8 @@ use axum::http::{Request, StatusCode};
 use mfm_events::v1::KernelEventPayload;
 use mfm_integration_tests::test_support::{
     connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema, json_post,
-    response_json, schema_scoped_database_url, start_collectors_rpc_mock, unique_postgres_schema,
-    write_collectors_runtime_config_for_test,
+    response_json, schema_scoped_database_url, start_portfolio_rpc_mock, unique_postgres_schema,
+    write_portfolio_runtime_config_for_test,
 };
 use mfm_portfolio_model::portfolio::PortfolioConfig;
 use mfm_store::v1::{RunEventStore, StoreScopeStore};
@@ -228,10 +228,9 @@ async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_repla
     .into_iter()
     .next()
     .expect("one setup publication");
-    let rpc_url = start_collectors_rpc_mock().await;
+    let rpc_url = start_portfolio_rpc_mock().await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
-    let runtime_config_path =
-        write_collectors_runtime_config_for_test(runtime_dir.path(), &rpc_url);
+    let runtime_config_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &rpc_url);
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         fact_index: mfm_app::production_fact_index_read_provider(store.clone()),

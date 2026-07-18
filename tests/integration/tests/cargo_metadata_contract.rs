@@ -314,8 +314,6 @@ fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
         "mfm-stream-store-postgres",
         "mfm-op-portfolio-tracker",
         "mfm-catalog-model",
-        "mfm-evm-core",
-        "mfm-op-evm-collectors",
     ] {
         assert!(
             packages.iter().all(|package| package.name != removed),

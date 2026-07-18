@@ -24,19 +24,3 @@ fn contracts_contain_no_runtime_secret_storage() {
         assert!(!source.contains(forbidden), "forbidden detail: {forbidden}");
     }
 }
-
-#[test]
-fn old_per_method_provider_families_are_deleted() {
-    let source = include_str!("../src/lib.rs");
-    for deleted in [
-        "EvmBlockReadProvider",
-        "EvmBalanceReadProvider",
-        "EvmCallReadProvider",
-        "EvmNonceReadProvider",
-        "EvmFeeReadProvider",
-        "EvmReceiptReadProvider",
-        "EvmSourcePolicyId",
-    ] {
-        assert!(!source.contains(deleted), "old surface survived: {deleted}");
-    }
-}

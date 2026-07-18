@@ -187,17 +187,6 @@ mod tests {
     use super::{entry_point_ids, PORTFOLIO_SNAPSHOT_ID};
     use mfm_portfolio_model::ids::PortfolioId;
 
-    const DELETED_ENTRY_POINTS: [&str; 8] = [
-        "mfm.portfolio/portfolio_snapshot@1",
-        "mfm.portfolio/collect_then_report@1",
-        "mfm.bitcoin/btc_address_balance@1",
-        "mfm.evm/evm_native_balance@1",
-        "mfm.evm.contract/deploy@1",
-        "mfm.evm.contract/configure@1",
-        "mfm.evm.contract/validate@1",
-        "mfm.evm.contract/lifecycle@1",
-    ];
-
     #[test]
     fn discovery_exposes_only_the_portfolio_snapshot_objective() {
         assert_eq!(entry_point_ids(), &[PORTFOLIO_SNAPSHOT_ID]);
@@ -210,14 +199,6 @@ mod tests {
         }
         for invalid in ["", "Mfm/primary", "mfm.reserved", "acme//primary"] {
             PortfolioId::new(invalid).expect_err("invalid target");
-        }
-    }
-
-    #[test]
-    fn deleted_entry_points_are_not_discoverable() {
-        let discovered = entry_point_ids();
-        for entry_point in DELETED_ENTRY_POINTS {
-            assert!(!discovered.contains(&entry_point));
         }
     }
 }

@@ -35,16 +35,16 @@ once at admission, records its target/schema/digest in `RunAdmitted`, and passes
 the complete snapshot operation. Resume, replay, status, stream, and public-output reads never
 consult current configuration.
 
-Domain runner behavior lives in adapter crates. The former library-only EVM contract lifecycle was
-deleted; `mfm-app` does not register speculative mutation or validation runners without an owned
-certified graph consumer.
+Domain runner behavior lives in adapter crates. `mfm-app` registers the portfolio EVM runner family
+and the reusable EVM transaction and exact-anchor validation bindings; public discovery remains the
+single certified portfolio objective.
 
 The standalone signing facade is not a second mutation workflow. It accepts an already checked
 unsigned envelope, resolves exactly the requested generic runtime signer and its referenced
 keystore, and invokes `mfm-evm-signing`. The returned signed envelope is transient bearer material;
 the app does not serialize, persist, clone, submit, or render its bytes. The CLI uses this facade
 for its explicit local bearer-output command, and the owned transaction adapter reuses the same
-canonical function when its state contract lands.
+canonical function during transaction preparation.
 
 After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
 reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They

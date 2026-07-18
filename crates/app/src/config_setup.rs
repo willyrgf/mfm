@@ -329,16 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_rejects_every_removed_collector_kind() {
-        for kind in ["btc_address_balance", "evm_native_balance"] {
-            let document = format!("[[configs]]\nkind = \"{kind}\"\n\n[configs.value]\n");
-            let error = parse_setup_document(document.as_bytes())
-                .expect_err("removed setup kind must not decode");
-            assert_eq!(error.code, "SetupDocumentInvalid", "{kind}");
-        }
-    }
-
-    #[test]
     fn setup_rejects_removed_catalog_name_and_values_envelopes() {
         let fixture = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

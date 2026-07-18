@@ -17,8 +17,8 @@ mod run_control_support;
 
 pub use run_control_support::{
     admit_btc_chain_head_run_without_driving, prepare_btc_chain_head_launch_for_store,
-    set_evm_runtime_config_env_with_signer_for_test, start_collectors_rpc_mock,
-    write_collectors_runtime_config_for_test, write_evm_runtime_config_for_test, EnvVarRestore,
+    set_evm_runtime_config_env_with_signer_for_test, start_portfolio_rpc_mock,
+    write_evm_runtime_config_for_test, write_portfolio_runtime_config_for_test, EnvVarRestore,
     RuntimeConfigSignerBinding, ENV_RUNTIME_CONFIG_FILE,
 };
 

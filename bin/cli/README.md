@@ -412,9 +412,8 @@ mfm_cli --output-format json ops list
 ```
 
 JSON output returns plain string ids under `entry_points`. The production surface contains exactly
-one entry point, `mfm.portfolio/snapshot@1`. The deleted fixed contract lifecycle has no library or
-command surface. There is no latest-version selection, compatibility alias, collector root,
-report-only mode, or contract workflow entry point.
+one entry point, `mfm.portfolio/snapshot@1`; that exact versioned id is the complete discovery
+surface.
 
 ### `setup import`, `setup list`, and `setup export`
 
@@ -499,7 +498,7 @@ The repository includes a complete strict-import fixture at
 Ethereum runtime route and start it by its derived target after importing.
 
 `ops list` is the authoritative public surface. The setup fixture publishes portfolio config only;
-it does not create an independently startable collector or contract workflow.
+setup changes target configuration without changing the entry-point registry.
 
 For example:
 
@@ -515,8 +514,7 @@ decimals, runtime routes, or a collect/reuse/report-only mode.
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
-contains only runner families with a current certified public graph consumer. The deleted EVM
-contract lifecycle has no runner family or hidden library test graph.
+contains the portfolio EVM runner family and the reusable EVM transaction/validation bindings.
 
 JSON output exposes `outcome`; text output renders `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the

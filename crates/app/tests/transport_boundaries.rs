@@ -89,11 +89,8 @@ fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
 
     for (name, source) in production_sources {
         for forbidden in [
-            concat!("EvmRequest", "Authority"),
-            concat!("EvmRequest", "Source"),
             concat!("BtcRequest", "Source"),
             concat!("BtcJsonRpc", "ChainHeadProvider"),
-            concat!("PortfolioRuntime", "Validator"),
             concat!("pub fn with_", "middleware"),
             concat!("pub trait Middle", "ware"),
             concat!("pub struct Middle", "ware"),
@@ -102,8 +99,6 @@ fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
             concat!("pub fn in", "ner("),
             concat!("pub fn un", "checked"),
             concat!("skip_", "validation"),
-            concat!("pub struct EvmSource", "Guard"),
-            concat!("pub struct EvmChain", "Guard"),
             concat!("pub struct BtcSource", "Guard"),
             concat!("pub struct BtcChain", "Guard"),
             concat!("pub struct Source", "Guard"),
@@ -128,18 +123,6 @@ fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
     assert!(evm_capabilities.contains("pub trait EvmReadSession"));
     assert!(evm_capabilities.contains("EvmTransactionCapability"));
     assert!(evm_capabilities.contains("pub trait EvmTransactionSession"));
-    for deleted in [
-        concat!("EvmBlockRead", "Provider"),
-        concat!("EvmBalanceRead", "Provider"),
-        concat!("EvmCallRead", "Provider"),
-        concat!("EvmSource", "PolicyId"),
-    ] {
-        assert!(
-            !evm_capabilities.contains(deleted),
-            "EVM capability surface must not retain {deleted}"
-        );
-    }
-
     let evm_transport = include_str!("../../transports/evm/src/lib.rs");
     assert!(
         evm_transport.contains("pub struct EvmJsonRpcSession")
@@ -152,25 +135,14 @@ fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
         1,
         "a session must probe chain identity exactly once while binding"
     );
-    for deleted in [
-        concat!("EvmSource", "Registry"),
-        concat!("EvmRoute", "Registry"),
-        concat!("EvmSource", "Policy"),
-        concat!("EvmJsonRpc", "Client"),
-    ] {
-        assert!(
-            !evm_transport.contains(deleted),
-            "EVM transport must not retain routing/client surface {deleted}"
-        );
-    }
-
     let evm_adapter = include_str!("../../adapters/evm/src/lib.rs");
     let app_evm = include_str!("../src/evm_runtime.rs");
     assert!(
-        !evm_adapter.contains(concat!("EvmProvider", "Factory"))
-            && !evm_adapter.contains(concat!("EvmBound", "Provider"))
-            && !app_evm.contains(concat!("BoundLiveEvm", "Provider")),
-        "adapter and app must bind sessions directly without provider proxies"
+        evm_adapter.contains("register_evm_transaction_runner")
+            && evm_adapter.contains("register_evm_validation_runner")
+            && app_evm.contains("bind_evm_read_session")
+            && app_evm.contains("bind_evm_transaction_session"),
+        "adapter and app must register both retained EVM bindings over direct sessions"
     );
 
     let btc_transport = include_str!("../../transports/btc-jsonrpc-http/src/lib.rs");

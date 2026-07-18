@@ -37,32 +37,31 @@ impl Drop for EnvVarRestore {
     }
 }
 
-/// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by the production collector
-/// registry integration test.
-pub async fn start_collectors_rpc_mock() -> String {
-    let app = axum::Router::new().route("/", axum::routing::post(collectors_rpc_handler));
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind collector rpc mock");
-    let addr = listener.local_addr().expect("collector rpc mock addr");
+/// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by portfolio integration tests.
+pub async fn start_portfolio_rpc_mock() -> String {
+    let app = axum::Router::new().route("/", axum::routing::post(portfolio_rpc_handler));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind portfolio RPC mock");
+    let addr = listener.local_addr().expect("portfolio RPC mock address");
     listener
         .set_nonblocking(true)
-        .expect("set collector rpc mock nonblocking");
+        .expect("set portfolio RPC mock nonblocking");
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("collector rpc mock runtime");
+            .expect("portfolio RPC mock runtime");
         runtime.block_on(async move {
             let listener =
-                tokio::net::TcpListener::from_std(listener).expect("tokio collector rpc listener");
+                tokio::net::TcpListener::from_std(listener).expect("tokio portfolio RPC listener");
             axum::serve(listener, app)
                 .await
-                .expect("collector rpc mock serve");
+                .expect("portfolio RPC mock serve");
         });
     });
     format!("http://{addr}")
 }
 
-async fn collectors_rpc_handler(
+async fn portfolio_rpc_handler(
     axum::Json(request): axum::Json<serde_json::Value>,
 ) -> axum::Json<serde_json::Value> {
     let id = request
@@ -72,10 +71,9 @@ async fn collectors_rpc_handler(
     let method = request
         .get("method")
         .and_then(|value| value.as_str())
-        .expect("collector json-rpc method");
+        .expect("portfolio JSON-RPC method");
     let result = match method {
         "eth_chainId" => serde_json::json!("0x1"),
-        "web3_clientVersion" => serde_json::json!("mfm-test-rpc"),
         "eth_getBlockByNumber" => serde_json::json!({
             "number": format!("0x{:x}", 21_000_000u64),
             "hash": format!("0x{}", "cd".repeat(32))
@@ -159,8 +157,8 @@ entry_id = {entry_id}
     config_path
 }
 
-/// Writes a runtime config containing both collector routes for the production registry test.
-pub fn write_collectors_runtime_config_for_test(dir: &Path, rpc_url: &str) -> std::path::PathBuf {
+/// Writes a runtime config containing the Bitcoin and EVM routes for a portfolio test.
+pub fn write_portfolio_runtime_config_for_test(dir: &Path, rpc_url: &str) -> std::path::PathBuf {
     let config_path = dir.join("runtime.toml");
     let config = format!(
         r#"
@@ -173,7 +171,7 @@ rpc_url = {rpc_url}
 "#,
         rpc_url = toml_string(rpc_url),
     );
-    std::fs::write(&config_path, config).expect("write collector runtime config");
+    std::fs::write(&config_path, config).expect("write portfolio runtime config");
     config_path
 }
 

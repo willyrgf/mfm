@@ -228,8 +228,7 @@ only accepted entry point is `mfm.portfolio/snapshot@1`:
 }
 ```
 
-The deleted fixed contract lifecycle has no REST request schema. Standalone collector, report-only,
-collect/reuse, alias, unversioned, latest-like, and contract-workflow entry points are rejected.
+No other run-start entry point or selector form is admitted.
 
 Request notes:
 
@@ -253,8 +252,8 @@ execution lane for the same base work identity, start reports `already_active` w
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
-No EVM contract lifecycle is exposed as a REST operation. RPC endpoints, auth headers, keystore
-paths, unlock files, and private material remain runtime-only.
+EVM transaction and validation state primitives are not direct REST operations. RPC endpoints,
+auth headers, keystore paths, unlock files, and private material remain runtime-only.
 
 Stable launch error codes:
 

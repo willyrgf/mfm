@@ -31,7 +31,7 @@ async fn run_status_and_stream_preserve_interrupted_chain_head_attempt_history()
         .await
         .expect("connect typed postgres store");
     let runtime_config_dir = tempfile::tempdir().expect("runtime config directory");
-    let runtime_config_path = run_control_support::write_collectors_runtime_config_for_test(
+    let runtime_config_path = run_control_support::write_portfolio_runtime_config_for_test(
         runtime_config_dir.path(),
         "http://127.0.0.1:8332",
     );

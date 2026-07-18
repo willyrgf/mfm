@@ -279,16 +279,11 @@ typed artifacts, and side-effect evidence. Adapters translate state-owned plans 
 into capability calls and evidence phases without moving protocol IO or signer material into state
 code.
 
-The former fixed EVM deploy/configure/validate lifecycle is not a runtime or authoring surface. Its
-three state packages, lifecycle schemas, adapter graph, and historical-log and nonce-occupancy
-authorities were deleted because no operation or application entry point owned them. There is no
-compatibility facade or library-only lifecycle graph.
-
-The owned replacement is intentionally narrower and is registered as reusable state authority, not
-as a restored lifecycle. `SubmitEvmTransactionState` is the sole EIP-1559 mutation state and its
-closed action is direct `Create` or ordinary `Call`; one side-effect node always represents one
-transaction. Operation crates own constructor/call encoding and any dependency-ordered contract
-workflow. The independent `ValidateEvmContractState` is the one exact-anchor code/call validation
+The reusable EVM surface is intentionally narrow. `SubmitEvmTransactionState` is the sole EIP-1559
+mutation state, and its closed action is direct `Create` or ordinary `Call`; one side-effect node
+always represents one transaction. Operation crates own constructor/call encoding and any
+dependency-ordered domain composition. The independent `ValidateEvmContractState` is the one
+exact-anchor code/call validation
 read state; neither primitive creates a public operation or application entry point by itself.
 
 Contract validation accepts an explicitly anchored address and a mandatory expected runtime-code

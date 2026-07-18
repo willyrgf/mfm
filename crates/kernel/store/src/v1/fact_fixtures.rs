@@ -329,7 +329,7 @@ fn fact_claim_fixture_for_test(
 /// One Platform holding fact to append into an in-memory store for report SelectHoldings tests.
 #[derive(Debug, Clone)]
 pub struct PlatformHoldingFactSeedForTest {
-    /// Holding fact descriptor (BTC address balance or EVM native balance at cutover).
+    /// Holding fact descriptor admitted by the source-run fixture.
     pub descriptor: mfm_facts::FactDescriptor,
     /// Fact-record input appended through the typed store.
     pub input: FactRecordFixtureInputForTest,

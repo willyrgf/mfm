@@ -808,11 +808,6 @@ mod tests {
             .operation_lineage()
             .iter()
             .any(|operation| operation.operation_name == "mfm.portfolio.snapshot"));
-        assert!(first.operation_lineage().iter().all(|operation| {
-            !operation.operation_name.contains("tracker")
-                && !operation.operation_name.contains("collect_then_report")
-        }));
-
         let collect_kind =
             mfm_state_portfolio::CollectEvmNetworkState::kind().expect("collect state kind");
         let publish_kind =
@@ -833,20 +828,6 @@ mod tests {
                 .count(),
             1
         );
-        for deleted in [
-            "resolve_evm_joint_tip",
-            "observe_evm_native",
-            "observe_erc20",
-            "record_evm_native",
-            "record_erc20",
-            "assemble_evm_network_collection_receipt",
-        ] {
-            assert!(first
-                .state_nodes()
-                .iter()
-                .all(|node| !node.state_descriptor_name.contains(deleted)));
-        }
-
         mfm_certify::certify_program_draft(&first).expect("snapshot draft certifies");
         let launch = portfolio_snapshot_program_launch_plan(config).expect("snapshot launch plan");
         assert_eq!(launch.draft, first);

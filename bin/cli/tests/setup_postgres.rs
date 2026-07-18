@@ -278,9 +278,9 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
     let existing = json_error(run_cli(&scoped_url, &export_args(TARGET, &first_output)));
     assert_eq!(existing["error"]["code"], "SetupExportPathExists");
 
-    let rpc_url = run_control_support::start_collectors_rpc_mock().await;
+    let rpc_url = run_control_support::start_portfolio_rpc_mock().await;
     let runtime_config_path =
-        run_control_support::write_collectors_runtime_config_for_test(directory.path(), &rpc_url);
+        run_control_support::write_portfolio_runtime_config_for_test(directory.path(), &rpc_url);
     let started_a = json_output(run_cli(
         &scoped_url,
         &start_args(TARGET, STABLE_INVOCATION_KEY, &runtime_config_path),

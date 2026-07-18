@@ -49,14 +49,14 @@ const VALIDATION_CALLDATA: &[u8] = &[0x99];
 const VALIDATION_RETURN: &[u8] = &[0x01];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.app.test.evm_contract_workflow_projection_config")]
+#[mfm(schema = "mfm.app.test.evm_transaction_composition_projection_config")]
 struct ProjectionConfig {}
 
 struct FirstCallActionState;
 struct SecondCallActionState;
 struct ValidationTargetState;
 
-fn workflow_state_kind(name: &str) -> mfm_program::Result<mfm_ids::StateKind> {
+fn composition_state_kind(name: &str) -> mfm_program::Result<mfm_ids::StateKind> {
     mfm_ids::StateKind::new(
         "mfm.app.test",
         name,
@@ -77,7 +77,7 @@ macro_rules! impl_projection_state_spec {
             type Caps = mfm_capabilities::NoCaps;
 
             fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
-                workflow_state_kind($kind)
+                composition_state_kind($kind)
             }
 
             fn version() -> mfm_program::Result<mfm_ids::StateVersion> {
@@ -190,8 +190,8 @@ fn called_address(outcome: &EvmTransactionOutcome) -> StateResult<Address> {
 }
 
 #[derive(PublicOutputs)]
-#[mfm(schema = "mfm.app.test.evm_contract_workflow_public_outputs")]
-struct ContractWorkflowPublicOutputs<'program, 'scope> {
+#[mfm(schema = "mfm.app.test.evm_transaction_composition_public_outputs")]
+struct TransactionCompositionPublicOutputs<'program, 'scope> {
     verified: mfm_program::Handle<'program, 'scope, VerifiedEvmContract>,
 }
 
@@ -201,11 +201,11 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
     let signing_key = Arc::new(SigningKey::random(&mut OsRng));
     let sender = signing_key_address(&signing_key);
     let created = sender.create(BASE_NONCE);
-    let world = Arc::new(ContractWorkflowWorld::new(sender, created));
+    let world = Arc::new(TransactionCompositionWorld::new(sender, created));
     let live_validation_reads = Arc::new(AtomicUsize::new(0));
-    let certification = workflow_certification_registry();
+    let certification = composition_certification_registry();
     let launch_services = make_run_services(
-        workflow_runners(
+        composition_runners(
             &store,
             Arc::clone(&world),
             Arc::clone(&signing_key),
@@ -215,12 +215,12 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
         store.clone(),
         certification.clone(),
     );
-    let (draft, seed_material) = workflow_launch_material(sender, created);
-    let lowered = mfm_certify::lower_program_draft(&draft).expect("lower workflow draft");
+    let (draft, seed_material) = composition_launch_material(sender, created);
+    let lowered = mfm_certify::lower_program_draft(&draft).expect("lower composition draft");
     let scoped = certification
         .scoped_for_spec(lowered.spec())
-        .expect("scope workflow certification registry");
-    mfm_certify::certify_typed_spec(lowered, &scoped).expect("certify workflow draft");
+        .expect("scope composition certification registry");
+    mfm_certify::certify_typed_spec(lowered, &scoped).expect("certify composition draft");
     let request = crate::prepare_typed_program_run_launch_for_test(
         draft,
         seed_material,
@@ -228,7 +228,7 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
         store.load_store_scope_id().await.expect("store scope"),
         None,
     )
-    .expect("workflow launch request");
+    .expect("composition launch request");
     let run_id = request.run_id.clone();
 
     let launch = launch_services
@@ -237,7 +237,9 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
         .expect("launch create/call/call/validate graph");
     let (_, launched, _) = launch.into_response_parts();
     assert_eq!(
-        launched.expect("completed contract workflow").run_mode,
+        launched
+            .expect("completed transaction composition")
+            .run_mode,
         RunModeStatus::Completed
     );
     assert_eq!(world.included_count(), 3);
@@ -250,12 +252,12 @@ async fn create_call_call_validate_graph_replays_from_evidence_only() {
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
-        .expect("evidence-only contract workflow replay");
+        .expect("evidence-only transaction composition replay");
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 3);
 }
 
-fn workflow_launch_material(
+fn composition_launch_material(
     sender: Address,
     created: Address,
 ) -> (
@@ -285,7 +287,7 @@ fn workflow_launch_material(
         .expect("register validation state");
 
     let draft = build_root_with_registries(
-        ScopeKey::new("evm-contract-workflow").expect("scope key"),
+        ScopeKey::new("evm-transaction-composition").expect("scope key"),
         states.snapshot(),
         mfm_program::OperationRegistryBuilder::new().snapshot(),
         |root: &mut RootBuilder<'_, '_>| {
@@ -296,7 +298,7 @@ fn workflow_launch_material(
                 .side_effect::<SubmitEvmTransactionState, _>(
                     StateKey::new("create")?,
                     NoContext,
-                    workflow_transaction_config(sender),
+                    composition_transaction_config(sender),
                     create_action,
                     evm_sender_lane_resource_claim()?,
                     SideEffectVerificationSpec::Receipt,
@@ -313,7 +315,7 @@ fn workflow_launch_material(
                 .side_effect::<SubmitEvmTransactionState, _>(
                     StateKey::new("first-call")?,
                     NoContext,
-                    workflow_transaction_config(sender),
+                    composition_transaction_config(sender),
                     first_action,
                     evm_sender_lane_resource_claim()?,
                     SideEffectVerificationSpec::Receipt,
@@ -330,7 +332,7 @@ fn workflow_launch_material(
                 .side_effect::<SubmitEvmTransactionState, _>(
                     StateKey::new("second-call")?,
                     NoContext,
-                    workflow_transaction_config(sender),
+                    composition_transaction_config(sender),
                     second_action,
                     evm_sender_lane_resource_claim()?,
                     SideEffectVerificationSpec::Receipt,
@@ -348,32 +350,32 @@ fn workflow_launch_material(
             let verified = root.scope().state::<ValidateEvmContractState, _>(
                 StateKey::new("validate")?,
                 NoContext,
-                workflow_validation_config(sender, created),
+                composition_validation_config(sender, created),
                 target,
             )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("terminal")?,
-                &ContractWorkflowPublicOutputs { verified },
+                &TransactionCompositionPublicOutputs { verified },
             )
         },
     )
-    .expect("contract workflow draft");
+    .expect("transaction composition draft");
     let seed_material = BTreeMap::from([(draft.seeds()[0].seed_id.clone(), create_bytes)]);
     (draft, seed_material)
 }
 
-fn workflow_transaction_config(sender: Address) -> EvmTransactionConfig {
+fn composition_transaction_config(sender: Address) -> EvmTransactionConfig {
     EvmTransactionConfig::new(
         "ethereum-mainnet",
         1,
         sender,
-        mfm_signing::SignerRef::new("workflow-signer").expect("signer ref"),
+        mfm_signing::SignerRef::new("composition-signer").expect("signer ref"),
         Vec::new(),
     )
     .expect("transaction config")
 }
 
-fn workflow_validation_config(sender: Address, created: Address) -> EvmContractValidationConfig {
+fn composition_validation_config(sender: Address, created: Address) -> EvmContractValidationConfig {
     EvmContractValidationConfig::new(
         "ethereum-mainnet",
         1,
@@ -392,7 +394,7 @@ fn workflow_validation_config(sender: Address, created: Address) -> EvmContractV
     .expect("validation config")
 }
 
-fn workflow_certification_registry() -> CertificationRegistry {
+fn composition_certification_registry() -> CertificationRegistry {
     let mut registry = CertificationRegistry::new();
     registry
         .register_state::<SubmitEvmTransactionState>()
@@ -412,9 +414,9 @@ fn workflow_certification_registry() -> CertificationRegistry {
     registry
 }
 
-fn workflow_runners(
+fn composition_runners(
     store: &store::AsyncInMemoryRunStore,
-    world: Arc<ContractWorkflowWorld>,
+    world: Arc<TransactionCompositionWorld>,
     signing_key: Arc<SigningKey>,
     live_validation_reads: Arc<AtomicUsize>,
 ) -> ErasedRunnerRegistry {
@@ -423,9 +425,9 @@ fn workflow_runners(
     register_projection_runners(&mut runners, Arc::clone(&artifacts));
 
     let sender = world.sender;
-    let transaction_session = Arc::new(WorkflowTransactionSession::new(Arc::clone(&world)));
+    let transaction_session = Arc::new(CompositionTransactionSession::new(Arc::clone(&world)));
     let bind_transaction_session = Arc::clone(&transaction_session);
-    let signer = Arc::new(WorkflowSigner {
+    let signer = Arc::new(CompositionSigner {
         signing_key,
         sender,
     });
@@ -433,31 +435,31 @@ fn workflow_runners(
         &mut runners,
         EvmTransactionRunnerCapabilities::new(
             Arc::clone(&artifacts),
-            CapabilityImplementationId::new("mfm.test.workflow-signer")
+            CapabilityImplementationId::new("mfm.test.composition-signer")
                 .expect("signing implementation"),
             move |binding, signer_ref| {
                 if binding.network_id().as_str() == "ethereum-mainnet"
                     && binding.expected_chain_id() == 1
-                    && signer_ref.as_str() == "workflow-signer"
+                    && signer_ref.as_str() == "composition-signer"
                 {
                     Ok(())
                 } else {
                     Err(mfm_runtime::RuntimeError::RunnerBinding(
-                        "unexpected workflow transaction binding".to_owned(),
+                        "unexpected composition transaction binding".to_owned(),
                     ))
                 }
             },
             move |binding| {
                 let transaction_session = Arc::clone(&bind_transaction_session);
                 Box::pin(async move {
-                    validate_workflow_binding(&binding)?;
+                    validate_composition_binding(&binding)?;
                     Ok(transaction_session as Arc<dyn EvmTransactionSession>)
                 })
             },
             move |signer_ref| {
                 let signer = Arc::clone(&signer);
                 Box::pin(async move {
-                    if signer_ref.as_str() != "workflow-signer" {
+                    if signer_ref.as_str() != "composition-signer" {
                         return Err(mfm_signing::SigningError::redacted_provider_failure(
                             "unexpected signer reference",
                         ));
@@ -473,13 +475,13 @@ fn workflow_runners(
         &mut runners,
         EvmValidationRunnerCapabilities::new(
             artifacts,
-            validate_workflow_binding,
+            validate_composition_binding,
             move |binding| {
                 let world = Arc::clone(&world);
                 let reads = Arc::clone(&live_validation_reads);
                 Box::pin(async move {
-                    validate_workflow_binding(&binding)?;
-                    Ok(Arc::new(WorkflowReadSession::new(binding, world, reads))
+                    validate_composition_binding(&binding)?;
+                    Ok(Arc::new(CompositionReadSession::new(binding, world, reads))
                         as Arc<dyn EvmReadSession>)
                 })
             },
@@ -495,7 +497,7 @@ fn register_projection_runners(
 ) {
     let identities = RunnerExecutableIdentityTemplate::new(
         "mfm-app",
-        "evm-contract-workflow-test",
+        "evm-transaction-composition-test",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("projection executable identities");
@@ -565,15 +567,15 @@ where
     }
 }
 
-fn validate_workflow_binding(binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
+fn validate_composition_binding(binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
     if binding.network_id().as_str() == "ethereum-mainnet" && binding.expected_chain_id() == 1 {
         Ok(())
     } else {
-        Err(workflow_provider_failure())
+        Err(composition_provider_failure())
     }
 }
 
-fn workflow_provider_failure() -> EvmCapabilityError {
+fn composition_provider_failure() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(evm_diagnostic(
         mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
     ))
@@ -591,34 +593,34 @@ struct IncludedTransaction {
 }
 
 #[derive(Default)]
-struct WorkflowChain {
+struct CompositionChain {
     pending: Option<PendingTransaction>,
     included: BTreeMap<B256, IncludedTransaction>,
 }
 
-struct ContractWorkflowWorld {
+struct TransactionCompositionWorld {
     sender: Address,
     created: Address,
-    chain: Mutex<WorkflowChain>,
+    chain: Mutex<CompositionChain>,
 }
 
-impl ContractWorkflowWorld {
+impl TransactionCompositionWorld {
     fn new(sender: Address, created: Address) -> Self {
         Self {
             sender,
             created,
-            chain: Mutex::new(WorkflowChain::default()),
+            chain: Mutex::new(CompositionChain::default()),
         }
     }
 
     fn included_count(&self) -> usize {
-        self.chain.lock().expect("workflow chain").included.len()
+        self.chain.lock().expect("composition chain").included.len()
     }
 
     fn block_by_number(&self, number: U256) -> Option<EvmBlock> {
         self.chain
             .lock()
-            .expect("workflow chain")
+            .expect("composition chain")
             .included
             .values()
             .find(|included| included.receipt.block_number == number)
@@ -631,20 +633,20 @@ impl ContractWorkflowWorld {
     fn has_block_hash(&self, hash: B256) -> bool {
         self.chain
             .lock()
-            .expect("workflow chain")
+            .expect("composition chain")
             .included
             .values()
             .any(|included| included.receipt.block_hash == hash)
     }
 }
 
-struct WorkflowTransactionSession {
+struct CompositionTransactionSession {
     evidence: EvmSessionEvidence,
-    world: Arc<ContractWorkflowWorld>,
+    world: Arc<TransactionCompositionWorld>,
 }
 
-impl WorkflowTransactionSession {
-    fn new(world: Arc<ContractWorkflowWorld>) -> Self {
+impl CompositionTransactionSession {
+    fn new(world: Arc<TransactionCompositionWorld>) -> Self {
         let binding = EvmNetworkBinding::new(
             mfm_ids::LocalPublicId::new("ethereum-mainnet").expect("network id"),
             1,
@@ -653,7 +655,7 @@ impl WorkflowTransactionSession {
         Self {
             evidence: EvmSessionEvidence::new(
                 &binding,
-                mfm_ids::LocalPublicId::new("workflow").expect("source ref"),
+                mfm_ids::LocalPublicId::new("composition").expect("source ref"),
                 mfm_ids::LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
                     .expect("implementation id"),
             ),
@@ -662,7 +664,7 @@ impl WorkflowTransactionSession {
     }
 }
 
-impl EvmTransactionSession for WorkflowTransactionSession {
+impl EvmTransactionSession for CompositionTransactionSession {
     fn evidence(&self) -> &EvmSessionEvidence {
         &self.evidence
     }
@@ -689,7 +691,7 @@ impl EvmTransactionSession for WorkflowTransactionSession {
     ) -> EvmSessionFuture<'a, U256> {
         let nonce = BASE_NONCE
             + u64::try_from(self.world.included_count()).expect("included transaction count");
-        self.world.chain.lock().expect("workflow chain").pending = Some(PendingTransaction {
+        self.world.chain.lock().expect("composition chain").pending = Some(PendingTransaction {
             nonce,
             estimate: request.clone(),
         });
@@ -702,7 +704,7 @@ impl EvmTransactionSession for WorkflowTransactionSession {
         expected_hash: B256,
     ) -> EvmSessionFuture<'a, B256> {
         assert_eq!(keccak256(signed_bytes), expected_hash);
-        let mut chain = self.world.chain.lock().expect("workflow chain");
+        let mut chain = self.world.chain.lock().expect("composition chain");
         let pending = chain.pending.take().expect("pending transaction estimate");
         let transaction_index = u64::try_from(chain.included.len()).expect("transaction index");
         let block_number = U256::from(100 + transaction_index);
@@ -762,7 +764,7 @@ impl EvmTransactionSession for WorkflowTransactionSession {
             .world
             .chain
             .lock()
-            .expect("workflow chain")
+            .expect("composition chain")
             .included
             .get(&transaction_hash)
             .map(|included| included.transaction.clone());
@@ -774,7 +776,7 @@ impl EvmTransactionSession for WorkflowTransactionSession {
             .world
             .chain
             .lock()
-            .expect("workflow chain")
+            .expect("composition chain")
             .included
             .get(&transaction_hash)
             .map(|included| included.receipt.clone());
@@ -786,29 +788,29 @@ impl EvmTransactionSession for WorkflowTransactionSession {
             EvmBlockSelector::Number(number) => self
                 .world
                 .block_by_number(*number)
-                .ok_or_else(workflow_provider_failure),
-            _ => Err(workflow_provider_failure()),
+                .ok_or_else(composition_provider_failure),
+            _ => Err(composition_provider_failure()),
         };
         Box::pin(std::future::ready(result))
     }
 }
 
-struct WorkflowReadSession {
+struct CompositionReadSession {
     evidence: EvmSessionEvidence,
-    world: Arc<ContractWorkflowWorld>,
+    world: Arc<TransactionCompositionWorld>,
     reads: Arc<AtomicUsize>,
 }
 
-impl WorkflowReadSession {
+impl CompositionReadSession {
     fn new(
         binding: EvmNetworkBinding,
-        world: Arc<ContractWorkflowWorld>,
+        world: Arc<TransactionCompositionWorld>,
         reads: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             evidence: EvmSessionEvidence::new(
                 &binding,
-                mfm_ids::LocalPublicId::new("workflow").expect("source ref"),
+                mfm_ids::LocalPublicId::new("composition").expect("source ref"),
                 mfm_ids::LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
                     .expect("implementation id"),
             ),
@@ -822,7 +824,7 @@ impl WorkflowReadSession {
     }
 }
 
-impl EvmReadSession for WorkflowReadSession {
+impl EvmReadSession for CompositionReadSession {
     fn evidence(&self) -> &EvmSessionEvidence {
         &self.evidence
     }
@@ -833,8 +835,8 @@ impl EvmReadSession for WorkflowReadSession {
             EvmBlockSelector::Number(number) => self
                 .world
                 .block_by_number(*number)
-                .ok_or_else(workflow_provider_failure),
-            _ => Err(workflow_provider_failure()),
+                .ok_or_else(composition_provider_failure),
+            _ => Err(composition_provider_failure()),
         };
         Box::pin(std::future::ready(result))
     }
@@ -844,7 +846,7 @@ impl EvmReadSession for WorkflowReadSession {
         _account: Address,
         _block: &'a EvmBlockSelector,
     ) -> EvmSessionFuture<'a, U256> {
-        Box::pin(std::future::ready(Err(workflow_provider_failure())))
+        Box::pin(std::future::ready(Err(composition_provider_failure())))
     }
 
     fn read_code<'a>(
@@ -861,7 +863,7 @@ impl EvmReadSession for WorkflowReadSession {
                 hash: keccak256(RUNTIME_CODE),
             })
         } else {
-            Err(workflow_provider_failure())
+            Err(composition_provider_failure())
         };
         Box::pin(std::future::ready(result))
     }
@@ -878,18 +880,18 @@ impl EvmReadSession for WorkflowReadSession {
         {
             Ok(Bytes::copy_from_slice(VALIDATION_RETURN))
         } else {
-            Err(workflow_provider_failure())
+            Err(composition_provider_failure())
         };
         Box::pin(std::future::ready(result))
     }
 }
 
-struct WorkflowSigner {
+struct CompositionSigner {
     signing_key: Arc<SigningKey>,
     sender: Address,
 }
 
-impl SigningProvider for WorkflowSigner {
+impl SigningProvider for CompositionSigner {
     fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a> {
         let result = self
             .signing_key
@@ -920,7 +922,7 @@ impl SigningProvider for WorkflowSigner {
     }
 }
 
-impl DeterministicSigningProvider for WorkflowSigner {
+impl DeterministicSigningProvider for CompositionSigner {
     fn deterministic_profile_id(&self) -> &'static str {
         SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }
