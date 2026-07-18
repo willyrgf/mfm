@@ -42,10 +42,15 @@ pub trait ExternalReadPlanExecutor<S>: Send + Sync
 where
     S: ReadState,
 {
-    /// Validates process-local resources before the run is admitted.
-    fn validate_ingress(&self, _ctx: RunnerIngressContext<'_>, _state: &S) -> Result<()> {
-        Ok(())
-    }
+    /// Asynchronously validates process-local resources before the run is admitted.
+    ///
+    /// Implementations must offload blocking resource discovery rather than blocking the async
+    /// runtime worker that polls this future.
+    fn validate_ingress<'a>(
+        &'a self,
+        ctx: RunnerIngressContext<'a>,
+        state: &'a S,
+    ) -> crate::RunnerIngressFuture<'a>;
 
     /// Executes a deterministic plan and returns canonical evidence only.
     fn execute<'a>(
@@ -107,7 +112,7 @@ where
             let config = load_launch_config_for_node::<S::Config>(&ctx, ctx.node())?;
             let state =
                 S::new(config).map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
-            self.executor.validate_ingress(ctx, &state)
+            self.executor.validate_ingress(ctx, &state).await
         })
     }
 

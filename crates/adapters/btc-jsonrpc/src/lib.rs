@@ -54,13 +54,18 @@ const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.bitcoin.jsonrpc.runtime.v1";
 /// Result type for Bitcoin JSON-RPC adapter operations.
 pub type Result<T> = std::result::Result<T, BtcJsonRpcAdapterError>;
 
+/// Future returned by asynchronous Bitcoin source-route validation.
+pub type BtcSourceBindingValidationFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = mfm_btc_capabilities::Result<()>> + Send + 'a>,
+>;
+
 /// Factory for Bitcoin chain-head and balance providers bound to a certified source binding.
 pub trait BtcChainHeadProviderFactory: Send + Sync {
-    /// Validates that the binding can resolve without live network IO.
-    fn validate_source_binding(
-        &self,
-        binding: &BtcSourceBinding,
-    ) -> mfm_btc_capabilities::Result<()>;
+    /// Asynchronously validates that the binding can resolve without live network IO.
+    fn validate_source_binding<'a>(
+        &'a self,
+        binding: BtcSourceBinding,
+    ) -> BtcSourceBindingValidationFuture<'a>;
 
     /// Binds a checked source binding to a chain-head provider.
     fn bind_source(
@@ -286,15 +291,18 @@ struct ChainHeadExecutor {
 }
 
 impl ExternalReadPlanExecutor<ObserveBtcChainHeadState> for ChainHeadExecutor {
-    fn validate_ingress(
-        &self,
-        _ctx: RunnerIngressContext<'_>,
-        state: &ObserveBtcChainHeadState,
-    ) -> mfm_runtime::Result<()> {
-        let binding = chain_head_binding(state.config()).map_err(btc_adapter_runtime_error)?;
-        self.btc
-            .validate_source_binding(&binding)
-            .map_err(btc_capability_runtime_error)
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: RunnerIngressContext<'a>,
+        state: &'a ObserveBtcChainHeadState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async move {
+            let binding = chain_head_binding(state.config()).map_err(btc_adapter_runtime_error)?;
+            self.btc
+                .validate_source_binding(binding)
+                .await
+                .map_err(btc_capability_runtime_error)
+        })
     }
 
     fn execute<'a>(
@@ -325,15 +333,18 @@ struct JointTipExecutor {
 }
 
 impl ExternalReadPlanExecutor<ResolveBtcJointTipState> for JointTipExecutor {
-    fn validate_ingress(
-        &self,
-        _ctx: RunnerIngressContext<'_>,
-        state: &ResolveBtcJointTipState,
-    ) -> mfm_runtime::Result<()> {
-        let binding = joint_tip_binding(state.config()).map_err(btc_adapter_runtime_error)?;
-        self.btc
-            .validate_source_binding(&binding)
-            .map_err(btc_capability_runtime_error)
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: RunnerIngressContext<'a>,
+        state: &'a ResolveBtcJointTipState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async move {
+            let binding = joint_tip_binding(state.config()).map_err(btc_adapter_runtime_error)?;
+            self.btc
+                .validate_source_binding(binding)
+                .await
+                .map_err(btc_capability_runtime_error)
+        })
     }
 
     fn execute<'a>(
@@ -364,15 +375,19 @@ struct AddressBalanceExecutor {
 }
 
 impl ExternalReadPlanExecutor<ObserveBtcAddressBalanceState> for AddressBalanceExecutor {
-    fn validate_ingress(
-        &self,
-        _ctx: RunnerIngressContext<'_>,
-        state: &ObserveBtcAddressBalanceState,
-    ) -> mfm_runtime::Result<()> {
-        let binding = address_balance_binding(state.config()).map_err(btc_adapter_runtime_error)?;
-        self.btc
-            .validate_source_binding(&binding)
-            .map_err(btc_capability_runtime_error)
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: RunnerIngressContext<'a>,
+        state: &'a ObserveBtcAddressBalanceState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async move {
+            let binding =
+                address_balance_binding(state.config()).map_err(btc_adapter_runtime_error)?;
+            self.btc
+                .validate_source_binding(binding)
+                .await
+                .map_err(btc_capability_runtime_error)
+        })
     }
 
     fn execute<'a>(
@@ -404,6 +419,14 @@ struct QueryCheckpointExecutor {
 }
 
 impl ExternalReadPlanExecutor<QueryCollectorCheckpointState> for QueryCheckpointExecutor {
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: RunnerIngressContext<'a>,
+        _state: &'a QueryCollectorCheckpointState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn execute<'a>(
         &'a self,
         plan: &'a QueryCollectorCheckpointReadPlan,

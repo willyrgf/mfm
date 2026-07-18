@@ -42,15 +42,18 @@ pub type EvmReadSessionBindFuture = Pin<
     >,
 >;
 
-type ValidateEvmBinding =
-    dyn Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync;
+/// Future returned by the application-owned EVM read-route validator.
+pub type EvmReadRouteValidationFuture =
+    Pin<Box<dyn Future<Output = mfm_evm_capabilities::Result<()>> + Send + 'static>>;
+
+type ValidateEvmReadRoute = dyn Fn(EvmNetworkBinding) -> EvmReadRouteValidationFuture + Send + Sync;
 type BindEvmReadSession = dyn Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync;
 
 /// Shared process resources required by reusable EVM read states.
 #[derive(Clone)]
 pub struct EvmReadRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    validate_evm_binding: Arc<ValidateEvmBinding>,
+    validate_evm_read_route: Arc<ValidateEvmReadRoute>,
     bind_evm_read_session: Arc<BindEvmReadSession>,
 }
 
@@ -58,22 +61,25 @@ impl EvmReadRunnerCapabilities {
     /// Creates one lazy source-bound capability assembly for all EVM reads.
     pub fn new<V, B>(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-        validate_evm_binding: V,
+        validate_evm_read_route: V,
         bind_evm_read_session: B,
     ) -> Self
     where
-        V: Fn(&EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> + Send + Sync + 'static,
+        V: Fn(EvmNetworkBinding) -> EvmReadRouteValidationFuture + Send + Sync + 'static,
         B: Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync + 'static,
     {
         Self {
             artifacts,
-            validate_evm_binding: Arc::new(validate_evm_binding),
+            validate_evm_read_route: Arc::new(validate_evm_read_route),
             bind_evm_read_session: Arc::new(bind_evm_read_session),
         }
     }
 
-    pub(crate) fn validate(&self, binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
-        (self.validate_evm_binding)(binding)
+    pub(crate) async fn validate_read_route(
+        &self,
+        binding: EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<()> {
+        (self.validate_evm_read_route)(binding).await
     }
 
     pub(crate) async fn bind(
@@ -147,10 +153,9 @@ struct ValidateContractExecutor {
     capabilities: EvmReadRunnerCapabilities,
 }
 
-impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExecutor {
-    fn validate_ingress(
+impl ValidateContractExecutor {
+    async fn validate_read_route(
         &self,
-        _ctx: RunnerIngressContext<'_>,
         state: &ValidateEvmContractState,
     ) -> mfm_runtime::Result<()> {
         let binding = state
@@ -158,8 +163,19 @@ impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExec
             .network_binding()
             .map_err(evm_state_runtime_error)?;
         self.capabilities
-            .validate(&binding)
+            .validate_read_route(binding)
+            .await
             .map_err(evm_read_runtime_error)
+    }
+}
+
+impl ExternalReadPlanExecutor<ValidateEvmContractState> for ValidateContractExecutor {
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: RunnerIngressContext<'a>,
+        state: &'a ValidateEvmContractState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async move { self.validate_read_route(state).await })
     }
 
     fn execute<'a>(

@@ -122,6 +122,14 @@ fn executable(
 struct ProofReadExecutor;
 
 impl ExternalReadPlanExecutor<ProofReadFactState> for ProofReadExecutor {
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: mfm_runtime::RunnerIngressContext<'a>,
+        _state: &'a ProofReadFactState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn execute<'a>(
         &'a self,
         plan: &'a ProofReadPlan,

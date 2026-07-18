@@ -226,13 +226,15 @@ fn capabilities(
     EvmReadRunnerCapabilities::new(
         artifacts,
         |binding| {
-            if binding.network_id().as_str() == "ethereum-mainnet"
-                && binding.expected_chain_id() == 1
-            {
-                Ok(())
-            } else {
-                Err(provider_failure())
-            }
+            Box::pin(async move {
+                if binding.network_id().as_str() == "ethereum-mainnet"
+                    && binding.expected_chain_id() == 1
+                {
+                    Ok(())
+                } else {
+                    Err(provider_failure())
+                }
+            })
         },
         move |_binding| {
             let session = Arc::clone(&session);
@@ -324,7 +326,7 @@ async fn temporary_provider_outage_blocks_the_balance_collector() {
         Arc::new(store::AsyncInMemoryRunStore::default());
     let capabilities = EvmReadRunnerCapabilities::new(
         artifacts,
-        |_| Ok(()),
+        |_| Box::pin(async { Ok(()) }),
         move |_| {
             let session = Arc::clone(&session);
             Box::pin(async move { Ok(session as Arc<dyn EvmReadSession>) })

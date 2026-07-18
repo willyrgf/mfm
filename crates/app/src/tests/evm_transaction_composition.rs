@@ -714,15 +714,19 @@ fn composition_runners(
 
     register_evm_read_runners(
         &mut runners,
-        EvmReadRunnerCapabilities::new(artifacts, validate_composition_binding, move |binding| {
-            let world = Arc::clone(&world);
-            let reads = Arc::clone(&live_validation_reads);
-            Box::pin(async move {
-                validate_composition_binding(&binding)?;
-                Ok(Arc::new(CompositionReadSession::new(binding, world, reads))
-                    as Arc<dyn EvmReadSession>)
-            })
-        }),
+        EvmReadRunnerCapabilities::new(
+            artifacts,
+            |binding| Box::pin(async move { validate_composition_binding(&binding) }),
+            move |binding| {
+                let world = Arc::clone(&world);
+                let reads = Arc::clone(&live_validation_reads);
+                Box::pin(async move {
+                    validate_composition_binding(&binding)?;
+                    Ok(Arc::new(CompositionReadSession::new(binding, world, reads))
+                        as Arc<dyn EvmReadSession>)
+                })
+            },
+        ),
     )
     .expect("register validation runner");
     runners

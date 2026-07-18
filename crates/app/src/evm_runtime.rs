@@ -13,7 +13,10 @@ pub(crate) fn register_evm_runners(
     let bind_runtime = Arc::clone(&runtime_config);
     let capabilities = mfm_adapters_evm::EvmReadRunnerCapabilities::new(
         artifacts.clone(),
-        move |binding| validate_runtime.validate_evm_network_binding(binding),
+        move |binding| {
+            let runtime = Arc::clone(&validate_runtime);
+            Box::pin(async move { runtime.validate_evm_read_route(binding).await })
+        },
         move |binding| {
             let runtime = Arc::clone(&bind_runtime);
             Box::pin(async move { runtime.bind_evm_read_session(binding).await })

@@ -115,6 +115,14 @@ struct SelectHoldingsExecutor {
 }
 
 impl ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor {
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: mfm_runtime::RunnerIngressContext<'a>,
+        _state: &'a SelectHoldingsState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn execute<'a>(
         &'a self,
         plan: &'a SelectHoldingsReadPlan,

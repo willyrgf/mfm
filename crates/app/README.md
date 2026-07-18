@@ -37,9 +37,11 @@ consult current configuration.
 
 Domain runner behavior lives in adapter crates. `mfm-app` registers the shared reusable EVM read
 assembly for balance collection and exact-anchor validation, plus the reusable EVM transaction
-binding. It also registers the EVM collector operation/fact descriptors needed by composed and
-internal runs. Public discovery remains the single certified portfolio objective; the internal EVM
-collector cycle has no app target, resolver, renderer, or discovery id.
+binding. The shared read-route validator loads selective runtime configuration on a blocking worker
+before admission; no external-read ingress path performs filesystem IO on an async worker. It also
+registers the EVM collector operation/fact descriptors needed by composed and internal runs. Public
+discovery remains the single certified portfolio objective; the internal EVM collector cycle has no
+app target, resolver, renderer, or discovery id.
 
 The standalone signing facade is not a second mutation workflow. It accepts raw command fields,
 canonically parses and constructs the checked unsigned envelope, resolves exactly the requested

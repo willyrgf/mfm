@@ -26,7 +26,7 @@ impl RuntimeConfigLoader {
         Self { path }
     }
 
-    fn load_optional(
+    fn load_optional_blocking(
         &self,
     ) -> mfm_runtime_config::Result<Option<mfm_runtime_config::RuntimeConfig>> {
         let Some(path) = self.path.as_ref() else {
@@ -40,7 +40,6 @@ pub(crate) struct LiveTransportRuntime {
     runtime_config: RuntimeConfigLoader,
     evm_transport:
         OnceLock<mfm_transports_evm::TransportResult<mfm_transports_evm::EvmJsonRpcTransport>>,
-    parsed_config: OnceLock<Result<Option<Arc<mfm_runtime_config::RuntimeConfig>>, ()>>,
     btc_router: OnceLock<
         Result<
             Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>,
@@ -54,23 +53,22 @@ impl LiveTransportRuntime {
         Self {
             runtime_config,
             evm_transport: OnceLock::new(),
-            parsed_config: OnceLock::new(),
             btc_router: OnceLock::new(),
         }
     }
 
-    pub(crate) fn validate_evm_network_binding(
+    pub(crate) async fn validate_evm_read_route(
         &self,
-        binding: &EvmNetworkBinding,
+        binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<()> {
-        self.evm_route(binding).map(|_| ())
+        self.load_evm_route_async(binding).await.map(|_| ())
     }
 
     pub(crate) async fn bind_evm_read_session(
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmReadSession>> {
-        let route = self.evm_route_async(&binding).await?;
+        let route = self.load_evm_route_async(binding.clone()).await?;
         self.evm_transport(&binding)?
             .bind(
                 binding.clone(),
@@ -89,7 +87,7 @@ impl LiveTransportRuntime {
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmTransactionSession>> {
-        let route = self.evm_route_async(&binding).await?;
+        let route = self.load_evm_route_async(binding.clone()).await?;
         self.evm_transport(&binding)?
             .bind(
                 binding.clone(),
@@ -115,7 +113,8 @@ impl LiveTransportRuntime {
         tokio::task::spawn_blocking(move || {
             let runtime = Self::new(runtime_config);
             runtime
-                .validate_evm_network_binding(&binding)
+                .load_evm_route(&binding)
+                .map(|_| ())
                 .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
             runtime
                 .assemble_evm_signer(signer_ref)
@@ -157,7 +156,7 @@ impl LiveTransportRuntime {
             .map_err(SigningError::redacted_provider_failure)
     }
 
-    fn evm_route(
+    fn load_evm_route(
         &self,
         binding: &EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<mfm_runtime_config::EvmRpcRoute> {
@@ -191,44 +190,52 @@ impl LiveTransportRuntime {
             .map_err(|error| evm_transport_capability_error(binding, error))
     }
 
-    async fn evm_route_async(
+    async fn load_evm_route_async(
         &self,
-        binding: &EvmNetworkBinding,
+        binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<mfm_runtime_config::EvmRpcRoute> {
         let runtime_config = self.runtime_config.clone();
-        let binding = binding.clone();
         let diagnostic_binding = binding.clone();
-        tokio::task::spawn_blocking(move || Self::new(runtime_config).evm_route(&binding))
-            .await
-            .map_err(|_| {
-                evm_provider_failure(
-                    &diagnostic_binding,
-                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
-                )
-            })?
+        load_runtime_config_on_blocking_worker(move || {
+            Self::new(runtime_config).load_evm_route(&binding)
+        })
+        .await
+        .map_err(|_| {
+            evm_provider_failure(
+                &diagnostic_binding,
+                ProviderDiagnosticCode::ProviderConfigurationInvalid,
+            )
+        })?
     }
 
-    fn btc_router_optional(
+    fn load_btc_router_optional(
         &self,
     ) -> Result<
         Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>,
         ProviderDiagnosticCode,
     > {
-        self.btc_router
-            .get_or_init(|| {
-                self.btc_runtime_config_optional()?
-                    .map(btc_json_rpc_router)
-                    .transpose()
-                    .map(|router| router.map(Arc::new))
-            })
-            .clone()
+        self.runtime_config
+            .load_optional_blocking()
+            .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)?
+            .and_then(|config| config.btc().cloned())
+            .map(btc_json_rpc_router)
+            .transpose()
+            .map(|router| router.map(Arc::new))
     }
 
-    fn btc_router(
+    fn cached_btc_router(
         &self,
         binding: &BtcSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>> {
-        self.btc_router_optional()
+        self.btc_router
+            .get()
+            .ok_or_else(|| {
+                btc_provider_failure(
+                    binding,
+                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                )
+            })?
+            .clone()
             .map_err(|code| btc_provider_failure(binding, code))?
             .ok_or_else(|| {
                 btc_provider_failure(
@@ -238,43 +245,68 @@ impl LiveTransportRuntime {
             })
     }
 
-    fn runtime_config_optional(
+    async fn validate_btc_source_binding(
         &self,
-    ) -> Result<Option<Arc<mfm_runtime_config::RuntimeConfig>>, ()> {
-        self.parsed_config
-            .get_or_init(|| {
-                self.runtime_config
-                    .load_optional()
-                    .map(|config| config.map(Arc::new))
-                    .map_err(|_| ())
-            })
-            .clone()
+        binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<()> {
+        self.btc_router_async(&binding)
+            .await?
+            .validate_source_binding(&binding)
+            .map_err(|error| enrich_btc_capability_error(&binding, error))
     }
 
-    fn btc_runtime_config_optional(
+    async fn btc_router_async(
         &self,
-    ) -> Result<Option<mfm_runtime_config::BtcRuntimeConfig>, ProviderDiagnosticCode> {
-        self.runtime_config_optional()
-            .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)
-            .map(|config| config.and_then(|config| config.btc().cloned()))
+        binding: &BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>> {
+        if let Some(cached) = self.btc_router.get() {
+            return cached
+                .clone()
+                .map_err(|code| btc_provider_failure(binding, code))?
+                .ok_or_else(|| {
+                    btc_provider_failure(
+                        binding,
+                        ProviderDiagnosticCode::ProviderConfigurationMissing,
+                    )
+                });
+        }
+        let runtime_config = self.runtime_config.clone();
+        let loaded = load_runtime_config_on_blocking_worker(move || {
+            Self::new(runtime_config).load_btc_router_optional()
+        })
+        .await
+        .map_err(|_| {
+            btc_provider_failure(
+                binding,
+                ProviderDiagnosticCode::ProviderConfigurationInvalid,
+            )
+        })?;
+        let _ = self.btc_router.set(loaded);
+        self.cached_btc_router(binding)
     }
 }
 
+async fn load_runtime_config_on_blocking_worker<T, F>(load: F) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(load).await
+}
+
 impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRuntime {
-    fn validate_source_binding(
-        &self,
-        binding: &BtcSourceBinding,
-    ) -> mfm_btc_capabilities::Result<()> {
-        self.btc_router(binding)?
-            .validate_source_binding(binding)
-            .map_err(|error| enrich_btc_capability_error(binding, error))
+    fn validate_source_binding<'a>(
+        &'a self,
+        binding: BtcSourceBinding,
+    ) -> mfm_adapters_btc_jsonrpc::BtcSourceBindingValidationFuture<'a> {
+        Box::pin(async move { self.validate_btc_source_binding(binding).await })
     }
 
     fn bind_source(
         &self,
         binding: BtcSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcChainHeadReadProvider>> {
-        let router = self.btc_router(&binding)?;
+        let router = self.cached_btc_router(&binding)?;
         router
             .bind_source(binding.clone())
             .map(|provider| Arc::new(provider) as Arc<dyn BtcChainHeadReadProvider>)
@@ -285,7 +317,7 @@ impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRunt
         &self,
         binding: BtcSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcBalanceReadProvider>> {
-        let router = self.btc_router(&binding)?;
+        let router = self.cached_btc_router(&binding)?;
         router
             .bind_source(binding.clone())
             .map(|provider| Arc::new(provider) as Arc<dyn BtcBalanceReadProvider>)
@@ -437,11 +469,12 @@ mod tests {
         (dir, runtime)
     }
 
-    #[test]
-    fn missing_config_preserves_evm_semantic_binding() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_config_preserves_evm_semantic_binding() {
         let runtime = LiveTransportRuntime::new(RuntimeConfigLoader::from_path_or_env(None));
         let error = runtime
-            .validate_evm_network_binding(&evm_binding())
+            .validate_evm_read_route(evm_binding())
+            .await
             .expect_err("missing EVM configuration");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
 
@@ -456,13 +489,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_config_preserves_bitcoin_semantic_binding() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn selective_evm_route_file_loading_runs_on_a_blocking_worker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("runtime.toml");
+        std::fs::write(
+            &path,
+            r#"
+[evm.routes.test-evm]
+source_ref = "primary"
+rpc_url = "http://127.0.0.1:8545"
+"#,
+        )
+        .expect("write runtime config");
+        let binding = evm_binding();
+        let async_worker = std::thread::current().id();
+
+        let file_worker = load_runtime_config_on_blocking_worker(move || {
+            mfm_runtime_config::RuntimeConfig::load_evm_route(&path, binding.network_id())
+                .expect("selective EVM route");
+            std::thread::current().id()
+        })
+        .await
+        .expect("blocking route-load worker");
+
+        assert_ne!(file_worker, async_worker);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_config_preserves_bitcoin_semantic_binding() {
         let runtime = LiveTransportRuntime::new(RuntimeConfigLoader::from_path_or_env(None));
         let binding = btc_binding();
         let error = mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory::validate_source_binding(
-            &runtime, &binding,
+            &runtime, binding,
         )
+        .await
         .expect_err("missing Bitcoin configuration");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
 
@@ -481,13 +542,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn malformed_supplied_config_is_invalid_and_redacted() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_supplied_config_is_invalid_and_redacted() {
         let (dir, runtime) = runtime_with_config(
             "rpc_url = 'https://alice:password@example.invalid/private'\nauth_header = 'Bearer secret-token'\ninvalid = [",
         );
         let error = runtime
-            .validate_evm_network_binding(&evm_binding())
+            .validate_evm_read_route(evm_binding())
+            .await
             .expect_err("malformed configuration");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
 
@@ -513,8 +575,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn supplied_config_missing_bitcoin_reports_only_bitcoin_missing() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn supplied_config_missing_bitcoin_reports_only_bitcoin_missing() {
         let (_dir, runtime) = runtime_with_config(
             r#"
 [evm.routes.test-evm]
@@ -524,8 +586,9 @@ rpc_url = "http://127.0.0.1:8545"
         );
         let binding = btc_binding();
         let error = mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory::validate_source_binding(
-            &runtime, &binding,
+            &runtime, binding,
         )
+        .await
         .expect_err("Bitcoin family is missing");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
 
@@ -536,8 +599,8 @@ rpc_url = "http://127.0.0.1:8545"
         );
     }
 
-    #[test]
-    fn missing_semantic_evm_route_retains_requested_binding() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_semantic_evm_route_retains_requested_binding() {
         let (_dir, runtime) = runtime_with_config(
             r#"
 [evm.routes.other-evm]
@@ -546,7 +609,8 @@ rpc_url = "http://127.0.0.1:8545"
 "#,
         );
         let error = runtime
-            .validate_evm_network_binding(&evm_binding())
+            .validate_evm_read_route(evm_binding())
+            .await
             .expect_err("semantic route is missing");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
 

@@ -33,10 +33,9 @@ pub(crate) struct CollectEvmBalancesExecutor {
     pub(crate) capabilities: EvmReadRunnerCapabilities,
 }
 
-impl ExternalReadPlanExecutor<CollectEvmBalancesState> for CollectEvmBalancesExecutor {
-    fn validate_ingress(
+impl CollectEvmBalancesExecutor {
+    pub(crate) async fn validate_read_route(
         &self,
-        _ctx: RunnerIngressContext<'_>,
         state: &CollectEvmBalancesState,
     ) -> mfm_runtime::Result<()> {
         let binding = state
@@ -44,8 +43,19 @@ impl ExternalReadPlanExecutor<CollectEvmBalancesState> for CollectEvmBalancesExe
             .binding()
             .map_err(balance_state_runtime_error)?;
         self.capabilities
-            .validate(&binding)
+            .validate_read_route(binding)
+            .await
             .map_err(evm_read_runtime_error)
+    }
+}
+
+impl ExternalReadPlanExecutor<CollectEvmBalancesState> for CollectEvmBalancesExecutor {
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: RunnerIngressContext<'a>,
+        state: &'a CollectEvmBalancesState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async move { self.validate_read_route(state).await })
     }
 
     fn execute<'a>(

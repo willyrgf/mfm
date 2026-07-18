@@ -682,6 +682,54 @@ fn production_registry_certifies_internal_evm_collector_descriptors() {
         .expect("production registry certifies the internal EVM collector cycle");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn evm_balance_collection_validates_its_async_route_before_admission() {
+    use alloy_primitives::address;
+    use mfm_store::v1::StoreScopeStore as _;
+
+    let store = store::AsyncInMemoryRunStore::default();
+    let config = mfm_op_evm_collectors::EvmBalanceCollectionConfig::new(
+        "ethereum-mainnet",
+        1,
+        18,
+        vec![mfm_op_evm_collectors::EvmBalanceSource::new(
+            address!("000000000000000000000000000000000000dead"),
+            mfm_op_evm_collectors::EvmBalanceAsset::Native,
+        )
+        .expect("EVM source")],
+    )
+    .expect("EVM collection config");
+    let draft = mfm_op_evm_collectors::evm_balance_collection_cycle_program_draft(config)
+        .expect("internal EVM collection draft");
+    let certification = production_certification_registry().expect("production registry");
+    let request = prepare_typed_program_run_launch_for_test(
+        draft,
+        BTreeMap::new(),
+        &certification,
+        store.load_store_scope_id().await.expect("store scope"),
+        None,
+    )
+    .expect("EVM collection launch request");
+    let run_id = request.run_id.clone();
+    let fact_index = crate::ProjectionFactIndexProvider::new(store.clone());
+    let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
+        .expect("production runners without EVM config");
+    let services = make_run_services(runners, store.clone(), store.clone(), certification);
+
+    let error = services
+        .launch_run(request)
+        .await
+        .expect_err("missing EVM route rejects collection before admission");
+
+    assert_eq!(error.code, "LaunchRuntimeError");
+    assert!(error.diagnostics.is_empty());
+    assert!(store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream")
+        .is_empty());
+}
+
 #[tokio::test]
 async fn btc_collector_launch_defers_runtime_config_to_ingress() {
     let store = store::AsyncInMemoryRunStore::default();

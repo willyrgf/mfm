@@ -79,6 +79,39 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
     assert_eq!(live_reads.load(Ordering::SeqCst), 3);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn contract_validation_validates_its_async_route_before_admission() {
+    let store = store::AsyncInMemoryRunStore::default();
+    let (draft, seed_material) = validation_launch_material();
+    let certification = production_certification_registry().expect("production registry");
+    let request = crate::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        &certification,
+        store.load_store_scope_id().await.expect("store scope"),
+        None,
+    )
+    .expect("validation launch request");
+    let run_id = request.run_id.clone();
+    let fact_index = crate::ProjectionFactIndexProvider::new(store.clone());
+    let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
+        .expect("production runners without EVM config");
+    let services = make_run_services(runners, store.clone(), store.clone(), certification);
+
+    let error = services
+        .launch_run(request)
+        .await
+        .expect_err("missing EVM route rejects validation before admission");
+
+    assert_eq!(error.code, "LaunchRuntimeError");
+    assert!(error.diagnostics.is_empty());
+    assert!(store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream")
+        .is_empty());
+}
+
 fn validation_launch_material() -> (
     mfm_program::TypedProgramDraft,
     BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
@@ -151,14 +184,18 @@ fn validation_runners(
     let mut runners = ErasedRunnerRegistry::new();
     register_evm_read_runners(
         &mut runners,
-        EvmReadRunnerCapabilities::new(Arc::new(store.clone()), validate_binding, move |binding| {
-            let live_reads = Arc::clone(&live_reads);
-            Box::pin(async move {
-                validate_binding(&binding)?;
-                Ok(Arc::new(ValidationSession::new(binding, live_reads))
-                    as Arc<dyn EvmReadSession>)
-            })
-        }),
+        EvmReadRunnerCapabilities::new(
+            Arc::new(store.clone()),
+            |binding| Box::pin(async move { validate_binding(&binding) }),
+            move |binding| {
+                let live_reads = Arc::clone(&live_reads);
+                Box::pin(async move {
+                    validate_binding(&binding)?;
+                    Ok(Arc::new(ValidationSession::new(binding, live_reads))
+                        as Arc<dyn EvmReadSession>)
+                })
+            },
+        ),
     )
     .expect("register validation runner");
     runners

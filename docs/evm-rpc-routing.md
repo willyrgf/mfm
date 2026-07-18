@@ -50,11 +50,13 @@ The EVM state-facing capability surface has two coherent authorities:
 - `EvmTransactionCapability` / `EvmTransactionSession` for pending nonce, fee inputs, estimation,
   submission, transaction observation, receipt observation, and confirmation blocks.
 
-App assembly derives an `EvmNetworkBinding` from certified `network_id` and non-zero chain id, loads
-its direct route, and asynchronously binds `EvmJsonRpcSession` through one process-shared
-`EvmJsonRpcTransport`. Binding calls `eth_chainId` once. A mismatch fails before a session is
-returned. The resulting session is fixed to one endpoint and one redacted `source_ref` for the
-whole attempt; methods do not reselect, reprobe, or fail over.
+App assembly derives an `EvmNetworkBinding` from certified `network_id` and non-zero chain id. One
+shared asynchronous route validator serves balance collection and exact-anchor contract validation;
+it performs selective runtime-config file loading and parsing on a blocking worker before admission.
+Only after validation may execution asynchronously bind `EvmJsonRpcSession` through one
+process-shared `EvmJsonRpcTransport`. Binding calls `eth_chainId` once. A mismatch fails before a
+session is returned. The resulting session is fixed to one endpoint and one redacted `source_ref`
+for the whole attempt; methods do not reselect, reprobe, or fail over.
 
 The bind-time `EvmSessionEvidence` contains only semantic network id, verified chain id, source ref,
 and the certified session implementation id. The source ref is audit provenance for the route used

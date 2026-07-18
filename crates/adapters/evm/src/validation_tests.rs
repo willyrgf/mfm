@@ -11,6 +11,7 @@ use mfm_evm_capabilities::{
 };
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_states_evm::{
+    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceSource,
     EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
     EVM_CONTRACT_CODE_MAX_BYTES, EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES,
 };
@@ -104,7 +105,7 @@ async fn wrong_session_binding_fails_before_using_validation_authority() {
     let bound_session = Arc::clone(&session);
     let capabilities = EvmReadRunnerCapabilities::new(
         Arc::new(MissingArtifacts),
-        |_| Ok(()),
+        |_| Box::pin(async { Ok(()) }),
         move |_| {
             let session = Arc::clone(&bound_session);
             Box::pin(async move { Ok(session as Arc<dyn EvmReadSession>) })
@@ -122,6 +123,85 @@ async fn wrong_session_binding_fails_before_using_validation_authority() {
             reason: mfm_evm_capabilities::EvmInvalidRequest::SessionAuthorityMismatch,
         }
     );
+    assert_eq!(session.uses.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn both_evm_read_families_share_async_route_validation_before_binding_or_rpc() {
+    let route_validations = Arc::new(AtomicUsize::new(0));
+    let session_binds = Arc::new(AtomicUsize::new(0));
+    let session = Arc::new(CountingReadSession::with_chain_id(1));
+    let validation_counter = Arc::clone(&route_validations);
+    let bind_counter = Arc::clone(&session_binds);
+    let bound_session = Arc::clone(&session);
+    let capabilities = EvmReadRunnerCapabilities::new(
+        Arc::new(MissingArtifacts),
+        move |_| {
+            let validation_counter = Arc::clone(&validation_counter);
+            Box::pin(async move {
+                validation_counter.fetch_add(1, Ordering::SeqCst);
+                Err(EvmCapabilityError::provider_failure(
+                    mfm_evm_capabilities::evm_diagnostic(
+                        ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                    ),
+                ))
+            })
+        },
+        move |_| {
+            let bind_counter = Arc::clone(&bind_counter);
+            let bound_session = Arc::clone(&bound_session);
+            Box::pin(async move {
+                bind_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(bound_session as Arc<dyn EvmReadSession>)
+            })
+        },
+    );
+    let validation_state = <ValidateEvmContractState as StateSpec>::new(
+        ValidatedConfig::new(
+            EvmContractValidationConfig::new(
+                "ethereum-mainnet",
+                1,
+                keccak256([0x60, 0x00]),
+                Vec::new(),
+            )
+            .expect("validation config"),
+        )
+        .expect("validated validation config"),
+    )
+    .expect("validation state");
+    let balance_state = <CollectEvmBalancesState as StateSpec>::new(
+        ValidatedConfig::new(
+            EvmBalanceCollectionConfig::new(
+                "ethereum-mainnet",
+                1,
+                18,
+                vec![
+                    EvmBalanceSource::new(Address::from([0x11; 20]), EvmBalanceAsset::Native)
+                        .expect("balance source"),
+                ],
+            )
+            .expect("balance config"),
+        )
+        .expect("validated balance config"),
+    )
+    .expect("balance state");
+
+    let validation_executor = ValidateContractExecutor {
+        capabilities: capabilities.clone(),
+    };
+    let balance_executor = balance_collection::CollectEvmBalancesExecutor { capabilities };
+
+    validation_executor
+        .validate_read_route(&validation_state)
+        .await
+        .expect_err("validation route must fail");
+    balance_executor
+        .validate_read_route(&balance_state)
+        .await
+        .expect_err("balance route must fail");
+
+    assert_eq!(route_validations.load(Ordering::SeqCst), 2);
+    assert_eq!(session_binds.load(Ordering::SeqCst), 0);
     assert_eq!(session.uses.load(Ordering::SeqCst), 0);
 }
 
