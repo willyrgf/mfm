@@ -207,13 +207,16 @@ keystore; unrelated malformed entries do not block that resource. Evidence-only 
 runtime TOML. There is no fallback or compatibility surface.
 
 Portfolio selection consumes family completion authority without a generic fan-in value. The
-operation passes typed Bitcoin and EVM receipt vectors directly into `SelectHoldingsState`; their
-managed-write input edges are the readiness barrier. The state validates exact portfolio demand,
-receipt family/chain/source coverage, and receipt uniqueness before it authors any query. There is
-no portfolio manifest identity, generic receipt entry, count/readiness value, app-only fan-in
-runner, or separate replay verifier. This explicit downstream state-to-state contract is the sole
-approved reason for `mfm-state-portfolio` to depend on the Bitcoin state package; state packages
-remain independent of adapters, transports, app assembly, and runtime config.
+snapshot operation passes typed Bitcoin and EVM receipt vectors into one report operation. That
+operation's structured input binding is passed unchanged into `SelectHoldingsState`; the
+managed-write input edges are the readiness barrier. The snapshot operation constructs only child
+operations, while the report operation constructs only selection, snapshot assembly, and report
+projection. The state validates exact portfolio demand, receipt family/chain/source coverage, and
+receipt uniqueness before it authors any query. There is no portfolio manifest identity, generic
+receipt entry, count/readiness value, app-only fan-in runner, or separate replay verifier. This
+explicit downstream state-to-state contract is the sole approved reason for
+`mfm-state-portfolio` to depend on the Bitcoin state package; state packages remain independent of
+adapters, transports, app assembly, and runtime config.
 
 ## Typed Program Authoring
 

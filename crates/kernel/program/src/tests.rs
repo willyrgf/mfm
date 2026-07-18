@@ -650,6 +650,46 @@ impl Operation for MultiplyOperation {
 }
 
 #[derive(Debug, Clone)]
+struct StructuredInputOperation;
+
+impl Operation for StructuredInputOperation {
+    type Config = LaunchConfig;
+    type Input<'program, 'scope> =
+        OperationInputHandles<LaunchInput, LaunchInputHandles<'program, 'scope>>;
+    type Output<'program, 'scope> = LaunchOperationOutputs<'program, 'scope>;
+
+    fn kind() -> Result<OperationKind> {
+        test_operation_kind(
+            "structured_input",
+            b"mfm.program.test.operation:structured_input",
+        )
+    }
+
+    fn version() -> Result<OperationVersion> {
+        OperationVersion::new("mfm.program.test.operation.structured_input.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "structured_input"
+    }
+
+    fn expand<'program, 'scope>(
+        &self,
+        config: ValidatedConfig<Self::Config>,
+        input: Self::Input<'program, 'scope>,
+        _builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: OperationExpansionDispatch<Self>,
+    ) -> Result<Self::Output<'program, 'scope>> {
+        let _config = config.into_inner();
+        let handles = input.into_handles();
+        Ok(LaunchOperationOutputs {
+            result: handles.primary_value,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 struct ContextualMutationOperation;
 
 impl Operation for ContextualMutationOperation {

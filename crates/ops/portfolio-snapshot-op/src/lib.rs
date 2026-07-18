@@ -1,9 +1,10 @@
 #![warn(missing_docs)]
 //! Deterministic end-to-end portfolio snapshot composition.
 //!
-//! The operation accepts exactly one normalized [`PortfolioConfig`] authority. It compiles Bitcoin
-//! demand into reusable family collection operation calls. The family receipt handles flow
-//! directly into store-backed selection before snapshot and report projection.
+//! [`PortfolioSnapshotOperation`] accepts exactly one normalized [`PortfolioConfig`] authority,
+//! compiles family demand into reusable collector operation calls, and passes their receipt
+//! handles to one [`PortfolioReportOperation`]. The report operation owns store-backed selection,
+//! snapshot assembly, and public report projection.
 //!
 //! # Examples
 //!
@@ -21,26 +22,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_op_btc_collectors::{
     BtcNativeBalancesAtAnchorConfig, BtcNetworkCollectionConfig, BtcNetworkCollectionOperation,
-    BtcNetworkCollectionReceipt,
 };
 use mfm_op_evm_collectors::{
-    EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceCollectionOperation,
-    EvmBalanceCollectionReceipt, EvmBalanceSource,
+    EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceCollectionOperation, EvmBalanceSource,
 };
 use mfm_portfolio_model::domain_key::{HoldingsDomainKey, ReportDomainKey};
 use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig, ValidatedPortfolioConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
     build_root_with_registries, BridgeKey, BridgePolicy, MfmFactType, NoContext, Operation,
-    OperationExpansion, OperationKey, PublicOutputKey, RootBuilder, ScopeKey,
-    TypedProgramLaunchPlan, ValidatedConfig,
+    OperationExpansion, OperationInputHandles, OperationKey, PublicOutputKey, RootBuilder,
+    ScopeKey, TypedProgramLaunchPlan, ValidatedConfig,
 };
 use mfm_program_derive::OperationOutput;
 use mfm_state_portfolio::{
     AssembleSnapshotConfig, AssembleSnapshotInputHandles, AssembleSnapshotState,
     PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
-    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInputHandles,
-    SelectHoldingsState,
+    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput,
+    SelectHoldingsInputHandles, SelectHoldingsState,
 };
 use mfm_states_btc::BtcAddressBalanceSnapshotFact;
 use mfm_states_evm::EvmBalanceSnapshotFact;
@@ -49,14 +48,29 @@ use mfm_values::ConfigError;
 const OP_NAMESPACE: &str = "mfm.portfolio";
 const OP_KIND_NAME: &str = "snapshot";
 const OP_VERSION: &str = "mfm.portfolio.operation.snapshot.v1";
+const REPORT_OP_KIND_NAME: &str = "report";
+const REPORT_OP_VERSION: &str = "mfm.portfolio.operation.report.v1";
 const ROOT_SCOPE: &str = "portfolio_snapshot";
 const OPERATION_KEY: &str = "portfolio_snapshot";
+const REPORT_OPERATION_KEY: &str = "portfolio_report";
 const PUBLIC_OUTPUT_KEY: &str = "portfolio_snapshot";
 
 /// Internal handles produced by the complete portfolio snapshot operation.
 #[derive(OperationOutput)]
 #[mfm(schema = "mfm.portfolio.operation_outputs.snapshot")]
 pub struct PortfolioSnapshotOperationOutputs<'program, 'scope> {
+    /// Fully assembled portfolio snapshot.
+    pub snapshot:
+        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioSnapshot>,
+    /// Public report projection derived from the snapshot.
+    pub report:
+        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioReport>,
+}
+
+/// Internal handles produced by receipt-pinned portfolio report composition.
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.portfolio.operation_outputs.report")]
+pub struct PortfolioReportOperationOutputs<'program, 'scope> {
     /// Fully assembled portfolio snapshot.
     pub snapshot:
         mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioSnapshot>,
@@ -153,63 +167,103 @@ impl Operation for PortfolioSnapshotOperation {
                 },
             )?);
         }
-        expand_receipt_pinned_report(builder, portfolio, bitcoin_receipts, evm_receipts)
+        let report = builder.call::<PortfolioReportOperation, _>(
+            OperationKey::new(REPORT_OPERATION_KEY)?,
+            PortfolioReportOperation,
+            portfolio,
+            OperationInputHandles::new(SelectHoldingsInputHandles {
+                bitcoin_receipts,
+                evm_receipts,
+            }),
+        )?;
+        Ok(PortfolioSnapshotOperationOutputs {
+            snapshot: report.snapshot,
+            report: report.report,
+        })
     }
 }
 
-/// Expands the report half of the portfolio objective from exact family receipt vectors.
+/// Deterministic receipt-pinned portfolio report operation.
 ///
-/// This remains private to the snapshot operation: callers may only plan the complete collection
-/// and reporting objective from one normalized portfolio config.
-fn expand_receipt_pinned_report<'program, 'scope>(
-    builder: &mut OperationExpansion<'program, 'scope>,
-    portfolio: PortfolioConfig,
-    bitcoin_receipts: Vec<mfm_program::Handle<'program, 'scope, BtcNetworkCollectionReceipt>>,
-    evm_receipts: Vec<mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>>,
-) -> mfm_program::Result<PortfolioSnapshotOperationOutputs<'program, 'scope>> {
-    let normalized = ValidatedPortfolioConfig::new(portfolio.clone())
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?
-        .into_config();
-    if normalized != portfolio {
-        return Err(mfm_program::PlanError::Key(
-            "portfolio snapshot config must be normalized before expansion".to_owned(),
-        ));
+/// Its structured operation input is passed unchanged to [`SelectHoldingsState`]. The receipt
+/// edges are therefore the exact managed-write readiness barrier; this operation creates no
+/// aggregate receipt value or alternate replay surface.
+pub struct PortfolioReportOperation;
+
+impl Operation for PortfolioReportOperation {
+    type Config = PortfolioConfig;
+    type Input<'program, 'scope> =
+        OperationInputHandles<SelectHoldingsInput, SelectHoldingsInputHandles<'program, 'scope>>;
+    type Output<'program, 'scope> = PortfolioReportOperationOutputs<'program, 'scope>;
+
+    fn kind() -> mfm_program::Result<OperationKind> {
+        OperationKind::new(
+            OP_NAMESPACE,
+            REPORT_OP_KIND_NAME,
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"mfm.portfolio.operation:report"),
+        )
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
-    let holdings_key = HoldingsDomainKey::new("portfolio_holdings")
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-    let report_key = ReportDomainKey::new("portfolio_report")
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+    fn version() -> mfm_program::Result<OperationVersion> {
+        OperationVersion::new(REPORT_OP_VERSION)
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
 
-    let holdings = builder.state_with_domain_keys::<SelectHoldingsState, _, _>(
-        mfm_program::StateKey::new("select_holdings")?,
-        NoContext,
-        SelectHoldingsConfig::new(portfolio.clone(), holding_fact_descriptors()?)
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        SelectHoldingsInputHandles {
-            bitcoin_receipts,
-            evm_receipts,
-        },
-        vec![holdings_key],
-    )?;
-    let snapshot = builder.state::<AssembleSnapshotState, _>(
-        mfm_program::StateKey::new("assemble_snapshot")?,
-        NoContext,
-        AssembleSnapshotConfig::new(portfolio.clone())
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        AssembleSnapshotInputHandles { holdings },
-    )?;
-    let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
-        mfm_program::StateKey::new("project_report")?,
-        NoContext,
-        ProjectReportConfig::default(),
-        ProjectReportInputHandles {
-            snapshot: snapshot.clone(),
-        },
-        vec![report_key],
-    )?;
+    fn name() -> &'static str {
+        "mfm.portfolio.report"
+    }
 
-    Ok(PortfolioSnapshotOperationOutputs { snapshot, report })
+    fn expand<'program, 'scope>(
+        &self,
+        config: ValidatedConfig<Self::Config>,
+        input: Self::Input<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
+    ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let portfolio = config.into_inner();
+        let normalized = ValidatedPortfolioConfig::new(portfolio.clone())
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?
+            .into_config();
+        if normalized != portfolio {
+            return Err(mfm_program::PlanError::Key(
+                "portfolio report config must be normalized before expansion".to_owned(),
+            ));
+        }
+
+        let holdings_key = HoldingsDomainKey::new("portfolio_holdings")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+        let report_key = ReportDomainKey::new("portfolio_report")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+
+        let holdings = builder.state_with_domain_keys::<SelectHoldingsState, _, _>(
+            mfm_program::StateKey::new("select_holdings")?,
+            NoContext,
+            SelectHoldingsConfig::new(portfolio.clone(), holding_fact_descriptors()?)
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+            input.into_handles(),
+            vec![holdings_key],
+        )?;
+        let snapshot = builder.state::<AssembleSnapshotState, _>(
+            mfm_program::StateKey::new("assemble_snapshot")?,
+            NoContext,
+            AssembleSnapshotConfig::new(portfolio.clone())
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+            AssembleSnapshotInputHandles { holdings },
+        )?;
+        let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
+            mfm_program::StateKey::new("project_report")?,
+            NoContext,
+            ProjectReportConfig::default(),
+            ProjectReportInputHandles {
+                snapshot: snapshot.clone(),
+            },
+            vec![report_key],
+        )?;
+
+        Ok(PortfolioReportOperationOutputs { snapshot, report })
+    }
 }
 
 fn holding_fact_descriptors() -> mfm_program::Result<SelectHoldingsFactDescriptors> {
@@ -411,6 +465,7 @@ mfm_certify::define_program_descriptor_registry! {
     ],
     operations: [
         PortfolioSnapshotOperation,
+        PortfolioReportOperation,
         BtcNetworkCollectionOperation,
         mfm_op_btc_collectors::BtcNativeBalancesAtAnchorOperation,
         EvmBalanceCollectionOperation,

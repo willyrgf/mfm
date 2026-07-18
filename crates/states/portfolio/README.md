@@ -6,7 +6,7 @@ Family collectors are external reusable operations. This crate consumes their ty
 EVM receipts plus registered fact descriptors; it defines no family read, RPC, fact-publication,
 or collection-replay implementation.
 
-The remaining snapshot projection is:
+`PortfolioReportOperation` owns the remaining snapshot projection:
 
 ```text
 Bitcoin receipt vector ─┐

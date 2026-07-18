@@ -56,9 +56,11 @@ typed BTC/EVM receipt vectors flow directly into one store-backed selection stat
 receives only rehydrated and identity-reverified facts. The complete snapshot graph is the sole
 public objective, `mfm.portfolio/snapshot@1`.
 
-`mfm-op-portfolio-snapshot` owns that complete internal graph from normalized
-`PortfolioConfig` through child family-operation calls, receipt-pinned selection, snapshot
-assembly, and report projection. Its one production draft helper binds exactly one
+`mfm-op-portfolio-snapshot` owns that complete internal graph through two operations.
+`PortfolioSnapshotOperation` projects normalized `PortfolioConfig` into child Bitcoin/EVM
+collector calls and one `PortfolioReportOperation` call; it constructs no state directly. The
+report operation receives the typed family receipt handles and owns receipt-pinned selection,
+snapshot assembly, and report projection. Its one production draft helper binds exactly one
 `PortfolioPublicOutputs` root. Portfolio admission bounds networks, wallets, symbols,
 wallet-to-symbol relations, and distinct EVM sources per network before graph expansion. The app
 registers the needed runners and certification descriptors, strictly resolves one target-keyed
@@ -154,9 +156,11 @@ certified artifacts and the append-only run stream only.
 
 Two v1 decisions are deliberate:
 
-- Family managed-write outputs are the completion authority for portfolio selection. The operation
-  passes typed Bitcoin and EVM receipt vectors directly to `SelectHoldingsState`; it has no generic
-  receipt entry, logical-manifest wrapper, count/readiness value, or fan-in state. Selection checks
+- Family managed-write outputs are the completion authority for portfolio selection.
+  `PortfolioSnapshotOperation` passes typed Bitcoin and EVM receipt vectors into one
+  `PortfolioReportOperation`, whose structured input is passed unchanged to
+  `SelectHoldingsState`; neither operation has a generic receipt entry, logical-manifest wrapper,
+  count/readiness value, or fan-in state. Selection checks
   exact portfolio demand and both family receipt contracts before issuing one shared-snapshot query
   batch. The portfolio state package's dependencies on the Bitcoin and EVM state packages are the
   explicit downstream typed-output/fact contracts; it owns neither family's runner, transport,

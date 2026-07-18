@@ -26,7 +26,8 @@ decimals and balances at the retained anchor.
 
 At admission, the app loads the target's current configuration, verifies and normalizes it, records
 the target/schema/digest evidence in `RunAdmitted`, and gives the concrete `PortfolioConfig` to the
-snapshot operation. Admission also enforces the configured network, wallet, symbol,
+snapshot operation. That operation constructs only collector child calls and one report-operation
+call; it constructs no state directly. Admission also enforces the configured network, wallet, symbol,
 wallet-to-symbol, and per-EVM-network source limits before graph expansion.
 
 The operation derives only explicit wallet-to-symbol demand. Bitcoin collection resolves one
@@ -40,12 +41,14 @@ and preserves that order independently of response completion order.
 The publication attempt records the complete `evm.balance_snapshot` fact batch and a checked
 `EvmBalanceCollectionReceipt` together. That receipt contains the network/chain, exact anchor,
 sorted sources, and verified fact content identities, but no duplicate balance response material.
-The typed Bitcoin and EVM receipt vectors flow directly into `SelectHoldingsState`; their input
-edges are the managed-write completion barrier. Selection issues all family queries over one store
-snapshot, rehydrates every candidate response, rederives fact identity, and admits only the exact
-receipt-authorized content. Byte-identical append occurrences are equivalent; same-subject facts
-with different response content are filtered before ordering. Assembly consumes only these
-store-reread observations, including for token-only and all-EVM portfolios.
+The typed Bitcoin and EVM receipt vectors flow into one `PortfolioReportOperation`. Its structured
+operation input is passed unchanged into `SelectHoldingsState`; those input edges are the
+managed-write completion barrier. The report operation then owns snapshot assembly and report
+projection. Selection issues all family queries over one store snapshot, rehydrates every
+candidate response, rederives fact identity, and admits only the exact receipt-authorized content.
+Byte-identical append occurrences are equivalent; same-subject facts with different response
+content are filtered before ordering. Assembly consumes only these store-reread observations,
+including for token-only and all-EVM portfolios.
 
 Portfolio planning projects configured `NormalizedEvmAddress` and `HoldingSourceConfig` values
 into generic `EvmBalanceSource` and `EvmBalanceAsset` demand before the child call. Collection

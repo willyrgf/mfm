@@ -1165,8 +1165,8 @@ where
 mod private {
     use super::{
         ApplySideEffect, DeclaredContext, ForwardSideEffectHandle, Handle, ManagedPlatformWrite,
-        MfmContext, MfmValue, NoContext, NonEmptyHandles, Pure, ReadExternal, SideEffectState,
-        StateContext, StateSpec,
+        MfmContext, MfmValue, NoContext, NonEmptyHandles, OperationInputHandles, Pure,
+        ReadExternal, SideEffectState, StateContext, StateInput, StateSpec,
     };
 
     pub trait EffectRunnerSealed<S: StateSpec> {}
@@ -1192,6 +1192,8 @@ mod private {
     }
 
     impl OperationInputSealed for () {}
+
+    impl<I, H> OperationInputSealed for OperationInputHandles<I, H> where I: StateInput {}
 
     impl<'program, 'scope, T> OperationInputSealed for Handle<'program, 'scope, T> where T: MfmValue {}
 
