@@ -357,10 +357,13 @@ Alloy's hash. There is no legacy/style enum, custom RLP, alternate encoder, norm
 or second normal-path signing call.
 
 Transaction quantity ingress uses `U256`. Alloy 0.8 represents chain id, nonce, and gas limit as
-`u64` and fee fields as `u128`, so envelope admission checked-converts those fields and rejects
-unrepresentable values without truncation, clamping, or fallback; transaction value remains full
-`U256`. This fail-closed representability boundary is the only production path. Supporting wider
-fee fields would require upstream Alloy support, not a parallel MFM envelope implementation.
+`u64` and fee fields as `u128`. The one pre-gas type-2 description checked-converts chain id, nonce,
+and fees before estimation IO; the exact complete object is sent to `eth_estimateGas` against
+`pending`, then the checked gas result is added to that same description to form signing authority.
+Envelope admission also checks the gas limit. Unrepresentable values are rejected without
+truncation, clamping, or fallback, while transaction value remains full `U256`. This fail-closed
+representability boundary is the only production path. Supporting wider fee fields would require
+upstream Alloy support, not a parallel MFM envelope implementation.
 
 `mfm-signing` carries the protocol-neutral algorithm and explicit signing-profile ids on every
 transient request/result. The admitted EVM profile is deterministic RFC 6979 recoverable

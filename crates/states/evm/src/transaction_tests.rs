@@ -46,13 +46,11 @@ fn fees() -> EvmFeeInputs {
 
 fn prepared(action: EvmTransactionAction, nonce: u64) -> EvmPreparedTransaction {
     let intent = EvmTransactionIntent::from_config(&config(), &action).expect("intent");
-    let unsigned = EvmUnsignedTransaction::from_observations(
-        &intent,
-        U256::from(nonce),
-        &fees(),
-        U256::from(100_000),
-    )
-    .expect("unsigned");
+    let estimate = intent
+        .transaction_estimate(U256::from(nonce), &fees())
+        .expect("estimate");
+    let unsigned =
+        EvmUnsignedTransaction::from_estimate(&estimate, U256::from(100_000)).expect("unsigned");
     EvmPreparedTransaction::new(
         intent,
         U256::from(nonce),
@@ -153,6 +151,80 @@ fn authored_intent_contains_only_immutable_public_authority() {
     ] {
         assert!(!rendered.contains(forbidden), "leaked {forbidden}");
     }
+}
+
+#[test]
+fn estimate_is_the_common_authority_for_unsigned_transaction_fields() {
+    let intent = EvmTransactionIntent::from_config(
+        &config(),
+        &EvmTransactionAction::call(destination(), [0xaa, 0xbb], U256::from(9)).expect("action"),
+    )
+    .expect("intent");
+    let estimate = intent
+        .transaction_estimate(U256::from(7), &fees())
+        .expect("estimate");
+    let unsigned =
+        EvmUnsignedTransaction::from_estimate(&estimate, U256::from(100_000)).expect("unsigned");
+
+    assert_eq!(unsigned.transaction_type(), estimate.transaction_type());
+    assert_eq!(U256::from(unsigned.chain_id()), estimate.chain_id());
+    assert_eq!(
+        parse_quantity(unsigned.nonce()).expect("nonce"),
+        estimate.nonce()
+    );
+    assert_eq!(
+        parse_quantity(unsigned.max_priority_fee_per_gas()).expect("priority fee"),
+        estimate.max_priority_fee_per_gas()
+    );
+    assert_eq!(
+        parse_quantity(unsigned.max_fee_per_gas()).expect("maximum fee"),
+        estimate.max_fee_per_gas()
+    );
+    assert_eq!(
+        unsigned.to(),
+        Some(canonical_address(destination()).as_str())
+    );
+    assert_eq!(
+        parse_quantity(unsigned.value()).expect("value"),
+        estimate.value()
+    );
+    assert_eq!(
+        unsigned.access_list(),
+        access_list_from_alloy(estimate.access_list())
+    );
+    assert_eq!(unsigned.input(), canonical_bytes(estimate.input()).as_str());
+}
+
+#[test]
+fn nonce_and_fee_observations_change_estimate_and_signing_digest() {
+    let intent = EvmTransactionIntent::from_config(
+        &config(),
+        &EvmTransactionAction::call(destination(), [0x01], U256::ZERO).expect("action"),
+    )
+    .expect("intent");
+    let first_estimate = intent
+        .transaction_estimate(U256::from(7), &fees())
+        .expect("first estimate");
+    let nonce_estimate = intent
+        .transaction_estimate(U256::from(8), &fees())
+        .expect("nonce estimate");
+    let changed_fees =
+        EvmFeeInputs::from_base_and_priority(U256::from(11), U256::from(2)).expect("fees");
+    let fee_estimate = intent
+        .transaction_estimate(U256::from(7), &changed_fees)
+        .expect("fee estimate");
+
+    assert_ne!(first_estimate, nonce_estimate);
+    assert_ne!(first_estimate, fee_estimate);
+    let digest = |estimate: &EvmTransactionEstimate| {
+        EvmUnsignedTransaction::from_estimate(estimate, U256::from(100_000))
+            .expect("unsigned")
+            .to_signing_envelope()
+            .expect("envelope")
+            .signing_digest()
+    };
+    assert_ne!(digest(&first_estimate), digest(&nonce_estimate));
+    assert_ne!(digest(&first_estimate), digest(&fee_estimate));
 }
 
 #[test]

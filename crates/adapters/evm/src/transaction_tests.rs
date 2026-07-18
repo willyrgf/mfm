@@ -121,9 +121,19 @@ impl EvmTransactionSession for MockSession {
         &'a self,
         request: &'a EvmTransactionEstimate,
     ) -> EvmSessionFuture<'a, U256> {
+        assert_eq!(request.transaction_type(), 2);
+        assert_eq!(request.chain_id(), U256::from(1));
+        assert_eq!(request.nonce(), U256::from(0x42));
         assert_eq!(request.from(), EXPECTED_SENDER);
         assert_eq!(request.to(), TxKind::Call(DESTINATION));
+        assert_eq!(request.value(), U256::ZERO);
         assert_eq!(request.input().as_ref(), vector_calldata());
+        assert_eq!(request.access_list(), &AccessList::default());
+        assert_eq!(request.max_fee_per_gas(), U256::from(20_000_000_000_u64));
+        assert_eq!(
+            request.max_priority_fee_per_gas(),
+            U256::from(1_000_000_000_u64)
+        );
         Box::pin(async { Ok(U256::from(44_386)) })
     }
 

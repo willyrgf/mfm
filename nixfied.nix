@@ -51,6 +51,9 @@ let
     DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
     SQLX_OFFLINE = "false";
   };
+  rethEnv = {
+    MFM_RETH_PARITY_HTTP_URL = "http://127.0.0.1:\${port:reth}";
+  };
 
   # A cargo leaf: argv + extra env + service requirements. Reuse is this Nix
   # function; the model carries the fully-applied copies.
@@ -72,10 +75,11 @@ let
     };
 in
 {
-  # Postgres comes from the upstream reference adapter: idempotent prepare,
+  # Postgres and Reth come from upstream reference adapters: idempotent prepare,
   # protocol probes, platform behavior, and lifecycle are framework-owned.
   imports = [
     adapters.postgres
+    adapters.reth
   ];
 
   nixfied.project.projectId = "mfm";
@@ -322,6 +326,22 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    parity-reth-eip1559 = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_reth_eip1559"
+        "--"
+        "--nocapture"
+      ];
+      env = rethEnv;
+      requires = [ "reth" ];
+    };
     # Keep workspace tests as explicit leaves so each command has its own evidence.
     workspace-tests = {
       kind = "composite";
@@ -394,6 +414,10 @@ in
         test-db = {
           task = "test-db";
           dependsOn = [ "parity-cli-keystore" ];
+        };
+        parity-reth-eip1559 = {
+          task = "parity-reth-eip1559";
+          dependsOn = [ "test-db" ];
         };
       };
     };

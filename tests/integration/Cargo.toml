@@ -32,11 +32,13 @@ mfm-adapters-evm = { path = "../../crates/adapters/evm" }
 mfm-adapters-portfolio = { path = "../../crates/adapters/portfolio" }
 mfm-btc-capabilities = { path = "../../crates/btc-capabilities" }
 mfm-evm-capabilities = { path = "../../crates/evm-capabilities" }
+mfm-evm-signing = { path = "../../crates/evm-signing" }
 mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
 mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
 mfm-op-portfolio-snapshot = { path = "../../crates/ops/portfolio-snapshot-op" }
 mfm-states-btc = { path = "../../crates/states/btc" }
 mfm-states-evm = { path = "../../crates/states/evm" }
+mfm-transports-evm = { path = "../../crates/transports/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-portfolio-model = { path = "../../crates/portfolio/model" }
 mfm-rest-api = { path = "../../bin/rest-api" }
@@ -45,6 +47,7 @@ mfm-rest-api = { path = "../../bin/rest-api" }
 alloy-primitives = { workspace = true }
 hex = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 mfm-program-derive = { path = "../../crates/kernel/program-derive" }
 mfm-replay = { path = "../../crates/kernel/replay" }
 mfm-signing = { path = "../../crates/signing" }

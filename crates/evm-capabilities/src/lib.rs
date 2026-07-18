@@ -41,6 +41,8 @@ pub type EvmSessionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send
 
 /// Stable implementation id for the bounded JSON-RPC session.
 pub const EVM_JSONRPC_SESSION_IMPLEMENTATION_ID: &str = "mfm.evm.jsonrpc.session.v1";
+/// EIP-2718 transaction type used by the one admitted EVM transaction flow.
+pub const EVM_EIP1559_TRANSACTION_TYPE: u8 = 2;
 
 macro_rules! evm_capability {
     ($(#[$meta:meta])* $ty:ident, $role:ty, $name:literal) => {
@@ -363,32 +365,108 @@ impl EvmFeeInputs {
     }
 }
 
-/// Transaction fields supplied to `eth_estimateGas`.
+/// Exact pre-gas-limit EIP-1559 transaction description supplied to `eth_estimateGas`.
+///
+/// Construction admits nonce and fee observations into Alloy's narrower
+/// EIP-1559 widths before any estimation IO. Adding the returned gas limit to
+/// this description produces the signing authority; callers must not rebuild
+/// transaction fields from the original intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmTransactionEstimate {
+    chain_id: U256,
+    nonce: U256,
     from: Address,
     to: TxKind,
     value: U256,
     input: Bytes,
     access_list: AccessList,
+    max_fee_per_gas: U256,
+    max_priority_fee_per_gas: U256,
 }
 
 impl EvmTransactionEstimate {
-    /// Creates a gas-estimation request.
-    pub const fn new(
+    /// Creates one checked type-2 gas-estimation request.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        chain_id: U256,
+        nonce: U256,
         from: Address,
         to: TxKind,
         value: U256,
         input: Bytes,
         access_list: AccessList,
-    ) -> Self {
-        Self {
+        max_fee_per_gas: U256,
+        max_priority_fee_per_gas: U256,
+    ) -> Result<Self> {
+        let request = Self {
+            chain_id,
+            nonce,
             from,
             to,
             value,
             input,
             access_list,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+        };
+        request.validate_alloy_widths()?;
+        Ok(request)
+    }
+
+    /// Returns the EIP-2718 transaction type.
+    pub const fn transaction_type(&self) -> u8 {
+        EVM_EIP1559_TRANSACTION_TYPE
+    }
+
+    /// Returns the exact chain id.
+    pub const fn chain_id(&self) -> U256 {
+        self.chain_id
+    }
+
+    /// Returns the exact pending sender nonce.
+    pub const fn nonce(&self) -> U256 {
+        self.nonce
+    }
+
+    /// Returns the maximum total fee per gas.
+    pub const fn max_fee_per_gas(&self) -> U256 {
+        self.max_fee_per_gas
+    }
+
+    /// Returns the maximum priority fee per gas.
+    pub const fn max_priority_fee_per_gas(&self) -> U256 {
+        self.max_priority_fee_per_gas
+    }
+
+    fn validate_alloy_widths(&self) -> Result<()> {
+        let chain_id =
+            u64::try_from(self.chain_id).map_err(|_| EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ChainIdOutOfRange,
+            })?;
+        if chain_id == 0 {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ZeroExpectedChainId,
+            });
         }
+        u64::try_from(self.nonce).map_err(|_| EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::NonceOutOfRange,
+        })?;
+        let max_fee = u128::try_from(self.max_fee_per_gas).map_err(|_| {
+            EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::MaxFeePerGasOutOfRange,
+            }
+        })?;
+        let priority = u128::try_from(self.max_priority_fee_per_gas).map_err(|_| {
+            EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::MaxPriorityFeePerGasOutOfRange,
+            }
+        })?;
+        if priority > max_fee {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::PriorityFeeExceedsMaxFee,
+            });
+        }
+        Ok(())
     }
 
     /// Returns the sender.
@@ -572,6 +650,16 @@ pub enum EvmInvalidRequest {
     ZeroExpectedChainId,
     /// Checked EIP-1559 fee arithmetic overflowed U256.
     FeeOverflow,
+    /// Chain id exceeded Alloy's exact EIP-1559 representation.
+    ChainIdOutOfRange,
+    /// Sender nonce exceeded Alloy's exact EIP-1559 representation.
+    NonceOutOfRange,
+    /// Maximum fee exceeded Alloy's exact EIP-1559 representation.
+    MaxFeePerGasOutOfRange,
+    /// Priority fee exceeded Alloy's exact EIP-1559 representation.
+    MaxPriorityFeePerGasOutOfRange,
+    /// Priority fee exceeded the maximum total fee.
+    PriorityFeeExceedsMaxFee,
     /// A read-only call supplied a zero gas limit.
     ZeroCallGasLimit,
     /// Signed transaction bytes were empty.

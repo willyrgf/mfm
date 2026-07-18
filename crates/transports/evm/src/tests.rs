@@ -235,6 +235,89 @@ async fn transaction_view_uses_u256_checked_fees_and_strict_observations() {
 }
 
 #[tokio::test]
+async fn gas_estimation_sends_complete_call_and_create_type_two_descriptions() {
+    let server = TestServer::spawn(Mode::Valid).await;
+    let session = session(&server).await;
+    let storage_key = B256::from([0x33; 32]);
+    let call = EvmTransactionEstimate::new(
+        U256::from(u64::MAX),
+        U256::from(u64::MAX),
+        ACCOUNT,
+        TxKind::Call(Address::from([2; 20])),
+        U256::MAX,
+        Bytes::from_static(&[0xaa, 0xbb]),
+        AccessList(vec![AccessListItem {
+            address: Address::from([3; 20]),
+            storage_keys: vec![storage_key],
+        }]),
+        U256::from(u128::MAX),
+        U256::from(u128::MAX - 1),
+    )
+    .expect("call estimate");
+    let create = EvmTransactionEstimate::new(
+        U256::from(1),
+        U256::from(8),
+        ACCOUNT,
+        TxKind::Create,
+        U256::ZERO,
+        Bytes::from_static(&[0x60, 0x00]),
+        AccessList::default(),
+        U256::from(66),
+        U256::from(2),
+    )
+    .expect("create estimate");
+
+    assert_eq!(
+        session.estimate_gas(&call).await.expect("call gas"),
+        U256::from(21_000)
+    );
+    assert_eq!(
+        session.estimate_gas(&create).await.expect("create gas"),
+        U256::from(21_000)
+    );
+
+    let requests = server
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "eth_estimateGas")
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0]["params"],
+        json!([{
+            "type": "0x2",
+            "chainId": "0xffffffffffffffff",
+            "nonce": "0xffffffffffffffff",
+            "from": format!("{ACCOUNT:#x}"),
+            "to": format!("{:#x}", Address::from([2; 20])),
+            "value": format!("0x{:x}", U256::MAX),
+            "data": "0xaabb",
+            "accessList": [{
+                "address": format!("{:#x}", Address::from([3; 20])),
+                "storageKeys": [format!("{storage_key:#x}")],
+            }],
+            "maxFeePerGas": "0xffffffffffffffffffffffffffffffff",
+            "maxPriorityFeePerGas": "0xfffffffffffffffffffffffffffffffe",
+        }, "pending"])
+    );
+    assert_eq!(
+        requests[1]["params"],
+        json!([{
+            "type": "0x2",
+            "chainId": "0x1",
+            "nonce": "0x8",
+            "from": format!("{ACCOUNT:#x}"),
+            "value": "0x0",
+            "data": "0x6000",
+            "accessList": [],
+            "maxFeePerGas": "0x42",
+            "maxPriorityFeePerGas": "0x2",
+        }, "pending"])
+    );
+    assert!(requests[1]["params"][0].get("to").is_none());
+}
+
+#[tokio::test]
 async fn transaction_submit_preserves_a_wrong_provider_hash_for_adapter_ambiguity() {
     let server = TestServer::spawn(Mode::WrongSubmitHash).await;
     let session = session(&server).await;

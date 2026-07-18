@@ -464,17 +464,36 @@ impl EvmTransactionIntent {
         SignerRef::new(&self.signer_ref).map_err(|_| invalid("signer_ref was invalid"))
     }
 
-    /// Builds the exact capability gas-estimation request.
-    pub fn transaction_estimate(&self) -> Result<EvmTransactionEstimate, EvmStateError> {
+    /// Admits intent and exact nonce/fee observations into one pre-gas transaction description.
+    pub fn transaction_estimate(
+        &self,
+        pending_nonce: U256,
+        fees: &EvmFeeInputs,
+    ) -> Result<EvmTransactionEstimate, EvmStateError> {
         self.validate()?;
+        let recomputed_fees = EvmFeeInputs::from_base_and_priority(
+            fees.base_fee_per_gas,
+            fees.max_priority_fee_per_gas,
+        )
+        .map_err(|_| invalid("fee observations were invalid"))?;
+        if &recomputed_fees != fees {
+            return Err(invalid(
+                "fee observations did not match the certified policy",
+            ));
+        }
         let (to, value, input) = self.action.transaction_fields()?;
-        Ok(EvmTransactionEstimate::new(
+        EvmTransactionEstimate::new(
+            U256::from(self.chain_id),
+            pending_nonce,
             self.expected_sender_address()?,
             to,
             value,
             input,
             self.alloy_access_list()?,
-        ))
+            fees.max_fee_per_gas,
+            fees.max_priority_fee_per_gas,
+        )
+        .map_err(|_| invalid("transaction observations exceeded EIP-1559 bounds"))
     }
 }
 
@@ -534,45 +553,37 @@ pub struct EvmUnsignedTransaction {
 }
 
 impl EvmUnsignedTransaction {
-    /// Deterministically reduces authored intent and checked observations into one envelope.
-    pub fn from_observations(
-        intent: &EvmTransactionIntent,
-        pending_nonce: U256,
-        fees: &EvmFeeInputs,
+    /// Adds the checked gas-limit policy to the exact estimated transaction description.
+    pub fn from_estimate(
+        estimate: &EvmTransactionEstimate,
         gas_estimate: U256,
     ) -> Result<Self, EvmStateError> {
-        intent.validate()?;
         if gas_estimate.is_zero() {
             return Err(invalid("gas estimate must be non-zero"));
         }
-        let recomputed_fees = EvmFeeInputs::from_base_and_priority(
-            fees.base_fee_per_gas,
-            fees.max_priority_fee_per_gas,
-        )
-        .map_err(|_| invalid("fee observations were invalid"))?;
-        if &recomputed_fees != fees {
-            return Err(invalid(
-                "fee observations did not match the certified policy",
-            ));
-        }
-        let (to, value, input) = intent.action.transaction_fields()?;
-        let to = match to {
+        let to = match estimate.to() {
             TxKind::Create => None,
             TxKind::Call(address) => Some(canonical_address(address)),
         };
         let unsigned = Self {
-            chain_id: intent.chain_id,
-            nonce: pending_nonce.to_string(),
-            max_priority_fee_per_gas: fees.max_priority_fee_per_gas.to_string(),
-            max_fee_per_gas: fees.max_fee_per_gas.to_string(),
+            chain_id: u64::try_from(estimate.chain_id())
+                .map_err(|_| invalid("chain id exceeded EIP-1559 range"))?,
+            nonce: estimate.nonce().to_string(),
+            max_priority_fee_per_gas: estimate.max_priority_fee_per_gas().to_string(),
+            max_fee_per_gas: estimate.max_fee_per_gas().to_string(),
             gas_limit: gas_estimate.to_string(),
             to,
-            value: value.to_string(),
-            access_list: intent.access_list.clone(),
-            input: canonical_bytes(&input),
+            value: estimate.value().to_string(),
+            access_list: access_list_from_alloy(estimate.access_list()),
+            input: canonical_bytes(estimate.input()),
         };
         unsigned.validate()?;
         Ok(unsigned)
+    }
+
+    /// Returns the EIP-2718 transaction type.
+    pub const fn transaction_type(&self) -> u8 {
+        mfm_evm_capabilities::EVM_EIP1559_TRANSACTION_TYPE
     }
 
     /// Returns the exact chain id.
@@ -585,6 +596,16 @@ impl EvmUnsignedTransaction {
         &self.nonce
     }
 
+    /// Returns the canonical maximum priority fee per gas.
+    pub fn max_priority_fee_per_gas(&self) -> &str {
+        &self.max_priority_fee_per_gas
+    }
+
+    /// Returns the canonical maximum total fee per gas.
+    pub fn max_fee_per_gas(&self) -> &str {
+        &self.max_fee_per_gas
+    }
+
     /// Returns the canonical gas limit.
     pub fn gas_limit(&self) -> &str {
         &self.gas_limit
@@ -593,6 +614,16 @@ impl EvmUnsignedTransaction {
     /// Returns the call destination, or `None` for direct creation.
     pub fn to(&self) -> Option<&str> {
         self.to.as_deref()
+    }
+
+    /// Returns the canonical transferred value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the exact access list.
+    pub fn access_list(&self) -> &[EvmAccessListEntry] {
+        &self.access_list
     }
 
     /// Returns the exact canonical transaction input.
@@ -783,8 +814,8 @@ impl EvmPreparedTransaction {
             ));
         }
         let gas = parse_quantity(&self.gas_estimate)?;
-        let recomputed =
-            EvmUnsignedTransaction::from_observations(&self.intent, nonce, &fees, gas)?;
+        let estimate = self.intent.transaction_estimate(nonce, &fees)?;
+        let recomputed = EvmUnsignedTransaction::from_estimate(&estimate, gas)?;
         if recomputed != self.unsigned {
             return Err(invalid(
                 "prepared unsigned envelope did not match observations",

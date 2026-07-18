@@ -327,14 +327,15 @@ impl EvmTransactionAdapter {
             .fee_inputs()
             .await
             .map_err(pre_submission_capability_error)?;
-        let estimate = intent.transaction_estimate().map_err(state_error)?;
+        let estimate = intent
+            .transaction_estimate(pending_nonce, &fees)
+            .map_err(state_error)?;
         let gas_estimate = session
             .estimate_gas(&estimate)
             .await
             .map_err(pre_submission_capability_error)?;
         let unsigned =
-            EvmUnsignedTransaction::from_observations(intent, pending_nonce, &fees, gas_estimate)
-                .map_err(state_error)?;
+            EvmUnsignedTransaction::from_estimate(&estimate, gas_estimate).map_err(state_error)?;
         let signer_ref = intent.signer_reference().map_err(state_error)?;
         let signer = self.capabilities.bind_signer(signer_ref.clone()).await?;
         let signing_envelope = unsigned.to_signing_envelope().map_err(state_error)?;

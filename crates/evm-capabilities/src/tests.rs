@@ -148,6 +148,80 @@ fn fee_policy_uses_checked_u256_arithmetic() {
 }
 
 #[test]
+fn estimate_admission_rejects_alloy_width_overflow_before_io() {
+    let overflow_u64 = U256::from(u64::MAX) + U256::from(1);
+    let overflow_u128 = U256::from(u128::MAX) + U256::from(1);
+
+    for (chain_id, nonce, maximum, priority, reason) in [
+        (
+            overflow_u64,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            EvmInvalidRequest::ChainIdOutOfRange,
+        ),
+        (
+            U256::from(1),
+            overflow_u64,
+            U256::ZERO,
+            U256::ZERO,
+            EvmInvalidRequest::NonceOutOfRange,
+        ),
+        (
+            U256::from(1),
+            U256::ZERO,
+            overflow_u128,
+            U256::ZERO,
+            EvmInvalidRequest::MaxFeePerGasOutOfRange,
+        ),
+        (
+            U256::from(1),
+            U256::ZERO,
+            U256::from(u128::MAX),
+            overflow_u128,
+            EvmInvalidRequest::MaxPriorityFeePerGasOutOfRange,
+        ),
+        (
+            U256::from(1),
+            U256::ZERO,
+            U256::from(1),
+            U256::from(2),
+            EvmInvalidRequest::PriorityFeeExceedsMaxFee,
+        ),
+    ] {
+        let error = EvmTransactionEstimate::new(
+            chain_id,
+            nonce,
+            Address::ZERO,
+            TxKind::Create,
+            U256::MAX,
+            Bytes::new(),
+            AccessList::default(),
+            maximum,
+            priority,
+        )
+        .expect_err("invalid estimate width");
+        assert_eq!(error, EvmCapabilityError::InvalidRequest { reason });
+    }
+
+    let estimate = EvmTransactionEstimate::new(
+        U256::from(u64::MAX),
+        U256::from(u64::MAX),
+        Address::ZERO,
+        TxKind::Create,
+        U256::MAX,
+        Bytes::new(),
+        AccessList::default(),
+        U256::from(u128::MAX),
+        U256::from(u128::MAX),
+    )
+    .expect("exact boundaries");
+    assert_eq!(estimate.transaction_type(), EVM_EIP1559_TRANSACTION_TYPE);
+    assert_eq!(estimate.nonce(), U256::from(u64::MAX));
+    assert_eq!(estimate.max_fee_per_gas(), U256::from(u128::MAX));
+}
+
+#[test]
 fn call_request_requires_an_explicit_nonzero_gas_bound() {
     let selector = EvmBlockSelector::ExactHash(B256::from([3; 32]));
     let error = EvmCall::new(

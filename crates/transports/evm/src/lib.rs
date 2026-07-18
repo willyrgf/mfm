@@ -259,6 +259,15 @@ impl EvmJsonRpcSession {
 
     async fn estimate(&self, request: &EvmTransactionEstimate) -> TransportResult<U256> {
         let mut call = Map::new();
+        call.insert(
+            "type".to_owned(),
+            json!(encode_quantity(U256::from(request.transaction_type()))),
+        );
+        call.insert(
+            "chainId".to_owned(),
+            json!(encode_quantity(request.chain_id())),
+        );
+        call.insert("nonce".to_owned(), json!(encode_quantity(request.nonce())));
         call.insert("from".to_owned(), json!(format!("{:#x}", request.from())));
         if let TxKind::Call(to) = request.to() {
             call.insert("to".to_owned(), json!(format!("{to:#x}")));
@@ -269,8 +278,16 @@ impl EvmJsonRpcSession {
             "accessList".to_owned(),
             encode_access_list(request.access_list()),
         );
+        call.insert(
+            "maxFeePerGas".to_owned(),
+            json!(encode_quantity(request.max_fee_per_gas())),
+        );
+        call.insert(
+            "maxPriorityFeePerGas".to_owned(),
+            json!(encode_quantity(request.max_priority_fee_per_gas())),
+        );
         let value = self
-            .rpc_call("eth_estimateGas", json!([Value::Object(call)]))
+            .rpc_call("eth_estimateGas", json!([Value::Object(call), "pending"]))
             .await?;
         parse_quantity(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
     }

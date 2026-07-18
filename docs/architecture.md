@@ -490,8 +490,10 @@ current consumer.
 
 `SubmitEvmTransactionState` is registered by app certification and runner assembly as reusable
 substrate. Its runner preclaims the exact `mfm.evm.sender_nonce` lane, prepares one immutable
-EIP-1559 envelope, and delegates submission/observation to one adapter contract. Read-only services
-and existing portfolio execution do not resolve signer material merely because this descriptor is
+EIP-1559 envelope, and delegates submission/observation to one adapter contract. Preparation admits
+intent, exact nonce, and checked fees into one complete type-2 estimate request before IO, then adds
+the returned gas limit to that same representation for Alloy signing. Read-only services and
+existing portfolio execution do not resolve signer material merely because this descriptor is
 registered; the exact signer and referenced keystore are loaded only when a live transaction node
 is admitted or executed.
 

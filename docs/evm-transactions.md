@@ -42,9 +42,15 @@ another MFM deployment, an operator, or any other process.
 ## Preparation and signing
 
 After the lane claim commits, one source-bound `EvmTransactionSession` reads the pending nonce,
-checked fee inputs, and gas estimate. The deterministic reducer fixes one unsigned envelope. The
-adapter then binds the exact configured signer, signs once, verifies the profile and recovered
-sender, and computes the expected hash from the exact signed EIP-2718 bytes.
+then the checked fee inputs. Intent and those observations are admitted once as the complete
+pre-gas type-2 transaction description: chain id, nonce, sender, destination/create kind, value,
+input, access list, maximum fee, and priority fee. Nonce and fee widths are checked against Alloy's
+exact EIP-1559 representation before `eth_estimateGas` is called. The transport sends that full
+object with type `0x2` against the `pending` block context. Adding the exact returned gas limit to
+the same admitted description produces the unsigned envelope; no transaction field is reconstructed
+from intent for signing. The adapter then binds the exact configured signer, signs once, verifies
+the profile and recovered sender, and computes the expected hash from the exact signed EIP-2718
+bytes.
 
 The binding accepts `DeterministicSigningProvider`, not the unconstrained signing-provider trait.
 The identity-bearing binder owns implementation `mfm.signing.keystore.rfc6979.v1`; transaction
