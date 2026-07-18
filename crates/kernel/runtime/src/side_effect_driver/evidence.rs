@@ -82,17 +82,6 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         Ok(output.finish())
     }
 
-    /// Crosses the durable started boundary without performing external IO.
-    pub(crate) fn start_prepared(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        claim: RunnerClaimBinding,
-    ) -> ErasedRunnerOutput {
-        let payload =
-            RunnerPayloadBuilder::new(self.ctx).side_effect_invocation_started(side_effect, claim);
-        ErasedRunnerOutput::new(vec![payload])
-    }
-
     /// Builds not-submitted proof evidence.
     pub(crate) fn not_submitted_proven_with_role<Proof>(
         &self,

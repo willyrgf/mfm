@@ -12,9 +12,6 @@ impl SideEffectDriver {
             SideEffectStep::Prepare { invocation_epoch } => {
                 Self::prepare(&ctx, adapter, &view, invocation_epoch).await
             }
-            SideEffectStep::Start { invocation_epoch } => {
-                Self::start(&ctx, &view, invocation_epoch)
-            }
             SideEffectStep::Submit { invocation_epoch } => {
                 Self::submit(&ctx, adapter, &view, invocation_epoch).await
             }
@@ -114,23 +111,6 @@ impl SideEffectDriver {
             claim,
             &prepared,
         )
-    }
-
-    fn start(
-        ctx: &ErasedRunCtx<'_>,
-        view: &SideEffectAttemptView<'_>,
-        invocation_epoch: u32,
-    ) -> Result<ErasedRunnerOutput> {
-        let claim = match view.phase() {
-            Some(store::SideEffectLedgerPhase::Prepared { claim, .. }) => RunnerClaimBinding {
-                claim_owner: claim.claim_owner.clone(),
-                claim_generation: claim.claim_generation,
-                claim_fencing_token: claim.claim_fencing_token.clone(),
-            },
-            _ => return Err(missing_driver_projection("prepared claim")),
-        };
-        Ok(SideEffectEvidenceBuilder::new(ctx)
-            .start_prepared(side_effect_binding(view, invocation_epoch)?, claim))
     }
 
     async fn submit<A>(

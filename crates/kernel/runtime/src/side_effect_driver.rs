@@ -248,11 +248,6 @@ pub(crate) enum SideEffectStep {
         /// Invocation epoch to prepare and start.
         invocation_epoch: u32,
     },
-    /// A prepared invocation must cross the durable started boundary without external IO.
-    Start {
-        /// Invocation epoch to start.
-        invocation_epoch: u32,
-    },
     /// A started invocation can submit exact prepared authority.
     Submit {
         /// Invocation epoch to submit.
@@ -272,9 +267,6 @@ impl SideEffectStep {
             return Ok(Self::Claim);
         };
         match phase {
-            store::SideEffectLedgerPhase::Prepared { claim, .. } => Ok(Self::Start {
-                invocation_epoch: claim.invocation_epoch,
-            }),
             store::SideEffectLedgerPhase::Claimed { claim } => Ok(Self::Prepare {
                 invocation_epoch: claim.invocation_epoch,
             }),
@@ -287,6 +279,7 @@ impl SideEffectStep {
                 })
             }
             store::SideEffectLedgerPhase::IntentPersisted { .. }
+            | store::SideEffectLedgerPhase::Prepared { .. }
             | store::SideEffectLedgerPhase::ReceiptObserved { .. }
             | store::SideEffectLedgerPhase::Confirmed { .. }
             | store::SideEffectLedgerPhase::Ambiguous { .. }

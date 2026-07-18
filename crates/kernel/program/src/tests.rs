@@ -194,6 +194,46 @@ fn external_read_contract_digest_binds_plan_and_evidence_identities() {
     );
 }
 
+#[test]
+fn side_effect_contract_digest_binds_recovery_evidence_identity() {
+    let original = side_effect_contract_digest::<
+        LaunchValue,
+        LaunchValue,
+        LaunchValue,
+        LaunchValue,
+        ReadEvidenceValue,
+        LaunchValue,
+        LaunchValue,
+    >()
+    .expect("side-effect contract");
+    assert_eq!(
+        original,
+        side_effect_contract_digest::<
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            ReadEvidenceValue,
+            LaunchValue,
+            LaunchValue,
+        >()
+        .expect("stable side-effect contract")
+    );
+    assert_ne!(
+        original,
+        side_effect_contract_digest::<
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            AlternateReadEvidence,
+            LaunchValue,
+            LaunchValue,
+        >()
+        .expect("changed recovery evidence contract")
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.program.test",

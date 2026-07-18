@@ -948,6 +948,74 @@ where
     }))
 }
 
+/// Derives the hash-defining contract for one side-effect evidence protocol.
+pub fn side_effect_contract_digest<
+    Intent,
+    IdempotencyInput,
+    PreparedInvocation,
+    Submission,
+    RecoveryEvidence,
+    Receipt,
+    Confirmation,
+>() -> Result<ContentDigest>
+where
+    Intent: MfmValue,
+    IdempotencyInput: MfmValue,
+    PreparedInvocation: MfmValue,
+    Submission: MfmValue,
+    RecoveryEvidence: MfmValue,
+    Receipt: MfmValue,
+    Confirmation: MfmValue,
+{
+    canonical_digest(serde_json::json!({
+        "contract_domain": "mfm.side_effect",
+        "contract_version": 1,
+        "effect_class": "apply_side_effect",
+        "confirmation_schema_id": Confirmation::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "confirmation_semantic_type_id": Confirmation::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "idempotency_input_schema_id": IdempotencyInput::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "idempotency_input_semantic_type_id": IdempotencyInput::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "intent_schema_id": Intent::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "intent_semantic_type_id": Intent::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "prepared_invocation_schema_id": PreparedInvocation::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "prepared_invocation_semantic_type_id": PreparedInvocation::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "receipt_schema_id": Receipt::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "receipt_semantic_type_id": Receipt::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "recovery_evidence_schema_id": RecoveryEvidence::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "recovery_evidence_semantic_type_id": RecoveryEvidence::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "submission_schema_id": Submission::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "submission_semantic_type_id": Submission::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+    }))
+}
+
 /// MFM-managed platform write state runner.
 pub trait ManagedWriteState: StateSpec<Effect = ManagedPlatformWrite> {
     /// Future returned by [`ManagedWriteState::run`].
@@ -1081,46 +1149,16 @@ where
     }
 
     fn effect_contract_digest() -> Result<Option<ContentDigest>> {
-        let digest = canonical_digest(serde_json::json!({
-            "effect_class": "apply_side_effect",
-            "confirmation_schema_id": S::Confirmation::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "confirmation_semantic_type_id": S::Confirmation::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "idempotency_input_schema_id": S::IdempotencyInput::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "idempotency_input_semantic_type_id": S::IdempotencyInput::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "intent_schema_id": S::Intent::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "intent_semantic_type_id": S::Intent::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "prepared_invocation_schema_id": S::PreparedInvocation::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "prepared_invocation_semantic_type_id": S::PreparedInvocation::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "receipt_schema_id": S::Receipt::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "receipt_semantic_type_id": S::Receipt::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "submission_schema_id": S::Submission::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "submission_semantic_type_id": S::Submission::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-        }))?;
-        Ok(Some(digest))
+        side_effect_contract_digest::<
+            S::Intent,
+            S::IdempotencyInput,
+            S::PreparedInvocation,
+            S::Submission,
+            S::RecoveryEvidence,
+            S::Receipt,
+            S::Confirmation,
+        >()
+        .map(Some)
     }
 }
 
