@@ -302,7 +302,7 @@ fn config_rejects_aggregate_call_material_plus_one() {
 
 #[test]
 fn maximum_policy_builds_reduces_and_fits_canonical_artifacts() {
-    let code = vec![0x60; EVM_CONTRACT_CODE_MAX_BYTES];
+    let code = vec![0x60; EVM_CODE_MAX_RESPONSE_BYTES];
     let config = maximum_artifact_policy(&code);
     let plan = EvmContractValidationPlan::from_config_and_target(&config, &maximum_target())
         .expect("maximum validation plan");
@@ -392,7 +392,7 @@ fn reducer_rejects_empty_mismatched_or_oversized_code() {
     )
     .is_err());
 
-    let oversized = vec![0x60; EVM_CONTRACT_CODE_MAX_BYTES + 1];
+    let oversized = vec![0x60; EVM_CODE_MAX_RESPONSE_BYTES + 1];
     let oversized_plan = plan(&oversized, Vec::new());
     assert!(validate_evm_contract(
         &oversized_plan,
@@ -470,7 +470,7 @@ fn reducer_rejects_changed_request_return_source_or_canonical_block() {
 
 #[test]
 fn deserialized_over_budget_plan_and_evidence_fail_reduction() {
-    let code = vec![0x60; EVM_CONTRACT_CODE_MAX_BYTES];
+    let code = vec![0x60; EVM_CODE_MAX_RESPONSE_BYTES];
     let mut calls = exact_return_budget_calls();
     calls.push(call_check_with_material(&[], Vec::new(), &[0x01]));
 

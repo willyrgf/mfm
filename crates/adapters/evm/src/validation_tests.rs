@@ -7,13 +7,13 @@ use std::sync::Mutex;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mfm_evm_capabilities::{
     EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence, EvmSessionFuture,
-    ProviderDiagnosticCode,
+    ProviderDiagnosticCode, EVM_CODE_MAX_RESPONSE_BYTES,
 };
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_states_evm::{
     CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceSource,
     EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
-    EVM_CONTRACT_CODE_MAX_BYTES, EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES,
+    EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES,
 };
 
 struct MissingArtifacts;
@@ -222,6 +222,37 @@ fn validation_provider_availability_blocks_while_contract_failures_terminalize()
         evm_read_runtime_error(malformed),
         mfm_runtime::RuntimeError::Failure(_)
     ));
+
+    for (code, blocks) in [(-32603, true), (-32602, false)] {
+        let error = EvmCapabilityError::provider_failure(
+            mfm_evm_capabilities::evm_diagnostic(ProviderDiagnosticCode::RpcJsonError).with_field(
+                mfm_ids::LocalPublicId::new("rpc_code").expect("field"),
+                mfm_capabilities::ProviderDiagnosticValue::I64(code),
+            ),
+        );
+        assert_eq!(
+            matches!(
+                evm_read_runtime_error(error),
+                mfm_runtime::RuntimeError::Blocked(_)
+            ),
+            blocks
+        );
+    }
+    for (status, blocks) in [(503, true), (400, false)] {
+        let error = EvmCapabilityError::provider_failure(
+            mfm_evm_capabilities::evm_diagnostic(ProviderDiagnosticCode::RpcHttpStatus).with_field(
+                mfm_ids::LocalPublicId::new("http_status").expect("field"),
+                mfm_capabilities::ProviderDiagnosticValue::U64(status),
+            ),
+        );
+        assert_eq!(
+            matches!(
+                evm_read_runtime_error(error),
+                mfm_runtime::RuntimeError::Blocked(_)
+            ),
+            blocks
+        );
+    }
 }
 
 #[test]
@@ -362,7 +393,7 @@ fn validation_plan(code: &[u8], expected_returns: &[&[u8]]) -> EvmContractValida
 
 #[tokio::test]
 async fn oversized_code_prevents_contract_calls_and_canonicality_read() {
-    let code = Bytes::from(vec![0x60; EVM_CONTRACT_CODE_MAX_BYTES + 1]);
+    let code = Bytes::from(vec![0x60; EVM_CODE_MAX_RESPONSE_BYTES + 1]);
     let plan = validation_plan(&code, &[&[0x01], &[0x02]]);
     let session = Arc::new(ScriptedValidationSession::new(
         code,

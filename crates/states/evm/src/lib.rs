@@ -51,7 +51,7 @@ pub use contract_validation::{
     EvmContractCallContext, EvmContractValidationConfig, EvmContractValidationEvidence,
     EvmContractValidationEvidenceBuilder, EvmContractValidationObservation,
     EvmContractValidationPlan, EvmContractValidationTarget, ValidateEvmContractState,
-    VerifiedEvmContract, EVM_CONTRACT_CODE_MAX_BYTES, EVM_CONTRACT_VALIDATION_MAX_CALLS,
+    VerifiedEvmContract, EVM_CONTRACT_VALIDATION_MAX_CALLS,
     EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES,
     EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_ENTRIES,
     EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_STORAGE_KEYS,

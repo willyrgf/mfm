@@ -130,9 +130,12 @@ fn transport_provider_boundaries_keep_one_bound_session_per_evm_view() {
             && evm_transport.contains("impl EvmTransactionSession for EvmJsonRpcSession"),
         "EVM transport must expose the two views on one bound session"
     );
+    let chain_identity_probes = evm_transport
+        .match_indices(".rpc_call")
+        .filter(|(offset, _)| function_args(evm_transport, *offset).contains("\"eth_chainId\""))
+        .count();
     assert_eq!(
-        evm_transport.matches("rpc_call(\"eth_chainId\"").count(),
-        1,
+        chain_identity_probes, 1,
         "a session must probe chain identity exactly once while binding"
     );
     let evm_adapter = include_str!("../../adapters/evm/src/lib.rs");

@@ -80,7 +80,6 @@ fn capability_failure_classification_is_closed_and_phase_aware() {
         ProviderDiagnosticCode::RouteUnavailable,
         ProviderDiagnosticCode::SourceUnavailable,
         ProviderDiagnosticCode::TransportFailed,
-        ProviderDiagnosticCode::RpcHttpStatus,
         ProviderDiagnosticCode::OperationIncomplete,
     ] {
         let error = EvmCapabilityError::provider_failure(evm_diagnostic(code));
@@ -94,7 +93,6 @@ fn capability_failure_classification_is_closed_and_phase_aware() {
 
     for code in [
         ProviderDiagnosticCode::SourceNotAllowed,
-        ProviderDiagnosticCode::RpcJsonError,
         ProviderDiagnosticCode::ResponseInvalid,
         ProviderDiagnosticCode::ResponseMissingResult,
         ProviderDiagnosticCode::UnsupportedOperation,
@@ -115,6 +113,84 @@ fn capability_failure_classification_is_closed_and_phase_aware() {
     );
     for phase in [ReadOnly, BeforeSubmission, AfterSubmission] {
         assert_eq!(mismatch.failure_disposition(phase), OperationalBlock);
+    }
+}
+
+#[test]
+fn protocol_failure_classification_uses_closed_numeric_codes() {
+    use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+    use EvmCapabilityPhase::{AfterSubmission, BeforeSubmission, ReadOnly};
+
+    for status in [408, 425, 429, 500, 502, 503, 504, 507] {
+        let error = EvmCapabilityError::provider_failure(
+            evm_diagnostic(ProviderDiagnosticCode::RpcHttpStatus).with_field(
+                public_id("http_status"),
+                ProviderDiagnosticValue::U64(status),
+            ),
+        );
+        assert_eq!(error.failure_disposition(ReadOnly), OperationalBlock);
+        assert_eq!(
+            error.failure_disposition(BeforeSubmission),
+            OperationalBlock
+        );
+        assert_eq!(error.failure_disposition(AfterSubmission), OperationalBlock);
+    }
+    for status in [307, 400, 401, 403, 404, 413, 422, 501, 505] {
+        let error = EvmCapabilityError::provider_failure(
+            evm_diagnostic(ProviderDiagnosticCode::RpcHttpStatus).with_field(
+                public_id("http_status"),
+                ProviderDiagnosticValue::U64(status),
+            ),
+        );
+        assert_eq!(error.failure_disposition(ReadOnly), TerminalValidation);
+        assert_eq!(
+            error.failure_disposition(BeforeSubmission),
+            TerminalValidation
+        );
+        assert_eq!(error.failure_disposition(AfterSubmission), OperationalBlock);
+    }
+
+    for code in [-32603, -32001, -32002, -32005] {
+        let error = EvmCapabilityError::provider_failure(
+            evm_diagnostic(ProviderDiagnosticCode::RpcJsonError)
+                .with_field(public_id("rpc_code"), ProviderDiagnosticValue::I64(code)),
+        );
+        assert_eq!(error.failure_disposition(ReadOnly), OperationalBlock);
+        assert_eq!(
+            error.failure_disposition(BeforeSubmission),
+            OperationalBlock
+        );
+        assert_eq!(error.failure_disposition(AfterSubmission), OperationalBlock);
+    }
+    for code in [
+        -32700, -32600, -32601, -32602, -32000, -32003, -32004, -32006,
+    ] {
+        let error = EvmCapabilityError::provider_failure(
+            evm_diagnostic(ProviderDiagnosticCode::RpcJsonError)
+                .with_field(public_id("rpc_code"), ProviderDiagnosticValue::I64(code)),
+        );
+        assert_eq!(error.failure_disposition(ReadOnly), TerminalValidation);
+        assert_eq!(
+            error.failure_disposition(BeforeSubmission),
+            TerminalValidation
+        );
+        assert_eq!(error.failure_disposition(AfterSubmission), OperationalBlock);
+    }
+
+    for code in [
+        ProviderDiagnosticCode::RpcHttpStatus,
+        ProviderDiagnosticCode::RpcJsonError,
+    ] {
+        let malformed = EvmCapabilityError::provider_failure(evm_diagnostic(code));
+        assert_eq!(malformed.failure_disposition(ReadOnly), TerminalValidation);
+        assert_eq!(
+            malformed.failure_disposition(BeforeSubmission),
+            TerminalValidation
+        );
+        assert_eq!(
+            malformed.failure_disposition(AfterSubmission),
+            OperationalBlock
+        );
     }
 }
 

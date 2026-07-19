@@ -73,13 +73,16 @@ requests or evidence.
 
 The HTTP transport has one shared connection pool, a global bound of 64 in-flight exchanges, a
 process-local bound of 16 in-flight exchanges for each `source_ref`, a 10-second connection timeout,
-a 30-second request timeout, and a one-MiB response limit. Redirect following and reqwest's implicit
-retry policy are disabled. Every capability call therefore owns exactly one exchange with its fixed
-endpoint; every later transaction broadcast is an explicit adapter recovery decision. The
-transport requires JSON-RPC version `2.0`, exact response id `1`, and exactly one of `result` or
-`error`. Quantities, hashes, addresses, bytes, transactions, receipts, and complete logs are decoded
-into checked Alloy-backed types. Submission succeeds only when the provider hash equals the local
-hash of the submitted bytes.
+a 30-second request timeout, and a one-MiB outer response limit. Deployed-code and contract-call
+responses instead derive a smaller body limit from the 128-KiB code bound or the call's explicit
+decoded-result bound plus a fixed JSON-RPC envelope allowance. Both content length and streamed
+chunks are checked against that method limit before JSON decoding. Redirect following and
+reqwest's implicit retry policy are disabled. Every capability call therefore owns exactly one
+exchange with its fixed endpoint; every later transaction broadcast is an explicit adapter
+recovery decision. The transport requires JSON-RPC version `2.0`, exact response id `1`, and exactly
+one of `result` or `error`. Quantities, hashes, addresses, bytes, transactions, receipts, and
+complete logs are decoded into checked Alloy-backed types. Submission succeeds only when the
+provider hash equals the local hash of the submitted bytes.
 
 ## Exact anchors
 
@@ -125,10 +128,14 @@ carry the certified network, expected chain id, source ref, closed operation id,
 numeric codes, but never endpoints, authorization, provider messages, response bodies, or paths.
 
 Read-only and pre-mutation availability/resource failures block the attempt so process-local routing
-can be repaired. Deterministic request and response-contract violations remain terminal. After
-transaction submission is durably possible, every provider/session failure blocks: it cannot prove
-the transaction failed and cannot authorize rebroadcast. Classification uses typed capability
-variants and closed diagnostic codes only, never provider messages.
+can be repaired. HTTP 408, 425, 429, 500, 502, 503, 504, and 507 are availability/resource failures;
+other non-success HTTP statuses are deterministic rejections. JSON-RPC internal error `-32603` and
+Ethereum resource errors `-32001`, `-32002`, and `-32005` are availability/resource failures; other
+numeric JSON-RPC errors are deterministic rejections. A missing or wrongly typed numeric field is
+a response-contract violation. Deterministic request and response-contract violations remain
+terminal. After transaction submission is durably possible, every provider/session failure blocks:
+it cannot prove the transaction failed and cannot authorize rebroadcast. Classification uses typed
+capability variants and closed numeric diagnostics only, never provider messages.
 
 Replay uses the certified spec, append-only stream, retained typed artifacts, and replay verifiers.
 It must not open an RPC connection, resolve a current route, or construct a signer.

@@ -3,8 +3,9 @@
 //!
 //! One transport owns the bounded HTTP pool and process-local concurrency
 //! guards shared by every session it binds. Binding probes `eth_chainId` once
-//! and returns a session fixed to that source for its entire lifetime. Routing
-//! and secret resolution stay in app assembly.
+//! and returns a session fixed to that source for its entire lifetime. Code
+//! and contract-call body limits are enforced while reading the response,
+//! before JSON decoding. Routing and secret resolution stay in app assembly.
 //!
 //! ```no_run
 //! use mfm_evm_capabilities::EvmNetworkBinding;
@@ -39,7 +40,7 @@ use mfm_evm_capabilities::{
     EvmCapabilityError, EvmCode, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
     EvmReadSession, EvmReceipt, EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence,
     EvmSessionFuture, EvmTransactionEstimate, EvmTransactionPlacement, EvmTransactionSession,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EVM_CODE_MAX_RESPONSE_BYTES, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_ids::LocalPublicId;
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
@@ -50,10 +51,33 @@ use tracing::debug;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_JSON_RPC_ENVELOPE_BYTES: usize = 16 * 1024;
 const MAX_GLOBAL_IN_FLIGHT_EXCHANGES: usize = 64;
 const MAX_IN_FLIGHT_EXCHANGES_PER_SOURCE: usize = 16;
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 16;
 const JSON_RPC_ID: u64 = 1;
+
+#[derive(Clone, Copy)]
+enum RpcResponseBodyLimit {
+    TransportMaximum,
+    HexResult { maximum_decoded_bytes: usize },
+}
+
+impl RpcResponseBodyLimit {
+    fn maximum_body_bytes(self) -> TransportResult<usize> {
+        match self {
+            Self::TransportMaximum => Ok(MAX_RESPONSE_BYTES),
+            Self::HexResult {
+                maximum_decoded_bytes,
+            } => maximum_decoded_bytes
+                .checked_mul(2)
+                .and_then(|hex_bytes| hex_bytes.checked_add(2))
+                .and_then(|result_bytes| result_bytes.checked_add(MAX_JSON_RPC_ENVELOPE_BYTES))
+                .filter(|maximum| *maximum <= MAX_RESPONSE_BYTES)
+                .ok_or(EvmTransportError::ResponseTooLarge),
+        }
+    }
+}
 
 /// Result type for EVM transport setup and exchange.
 pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
@@ -122,7 +146,11 @@ impl EvmJsonRpcTransport {
             ),
         };
         let observed_chain_id = unbound
-            .rpc_call("eth_chainId", json!([]))
+            .rpc_call(
+                "eth_chainId",
+                json!([]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
             .await?
             .as_str()
             .ok_or(EvmTransportError::InvalidResponse)
@@ -165,13 +193,18 @@ impl EvmJsonRpcSession {
     async fn block(&self, selector: &EvmBlockSelector) -> TransportResult<EvmBlockAnchor> {
         let value = match selector {
             EvmBlockSelector::ExactHash(hash) => {
-                self.rpc_call("eth_getBlockByHash", json!([format!("{hash:#x}"), false]))
-                    .await?
+                self.rpc_call(
+                    "eth_getBlockByHash",
+                    json!([format!("{hash:#x}"), false]),
+                    RpcResponseBodyLimit::TransportMaximum,
+                )
+                .await?
             }
             _ => {
                 self.rpc_call(
                     "eth_getBlockByNumber",
                     json!([selector_tag(selector)?, false]),
+                    RpcResponseBodyLimit::TransportMaximum,
                 )
                 .await?
             }
@@ -195,6 +228,7 @@ impl EvmJsonRpcSession {
             .rpc_call(
                 "eth_getBalance",
                 json!([format!("{account:#x}"), selector_param(block)]),
+                RpcResponseBodyLimit::TransportMaximum,
             )
             .await?;
         parse_quantity(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
@@ -205,9 +239,15 @@ impl EvmJsonRpcSession {
             .rpc_call(
                 "eth_getCode",
                 json!([format!("{address:#x}"), selector_param(block)]),
+                RpcResponseBodyLimit::HexResult {
+                    maximum_decoded_bytes: EVM_CODE_MAX_RESPONSE_BYTES,
+                },
             )
             .await?;
-        let bytes = parse_bytes(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)?;
+        let bytes = parse_bounded_bytes(
+            value.as_str().ok_or(EvmTransportError::InvalidResponse)?,
+            EVM_CODE_MAX_RESPONSE_BYTES,
+        )?;
         Ok(EvmCode {
             hash: keccak256(&bytes),
             bytes,
@@ -226,6 +266,9 @@ impl EvmJsonRpcSession {
                     "gas": encode_quantity(request.gas_limit()),
                     "accessList": encode_access_list(request.access_list()),
                 }, selector_param(request.block())]),
+                RpcResponseBodyLimit::HexResult {
+                    maximum_decoded_bytes: request.max_response_bytes(),
+                },
             )
             .await?;
         parse_bounded_bytes(
@@ -239,6 +282,7 @@ impl EvmJsonRpcSession {
             .rpc_call(
                 "eth_getTransactionCount",
                 json!([format!("{account:#x}"), "pending"]),
+                RpcResponseBodyLimit::TransportMaximum,
             )
             .await?;
         parse_quantity(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
@@ -246,13 +290,21 @@ impl EvmJsonRpcSession {
 
     async fn fee_input_values(&self) -> TransportResult<EvmFeeInputs> {
         let priority = self
-            .rpc_call("eth_maxPriorityFeePerGas", json!([]))
+            .rpc_call(
+                "eth_maxPriorityFeePerGas",
+                json!([]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
             .await?
             .as_str()
             .ok_or(EvmTransportError::InvalidResponse)
             .and_then(parse_quantity)?;
         let latest = self
-            .rpc_call("eth_getBlockByNumber", json!(["latest", false]))
+            .rpc_call(
+                "eth_getBlockByNumber",
+                json!(["latest", false]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
             .await?;
         let base = quantity_field(required_object(&latest)?, "baseFeePerGas")?;
         EvmFeeInputs::from_base_and_priority(base, priority)
@@ -289,7 +341,11 @@ impl EvmJsonRpcSession {
             json!(encode_quantity(request.max_priority_fee_per_gas())),
         );
         let value = self
-            .rpc_call("eth_estimateGas", json!([Value::Object(call), "pending"]))
+            .rpc_call(
+                "eth_estimateGas",
+                json!([Value::Object(call), "pending"]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
             .await?;
         parse_quantity(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
     }
@@ -302,6 +358,7 @@ impl EvmJsonRpcSession {
             .rpc_call(
                 "eth_sendRawTransaction",
                 json!([encode_bytes(signed_bytes)]),
+                RpcResponseBodyLimit::TransportMaximum,
             )
             .await?;
         parse_hash(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
@@ -315,6 +372,7 @@ impl EvmJsonRpcSession {
             .rpc_call(
                 "eth_getTransactionByHash",
                 json!([format!("{transaction_hash:#x}")]),
+                RpcResponseBodyLimit::TransportMaximum,
             )
             .await?;
         if value.is_null() {
@@ -347,6 +405,7 @@ impl EvmJsonRpcSession {
             .rpc_call(
                 "eth_getTransactionReceipt",
                 json!([format!("{transaction_hash:#x}")]),
+                RpcResponseBodyLimit::TransportMaximum,
             )
             .await?;
         if value.is_null() {
@@ -390,7 +449,13 @@ impl EvmJsonRpcSession {
         Ok(Some(receipt))
     }
 
-    async fn rpc_call(&self, method: &'static str, params: Value) -> TransportResult<Value> {
+    async fn rpc_call(
+        &self,
+        method: &'static str,
+        params: Value,
+        response_limit: RpcResponseBodyLimit,
+    ) -> TransportResult<Value> {
+        let maximum_body_bytes = response_limit.maximum_body_bytes()?;
         let operation = operation_id(method);
         let _source_permit = Arc::clone(&self.endpoint.source_limit)
             .acquire_owned()
@@ -434,7 +499,7 @@ impl EvmJsonRpcSession {
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<usize>().ok())
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES)
+            .is_some_and(|length| length > maximum_body_bytes)
         {
             return Err(EvmTransportError::ResponseTooLarge);
         }
@@ -451,7 +516,7 @@ impl EvmJsonRpcSession {
                 .len()
                 .checked_add(chunk.len())
                 .ok_or(EvmTransportError::ResponseTooLarge)?;
-            if next_len > MAX_RESPONSE_BYTES {
+            if next_len > maximum_body_bytes {
                 return Err(EvmTransportError::ResponseTooLarge);
             }
             bytes.extend_from_slice(&chunk);
@@ -591,16 +656,20 @@ fn checked_endpoint(
     })
 }
 
-fn validate_rpc_response(body: Value, operation: LocalPublicId) -> TransportResult<Value> {
-    let object = required_object(&body)?;
+fn validate_rpc_response(mut body: Value, operation: LocalPublicId) -> TransportResult<Value> {
+    let object = body
+        .as_object_mut()
+        .ok_or(EvmTransportError::InvalidResponse)?;
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
         || object.get("id").and_then(Value::as_u64) != Some(JSON_RPC_ID)
     {
         return Err(EvmTransportError::InvalidResponse);
     }
-    match (object.get("result"), object.get("error")) {
-        (Some(result), None) => Ok(result.clone()),
-        (None, Some(error)) => {
+    match (object.contains_key("result"), object.get("error")) {
+        (true, None) => object
+            .remove("result")
+            .ok_or(EvmTransportError::InvalidResponse),
+        (false, Some(error)) => {
             let code = error
                 .as_object()
                 .and_then(|error| error.get("code"))
@@ -608,8 +677,8 @@ fn validate_rpc_response(body: Value, operation: LocalPublicId) -> TransportResu
                 .ok_or(EvmTransportError::InvalidResponse)?;
             Err(EvmTransportError::RpcJsonError { operation, code })
         }
-        (None, None) => Err(EvmTransportError::ResponseMissingResult { operation }),
-        (Some(_), Some(_)) => Err(EvmTransportError::InvalidResponse),
+        (false, None) => Err(EvmTransportError::ResponseMissingResult { operation }),
+        (true, Some(_)) => Err(EvmTransportError::InvalidResponse),
     }
 }
 

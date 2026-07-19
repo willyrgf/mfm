@@ -52,6 +52,8 @@ pub const EVM_JSONRPC_SESSION_IMPLEMENTATION_ID: &str = "mfm.evm.jsonrpc.session
 pub const EVM_EIP1559_TRANSACTION_TYPE: u8 = 2;
 /// Maximum decoded result bytes admitted by one read-only contract call.
 pub const EVM_CALL_MAX_RESPONSE_BYTES: usize = 128 * 1024;
+/// Maximum decoded deployed-code bytes admitted by one source-bound read.
+pub const EVM_CODE_MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
 macro_rules! evm_capability {
     ($(#[$meta:meta])* $ty:ident, $role:ty, $name:literal) => {
@@ -343,7 +345,7 @@ pub trait EvmReadSession: Send + Sync {
         block: &'a EvmBlockSelector,
     ) -> EvmSessionFuture<'a, U256>;
 
-    /// Reads deployed code.
+    /// Reads deployed code bounded by [`EVM_CODE_MAX_RESPONSE_BYTES`].
     fn read_code<'a>(
         &'a self,
         address: Address,
@@ -784,10 +786,10 @@ impl EvmCapabilityError {
                 | ProviderDiagnosticCode::RouteUnavailable
                 | ProviderDiagnosticCode::SourceUnavailable
                 | ProviderDiagnosticCode::TransportFailed
-                | ProviderDiagnosticCode::RpcHttpStatus
                 | ProviderDiagnosticCode::OperationIncomplete => OperationalBlock,
+                ProviderDiagnosticCode::RpcHttpStatus => http_failure_disposition(diagnostic),
+                ProviderDiagnosticCode::RpcJsonError => json_rpc_failure_disposition(diagnostic),
                 ProviderDiagnosticCode::SourceNotAllowed
-                | ProviderDiagnosticCode::RpcJsonError
                 | ProviderDiagnosticCode::ResponseInvalid
                 | ProviderDiagnosticCode::ResponseMissingResult
                 | ProviderDiagnosticCode::SourceMismatch
@@ -795,6 +797,56 @@ impl EvmCapabilityError {
             },
         }
     }
+}
+
+fn http_failure_disposition(
+    diagnostic: &RedactedProviderDiagnostic,
+) -> EvmCapabilityFailureDisposition {
+    use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+
+    match diagnostic_u64(diagnostic, "http_status") {
+        Some(408 | 425 | 429 | 500 | 502 | 503 | 504 | 507) => OperationalBlock,
+        Some(_) | None => TerminalValidation,
+    }
+}
+
+fn json_rpc_failure_disposition(
+    diagnostic: &RedactedProviderDiagnostic,
+) -> EvmCapabilityFailureDisposition {
+    use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+
+    match diagnostic_i64(diagnostic, "rpc_code") {
+        // JSON-RPC internal error plus the Ethereum resource-not-found,
+        // resource-unavailable, and limit-exceeded server errors.
+        Some(-32603 | -32001 | -32002 | -32005) => OperationalBlock,
+        Some(_) | None => TerminalValidation,
+    }
+}
+
+fn diagnostic_u64(diagnostic: &RedactedProviderDiagnostic, field: &str) -> Option<u64> {
+    diagnostic
+        .fields()
+        .iter()
+        .find(|(name, _)| name.as_str() == field)
+        .and_then(|(_, value)| match value {
+            ProviderDiagnosticValue::U64(value) => Some(*value),
+            ProviderDiagnosticValue::Id(_)
+            | ProviderDiagnosticValue::I64(_)
+            | ProviderDiagnosticValue::Bool(_) => None,
+        })
+}
+
+fn diagnostic_i64(diagnostic: &RedactedProviderDiagnostic, field: &str) -> Option<i64> {
+    diagnostic
+        .fields()
+        .iter()
+        .find(|(name, _)| name.as_str() == field)
+        .and_then(|(_, value)| match value {
+            ProviderDiagnosticValue::I64(value) => Some(*value),
+            ProviderDiagnosticValue::Id(_)
+            | ProviderDiagnosticValue::U64(_)
+            | ProviderDiagnosticValue::Bool(_) => None,
+        })
 }
 
 /// Builds a closed redacted source mismatch.

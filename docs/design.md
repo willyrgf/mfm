@@ -323,6 +323,10 @@ calls at the same EIP-1898 hash selector with `requireCanonical = true`, then re
 number and requires the same hash. The state-owned reducer rejects empty code, code-hash drift,
 call-context/result drift, session-implementation/network/chain drift, evidence
 omission/reordering, and reorgs.
+The capability contract owns the 128-KiB deployed-code maximum and every `EvmCall` owns its exact
+decoded-result maximum. The HTTP transport derives method body limits from those values and checks
+content length and streamed chunks before JSON decoding; its one-MiB limit is only an outer defense
+for methods without a smaller semantic response contract.
 The compact output contains only the address, anchor, observed code hash, and validation-plan
 digest. Evidence-only replay invokes that reducer without a route, transport, signer, or runtime
 configuration.
@@ -815,6 +819,11 @@ response-shape failure, unsupported operation, operation incomplete, and source 
 not carry RPC URLs, authorization headers, file paths, provider messages, request/response bodies,
 signer material, or signed transactions. Replay decodes the checked session evidence and verifies
 it against the certified binding without resolving source refs through current runtime config.
+For EVM reads and pre-submission work, the phase-aware classifier treats HTTP 408, 425, 429, 500,
+502, 503, 504, and 507 plus JSON-RPC `-32603`, `-32001`, `-32002`, and `-32005` as operational
+availability/resource failures. Other numeric HTTP and JSON-RPC rejections are terminal contract
+failures, as are missing numeric classification fields. After submission, every provider failure is
+operational because it cannot prove non-mutation or authorize another broadcast.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and

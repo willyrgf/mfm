@@ -6,7 +6,7 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_effects::ReadExternal;
 use mfm_evm_capabilities::{
     EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
-    EvmSessionEvidence, EVM_CALL_MAX_RESPONSE_BYTES,
+    EvmSessionEvidence, EVM_CALL_MAX_RESPONSE_BYTES, EVM_CODE_MAX_RESPONSE_BYTES,
 };
 use mfm_ids::LocalPublicId;
 use mfm_program::{
@@ -26,13 +26,11 @@ use crate::{EvmAccessListEntry, EvmStateError, EVM_TRANSACTION_DATA_MAX_BYTES};
 
 /// Maximum checked calls admitted by one validation node.
 pub const EVM_CONTRACT_VALIDATION_MAX_CALLS: usize = 64;
-/// Maximum runtime-code bytes retained by one validation node.
-pub const EVM_CONTRACT_CODE_MAX_BYTES: usize = 128 * 1024;
 /// Maximum aggregate code and call-return bytes retained by one validation node.
 pub const EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum aggregate call-return bytes admitted while reserving the full code allowance.
 pub const EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES: usize =
-    EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES - EVM_CONTRACT_CODE_MAX_BYTES;
+    EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES - EVM_CODE_MAX_RESPONSE_BYTES;
 /// Maximum aggregate authored calldata bytes retained by one validation policy.
 pub const EVM_CONTRACT_VALIDATION_MAX_TOTAL_CALLDATA_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum aggregate authored access-list addresses retained by one validation policy.
@@ -680,7 +678,7 @@ pub fn validate_evm_contract(
         ));
     }
 
-    let code = parse_bytes(code, EVM_CONTRACT_CODE_MAX_BYTES)?;
+    let code = parse_bytes(code, EVM_CODE_MAX_RESPONSE_BYTES)?;
     let mut budget = validate_runtime_code(plan, &code)?;
     let observed_code_hash = keccak256(&code);
 
@@ -912,7 +910,7 @@ impl EvmContractValidationEvidenceBudget {
         if code_len == 0 {
             return Err(invalid("observed contract runtime code was empty"));
         }
-        if code_len > EVM_CONTRACT_CODE_MAX_BYTES {
+        if code_len > EVM_CODE_MAX_RESPONSE_BYTES {
             return Err(invalid("observed contract runtime code exceeded its bound"));
         }
         if code_len > EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES {

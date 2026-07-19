@@ -33,6 +33,7 @@ enum Mode {
     SlowBalance,
     SubmitHttpFailure,
     HostileCallResult,
+    HostileCodeResult,
 }
 
 struct TestServer {
@@ -204,9 +205,9 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
 }
 
 #[tokio::test]
-async fn call_result_obeys_its_semantic_bound_below_the_http_body_bound() {
-    let server = TestServer::spawn(Mode::HostileCallResult).await;
-    let session = session(&server).await;
+async fn code_and_call_results_bound_the_body_before_json_decoding() {
+    let call_server = TestServer::spawn(Mode::HostileCallResult).await;
+    let call_session = session(&call_server).await;
     let request = EvmCall::new(
         ACCOUNT,
         Address::from([2; 20]),
@@ -219,21 +220,42 @@ async fn call_result_obeys_its_semantic_bound_below_the_http_body_bound() {
     )
     .expect("call request");
 
-    let error = session
-        .call(&request)
+    let error = call_session
+        .call_contract(&request)
         .await
         .expect_err("near-body-limit result must fail the two-byte call bound");
-    assert_eq!(
-        error.redacted_diagnostic().expect("diagnostic").code(),
-        ProviderDiagnosticCode::ResponseInvalid
+    assert_eq!(error, EvmTransportError::ResponseTooLarge);
+    assert!(
+        RpcResponseBodyLimit::HexResult {
+            maximum_decoded_bytes: request.max_response_bytes(),
+        }
+        .maximum_body_bytes()
+        .expect("call body bound")
+            < MAX_RESPONSE_BYTES
     );
     assert_eq!(
-        server
+        call_server
             .requests()
             .iter()
             .filter(|request| request["method"] == "eth_call")
             .count(),
         1
+    );
+
+    let code_server = TestServer::spawn(Mode::HostileCodeResult).await;
+    let code_session = session(&code_server).await;
+    let error = code_session
+        .code(ACCOUNT, request.block())
+        .await
+        .expect_err("near-body-limit result must fail the deployed-code bound");
+    assert_eq!(error, EvmTransportError::ResponseTooLarge);
+    assert!(
+        RpcResponseBodyLimit::HexResult {
+            maximum_decoded_bytes: EVM_CODE_MAX_RESPONSE_BYTES,
+        }
+        .maximum_body_bytes()
+        .expect("code body bound")
+            < MAX_RESPONSE_BYTES
     );
 }
 
@@ -809,6 +831,10 @@ fn rpc_result(mode: Mode, request: &Value, method: &str) -> Value {
         }
         "eth_getBlockByHash" => json!({"number": "0x2a", "hash": BLOCK_HASH}),
         "eth_getBalance" => json!("0xde0b6b3a7640000"),
+        "eth_getCode" if matches!(mode, Mode::HostileCodeResult) => {
+            let decoded_len = (MAX_RESPONSE_BYTES - 128) / 2;
+            json!(format!("0x{}", "ab".repeat(decoded_len)))
+        }
         "eth_getCode" => json!("0xdeadbeef"),
         "eth_call" if matches!(mode, Mode::HostileCallResult) => {
             let decoded_len = (MAX_RESPONSE_BYTES - 128) / 2;
