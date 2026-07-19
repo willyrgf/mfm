@@ -342,6 +342,14 @@ in
       env = rethEnv;
       requires = [ "reth" ];
     };
+    closing-source-revision = cargoLeaf {
+      run = [
+        "git"
+        "rev-parse"
+        "--verify"
+        "HEAD^{commit}"
+      ];
+    };
     # Keep workspace tests as explicit leaves so each command has its own evidence.
     workspace-tests = {
       kind = "composite";
@@ -418,6 +426,10 @@ in
         parity-reth-eip1559 = {
           task = "parity-reth-eip1559";
           dependsOn = [ "test-db" ];
+        };
+        closing-source-revision = {
+          task = "closing-source-revision";
+          dependsOn = [ "parity-reth-eip1559" ];
         };
       };
     };

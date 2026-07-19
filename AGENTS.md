@@ -65,7 +65,9 @@ Before each commit, run the Nixfied managed gates:
 - `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
 - `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
 
-Run `nix run .#ci` after major work or for final merge-readiness validation.
+Run `nix run .#ci` after major work or for final merge-readiness validation. Its terminal
+`closing-source-revision` stage retains the full tested Git SHA; pair it with clean
+`git status --short` output for closure evidence.
 
 ## Key Docs:
 
@@ -128,7 +130,8 @@ Current Nixfied command contract:
 - `nix run .#check`: rustfmt, clippy, and architecture/cargo metadata contracts.
 - `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
 - `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
-- `nix run .#ci`: full CI by definition; starts the managed services required by parity tests.
+- `nix run .#ci`: full CI by definition; starts the managed services required by parity tests,
+  then retains the full tested Git SHA.
 - `nix run .#mfm -- <ARGS>`: runs the packaged MFM CLI with persistent slot-9
   managed Postgres for local development.
 - `nix build .#mfm`: builds the raw MFM CLI with the Nixfied-pinned Rust toolchain.

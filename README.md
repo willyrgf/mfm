@@ -129,7 +129,9 @@ nix run .#ci
 `nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
 against a migrated schema, and runs Postgres-backed parity tests.
 `.#ci` is full by definition: it starts the managed services required by feature-gated parity
-tests. There is no `--mode` or `--full` alias flag.
+tests, then records the full closing Git SHA in the retained `closing-source-revision` task log.
+Pair that artifact with `git status --short` for clean-worktree closure evidence. There is no
+`--mode` or `--full` alias flag.
 
 Run binaries locally:
 
