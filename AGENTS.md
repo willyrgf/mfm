@@ -132,8 +132,18 @@ Current Nixfied command contract:
 
 Environment variables you should expect:
 
-- `NIXFIED_STATE_DIR`: optional runtime state/artifact root override.
-- `CARGO_TARGET_DIR`: optional shared Cargo target directory override.
+- `NIXFIED_STATE_DIR`: optional Nixfied runtime state and evidence root
+  override. It neither selects nor cleans Cargo artifacts.
+- `CARGO_TARGET_DIR`: broad Nixfied gates set the ordinary project-owned value
+  `target/verification`; `nix develop` and `.#quick` unset it so direct
+  development uses the normal target directory.
+
+All Nixfied slots in one worktree share `target/verification`; separate
+worktrees isolate by path. Cargo/MFM own locking, fingerprints, inspection,
+retention, corruption recovery, and cleanup. Cargo leaves anchor the authored
+relative value at the invocation root before nested Cargo processes run. Use
+`cargo clean --target-dir target/verification` to discard broad verification
+artifacts. Nixfied runtime output is execution evidence, not cache evidence.
 
 ## Common Contribution Types
 

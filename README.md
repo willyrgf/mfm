@@ -123,6 +123,21 @@ comprehensive Nixfied gates above.
 
 `nix run .#model-check` validates the compiled model without executing project tasks.
 
+The broad Nixfied gates compile into the worktree-owned
+`target/verification` directory using the compact verification profile. All
+slots in one worktree share that target; another worktree gets a different one
+by path. Nixfied executes the tasks and owns their runtime evidence, but Cargo
+and MFM own the compiler artifacts. `NIXFIED_STATE_DIR` does not select or
+clean them, and `nixfied clean` leaves them untouched. To discard only broad
+verification artifacts, run:
+
+```bash
+cargo clean --target-dir target/verification
+```
+
+Direct Cargo development, `nix develop`, and `.#quick` continue to use the
+ordinary worktree target.
+
 `nix run .#test` runs `cargo nextest run --workspace` followed by
 `cargo test --workspace --doc`, without managed external services.
 `nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
