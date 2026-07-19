@@ -20,9 +20,19 @@ batch, factory deployment, CREATE2 deployment, swap, or flash-loan executor is o
 one atomic chain transaction. Operation crates own byte encoding and typed interpretation of logs;
 the generic state owns no ABI JSON, function lookup, or multi-transaction workflow topology.
 
+An ordinary call to a smart wallet remains `Call`. ERC-4337 user operations or another
+account-abstraction submission protocol require a separate mutation authority; they are not another
+transaction-action variant and must not be routed through the EVM transaction session merely because
+their eventual execution reaches the EVM.
+
 Exact validation composes independently at the receipt anchor. Both `Create -> Validate` and
 `Create -> Call -> Call -> Validate` are covered end to end, including evidence-only replay; no
 fixed deployment lifecycle or validation-only mutation path exists.
+
+Validation proves only the declared code and call checks at the exact anchor. It does not prove
+general contract correctness, upgrade safety, business invariants, or that MFM submitted a
+transaction; submission authority comes only from the transaction side-effect ledger and its typed
+evidence.
 
 ## Authored authority
 
@@ -35,6 +45,10 @@ deterministic RFC 6979 recoverable low-s profile, access list, and the only admi
 The action supplies bounded canonical init code/calldata and canonical decimal U256 value. The full
 `EvmTransactionIntent` is also the kernel idempotency input. It intentionally excludes pending
 nonce, fee observations, gas estimate, RPC source, and all signer output.
+
+When init code or calldata originates in a content-addressed contract artifact, an upstream typed
+materialization node must produce the exact bounded bytes before this state is authored. Transaction
+preparation and replay never resolve mutable artifact references or perform ambient filesystem IO.
 
 Every caller must plan the side effect with `evm_sender_lane_resource_claim()`. The runner resolves
 the typed lane `(network_id, chain_id, expected_sender)` before preparation. This prevents two MFM
@@ -82,9 +96,11 @@ idempotent, admission-blocked, stale, failed, or dropped outputs destroy it. Sat
 attempt without evicting or deduplicating an active envelope. Submission leases those exact bytes
 and marks them uncertain before the submission call. An uncertain lease is never submitted again:
 the adapter performs exact-hash lookup and either records observation/ambiguity or retains only
-uncertainty. Once durable `SubmissionUnknown` exists, recovery discards any remaining transient
-envelope and is lookup-only. Runtime route reads, keystore reads, unlock/KDF work, and signer
-validation execute on a blocking worker rather than an async runtime worker.
+uncertainty. Absence of the fresh lease after the durable invocation-started boundary is uncertainty,
+not authority to reconstruct a signature or broadcast again. Once durable `SubmissionUnknown`
+exists, recovery discards any remaining transient envelope and is lookup-only. Runtime route reads,
+keystore reads, unlock/KDF work, and signer validation execute on a blocking worker rather than an
+async runtime worker.
 
 ## Submission and recovery
 
@@ -135,7 +151,7 @@ it to u64.
 
 Provider unavailability while reading the receipt, canonical block, or head is also an operational
 block. Resume re-observes from the durable submission phase and never executes the submit node or
-broadcast again. Malformed retained evidence, a regenerated signed-hash mismatch, or a certified
+broadcast again. Malformed retained evidence, a transient signed-hash mismatch, or a certified
 authority violation remains terminal validation failure.
 
 ## Replay and secret boundary

@@ -19,6 +19,3 @@ mfm-program = { path = "../../kernel/program", version = "0.1.0" }
 mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
 mfm-states-btc = { path = "../../states/btc", version = "0.1.0" }
 mfm-values = { path = "../../kernel/values", version = "0.1.0" }
-
-[dev-dependencies]
-serde_json = { workspace = true }

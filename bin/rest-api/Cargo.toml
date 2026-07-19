@@ -28,7 +28,6 @@ parity-tests = []
 
 [dev-dependencies]
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
-mfm-facts = { path = "../../crates/kernel/facts" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 tower = "0.5"
 

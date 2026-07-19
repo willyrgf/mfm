@@ -78,8 +78,9 @@ responses instead derive a smaller body limit from the 128-KiB code bound or the
 decoded-result bound plus a fixed JSON-RPC envelope allowance. Both content length and streamed
 chunks are checked against that method limit before JSON decoding. Redirect following and
 reqwest's implicit retry policy are disabled. Every capability call therefore owns exactly one
-exchange with its fixed endpoint; every later transaction broadcast is an explicit adapter
-recovery decision. The transport requires JSON-RPC version `2.0`, exact response id `1`, and exactly
+exchange with its fixed endpoint. The transport never retries a broadcast, and durable submission
+uncertainty is recovered only by exact-hash observation. The transport requires JSON-RPC version
+`2.0`, exact response id `1`, and exactly
 one of `result` or `error`. Quantities, hashes, addresses, bytes, transactions, receipts, and
 complete logs are decoded into checked Alloy-backed types. Submission succeeds only when the
 provider hash equals the local hash of the submitted bytes.
@@ -103,11 +104,12 @@ both live execution and replay.
 anchor, sorted sources, and verified content identities without copying balance response material.
 The live runner, atomic publication, and evidence-only replay live in `mfm-adapters-evm`.
 `PortfolioReportOperation` receives the typed family receipt vectors and passes the same structured
-binding to selection, which queries same-run facts through the shared BTC/EVM fact-index snapshot,
-rehydrates response artifacts, and rederives exact content identity before assembly. All-EVM
-portfolios use this same store path. EVM replay reconstructs collection and publication in the EVM
-adapter; portfolio replay reconstructs only receipt-pinned selection and report projection. Neither
-requires runtime config or network access.
+binding to selection, which queries receipt-authorized content through the shared BTC/EVM fact-index
+snapshot, rehydrates response artifacts, and rederives exact content identity before assembly. The
+receipts come from the same run, while any byte-identical append occurrence with the authorized
+content identity is interchangeable. All-EVM portfolios use this same store path. EVM replay
+reconstructs collection and publication in the EVM adapter; portfolio replay reconstructs only
+receipt-pinned selection and report projection. Neither requires runtime config or network access.
 
 ## Signing
 

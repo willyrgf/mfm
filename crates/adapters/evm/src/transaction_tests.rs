@@ -30,6 +30,8 @@ enum LookupMode {
 struct MockSession {
     evidence: EvmSessionEvidence,
     lookup_mode: AtomicU8,
+    bind_response_invalid: AtomicBool,
+    lookup_response_invalid: AtomicBool,
     return_wrong_hash: AtomicBool,
     submit_response_unavailable: AtomicBool,
     pending_nonce: AtomicU64,
@@ -57,6 +59,8 @@ impl MockSession {
                 LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID).expect("implementation"),
             ),
             lookup_mode: AtomicU8::new(mode as u8),
+            bind_response_invalid: AtomicBool::new(false),
+            lookup_response_invalid: AtomicBool::new(false),
             return_wrong_hash: AtomicBool::new(false),
             submit_response_unavailable: AtomicBool::new(false),
             pending_nonce: AtomicU64::new(0x42),
@@ -69,6 +73,15 @@ impl MockSession {
 
     fn set_lookup_mode(&self, mode: LookupMode) {
         self.lookup_mode.store(mode as u8, Ordering::SeqCst);
+    }
+
+    fn set_bind_response_invalid(&self, invalid: bool) {
+        self.bind_response_invalid.store(invalid, Ordering::SeqCst);
+    }
+
+    fn set_lookup_response_invalid(&self, invalid: bool) {
+        self.lookup_response_invalid
+            .store(invalid, Ordering::SeqCst);
     }
 
     fn set_lookup_unavailable(&self, unavailable: bool) {
@@ -178,6 +191,9 @@ impl EvmTransactionSession for MockSession {
         _transaction_hash: B256,
     ) -> EvmSessionFuture<'_, Option<EvmObservedTransaction>> {
         self.lookup_calls.fetch_add(1, Ordering::SeqCst);
+        if self.lookup_response_invalid.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(response_invalid_error()) });
+        }
         if self.lookup_unavailable.load(Ordering::SeqCst) {
             return Box::pin(async {
                 Err(EvmCapabilityError::provider_failure(
@@ -320,6 +336,12 @@ fn other_intent() -> EvmTransactionIntent {
     .expect("other intent")
 }
 
+fn response_invalid_error() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::ResponseInvalid,
+    ))
+}
+
 fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTransactionAdapter {
     let bind_session = Arc::clone(&session);
     let bind_signer = Arc::clone(&signer);
@@ -337,7 +359,12 @@ fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTra
         |_binding, _signer_ref| Box::pin(async { Ok(()) }),
         move |_binding| {
             let session = Arc::clone(&bind_session);
-            Box::pin(async move { Ok(session as Arc<dyn EvmTransactionSession>) })
+            Box::pin(async move {
+                if session.bind_response_invalid.load(Ordering::SeqCst) {
+                    return Err(response_invalid_error());
+                }
+                Ok(session as Arc<dyn EvmTransactionSession>)
+            })
         },
     ))
 }
@@ -416,6 +443,69 @@ async fn resumed_started_submission_looks_up_before_signing_or_broadcasting() {
     ));
     assert_eq!(resumed_signer.calls.load(Ordering::SeqCst), 0);
     assert!(session.submitted.lock().expect("submitted").is_empty());
+    assert_eq!(session.lookup_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn resumed_started_submission_without_observation_records_unknown() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let preparation_signer = Arc::new(FixedProvider::new());
+    let preparation_adapter = make_adapter(Arc::clone(&session), preparation_signer);
+    let prepared = prepare_and_commit(&preparation_adapter).await;
+    let resumed_signer = Arc::new(FixedProvider::new());
+    let resumed_adapter = make_adapter(Arc::clone(&session), Arc::clone(&resumed_signer));
+
+    let decision = resumed_adapter
+        .submit_transaction(prepared)
+        .await
+        .expect("resume started submission");
+
+    assert!(matches!(decision, SideEffectSubmissionDecision::Unknown(_)));
+    assert_eq!(resumed_signer.calls.load(Ordering::SeqCst), 0);
+    assert!(session.submitted.lock().expect("submitted").is_empty());
+    assert_eq!(session.lookup_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn resumed_started_lookup_contract_failure_blocks_without_mutation() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let preparation_signer = Arc::new(FixedProvider::new());
+    let preparation_adapter = make_adapter(Arc::clone(&session), preparation_signer);
+    let prepared = prepare_and_commit(&preparation_adapter).await;
+    session.set_lookup_response_invalid(true);
+    let resumed_signer = Arc::new(FixedProvider::new());
+    let resumed_adapter = make_adapter(Arc::clone(&session), Arc::clone(&resumed_signer));
+
+    let error = match resumed_adapter.submit_transaction(prepared).await {
+        Ok(_) => panic!("post-submission provider failure must block"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
+    assert_eq!(resumed_signer.calls.load(Ordering::SeqCst), 0);
+    assert!(session.submitted.lock().expect("submitted").is_empty());
+    assert_eq!(session.lookup_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn resumed_started_session_contract_failure_blocks_without_mutation() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let preparation_signer = Arc::new(FixedProvider::new());
+    let preparation_adapter = make_adapter(Arc::clone(&session), preparation_signer);
+    let prepared = prepare_and_commit(&preparation_adapter).await;
+    session.set_bind_response_invalid(true);
+    let resumed_signer = Arc::new(FixedProvider::new());
+    let resumed_adapter = make_adapter(Arc::clone(&session), Arc::clone(&resumed_signer));
+
+    let error = match resumed_adapter.submit_transaction(prepared).await {
+        Ok(_) => panic!("post-submission bind failure must block"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
+    assert_eq!(resumed_signer.calls.load(Ordering::SeqCst), 0);
+    assert!(session.submitted.lock().expect("submitted").is_empty());
+    assert_eq!(session.lookup_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -531,6 +621,59 @@ async fn same_process_retry_does_not_rebroadcast_uncertain_envelope() {
 }
 
 #[tokio::test]
+async fn uncertain_retry_session_contract_failure_blocks_without_rebroadcast() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    session.fail_next_submit_response();
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
+    let prepared = prepare_and_commit(&adapter).await;
+    let retry_prepared = prepared.clone();
+    assert!(matches!(
+        adapter.submit_transaction(prepared).await.expect("submit"),
+        SideEffectSubmissionDecision::Unknown(_)
+    ));
+    session.set_bind_response_invalid(true);
+
+    let error = match adapter.submit_transaction(retry_prepared).await {
+        Ok(_) => panic!("uncertain submission bind failure must block"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
+    assert_eq!(session.lookup_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn fresh_envelope_keeps_pre_submission_failure_classification() {
+    let session = Arc::new(MockSession::new(LookupMode::Missing));
+    let signer = Arc::new(FixedProvider::new());
+    let adapter = make_adapter(Arc::clone(&session), Arc::clone(&signer));
+    let prepared = prepare_and_commit(&adapter).await;
+    let retry_prepared = prepared.clone();
+    session.set_bind_response_invalid(true);
+
+    let error = match adapter.submit_transaction(prepared).await {
+        Ok(_) => panic!("fresh-envelope provider contract failure must be terminal"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, mfm_runtime::RuntimeError::Failure(_)));
+    assert!(session.submitted.lock().expect("submitted").is_empty());
+
+    session.set_bind_response_invalid(false);
+    assert!(matches!(
+        adapter
+            .submit_transaction(retry_prepared)
+            .await
+            .expect("retry fresh envelope"),
+        SideEffectSubmissionDecision::Observed(_)
+    ));
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(session.submitted.lock().expect("submitted").len(), 1);
+}
+
+#[tokio::test]
 async fn signer_implementation_mismatch_fails_before_requesting_a_signature() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     let signer = Arc::new(FixedProvider::new());
@@ -584,30 +727,6 @@ async fn wrong_session_binding_fails_before_using_transaction_or_signing_authori
     assert_eq!(session.pending_nonce_calls.load(Ordering::SeqCst), 0);
     assert!(session.submitted.lock().expect("submitted").is_empty());
     assert_eq!(signer.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn regenerated_signed_hash_mismatch_remains_terminal() {
-    let session = Arc::new(MockSession::new(LookupMode::Missing));
-    let signer = Arc::new(FixedProvider::new());
-    let adapter = make_adapter(Arc::clone(&session), signer);
-    let prepared = prepare_and_commit(&adapter).await;
-    let mut value = serde_json::to_value(prepared).expect("prepared JSON");
-    value["expected_transaction_hash"] =
-        serde_json::json!(format!("{:#x}", B256::from([0xee; 32])));
-    let tampered: EvmPreparedTransaction =
-        serde_json::from_value(value).expect("structurally valid prepared transaction");
-
-    let error = match adapter.sign_prepared_transaction(&tampered).await {
-        Ok(_) => panic!("changed expected hash must fail signing authority"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
-    ));
-    assert!(session.submitted.lock().expect("submitted").is_empty());
 }
 
 #[test]

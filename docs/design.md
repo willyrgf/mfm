@@ -225,8 +225,8 @@ projection. The state validates exact portfolio demand, receipt family/chain/sou
 receipt uniqueness before it authors any query. There is no portfolio manifest identity, generic
 receipt entry, count/readiness value, app-only fan-in runner, or separate replay verifier. This
 explicit downstream state-to-state contract is the sole approved reason for
-`mfm-state-portfolio` to depend on the Bitcoin state package; state packages remain independent of
-adapters, transports, app assembly, and runtime config.
+`mfm-state-portfolio` to depend on the Bitcoin and EVM state packages; state packages remain
+independent of adapters, transports, app assembly, and runtime config.
 
 ## Typed Program Authoring
 

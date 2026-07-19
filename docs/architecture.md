@@ -93,6 +93,12 @@ Exactly six workspace packages have an EVM-specific package name:
 Only capabilities and signing are top-level `crates/evm-*` directories. The other four packages
 follow the repository state/adapter/transport/operation taxonomy.
 
+This split is deliberate. Do not merge the five lower EVM layers merely to reduce manifest count:
+their dependency firebreaks keep protocol authority, signing, reusable state semantics, runtime
+binding, and live HTTP implementation independently reusable. Likewise, Bitcoin and EVM collector
+operations remain separate because they share the operation-composition mechanism, not protocol
+plans, facts, evidence, or state semantics.
+
 ### State kinds
 
 `mfm-states-evm` owns exactly these four state kinds:
@@ -464,6 +470,11 @@ semantics. When a family cannot provide the same semantic guarantee, fail closed
 explicit workflow mode rather than weakening the existing mode.
 
 ## Architecture Doctrine
+
+When simplifying an existing subsystem, optimize in this order: fewer concepts, fewer execution and
+replay paths, fewer public types and schemas, fewer duplicated responsibilities, fewer places a
+future change must touch, and finally fewer lines once correctness, security, and replay guarantees
+are satisfied. Package count alone is not a useful simplification metric.
 
 ### Rule 1: One Stable Abstraction Per Crate
 

@@ -2209,21 +2209,17 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
- "k256",
  "mfm-app",
  "mfm-canonical",
  "mfm-certify",
  "mfm-events",
  "mfm-evm-signing",
  "mfm-ids",
- "mfm-manual-auth",
  "mfm-op-btc-collectors",
- "mfm-op-proof",
  "mfm-program",
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-runtime-config",
- "mfm-spec",
  "mfm-store",
  "mfm_core",
  "predicates",
@@ -2234,7 +2230,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
- "thiserror",
  "tokio",
  "tower",
  "uuid",
@@ -2247,13 +2242,11 @@ version = "0.1.0"
 dependencies = [
  "mfm-artifact-capabilities",
  "mfm-btc-capabilities",
- "mfm-canonical",
  "mfm-events",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
  "mfm-program",
- "mfm-program-derive",
  "mfm-replay",
  "mfm-runtime",
  "mfm-spec",
@@ -2261,9 +2254,7 @@ dependencies = [
  "mfm-store",
  "mfm-values",
  "serde",
- "serde_json",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -2272,7 +2263,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
- "hex",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-events",
@@ -2290,7 +2280,6 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
 ]
 
@@ -2333,7 +2322,6 @@ dependencies = [
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
- "mfm-manual-auth",
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
  "mfm-op-portfolio-snapshot",
@@ -2356,7 +2344,6 @@ dependencies = [
  "mfm-transports-evm",
  "mfm-transports-proof",
  "mfm-values",
- "mfm_core",
  "serde",
  "serde_json",
  "tempfile",
@@ -2546,11 +2533,8 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "axum",
- "hex",
  "k256",
  "mfm-adapters-btc-jsonrpc",
- "mfm-adapters-evm",
- "mfm-adapters-portfolio",
  "mfm-app",
  "mfm-btc-capabilities",
  "mfm-canonical",
@@ -2565,20 +2549,15 @@ dependencies = [
  "mfm-op-portfolio-snapshot",
  "mfm-portfolio-model",
  "mfm-program",
- "mfm-program-derive",
- "mfm-replay",
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-signing",
- "mfm-spec",
- "mfm-states-btc",
  "mfm-states-evm",
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-transports-evm",
  "mfm-values",
  "reqwest",
- "serde",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -2614,7 +2593,6 @@ dependencies = [
  "mfm-states-btc",
  "mfm-values",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2636,10 +2614,7 @@ name = "mfm-op-portfolio-snapshot"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-capabilities",
  "mfm-certify",
- "mfm-effects",
- "mfm-facts",
  "mfm-ids",
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
@@ -2650,7 +2625,6 @@ dependencies = [
  "mfm-states-btc",
  "mfm-states-evm",
  "mfm-values",
- "serde",
  "serde_json",
 ]
 
@@ -2721,7 +2695,6 @@ dependencies = [
 name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
- "k256",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2748,7 +2721,6 @@ dependencies = [
  "http",
  "mfm-app",
  "mfm-canonical",
- "mfm-facts",
  "mfm-ids",
  "mfm-store",
  "serde",
@@ -2792,7 +2764,6 @@ version = "0.1.0"
 dependencies = [
  "http",
  "mfm-btc-capabilities",
- "mfm-evm-capabilities",
  "mfm-ids",
  "mfm-signing",
  "serde",
@@ -2826,11 +2797,8 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
- "mfm-program-derive",
- "mfm-values",
  "serde",
  "thiserror",
- "trybuild",
 ]
 
 [[package]]
@@ -2999,7 +2967,6 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

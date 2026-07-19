@@ -267,30 +267,6 @@ impl EvmTransactionAdapter {
         }
     }
 
-    async fn sign_prepared_transaction(
-        &self,
-        prepared: &EvmPreparedTransaction,
-    ) -> mfm_runtime::Result<SignedEnvelopeLease> {
-        prepared.validate().map_err(state_error)?;
-        let reservation = self.signed_envelopes.reserve()?;
-        let signer_ref = prepared.intent().signer_reference().map_err(state_error)?;
-        let signer = self.capabilities.bind_signer(signer_ref.clone()).await?;
-        let envelope = prepared.signing_envelope().map_err(state_error)?;
-        let signed = mfm_evm_signing::sign_eip1559(
-            &envelope,
-            signer_ref,
-            prepared
-                .intent()
-                .expected_sender_address()
-                .map_err(state_error)?,
-            signer.as_ref(),
-        )
-        .await
-        .map_err(signing_error)?;
-        ensure_signed_hash(prepared, &signed)?;
-        Ok(reservation.into_lease(prepared.expected_transaction_hash().to_owned(), signed))
-    }
-
     async fn session_for(
         &self,
         prepared: &EvmPreparedTransaction,
@@ -403,58 +379,44 @@ impl EvmTransactionAdapter {
         SideEffectSubmissionDecision<EvmTransactionSubmission, EvmTransactionRecoveryEvidence>,
     > {
         prepared.validate().map_err(state_error)?;
-        let session = self
-            .session_for(&prepared, EvmCapabilityPhase::BeforeSubmission)
-            .await?;
-        let mut signed = match self
+        let signed = self
             .signed_envelopes
-            .take(prepared.expected_transaction_hash())?
-        {
-            Some(signed) => signed,
-            None => {
-                match lookup_submission(session.as_ref(), &prepared)
-                    .await
-                    .map_err(pre_submission_capability_error)?
-                {
-                    LookupSubmission::Observed(submission) => {
-                        return Ok(SideEffectSubmissionDecision::Observed(*submission));
-                    }
-                    LookupSubmission::Mismatched => {
-                        return Ok(SideEffectSubmissionDecision::Ambiguous {
-                            ambiguity_code: transaction_mismatch_code()?,
-                            evidence: recovery_evidence(&prepared, session.as_ref())?,
-                        });
-                    }
-                    LookupSubmission::Missing => {}
-                }
-                self.sign_prepared_transaction(&prepared).await?
+            .take(prepared.expected_transaction_hash())?;
+        let phase = match signed.as_ref() {
+            Some(signed) if signed.state()? == SignedEnvelopeState::Fresh => {
+                EvmCapabilityPhase::BeforeSubmission
             }
+            Some(_) | None => EvmCapabilityPhase::AfterSubmission,
         };
-        if signed.state()? == SignedEnvelopeState::Uncertain {
-            match lookup_submission(session.as_ref(), &prepared)
+        let session = self.session_for(&prepared, phase).await?;
+        if phase == EvmCapabilityPhase::AfterSubmission {
+            return match lookup_submission(session.as_ref(), &prepared)
                 .await
                 .map_err(post_submission_capability_error)?
             {
                 LookupSubmission::Observed(submission) => {
-                    signed.discard()?;
-                    return Ok(SideEffectSubmissionDecision::Observed(*submission));
+                    if let Some(signed) = signed {
+                        signed.discard()?;
+                    }
+                    Ok(SideEffectSubmissionDecision::Observed(*submission))
                 }
                 LookupSubmission::Mismatched => {
-                    let evidence = recovery_evidence(&prepared, session.as_ref())?;
-                    signed.discard()?;
-                    return Ok(SideEffectSubmissionDecision::Ambiguous {
+                    if let Some(signed) = signed {
+                        signed.discard()?;
+                    }
+                    Ok(SideEffectSubmissionDecision::Ambiguous {
                         ambiguity_code: transaction_mismatch_code()?,
-                        evidence,
-                    });
+                        evidence: recovery_evidence(&prepared, session.as_ref())?,
+                    })
                 }
-                LookupSubmission::Missing => {
-                    return Ok(SideEffectSubmissionDecision::Unknown(recovery_evidence(
-                        &prepared,
-                        session.as_ref(),
-                    )?));
-                }
-            }
+                LookupSubmission::Missing => Ok(SideEffectSubmissionDecision::Unknown(
+                    recovery_evidence(&prepared, session.as_ref())?,
+                )),
+            };
         }
+        let Some(mut signed) = signed else {
+            return Err(cache_error());
+        };
         signed.mark_uncertain()?;
         let signed_envelope = signed.envelope()?;
         ensure_signed_hash(&prepared, signed_envelope)?;
@@ -630,22 +592,6 @@ impl SignedEnvelopeReservation {
             state: envelope_state,
         });
         self.active = false;
-    }
-
-    fn into_lease(
-        mut self,
-        transaction_hash: String,
-        envelope: TransientSignedEip1559Envelope,
-    ) -> SignedEnvelopeLease {
-        self.active = false;
-        SignedEnvelopeLease {
-            cache: Arc::clone(&self.cache),
-            entry: Some(SignedEnvelopeEntry {
-                transaction_hash,
-                envelope,
-                state: SignedEnvelopeState::Fresh,
-            }),
-        }
     }
 }
 
@@ -1234,7 +1180,7 @@ fn ensure_signed_hash(
 ) -> mfm_runtime::Result<()> {
     if signed.transaction_hash() != prepared.expected_hash().map_err(state_error)? {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "regenerated signed envelope did not match prepared transaction hash".to_owned(),
+            "transient signed envelope did not match prepared transaction hash".to_owned(),
         ));
     }
     Ok(())

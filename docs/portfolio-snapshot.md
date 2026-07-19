@@ -41,6 +41,11 @@ and preserves that order independently of response completion order.
 The publication attempt records the complete `evm.balance_snapshot` fact batch and a checked
 `EvmBalanceCollectionReceipt` together. That receipt contains the network/chain, exact anchor,
 sorted sources, and verified fact content identities, but no duplicate balance response material.
+Collector batches commit independently. If one sibling collector fails, no report is produced;
+already committed sibling facts remain valid append-only observations, and resume advances the
+unfinished graph. MFM does not wrap independent networks in a cross-family database transaction or
+delete successful observations as compensation.
+
 The typed Bitcoin and EVM receipt vectors flow into one `PortfolioReportOperation`. Its structured
 operation input is passed unchanged into `SelectHoldingsState`; those input edges are the
 managed-write completion barrier. The report operation then owns snapshot assembly and report
@@ -55,6 +60,11 @@ into generic `EvmBalanceSource` and `EvmBalanceAsset` demand before the child ca
 plans, evidence, receipts, and facts contain only those EVM-domain source identities. Session
 evidence and the shared checked `EvmBlockAnchor` come from the EVM capability contract; the block
 number retains the full U256 range as a canonical decimal string in persisted values.
+
+Each collector invocation retains its own network anchor; MFM does not invent a simultaneous
+cross-chain tip. Freshness, maximum-age, and as-of behavior must be explicit authored policy and are
+never inferred by selecting the current latest fact. A cross-run balance or token-decimals cache
+requires its own explicit anchor and invalidation contract before it can be introduced.
 
 A wallet with no configured symbols is retained with empty observations and zero quote totals, but
 creates no collection work or network pin; the aggregate remains valid only when another explicit
