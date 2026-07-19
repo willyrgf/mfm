@@ -1,22 +1,22 @@
-use crate::commands::result::{CommandOutput, CommandResult};
+use std::path::PathBuf;
+
+use clap::Args;
+
+use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{keystore, keystore_selection};
-use clap::Args;
-use serde::Serialize;
-use std::fmt;
-use std::path::PathBuf;
+use crate::support::output_file::{self, CreateNewFileError};
 
 /// Arguments for `mfm keystore tx-sign`.
 #[derive(Args)]
 pub(crate) struct TxSignArgs {
-    /// Key ID (UUID) to use for signing
+    /// Exact signer ref from the runtime configuration
     #[arg(long)]
-    pub id: Option<String>,
+    pub signer_ref: String,
 
-    /// Key label to use for signing
-    #[arg(long)]
-    pub by_label: Option<String>,
+    /// Expected sender address (0x-prefixed)
+    #[arg(long = "from")]
+    pub expected_from: String,
 
     /// Destination address (0x-prefixed)
     #[arg(long)]
@@ -26,27 +26,27 @@ pub(crate) struct TxSignArgs {
     #[arg(long)]
     pub value_wei: String,
 
-    /// EVM chain id
+    /// EVM chain id (decimal or 0x-prefixed hex)
     #[arg(long)]
-    pub chain_id: u64,
+    pub chain_id: String,
 
-    /// Sender nonce
+    /// Sender nonce (decimal or 0x-prefixed hex)
     #[arg(long)]
-    pub nonce: u64,
+    pub nonce: String,
 
-    /// Max fee per gas (wei, decimal or 0x-prefixed hex)
+    /// Max fee per gas in wei (decimal or 0x-prefixed hex)
     #[arg(long)]
     pub max_fee_per_gas: String,
 
-    /// Max priority fee per gas (wei, decimal or 0x-prefixed hex)
+    /// Max priority fee per gas in wei (decimal or 0x-prefixed hex)
     #[arg(long)]
     pub max_priority_fee_per_gas: String,
 
-    /// Gas limit
+    /// Gas limit (decimal or 0x-prefixed hex)
     #[arg(long)]
-    pub gas_limit: u64,
+    pub gas_limit: String,
 
-    /// Output file path where the signed raw transaction hex will be written
+    /// Explicit bearer-output file for the signed raw transaction hex
     #[arg(long)]
     pub out: PathBuf,
 
@@ -58,38 +58,9 @@ pub(crate) struct TxSignArgs {
     #[arg(long, default_value = "0x")]
     pub data: String,
 
-    /// Keystore file path
-    #[arg(long)]
-    pub keystore: Option<PathBuf>,
-
-    /// Runtime configuration file for keystore profile selection
+    /// Runtime configuration file (default: $MFM_RUNTIME_CONFIG_FILE)
     #[arg(long)]
     pub runtime_config: Option<PathBuf>,
-
-    /// Keystore profile ref inside the runtime config (default: default)
-    #[arg(long)]
-    pub keystore_ref: Option<String>,
-}
-
-/// Response returned after writing a signed transaction payload.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct TxSignResponse {
-    from: String,
-    to: String,
-    nonce: u64,
-    chain_id: u64,
-    tx_type: String,
-    payload_hash: String,
-}
-
-impl fmt::Display for TxSignResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Signed EIP-1559 tx (type {}) from {} to {} and wrote payload locally",
-            self.tx_type, self.from, self.to
-        )
-    }
 }
 
 /// Executes the signing command and terminates the process.
@@ -98,39 +69,57 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
-    let access =
-        keystore_selection::resolve_keystore_access(keystore_selection::KeystoreSelectionArgs {
-            keystore: args.keystore.as_ref(),
-            runtime_config: args.runtime_config.as_ref(),
-            keystore_ref: args.keystore_ref.as_deref(),
-        })?;
-    let response = keystore::sign_transaction(keystore::TxSignRequest {
-        id: args.id.clone(),
-        by_label: args.by_label.clone(),
-        to: args.to.clone(),
-        value_wei: args.value_wei.clone(),
-        chain_id: args.chain_id,
-        nonce: args.nonce,
-        max_fee_per_gas: args.max_fee_per_gas.clone(),
-        max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
-        gas_limit: args.gas_limit,
-        out_path: args.out.clone(),
-        out_write_mode: if args.overwrite {
-            keystore::OutputWriteMode::Overwrite
-        } else {
-            keystore::OutputWriteMode::CreateNew
+async fn execute_internal(
+    args: &TxSignArgs,
+) -> CommandResult<mfm_app::EvmTransactionSigningMetadata> {
+    let request = mfm_app::EvmTransactionSigningRequest {
+        runtime_config_path: args.runtime_config.clone(),
+        signer_ref: args.signer_ref.clone(),
+        envelope: mfm_app::EvmTransactionSigningEnvelopeInput {
+            expected_from: args.expected_from.clone(),
+            to: args.to.clone(),
+            value_wei: args.value_wei.clone(),
+            chain_id: args.chain_id.clone(),
+            nonce: args.nonce.clone(),
+            max_fee_per_gas: args.max_fee_per_gas.clone(),
+            max_priority_fee_per_gas: args.max_priority_fee_per_gas.clone(),
+            gas_limit: args.gas_limit.clone(),
+            data: args.data.clone(),
         },
-        data: args.data.clone(),
-        access,
-    })?;
+    };
+    let signed = mfm_app::sign_evm_transaction_command(request).await?;
+    let (metadata, bearer) = signed.into_parts();
+    let output_path = args.out.clone();
+    let overwrite = args.overwrite;
+    tokio::task::spawn_blocking(move || {
+        let raw_transaction_hex = format!("0x{}", hex::encode(bearer.bytes()));
+        output_file::publish_bearer_atomic(&output_path, raw_transaction_hex.as_bytes(), overwrite)
+            .map_err(public_output_error)
+    })
+    .await
+    .map_err(|_| {
+        PublicError::internal(
+            "file_write_error",
+            "Signed transaction output worker failed",
+        )
+    })??;
 
-    Ok(CommandOutput::new(TxSignResponse {
-        from: response.from,
-        to: response.to,
-        nonce: response.nonce,
-        chain_id: response.chain_id,
-        tx_type: response.tx_type,
-        payload_hash: response.payload_hash,
-    }))
+    Ok(CommandOutput::new(metadata))
+}
+
+fn public_output_error(error: CreateNewFileError) -> PublicError {
+    match error {
+        CreateNewFileError::TargetExists => PublicError::bad_request(
+            "file_write_error",
+            "Output file already exists; pass --overwrite to replace it",
+        ),
+        CreateNewFileError::InvalidPath => PublicError::bad_request(
+            "file_write_error",
+            "Signed transaction output path is unsafe or invalid",
+        ),
+        CreateNewFileError::WriteFailed => PublicError::internal(
+            "file_write_error",
+            "Failed to publish signed transaction output",
+        ),
+    }
 }

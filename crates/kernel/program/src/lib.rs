@@ -20,8 +20,8 @@ use mfm_effects::{
 };
 pub use mfm_facts as facts;
 use mfm_ids::{
-    AdapterKind, AdapterVersion, CellId, ContentDigest, ContextDescriptorId, DescriptorId,
-    DigestAlgorithm, DigestBytes, EffectKind, FieldPath as CheckedFieldPath,
+    AdapterKind, AdapterVersion, CellId, ContentDigest, ContextDescriptorId, ContextRef,
+    DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, FieldPath as CheckedFieldPath,
     FieldSegment as CheckedFieldSegment, NodeId, OperationInstanceId, OperationKind,
     OperationVersion, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId,
     StableAuthorKey as CheckedStableAuthorKey, StateKind, StateVersion,
@@ -122,6 +122,15 @@ pub fn fact_descriptor_ref_for_descriptor(
         descriptor_hash: facts::fact_descriptor_hash(descriptor)
             .map_err(|error| PlanError::Registry(error.to_string()))?,
     })
+}
+
+/// Derives the certified context reference for an authored context value.
+///
+/// This is the same context authority used by [`RootBuilder::declare_context`].
+/// Planning code may use it to validate static context joins before operation
+/// expansion; it does not mint a persisted context outside a typed program.
+pub fn context_ref_for<C: MfmContext>(value: &C) -> Result<ContextRef> {
+    Ok(certified_context_spec(value.clone())?.context_ref)
 }
 
 /// Error returned by typed program authoring operations.
@@ -591,7 +600,7 @@ pub struct StateDescriptorIdentity {
     effect: EffectDescriptor,
     capabilities: CapabilitySetDescriptor,
     emitted_fact_descriptors: Vec<FactDescriptorRef>,
-    side_effect_contract_digest: Option<ContentDigest>,
+    effect_contract_digest: Option<ContentDigest>,
     runner: RunnerKind,
 }
 
@@ -618,8 +627,7 @@ impl StateDescriptorIdentity {
             .validate_for_effect::<S::Effect>()
             .map_err(|error| PlanError::Registry(error.to_string()))?;
         let runner = <S::Effect as EffectRunner<S>>::runner_kind();
-        let side_effect_contract_digest =
-            <S::Effect as EffectRunner<S>>::side_effect_contract_digest()?;
+        let effect_contract_digest = <S::Effect as EffectRunner<S>>::effect_contract_digest()?;
         let emitted_fact_descriptors =
             canonical_fact_descriptor_refs(S::emitted_fact_descriptors()?)?;
         let context = S::Context::descriptor()?;
@@ -639,7 +647,7 @@ impl StateDescriptorIdentity {
             effect: &effect,
             capabilities: &capabilities,
             emitted_fact_descriptors: &emitted_fact_descriptors,
-            side_effect_contract_digest: side_effect_contract_digest.as_ref(),
+            effect_contract_digest: effect_contract_digest.as_ref(),
             runner,
         })?;
         Ok(Self {
@@ -657,7 +665,7 @@ impl StateDescriptorIdentity {
             effect,
             capabilities,
             emitted_fact_descriptors,
-            side_effect_contract_digest,
+            effect_contract_digest,
             runner,
         })
     }
@@ -732,9 +740,9 @@ impl StateDescriptorIdentity {
         &self.emitted_fact_descriptors
     }
 
-    /// Returns the side-effect contract digest when this descriptor mutates an external system.
-    pub fn side_effect_contract_digest(&self) -> Option<&ContentDigest> {
-        self.side_effect_contract_digest.as_ref()
+    /// Returns the hash-defining effect contract, when the effect declares one.
+    pub fn effect_contract_digest(&self) -> Option<&ContentDigest> {
+        self.effect_contract_digest.as_ref()
     }
 
     /// Returns the registered runner kind.
@@ -835,8 +843,8 @@ pub trait EffectRunner<S: StateSpec>: private::EffectRunnerSealed<S> {
     /// Returns the runner kind for this effect/state pair.
     fn runner_kind() -> RunnerKind;
 
-    /// Returns the side-effect contract digest for external mutation states.
-    fn side_effect_contract_digest() -> Result<Option<ContentDigest>> {
+    /// Returns an optional hash-defining effect contract for this state.
+    fn effect_contract_digest() -> Result<Option<ContentDigest>> {
         Ok(None)
     }
 }
@@ -853,18 +861,159 @@ pub trait PureState: StateSpec<Effect = Pure, Caps = NoCaps> {
 
 /// External read state runner.
 pub trait ReadState: StateSpec<Effect = ReadExternal> {
-    /// Future returned by [`ReadState::run`].
-    type RunFuture<'a>: Future<Output = StateResult<Self::Output>> + Send + 'a
-    where
-        Self: 'a;
+    /// Deterministic, capability-independent plan executed by an adapter.
+    type Plan: MfmValue;
+    /// Canonical primary evidence returned by the adapter and consumed by the reducer.
+    type Evidence: MfmValue;
 
-    /// Executes this read state through declared capabilities.
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        caps: &'a Self::Caps,
-        context: &'a CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a>;
+    /// Builds the complete deterministic external-read plan.
+    fn plan(
+        &self,
+        input: &Self::Input,
+        context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan>;
+
+    /// Reduces retained evidence into the state output without ambient IO.
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output>;
+}
+
+/// Complete retained evidence supplied to an external-read state reducer.
+///
+/// Every read attempt has exactly one state-owned primary evidence value. Fact-query states may
+/// additionally receive kernel-owned query receipts whose referenced fact artifacts remain under
+/// their existing retention authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalReadEvidenceSet<E> {
+    primary: E,
+    fact_queries: Vec<facts::FactQueryEvidence>,
+}
+
+impl<E> ExternalReadEvidenceSet<E> {
+    /// Creates an evidence set from one primary value and optional fact-query evidence.
+    pub fn new(primary: E, fact_queries: Vec<facts::FactQueryEvidence>) -> Self {
+        Self {
+            primary,
+            fact_queries,
+        }
+    }
+
+    /// Creates an evidence set with no auxiliary fact queries.
+    pub fn primary(primary: E) -> Self {
+        Self::new(primary, Vec::new())
+    }
+
+    /// Returns the one state-owned primary evidence value.
+    pub const fn primary_evidence(&self) -> &E {
+        &self.primary
+    }
+
+    /// Returns kernel-owned auxiliary fact-query evidence in execution order.
+    pub fn fact_query_evidence(&self) -> &[facts::FactQueryEvidence] {
+        &self.fact_queries
+    }
+
+    /// Splits this set into its primary and auxiliary evidence.
+    pub fn into_parts(self) -> (E, Vec<facts::FactQueryEvidence>) {
+        (self.primary, self.fact_queries)
+    }
+}
+
+/// Derives a hash-defining contract for one external-read plan/evidence pair.
+pub fn external_read_contract_digest<Plan, Evidence>() -> Result<ContentDigest>
+where
+    Plan: MfmValue,
+    Evidence: MfmValue,
+{
+    canonical_digest(serde_json::json!({
+        "contract_domain": "mfm.external_read",
+        "contract_version": 1,
+        "effect_class": "read_external",
+        "evidence_schema_id": Evidence::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "evidence_semantic_type_id": Evidence::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "plan_schema_id": Plan::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "plan_semantic_type_id": Plan::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+    }))
+}
+
+/// Derives the hash-defining contract for one side-effect evidence protocol.
+pub fn side_effect_contract_digest<
+    Intent,
+    IdempotencyInput,
+    PreparedInvocation,
+    Submission,
+    RecoveryEvidence,
+    Receipt,
+    Confirmation,
+>() -> Result<ContentDigest>
+where
+    Intent: MfmValue,
+    IdempotencyInput: MfmValue,
+    PreparedInvocation: MfmValue,
+    Submission: MfmValue,
+    RecoveryEvidence: MfmValue,
+    Receipt: MfmValue,
+    Confirmation: MfmValue,
+{
+    canonical_digest(serde_json::json!({
+        "contract_domain": "mfm.side_effect",
+        "contract_version": 1,
+        "effect_class": "apply_side_effect",
+        "confirmation_schema_id": Confirmation::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "confirmation_semantic_type_id": Confirmation::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "idempotency_input_schema_id": IdempotencyInput::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "idempotency_input_semantic_type_id": IdempotencyInput::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "intent_schema_id": Intent::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "intent_semantic_type_id": Intent::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "prepared_invocation_schema_id": PreparedInvocation::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "prepared_invocation_semantic_type_id": PreparedInvocation::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "receipt_schema_id": Receipt::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "receipt_semantic_type_id": Receipt::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "recovery_evidence_schema_id": RecoveryEvidence::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "recovery_evidence_semantic_type_id": RecoveryEvidence::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "submission_schema_id": Submission::schema_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+        "submission_semantic_type_id": Submission::semantic_id()
+            .map_err(|error| PlanError::Value(error.to_string()))?
+            .as_str(),
+    }))
 }
 
 /// MFM-managed platform write state runner.
@@ -883,25 +1032,35 @@ pub trait ManagedWriteState: StateSpec<Effect = ManagedPlatformWrite> {
     ) -> Self::RunFuture<'a>;
 }
 
-/// Typed idempotency key for side-effect submission protocols.
+/// Deterministic state-authored mutation intent and idempotency material.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdempotencyKey<T: MfmValue> {
-    digest: ContentDigest,
-    _input: PhantomData<fn(T) -> T>,
+pub struct SideEffectIntent<Intent, Idempotency> {
+    intent: Intent,
+    idempotency: Idempotency,
 }
 
-impl<T: MfmValue> IdempotencyKey<T> {
-    /// Creates an idempotency key from a typed digest.
-    pub fn new(digest: ContentDigest) -> Self {
+impl<Intent, Idempotency> SideEffectIntent<Intent, Idempotency> {
+    /// Creates one immutable authored side-effect intent.
+    pub const fn new(intent: Intent, idempotency: Idempotency) -> Self {
         Self {
-            digest,
-            _input: PhantomData,
+            intent,
+            idempotency,
         }
     }
 
-    /// Returns the idempotency digest.
-    pub fn digest(&self) -> &ContentDigest {
-        &self.digest
+    /// Returns the mutation intent.
+    pub const fn intent(&self) -> &Intent {
+        &self.intent
+    }
+
+    /// Returns the material from which the adapter derives the idempotency key.
+    pub const fn idempotency(&self) -> &Idempotency {
+        &self.idempotency
+    }
+
+    /// Splits the authored intent into its typed parts.
+    pub fn into_parts(self) -> (Intent, Idempotency) {
+        (self.intent, self.idempotency)
     }
 }
 
@@ -911,46 +1070,29 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
     type Intent: MfmValue;
     /// Deterministic idempotency input.
     type IdempotencyInput: MfmValue;
+    /// Immutable public invocation authority prepared before submission starts.
+    type PreparedInvocation: MfmValue;
     /// Submission result value.
     type Submission: MfmValue;
+    /// Public evidence retained when submission recovery is not yet terminal.
+    type RecoveryEvidence: MfmValue;
     /// Receipt value observed after submission.
     type Receipt: MfmValue;
     /// Confirmation value used to produce terminal output.
     type Confirmation: MfmValue;
-    /// Future returned by [`SideEffectState::submit`].
-    type SubmitFuture<'a>: Future<Output = StateResult<Self::Submission>> + Send + 'a
-    where
-        Self: 'a;
-
-    /// Builds a deterministic mutation intent from materialized input.
-    fn prepare_intent(
+    /// Builds the one deterministic authored intent from materialized state input.
+    fn intent(
         &self,
         input: &Self::Input,
         context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Intent>;
-
-    /// Builds deterministic idempotency input from materialized input and intent.
-    fn idempotency_input(
-        &self,
-        input: &Self::Input,
-        intent: &Self::Intent,
-        context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::IdempotencyInput>;
-
-    /// Submits the intent through declared capabilities.
-    fn submit<'a>(
-        &'a self,
-        intent: &'a Self::Intent,
-        key: &'a IdempotencyKey<Self::IdempotencyInput>,
-        caps: &'a Self::Caps,
-        context: &'a CertifiedContext<Self::Context>,
-    ) -> Self::SubmitFuture<'a>;
+    ) -> StateResult<SideEffectIntent<Self::Intent, Self::IdempotencyInput>>;
 
     /// Constructs terminal output from receipt-level side-effect evidence.
     fn output_from_receipt(
         &self,
         input: &Self::Input,
-        intent: &Self::Intent,
+        prepared: &Self::PreparedInvocation,
+        submission: &Self::Submission,
         receipt: &Self::Receipt,
         context: &CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output>;
@@ -959,7 +1101,9 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
     fn output_from_confirmation(
         &self,
         input: &Self::Input,
-        intent: &Self::Intent,
+        prepared: &Self::PreparedInvocation,
+        submission: &Self::Submission,
+        receipt: &Self::Receipt,
         confirmation: &Self::Confirmation,
         context: &CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output>;
@@ -981,6 +1125,10 @@ where
     fn runner_kind() -> RunnerKind {
         RunnerKind::ReadExternal
     }
+
+    fn effect_contract_digest() -> Result<Option<ContentDigest>> {
+        external_read_contract_digest::<S::Plan, S::Evidence>().map(Some)
+    }
 }
 
 impl<S> EffectRunner<S> for ManagedPlatformWrite
@@ -1000,48 +1148,25 @@ where
         RunnerKind::ApplySideEffect
     }
 
-    fn side_effect_contract_digest() -> Result<Option<ContentDigest>> {
-        let digest = canonical_digest(serde_json::json!({
-            "confirmation_schema_id": S::Confirmation::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "confirmation_semantic_type_id": S::Confirmation::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "idempotency_input_schema_id": S::IdempotencyInput::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "idempotency_input_semantic_type_id": S::IdempotencyInput::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "intent_schema_id": S::Intent::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "intent_semantic_type_id": S::Intent::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "receipt_schema_id": S::Receipt::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "receipt_semantic_type_id": S::Receipt::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "submission_schema_id": S::Submission::schema_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-            "submission_semantic_type_id": S::Submission::semantic_id()
-                .map_err(|error| PlanError::Value(error.to_string()))?
-                .as_str(),
-        }))?;
-        Ok(Some(digest))
+    fn effect_contract_digest() -> Result<Option<ContentDigest>> {
+        side_effect_contract_digest::<
+            S::Intent,
+            S::IdempotencyInput,
+            S::PreparedInvocation,
+            S::Submission,
+            S::RecoveryEvidence,
+            S::Receipt,
+            S::Confirmation,
+        >()
+        .map(Some)
     }
 }
 
 mod private {
     use super::{
         ApplySideEffect, DeclaredContext, ForwardSideEffectHandle, Handle, ManagedPlatformWrite,
-        MfmContext, MfmValue, NoContext, NonEmptyHandles, Pure, ReadExternal, SideEffectState,
-        StateContext, StateSpec,
+        MfmContext, MfmValue, NoContext, NonEmptyHandles, OperationInputHandles, Pure,
+        ReadExternal, SideEffectState, StateContext, StateInput, StateSpec,
     };
 
     pub trait EffectRunnerSealed<S: StateSpec> {}
@@ -1067,6 +1192,8 @@ mod private {
     }
 
     impl OperationInputSealed for () {}
+
+    impl<I, H> OperationInputSealed for OperationInputHandles<I, H> where I: StateInput {}
 
     impl<'program, 'scope, T> OperationInputSealed for Handle<'program, 'scope, T> where T: MfmValue {}
 

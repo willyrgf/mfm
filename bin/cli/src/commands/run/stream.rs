@@ -1,4 +1,4 @@
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_read_services, parse_run_id, RunStoresArgs};
@@ -32,14 +32,14 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StreamArgs) -> ! {
 
 async fn execute_internal(args: &StreamArgs) -> CommandResult<RunStreamResponse> {
     if args.from_seq == 0 {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "InvalidSequenceRange",
             "--from-seq must be greater than zero",
         ));
     }
     if let Some(to_seq) = args.to_seq {
         if to_seq < args.from_seq {
-            return Err(CommandError::new(
+            return Err(PublicError::bad_request(
                 "InvalidSequenceRange",
                 "--to-seq must be greater than or equal to --from-seq",
             ));

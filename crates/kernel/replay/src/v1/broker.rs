@@ -69,6 +69,7 @@ impl ReplayBroker {
             intents: BTreeMap::new(),
             prepared_invocations: BTreeMap::new(),
             submissions: BTreeMap::new(),
+            submission_unknown: BTreeMap::new(),
             not_submitted: BTreeMap::new(),
             receipts: BTreeMap::new(),
             confirmations: BTreeMap::new(),
@@ -323,6 +324,13 @@ impl ReplayBroker {
                         &payload.attempt_id,
                     )?;
                     self.authorize_event_artifacts(envelope.payload())?;
+                    insert_unique(
+                        &mut self.submission_unknown,
+                        (payload.pair_id.clone(), payload.invocation_epoch),
+                        payload.clone(),
+                        ReplayErrorKind::InvalidRunStream,
+                        "duplicate side-effect submission-unknown replay event",
+                    )?;
                 }
                 KernelEventPayload::SideEffectAmbiguous(payload) => {
                     self.verify_side_effect_ambiguity_against_intent(

@@ -25,36 +25,27 @@ members = [
 	"crates/kernel/spec",
 	"crates/kernel/store",
 	"crates/kernel/values",
-	"crates/evm-contract-model",
-	"crates/evm-contract-config",
-	"crates/evm-core",
 	"crates/btc-capabilities",
 	"crates/evm-capabilities",
 	"crates/fact-capabilities",
 	"crates/artifact-capabilities",
-	"crates/adapter-contracts",
 	"crates/adapters/btc-jsonrpc",
-	"crates/adapters/evm-contracts",
 "crates/adapters/evm",
 	"crates/adapters/portfolio",
 	"crates/signing",
 	"crates/evm-signing",
 	"crates/signers/keystore",
-	"crates/authored-config",
 	"crates/runtime-config",
-	"crates/portfolio-config",
 	"crates/portfolio/model",
-	"crates/states/evm-contracts",
 	"crates/states/evm",
 	"crates/states/btc",
 	"crates/states/portfolio",
-	"crates/storages/stream-store-postgres",
+	"crates/storages/postgres",
 	"crates/transports/evm",
 	"crates/transports/proof",
-	"crates/ops/evm-contract-lifecycle-op",
-"crates/ops/evm-collectors-op",
 	"crates/ops/btc-collectors-op",
-	"crates/ops/portfolio-tracker-op",
+	"crates/ops/evm-collectors-op",
+	"crates/ops/portfolio-snapshot-op",
 	"crates/ops/proof-op",
 ]
 
@@ -62,6 +53,10 @@ members = [
 [workspace.dependencies]
 # Alloy blockchain library components
 alloy-primitives = "0.8"
+alloy-consensus = "0.8.3"
+alloy-eips = "0.8"
+# Alloy 0.8's EIP-7702 manifest omits the derive feature used by its source.
+derive_more = { version = "1.0.0", features = ["display"] }
 bech32 = "0.12"
 bs58 = "0.5.1"
 # Cryptography dependency
@@ -74,6 +69,7 @@ tokio = { version = "1.44", features = ["full"] }
 clap = { version = "4.4", features = ["derive"] }
 url = "2.5"
 hex = "0.4"
+http = "1"
 rand = "0.9"
 async-trait = "0.1"
 tracing = "0.1"

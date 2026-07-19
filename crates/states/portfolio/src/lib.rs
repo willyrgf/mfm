@@ -1,70 +1,68 @@
 #![warn(missing_docs)]
-//! Typed portfolio-domain state contracts for fact-backed report-only snapshots.
+//! Typed portfolio-domain state contracts for certified portfolio snapshots.
 //!
-//! After the collectors cutover, `portfolio_snapshot` is select-centric:
-//! `ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport`.
+//! [`SelectHoldingsState`] consumes Bitcoin and generic EVM collection receipts directly, then
+//! reads and reverifies every selected balance from the fact store before snapshot assembly.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
-//! use mfm_state_portfolio::PortfolioWorkflowConfig;
+//! use mfm_portfolio_model::portfolio::PortfolioConfig;
 //!
-//! fn workflow_config(canonical: PortfolioSnapshotCanonicalConfig) -> PortfolioWorkflowConfig {
-//!     PortfolioWorkflowConfig::from(canonical)
+//! fn workflow_config(config: PortfolioConfig) -> PortfolioConfig {
+//!     config.normalized()
 //! }
 //! ```
 
+mod collection_receipt;
+mod holding_read;
 mod selection;
 
 #[path = "decimal.rs"]
 mod decimal;
 use self::decimal::{multiply_decimal_strings, DecimalValue};
 
+pub use collection_receipt::{
+    HoldingRequirementKey, SelectHoldingsInput, SelectHoldingsInputHandles,
+};
+pub use holding_read::{
+    PortfolioHoldingFactResponse, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
+};
 pub use selection::{
-    holding_candidate_from_normalized, is_filter_empty_holding_error,
     portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
-    project_holding_fact_for_network, project_holding_fact_kind,
-    project_network_pins_from_observations, select_network_coherent, HoldingAnchor,
-    HoldingCandidate, HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, RequiredHoldingKey, SelectedHolding, SelectedHoldingMaterial,
-    PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID,
+    project_network_pins_from_observations, HoldingCandidate, PortfolioHoldingErrorCode,
+    PortfolioHoldingSelectionError, SelectedHolding, SelectedHoldingMaterial,
+    PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future;
-use std::num::NonZeroU64;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_effects::{Pure, ReadExternal};
 use mfm_fact_capabilities::FactIndexReadCapability;
-use mfm_facts::{FactSelectionEvidence, StoreScopeRef};
+use mfm_facts::StoreScopeRef;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
-use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
-use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
-    NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport,
-    PortfolioSnapshot, ValidatedPortfolioConfig, ValidatedSymbolConfigs, ValidatedWalletConfigs,
-    WalletReport, WalletSnapshot,
+    PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
+    ValidatedPortfolioConfig, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
-    BalanceReaderConfig, Observation, ObservationQuantity, ObservationSource, ObservationValue,
-    QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
+    AnchoredHoldingSource, Observation, ObservationQuantity, ObservationValue, QuoteCode,
+    SymbolConfig,
 };
-use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{
-    AdapterBindingSpec, NoContext, PureState, ReadState, StateError, StateResult, StateSpec,
+    AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, PureState, ReadState, StateError,
+    StateResult, StateSpec,
 };
-use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
+use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs, StateInput};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "mfm.portfolio";
 const ADAPTER_NAME: &str = "typed-portfolio";
 const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v1";
-/// Default store scope used by portfolio Platform holding selection.
-pub const DEFAULT_PORTFOLIO_STORE_SCOPE: &str = "mfm.store.default";
+const PORTFOLIO_STORE_SCOPE: &str = "mfm.store.default";
 
 #[path = "config.rs"]
 mod config;
@@ -117,69 +115,7 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-/// Resolved wallet subject.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-subject",
-    schema = "mfm.portfolio.resolved_subject"
-)]
-pub struct ResolvedSubject {
-    /// Stable wallet identifier.
-    pub wallet_id: String,
-    /// Canonical resolved address.
-    pub address: String,
-    /// Subject kind.
-    pub subject_kind: WalletSubjectKind,
-    /// Stable network identifier.
-    pub network_id: String,
-    /// Stable wallet implementation kind.
-    pub implementation_kind: String,
-}
-
-/// Resolved subject collection.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-subjects",
-    schema = "mfm.portfolio.resolved_subjects"
-)]
-pub struct ResolvedSubjects {
-    /// Subjects in canonical wallet order.
-    pub subjects: Vec<ResolvedSubject>,
-}
-
-/// Resolved unit-price valuation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-valuation",
-    schema = "mfm.portfolio.resolved_valuation"
-)]
-pub struct ResolvedValuation {
-    /// Symbol whose quote route was resolved.
-    pub symbol_id: String,
-    /// Quote unit.
-    pub quote: QuoteCode,
-    /// Symbol whose unit price applies to this route.
-    pub priced_symbol_id: String,
-    /// Decimal-string unit price.
-    pub unit_price_dec: String,
-}
-
-/// Resolved valuation collection (hard-fail: empty only when no symbols; no soft errors).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-valuations",
-    schema = "mfm.portfolio.resolved_valuations"
-)]
-pub struct ResolvedValuations {
-    /// Valuations in canonical symbol/quote order.
-    pub valuations: Vec<ResolvedValuation>,
-}
-
-/// Selected holdings material emitted by SelectHoldings (observations without valuation join).
+/// Selected receipt-authorized holdings emitted by fact selection (without valuation join).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
 #[mfm(
     namespace = "mfm.portfolio",
@@ -195,12 +131,8 @@ pub struct SelectedHoldings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
 #[mfm(schema = "mfm.portfolio.input.assemble_snapshot")]
 pub struct AssembleSnapshotInput {
-    /// Resolved wallet subjects.
-    pub subjects: ResolvedSubjects,
-    /// Selected holdings from Platform fact selection.
+    /// Selected Bitcoin and EVM holdings from Platform fact selection.
     pub holdings: SelectedHoldings,
-    /// Resolved fixed unit-price valuations.
-    pub valuations: ResolvedValuations,
 }
 
 /// Input consumed by report projection.
@@ -211,20 +143,13 @@ pub struct ProjectReportInput {
     pub snapshot: PortfolioSnapshot,
 }
 
-/// Public output contract for portfolio workflows.
+/// Public output contract for the complete portfolio snapshot root.
+///
+/// It exposes only the snapshot and report projections; collection receipts, fact identities, and
+/// selection evidence remain internal certified graph values.
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.portfolio.public_outputs")]
 pub struct PortfolioPublicOutputs<'program, 'scope> {
-    /// Public portfolio snapshot.
-    pub snapshot: mfm_program::Handle<'program, 'scope, PortfolioSnapshot>,
-    /// Projected portfolio report.
-    pub report: mfm_program::Handle<'program, 'scope, PortfolioReport>,
-}
-
-/// Operation output handles produced by the typed portfolio workflow.
-#[derive(OperationOutput)]
-#[mfm(schema = "mfm.portfolio.operation_outputs")]
-pub struct PortfolioOperationOutputs<'program, 'scope> {
     /// Public portfolio snapshot.
     pub snapshot: mfm_program::Handle<'program, 'scope, PortfolioSnapshot>,
     /// Projected portfolio report.

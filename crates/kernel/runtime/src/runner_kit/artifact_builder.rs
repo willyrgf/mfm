@@ -75,12 +75,12 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
         self.evidence_artifact(value, events::ArtifactRole::SideEffectIntent)
     }
 
-    /// Builds a schema-less prepared invocation artifact.
+    /// Builds a typed prepared invocation artifact.
     pub(crate) fn prepared_invocation<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
-        T: Serialize,
+        T: MfmValue,
     {
-        self.json_artifact(value, events::ArtifactRole::PreparedInvocation, None, None)
+        self.evidence_artifact(value, events::ArtifactRole::PreparedInvocation)
     }
 
     /// Builds a not-submitted proof artifact.

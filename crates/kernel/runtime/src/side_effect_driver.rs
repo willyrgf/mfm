@@ -5,10 +5,10 @@ use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     short_stable_id_fragment, ArtifactId, AttemptId, ContentDigest, NodeId, RunId, SideEffectPairId,
 };
+use mfm_program::SideEffectIntent;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
-use serde::Serialize;
 
 use crate::runner_kit::{
     RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding,
@@ -17,42 +17,55 @@ use crate::side_effect_lifecycle::SideEffectAttemptView;
 use crate::{
     canonical_json, CertifiedRuntimeSpec, ErasedRunCtx, ErasedRunnerOutput, MaterializedInputs,
     PreInvocationRunCtx, Result, RunnerArtifactBuilder, RunnerCapabilityBinding,
-    RunnerEventPayload, RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RuntimeError, StagedArtifact, StagedRetentionRefs,
+    RunnerEventPayload, RunnerJsonArtifact, RunnerOutputBuilder, RunnerOutputSettlement,
+    RunnerPayloadBuilder, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by side-effect driver callbacks.
 pub type SideEffectDriverFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Future returned by callbacks that submit or recover a prepared side-effect invocation.
-pub type SideEffectSubmissionDecisionFuture<
-    'a,
-    Submission,
-    UnknownEvidence,
-    NotSubmittedProof,
-    AmbiguityEvidence,
-> = SideEffectDriverFuture<
-    'a,
-    SideEffectSubmissionDecision<Submission, UnknownEvidence, NotSubmittedProof, AmbiguityEvidence>,
->;
+pub type SideEffectSubmissionDecisionFuture<'a, Submission, RecoveryEvidence> =
+    SideEffectDriverFuture<'a, SideEffectSubmissionDecision<Submission, RecoveryEvidence>>;
 
 /// Future returned by callbacks that recover a previously unknown submission.
-pub type SideEffectUnknownSubmissionDecisionFuture<
-    'a,
-    Submission,
-    NotSubmittedProof,
-    AmbiguityEvidence,
-> = SideEffectDriverFuture<
-    'a,
-    SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence>,
->;
+pub type SideEffectUnknownSubmissionDecisionFuture<'a, Submission, RecoveryEvidence> =
+    SideEffectDriverFuture<'a, SideEffectUnknownSubmissionDecision<Submission, RecoveryEvidence>>;
+
+/// Public prepared invocation plus optional process-local authority awaiting durable settlement.
+pub struct SideEffectPreparedInvocation<T> {
+    evidence: T,
+    settlement: Option<RunnerOutputSettlement>,
+}
+
+impl<T> SideEffectPreparedInvocation<T> {
+    /// Creates prepared evidence that carries no process-local settlement.
+    pub const fn new(evidence: T) -> Self {
+        Self {
+            evidence,
+            settlement: None,
+        }
+    }
+
+    /// Creates prepared evidence with authority promoted only after its append succeeds.
+    pub fn with_settlement(evidence: T, settlement: RunnerOutputSettlement) -> Self {
+        Self {
+            evidence,
+            settlement: Some(settlement),
+        }
+    }
+
+    /// Separates persisted evidence from its optional process-local settlement.
+    pub(crate) fn into_parts(self) -> (T, Option<RunnerOutputSettlement>) {
+        (self.evidence, self.settlement)
+    }
+}
 
 /// Builds pre-invocation side-effect resource-lane claim evidence for the first epoch.
 pub fn preclaim_side_effect_resource_lane<Intent, Idempotency>(
     ctx: &PreInvocationRunCtx<'_>,
     intent: &Intent,
     idempotency: &Idempotency,
-    idempotency_key: events::IdempotencyKeyRef,
     capability_binding: RunnerCapabilityBinding,
     resource_key: events::ResourceKeyEvidence,
 ) -> Result<ErasedRunnerOutput>
@@ -81,7 +94,7 @@ where
                 side_effect.clone(),
                 &intent_artifact,
                 idempotency,
-                idempotency_key,
+                side_effect_idempotency_key(idempotency)?,
                 capability_binding,
             )?,
             RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
@@ -255,24 +268,18 @@ fn validate_pre_invocation_resolved_resource_key(
     }
 }
 
-/// Generic side-effect protocol action selected from a verified attempt view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SideEffectProtocolAction {
+pub(crate) enum SideEffectStep {
     /// No ledger evidence exists yet; persist intent and claim the first invocation epoch.
-    PrepareAndStart,
-    /// A side-effect claim exists and can now prepare/start under its held lane.
-    PrepareAndStartClaimed {
+    Claim,
+    /// A committed side-effect claim can now prepare immutable invocation authority.
+    Prepare {
         /// Invocation epoch to prepare and start.
         invocation_epoch: u32,
     },
-    /// Invocation crossed the external uncertainty boundary; submit or recover submission status.
-    SubmitOrRecoverSubmission {
-        /// Invocation epoch to submit or recover.
-        invocation_epoch: u32,
-    },
-    /// Invocation was prepared but not marked started; start it, then submit or recover status.
-    StartPreparedAndSubmitOrRecoverSubmission {
-        /// Invocation epoch to start and submit or recover.
+    /// A started invocation can submit exact prepared authority.
+    Submit {
+        /// Invocation epoch to submit.
         invocation_epoch: u32,
     },
     /// A durable submission boundary result exists; complete the submit anchor.
@@ -282,32 +289,26 @@ pub enum SideEffectProtocolAction {
     },
 }
 
-impl SideEffectProtocolAction {
+impl SideEffectStep {
     /// Selects the protocol action for a verified side-effect attempt view.
     pub(crate) fn from_attempt_view(view: &SideEffectAttemptView<'_>) -> Result<Self> {
         let Some(phase) = view.phase() else {
-            return Ok(Self::PrepareAndStart);
+            return Ok(Self::Claim);
         };
         match phase {
-            store::SideEffectLedgerPhase::Prepared { claim, .. } => {
-                Ok(Self::StartPreparedAndSubmitOrRecoverSubmission {
-                    invocation_epoch: claim.invocation_epoch,
-                })
-            }
-            store::SideEffectLedgerPhase::Claimed { claim } => Ok(Self::PrepareAndStartClaimed {
+            store::SideEffectLedgerPhase::Claimed { claim } => Ok(Self::Prepare {
                 invocation_epoch: claim.invocation_epoch,
             }),
-            store::SideEffectLedgerPhase::Started { claim, .. } => {
-                Ok(Self::SubmitOrRecoverSubmission {
-                    invocation_epoch: claim.invocation_epoch,
-                })
-            }
+            store::SideEffectLedgerPhase::Started { claim, .. } => Ok(Self::Submit {
+                invocation_epoch: claim.invocation_epoch,
+            }),
             store::SideEffectLedgerPhase::SubmissionKnown { claim, .. } => {
                 Ok(Self::CompleteSubmissionBoundary {
                     invocation_epoch: claim.invocation_epoch,
                 })
             }
             store::SideEffectLedgerPhase::IntentPersisted { .. }
+            | store::SideEffectLedgerPhase::Prepared { .. }
             | store::SideEffectLedgerPhase::ReceiptObserved { .. }
             | store::SideEffectLedgerPhase::Confirmed { .. }
             | store::SideEffectLedgerPhase::Ambiguous { .. }
@@ -399,8 +400,8 @@ impl SideEffectReplayEvidence {
     }
 }
 
-/// Input for preparing and starting a side-effect invocation.
-pub(crate) struct SideEffectPrepareEvidence<'a, Intent, Idempotency> {
+/// Input for persisting authored intent and claiming a side-effect invocation.
+pub(crate) struct SideEffectClaimEvidence<'a, Intent, Idempotency> {
     /// Side-effect ledger coordinates.
     pub(crate) side_effect: RunnerSideEffectBinding,
     /// Claim authority for the invocation epoch.
@@ -409,77 +410,72 @@ pub(crate) struct SideEffectPrepareEvidence<'a, Intent, Idempotency> {
     pub(crate) intent: &'a Intent,
     /// Typed idempotency input evidence.
     pub(crate) idempotency: &'a Idempotency,
-    /// Stable idempotency key derived by the adapter.
-    pub(crate) idempotency_key: events::IdempotencyKeyRef,
     /// Capability implementation that will perform the mutation.
     pub(crate) capability_binding: RunnerCapabilityBinding,
 }
 
-/// Owned side-effect intent and idempotency plan returned by adapter callbacks.
-pub struct SideEffectIntentPlan<Intent, Idempotency> {
+/// Kernel-owned authored side-effect authority.
+pub(crate) struct AuthoredSideEffect<Intent, Idempotency> {
     /// Typed intent evidence.
     pub(crate) intent: Intent,
     /// Typed idempotency input evidence.
     pub(crate) idempotency: Idempotency,
-    /// Stable idempotency key derived by the adapter.
+    /// Stable schema-bound idempotency key derived by the kernel.
     pub(crate) idempotency_key: events::IdempotencyKeyRef,
     /// Capability implementation that will perform the mutation.
     pub(crate) capability_binding: RunnerCapabilityBinding,
 }
 
-impl<Intent, Idempotency> SideEffectIntentPlan<Intent, Idempotency> {
-    /// Creates an adapter-owned side-effect intent and idempotency plan.
-    pub fn new(
+impl<Intent, Idempotency> AuthoredSideEffect<Intent, Idempotency> {
+    fn new(
         intent: Intent,
         idempotency: Idempotency,
-        idempotency_key: events::IdempotencyKeyRef,
         capability_binding: RunnerCapabilityBinding,
-    ) -> Self {
-        Self {
+    ) -> Result<Self>
+    where
+        Idempotency: MfmValue,
+    {
+        let idempotency_key = side_effect_idempotency_key(&idempotency)?;
+        Ok(Self {
             intent,
             idempotency,
             idempotency_key,
             capability_binding,
-        }
+        })
     }
 }
 
 /// Submission recovery result returned by side-effect driver callbacks.
-pub enum SideEffectSubmissionDecision<
-    Submission,
-    UnknownEvidence,
-    NotSubmittedProof,
-    AmbiguityEvidence,
-> {
+pub enum SideEffectSubmissionDecision<Submission, RecoveryEvidence> {
     /// Submission was observed and can be persisted.
     Observed(Submission),
     /// Submission status could not be determined and uncertainty evidence can be persisted.
-    Unknown(UnknownEvidence),
+    Unknown(RecoveryEvidence),
     /// The invocation was proven not submitted.
-    NotSubmitted(NotSubmittedProof),
+    NotSubmitted(RecoveryEvidence),
     /// Submission recovery became ambiguous and must stop emitting further evidence.
     Ambiguous {
         /// Ambiguity classifier code.
         ambiguity_code: events::AmbiguityCode,
         /// Redaction-safe ambiguity evidence.
-        evidence: AmbiguityEvidence,
+        evidence: RecoveryEvidence,
     },
 }
 
 /// Verify-side recovery result for a previously unknown submission.
-pub enum SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence> {
+pub enum SideEffectUnknownSubmissionDecision<Submission, RecoveryEvidence> {
     /// Submission was observed and can be persisted by the verify role.
     Observed(Submission),
     /// Submission status remains unknown; the scheduler must stop without committing evidence.
     StillUnknown,
     /// The invocation was proven not submitted by the verify role.
-    NotSubmitted(NotSubmittedProof),
+    NotSubmitted(RecoveryEvidence),
     /// Recovery became ambiguous and must stop emitting further evidence.
     Ambiguous {
         /// Ambiguity classifier code.
         ambiguity_code: events::AmbiguityCode,
         /// Redaction-safe ambiguity evidence.
-        evidence: AmbiguityEvidence,
+        evidence: RecoveryEvidence,
     },
 }
 
@@ -498,66 +494,115 @@ impl<T> SideEffectObservedEvidence<T> {
     }
 }
 
-/// Adapter callbacks used by the generic side-effect driver.
+/// One adapter contract for preparing, submitting, recovering, and verifying a side effect.
 ///
 /// Implementations own artifact reads, live providers, signing, and domain reconstruction. The
-/// runtime driver turns callback results into runner outputs without taking ownership of adapter IO.
-pub trait SideEffectDriverCallbacks {
+/// runtime owns ledger phase selection, idempotency, and evidence emission.
+pub trait SideEffectAdapter {
     /// Typed side-effect intent evidence.
     type Intent: MfmValue + Send + Sync + 'static;
     /// Typed idempotency input evidence.
     type Idempotency: MfmValue + Send + Sync + 'static;
     /// Public prepared invocation evidence.
-    type PreparedInvocation: Serialize + Send + Sync + 'static;
+    type PreparedInvocation: MfmValue + Send + Sync + 'static;
     /// Typed submission evidence.
     type Submission: MfmValue + Send + Sync + 'static;
-    /// Typed submission-unknown evidence.
-    type SubmissionUnknownEvidence: MfmValue + Send + Sync + 'static;
-    /// Typed not-submitted proof evidence.
-    type NotSubmittedProof: MfmValue + Send + Sync + 'static;
-    /// Typed ambiguity evidence.
-    type AmbiguityEvidence: MfmValue + Send + Sync + 'static;
+    /// Typed recovery, uncertainty, and ambiguity evidence.
+    type RecoveryEvidence: MfmValue + Send + Sync + 'static;
+    /// Typed receipt evidence.
+    type Receipt: MfmValue + Send + Sync + 'static;
+    /// Typed confirmation evidence.
+    type Confirmation: MfmValue + Send + Sync + 'static;
+    /// Typed terminal state output.
+    type Output: MfmValue + Send + Sync + 'static;
 
-    /// Builds side-effect intent, idempotency, claim, and capability binding evidence.
-    fn intent_and_idempotency<'a, 'ctx>(
+    /// Returns the fixed certified capability and adapter binding for this runner.
+    fn capability_binding(&self) -> Result<RunnerCapabilityBinding>;
+
+    /// Invokes the state-owned pure intent reducer for the submit node.
+    fn authored_intent<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>>;
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntent<Self::Intent, Self::Idempotency>>;
 
-    /// Optionally prepares public invocation evidence before the external uncertainty boundary.
-    fn prepare_invocation<'a, 'ctx>(
+    /// Prepares required public invocation authority under the committed claim.
+    fn prepare<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-        plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>>;
+        intent: &'a Self::Intent,
+        idempotency: &'a Self::Idempotency,
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocation<Self::PreparedInvocation>>;
 
-    /// Reconstructs live invocation state from adapter-owned artifact reads.
-    fn reconstruct_prepared_invocation<'a, 'ctx>(
+    /// Loads and type-checks retained prepared invocation authority.
+    fn load_prepared<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
         prepared: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation>;
 
-    /// Submits the prepared invocation or recovers submission status after uncertainty.
-    fn submit_or_recover_submission<'a, 'ctx>(
+    /// Submits exact prepared authority; implementations must be restart-safe.
+    fn submit_prepared<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-        action: SideEffectProtocolAction,
-        prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectSubmissionDecisionFuture<
-        'a,
-        Self::Submission,
-        Self::SubmissionUnknownEvidence,
-        Self::NotSubmittedProof,
-        Self::AmbiguityEvidence,
-    >;
+        prepared: Self::PreparedInvocation,
+    ) -> SideEffectSubmissionDecisionFuture<'a, Self::Submission, Self::RecoveryEvidence>;
+
+    /// Recovers a previously unknown submission without crossing the submission boundary again.
+    fn recover_unknown<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+        prepared: Self::PreparedInvocation,
+    ) -> SideEffectUnknownSubmissionDecisionFuture<'a, Self::Submission, Self::RecoveryEvidence>;
+
+    /// Reads receipt evidence for an observed submission.
+    fn observe_receipt<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>>;
+
+    /// Builds confirmation evidence from a stored receipt.
+    fn observe_confirmation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>>;
+
+    /// Maps stored receipt evidence to the verified state output.
+    fn output_from_receipt<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_inputs: &'a MaterializedInputs,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output>;
+
+    /// Maps stored confirmation evidence to the verified state output.
+    fn output_from_confirmation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_inputs: &'a MaterializedInputs,
+        prepared: &'a store::SideEffectArtifactProjection,
+        submission: &'a store::SideEffectArtifactProjection,
+        receipt: &'a store::SideEffectArtifactProjection,
+        confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output>;
 }
 
-/// Generic one-step side-effect protocol driver.
-///
-/// The driver chooses one protocol action from a runtime-minted [`SideEffectAttemptView`] and
-/// proposes one runner output. It never commits, derives store preconditions, reads artifacts, or
-/// calls live providers directly.
+/// Generic one-step side-effect submit driver.
 pub struct SideEffectDriver;
 
 #[path = "side_effect_driver/evidence.rs"]
@@ -566,72 +611,7 @@ pub(crate) use self::evidence::SideEffectEvidenceBuilder;
 
 #[path = "side_effect_driver/driver.rs"]
 mod driver;
-
-/// Adapter callbacks used by the generic side-effect verify driver.
-pub trait SideEffectVerifyCallbacks {
-    /// Typed submission evidence recovered by the verify role.
-    type Submission: MfmValue + Send + Sync + 'static;
-    /// Typed receipt evidence.
-    type Receipt: MfmValue + Send + Sync + 'static;
-    /// Typed confirmation evidence.
-    type Confirmation: MfmValue + Send + Sync + 'static;
-    /// Typed state output built from terminal verification evidence.
-    type Output: MfmValue + Send + Sync + 'static;
-    /// Typed not-submitted proof evidence recovered by the verify role.
-    type NotSubmittedProof: MfmValue + Send + Sync + 'static;
-    /// Typed ambiguity evidence recovered by the verify role.
-    type AmbiguityEvidence: MfmValue + Send + Sync + 'static;
-
-    /// Recovers a previously unknown submission without crossing the submission boundary again.
-    fn recover_unknown_submission<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        submit_node: &'a spec::NodeSpec,
-        submit_inputs: &'a MaterializedInputs,
-        prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
-    ) -> SideEffectUnknownSubmissionDecisionFuture<
-        'a,
-        Self::Submission,
-        Self::NotSubmittedProof,
-        Self::AmbiguityEvidence,
-    >;
-
-    /// Reads receipt evidence for an observed submission.
-    fn read_receipt<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        submit_node: &'a spec::NodeSpec,
-        submit_inputs: &'a MaterializedInputs,
-        submission: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>>;
-
-    /// Builds confirmation evidence from a stored receipt.
-    fn build_confirmation<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        submit_node: &'a spec::NodeSpec,
-        submit_inputs: &'a MaterializedInputs,
-        receipt: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>>;
-
-    /// Maps stored receipt evidence to the verified state output.
-    fn map_receipt_to_output<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        submit_node: &'a spec::NodeSpec,
-        submit_inputs: &'a MaterializedInputs,
-        receipt: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, Self::Output>;
-
-    /// Maps stored confirmation evidence to the verified state output.
-    fn map_confirmation_to_output<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        submit_node: &'a spec::NodeSpec,
-        submit_inputs: &'a MaterializedInputs,
-        confirmation: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, Self::Output>;
-}
+pub(crate) use self::driver::{authored_plan, verify_authored_plan};
 
 /// Generic one-step side-effect verification driver.
 pub struct SideEffectVerifyDriver;
@@ -877,6 +857,31 @@ where
     let value = serde_json::to_value(value)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     canonical_json(value)
+}
+
+/// Derives the canonical runtime idempotency key for typed side-effect input.
+///
+/// Domain replay verifiers use this helper to recompute the exact key authored by the live
+/// side-effect driver rather than maintaining a second hashing formula.
+pub fn side_effect_idempotency_key<T>(value: &T) -> Result<events::IdempotencyKeyRef>
+where
+    T: MfmValue,
+{
+    let schema_id =
+        T::schema_id().map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let semantic_type_id =
+        T::semantic_id().map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let value = serde_json::to_value(value)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let digest = crate::content_digest_json(serde_json::json!({
+        "schema_id": schema_id.as_str(),
+        "semantic_type_id": semantic_type_id.as_str(),
+        "value": value,
+    }))?;
+    Ok(events::IdempotencyKeyRef::new(format!(
+        "mfm.runtime.idempotency.{}",
+        digest.as_str()
+    ))?)
 }
 
 fn missing_driver_projection(label: &str) -> RuntimeError {

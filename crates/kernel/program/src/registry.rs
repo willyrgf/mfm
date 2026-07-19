@@ -200,6 +200,28 @@ impl StateRegistryBuilder {
             descriptor_id: descriptor.descriptor_id().clone(),
             runner,
         };
+        self.insert(key, record)
+    }
+
+    /// Includes every validated registration from a child registry snapshot.
+    ///
+    /// Reincluding the same registration is idempotent. A conflicting descriptor for an existing
+    /// kind/version pair fails with the same closed error as direct registration.
+    pub fn include(
+        &mut self,
+        snapshot: StateRegistrySnapshot,
+    ) -> std::result::Result<(), RegistryError> {
+        for (key, record) in snapshot.records {
+            self.insert(key, record)?;
+        }
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        key: StateRegistrationKey,
+        record: StateRegistrationRecord,
+    ) -> std::result::Result<(), RegistryError> {
         if let Some(existing) = self.snapshot.records.get(&key) {
             if existing != &record {
                 return Err(RegistryError::DuplicateStateRegistration {
@@ -288,6 +310,28 @@ impl OperationRegistryBuilder {
         let record = OperationRegistrationRecord {
             descriptor_id: descriptor.descriptor_id().clone(),
         };
+        self.insert(key, record)
+    }
+
+    /// Includes every validated registration from a child registry snapshot.
+    ///
+    /// Reincluding the same registration is idempotent. A conflicting descriptor for an existing
+    /// kind/version pair fails with the same closed error as direct registration.
+    pub fn include(
+        &mut self,
+        snapshot: OperationRegistrySnapshot,
+    ) -> std::result::Result<(), RegistryError> {
+        for (key, record) in snapshot.records {
+            self.insert(key, record)?;
+        }
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        key: OperationRegistrationKey,
+        record: OperationRegistrationRecord,
+    ) -> std::result::Result<(), RegistryError> {
         if let Some(existing) = self.snapshot.records.get(&key) {
             if existing != &record {
                 return Err(RegistryError::DuplicateOperationRegistration {

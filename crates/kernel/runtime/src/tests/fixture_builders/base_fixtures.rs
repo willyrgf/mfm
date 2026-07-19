@@ -275,7 +275,7 @@ pub(in crate::tests::support) fn fixture() -> Fixture {
                 capabilities: no_caps,
                 runner: "managed_platform_write".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             })),
             spec::DescriptorIdentity::Renderer(Box::new(renderer.clone())),
         ],

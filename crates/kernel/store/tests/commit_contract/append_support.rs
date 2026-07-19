@@ -232,7 +232,7 @@ pub(super) fn append_side_effect_prepare(store: &mut StoreContractRunStore, run_
             side_effect_claim(),
             side_effect_prepared(1, "token-1"),
         ],
-        vec![intent_evidence],
+        vec![intent_evidence, prepared_artifact_ref()],
     )
     .expect("append sidefx prepare");
 }
@@ -379,8 +379,9 @@ pub(super) fn append_certified_side_effect_commit(
     run_id: &RunId,
     commit_key: &str,
     mut payloads: Vec<KernelEventPayload>,
-    required_artifacts: Vec<ArtifactEvidenceRef>,
+    mut required_artifacts: Vec<ArtifactEvidenceRef>,
 ) -> std::result::Result<CommitOutcome, StoreError> {
+    add_prepared_artifact_requirements(&payloads, &mut required_artifacts);
     store.certify_payloads_for_run(run_id, &mut payloads);
     store.append_prepared_commit(typed_commit_request! {
         run_id: run_id.clone(),

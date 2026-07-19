@@ -4,13 +4,16 @@
 //! This crate owns the domain-free facts kernel surface: descriptor identity,
 //! field extraction contracts, fact visibility, fact keys, claim identity,
 //! internal refs, and canonical query evidence. See `docs/design.md` for the
-//! typed-core authority contract and `docs/portfolio-collect-then-report.md`
+//! typed-core authority contract and the portfolio section of `docs/design.md`
 //! for portfolio fact-backed reporting. The crate stays behind the kernel
 //! dependency boundary without mixing domain logic into event, runtime, store,
 //! app, or collector code.
 //!
 //! ```
-//! assert_eq!(mfm_facts::FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");
+//! use mfm_facts::{FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, FACTS_KERNEL_CONTRACT_VERSION};
+//!
+//! assert_eq!(FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");
+//! assert_eq!(FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, "mfm.fact.content-identity.v1");
 //! ```
 
 macro_rules! impl_fact_tag {
@@ -51,6 +54,7 @@ macro_rules! impl_fact_tag {
 
 mod claim;
 mod codec;
+mod content_identity;
 mod descriptor;
 mod extraction;
 mod ids;
@@ -80,6 +84,13 @@ pub use codec::{
     subject_material_hash, typed_fact_subject_evidence, typed_fact_subject_value,
     validate_descriptor, validate_fact_query_evidence,
 };
+pub use content_identity::{
+    canonical_fact_content_identity_bytes, derive_fact_content_identity,
+    derive_fact_content_identity_from_typed_values, fact_content_identity_digest,
+    verify_fact_claim_content_identity, verify_internal_fact_ref_content_identity,
+    verify_serialized_fact_content_identity_from_typed_values, FactContentIdentity,
+    FactContentIdentityEvidence, FACT_CONTENT_IDENTITY_DIGEST_DOMAIN,
+};
 pub use descriptor::{
     FactDescriptor, FactFieldDescriptor, FactFieldPolicy, FactOrderingPolicy, FactOrderingTerm,
 };
@@ -100,7 +111,7 @@ pub use receipt::{
     StoreReadFrontierType,
 };
 pub use scalar::FactCanonicalScalar;
-pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV1};
+pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV2};
 pub use tags::{
     FactAudience, FactFieldExposure, FactFieldExtraction, FactFieldSource, FactFieldValueType,
     FactMetadataField, FactQueryOperator, FactScale, FactVisibility, FactVisibilityScope,
@@ -118,8 +129,8 @@ pub const FACTS_KERNEL_CONTRACT_VERSION: &str = "mfm.facts.v1";
 /// V2 fact-query evidence wire contract with deterministic unsigned receipt metadata.
 pub const FACT_QUERY_EVIDENCE_CONTRACT_VERSION: &str = "mfm.fact-query-evidence.v2";
 
-/// V1 fact query compiler version recorded in canonical query plans.
-pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v1";
+/// V2 fact query compiler version recorded in canonical query plans.
+pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v2";
 
 /// V1 canonicalizer version recorded in canonical query plans.
 pub const FACT_QUERY_CANONICALIZER_VERSION: &str = "mfm.canonical.v1";

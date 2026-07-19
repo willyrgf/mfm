@@ -144,7 +144,7 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         | "RendererVersion" => visible_ascii_256_type(type_name),
         "PublicFieldPath" => public_field_path_type(),
         "ResourceNamespace" => resource_namespace_type(),
-        "RendererKind" => stable_author_key_type(type_name),
+        "RendererKind" | "StableAuthorKey" => stable_author_key_type(type_name),
         "RunnerFactoryId"
         | "NixDerivationHash"
         | "NixOutputHash"
@@ -159,20 +159,29 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         | "AmbiguityCode"
         | "ErrorCode"
         | "ClaimFencingToken"
-        | "EntryPointOpId" => visible_ascii_256_type(type_name),
+        | "EntryPointId"
+        | "RuntimeBindingId" => visible_ascii_256_type(type_name),
         "EntryPointLaunchEvidence" => struct_type(
             "EntryPointLaunchEvidence",
             vec![
                 schema_field(
-                    "resolved_op_id",
-                    "EntryPointOpId",
+                    "entry_point_id",
+                    "EntryPointId",
                     EventFieldCardinality::Required,
                 ),
                 schema_field(
-                    "entry_point_registry_digest",
-                    "ContentDigest",
-                    EventFieldCardinality::Required,
+                    "configured_targets",
+                    "ConfiguredTargetEvidence",
+                    EventFieldCardinality::Repeated,
                 ),
+            ],
+        ),
+        "ConfiguredTargetEvidence" => struct_type(
+            "ConfiguredTargetEvidence",
+            vec![
+                schema_field("target", "StableAuthorKey", EventFieldCardinality::Required),
+                schema_field("schema_id", "SchemaId", EventFieldCardinality::Required),
+                schema_field("digest", "ContentDigest", EventFieldCardinality::Required),
             ],
         ),
         "FactKind" | "FactKey" => visible_ascii_256_type(type_name),
@@ -586,6 +595,26 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
                     "nix_output_hash",
                     "NixOutputHash",
                     EventFieldCardinality::Optional,
+                ),
+            ],
+        ),
+        "CapabilityImplementationIdentity" => struct_type(
+            "CapabilityImplementationIdentity",
+            vec![
+                schema_field(
+                    "capability_kind",
+                    "CapabilityKind",
+                    EventFieldCardinality::Required,
+                ),
+                schema_field(
+                    "capability_version",
+                    "CapabilityVersion",
+                    EventFieldCardinality::Required,
+                ),
+                schema_field(
+                    "implementation_id",
+                    "RuntimeBindingId",
+                    EventFieldCardinality::Required,
                 ),
             ],
         ),

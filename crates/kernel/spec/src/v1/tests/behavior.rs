@@ -13,7 +13,7 @@ fn certified_spec_hash_golden() {
     );
     assert_eq!(
         spec.spec_hash().expect("spec hash").as_str(),
-        "spec:sha256-jcs-v1:b02b860002e89c1904df121fd4d9a9686c79d3b504e5cb27de824761d15f9a8c"
+        "spec:sha256-jcs-v1:2a2cc678c27df0580379244e4e825799888991bb602b0a03f5733109690b1319"
     );
     assert!(canonical
         .as_str()

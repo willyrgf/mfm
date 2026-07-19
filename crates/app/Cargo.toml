@@ -10,6 +10,7 @@ category = "app"
 test-support = ["mfm-store/test-support"]
 
 [dependencies]
+alloy-primitives = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -19,9 +20,7 @@ thiserror = { workspace = true }
 
 mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../adapters/evm" }
-mfm-adapters-evm-contracts = { path = "../adapters/evm-contracts" }
 mfm-adapters-portfolio = { path = "../adapters/portfolio" }
-mfm-authored-config = { path = "../authored-config" }
 mfm-artifact-capabilities = { path = "../artifact-capabilities" }
 mfm-btc-capabilities = { path = "../btc-capabilities" }
 mfm-canonical = { path = "../kernel/canonical" }
@@ -30,43 +29,39 @@ mfm-certify = { path = "../kernel/certify" }
 mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
-mfm-evm-contract-model = { path = "../evm-contract-model" }
+mfm-evm-signing = { path = "../evm-signing" }
 mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }
 mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
-mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
-mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
+mfm-op-portfolio-snapshot = { path = "../ops/portfolio-snapshot-op" }
+mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-runtime-config = { path = "../runtime-config" }
 mfm-state-portfolio = { path = "../states/portfolio" }
-mfm-state-evm-contracts = { path = "../states/evm-contracts" }
 mfm-states-btc = { path = "../states/btc" }
 mfm-states-evm = { path = "../states/evm" }
-mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-signing = { path = "../signing" }
+mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
-mfm-stream-store-postgres = { path = "../storages/stream-store-postgres" }
+mfm-storage-postgres = { path = "../storages/postgres" }
 mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
 mfm-values = { path = "../kernel/values" }
+toml = "0.8"
+url = { workspace = true }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-effects = { path = "../kernel/effects" }
-mfm-manual-auth = { path = "../kernel/manual-auth" }
-mfm_core = { path = "../core" }
+mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
 tempfile = "3.0"
 trybuild = "1.0"
-
-[[test]]
-name = "manual_resolution"
-required-features = ["test-support"]

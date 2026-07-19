@@ -37,8 +37,9 @@ they do not own workflow semantics.
   executors over the store, and leases/claims are liveness coordination only.
 - Admission, drive, verify, and replay must not consult mutable registries or external policy
   oracles; outcome-affecting policy is resolved once into hash-defining certified spec material.
-- Side effects use typed intent, typed idempotency input, durable ledger events, and typed receipt
-  or recovery evidence.
+- Side effects use one state-authored typed intent plus idempotency input, required typed prepared
+  invocation authority, durable ledger events, and typed submission, receipt, confirmation, or
+  recovery evidence. State logic is pure; adapters alone prepare and submit external mutations.
 - Side-effect verification policy is hash-defining certified config. `RunAdmitted` may record
   launch audit evidence, but it is not independent finality or verification authority.
 - Certified saga decisions are derived from the certified spec plus append-only stream facts.
@@ -156,6 +157,77 @@ Persisted and public surfaces are inventoried in `docs/persisted-public-surfaces
 is the review checklist for applying this no-secret invariant to app, CLI, REST, storage, artifact,
 and diagnostic boundaries.
 
+## Fact Identity And Query Terms
+
+Fact identity retains the complete canonical typed subject object. `FactSubjectMaterialV2` wraps
+that object under `mfm.fact-subject-material.v2`; it never projects identity down to a configured
+list of scalar paths. The v2 subject namespace binds the fact kind and subject schema id. `FactKey`
+then binds that namespace hash to the full subject-material hash, so an undeclared nested subject
+field, optional tagged-enum payload, account, asset, or contract address cannot disappear from
+identity merely because it is not indexed.
+
+Descriptor-declared subject fields validate typed scalar paths and define query-term extraction.
+They are searchable projections, not identity declarations. `fact_index_terms` may omit optional
+terms, but rebuild, signed query evidence, replay, and content-identity verification must rehydrate
+the retained full subject, validate every declared required term, and derive terms again. No
+flattened path list, delimiter-joined asset key, or term cache can substitute for canonical subject
+material.
+
+Canonical fact-query v2 may carry one opaque `FactContentIdentityEvidence` narrowing value. The
+compiler binds its descriptor component to the resolved descriptor, and providers compare all four
+compact components against trusted indexed references before ordering and limiting. This filter is
+only a bounded candidate-narrowing mechanism: the consumer must still hydrate canonical subject and
+response material and rederive the full content identity before trusting a returned fact. Query v1
+has no reader.
+
+## Current Semantic Configuration And Launch Boundary
+
+Semantic configuration has a strict pre-admission path and a separate process-local runtime path.
+
+Setup import is the only TOML semantic configuration surface. `mfm-app` decodes a closed
+`SetupDocument { configs: Vec<SetupConfig> }`, validates every typed value, derives its stable
+target from the intrinsic domain id, canonicalizes it through the typed descriptor path, rejects
+prohibited secret-bearing fields, enforces size limits, and atomically upserts the complete batch.
+A failed value or duplicate target leaves all current configuration unchanged. Configuration storage
+persists opaque canonical bytes plus target/schema/digest; target is the primary key. It has no
+history, revision selector, digest lookup, cursor, or knowledge of setup kinds or domain types.
+
+Run start accepts one exact entry-point id and one target. The sole public entry point is
+`mfm.portfolio/snapshot@1`, whose target is a `PortfolioId` such as `acme/primary`. The target
+contains no collector policy, child config, runtime route, read bound, collect/reuse switch, or
+report-only switch. App assembly loads that target's current row, requires the expected schema,
+verifies canonical bytes and digest, revalidates semantic config, verifies the embedded
+`portfolio_id` equals the selected target, and only then calls the deterministic operation builder.
+The completed config, typed graph, certificate, and runtime authority contain concrete values.
+
+`RunAdmitted` records the exact entry-point id and sorted `(target, schema_id, digest)` evidence.
+The certified spec, certificate, seeds, retained artifacts, facts, outputs, and append-only run
+stream are the authority after admission. Resume, status, stream, public-output, and replay paths
+must not query mutable current configuration or reconstruct semantic config from current setup
+files. Replay verifies retained evidence and recomputes pure behavior from certified values only.
+
+Runtime TOML is intentionally outside this semantic boundary. It maps non-secret source and signer
+references to process-local routing and capability resources, is not semantic configuration data,
+and is never persisted in specs, events, artifacts, public outputs, or replay inputs. Live assembly
+selectively resolves only the requested EVM route or the requested signer plus its referenced
+keystore; unrelated malformed entries do not block that resource. Evidence-only reads do not load
+runtime TOML. Selected EVM routes admit only HTTP(S) URLs without userinfo and valid HTTP
+authorization values. Ingress validates those rules before `RunAdmitted` and preserves
+`RuntimeConfigRequired` versus `RuntimeConfigInvalid` with closed semantic diagnostics. There is no
+fallback or compatibility surface.
+
+Portfolio selection consumes family completion authority without a generic fan-in value. The
+snapshot operation passes typed Bitcoin and EVM receipt vectors into one report operation. That
+operation's structured input binding is passed unchanged into `SelectHoldingsState`; the
+managed-write input edges are the readiness barrier. The snapshot operation constructs only child
+operations, while the report operation constructs only selection, snapshot assembly, and report
+projection. The state validates exact portfolio demand, receipt family/chain/source coverage, and
+receipt uniqueness before it authors any query. There is no portfolio manifest identity, generic
+receipt entry, count/readiness value, app-only fan-in runner, or separate replay verifier. This
+explicit downstream state-to-state contract is the sole approved reason for
+`mfm-state-portfolio` to depend on the Bitcoin and EVM state packages; state packages remain
+independent of adapters, transports, app assembly, and runtime config.
+
 ## Typed Program Authoring
 
 State outputs are represented by branded typed handles. Handles carry the produced Rust value type,
@@ -182,11 +254,14 @@ A state type is executable only after framework registration validates:
 - config, input, output, and public descriptor identities
 - effect class
 - capability set
-- side-effect contract when applicable
+- hash-defining effect contract for every external read and side effect
 - runner kind and executable identity
 
 Planning requires state and operation membership in the builder registry. Runtime requires the
 certified descriptor identity and the registered runner identity to match the stored spec.
+Parent operation registries compose child state, operation, and certification registries as one
+unit, then register only parent-owned types. Repeating a child's concrete inventory in its parent
+is forbidden because it creates a second topology authority that can drift independently.
 
 ## Effects And Capabilities
 
@@ -202,6 +277,18 @@ own live network, filesystem, clock, process, or signer access when that access 
 execution. Domain helpers may compute deterministic values, parse data, or validate typed inputs,
 but side effects and replayable observations must pass through typed capabilities.
 
+Every `ReadExternal` state owns canonical `Plan` and `Evidence` value contracts plus a pure reducer.
+The plan is derived only from certified config, input, and context; the reducer consumes the same
+input/context, one primary evidence value, and any kernel-owned fact-query evidence. Plan and
+evidence schema and semantic identities are included in the state descriptor's effect-contract
+digest, so either identity changing produces different descriptor authority.
+
+Runtime uses one generic external-read runner to load arbitrary certified input trees and context,
+invoke the state planner, let an adapter execute only the resulting plan, retain exactly one primary
+external-read evidence artifact plus any fact-query evidence, and invoke the reducer. Replay loads
+the same config/input/context and retained evidence and calls the same reducer. It constructs no
+live capability implementation and rejects missing, duplicate, or wrong-schema primary evidence.
+
 ## State Capability Boundary
 
 States declare authority. Transports implement authority. Adapters bind the two at runtime.
@@ -212,21 +299,113 @@ external authority. They must not perform live IO, route endpoints, resolve sign
 workflow topology.
 
 States may depend on capability contract crates. States must not depend on live transport
-implementation crates. For example, a contract validation state may depend on an EVM capability
-contract that defines an EVM call-read capability, request, and evidence type. It must not depend on
-the live JSON-RPC transport that chooses an endpoint, attaches authorization, retries HTTP calls, or
-uses a concrete client library.
+implementation crates. For example, a contract validation state may depend on the coherent
+`EvmReadCapability` and its source-bound session types. It must not depend on the live JSON-RPC
+transport that chooses an endpoint, attaches authorization, or uses a concrete client library.
 
 Runtime/app assembly supplies concrete capability implementations for live execution. Replay
-supplies replay implementations backed only by recorded facts, typed artifacts, and side-effect
-evidence. Adapters translate state-owned intent into capability calls and evidence phases without
-moving protocol IO or signer material into state code.
+reconstructs state input and context from certified authority and consumes only recorded facts,
+typed artifacts, and side-effect evidence. Adapters translate state-owned plans or mutation intent
+into capability calls and evidence phases without moving protocol IO or signer material into state
+code.
+
+The reusable EVM surface is intentionally narrow. `SubmitEvmTransactionState` is the sole EIP-1559
+mutation state, and its closed action is direct `Create` or ordinary `Call`; one side-effect node
+always represents one transaction. Operation crates own constructor/call encoding and any
+dependency-ordered domain composition. The independent `ValidateEvmContractState` is the one
+exact-anchor code/call validation
+read state; neither primitive creates a public operation or application entry point by itself.
+
+Contract validation accepts an explicitly anchored address and a mandatory expected runtime-code
+hash other than the empty-code digest. Its bounded ordered checks retain full caller, target, value,
+calldata, gas, access-list, and exact-return context. One bound `EvmReadSession` performs code and
+calls at the same EIP-1898 hash selector with `requireCanonical = true`, then re-reads the authored
+number and requires the same hash. The state-owned reducer rejects empty code, code-hash drift,
+call-context/result drift, session-implementation/network/chain drift, evidence
+omission/reordering, and reorgs.
+The capability contract owns the 128-KiB deployed-code maximum and every `EvmCall` owns its exact
+decoded-result maximum. The HTTP transport derives method body limits from those values and checks
+content length and streamed chunks before JSON decoding; its one-MiB limit is only an outer defense
+for methods without a smaller semantic response contract.
+The compact output contains only the address, anchor, observed code hash, and validation-plan
+digest. Evidence-only replay invokes that reducer without a route, transport, signer, or runtime
+configuration.
+
+Transaction idempotency is the full schema- and semantic-bound immutable authored intent: semantic
+network and chain, expected sender, signer ref, deterministic signing profile, action bytes/value,
+access list, and the one checked gas/fee policy. The later prepared invocation is separate authority.
+Under the exclusive `(network_id, chain_id, expected_sender)` lane, it fixes the pending nonce, fee
+observations, gas estimate, unsigned envelope, signing digest, expected signed hash, derived CREATE
+address when applicable, and redacted checked-session evidence. Preparation contains no signature,
+raw signed envelope, endpoint, credential, keystore path, or provider body.
+
+The adapter signs once during ordinary preparation and holds the resulting bearer envelope only in
+a bounded process-local one-shot cache. Submission consumes those exact bytes. A provider
+acknowledgement is accepted only when its hash equals the locally computed prepared hash; that
+acknowledgement immediately becomes submission evidence without a visibility lookup. If the submit
+exchange does not return a trusted acknowledgement, the adapter performs exact-hash lookup once and
+persists `SubmissionUnknown` when the lookup is absent or unavailable. Recovery of that durable
+uncertainty is observation-only: it never reconstructs a signature or invokes submission again.
+EVM nonce observations never mint a non-submission proof. The sender lane serializes MFM attempts
+only and cannot reserve a nonce against another wallet, operator, or process.
+
+The mutation runner binds a `DeterministicSigningProvider` and records the concrete signing
+capability implementation independently from the transaction-session implementation. The keystore
+provider identity is `mfm.signing.keystore.rfc6979.v1`; the EVM signing boundary rejects a provider
+whose deterministic profile is not `secp256k1.rfc6979.recoverable.low_s.v1` before requesting a
+signature. Implementing only the unconstrained generic signing-provider contract is insufficient.
+
+Transaction lookup must match every prepared public field. Receipts retain strict status, optional
+contract address, and complete coherent successful-execution logs with a lossless immutable read
+surface for downstream operations. Only a successful direct `Create` may carry a contract address,
+and it must be the sender/nonce-derived address; reverted creation and every `Call` forbid one.
+Because top-level revert rolls logs back, reverted receipts must have no logs at capability and
+persisted/replay boundaries. Revert is a terminal external effect. Finalized evidence re-reads the
+unchanged receipt, checks
+its number/hash against a block-by-number result, and proves the certified depth against a fresh
+head. Provider, route, transport, HTTP/RPC, response, and source-binding failures after submission
+block the open attempt and resume observation from durable ledger evidence; they never terminalize
+trusted on-chain success or authorize another broadcast. Deterministic request, retained-evidence,
+signed-hash, reducer, and certified-authority violations remain terminal. Replay decodes the same
+typed intent, preparation, transaction, receipt, and confirmation artifacts and recomputes their
+relations without network, signer, keystore, or current runtime config.
+
+The retained transaction-signing foundation is one canonical path in `mfm-evm-signing`. It admits
+one opaque Alloy `TxEip1559`, obtains its signing digest from Alloy, builds one generic digest-sign
+request, verifies the exact deterministic profile, low-s signature, recoverable parity, public
+identity, and expected sender, then asks Alloy to finalize and EIP-2718 encode the envelope. The
+signed transaction hash is Keccak-256 of those exact transient bytes and is cross-checked against
+Alloy's hash. There is no legacy/style enum, custom RLP, alternate encoder, normalization fallback,
+or second normal-path signing call.
+
+Transaction quantity ingress uses `U256`. Alloy 0.8 represents chain id, nonce, and gas limit as
+`u64` and fee fields as `u128`. The one pre-gas type-2 description checked-converts chain id, nonce,
+and fees before estimation IO; the exact complete object is sent to `eth_estimateGas` against
+`pending`, then the checked gas result is added to that same description to form signing authority.
+Envelope admission also checks the gas limit. Unrepresentable values are rejected without
+truncation, clamping, or fallback, while transaction value remains full `U256`. This fail-closed
+representability boundary is the only production path. Supporting wider fee fields would require
+upstream Alloy support, not a parallel MFM envelope implementation.
+
+`mfm-signing` carries the protocol-neutral algorithm and explicit signing-profile ids on every
+transient request/result. The admitted EVM profile is deterministic RFC 6979 recoverable
+secp256k1 with canonical low-s output. `mfm-signers-keystore` binds exactly one runtime signer ref
+to one keystore entry, enforces that generic algorithm/profile and expected identity, and leaves
+domain/purpose authorization to the caller. It performs file access, password resolution,
+unlock/KDF, key access, and signing on a blocking worker with one-request unlock scope. App
+assembly admits the signer/keystore support families without loading EVM routes, then selects the
+requested `[signers]` entry and its referenced `[keystores]` profile.
 
 App assembly keeps evidence-only services separate from live driver services. Status, stream
 inspection, list/watch, replay, and public-output rendering construct only store, artifact, and
 certification/replay authority; they do not parse live runtime config, construct live EVM transports,
 or construct signer providers. Malformed or missing live capability wiring can block live
 start/resume when that run needs it, but it must not affect evidence-only reads.
+
+Initial admission validates ingress for every domain node. Resume revalidates process-local live
+capability only for nonterminal domain nodes that can still execute in the verified stream; a
+terminal source read must not make downstream deterministic work depend on an unavailable runtime
+configuration.
 
 Runtime admission binds each certified capability descriptor to a registered non-secret
 implementation identity before the run can start or resume. Missing or mismatched implementation
@@ -236,15 +415,50 @@ Replay and resume semantics follow the effect class:
 
 - Pure states replay by recomputing deterministic state behavior.
 - Read states replay from recorded read evidence. Replay must not call live transports.
-- Side-effect states resume from durable phase evidence such as intent, idempotency, preparation,
-  submission, receipt, confirmation, or recovery evidence. Resume must not duplicate external
-  mutations or infer mutation status from unstored state.
+- Side-effect states resume from durable phase evidence such as intent, idempotency, required
+  prepared invocation authority, submission, receipt, confirmation, or recovery evidence. Resume
+  must not duplicate external mutations or infer mutation status from unstored state. The kernel
+  derives the full schema-bound idempotency key; adapters cannot supply or truncate it.
 - Replay never constructs live transports or signer providers.
 
-Portfolio reporting is fact-backed and report-only after collectors cutover: pure report states
-recompute from certified config; SelectHoldings recomputes from recorded Platform fact-query
-evidence and retained response artifacts only. Public-facts CLI/REST is not report selection
-authority. See `docs/portfolio-collect-then-report.md`.
+Portfolio holding intent is direct and aggregate-validated: each symbol is a `Native` source or an
+EVM `Erc20` source with a normalized non-zero contract address, and EVM native scale is owned by
+the semantic network. Admission rejects excessive networks, wallets, symbols, wallet-symbol
+relations, or distinct sources for one EVM network before graph expansion or provider work.
+
+Each demanded EVM network is one child call to `EvmBalanceCollectionOperation`. The reusable
+operation expands to exactly `CollectEvmBalancesState` followed by `RecordEvmBalanceFactsState` and
+exports only an `EvmBalanceCollectionReceipt`. The read state owns the sorted native/ERC-20 source
+plan and deterministic reducer. One checked source-bound session resolves latest once, reads
+deduplicated token metadata and every balance at the exact EIP-1898 hash with canonicality
+required, and finishes with one number-to-hash recheck. Reads use bounded concurrency. The
+managed-write state publishes one `evm.balance_snapshot` fact per source and the checked receipt in
+the same atomic attempt.
+
+The generic source contract is `EvmBalanceSource { account, asset }`, where `EvmBalanceAsset` is
+`Native` or `Erc20` with a non-zero contract address. Typed constructors accept checked EVM
+addresses and persisted values retain their canonical lowercase representation. The fact subject,
+collection plan, evidence, observation batch, and receipt use this one EVM-domain algebra; they
+contain no portfolio, wallet, symbol, route, endpoint, schedule, or invocation identity. Their
+shared EVM block anchor persists the full U256 number as canonical decimal plus canonical hash. The
+receipt retains only network/chain, anchor, sorted sources, and verified content identities; it
+does not duplicate response material.
+
+`PortfolioSnapshotOperation` constructs collector operation calls and one
+`PortfolioReportOperation` call; it constructs no state directly. The report operation receives
+the typed Bitcoin and EVM receipt vectors and passes the same structured binding to selection,
+which compiles one exact query per demanded holding. The fact-index provider evaluates the complete
+batch over one store snapshot and applies receipt content identity before the one-row limit. The
+production Postgres provider reconstructs append-only fact authority once for that batch, not once
+per holding. Selection rehydrates the returned response and rederives full
+descriptor/subject/response identity and fact refs before accepting it. Content identity
+intentionally treats any number of byte-identical append occurrences as equivalent; deterministic
+last-write ordering selects one occurrence without scaling hydration with history. Missing receipt
+content, mixed frontiers, malformed cardinality, tampering, unexpected receipts, or incomplete coverage fail closed. The
+report operation assembles only the selected store material, rechecks exact config-derived
+coverage, and projects the structured report. EVM collection replay belongs only to
+`mfm-adapters-evm`; portfolio replay verifies selection, snapshot, and report. Both use retained
+evidence without a live route. Public-facts CLI/REST is not portfolio selection authority.
 
 ## Certified Saga Semantics
 
@@ -298,7 +512,7 @@ independently proved external domain truth.
 - scopes, seeds, configs, nodes, cells, bridge nodes, and public outputs
 - input binding trees and value lineage
 - effect and capability evidence
-- side-effect contracts
+- hash-defining external-read and side-effect contracts
 - retained config and seed artifact refs
 - public-output render nodes and output evidence
 
@@ -354,7 +568,7 @@ be the sole authority for resume, replay, public output, retention, or side-effe
 The first certified persistent storage path is:
 
 ```text
-crates/storages/stream-store-postgres
+crates/storages/postgres
 ```
 
 Postgres is the only production persistence backend. It stores append-only `commits`, canonical
@@ -364,7 +578,7 @@ commit cursor authority, store metadata, and mutable operational admission-lane 
 trust boundary; callers cannot supply or update it. Observation list/watch rows are derived from
 strict authority at read time. Artifact bytes live in Postgres; production app, CLI, and REST paths
 do not stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
-migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
+migrations are owned by `crates/storages/postgres`; runtime callers validate schema
 contract shape and must not run startup auto-DDL. Because MFM is pre-production, replacing a
 persisted contract shape is a destructive schema change that updates the baseline directly.
 Existing-run detection folds authoritative `run_events`; there is no separate run-admission index.
@@ -518,6 +732,10 @@ sealed handles but cannot append to the run stream. Context-bound output artifac
 when the runner's registered extractor can recover the certified context metadata from the staged
 bytes and it matches the output cell's certified context binding.
 
+For `ReadExternal`, the shared runner performs config, arbitrary input-tree, and context
+materialization; state planning; adapter plan execution; state reduction; and typed output/evidence
+staging in that order. Adapters do not own a second reducer or recorded-provider implementation.
+
 The commit planner owns all production execution appends. `RunAdmissionLifecycle` verifies and
 stages launch material, then commits exactly one `RunAdmitted` root event with certified spec,
 certificate, config, seed, executable, binding-digest, framework, source, and caller launch-time
@@ -567,23 +785,45 @@ stream, verifies completed cell and side-effect evidence against the spec, then 
 type-valid frontier.
 
 Replay loads the stored certified spec and certificate artifacts, verifies them against the compiled
-certification registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses
-replay adapters only. Live capability construction during replay is a contract violation.
+certification registry, compares the hashes to `RunAdmitted`, and rebuilds stream evidence.
+External reads are recomputed by the generic replay driver through the state-owned reducer;
+side-effect protocols use their evidence-only domain verifier. Live capability construction during
+replay is a contract violation.
 Replay service construction itself is evidence-only app assembly: it must not construct the live
 runner registry, live transports, signer providers, keystores, or live capability runtime config.
 
-Live provider identity is enforced by bound provider implementations. Runners derive a certified
+Live provider identity is enforced by bound session implementations. Runners derive a certified
 semantic binding, such as EVM `network_id` plus expected chain id or Bitcoin `network_id`,
-`source_identity`, and expected network tag, before issuing operation-only capability requests. A
-route that resolves but observes incompatible source evidence fails after `RunAdmitted` as an
-attempt/capability failure with a closed redacted provider diagnostic. Provider diagnostics carry a
+`source_identity`, and expected network tag, before issuing operation-only capability requests. An
+EVM collection attempt binds one direct route, probes its chain once, and persists one redacted
+session identity: `network_id`, chain id, `source_ref`, and transport `implementation_id`. Every
+native balance, ERC-20 metadata, ERC-20 balance, and number-to-hash re-verification uses that same
+session. The canonical capability evidence is carried directly in the aggregate EVM collection
+evidence; the shared block anchor and typed address/asset algebra are likewise retained without
+portfolio-specific mirrors. The checked collection receipt carries the semantic network, chain,
+anchor, sorted sources, and verified fact content identities, while source provenance remains only
+in read evidence. Balance responses remain solely in retained facts and are reread before portfolio
+assembly. One live attempt keeps one fixed source-bound session. Its checked `source_ref` is audit
+provenance explaining which
+process-local route served that attempt; it may differ on a later attempt or resume after runtime
+routing changes. Replay never resolves it against current runtime config or compares it with a
+current route. Post-commit changes remain detectable through ordinary artifact digest and stream
+integrity. If provider identity must influence semantic trust, the author must certify an explicit
+oracle/source identity instead of relying on process-local routing. A route that resolves but
+observes an incompatible semantic network or chain fails after `RunAdmitted` as an
+attempt/capability failure with a closed redacted provider diagnostic.
+Provider diagnostics carry a
 provider family, stable diagnostic code, optional redaction-safe operation id, and closed
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,
 response-shape failure, unsupported operation, operation incomplete, and source mismatch. They must
 not carry RPC URLs, authorization headers, file paths, provider messages, request/response bodies,
-signer material, or signed transactions. Replay providers rebuild the certified provider binding
-and verify recorded evidence against that binding without resolving source refs or policy ids
-through current runtime config.
+signer material, or signed transactions. Replay decodes the checked session evidence and verifies
+it against the certified binding without resolving source refs through current runtime config.
+For EVM reads and pre-submission work, the phase-aware classifier treats HTTP 408, 425, 429, 500,
+502, 503, 504, and 507 plus JSON-RPC `-32603`, `-32001`, `-32002`, and `-32005` as operational
+availability/resource failures. Other numeric HTTP and JSON-RPC rejections are terminal contract
+failures, as are missing numeric classification fields. After submission, every provider failure is
+operational because it cannot prove non-mutation or authorize another broadcast.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and
@@ -642,9 +882,20 @@ cleanup authority before interruption. `SideEffectInvocationPrepared` and every 
 owned by `SideEffectLifecycle`; recovery either resumes from the concrete ledger phase, records
 evidence-backed terminal side-effect outcome, or reports an operational block.
 
-Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
-signer references. Signed raw transactions are bearer mutation material and remain transient
-submit-time bytes inside the mutation adapter.
+Prepared-invocation artifacts are required before the invocation-started boundary and may retain
+unsigned mutation plans, expected hashes, and non-secret signer references. Preparation runs only
+under a committed claim. Signed raw transactions are bearer mutation material and remain transient
+submit-time bytes inside the mutation adapter. They are neither serializable typed values nor
+cloneable service results. The explicit user-selected `keystore tx-sign --out` file is the only
+non-run bearer-output boundary; CLI output reports distinct `signing_digest` and
+`transaction_hash` metadata and never the raw bytes, signature, or local path.
+
+Process-local authority that becomes usable only after a runner commit uses a non-cloneable
+one-shot `RunnerOutputSettlement`. Runtime executes its callback only for
+`CommitOutcome::Appended`. Idempotent, admission-blocked, stale, failed, or dropped outputs destroy
+the captured authority without promotion, including the case where an append returned an error but
+another read later observes that the commit exists. Durable events remain the only recovery
+authority.
 
 Submission observed, submission unknown, and not-submitted-proven evidence share one logical
 submission-result slot for an invocation epoch. Unknown submission can be superseded only by the
@@ -687,6 +938,9 @@ They must not:
 This design contract defines runtime authority. Crate placement, taxonomy, operation/state/adapter/
 transport/signer/config boundaries, public naming rules, and reviewer checks are maintained in
 `docs/architecture.md`.
+
+The exact current EVM package, state-kind, operation-composition, and app-entry-point inventory is
+maintained in `docs/architecture.md#current-evm-inventory`.
 
 ## Documentation Update Rules
 

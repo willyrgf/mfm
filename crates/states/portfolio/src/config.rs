@@ -1,81 +1,97 @@
 use super::*;
 
-/// Root workflow config for the portfolio snapshot operation.
-#[derive(Debug, Clone, Serialize, PartialEq, MfmConfig)]
+/// Certified family holding fact descriptors consumed by selection.
+///
+/// Descriptors are carried as canonical JSON so certified config fixes the exact query and
+/// hydration authority. The portfolio operation supplies the concrete registered descriptors when
+/// it authors the state config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
-    schema = "mfm.portfolio.config.workflow",
-    validate = "validate_portfolio_workflow_config"
+    namespace = "mfm.portfolio",
+    name = "select_holdings_fact_descriptors",
+    schema = "mfm.portfolio.config.select_holdings_fact_descriptors"
 )]
-pub struct PortfolioWorkflowConfig {
-    /// Canonical portfolio config.
-    pub(super) portfolio: PortfolioConfig,
+pub struct SelectHoldingsFactDescriptors {
+    bitcoin_native: String,
+    evm_balance: String,
 }
 
-impl PortfolioWorkflowConfig {
-    /// Creates a validated root portfolio workflow config.
-    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
-        let config = Self { portfolio };
-        validate_portfolio_workflow_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
+impl SelectHoldingsFactDescriptors {
+    /// Canonicalizes and admits the registered descriptors used by the portfolio operation.
+    pub fn new(
+        bitcoin_native: &mfm_facts::FactDescriptor,
+        evm_balance: &mfm_facts::FactDescriptor,
+    ) -> Result<Self, ConfigError> {
+        let descriptors = Self {
+            bitcoin_native: canonical_descriptor_json(bitcoin_native)?,
+            evm_balance: canonical_descriptor_json(evm_balance)?,
+        };
+        descriptors.validate().map_err(ConfigError::new)?;
+        Ok(descriptors)
     }
 
-    /// Returns the canonical portfolio config.
-    pub const fn portfolio(&self) -> &PortfolioConfig {
-        &self.portfolio
+    pub(crate) fn bitcoin_native(
+        &self,
+    ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
+        self.descriptor(
+            &self.bitcoin_native,
+            "bitcoin.address_balance_snapshot",
+            "Bitcoin",
+        )
     }
-}
 
-impl<'de> Deserialize<'de> for PortfolioWorkflowConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawPortfolioWorkflowConfig {
-            portfolio: PortfolioConfig,
+    pub(crate) fn evm_balance(
+        &self,
+    ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
+        self.descriptor(&self.evm_balance, "evm.balance_snapshot", "EVM")
+    }
+
+    fn descriptor(
+        &self,
+        canonical: &str,
+        expected_kind: &str,
+        family: &str,
+    ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
+        let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(canonical.as_bytes())
+            .map_err(|error| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::ReceiptMismatch,
+                    error.to_string(),
+                    None,
+                    None,
+                )
+            })?;
+        if descriptor.fact_kind().as_str() != expected_kind {
+            return Err(PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::ReceiptMismatch,
+                format!("{family} fact descriptor kind did not match its source family"),
+                None,
+                None,
+            ));
         }
+        Ok(descriptor)
+    }
 
-        let raw = RawPortfolioWorkflowConfig::deserialize(deserializer)?;
-        Ok(Self {
-            portfolio: raw.portfolio,
-        })
+    fn validate(&self) -> Result<(), String> {
+        self.bitcoin_native().map_err(|error| error.to_string())?;
+        self.evm_balance().map_err(|error| error.to_string())?;
+        Ok(())
     }
 }
 
-impl From<PortfolioSnapshotCanonicalConfig> for PortfolioWorkflowConfig {
-    fn from(canonical: PortfolioSnapshotCanonicalConfig) -> Self {
-        Self::new(canonical.portfolio).expect("canonical portfolio snapshot config must validate")
-    }
-}
-
-/// Config for subject resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.resolve_subjects",
-    validate = "validate_resolve_subjects_config"
-)]
-pub struct ResolveSubjectsConfig {
-    /// Wallets to resolve.
-    pub(super) wallets: Vec<WalletConfig>,
-}
-
-impl ResolveSubjectsConfig {
-    /// Creates validated subject-resolution config.
-    pub fn new(wallets: Vec<WalletConfig>) -> Result<Self, ConfigError> {
-        let config = Self { wallets };
-        validate_resolve_subjects_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
-    }
-
-    /// Returns the wallets to resolve.
-    pub fn wallets(&self) -> &[WalletConfig] {
-        &self.wallets
-    }
+fn canonical_descriptor_json(
+    descriptor: &mfm_facts::FactDescriptor,
+) -> Result<String, ConfigError> {
+    let bytes = mfm_facts::canonical_fact_descriptor_bytes(descriptor)
+        .map_err(|error| ConfigError::new(error.to_string()))?;
+    String::from_utf8(bytes.as_bytes().to_vec())
+        .map_err(|error| ConfigError::new(error.to_string()))
 }
 
 /// Config for Platform fact-backed holding selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     schema = "mfm.portfolio.config.select_holdings",
     validate = "validate_select_holdings_config"
@@ -87,26 +103,24 @@ pub struct SelectHoldingsConfig {
     pub(super) store_scope: String,
     /// Fixed certified selection policy id.
     pub(super) selection_policy_id: String,
+    /// Registered fact descriptors that define query and hydration authority.
+    pub(super) fact_descriptors: SelectHoldingsFactDescriptors,
 }
 
 impl SelectHoldingsConfig {
-    /// Creates validated select-holdings config with the cutover policy id.
+    /// Creates validated receipt-pinned selection config with closed version-1 policy values.
     pub fn new(
         portfolio: PortfolioConfig,
-        store_scope: impl Into<String>,
+        fact_descriptors: SelectHoldingsFactDescriptors,
     ) -> Result<Self, ConfigError> {
         let config = Self {
             portfolio,
-            store_scope: store_scope.into(),
-            selection_policy_id: PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID.to_owned(),
+            store_scope: PORTFOLIO_STORE_SCOPE.to_owned(),
+            selection_policy_id: PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID.to_owned(),
+            fact_descriptors,
         };
         validate_select_holdings_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Creates config using the default store scope.
-    pub fn with_default_store_scope(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
-        Self::new(portfolio, DEFAULT_PORTFOLIO_STORE_SCOPE)
     }
 
     /// Returns the portfolio requirements.
@@ -123,62 +137,31 @@ impl SelectHoldingsConfig {
     pub fn selection_policy_id(&self) -> &str {
         &self.selection_policy_id
     }
-}
 
-/// Config for valuation resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.resolve_valuations",
-    validate = "validate_resolve_valuations_config"
-)]
-pub struct ResolveValuationsConfig {
-    /// Symbols whose valuation routes should be resolved.
-    pub(super) symbol_configs: Vec<SymbolConfig>,
-}
-
-impl ResolveValuationsConfig {
-    /// Creates validated valuation-resolution config.
-    pub fn new(symbol_configs: Vec<SymbolConfig>) -> Result<Self, ConfigError> {
-        let config = Self { symbol_configs };
-        validate_resolve_valuations_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
-    }
-
-    /// Returns the symbols whose valuation routes should be resolved.
-    pub fn symbol_configs(&self) -> &[SymbolConfig] {
-        &self.symbol_configs
+    /// Returns the certified holding fact descriptor set.
+    pub const fn fact_descriptors(&self) -> &SelectHoldingsFactDescriptors {
+        &self.fact_descriptors
     }
 }
 
 /// Config for snapshot assembly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     schema = "mfm.portfolio.config.assemble_snapshot",
     validate = "validate_assemble_snapshot_config"
 )]
 pub struct AssembleSnapshotConfig {
-    /// Snapshot schema version to emit.
-    pub(super) snapshot_version: NonZeroU64,
     /// Portfolio config carried into the public snapshot.
     pub(super) portfolio: PortfolioConfig,
 }
 
 impl AssembleSnapshotConfig {
     /// Creates validated snapshot-assembly config.
-    pub fn new(snapshot_version: u64, portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
-        let snapshot_version = NonZeroU64::new(snapshot_version)
-            .ok_or_else(|| ConfigError::new("snapshot schema version must be non-zero"))?;
-        let config = Self {
-            snapshot_version,
-            portfolio,
-        };
+    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
+        let config = Self { portfolio };
         validate_assemble_snapshot_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Returns the snapshot schema version to emit.
-    pub const fn snapshot_version(&self) -> u64 {
-        self.snapshot_version.get()
     }
 
     /// Returns the portfolio config carried into the public snapshot.
@@ -188,60 +171,39 @@ impl AssembleSnapshotConfig {
 }
 
 /// Config for report projection.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(schema = "mfm.portfolio.config.project_report")]
-pub struct ProjectReportConfig {
-    /// Report schema version to emit.
-    pub(super) report_version: NonZeroU64,
-}
-
-impl ProjectReportConfig {
-    /// Creates validated report-projection config.
-    pub fn new(report_version: u64) -> Result<Self, ConfigError> {
-        let report_version = NonZeroU64::new(report_version)
-            .ok_or_else(|| ConfigError::new("report schema version must be non-zero"))?;
-        Ok(Self { report_version })
-    }
-
-    /// Returns the report schema version to emit.
-    pub const fn report_version(&self) -> u64 {
-        self.report_version.get()
-    }
-}
-
-fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Result<(), String> {
-    validate_with(config.portfolio.clone(), ValidatedPortfolioConfig::new)
-}
-
-fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
-    validate_with(config.wallets.clone(), ValidatedWalletConfigs::new)
-}
+pub struct ProjectReportConfig {}
 
 fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), String> {
-    validate_with(config.portfolio.clone(), ValidatedPortfolioConfig::new)?;
+    validate_normalized_portfolio(&config.portfolio)?;
     StoreScopeRef::new(&config.store_scope).map_err(|error| error.to_string())?;
-    if config.selection_policy_id != PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID {
+    if config.store_scope != PORTFOLIO_STORE_SCOPE {
+        return Err("portfolio store scope did not match the closed version-1 policy".to_owned());
+    }
+    if config.selection_policy_id != PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID {
         return Err(format!(
             "unsupported selection policy id `{}`",
             config.selection_policy_id
         ));
     }
+    config.fact_descriptors.validate()?;
     Ok(())
 }
 
-fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
-    validate_with(config.symbol_configs.clone(), ValidatedSymbolConfigs::new)
-}
-
 fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {
-    validate_with(config.portfolio.clone(), ValidatedPortfolioConfig::new)
+    validate_normalized_portfolio(&config.portfolio)
 }
 
-fn validate_with<T, U, E>(value: T, validator: impl FnOnce(T) -> Result<U, E>) -> Result<(), String>
-where
-    E: std::fmt::Display,
-{
-    validator(value)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+fn validate_normalized_portfolio(portfolio: &PortfolioConfig) -> Result<(), String> {
+    let normalized = ValidatedPortfolioConfig::new(portfolio.clone())
+        .map_err(|error| error.to_string())?
+        .into_config();
+    if normalized != *portfolio {
+        return Err(
+            "portfolio config must be normalized before it is used as state authority".to_owned(),
+        );
+    }
+    Ok(())
 }

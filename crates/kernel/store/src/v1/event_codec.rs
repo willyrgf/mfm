@@ -73,6 +73,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
     match payload {
         KernelEventPayload::RunAdmitted(payload) => serde_json::json!({
             "admitted_binding_digest": payload.admitted_binding_digest.as_str(),
+            "capability_implementations": payload.capability_implementations.iter().map(capability_implementation_identity_json).collect::<Vec<_>>(),
             "canonicalizer_identity": payload.canonicalizer_identity.as_str(),
             "certificate_artifact": run_artifact_json(&payload.certificate_artifact),
             "config_artifacts": payload.config_artifacts.iter().map(run_artifact_json).collect::<Vec<_>>(),
@@ -240,12 +241,10 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
             "resource_key": payload.resource_key.as_ref().map(resource_key_evidence_json),
-            "prepared_artifact_evidence_hash": payload
-                .prepared_artifact_evidence_hash
-                .as_ref()
-                .map(ContentDigest::as_str),
-            "prepared_artifact_id": payload.prepared_artifact_id.as_ref().map(ArtifactId::as_str),
-            "prepared_hash": payload.prepared_hash.as_ref().map(ContentDigest::as_str),
+            "prepared_schema_id": payload.prepared_schema_id.as_str(),
+            "prepared_artifact_evidence_hash": payload.prepared_artifact_evidence_hash.as_str(),
+            "prepared_artifact_id": payload.prepared_artifact_id.as_str(),
+            "prepared_hash": payload.prepared_hash.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectInvocationPrepared",
         }),
@@ -664,8 +663,18 @@ fn entry_point_launch_evidence_json(
     evidence: &events::EntryPointLaunchEvidence,
 ) -> serde_json::Value {
     serde_json::json!({
-        "entry_point_registry_digest": evidence.entry_point_registry_digest.as_str(),
-        "resolved_op_id": evidence.resolved_op_id.as_str(),
+        "configured_targets": evidence
+            .configured_targets
+            .iter()
+            .map(|source| {
+                serde_json::json!({
+                    "digest": source.digest.as_str(),
+                    "target": source.target.as_str(),
+                    "schema_id": source.schema_id.as_str(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "entry_point_id": evidence.entry_point_id.as_str(),
     })
 }
 
@@ -684,6 +693,16 @@ fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json
         "factory_id": identity.factory_id.as_str(),
         "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
         "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
+    })
+}
+
+fn capability_implementation_identity_json(
+    identity: &events::CapabilityImplementationIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "capability_kind": identity.capability_kind.as_str(),
+        "capability_version": identity.capability_version.as_str(),
+        "implementation_id": identity.implementation_id.as_str(),
     })
 }
 
@@ -707,7 +726,7 @@ fn descriptor_identity_json(identity: &DescriptorIdentity) -> serde_json::Value 
             "output_schema_id": identity.output_schema_id.as_str(),
             "output_semantic_type_id": identity.output_semantic_type_id.as_str(),
             "runner": identity.runner.as_str(),
-            "side_effect_contract_digest": identity.side_effect_contract_digest.as_ref().map(ContentDigest::as_str),
+            "effect_contract_digest": identity.effect_contract_digest.as_ref().map(ContentDigest::as_str),
             "state_kind": identity.state_kind.as_str(),
             "state_version": identity.state_version.as_str(),
         }),

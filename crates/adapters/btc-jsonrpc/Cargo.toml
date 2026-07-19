@@ -11,25 +11,18 @@ category = "adapter"
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-btc-capabilities = { path = "../../btc-capabilities" }
-mfm-canonical = { path = "../../kernel/canonical" }
 mfm-events = { path = "../../kernel/events" }
 mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
-mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store" }
 mfm-states-btc = { path = "../../states/btc" }
 mfm-values = { path = "../../kernel/values" }
-
-[dev-dependencies]
-mfm-store = { path = "../../kernel/store", features = ["test-support"] }
-tokio = { workspace = true }

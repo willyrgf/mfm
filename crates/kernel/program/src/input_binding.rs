@@ -448,6 +448,32 @@ pub trait OperationInput<'program, 'scope>: private::OperationInputSealed {
     fn input_binding(&self) -> Result<OperationInputBindingSpec>;
 }
 
+/// Structured state-input handles passed directly across an operation boundary.
+///
+/// This wrapper lets an operation accept the same generated handle structure as a state input.
+/// Lowering records the structured binding on the operation lineage frame without materializing a
+/// persisted fan-in value or graph node. The operation can then pass the handles directly to the
+/// state that consumes them with [`Self::into_handles`].
+pub struct OperationInputHandles<I: StateInput, H> {
+    handles: H,
+    _runtime: PhantomData<fn() -> I>,
+}
+
+impl<I: StateInput, H> OperationInputHandles<I, H> {
+    /// Wraps a generated state-input handle structure for an operation call.
+    pub fn new(handles: H) -> Self {
+        Self {
+            handles,
+            _runtime: PhantomData,
+        }
+    }
+
+    /// Returns the generated state-input handle structure.
+    pub fn into_handles(self) -> H {
+        self.handles
+    }
+}
+
 /// Author-side conversion into an operation's typed input value.
 pub trait IntoOperationInput<'program, 'scope, I: OperationInput<'program, 'scope>> {
     /// Converts into the operation input expected by `Operation::expand`.
@@ -850,6 +876,20 @@ impl<'program, 'scope> OperationInput<'program, 'scope> for () {
     fn input_binding(&self) -> Result<OperationInputBindingSpec> {
         Ok(OperationInputBindingSpec::from_state_input_spec(
             InputBinding::<()>::from_root(InputBindingNode::Unit)?.spec(),
+        ))
+    }
+}
+
+impl<'program, 'scope, I, H> OperationInput<'program, 'scope> for OperationInputHandles<I, H>
+where
+    I: StateInput,
+    H: Clone + IntoStateInput<'program, 'scope, I>,
+{
+    type Runtime = I;
+
+    fn input_binding(&self) -> Result<OperationInputBindingSpec> {
+        Ok(OperationInputBindingSpec::from_binding(
+            self.handles.clone().into_binding()?,
         ))
     }
 }

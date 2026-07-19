@@ -441,6 +441,7 @@ fn side_effect_artifact_json(artifact: &SideEffectArtifactProjection) -> serde_j
         "artifact_id": artifact.artifact_id.as_str(),
         "content_digest": artifact.content_digest.as_str(),
         "evidence_hash": artifact.evidence_hash.as_str(),
+        "producer_node_id": artifact.producer_node_id.as_str(),
         "schema_id": artifact.schema_id.as_ref().map(SchemaId::as_str),
     })
 }
@@ -452,6 +453,7 @@ fn parse_side_effect_artifact(
         artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
         content_digest: parse_identity(required_str(json, "content_digest")?)?,
         evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
+        producer_node_id: parse_identity(required_str(json, "producer_node_id")?)?,
         schema_id: optional_str(json, "schema_id")?
             .map(parse_identity)
             .transpose()?,

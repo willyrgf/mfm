@@ -6,7 +6,7 @@ use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPaylo
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
     ContentDigest, DigestAlgorithm, NodeId, RunId, SchemaId, SeedId, SemanticTypeId,
-    SideEffectPairId, SpecHash,
+    SideEffectPairId, SpecHash, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualResolutionEvidenceRef,
@@ -23,6 +23,14 @@ use mfm_store::v1::{
 #[path = "verification_helpers.rs"]
 mod verification_helpers;
 use self::verification_helpers::*;
+#[path = "value_read.rs"]
+mod value_read;
+pub use self::value_read::{
+    canonical_value_bytes, decode_produced_value, external_read_evidence,
+    fact_query_evidence_for_attempt, load_node_config, load_node_context, load_node_input,
+    produced_input_frames, single_state_output_frame, verify_external_read_state,
+    verify_recorded_fact_batch_evidence, verify_recorded_fact_evidence,
+};
 #[path = "broker.rs"]
 mod broker;
 #[path = "evidence.rs"]
@@ -35,6 +43,7 @@ pub use self::evidence::{
     SideEffectConfirmationReplayInput, SideEffectEvidenceReplayRequest,
     SideEffectIntentReplayEvidence, SideEffectReceiptReplayInput, SideEffectReplayFrame,
     SideEffectReplayVerifier, SideEffectSubmissionReplayInput, SubmissionReplayEvidence,
+    SubmissionUnknownReplayEvidence,
 };
 
 /// Result type for replay broker operations.
@@ -164,6 +173,7 @@ pub struct ReplayReadAuthority {
     canonicalizer_identity: CanonicalizerIdentity,
     runner_executables: Vec<events::ExecutableIdentity>,
     adapter_executables: Vec<events::ExecutableIdentity>,
+    capability_implementations: Vec<events::CapabilityImplementationIdentity>,
     artifact_evidence: Vec<StoredArtifactEvidenceRef>,
     artifact_bytes: BTreeMap<ReplayArtifactAuthorityKey, Vec<u8>>,
     additional_artifact_evidence: Vec<StoredArtifactEvidenceRef>,
@@ -228,6 +238,7 @@ impl ReplayReadAuthority {
                 .clone(),
             runner_executables: run_admitted.runner_executables.clone(),
             adapter_executables: run_admitted.adapter_executables.clone(),
+            capability_implementations: run_admitted.capability_implementations.clone(),
             artifact_evidence,
             artifact_bytes,
             additional_artifact_evidence,
@@ -292,6 +303,36 @@ impl SideEffectReplayArtifact for side_effect::SubmissionObserved {
 
     fn mismatch_message(&self) -> &'static str {
         "submission evidence mismatch"
+    }
+}
+
+impl SideEffectReplayArtifact for side_effect::SubmissionUnknown {
+    fn artifact_id(&self) -> &ArtifactId {
+        &self.evidence_artifact_id
+    }
+
+    fn evidence_hash(&self) -> &ContentDigest {
+        &self.evidence_hash
+    }
+
+    fn artifact_evidence_hash(&self) -> &ContentDigest {
+        &self.evidence_artifact_evidence_hash
+    }
+
+    fn evidence_schema_id(&self) -> &SchemaId {
+        &self.evidence_schema_id
+    }
+
+    fn artifact_role(&self) -> ArtifactRole {
+        ArtifactRole::SubmissionUnknownEvidence
+    }
+
+    fn producer_node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    fn mismatch_message(&self) -> &'static str {
+        "submission-unknown evidence mismatch"
     }
 }
 
@@ -439,6 +480,7 @@ pub struct ReplayBroker {
     intents: BTreeMap<SideEffectPairId, side_effect::IntentPersisted>,
     prepared_invocations: BTreeMap<SideEffectKey, side_effect::InvocationPrepared>,
     submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
+    submission_unknown: BTreeMap<SideEffectKey, side_effect::SubmissionUnknown>,
     not_submitted: BTreeMap<SideEffectKey, side_effect::NotSubmittedProven>,
     receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
     confirmations: BTreeMap<SideEffectKey, side_effect::ConfirmationObserved>,

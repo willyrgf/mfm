@@ -62,7 +62,16 @@ pub(super) fn set_remediation_purpose(
         KernelEventPayload::SideEffectClaimTakenOver(inner) => set_remediation_emitter!(inner),
         KernelEventPayload::ResourceLaneClaimed(inner) => set_remediation_emitter!(inner),
         KernelEventPayload::ResourceLaneClaimIntent(inner) => set_remediation_emitter!(inner),
-        KernelEventPayload::SideEffectInvocationPrepared(inner) => set_remediation_emitter!(inner),
+        KernelEventPayload::SideEffectInvocationPrepared(inner) => {
+            set_remediation_emitter!(inner);
+            let evidence = prepared_artifact_ref_for_node(inner.node_id.clone());
+            inner.prepared_schema_id = evidence.schema_id.clone().expect("prepared schema");
+            inner.prepared_artifact_id = evidence.artifact_id.clone();
+            inner.prepared_hash = evidence.digest.clone();
+            inner.prepared_artifact_evidence_hash = evidence
+                .evidence_hash()
+                .expect("remediation prepared evidence hash");
+        }
         KernelEventPayload::SideEffectInvocationStarted(inner) => set_remediation_emitter!(inner),
         KernelEventPayload::SideEffectNotSubmittedProven(inner) => {
             set_remediation_emitter!(inner);
@@ -268,8 +277,15 @@ pub(super) fn set_side_effect_node_attempt(
             inner.attempt_id = attempt_id;
         }
         KernelEventPayload::SideEffectInvocationPrepared(inner) => {
-            inner.node_id = node_id;
+            inner.node_id = node_id.clone();
             inner.attempt_id = attempt_id;
+            let evidence = prepared_artifact_ref_for_node(node_id);
+            inner.prepared_schema_id = evidence.schema_id.clone().expect("prepared schema");
+            inner.prepared_artifact_id = evidence.artifact_id.clone();
+            inner.prepared_hash = evidence.digest.clone();
+            inner.prepared_artifact_evidence_hash = evidence
+                .evidence_hash()
+                .expect("prepared evidence hash after node assignment");
         }
         KernelEventPayload::SideEffectInvocationStarted(inner) => {
             inner.node_id = node_id;

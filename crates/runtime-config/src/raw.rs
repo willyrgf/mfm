@@ -18,17 +18,15 @@ pub(super) struct RawRuntimeConfig {
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct RawEvmConfig {
     #[serde(default)]
-    pub(super) sources: BTreeMap<String, RawEvmSource>,
-    #[serde(default)]
-    pub(super) policies: BTreeMap<String, RawEvmPolicy>,
-    #[serde(default)]
-    pub(super) routes: BTreeMap<String, RawEvmRoute>,
+    pub(super) routes: BTreeMap<String, Value>,
     #[serde(flatten)]
     pub(super) extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct RawEvmSource {
+pub(super) struct RawEvmRoute {
+    #[serde(default)]
+    pub(super) source_ref: Option<String>,
     #[serde(default)]
     pub(super) rpc_url: Option<String>,
     #[serde(default)]
@@ -45,24 +43,6 @@ pub(super) struct RawEvmSource {
     pub(super) auth_header_file: Option<String>,
     #[serde(default)]
     pub(super) auth_header_file_env: Option<String>,
-    #[serde(flatten)]
-    pub(super) extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct RawEvmPolicy {
-    #[serde(default)]
-    pub(super) ordered_sources: Option<Vec<String>>,
-    #[serde(flatten)]
-    pub(super) extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct RawEvmRoute {
-    #[serde(default)]
-    pub(super) source_ref: Option<String>,
-    #[serde(default)]
-    pub(super) policy_id: Option<String>,
     #[serde(flatten)]
     pub(super) extra: BTreeMap<String, Value>,
 }

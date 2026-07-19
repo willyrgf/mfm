@@ -1,188 +1,86 @@
 #![warn(missing_docs)]
-//! Deterministic EVM collector family operations.
+//! Deterministic reusable EVM balance collection topology.
 //!
-//! This monocrate owns EVM collector topologies only (native balance at cutover).
-//! It performs no live IO and does not register app assembly, adapters, transports,
-//! storage, binaries, or recurring scheduler policy.
+//! [`EvmBalanceCollectionOperation`] always expands to one external read followed by one atomic
+//! fact record and exports only the resulting receipt. The cycle helpers wrap that same operation
+//! for scheduler-owned internal runs; they are not application entry points.
 //!
 //! # Examples
 //!
 //! ```rust
+//! use alloy_primitives::Address;
 //! use mfm_op_evm_collectors::{
-//!     evm_native_balance_program_draft, EvmNativeBalanceConfig,
+//!     evm_balance_collection_cycle_program_draft, EvmBalanceAsset,
+//!     EvmBalanceCollectionConfig, EvmBalanceSource,
 //! };
 //!
-//! let draft = evm_native_balance_program_draft(
-//!     EvmNativeBalanceConfig::default(),
-//! )
-//! .unwrap();
-//! assert!(draft.state_nodes().len() >= 3);
+//! let source = EvmBalanceSource::new(Address::ZERO, EvmBalanceAsset::Native)?;
+//! let config = EvmBalanceCollectionConfig::new("ethereum-mainnet", 1, 18, vec![source])?;
+//! let draft = evm_balance_collection_cycle_program_draft(config)?;
+//! assert_eq!(draft.state_nodes().len(), 2);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::num::NonZeroU64;
-
-use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
-    build_root_with_registries, NoContext, NonEmptyHandles, Operation, OperationExpansion,
-    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
+    build_root_with_registries, NoContext, Operation, OperationExpansion, OperationKey,
+    PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
 };
-use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
+use mfm_program_derive::{OperationOutput, PublicOutputs};
 pub use mfm_states_evm::{
-    default_native_decimals, AssembleEvmNativeBalanceBatchConfig,
-    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchInputHandles,
-    AssembleEvmNativeBalanceBatchState, EvmAddressNativeBalanceObservation,
-    EvmAddressNativeBalanceSnapshotFact, EvmJointTip, EvmNativeBalanceBatchSummary,
-    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
-    ObserveEvmNativeBalanceInputHandles, ObserveEvmNativeBalanceState,
-    RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
-    RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
-    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
-    ResolveEvmJointTipState, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig,
+    EvmBalanceCollectionReceipt, EvmBalanceSource, RecordEvmBalanceFactsInputHandles,
+    RecordEvmBalanceFactsState,
 };
-use serde::{Deserialize, Serialize};
 
 const OP_NAMESPACE: &str = "mfm.evm";
-const BALANCE_OP_KIND_NAME: &str = "evm_native_balance";
-const BALANCE_OP_VERSION: &str = "mfm.evm.operation.evm_native_balance.v1";
-const BALANCE_ROOT_SCOPE: &str = "evm_native_balance";
-const BALANCE_OP_KEY: &str = "evm_native_balance";
-const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
+const OP_KIND_NAME: &str = "balance_collection";
+const OP_VERSION: &str = "mfm.evm.operation.balance_collection.v1";
+const CYCLE_ROOT_SCOPE: &str = "evm_balance_collection_cycle";
+const CYCLE_OPERATION_KEY: &str = "evm_balance_collection";
+const CYCLE_PUBLIC_OUTPUT_KEY: &str = "evm_balance_collection_receipt";
 
-/// Public EVM native-balance collector entry-point descriptor.
-///
-/// External multi-run only: writes Platform holding facts. Not report pin authority
-/// and not mixed into `portfolio_snapshot` expand.
-pub const EVM_NATIVE_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: "mfm.evm",
-    name: "evm_native_balance",
-    public_name: "evm_native_balance",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
-
-/// Planning config for a multi-account EVM native balance collector batch.
-///
-/// Multi-subject same-network batches **must** share one joint tip resolved once
-/// in expand.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(
-    schema = "mfm.evm.operation.config.evm_native_balance",
-    validate = "validate_evm_native_balance_config"
-)]
-pub struct EvmNativeBalanceConfig {
-    /// Semantic network id.
-    pub network: String,
-    /// Expected EVM chain id.
-    pub chain_id: u64,
-    /// Account addresses to observe (at least one).
-    pub accounts: Vec<String>,
-    /// Coverage claim written on success (default `configured_only`).
-    pub coverage: String,
-    /// Native token decimals (typically 18).
-    pub decimals: u8,
-    /// Maximum source reads for joint-tip resolution.
-    pub max_source_reads: NonZeroU64,
-}
-
-impl Default for EvmNativeBalanceConfig {
-    fn default() -> Self {
-        Self {
-            network: "ethereum-mainnet".to_owned(),
-            chain_id: 1,
-            accounts: vec!["0x0000000000000000000000000000000000000001".to_owned()],
-            coverage: "configured_only".to_owned(),
-            decimals: default_native_decimals(),
-            max_source_reads: NonZeroU64::new(1).expect("non-zero static value"),
-        }
-    }
-}
-
-impl EvmNativeBalanceConfig {
-    /// Builds the joint-tip resolve config for this batch.
-    pub fn joint_tip_config(&self) -> ResolveEvmJointTipConfig {
-        ResolveEvmJointTipConfig {
-            network: self.network.clone(),
-            chain_id: self.chain_id,
-            max_source_reads: self.max_source_reads,
-        }
-    }
-
-    /// Builds an observe config for one account in this batch.
-    pub fn observe_config_for_account(&self, account: &str) -> ObserveEvmNativeBalanceConfig {
-        ObserveEvmNativeBalanceConfig {
-            network: self.network.clone(),
-            chain_id: self.chain_id,
-            account: account.to_owned(),
-            coverage: self.coverage.clone(),
-            decimals: self.decimals,
-            max_source_reads: NonZeroU64::new(EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS)
-                .expect("native observation source reads are non-zero"),
-        }
-    }
-}
-
-/// Validates multi-account native balance collector planning config.
-pub fn validate_evm_native_balance_config(config: &EvmNativeBalanceConfig) -> Result<(), String> {
-    if config.accounts.is_empty() {
-        return Err("accounts must contain at least one address".to_owned());
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for account in &config.accounts {
-        mfm_states_evm::validate_observe_evm_native_balance_config(
-            &config.observe_config_for_account(account),
-        )?;
-        if !seen.insert(account.as_str()) {
-            return Err(format!("duplicate account in batch: {account}"));
-        }
-    }
-    mfm_states_evm::validate_resolve_evm_joint_tip_config(&config.joint_tip_config())?;
-    Ok(())
-}
-
-/// Output handles produced by one EVM native balance collector batch.
+/// Output of one reusable EVM balance collection operation.
 #[derive(OperationOutput)]
-#[mfm(schema = "mfm.evm.operation_outputs.evm_native_balance")]
-pub struct EvmNativeBalanceOutputs<'program, 'scope> {
-    /// Joint tip shared by every subject in the batch.
-    pub joint_tip: mfm_program::Handle<'program, 'scope, EvmJointTip>,
-    /// Batch summary after shared-tip verification.
-    pub batch_summary: mfm_program::Handle<'program, 'scope, EvmNativeBalanceBatchSummary>,
+#[mfm(schema = "mfm.evm.operation_outputs.balance_collection")]
+pub struct EvmBalanceCollectionOutputs<'program, 'scope> {
+    /// Checked receipt returned by the atomic fact-recording state.
+    pub receipt: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
 }
 
-/// Root public outputs for the native balance collector.
+/// Internal scheduler-cycle root outputs.
 #[derive(PublicOutputs)]
-#[mfm(schema = "mfm.evm.public_outputs.evm_native_balance")]
-pub struct EvmNativeBalancePublicOutputs<'program, 'scope> {
-    /// Batch summary produced by the collector.
-    pub batch_summary: mfm_program::Handle<'program, 'scope, EvmNativeBalanceBatchSummary>,
+#[mfm(schema = "mfm.evm.internal_cycle_outputs.balance_collection")]
+pub struct EvmBalanceCollectionCycleOutputs<'program, 'scope> {
+    /// Checked collection receipt; the internal observation batch remains private.
+    pub receipt: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
 }
 
-/// Deterministic multi-account EVM native balance collector operation.
-pub struct EvmNativeBalanceOperation;
+/// Reusable two-state EVM balance collection operation.
+pub struct EvmBalanceCollectionOperation;
 
-impl Operation for EvmNativeBalanceOperation {
-    type Config = EvmNativeBalanceConfig;
+impl Operation for EvmBalanceCollectionOperation {
+    type Config = EvmBalanceCollectionConfig;
     type Input<'program, 'scope> = ();
-    type Output<'program, 'scope> = EvmNativeBalanceOutputs<'program, 'scope>;
+    type Output<'program, 'scope> = EvmBalanceCollectionOutputs<'program, 'scope>;
 
     fn kind() -> mfm_program::Result<OperationKind> {
         OperationKind::new(
             OP_NAMESPACE,
-            BALANCE_OP_KIND_NAME,
+            OP_KIND_NAME,
             DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::sha256_digest_bytes(b"mfm.evm.operation:evm_native_balance"),
+            mfm_canonical::sha256_digest_bytes(b"mfm.evm.operation:balance_collection"),
         )
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
     fn version() -> mfm_program::Result<OperationVersion> {
-        OperationVersion::new(BALANCE_OP_VERSION)
+        OperationVersion::new(OP_VERSION)
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
     fn name() -> &'static str {
-        "mfm.evm.evm_native_balance"
+        "mfm.evm.balance_collection"
     }
 
     fn expand<'program, 'scope>(
@@ -193,99 +91,179 @@ impl Operation for EvmNativeBalanceOperation {
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
-        // Resolve the joint tip once for the entire same-network batch.
-        let joint_tip = builder.state::<ResolveEvmJointTipState, _>(
-            StateKey::new("resolve_joint_tip")?,
+        let batch = builder.state::<CollectEvmBalancesState, _>(
+            StateKey::new("collect_balances")?,
             NoContext,
-            config.joint_tip_config(),
-            ResolveEvmJointTipInputHandles {},
+            config.clone(),
+            (),
         )?;
-
-        let mut fact_handles = Vec::with_capacity(config.accounts.len());
-        for (index, account) in config.accounts.iter().enumerate() {
-            let observe = builder.state::<ObserveEvmNativeBalanceState, _>(
-                StateKey::new(format!("observe_native_balance_{index}"))?,
-                NoContext,
-                config.observe_config_for_account(account),
-                ObserveEvmNativeBalanceInputHandles {
-                    joint_tip: joint_tip.clone(),
-                },
-            )?;
-            let fact = builder.state::<RecordEvmNativeBalanceFactState, _>(
-                StateKey::new(format!("record_native_balance_{index}"))?,
-                NoContext,
-                RecordEvmNativeBalanceFactConfig {},
-                RecordEvmNativeBalanceFactInputHandles {
-                    observation: observe,
-                },
-            )?;
-            fact_handles.push(fact);
-        }
-
-        let balance_facts = NonEmptyHandles::try_from_vec(fact_handles)
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-        let batch_summary = builder.state::<AssembleEvmNativeBalanceBatchState, _>(
-            StateKey::new("assemble_native_balance_batch")?,
+        let receipt = builder.state::<RecordEvmBalanceFactsState, _>(
+            StateKey::new("record_balance_facts")?,
             NoContext,
-            AssembleEvmNativeBalanceBatchConfig {},
-            AssembleEvmNativeBalanceBatchInputHandles {
-                joint_tip: joint_tip.clone(),
-                balance_facts,
-            },
+            config,
+            RecordEvmBalanceFactsInputHandles { batch },
         )?;
-
-        Ok(EvmNativeBalanceOutputs {
-            joint_tip,
-            batch_summary,
-        })
+        Ok(EvmBalanceCollectionOutputs { receipt })
     }
 }
 
-/// Builds a typed program draft for a multi-account EVM native balance collector batch.
-pub fn evm_native_balance_program_draft(
-    config: EvmNativeBalanceConfig,
+/// Builds one scheduler-owned internal EVM balance collection cycle draft.
+pub fn evm_balance_collection_cycle_program_draft(
+    config: EvmBalanceCollectionConfig,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     build_root_with_registries(
-        ScopeKey::new(BALANCE_ROOT_SCOPE)?,
+        ScopeKey::new(CYCLE_ROOT_SCOPE)?,
         evm_collectors_state_registry()?,
         evm_collectors_operation_registry()?,
         |root: &mut RootBuilder<'_, '_>| {
-            let result = root.scope().call::<EvmNativeBalanceOperation, _>(
-                OperationKey::new(BALANCE_OP_KEY)?,
-                EvmNativeBalanceOperation,
+            let output = root.scope().call::<EvmBalanceCollectionOperation, _>(
+                OperationKey::new(CYCLE_OPERATION_KEY)?,
+                EvmBalanceCollectionOperation,
                 config,
                 (),
             )?;
             root.bind_public_outputs(
-                PublicOutputKey::new(BALANCE_PUBLIC_OUTPUT_KEY)?,
-                &EvmNativeBalancePublicOutputs {
-                    batch_summary: result.batch_summary,
+                PublicOutputKey::new(CYCLE_PUBLIC_OUTPUT_KEY)?,
+                &EvmBalanceCollectionCycleOutputs {
+                    receipt: output.receipt,
                 },
             )
         },
     )
 }
 
-/// Plans an EVM native-balance collector entry-point program.
-pub fn plan_evm_native_balance_entry_point(
-    config: EvmNativeBalanceConfig,
+/// Builds a launch plan for one scheduler-owned internal collection cycle.
+pub fn evm_balance_collection_cycle_program_launch_plan(
+    config: EvmBalanceCollectionConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    TypedProgramLaunchPlan::from_draft(evm_native_balance_program_draft(config)?)
+    TypedProgramLaunchPlan::from_draft(evm_balance_collection_cycle_program_draft(config)?)
 }
 
 mfm_certify::define_program_descriptor_registry! {
     state_registry: pub evm_collectors_state_registry,
     operation_registry: pub evm_collectors_operation_registry,
     certification: pub register_evm_collectors_certification_descriptors,
+    includes: [],
     states: [
-        ResolveEvmJointTipState,
-        ObserveEvmNativeBalanceState,
-        RecordEvmNativeBalanceFactState,
-        AssembleEvmNativeBalanceBatchState,
+        CollectEvmBalancesState,
+        RecordEvmBalanceFactsState,
     ],
-    operations: [EvmNativeBalanceOperation],
+    operations: [
+        EvmBalanceCollectionOperation,
+    ],
 }
 
 #[cfg(test)]
-#[path = "evm_collectors_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use alloy_primitives::address;
+    use mfm_program::{BridgeKey, BridgePolicy, StateSpec};
+
+    #[derive(PublicOutputs)]
+    #[mfm(schema = "mfm.evm.test.multi_parent_outputs")]
+    struct MultiParentOutputs<'program, 'scope> {
+        first: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
+        second: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
+    }
+
+    fn config() -> EvmBalanceCollectionConfig {
+        EvmBalanceCollectionConfig::new(
+            "ethereum-mainnet",
+            1,
+            18,
+            vec![EvmBalanceSource::new(
+                address!("000000000000000000000000000000000000dead"),
+                EvmBalanceAsset::Native,
+            )
+            .expect("source")],
+        )
+        .expect("config")
+    }
+
+    #[test]
+    fn operation_and_cycle_share_the_exact_two_state_topology() {
+        let first = evm_balance_collection_cycle_program_draft(config()).expect("first draft");
+        let second = evm_balance_collection_cycle_program_draft(config()).expect("second draft");
+        assert_eq!(first, second);
+        assert_eq!(first.state_nodes().len(), 2);
+        assert_eq!(first.operation_lineage().len(), 1);
+        assert_eq!(
+            first.operation_lineage()[0].operation_kind,
+            EvmBalanceCollectionOperation::kind().expect("operation kind")
+        );
+        assert_eq!(
+            first.state_nodes()[0].state_kind,
+            CollectEvmBalancesState::kind().expect("collect kind")
+        );
+        assert_eq!(
+            first.state_nodes()[1].state_kind,
+            RecordEvmBalanceFactsState::kind().expect("record kind")
+        );
+        assert_eq!(first.public_output_spec().outputs().len(), 1);
+        assert_eq!(
+            first.public_output_spec().outputs()[0]
+                .public_field_path()
+                .as_str(),
+            "receipt"
+        );
+        mfm_certify::certify_program_draft(&first).expect("cycle certifies");
+        let launch =
+            evm_balance_collection_cycle_program_launch_plan(config()).expect("cycle launch plan");
+        assert_eq!(launch.draft, first);
+    }
+
+    #[test]
+    fn multiple_parent_scopes_compose_the_same_operation_topology() {
+        let draft = build_root_with_registries(
+            ScopeKey::new("multi_parent").expect("root key"),
+            evm_collectors_state_registry().expect("state registry"),
+            evm_collectors_operation_registry().expect("operation registry"),
+            |root: &mut RootBuilder<'_, '_>| {
+                let first = root
+                    .scope()
+                    .child_scope(ScopeKey::new("first_parent")?, |child| {
+                        let output = child.scope().call::<EvmBalanceCollectionOperation, _>(
+                            OperationKey::new("collect")?,
+                            EvmBalanceCollectionOperation,
+                            config(),
+                            (),
+                        )?;
+                        let receipt = child.export_to_parent(
+                            BridgeKey::new("receipt")?,
+                            output.receipt,
+                            BridgePolicy::same_run_same_value(),
+                        )?;
+                        child.bridge_to_parent(receipt)
+                    })?;
+                let second =
+                    root.scope()
+                        .child_scope(ScopeKey::new("second_parent")?, |child| {
+                            let output = child.scope().call::<EvmBalanceCollectionOperation, _>(
+                                OperationKey::new("collect")?,
+                                EvmBalanceCollectionOperation,
+                                config(),
+                                (),
+                            )?;
+                            let receipt = child.export_to_parent(
+                                BridgeKey::new("receipt")?,
+                                output.receipt,
+                                BridgePolicy::same_run_same_value(),
+                            )?;
+                            child.bridge_to_parent(receipt)
+                        })?;
+                root.bind_public_outputs(
+                    PublicOutputKey::new("receipts")?,
+                    &MultiParentOutputs { first, second },
+                )
+            },
+        )
+        .expect("multi-parent draft");
+
+        assert_eq!(draft.state_nodes().len(), 4);
+        assert_eq!(draft.operation_lineage().len(), 2);
+        assert!(draft.operation_lineage().iter().all(|operation| {
+            operation.operation_name == EvmBalanceCollectionOperation::name()
+        }));
+        mfm_certify::certify_program_draft(&draft).expect("multi-parent draft certifies");
+    }
+}

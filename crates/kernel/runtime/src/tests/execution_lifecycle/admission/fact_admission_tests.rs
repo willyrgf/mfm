@@ -1,38 +1,40 @@
 use super::*;
 
-#[test]
-fn materialization_rejects_seed_digest_not_certified() {
+#[tokio::test]
+async fn materialization_rejects_seed_digest_not_certified() {
     let fixture = fixture();
     let mut seed = fixture.seed_ref.clone();
     seed.digest = content(0xee);
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
     let store = TestTypedRunStore::new();
     assert!(matches!(
-        prepare_fixture_launch(&scheduler, &store, &fixture, vec![seed],),
+        prepare_fixture_launch(&scheduler, &store, &fixture, vec![seed],).await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
 
-#[test]
-fn run_start_rejects_missing_config_artifact_evidence() {
+#[tokio::test]
+async fn run_start_rejects_missing_config_artifact_evidence() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
     let store = TestTypedRunStore::new();
     let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
     evidence.config_artifacts.clear();
     assert!(matches!(
-        scheduler.prepare_run_launch(
-            &fixture.runtime_spec,
-            fixture_run_identity_material(&fixture),
-            evidence,
-            store.expected_next_seq(&fixture.run_id),
-        ),
+        scheduler
+            .prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture_run_identity_material(&fixture),
+                evidence,
+                store.expected_next_seq(&fixture.run_id),
+            )
+            .await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
 
-#[test]
-fn run_start_rejects_missing_fact_descriptor_artifact_evidence() {
+#[tokio::test]
+async fn run_start_rejects_missing_fact_descriptor_artifact_evidence() {
     let (fixture, _descriptor, descriptor_ref) = fixture_with_first_node_fact_descriptor();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
     let store = TestTypedRunStore::new();
@@ -44,7 +46,8 @@ fn run_start_rejects_missing_fact_descriptor_artifact_evidence() {
             fixture_run_identity_material(&fixture),
             evidence,
             store.expected_next_seq(&fixture.run_id),
-        ),
+        )
+        .await,
         Err(RuntimeError::InvalidRunnerOutput(message))
             if message.contains("missing fact descriptor artifact")
                 && message.contains(descriptor_ref.descriptor_hash.as_str())
@@ -68,6 +71,7 @@ async fn run_start_admits_certified_fact_descriptor_artifacts() {
             evidence,
             store.expected_next_seq(&fixture.run_id),
         )
+        .await
         .expect("descriptor-backed launch prepares");
     scheduler_start_run(&scheduler, &mut store, launch)
         .await
@@ -107,6 +111,7 @@ async fn raw_runtime_view_rejects_fact_descriptor_stream_without_artifact_author
             evidence,
             store.expected_next_seq(&fixture.run_id),
         )
+        .await
         .expect("descriptor-backed launch prepares");
     scheduler_start_run(&scheduler, &mut store, launch)
         .await
@@ -138,6 +143,7 @@ async fn run_start_admitted_uses_committed_fact_descriptor_artifacts() {
             evidence,
             store.expected_next_seq(&fixture.run_id),
         )
+        .await
         .expect("descriptor-backed launch prepares");
 
     let authority =
@@ -168,6 +174,7 @@ async fn fact_bearing_runtime_prefix_rebuild_uses_retained_artifact_bytes() {
             evidence,
             store.expected_next_seq(&fixture.run_id),
         )
+        .await
         .expect("descriptor-backed launch prepares");
     scheduler_start_run(&scheduler, &mut store, launch)
         .await
@@ -226,8 +233,8 @@ async fn fact_bearing_runtime_prefix_rebuild_uses_retained_artifact_bytes() {
         .expect_err("fact-bearing prefix with mismatched response bytes must fail");
 }
 
-#[test]
-fn run_start_rejects_mismatched_staged_launch_bytes() {
+#[tokio::test]
+async fn run_start_rejects_mismatched_staged_launch_bytes() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
     let store = TestTypedRunStore::new();
@@ -236,24 +243,28 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
     let mut bad_spec = base.clone();
     bad_spec.spec_artifact.bytes.push(b'\n');
     assert!(matches!(
-        scheduler.prepare_run_launch(
-            &fixture.runtime_spec,
-            fixture_run_identity_material(&fixture),
-            bad_spec,
-            store.expected_next_seq(&fixture.run_id),
-        ),
+        scheduler
+            .prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture_run_identity_material(&fixture),
+                bad_spec,
+                store.expected_next_seq(&fixture.run_id),
+            )
+            .await,
         Err(RuntimeError::InvalidRunnerOutput(_))
     ));
 
     let mut bad_certificate = base.clone();
     bad_certificate.certificate_artifact.bytes.push(b'\n');
     assert!(matches!(
-        scheduler.prepare_run_launch(
-            &fixture.runtime_spec,
-            fixture_run_identity_material(&fixture),
-            bad_certificate,
-            store.expected_next_seq(&fixture.run_id),
-        ),
+        scheduler
+            .prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture_run_identity_material(&fixture),
+                bad_certificate,
+                store.expected_next_seq(&fixture.run_id),
+            )
+            .await,
         Err(RuntimeError::InvalidRunnerOutput(_))
     ));
 
@@ -265,12 +276,14 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
         .bytes
         .push(b'\n');
     assert!(matches!(
-        scheduler.prepare_run_launch(
-            &fixture.runtime_spec,
-            fixture_run_identity_material(&fixture),
-            bad_config,
-            store.expected_next_seq(&fixture.run_id),
-        ),
+        scheduler
+            .prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture_run_identity_material(&fixture),
+                bad_config,
+                store.expected_next_seq(&fixture.run_id),
+            )
+            .await,
         Err(RuntimeError::InvalidRunnerOutput(_))
     ));
 
@@ -282,12 +295,14 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
         .bytes
         .push(b'\n');
     assert!(matches!(
-        scheduler.prepare_run_launch(
-            &fixture.runtime_spec,
-            fixture_run_identity_material(&fixture),
-            bad_seed,
-            store.expected_next_seq(&fixture.run_id),
-        ),
+        scheduler
+            .prepare_run_launch(
+                &fixture.runtime_spec,
+                fixture_run_identity_material(&fixture),
+                bad_seed,
+                store.expected_next_seq(&fixture.run_id),
+            )
+            .await,
         Err(RuntimeError::InvalidRunnerOutput(_))
     ));
     assert!(store.load_run_stream(&fixture.run_id).is_empty());

@@ -410,6 +410,11 @@ impl ObserveBtcChainHeadState {
     ) -> Result<BtcChainHeadObservation, BtcStateError> {
         normalize_chain_head_response(&self.config, response, input)
     }
+
+    /// Returns the certified state config.
+    pub const fn config(&self) -> &ObserveBtcChainHeadConfig {
+        &self.config
+    }
 }
 
 impl StateSpec for ObserveBtcChainHeadState {
@@ -444,24 +449,40 @@ impl StateSpec for ObserveBtcChainHeadState {
 }
 
 impl ReadState for ObserveBtcChainHeadState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = BtcChainHeadReadPlan;
+    type Evidence = BtcChainHeadReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        let selection = match self.config.selection() {
-            Ok(selection) => selection,
-            Err(error) => return future::ready(Err(StateError::from(error))),
-        };
-        if let Err(error) =
-            validate_loaded_checkpoint_for_config(&self.config, selection, &input.loaded_checkpoint)
-        {
-            return future::ready(Err(StateError::from(error)));
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        let selection = self.config.selection()?;
+        validate_loaded_checkpoint_for_config(&self.config, selection, &input.loaded_checkpoint)?;
+        BtcChainHeadReadPlan::new(
+            &self.config.network,
+            &self.config.bitcoin_network,
+            &self.config.semantic_source_identity,
+            selection,
+        )
+        .map_err(StateError::from)
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        if !evidence.fact_query_evidence().is_empty() {
+            return Err(StateError::Message(
+                "Bitcoin chain-head read received unexpected fact-query evidence".to_owned(),
+            ));
         }
-        future::ready(Err(adapter_required_error(Self::name())))
+        let plan = self.plan(input, context)?;
+        let response = evidence.primary_evidence().response(&plan)?;
+        self.materialize_response(input, &response)
+            .map_err(StateError::from)
     }
 }
 

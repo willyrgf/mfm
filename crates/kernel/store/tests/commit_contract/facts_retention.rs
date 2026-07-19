@@ -228,6 +228,38 @@ fn fact_recorded_same_subject_claims_are_claim_id_distinct() {
 }
 
 #[test]
+fn byte_identical_fact_responses_are_reusable_across_append_occurrences() {
+    let run_id = fact_run_id(99);
+    let mut store = admitted_fact_store(&run_id, "shared-response-run-start");
+    let mut attempt_payloads = vec![fact_attempt_started()];
+    store.certify_payloads_for_run(&run_id, &mut attempt_payloads);
+    append_run_state_commit(
+        &mut store,
+        &run_id,
+        "shared-response-attempt-start",
+        attempt_payloads,
+        Vec::new(),
+        RequiredRunState::Started,
+    )
+    .expect("append fact attempt start");
+
+    append_fact_recorded_commit_for_height(&mut store, &run_id, "shared-response-first", 850000)
+        .expect("append first fact occurrence");
+    append_fact_recorded_commit_for_height(&mut store, &run_id, "shared-response-second", 850000)
+        .expect("append byte-identical fact occurrence");
+
+    let snapshot = store.projection_snapshot();
+    assert_eq!(snapshot.fact_records().count(), 2);
+    assert_eq!(snapshot.fact_index_entries().count(), 2);
+    let response_artifacts = snapshot
+        .fact_records()
+        .map(|(_, projection)| projection.claim.response().artifact_id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(response_artifacts.len(), 2);
+    assert_eq!(response_artifacts[0], response_artifacts[1]);
+}
+
+#[test]
 fn fact_recorded_requires_started_attempt_projection() {
     let run_id = fact_run_id(96);
     let mut store = admitted_fact_store(&run_id, "run-start");
@@ -644,7 +676,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
     let expected_summary = [
         "committed run_state=Started commits=6 events=12 next_seq=7".to_owned(),
         format!(
-            "side_effect pair={} phase=invocation_prepared prepared=false resource_key=true touched_set=false",
+            "side_effect pair={} phase=invocation_prepared prepared=true resource_key=true touched_set=false",
             side_effect_pair_id()
         ),
         format!(

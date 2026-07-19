@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::commands::result::{CommandError, CommandOutput, CommandResult};
+use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
@@ -99,7 +99,7 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
 
 async fn execute_internal(args: &ListArgs) -> CommandResult<ListOutput> {
     if args.watch && args.cursor.is_none() {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "WatchCursorRequired",
             "`mfm run list --watch` requires --cursor from a previous list page",
         ));

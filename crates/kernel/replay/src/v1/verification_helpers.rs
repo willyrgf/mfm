@@ -574,9 +574,16 @@ pub(super) fn verify_run_start_contract(
             "adapter executable identities do not match replay authority",
         ));
     }
+    if run_admitted.capability_implementations != authority.capability_implementations {
+        return Err(ReplayError::new(
+            ReplayErrorKind::UnsupportedCapability,
+            "capability implementation identities do not match replay authority",
+        ));
+    }
     let binding_digest = admitted_binding_digest(
         &authority.runner_executables,
         &authority.adapter_executables,
+        &authority.capability_implementations,
     )?;
     if run_admitted.admitted_binding_digest != binding_digest {
         return Err(ReplayError::new(
@@ -697,9 +704,11 @@ pub(super) fn verify_run_artifact(
 pub(super) fn admitted_binding_digest(
     runner_executables: &[events::ExecutableIdentity],
     adapter_executables: &[events::ExecutableIdentity],
+    capability_implementations: &[events::CapabilityImplementationIdentity],
 ) -> Result<ContentDigest> {
     let json = serde_json::to_string(&serde_json::json!({
             "adapter_executables": adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+            "capability_implementations": capability_implementations.iter().map(capability_implementation_identity_json).collect::<Vec<_>>(),
             "runner_executables": runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
         }))
         .map_err(|error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()))?;
@@ -709,6 +718,16 @@ pub(super) fn admitted_binding_digest(
         DigestAlgorithm::Sha256JcsV1,
         canonical.digest_bytes(),
     ))
+}
+
+fn capability_implementation_identity_json(
+    identity: &events::CapabilityImplementationIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "capability_kind": identity.capability_kind.as_str(),
+        "capability_version": identity.capability_version.as_str(),
+        "implementation_id": identity.implementation_id.as_str(),
+    })
 }
 
 pub(super) fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {

@@ -193,6 +193,7 @@ impl ReplayBroker {
                 certified_context,
                 prepared: self.prepared_invocations.get(&key),
                 submission: self.submissions.get(&key),
+                submission_unknown: self.submission_unknown.get(&key),
                 not_submitted: self.not_submitted.get(&key),
                 receipt: self.receipts.get(&key),
                 confirmation: self.confirmations.get(&key),
@@ -213,6 +214,25 @@ impl ReplayBroker {
         let artifact = self.verify_requested_side_effect_artifact(request, submission)?;
         Ok(SubmissionReplayEvidence {
             submission: submission.clone(),
+            artifact_bytes: self.artifact_bytes_for_evidence(&artifact)?.to_vec(),
+            artifact,
+        })
+    }
+
+    /// Returns retained submission-unknown evidence from replay records only.
+    pub fn side_effect_submission_unknown(
+        &self,
+        request: &SideEffectEvidenceReplayRequest,
+    ) -> Result<SubmissionUnknownReplayEvidence> {
+        self.verify_side_effect_intent(request)?;
+        let unknown = self.required_side_effect_record(
+            &self.submission_unknown,
+            request,
+            "submission-unknown evidence",
+        )?;
+        let artifact = self.verify_requested_side_effect_artifact(request, unknown)?;
+        Ok(SubmissionUnknownReplayEvidence {
+            unknown: unknown.clone(),
             artifact_bytes: self.artifact_bytes_for_evidence(&artifact)?.to_vec(),
             artifact,
         })
@@ -305,9 +325,11 @@ impl ReplayBroker {
         self.verify_side_effect_intent(request)?;
         let ambiguity =
             self.required_side_effect_record(&self.ambiguities, request, "ambiguity")?;
+        let artifact = self.verify_requested_side_effect_artifact(request, ambiguity)?;
         Ok(AmbiguityReplayEvidence {
             ambiguity: ambiguity.clone(),
-            artifact: self.verify_requested_side_effect_artifact(request, ambiguity)?,
+            artifact_bytes: self.artifact_bytes_for_evidence(&artifact)?.to_vec(),
+            artifact,
         })
     }
 

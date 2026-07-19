@@ -29,12 +29,10 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, EntryPointRunLaunchInput, ErrorClass, InvocationKey, ManualResolutionDecision,
-    ManualResolutionRecordRequest, ProductionRunStore, PublicFactQueryRequest, PublicFactRefId,
-    PublicOpName, PublicOutputResponse, PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices,
-    RunResponse, RunServices, RunStreamResponse,
+    ErrorClass, InvocationKey, ManualResolutionDecision, ManualResolutionRecordRequest,
+    PostgresStore, PublicError, PublicFactQueryRequest, PublicFactRefId, PublicOutputResponse,
+    RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices, RunStreamResponse,
 };
-use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{RunId, SchemaId};
 use mfm_store::v1 as store;
@@ -51,20 +49,10 @@ fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
 }
 
-fn err(code: impl Into<String>, message: impl Into<String>) -> serde_json::Value {
-    json!({
-        "status": "error",
-        "error": {
-            "code": code.into(),
-            "message": message.into(),
-        }
-    })
-}
-
 fn serialize_response<T: Serialize>(data: T) -> Result<serde_json::Value, ApiError> {
     serde_json::to_value(data).map_err(|_| {
         ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorClass::Internal,
             "SerializationError",
             "Failed to serialize response payload",
         )
@@ -75,77 +63,51 @@ fn json_ok<T: Serialize>(data: T) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(ok(serialize_response(data)?)))
 }
 
-/// Error payload mapped onto HTTP responses.
+/// Thin HTTP adapter around the shared public application error.
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct ApiError {
-    /// HTTP status to return.
-    pub status: StatusCode,
-    /// Stable machine-readable error code.
-    pub code: String,
-    /// Human-readable error message.
-    pub message: String,
-}
+#[error("{0}")]
+pub struct ApiError(PublicError);
 
 impl ApiError {
     /// Creates an API error with an explicit HTTP status, code, and message.
-    pub fn new(
-        status: StatusCode,
-        code: impl Into<String>,
-        message: impl Into<PublicSafeMessage>,
-    ) -> Self {
-        Self {
-            status,
-            code: code.into(),
-            message: message.into().into_string(),
-        }
+    pub fn new(class: ErrorClass, code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self(PublicError::new(class, code, message))
     }
 
     /// Creates an API error for a lower-level failure without exposing backend details.
-    pub fn backend(status: StatusCode, code: impl Into<String>, message: &'static str) -> Self {
-        Self::new(status, code, PublicSafeMessage::backend(message))
+    pub fn backend(class: ErrorClass, code: impl Into<String>, message: &'static str) -> Self {
+        Self(PublicError::backend(class, code, message))
     }
 
     /// Returns the standard invalid-JSON error.
     pub fn invalid_json() -> Self {
         Self::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidJson",
             "Failed to parse request body as JSON",
         )
     }
-}
 
-impl From<AppError> for ApiError {
-    fn from(value: AppError) -> Self {
-        let status = match value.class {
+    /// Returns the shared public error payload.
+    pub const fn public_error(&self) -> &PublicError {
+        &self.0
+    }
+
+    /// Derives the HTTP status from the shared error classification.
+    pub const fn status(&self) -> StatusCode {
+        match self.0.class {
             ErrorClass::BadRequest => StatusCode::BAD_REQUEST,
             ErrorClass::NotFound => StatusCode::NOT_FOUND,
             ErrorClass::Conflict => StatusCode::CONFLICT,
             ErrorClass::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-
-        Self::new(status, value.code, value.message)
+            ErrorClass::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
     }
 }
 
-impl From<mfm_app::EntryPointOpError> for ApiError {
-    fn from(error: mfm_app::EntryPointOpError) -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
-    }
-}
-
-impl From<mfm_authored_config::AuthoredConfigError> for ApiError {
-    fn from(error: mfm_authored_config::AuthoredConfigError) -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
+impl From<PublicError> for ApiError {
+    fn from(value: PublicError) -> Self {
+        Self(value)
     }
 }
 
@@ -157,7 +119,8 @@ impl From<JsonRejection> for ApiError {
 
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        (self.status, Json(err(self.code, self.message))).into_response()
+        let status = self.status();
+        (status, Json(json!({ "status": "error", "error": self.0 }))).into_response()
     }
 }
 
@@ -185,13 +148,13 @@ impl RestProcessRole {
                 "live" => Ok(Self::Live),
                 "read" => Ok(Self::Read),
                 _ => Err(ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorClass::Internal,
                     "InvalidRestRole",
                     format!("{MFM_REST_ROLE} must be \"live\" or \"read\""),
                 )),
             },
             Err(std::env::VarError::NotUnicode(_)) => Err(ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorClass::Internal,
                 "InvalidRestRole",
                 format!("{MFM_REST_ROLE} must be valid UTF-8"),
             )),
@@ -200,24 +163,27 @@ impl RestProcessRole {
 }
 
 /// Default production REST API state.
-pub type DefaultAppState = AppState<ProductionRunStore>;
+pub type DefaultAppState = AppState<PostgresStore>;
 
 /// Shared router state injected into request handlers.
 #[derive(Clone)]
-pub struct AppState<S = ProductionRunStore> {
+pub struct AppState<S = PostgresStore> {
     /// Process role that selected the store connector and route admission policy.
     pub role: RestProcessRole,
     /// Certified typed run-event and artifact authority store.
     pub store: S,
+    /// Mutable configured-value store used only during new run preparation.
+    pub configured_store: Option<PostgresStore>,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
-    /// Platform/Control fact-index used by portfolio report and collector runners.
+    /// Platform/Control fact-index used by portfolio snapshot and collector runners.
     pub fact_index: Arc<dyn mfm_app::FactIndexReadProvider>,
 }
 
 #[derive(Clone)]
 struct RouterState<S> {
     app: AppState<S>,
+    configured_store: Option<PostgresStore>,
     live_services: Arc<OnceLock<Result<RunServices<S, S>, ApiError>>>,
     read_services: Arc<OnceLock<Result<RunReadServices<S, S>, ApiError>>>,
 }
@@ -263,7 +229,7 @@ where
     fn require_live_role(&self) -> Result<(), ApiError> {
         if self.app.role != RestProcessRole::Live {
             return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorClass::ServiceUnavailable,
                 "RestRoleReadOnly",
                 "this REST process is read-only; live start/resume requires MFM_REST_ROLE=live",
             ));
@@ -307,10 +273,11 @@ where
 
 /// Builds production REST API state for an explicit process role.
 pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultAppState, ApiError> {
-    let store = mfm_app::connect_production_run_store(None).await?;
+    let store = mfm_app::connect_production_store(None).await?;
     let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     Ok(AppState {
         role,
+        configured_store: Some(store.clone()),
         store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
         fact_index,
@@ -339,6 +306,7 @@ where
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
     let state = RouterState {
+        configured_store: state.configured_store.clone(),
         app: state,
         live_services: Arc::new(OnceLock::new()),
         read_services: Arc::new(OnceLock::new()),
@@ -418,7 +386,7 @@ where
 {
     state.app.store.load_store_scope_id().await.map_err(|_| {
         ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorClass::ServiceUnavailable,
             "NotReady",
             "run store is not ready",
         )
@@ -432,8 +400,8 @@ where
     }))))
 }
 
-async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::NOT_FOUND, Json(err("not_found", "not found")))
+async fn not_found() -> ApiError {
+    ApiError::new(ErrorClass::NotFound, "not_found", "not found")
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -445,12 +413,8 @@ enum ManualResolutionKind {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunStartBody {
-    op: String,
-    #[serde(default)]
-    op_version: Option<u32>,
-    #[serde(default)]
-    config_format: Option<RestConfigFormat>,
-    config: serde_json::Value,
+    entry_point: String,
+    target: String,
     #[serde(default)]
     invocation_key: Option<String>,
 }
@@ -464,22 +428,6 @@ struct RunStartResponse {
     active_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     public_output: Option<PublicOutputResponse>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RestConfigFormat {
-    Toml,
-    Json,
-}
-
-impl From<RestConfigFormat> for AuthoredConfigFormat {
-    fn from(value: RestConfigFormat) -> Self {
-        match value {
-            RestConfigFormat::Toml => Self::Toml,
-            RestConfigFormat::Json => Self::Json,
-        }
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -654,10 +602,10 @@ fn public_fact_query_request(
         .map_err(fact_query_params_api_error)
 }
 
-fn fact_query_params_api_error(error: AppError) -> ApiError {
+fn fact_query_params_api_error(error: PublicError) -> ApiError {
     if mfm_app::is_public_fact_query_parameter_error(&error) {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidQuery",
             "Failed to parse fact query parameters",
         )
@@ -684,7 +632,7 @@ where
 {
     let Query(query) = query.map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidQuery",
             "Failed to parse run list query",
         )
@@ -711,24 +659,24 @@ where
     let Json(req) = body?;
     let services = state.live_services()?;
     let store_scope_id = services.load_store_scope_id().await?;
-    let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
-    let public_op_name = PublicOpName::new(&req.op)?;
-    let op_version = req.op_version.map(mfm_app::OpVersion::new).transpose()?;
     let invocation_key = req.invocation_key.map(InvocationKey::new).transpose()?;
-    let authored_config = AuthoredConfig::from_json_transport_value(
-        req.config_format.map(AuthoredConfigFormat::from),
-        &req.config,
-    )?;
-    let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
-        entry_point_registry: &entry_point_registry,
-        public_op_name,
-        op_version,
-        authored_config,
-        certification_registry: services.certification_registry(),
+    let configured_store = state.configured_store.as_ref().ok_or_else(|| {
+        ApiError::backend(
+            ErrorClass::Internal,
+            "ConfiguredStoreUnavailable",
+            "Configured-value authority is unavailable for run preparation",
+        )
+    })?;
+    let request = mfm_app::prepare_entry_point_run_launch(
+        configured_store,
+        &req.entry_point,
+        &req.target,
+        services.certification_registry(),
         store_scope_id,
         invocation_key,
-    })?;
-    let report = services.launch_prepared_entry_point_run(prepared).await?;
+    )
+    .await?;
+    let report = services.launch_run_and_render(request).await?;
 
     json_ok(RunStartResponse {
         outcome: report.outcome,
@@ -816,7 +764,7 @@ where
 {
     let Query(query) = query.map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidQuery",
             "Failed to parse stream query",
         )
@@ -886,7 +834,7 @@ where
 fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
     RunId::parse(value).map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidRunId",
             "Run id must use the typed run identity format `run:<algorithm>:<digest>`",
         )
@@ -896,7 +844,7 @@ fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
 fn parse_schema_id(value: &str) -> Result<SchemaId, ApiError> {
     SchemaId::parse(value).map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidSchemaId",
             "Schema id must use the typed schema identity format",
         )
@@ -919,7 +867,7 @@ fn canonical_json_value_bytes(
 ) -> Result<Vec<u8>, ApiError> {
     let json = serde_json::to_string(value).map_err(|_| {
         ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorClass::Internal,
             "SerializationError",
             "Failed to serialize request JSON",
         )
@@ -928,7 +876,7 @@ fn canonical_json_value_bytes(
         .map(|canonical| canonical.to_vec())
         .map_err(|_| {
             ApiError::backend(
-                StatusCode::BAD_REQUEST,
+                ErrorClass::BadRequest,
                 error_code,
                 "Request JSON is not canonical JSON",
             )
@@ -938,7 +886,7 @@ fn canonical_json_value_bytes(
 fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), ApiError> {
     if from_seq == 0 {
         return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
+            ErrorClass::BadRequest,
             "InvalidSequenceRange",
             "from_seq must be greater than zero",
         ));
@@ -946,7 +894,7 @@ fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), Api
     if let Some(to_seq) = to_seq {
         if to_seq < from_seq {
             return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
+                ErrorClass::BadRequest,
                 "InvalidSequenceRange",
                 "to_seq must be greater than or equal to from_seq",
             ));

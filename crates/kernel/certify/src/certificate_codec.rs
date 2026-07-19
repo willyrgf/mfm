@@ -209,7 +209,7 @@ pub(super) fn state_descriptor_id_from_spec(
         "output_schema_id": descriptor.output_schema_id.as_str(),
         "output_semantic_type_id": descriptor.output_semantic_type_id.as_str(),
         "runner": descriptor.runner.as_str(),
-        "side_effect_contract_digest": descriptor.side_effect_contract_digest.as_ref().map(ContentDigest::as_str),
+        "effect_contract_digest": descriptor.effect_contract_digest.as_ref().map(ContentDigest::as_str),
         "version": descriptor.state_version.as_str(),
     }))
 }

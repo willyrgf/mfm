@@ -22,3 +22,9 @@ mod artifact_overrides;
 use self::artifact_overrides::*;
 #[path = "tests/behavior.rs"]
 mod behavior;
+#[path = "tests/evm_transaction.rs"]
+mod evm_transaction;
+#[path = "tests/evm_transaction_composition.rs"]
+mod evm_transaction_composition;
+#[path = "tests/evm_validation.rs"]
+mod evm_validation;

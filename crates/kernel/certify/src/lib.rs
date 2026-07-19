@@ -191,13 +191,20 @@ impl From<program::RegistryError> for CertifyError {
     }
 }
 
-/// Defines matching program and certification registry functions from one descriptor inventory.
+/// Defines matching program and certification registries from child registries plus local types.
 #[macro_export]
 macro_rules! define_program_descriptor_registry {
     (
         state_registry: $state_vis:vis $state_registry:ident,
         operation_registry: $operation_vis:vis $operation_registry:ident,
         certification: $cert_vis:vis $certification:ident,
+        includes: [
+            $({
+                state_registry: $include_state:path,
+                operation_registry: $include_operation:path,
+                certification: $include_certification:path $(,)?
+            }),* $(,)?
+        ],
         states: [$($state:ty),* $(,)?],
         operations: [$($operation:ty),* $(,)?] $(,)?
     ) => {
@@ -205,6 +212,13 @@ macro_rules! define_program_descriptor_registry {
             state_registry: $state_vis $state_registry,
             operation_registry: $operation_vis $operation_registry,
             certification: $cert_vis $certification,
+            includes: [
+                $({
+                    state_registry: $include_state,
+                    operation_registry: $include_operation,
+                    certification: $include_certification,
+                }),*
+            ],
             states: [$($state),*],
             operations: [$($operation),*],
             after_registration:,
@@ -214,6 +228,13 @@ macro_rules! define_program_descriptor_registry {
         state_registry: $state_vis:vis $state_registry:ident,
         operation_registry: $operation_vis:vis $operation_registry:ident,
         certification: $cert_vis:vis $certification:ident,
+        includes: [
+            $({
+                state_registry: $include_state:path,
+                operation_registry: $include_operation:path,
+                certification: $include_certification:path $(,)?
+            }),* $(,)?
+        ],
         states: [$($state:ty),* $(,)?],
         operations: [$($operation:ty),* $(,)?],
         after_registration: $($after:path)?,
@@ -221,6 +242,7 @@ macro_rules! define_program_descriptor_registry {
         #[doc = "Builds the state registry used for typed authoring and certification."]
         $state_vis fn $state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
             let mut states = mfm_program::StateRegistryBuilder::new();
+            $(states.include($include_state()?)?;)*
             $(states.register::<$state>()?;)*
             Ok(states.into_snapshot())
         }
@@ -228,6 +250,7 @@ macro_rules! define_program_descriptor_registry {
         #[doc = "Builds the operation registry used for typed authoring and certification."]
         $operation_vis fn $operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
             let mut operations = mfm_program::OperationRegistryBuilder::new();
+            $(operations.include($include_operation()?)?;)*
             $(operations.register::<$operation>()?;)*
             Ok(operations.into_snapshot())
         }
@@ -236,6 +259,7 @@ macro_rules! define_program_descriptor_registry {
         $cert_vis fn $certification(
             registry: &mut $crate::CertificationRegistry,
         ) -> $crate::Result<()> {
+            $($include_certification(registry)?;)*
             $(registry.register_state::<$state>()?;)*
             $(registry.register_operation::<$operation>()?;)*
 

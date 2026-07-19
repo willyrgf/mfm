@@ -119,7 +119,7 @@ async fn runtime_rejects_invalid_touched_set_terminal_evidence_cases() {
                     &scheduler,
                     &mut store,
                     &fixture,
-                    3,
+                    4,
                     TOUCHED_SET_EVIDENCE_ERR,
                 )
                 .await;
@@ -138,7 +138,7 @@ async fn runtime_rejects_invalid_touched_set_terminal_evidence_cases() {
                     &scheduler,
                     &mut store,
                     &fixture,
-                    4,
+                    5,
                     TOUCHED_SET_EVIDENCE_ERR,
                 )
                 .await;
@@ -157,7 +157,7 @@ async fn runtime_rejects_invalid_touched_set_terminal_evidence_cases() {
                     &scheduler,
                     &mut store,
                     &fixture,
-                    4,
+                    5,
                     EXACT_TOUCHED_SET_CLAIM_ERR,
                 )
                 .await;
@@ -170,7 +170,14 @@ async fn runtime_rejects_invalid_touched_set_terminal_evidence_cases() {
 async fn side_effect_not_submitted_resume_completes_submit_boundary() {
     let fixture = fixture_with_first_side_effect_state();
     let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
-    drive_ok!(scheduler, store, fixture, "prepare and start side effect");
+    for _ in 0..2 {
+        drive_ok!(
+            scheduler,
+            store,
+            fixture,
+            "claim, prepare, and start side effect"
+        );
+    }
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     let attempt_id = attempt_id(
@@ -253,8 +260,9 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
                     staged_ledger,
                     1,
                 )?;
+                let prepared = side_effect_prepared_output(&ctx, ledger.clone(), 1, 1)?;
                 Ok(ErasedRunnerOutput::from_parts(
-                    vec![staged_artifact],
+                    vec![staged_artifact, prepared.staged_artifact],
                     Vec::new(),
                     vec![
                         RunnerEventPayload::SideEffectIntentPersisted(
@@ -287,7 +295,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
                             },
                         ),
                         side_effect_claimed(&ctx, ledger.clone(), 1, 1),
-                        side_effect_prepared(&ctx, ledger, 1, 1),
+                        prepared.payload,
                     ],
                 ))
             })
@@ -331,13 +339,17 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
     for _ in 0..3 {
         assert_drive!(scheduler, store, fixture, Advanced, "advance to ambiguity");
     }
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        PublicOutputProjected,
-        "ambiguous side effect resolves terminal"
-    );
+    for _ in 0..4 {
+        let status = drive_ok!(
+            scheduler,
+            store,
+            fixture,
+            "ambiguous side effect resolves terminal"
+        );
+        if matches!(status, SchedulerStatus::PublicOutputProjected) {
+            break;
+        }
+    }
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)

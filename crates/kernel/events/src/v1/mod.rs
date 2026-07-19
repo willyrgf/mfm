@@ -481,7 +481,9 @@ pub struct RunAdmitted {
     pub runner_executables: Vec<ExecutableIdentity>,
     /// Adapter executable identities.
     pub adapter_executables: Vec<ExecutableIdentity>,
-    /// Digest binding admitted runtime context and adapter executable identities.
+    /// Concrete capability implementation identities.
+    pub capability_implementations: Vec<CapabilityImplementationIdentity>,
+    /// Digest binding admitted runtime executables and capability implementations.
     pub admitted_binding_digest: ContentDigest,
     /// Canonicalizer identity used for the certified spec.
     pub canonicalizer_identity: CanonicalizerIdentity,
@@ -489,34 +491,83 @@ pub struct RunAdmitted {
     pub seed_cells: Vec<SeedCellRef>,
 }
 
+/// One concrete non-secret capability implementation admitted for a run.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CapabilityImplementationIdentity {
+    /// Certified capability kind implemented by this binding.
+    pub capability_kind: CapabilityKind,
+    /// Certified capability contract version implemented by this binding.
+    pub capability_version: CapabilityVersion,
+    /// Stable process-local provider implementation identity.
+    pub implementation_id: RuntimeBindingId,
+}
+
 /// Public entry-point operation evidence bound into `RunAdmitted`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPointLaunchEvidence {
-    /// Fully resolved app entry-point op id.
-    pub resolved_op_id: EntryPointOpId,
-    /// Digest of the registered entry-point operation set.
-    pub entry_point_registry_digest: ContentDigest,
+    /// Exact public entry-point id selected by application assembly.
+    pub entry_point_id: EntryPointId,
+    /// Exact configured targets resolved while preparing the launch.
+    pub configured_targets: Vec<ConfiguredTargetEvidence>,
 }
 
-/// Fully qualified app entry-point operation id.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntryPointOpId(CheckedVisibleAscii256);
+impl EntryPointLaunchEvidence {
+    /// Creates launch evidence and canonicalizes its configured-target ordering.
+    pub fn new(
+        entry_point_id: impl AsRef<str>,
+        mut configured_targets: Vec<ConfiguredTargetEvidence>,
+    ) -> Result<Self> {
+        let entry_point_id = EntryPointId::new(entry_point_id)?;
+        configured_targets.sort();
+        configured_targets.dedup();
+        Ok(Self {
+            entry_point_id,
+            configured_targets,
+        })
+    }
+}
 
-impl EntryPointOpId {
-    /// Creates a checked entry-point op id.
+/// Exact public entry-point id bound into `RunAdmitted`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryPointId(CheckedVisibleAscii256);
+
+impl EntryPointId {
+    /// Creates a checked exact entry-point id.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
         CheckedVisibleAscii256::new(value)
             .map(Self)
             .map_err(|_| EventError::InvalidString {
-                field: "entry point op id",
+                field: "entry point id",
                 value: value.to_owned(),
             })
     }
 
-    /// Returns the entry-point op id string.
+    /// Returns the entry-point id string.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+/// One exact current configuration identity resolved during launch preparation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConfiguredTargetEvidence {
+    /// Stable configuration target.
+    pub target: StableAuthorKey,
+    /// Expected typed config schema id.
+    pub schema_id: SchemaId,
+    /// Content digest of the resolved canonical value.
+    pub digest: ContentDigest,
+}
+
+impl ConfiguredTargetEvidence {
+    /// Creates exact configuration evidence from a checked stable target.
+    pub fn new(target: StableAuthorKey, schema_id: SchemaId, digest: ContentDigest) -> Self {
+        Self {
+            target,
+            schema_id,
+            digest,
+        }
     }
 }
 

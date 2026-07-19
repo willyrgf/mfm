@@ -137,6 +137,103 @@ struct LaunchValue {
     label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "external_read_plan_v2",
+    version = "1",
+    schema = "mfm.program.test.external_read_plan_v2"
+)]
+struct AlternateReadPlan {
+    amount: u64,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "external_read_evidence",
+    version = "1",
+    schema = "mfm.program.test.external_read_evidence"
+)]
+struct ReadEvidenceValue {
+    amount: u64,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "external_read_evidence_v2",
+    version = "1",
+    schema = "mfm.program.test.external_read_evidence_v2"
+)]
+struct AlternateReadEvidence {
+    amount: u64,
+    label: String,
+}
+
+#[test]
+fn external_read_contract_digest_binds_plan_and_evidence_identities() {
+    let original =
+        external_read_contract_digest::<LaunchValue, ReadEvidenceValue>().expect("read contract");
+    assert_eq!(
+        original,
+        external_read_contract_digest::<LaunchValue, ReadEvidenceValue>()
+            .expect("stable read contract")
+    );
+    assert_ne!(
+        original,
+        external_read_contract_digest::<AlternateReadPlan, ReadEvidenceValue>()
+            .expect("changed plan contract")
+    );
+    assert_ne!(
+        original,
+        external_read_contract_digest::<LaunchValue, AlternateReadEvidence>()
+            .expect("changed evidence contract")
+    );
+}
+
+#[test]
+fn side_effect_contract_digest_binds_recovery_evidence_identity() {
+    let original = side_effect_contract_digest::<
+        LaunchValue,
+        LaunchValue,
+        LaunchValue,
+        LaunchValue,
+        ReadEvidenceValue,
+        LaunchValue,
+        LaunchValue,
+    >()
+    .expect("side-effect contract");
+    assert_eq!(
+        original,
+        side_effect_contract_digest::<
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            ReadEvidenceValue,
+            LaunchValue,
+            LaunchValue,
+        >()
+        .expect("stable side-effect contract")
+    );
+    assert_ne!(
+        original,
+        side_effect_contract_digest::<
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            LaunchValue,
+            AlternateReadEvidence,
+            LaunchValue,
+            LaunchValue,
+        >()
+        .expect("changed recovery evidence contract")
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.program.test",
@@ -382,45 +479,29 @@ macro_rules! impl_side_effect_state {
         impl SideEffectState for $state {
             type Intent = LaunchValue;
             type IdempotencyInput = LaunchValue;
+            type PreparedInvocation = LaunchValue;
             type Submission = LaunchValue;
+            type RecoveryEvidence = LaunchValue;
             type Receipt = LaunchValue;
             type Confirmation = LaunchValue;
-            type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
 
-            fn prepare_intent(
+            fn intent(
                 &self,
                 input: &Self::Input,
                 _context: &CertifiedContext<Self::Context>,
-            ) -> StateResult<Self::Intent> {
-                Ok(LaunchValue {
+            ) -> StateResult<SideEffectIntent<Self::Intent, Self::IdempotencyInput>> {
+                let intent = LaunchValue {
                     amount: input.amount + self.config.multiplier,
                     label: input.label.clone(),
-                })
-            }
-
-            fn idempotency_input(
-                &self,
-                _input: &Self::Input,
-                intent: &Self::Intent,
-                _context: &CertifiedContext<Self::Context>,
-            ) -> StateResult<Self::IdempotencyInput> {
-                Ok(intent.clone())
-            }
-
-            fn submit<'a>(
-                &'a self,
-                intent: &'a Self::Intent,
-                _key: &'a IdempotencyKey<Self::IdempotencyInput>,
-                _caps: &'a Self::Caps,
-                _context: &'a CertifiedContext<Self::Context>,
-            ) -> Self::SubmitFuture<'a> {
-                std::future::ready(Ok(intent.clone()))
+                };
+                Ok(SideEffectIntent::new(intent.clone(), intent))
             }
 
             fn output_from_receipt(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
                 receipt: &Self::Receipt,
                 _context: &CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
@@ -430,7 +511,9 @@ macro_rules! impl_side_effect_state {
             fn output_from_confirmation(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
+                _receipt: &Self::Receipt,
                 confirmation: &Self::Confirmation,
                 _context: &CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
@@ -563,6 +646,46 @@ impl Operation for MultiplyOperation {
             input,
         )?;
         Ok(LaunchOperationOutputs { result })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StructuredInputOperation;
+
+impl Operation for StructuredInputOperation {
+    type Config = LaunchConfig;
+    type Input<'program, 'scope> =
+        OperationInputHandles<LaunchInput, LaunchInputHandles<'program, 'scope>>;
+    type Output<'program, 'scope> = LaunchOperationOutputs<'program, 'scope>;
+
+    fn kind() -> Result<OperationKind> {
+        test_operation_kind(
+            "structured_input",
+            b"mfm.program.test.operation:structured_input",
+        )
+    }
+
+    fn version() -> Result<OperationVersion> {
+        OperationVersion::new("mfm.program.test.operation.structured_input.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "structured_input"
+    }
+
+    fn expand<'program, 'scope>(
+        &self,
+        config: ValidatedConfig<Self::Config>,
+        input: Self::Input<'program, 'scope>,
+        _builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: OperationExpansionDispatch<Self>,
+    ) -> Result<Self::Output<'program, 'scope>> {
+        let _config = config.into_inner();
+        let handles = input.into_handles();
+        Ok(LaunchOperationOutputs {
+            result: handles.primary_value,
+        })
     }
 }
 
@@ -725,6 +848,50 @@ fn contextual_mutation_registries() -> (StateRegistrySnapshot, OperationRegistry
         .register::<ContextualMutationOperation>()
         .expect("contextual operation registers");
     (states.into_snapshot(), operations.into_snapshot())
+}
+
+#[test]
+fn registry_builders_compose_child_snapshots_idempotently() {
+    let (multiply_states, multiply_operations) = multiply_registries();
+    let (contextual_states, contextual_operations) = contextual_mutation_registries();
+
+    let mut states = StateRegistryBuilder::new();
+    states
+        .include(multiply_states.clone())
+        .expect("include multiply states");
+    states
+        .include(multiply_states)
+        .expect("reinclude multiply states");
+    states
+        .include(contextual_states)
+        .expect("include contextual states");
+    let states = states.into_snapshot();
+    assert_eq!(states.len(), 2);
+    states
+        .state_descriptor::<MultiplyState>()
+        .expect("composed multiply state");
+    states
+        .state_descriptor::<ContextualMutationState>()
+        .expect("composed contextual state");
+
+    let mut operations = OperationRegistryBuilder::new();
+    operations
+        .include(multiply_operations.clone())
+        .expect("include multiply operations");
+    operations
+        .include(multiply_operations)
+        .expect("reinclude multiply operations");
+    operations
+        .include(contextual_operations)
+        .expect("include contextual operations");
+    let operations = operations.into_snapshot();
+    assert_eq!(operations.len(), 2);
+    operations
+        .operation_descriptor::<MultiplyOperation>()
+        .expect("composed multiply operation");
+    operations
+        .operation_descriptor::<ContextualMutationOperation>()
+        .expect("composed contextual operation");
 }
 
 fn set_compensating_policy(root: &mut RootBuilder<'_, '_>) -> Result<()> {

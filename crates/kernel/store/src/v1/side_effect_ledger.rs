@@ -383,6 +383,7 @@ impl OwnedSideEffectLedgerState {
             content_digest: payload.submission_hash.clone(),
             evidence_hash: payload.submission_artifact_evidence_hash.clone(),
             schema_id: Some(payload.submission_schema_id.clone()),
+            producer_node_id: payload.node_id.clone(),
         });
         Ok(self)
     }
@@ -433,6 +434,7 @@ impl OwnedSideEffectLedgerState {
             content_digest: payload.receipt_hash.clone(),
             evidence_hash: payload.receipt_artifact_evidence_hash.clone(),
             schema_id: Some(payload.receipt_schema_id.clone()),
+            producer_node_id: payload.node_id.clone(),
         });
         if let Some(touched_set) = payload.resource_touched_set.clone() {
             self.retained.resource_touched_set = Some(touched_set);
@@ -466,6 +468,7 @@ impl OwnedSideEffectLedgerState {
             content_digest: payload.confirmation_hash.clone(),
             evidence_hash: payload.confirmation_artifact_evidence_hash.clone(),
             schema_id: Some(payload.confirmation_schema_id.clone()),
+            producer_node_id: payload.node_id.clone(),
         });
         if let Some(touched_set) = payload.resource_touched_set.clone() {
             self.retained.resource_touched_set = Some(touched_set);

@@ -17,9 +17,8 @@ fn diagnostic_renders_stable_code_summary_and_public_details() {
         "rpc_http_status operation=scantxoutset http_status=403"
     );
     assert_eq!(
-        diagnostic.to_public_details_json(),
+        serde_json::to_value(&diagnostic).expect("serialize diagnostic"),
         serde_json::json!({
-            "diagnostic_kind": "provider_failure",
             "provider_family": "bitcoin",
             "code": "rpc_http_status",
             "operation": "scantxoutset",
@@ -31,49 +30,39 @@ fn diagnostic_renders_stable_code_summary_and_public_details() {
 }
 
 #[test]
-fn source_mismatch_uses_source_mismatch_diagnostic_kind() {
-    let diagnostic =
-        RedactedProviderDiagnostic::new(id("evm"), ProviderDiagnosticCode::SourceMismatch);
-
-    assert_eq!(
-        diagnostic.to_public_details_json()["diagnostic_kind"],
-        "provider_source_mismatch"
-    );
-}
-
-#[test]
-fn public_details_round_trip_through_closed_parser() {
+fn serde_round_trip_uses_the_closed_canonical_representation() {
     let diagnostic =
         RedactedProviderDiagnostic::new(id("evm"), ProviderDiagnosticCode::SourceMismatch)
             .with_operation(id("chain_id"))
             .with_field(id("expected_chain_id"), ProviderDiagnosticValue::U64(1));
 
     assert_eq!(
-        RedactedProviderDiagnostic::from_public_details_json(&diagnostic.to_public_details_json()),
-        Some(diagnostic)
+        serde_json::from_value::<RedactedProviderDiagnostic>(
+            serde_json::to_value(&diagnostic).expect("serialize diagnostic")
+        )
+        .expect("deserialize diagnostic"),
+        diagnostic
     );
 }
 
 #[test]
 fn public_details_parser_rejects_unknown_or_untyped_fields() {
     let unknown_field = serde_json::json!({
-        "diagnostic_kind": "provider_failure",
         "provider_family": "evm",
         "code": "response_invalid",
         "operation": null,
         "fields": {},
         "unexpected": true,
     });
-    assert!(RedactedProviderDiagnostic::from_public_details_json(&unknown_field).is_none());
+    assert!(serde_json::from_value::<RedactedProviderDiagnostic>(unknown_field).is_err());
 
     let untyped_field = serde_json::json!({
-        "diagnostic_kind": "provider_failure",
         "provider_family": "evm",
         "code": "response_invalid",
         "operation": null,
         "fields": {"body": {"secret": "value"}},
     });
-    assert!(RedactedProviderDiagnostic::from_public_details_json(&untyped_field).is_none());
+    assert!(serde_json::from_value::<RedactedProviderDiagnostic>(untyped_field).is_err());
 }
 
 #[test]

@@ -134,6 +134,8 @@ pub struct SideEffectReplayFrame<'a> {
     pub prepared: Option<&'a side_effect::InvocationPrepared>,
     /// Submission observed event payload, when present.
     pub submission: Option<&'a side_effect::SubmissionObserved>,
+    /// Submission-unknown event payload, when present.
+    pub submission_unknown: Option<&'a side_effect::SubmissionUnknown>,
     /// Not-submitted proof payload, when present.
     pub not_submitted: Option<&'a side_effect::NotSubmittedProven>,
     /// Receipt observed event payload, when present.
@@ -145,6 +147,18 @@ pub struct SideEffectReplayFrame<'a> {
 }
 
 impl SideEffectReplayFrame<'_> {
+    /// Builds the replay request for this frame's prepared invocation, when present.
+    pub fn prepared_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+        let prepared = self.prepared?;
+        Some(side_effect_evidence_replay_request(
+            self.intent,
+            self.certified_context.clone(),
+            prepared.prepared_schema_id.clone(),
+            prepared.prepared_hash.clone(),
+            None,
+        ))
+    }
+
     /// Builds the replay request for this frame's submission evidence, when present.
     pub fn submission_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
         let submission = self.submission?;
@@ -153,6 +167,18 @@ impl SideEffectReplayFrame<'_> {
             self.certified_context.clone(),
             submission.submission_schema_id.clone(),
             submission.submission_hash.clone(),
+            None,
+        ))
+    }
+
+    /// Builds the replay request for this frame's submission-unknown evidence, when present.
+    pub fn submission_unknown_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+        let unknown = self.submission_unknown?;
+        Some(side_effect_evidence_replay_request(
+            self.intent,
+            self.certified_context.clone(),
+            unknown.evidence_schema_id.clone(),
+            unknown.evidence_hash.clone(),
             None,
         ))
     }
@@ -234,6 +260,17 @@ pub struct SubmissionReplayEvidence {
     pub artifact_bytes: Vec<u8>,
 }
 
+/// Replay evidence returned for an inconclusive side-effect submission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionUnknownReplayEvidence {
+    /// Submission-unknown event payload.
+    pub unknown: side_effect::SubmissionUnknown,
+    /// Retained uncertainty artifact evidence.
+    pub artifact: StoredArtifactEvidenceRef,
+    /// Retained uncertainty artifact bytes.
+    pub artifact_bytes: Vec<u8>,
+}
+
 /// Replay evidence returned for a prepared side-effect invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedInvocationReplayEvidence {
@@ -283,6 +320,8 @@ pub struct AmbiguityReplayEvidence {
     pub ambiguity: side_effect::Ambiguous,
     /// Retained ambiguity artifact evidence.
     pub artifact: StoredArtifactEvidenceRef,
+    /// Retained ambiguity artifact bytes.
+    pub artifact_bytes: Vec<u8>,
 }
 
 /// Intent evidence supplied to side-effect replay verifiers.

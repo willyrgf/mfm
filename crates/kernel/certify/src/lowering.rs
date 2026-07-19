@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CellInfo {
     pub(super) producer: spec::CellProducer,
     pub(super) semantic_type_id: SemanticTypeId,
@@ -46,6 +46,7 @@ impl<'a> DraftLowerer<'a> {
     pub(super) fn lower(&mut self) -> Result<spec::TypedExecutionSpec> {
         let scopes = self.lower_scopes()?;
         let seeds = self.lower_seeds()?;
+        self.register_planned_cells()?;
         self.lower_state_nodes()?;
         let remediations = self.lower_remediation_nodes()?;
         self.lower_bridge_nodes()?;
@@ -122,6 +123,51 @@ impl<'a> DraftLowerer<'a> {
             });
         }
         Ok(lowered)
+    }
+
+    fn register_planned_cells(&mut self) -> Result<()> {
+        for node in self
+            .draft
+            .state_nodes()
+            .iter()
+            .chain(self.draft.remediation_nodes().values())
+        {
+            self.register_planned_cell_info(
+                CellInfo {
+                    producer: spec::CellProducer::Node(node.node_id.clone()),
+                    semantic_type_id: node.output_semantic_type_id.clone(),
+                    schema_id: node.output_schema_id.clone(),
+                    value_lineage: lineage_ref(node.output_value_lineage.digest()),
+                    context: node.output_context.clone(),
+                },
+                &node.output_cell_id,
+            )?;
+            if let Some(verify) = &node.side_effect_verify {
+                self.register_planned_cell_info(
+                    CellInfo {
+                        producer: spec::CellProducer::Node(verify.node_id.clone()),
+                        semantic_type_id: node.output_semantic_type_id.clone(),
+                        schema_id: node.output_schema_id.clone(),
+                        value_lineage: lineage_ref(verify.output_value_lineage.digest()),
+                        context: verify.output_context.clone(),
+                    },
+                    &verify.output_cell_id,
+                )?;
+            }
+        }
+        for bridge in self.draft.bridge_nodes() {
+            self.register_planned_cell_info(
+                CellInfo {
+                    producer: spec::CellProducer::Node(bridge.node_id.clone()),
+                    semantic_type_id: bridge.semantic_type_id.clone(),
+                    schema_id: bridge.schema_id.clone(),
+                    value_lineage: lineage_ref(bridge.target_value_lineage.digest()),
+                    context: bridge.context.clone(),
+                },
+                &bridge.target_cell_id,
+            )?;
+        }
+        Ok(())
     }
 
     fn lower_state_nodes(&mut self) -> Result<()> {
@@ -215,28 +261,32 @@ impl<'a> DraftLowerer<'a> {
             state_descriptor_identity_from_program(node)?,
         )))?;
         let side_effect = match (
-            node.side_effect_contract_digest.as_ref(),
+            node.runner,
+            node.effect_contract_digest.as_ref(),
             node.side_effect_resource_claim.as_ref(),
             node.side_effect_verification.as_ref(),
         ) {
-            (Some(digest), Some(resource_claim), Some(verification)) => {
-                Some(spec::SideEffectContractSpec {
-                    contract_digest: digest.clone(),
-                    resource_claim: resource_claim.clone(),
-                    verification: verification.clone(),
-                })
-            }
-            (None, None, None) => None,
-            (Some(_), None, _) | (Some(_), _, None) => {
+            (
+                program::RunnerKind::ApplySideEffect,
+                Some(digest),
+                Some(resource_claim),
+                Some(verification),
+            ) => Some(spec::SideEffectContractSpec {
+                contract_digest: digest.clone(),
+                resource_claim: resource_claim.clone(),
+                verification: verification.clone(),
+            }),
+            (program::RunnerKind::ApplySideEffect, _, _, _) => {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(
-                        "side-effect node {} is missing resource claim or verification policy",
+                        "side-effect node {} is missing its effect contract, resource claim, or verification policy",
                         node.node_id
                     ),
                 ));
             }
-            (None, Some(_), _) | (None, _, Some(_)) => {
+            (_, _, None, None) => None,
+            (_, _, Some(_), _) | (_, _, _, Some(_)) => {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(
@@ -1025,15 +1075,7 @@ impl<'a> DraftLowerer<'a> {
     }
 
     fn insert_cell(&mut self, cell: spec::CellSpec) -> Result<()> {
-        let key = cell.cell_id.as_str().to_owned();
-        if self.cell_info.contains_key(&key) {
-            return Err(problem(
-                ProblemClass::InvalidTopology,
-                format!("duplicate cell id {}", cell.cell_id),
-            ));
-        }
-        self.cell_info.insert(
-            key,
+        self.register_planned_cell_info(
             CellInfo {
                 producer: cell.producer.clone(),
                 semantic_type_id: cell.semantic_type_id.clone(),
@@ -1041,8 +1083,34 @@ impl<'a> DraftLowerer<'a> {
                 value_lineage: cell.value_lineage.clone(),
                 context: cell.context.clone(),
             },
-        );
+            &cell.cell_id,
+        )?;
+        if self
+            .cells
+            .iter()
+            .any(|existing| existing.cell_id == cell.cell_id)
+        {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!("duplicate cell id {}", cell.cell_id),
+            ));
+        }
         self.cells.push(cell);
+        Ok(())
+    }
+
+    fn register_planned_cell_info(&mut self, info: CellInfo, cell_id: &CellId) -> Result<()> {
+        let key = cell_id.as_str().to_owned();
+        if let Some(existing) = self.cell_info.get(&key) {
+            if existing != &info {
+                return Err(problem(
+                    ProblemClass::InvalidTopology,
+                    format!("conflicting planned cell metadata for {cell_id}"),
+                ));
+            }
+        } else {
+            self.cell_info.insert(key, info);
+        }
         Ok(())
     }
 

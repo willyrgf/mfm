@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn side_effect_driver_prepares_and_starts_one_step() {
+async fn side_effect_driver_persists_intent_before_preparation() {
     let fixture = fixture_with_first_side_effect_state();
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
 
@@ -9,8 +9,8 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
         .await
         .expect("driver output");
 
-    assert_eq!(output.staged_artifacts().len(), 2);
-    assert_eq!(output.payloads().len(), 4);
+    assert_eq!(output.staged_artifacts().len(), 1);
+    assert_eq!(output.payloads().len(), 2);
     assert!(matches!(
         output.payloads()[0],
         RunnerEventPayload::SideEffectIntentPersisted(_)
@@ -18,14 +18,6 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
     assert!(matches!(
         output.payloads()[1],
         RunnerEventPayload::SideEffectClaimed(_)
-    ));
-    assert!(matches!(
-        output.payloads()[2],
-        RunnerEventPayload::SideEffectInvocationPrepared(_)
-    ));
-    assert!(matches!(
-        output.payloads()[3],
-        RunnerEventPayload::SideEffectInvocationStarted(_)
     ));
     match &output.payloads()[0] {
         RunnerEventPayload::SideEffectIntentPersisted(payload) => {
@@ -37,6 +29,88 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
         }
         other => panic!("expected intent payload: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn appended_preparation_settles_side_effect_authority_once() {
+    let fixture = fixture_with_first_side_effect_state();
+    let settled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        DriverSideEffectRunner::new(&fixture).with_preparation_settlement(Arc::clone(&settled)),
+    ));
+    let store = RecordingTypedRunStore::new();
+    start_fixture_run_async_store(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+        .await
+        .expect("start appended side-effect settlement run");
+
+    assert!(
+        drive_until_side_effect_preparation(&scheduler, &store, &fixture).await,
+        "the side-effect driver must carry settlement through preparation"
+    );
+    assert_eq!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a durably appended preparation must settle its process-local authority exactly once"
+    );
+}
+
+#[tokio::test]
+async fn uncertain_preparation_append_discards_side_effect_authority() {
+    let fixture = fixture_with_first_side_effect_state();
+    let settled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        DriverSideEffectRunner::new(&fixture).with_preparation_settlement(Arc::clone(&settled)),
+    ));
+    let store = StaleOnceTypedRunStore::for_side_effect_preparation();
+    start_fixture_run_async_store(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+        .await
+        .expect("start side-effect settlement run");
+
+    let preparation_committed =
+        drive_until_side_effect_preparation(&scheduler, &store, &fixture).await;
+
+    assert!(
+        preparation_committed,
+        "the injected append error occurs only after preparation was committed"
+    );
+    assert_eq!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the side-effect settlement token must be discarded when its append outcome is uncertain"
+    );
+}
+
+async fn drive_until_side_effect_preparation<S>(
+    scheduler: &SerialTypedScheduler,
+    store: &S,
+    fixture: &Fixture,
+) -> bool
+where
+    S: store::RunEventStore<Error = store::StoreError>
+        + store::ExecutionClaimStore<Error = store::StoreError>
+        + ?Sized,
+{
+    for _ in 0..8 {
+        drive_once_with_claim(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive through preparation append");
+        let stream = store
+            .load_committed_run_stream(&fixture.run_id)
+            .await
+            .expect("load side-effect settlement stream");
+        let preparation_committed = stream.events().iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectInvocationPrepared(_)
+            )
+        });
+        if preparation_committed {
+            return true;
+        }
+    }
+    false
 }
 
 #[tokio::test]
@@ -207,6 +281,64 @@ async fn runner_block_leaves_started_attempt_open_without_failure() {
         event.payload(),
         events::KernelEventPayload::StateAttemptFailed(payload)
             if payload.node_id == node.node_id
+    )));
+}
+
+#[tokio::test]
+async fn side_effect_verify_block_leaves_framework_attempt_open_without_failure() {
+    let fixture = fixture_with_first_side_effect_state();
+    let verify_node = fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+            )
+        })
+        .expect("side-effect verify node")
+        .clone();
+    let scheduler = test_scheduler(registered_first_side_effect_and_verify_runners_with(
+        &fixture,
+        DriverSideEffectRunner::new(&fixture),
+        BlockingRunner,
+    ));
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+
+    let mut blocked = false;
+    for _ in 0..12 {
+        match drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("drive side-effect pair")
+        {
+            SchedulerStatus::Advanced => {}
+            SchedulerStatus::Blocked => {
+                blocked = true;
+                break;
+            }
+            SchedulerStatus::PublicOutputProjected => {
+                panic!("verify runner blocked before public output")
+            }
+        }
+    }
+    assert!(blocked, "verify runner must report an operational block");
+    let stream = store.load_run_stream(&fixture.run_id);
+    assert!(stream.iter().any(|event| matches!(
+        event.payload(),
+        events::KernelEventPayload::StateAttemptStarted(payload)
+            if payload.node_id == verify_node.node_id
+    )));
+    assert!(stream.iter().all(|event| !matches!(
+        event.payload(),
+        events::KernelEventPayload::StateAttemptFailed(payload)
+            if payload.node_id == verify_node.node_id
     )));
 }
 
@@ -501,90 +633,5 @@ async fn side_effect_driver_rejects_ambiguous_projection() {
         drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks).await,
         Err(RuntimeError::InvalidRunnerOutput(message))
             if message.contains("unsupported side-effect driver phase: ambiguous")
-    ));
-}
-
-#[tokio::test]
-async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        node,
-        "wallet-driver-unsupported",
-        "sidefx-driver-unsupported",
-    );
-    let pair_id = fixture_side_effect_pair_id(&fixture, node);
-    let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
-
-    let output =
-        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
-            .await
-            .expect("driver output");
-
-    assert_eq!(output.staged_artifacts().len(), 1);
-    assert_eq!(output.payloads().len(), 2);
-    match &output.payloads()[0] {
-        RunnerEventPayload::SideEffectInvocationStarted(payload) => {
-            assert_side_effect_binding!(payload, ledger_key, 1);
-        }
-        other => panic!("expected invocation started payload: {other:?}"),
-    }
-    match &output.payloads()[1] {
-        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
-            assert_side_effect_binding!(payload, ledger_key, 1);
-        }
-        other => panic!("expected submission payload: {other:?}"),
-    }
-
-    let required_artifacts = output
-        .staged_artifacts()
-        .iter()
-        .map(|artifact| artifact.evidence().clone())
-        .collect::<Vec<_>>();
-    let payloads = output
-        .payloads()
-        .iter()
-        .cloned()
-        .map(events::KernelEventPayload::from)
-        .collect::<Vec<_>>();
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new("sidefx-driver-prepared-resume")
-                .expect("commit key"),
-            payloads: payloads,
-            required_artifacts: required_artifacts,
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: pair_id.clone(),
-                    required: store::RequiredSideEffectState::InvocationPrepared,
-                }],
-                certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
-                    fixture.run_id.clone(),
-                    fixture.runtime_spec.spec(),
-                )
-                .expect("certified run authority")),
-                ..store::CommitPreconditions::default()
-            },
-        })
-        .expect("append prepared recovery output");
-
-    let projection_snapshot = store.projection_snapshot();
-    let projection = projection_snapshot
-        .side_effect_state_for_pair(&fixture.run_id, &pair_id)
-        .expect("side-effect state")
-        .expect("side-effect projection");
-    assert!(matches!(
-        projection.phase(),
-        store::SideEffectLedgerPhase::SubmissionKnown {
-            status: store::SideEffectSubmissionState::Observed { .. },
-            ..
-        }
     ));
 }

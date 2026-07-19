@@ -1,7 +1,8 @@
 use super::*;
 
 impl ReplayBroker {
-    pub(super) fn side_effect_intent_evidence(
+    /// Returns retained side-effect intent evidence from replay records only.
+    pub fn side_effect_intent_evidence(
         &self,
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<SideEffectIntentReplayEvidence> {
@@ -95,38 +96,11 @@ impl ReplayBroker {
         &self,
         prepared: &side_effect::InvocationPrepared,
     ) -> Result<PreparedInvocationReplayEvidence> {
-        let artifact_id = prepared.prepared_artifact_id.as_ref().ok_or_else(|| {
-            ReplayError::new(
-                ReplayErrorKind::SideEffectMissing,
-                format!("missing prepared invocation artifact {}", prepared.pair_id),
-            )
-        })?;
-        let digest = prepared.prepared_hash.as_ref().ok_or_else(|| {
-            ReplayError::new(
-                ReplayErrorKind::SideEffectMissing,
-                format!(
-                    "missing prepared invocation artifact hash {}",
-                    prepared.pair_id
-                ),
-            )
-        })?;
-        let evidence_hash = prepared
-            .prepared_artifact_evidence_hash
-            .as_ref()
-            .ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::SideEffectMissing,
-                    format!(
-                        "missing prepared invocation artifact evidence hash {}",
-                        prepared.pair_id
-                    ),
-                )
-            })?;
         let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
-            artifact_id,
-            evidence_hash,
-            digest,
-            schema_id: None,
+            artifact_id: &prepared.prepared_artifact_id,
+            evidence_hash: &prepared.prepared_artifact_evidence_hash,
+            digest: &prepared.prepared_hash,
+            schema_id: Some(&prepared.prepared_schema_id),
             semantic_type_id: None,
             role: ArtifactRole::PreparedInvocation,
             producer_node_id: Some(&prepared.node_id),

@@ -1,15 +1,9 @@
 #![allow(clippy::disallowed_methods)]
 
-use crate::commands::result::CommandError;
+use crate::commands::result::PublicError;
 use chrono::Utc;
 use mfm_core::keystore::{KeyType, Keystore, KeystoreConfig, KeystoreError};
-use mfm_evm_core::tx::{
-    eip1559_signing_hash, encode_signed_eip1559_tx_hex, parse_address, parse_data_hex,
-    parse_u128_quantity, Eip1559TxToSign,
-};
 use std::io::{self, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -33,16 +27,6 @@ pub(crate) enum Bip39ExtraSource {
     Prompt,
     /// Read from a local file or FIFO.
     FilePath(PathBuf),
-}
-
-/// Local output write policy for `keystore tx-sign`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum OutputWriteMode {
-    /// Create a new output and fail if the target exists.
-    #[default]
-    CreateNew,
-    /// Replace an existing regular output file.
-    Overwrite,
 }
 
 /// Resolved keystore access for direct CLI commands.
@@ -174,72 +158,26 @@ pub(crate) struct DeletedKey {
     pub(crate) label: String,
 }
 
-/// Keystore transaction signing request.
-pub(crate) struct TxSignRequest {
-    /// Optional exact id.
-    pub(crate) id: Option<String>,
-    /// Optional exact label.
-    pub(crate) by_label: Option<String>,
-    /// Recipient.
-    pub(crate) to: String,
-    /// Transfer value in wei.
-    pub(crate) value_wei: String,
-    /// Chain id.
-    pub(crate) chain_id: u64,
-    /// Nonce.
-    pub(crate) nonce: u64,
-    /// Max fee per gas in wei.
-    pub(crate) max_fee_per_gas: String,
-    /// Max priority fee per gas in wei.
-    pub(crate) max_priority_fee_per_gas: String,
-    /// Gas limit.
-    pub(crate) gas_limit: u64,
-    /// Output file.
-    pub(crate) out_path: PathBuf,
-    /// Output write policy.
-    pub(crate) out_write_mode: OutputWriteMode,
-    /// Calldata hex.
-    pub(crate) data: String,
-    /// Keystore access.
-    pub(crate) access: KeystoreAccess,
-}
-
-/// Keystore transaction signing response.
-pub(crate) struct SignedTx {
-    /// Sender address.
-    pub(crate) from: String,
-    /// Recipient address.
-    pub(crate) to: String,
-    /// Nonce.
-    pub(crate) nonce: u64,
-    /// Chain id.
-    pub(crate) chain_id: u64,
-    /// EVM transaction type.
-    pub(crate) tx_type: String,
-    /// Signing payload hash.
-    pub(crate) payload_hash: String,
-}
-
 struct ProcessSecretInput;
 
 trait SecretInput {
-    fn read_stdin_material(&mut self) -> Result<Zeroizing<String>, CommandError>;
+    fn read_stdin_material(&mut self) -> Result<Zeroizing<String>, PublicError>;
 
-    fn read_hidden(&mut self, prompt: &str) -> Result<Zeroizing<String>, CommandError>;
+    fn read_hidden(&mut self, prompt: &str) -> Result<Zeroizing<String>, PublicError>;
 }
 
 impl SecretInput for ProcessSecretInput {
-    fn read_stdin_material(&mut self) -> Result<Zeroizing<String>, CommandError> {
+    fn read_stdin_material(&mut self) -> Result<Zeroizing<String>, PublicError> {
         read_stdin_material()
     }
 
-    fn read_hidden(&mut self, prompt: &str) -> Result<Zeroizing<String>, CommandError> {
+    fn read_hidden(&mut self, prompt: &str) -> Result<Zeroizing<String>, PublicError> {
         read_password(prompt)
     }
 }
 
 /// Imports a key directly through `mfm_core::keystore`.
-pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandError> {
+pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, PublicError> {
     let mut input = ProcessSecretInput;
     validate_import_request(&req)?;
     let material = match req.kind {
@@ -270,7 +208,9 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
             let label = req
                 .label
                 .unwrap_or_else(|| format!("imported-key-{}", Utc::now().format("%Y%m%d-%H%M%S")));
-            let key_id = ks.import_private_key(Some(label), normalized.as_str())?;
+            let key_id = ks
+                .import_private_key(Some(label), normalized.as_str())
+                .map_err(admin_error_from_keystore)?;
             imported_key_from_keystore(&ks, key_id)
         }
         ImportKind::Mnemonic => {
@@ -280,22 +220,25 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
                 .label
                 .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
             let extra = read_bip39_extra(req.bip39_extra, &mut input)?;
-            let key_id = ks.import_mnemonic(
-                Some(label),
-                material.as_str(),
-                &req.derivation_path,
-                extra.as_ref().map(|v| v.as_str()),
-            )?;
+            let key_id = ks
+                .import_mnemonic(
+                    Some(label),
+                    material.as_str(),
+                    &req.derivation_path,
+                    extra.as_ref().map(|v| v.as_str()),
+                )
+                .map_err(admin_error_from_keystore)?;
             imported_key_from_keystore(&ks, key_id)
         }
     }
 }
 
 /// Lists keys directly through `mfm_core::keystore`.
-pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, CommandError> {
+pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, PublicError> {
     let keystore = load_unlocked_keystore(&req.access)?;
     let mut keys: Vec<ListedKey> = keystore
-        .list_keys()?
+        .list_keys()
+        .map_err(admin_error_from_keystore)?
         .into_iter()
         .map(|key| ListedKey {
             id: key.id.to_string(),
@@ -312,7 +255,7 @@ pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, CommandError
 
     if let Some(pattern) = req.filter_label.as_ref() {
         let regex = regex::Regex::new(pattern)
-            .map_err(|_| CommandError::new("invalid_regex", "Invalid regex pattern"))?;
+            .map_err(|_| PublicError::bad_request("invalid_regex", "Invalid regex pattern"))?;
         keys.retain(|key| regex.is_match(&key.label));
     }
 
@@ -329,14 +272,15 @@ pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, CommandError
 }
 
 /// Deletes a key directly through `mfm_core::keystore`.
-pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandError> {
+pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, PublicError> {
     let mut keystore = load_unlocked_keystore(&req.access)?;
     let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
     let key_to_delete = keystore
-        .list_keys()?
+        .list_keys()
+        .map_err(admin_error_from_keystore)?
         .into_iter()
         .find(|key| key.id == key_id)
-        .ok_or_else(|| CommandError::new("key_not_found", "Key not found"))?;
+        .ok_or_else(|| PublicError::bad_request("key_not_found", "Key not found"))?;
 
     if !req.yes {
         let label = key_to_delete.alias.as_deref().unwrap_or("<no alias>");
@@ -345,14 +289,16 @@ pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandErr
             label, key_to_delete.id
         );
         if !confirm(&prompt)? {
-            return Err(CommandError::new(
+            return Err(PublicError::bad_request(
                 "operation_cancelled",
                 "Deletion cancelled by user",
             ));
         }
     }
 
-    keystore.delete_key(key_id)?;
+    keystore
+        .delete_key(key_id)
+        .map_err(admin_error_from_keystore)?;
 
     Ok(DeletedKey {
         id: key_to_delete.id.to_string(),
@@ -360,71 +306,16 @@ pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandErr
     })
 }
 
-/// Signs an EIP-1559 transaction and writes the raw signed transaction locally.
-pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandError> {
-    let mut keystore = load_unlocked_keystore(&req.access)?;
-    let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
-    let tx = Eip1559TxToSign {
-        to: Some(parse_address(&req.to, "to")?),
-        value_wei: parse_u128_quantity(&req.value_wei, "value-wei")?,
-        chain_id: req.chain_id,
-        nonce: req.nonce,
-        max_fee_per_gas: parse_u128_quantity(&req.max_fee_per_gas, "max-fee-per-gas")?,
-        max_priority_fee_per_gas: parse_u128_quantity(
-            &req.max_priority_fee_per_gas,
-            "max-priority-fee-per-gas",
-        )?,
-        gas_limit: req.gas_limit,
-        data: parse_data_hex(&req.data)?,
-    };
-
-    if tx.max_priority_fee_per_gas > tx.max_fee_per_gas {
-        return Err(CommandError::new(
-            "invalid_fee_config",
-            "max-priority-fee-per-gas must be <= max-fee-per-gas",
-        ));
-    }
-
-    let secure_key = keystore
-        .get_private_key(key_id)
-        .map_err(|_| CommandError::backend("keystore_error", "Failed to load key material"))?;
-    let from_address = secure_key
-        .ethereum_address()
-        .map_err(|_| CommandError::backend("signing_error", "Failed to derive signer address"))?;
-    let to_address = tx
-        .to
-        .map(|address| format!("{address:?}"))
-        .unwrap_or_default();
-
-    let hash = eip1559_signing_hash(&tx);
-    let mut hash_bytes = [0u8; 32];
-    hash_bytes.copy_from_slice(hash.as_slice());
-    let signature = secure_key
-        .sign_hash_recoverable(&hash_bytes)
-        .map_err(|_| CommandError::backend("signing_error", "Failed to sign transaction"))?;
-    let raw_tx_hex = encode_signed_eip1559_tx_hex(&tx, signature);
-    write_raw_transaction_file(&req.out_path, &raw_tx_hex, req.out_write_mode)?;
-
-    Ok(SignedTx {
-        from: format!("{from_address:?}"),
-        to: to_address,
-        nonce: tx.nonce,
-        chain_id: tx.chain_id,
-        tx_type: "0x2".to_string(),
-        payload_hash: format!("0x{}", hex::encode(hash.as_slice())),
-    })
-}
-
-fn validate_import_request(req: &ImportKeyRequest) -> Result<(), CommandError> {
+fn validate_import_request(req: &ImportKeyRequest) -> Result<(), PublicError> {
     if !matches!(req.bip39_extra, Bip39ExtraSource::None) && req.kind != ImportKind::Mnemonic {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "invalid_import_config",
             "BIP-39 extra input is only supported for mnemonic imports",
         ));
     }
 
     if req.stdin && matches!(req.bip39_extra, Bip39ExtraSource::Prompt) {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "invalid_import_config",
             "BIP-39 prompt input cannot be combined with stdin material",
         ));
@@ -436,13 +327,14 @@ fn validate_import_request(req: &ImportKeyRequest) -> Result<(), CommandError> {
 fn imported_key_from_keystore(
     keystore: &Keystore,
     key_id: Uuid,
-) -> Result<ImportedKey, CommandError> {
+) -> Result<ImportedKey, PublicError> {
     let key_info = keystore
-        .list_keys()?
+        .list_keys()
+        .map_err(admin_error_from_keystore)?
         .into_iter()
         .find(|key| key.id == key_id)
         .ok_or_else(|| {
-            CommandError::new("key_not_found", "Failed to retrieve imported key info")
+            PublicError::bad_request("key_not_found", "Failed to retrieve imported key info")
         })?;
 
     Ok(ImportedKey {
@@ -457,7 +349,7 @@ fn imported_key_from_keystore(
 fn create_keystore_if_needed(
     access: &KeystoreAccess,
     input: &mut dyn SecretInput,
-) -> Result<Keystore, CommandError> {
+) -> Result<Keystore, PublicError> {
     let path = access.path();
     if path.exists() {
         return load_unlocked_keystore_with_input(access, input);
@@ -465,20 +357,20 @@ fn create_keystore_if_needed(
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|_| {
-            CommandError::backend("keystore_error", "Failed to create keystore directory")
+            PublicError::internal("keystore_error", "Failed to create keystore directory")
         })?;
     }
 
     let password = get_create_password(access, input)?;
     let mut keystore = Keystore::new_with_config(path, KeystoreConfig::default())
-        .map_err(|_| CommandError::backend("keystore_error", "Failed to create keystore"))?;
+        .map_err(|_| PublicError::internal("keystore_error", "Failed to create keystore"))?;
     keystore
         .unlock(password.as_str())
-        .map_err(|_| CommandError::new("keystore_error", "failed to unlock keystore"))?;
+        .map_err(|_| PublicError::bad_request("keystore_error", "failed to unlock keystore"))?;
     Ok(keystore)
 }
 
-fn load_unlocked_keystore(access: &KeystoreAccess) -> Result<Keystore, CommandError> {
+fn load_unlocked_keystore(access: &KeystoreAccess) -> Result<Keystore, PublicError> {
     let mut input = ProcessSecretInput;
     load_unlocked_keystore_with_input(access, &mut input)
 }
@@ -486,17 +378,20 @@ fn load_unlocked_keystore(access: &KeystoreAccess) -> Result<Keystore, CommandEr
 fn load_unlocked_keystore_with_input(
     access: &KeystoreAccess,
     input: &mut dyn SecretInput,
-) -> Result<Keystore, CommandError> {
+) -> Result<Keystore, PublicError> {
     let path = access.path();
     if !path.exists() {
-        return Err(CommandError::new("keystore_error", "Keystore not found"));
+        return Err(PublicError::bad_request(
+            "keystore_error",
+            "Keystore not found",
+        ));
     }
 
     let mut keystore = Keystore::new(path)
-        .map_err(|_| CommandError::backend("keystore_error", "Failed to open keystore"))?;
+        .map_err(|_| PublicError::internal("keystore_error", "Failed to open keystore"))?;
     let password = get_unlock_password(access, input)?;
     keystore.unlock(password.as_str()).map_err(|_| {
-        CommandError::new("keystore_error", "invalid credential for keystore unlock")
+        PublicError::bad_request("keystore_error", "invalid credential for keystore unlock")
     })?;
     Ok(keystore)
 }
@@ -504,7 +399,7 @@ fn load_unlocked_keystore_with_input(
 fn get_unlock_password(
     access: &KeystoreAccess,
     input: &mut dyn SecretInput,
-) -> Result<Zeroizing<String>, CommandError> {
+) -> Result<Zeroizing<String>, PublicError> {
     match &access.credential {
         KeystoreCredentialSource::Prompt => input.read_hidden("Enter keystore password: "),
         KeystoreCredentialSource::File(path) => read_secret_file(path),
@@ -514,14 +409,14 @@ fn get_unlock_password(
 fn get_create_password(
     access: &KeystoreAccess,
     input: &mut dyn SecretInput,
-) -> Result<Zeroizing<String>, CommandError> {
+) -> Result<Zeroizing<String>, PublicError> {
     if let KeystoreCredentialSource::File(path) = &access.credential {
         return read_secret_file(path);
     }
     let password = input.read_hidden("Enter password for new keystore: ")?;
     let confirm_password = input.read_hidden("Confirm password: ")?;
     if password.as_str() != confirm_password.as_str() {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "keystore_error",
             "credential entries did not match",
         ));
@@ -532,7 +427,7 @@ fn get_create_password(
 fn read_bip39_extra(
     source: Bip39ExtraSource,
     input: &mut dyn SecretInput,
-) -> Result<Option<Zeroizing<String>>, CommandError> {
+) -> Result<Option<Zeroizing<String>>, PublicError> {
     match source {
         Bip39ExtraSource::None => Ok(None),
         Bip39ExtraSource::Prompt => input.read_hidden("Enter BIP-39 passphrase: ").map(Some),
@@ -544,7 +439,7 @@ fn read_secret_input(
     input: &mut dyn SecretInput,
     prompt: &str,
     from_stdin: bool,
-) -> Result<Zeroizing<String>, CommandError> {
+) -> Result<Zeroizing<String>, PublicError> {
     if from_stdin {
         return input.read_stdin_material();
     }
@@ -552,19 +447,19 @@ fn read_secret_input(
     input.read_hidden(prompt)
 }
 
-fn read_stdin_material() -> Result<Zeroizing<String>, CommandError> {
+fn read_stdin_material() -> Result<Zeroizing<String>, PublicError> {
     let mut input = Zeroizing::new(String::new());
     io::stdin()
         .read_to_string(&mut input)
-        .map_err(|_| CommandError::backend("input_error", "Failed to read secret input"))?;
+        .map_err(|_| PublicError::internal("input_error", "Failed to read secret input"))?;
     finalize_stdin_secret_material(&mut input)?;
     Ok(input)
 }
 
-fn finalize_stdin_secret_material(input: &mut String) -> Result<(), CommandError> {
+fn finalize_stdin_secret_material(input: &mut String) -> Result<(), PublicError> {
     trim_line_endings(input);
     if input.contains(['\r', '\n']) {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "input_error",
             "stdin secret material must contain exactly one line",
         ));
@@ -572,24 +467,24 @@ fn finalize_stdin_secret_material(input: &mut String) -> Result<(), CommandError
     Ok(())
 }
 
-fn read_password(prompt: &str) -> Result<Zeroizing<String>, CommandError> {
+fn read_password(prompt: &str) -> Result<Zeroizing<String>, PublicError> {
     print!("{prompt}");
     io::stdout()
         .flush()
-        .map_err(|_| CommandError::backend("input_error", "Failed to prompt for input"))?;
+        .map_err(|_| PublicError::internal("input_error", "Failed to prompt for input"))?;
     let password = rpassword::read_password()
-        .map_err(|_| CommandError::backend("input_error", "Failed to read password"))?;
+        .map_err(|_| PublicError::internal("input_error", "Failed to read password"))?;
     Ok(Zeroizing::new(password))
 }
 
-fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, CommandError> {
+fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, PublicError> {
     let mut raw = Zeroizing::new(
         std::fs::read_to_string(path)
-            .map_err(|_| CommandError::backend("keystore_error", "Failed to read secret file"))?,
+            .map_err(|_| PublicError::internal("keystore_error", "Failed to read secret file"))?,
     );
     trim_line_endings(&mut raw);
     if raw.is_empty() {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "keystore_error",
             "credential file was empty",
         ));
@@ -603,16 +498,16 @@ fn trim_line_endings(input: &mut String) {
     }
 }
 
-fn normalize_private_key(input: &str) -> Result<Zeroizing<String>, CommandError> {
+fn normalize_private_key(input: &str) -> Result<Zeroizing<String>, PublicError> {
     let normalized = Zeroizing::new(input.strip_prefix("0x").unwrap_or(input).trim().to_string());
     if normalized.len() != 64 {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "invalid_key_material",
             "Key material must be 64 hex characters",
         ));
     }
     if hex::decode(&normalized).is_err() {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "invalid_key_material",
             "Key material must be valid hexadecimal",
         ));
@@ -620,9 +515,9 @@ fn normalize_private_key(input: &str) -> Result<Zeroizing<String>, CommandError>
     Ok(normalized)
 }
 
-fn validate_mnemonic_basic(input: &str) -> Result<(), CommandError> {
+fn validate_mnemonic_basic(input: &str) -> Result<(), PublicError> {
     if input.split_whitespace().count() < 12 {
-        return Err(CommandError::new(
+        return Err(PublicError::bad_request(
             "invalid_recovery_phrase",
             "Recovery phrase must have at least 12 words",
         ));
@@ -630,16 +525,16 @@ fn validate_mnemonic_basic(input: &str) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn confirm(prompt: &str) -> Result<bool, CommandError> {
+fn confirm(prompt: &str) -> Result<bool, PublicError> {
     loop {
         print!("{prompt} (y/N): ");
         io::stdout()
             .flush()
-            .map_err(|_| CommandError::backend("input_error", "Failed to prompt for input"))?;
+            .map_err(|_| PublicError::internal("input_error", "Failed to prompt for input"))?;
 
         let mut input = String::new();
         io::stdin().read_line(&mut input).map_err(|_| {
-            CommandError::backend("input_error", "Failed to read confirmation input")
+            PublicError::internal("input_error", "Failed to read confirmation input")
         })?;
         match input.trim().to_lowercase().as_str() {
             "y" | "yes" => return Ok(true),
@@ -655,34 +550,34 @@ fn resolve_key_id(
     keystore: &Keystore,
     id: Option<&str>,
     by_label: Option<&str>,
-) -> Result<Uuid, CommandError> {
+) -> Result<Uuid, PublicError> {
     match (id, by_label) {
-        (Some(_), Some(_)) => Err(CommandError::new(
+        (Some(_), Some(_)) => Err(PublicError::bad_request(
             "missing_argument",
             "Specify exactly one key selector: ID or --by-label",
         )),
-        (None, None) => Err(CommandError::new(
+        (None, None) => Err(PublicError::bad_request(
             "missing_argument",
             "Must specify either key ID or --by-label",
         )),
         (Some(raw), None) => Uuid::parse_str(raw)
-            .map_err(|_| CommandError::new("invalid_uuid", "Invalid UUID format")),
+            .map_err(|_| PublicError::bad_request("invalid_uuid", "Invalid UUID format")),
         (None, Some(label)) => {
             let keys = keystore
                 .list_keys()
-                .map_err(|_| CommandError::backend("keystore_error", "Failed to list keys"))?;
+                .map_err(|_| PublicError::internal("keystore_error", "Failed to list keys"))?;
             let matching: Vec<_> = keys
                 .iter()
                 .filter(|key| key.alias.as_deref() == Some(label))
                 .collect();
 
             match matching.len() {
-                0 => Err(CommandError::new(
+                0 => Err(PublicError::bad_request(
                     "key_not_found",
                     "No key found with requested label",
                 )),
                 1 => Ok(matching[0].id),
-                _ => Err(CommandError::new(
+                _ => Err(PublicError::bad_request(
                     "ambiguous_label",
                     "Multiple keys found with requested label",
                 )),
@@ -691,196 +586,21 @@ fn resolve_key_id(
     }
 }
 
-fn write_raw_transaction_file(
-    path: &Path,
-    raw_tx_hex: &str,
-    mode: OutputWriteMode,
-) -> Result<(), CommandError> {
-    let parent = validate_output_parent(path)?;
-    validate_output_target(path, mode)?;
-    let temp_path = temp_output_path(path, &parent)?;
-
-    let write_result = write_temp_output_file(&temp_path, raw_tx_hex)
-        .and_then(|()| install_temp_output_file(&temp_path, path, mode))
-        .and_then(|()| sync_parent_directory(&parent));
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-
-    write_result
-}
-
-fn validate_output_parent(path: &Path) -> Result<PathBuf, CommandError> {
-    let parent = path
-        .parent()
-        .filter(|candidate| !candidate.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let metadata = std::fs::symlink_metadata(parent).map_err(|_| {
-        CommandError::backend(
-            "file_write_error",
-            "Failed to inspect output parent directory",
-        )
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(CommandError::new(
-            "file_write_error",
-            "Refusing symlinked output parent directory",
-        ));
-    }
-    if !metadata.file_type().is_dir() {
-        return Err(CommandError::new(
-            "file_write_error",
-            "Output parent path is not a directory",
-        ));
-    }
-
-    #[cfg(unix)]
-    {
-        let mode = metadata.permissions().mode();
-        let world_writable = (mode & 0o002) != 0;
-        let sticky = (mode & 0o1000) != 0;
-        if world_writable && !sticky {
-            return Err(CommandError::new(
-                "file_write_error",
-                "Refusing unsafe output parent directory permissions",
-            ));
-        }
-    }
-
-    Ok(parent.to_path_buf())
-}
-
-fn validate_output_target(path: &Path, mode: OutputWriteMode) -> Result<(), CommandError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(CommandError::new(
-                    "file_write_error",
-                    "Refusing symlinked output file",
-                ));
-            }
-            if !metadata.file_type().is_file() {
-                return Err(CommandError::new(
-                    "file_write_error",
-                    "Output path is not a regular file",
-                ));
-            }
-            if matches!(mode, OutputWriteMode::CreateNew) {
-                return Err(CommandError::new(
-                    "file_write_error",
-                    "Output file already exists; pass --overwrite to replace it",
-                ));
-            }
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => {
-            return Err(CommandError::backend(
-                "file_write_error",
-                "Failed to inspect output file",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn temp_output_path(path: &Path, parent: &Path) -> Result<PathBuf, CommandError> {
-    let file_name = path.file_name().ok_or_else(|| {
-        CommandError::new("file_write_error", "Output path must include a file name")
-    })?;
-    Ok(parent.join(format!(
-        ".{}.tmp-{}",
-        file_name.to_string_lossy(),
-        Uuid::new_v4()
-    )))
-}
-
-fn write_temp_output_file(path: &Path, raw_tx_hex: &str) -> Result<(), CommandError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-
-    let mut file = options.open(path).map_err(|_| {
-        CommandError::backend("file_write_error", "Failed to create temporary output file")
-    })?;
-
-    file.write_all(raw_tx_hex.as_bytes()).map_err(|_| {
-        CommandError::backend(
-            "file_write_error",
-            "Failed to write signed transaction file",
-        )
-    })?;
-    file.sync_all().map_err(|_| {
-        CommandError::backend("file_write_error", "Failed to sync temporary output file")
-    })?;
-
-    Ok(())
-}
-
-fn install_temp_output_file(
-    temp_path: &Path,
-    path: &Path,
-    mode: OutputWriteMode,
-) -> Result<(), CommandError> {
-    match mode {
-        OutputWriteMode::CreateNew => {
-            std::fs::hard_link(temp_path, path).map_err(|_| {
-                CommandError::backend("file_write_error", "Failed to install new output file")
-            })?;
-            std::fs::remove_file(temp_path).map_err(|_| {
-                CommandError::backend("file_write_error", "Failed to remove temporary output file")
-            })?;
-        }
-        OutputWriteMode::Overwrite => {
-            std::fs::rename(temp_path, path).map_err(|_| {
-                CommandError::backend("file_write_error", "Failed to replace output file")
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-fn sync_parent_directory(parent: &Path) -> Result<(), CommandError> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(parent)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|_| {
-                CommandError::backend("file_write_error", "Failed to sync output parent directory")
-            })?;
-    }
-
-    let _ = parent;
-    Ok(())
-}
-
-fn admin_error_from_keystore(err: KeystoreError) -> CommandError {
+fn admin_error_from_keystore(err: KeystoreError) -> PublicError {
     match err {
         KeystoreError::InvalidPrivateKey => {
-            CommandError::new("invalid_key_material", "Key material format is invalid")
+            PublicError::bad_request("invalid_key_material", "Key material format is invalid")
         }
         KeystoreError::InvalidMnemonic(_) => {
-            CommandError::new("invalid_recovery_phrase", "Recovery phrase is invalid")
+            PublicError::bad_request("invalid_recovery_phrase", "Recovery phrase is invalid")
         }
         KeystoreError::InvalidDerivationPath(_) => {
-            CommandError::new("invalid_derivation_path", "Derivation path is invalid")
+            PublicError::bad_request("invalid_derivation_path", "Derivation path is invalid")
         }
         KeystoreError::KeyNotFound(_) => {
-            CommandError::new("key_not_found", "Requested key does not exist")
+            PublicError::bad_request("key_not_found", "Requested key does not exist")
         }
-        _ => CommandError::backend("keystore_error", "Keystore operation failed"),
-    }
-}
-
-impl From<KeystoreError> for CommandError {
-    fn from(err: KeystoreError) -> Self {
-        admin_error_from_keystore(err)
+        _ => PublicError::internal("keystore_error", "Keystore operation failed"),
     }
 }
 

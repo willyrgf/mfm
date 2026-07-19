@@ -22,8 +22,8 @@ struct ReplayVerifierRegistration {
 
 /// The one production replay verifier registry compiled into the application.
 ///
-/// Verifiers are evidence-only domain functions. The certification registry is passed through
-/// because some domain contracts validate imported certified runs in addition to this run.
+/// Verifiers are evidence-only domain functions. The certification registry supplies the trusted
+/// descriptor authority needed to validate the retained certified run.
 pub(crate) struct ReplayVerifierRegistry {
     registrations: &'static [ReplayVerifierRegistration],
 }
@@ -33,7 +33,11 @@ impl ReplayVerifierRegistry {
         Self {
             registrations: &[
                 ReplayVerifierRegistration {
-                    state_keys: &[state_key::<mfm_state_portfolio::SelectHoldingsState>],
+                    state_keys: &[
+                        state_key::<mfm_state_portfolio::SelectHoldingsState>,
+                        state_key::<mfm_state_portfolio::AssembleSnapshotState>,
+                        state_key::<mfm_state_portfolio::ProjectReportState>,
+                    ],
                     intent_matcher: None,
                     verifier: verify_portfolio,
                 },
@@ -43,28 +47,28 @@ impl ReplayVerifierRegistry {
                         state_key::<mfm_states_btc::ResolveBtcJointTipState>,
                         state_key::<mfm_states_btc::ObserveBtcChainHeadState>,
                         state_key::<mfm_states_btc::ObserveBtcAddressBalanceState>,
-                        state_key::<mfm_states_btc::AssembleBtcAddressBalanceBatchState>,
+                        state_key::<mfm_states_btc::AssembleBtcNetworkCollectionReceiptState>,
                     ],
                     intent_matcher: None,
                     verifier: verify_btc,
                 },
                 ReplayVerifierRegistration {
                     state_keys: &[
-                        state_key::<mfm_states_evm::ResolveEvmJointTipState>,
-                        state_key::<mfm_states_evm::ObserveEvmNativeBalanceState>,
-                        state_key::<mfm_states_evm::AssembleEvmNativeBalanceBatchState>,
+                        state_key::<mfm_states_evm::CollectEvmBalancesState>,
+                        state_key::<mfm_states_evm::RecordEvmBalanceFactsState>,
                     ],
                     intent_matcher: None,
-                    verifier: verify_evm,
+                    verifier: verify_evm_balance_collection,
                 },
                 ReplayVerifierRegistration {
-                    state_keys: &[state_key::<
-                        mfm_state_evm_contracts::ContextBoundValidateContractState,
-                    >],
-                    intent_matcher: Some(
-                        mfm_adapters_evm_contracts::is_contract_lifecycle_replay_intent,
-                    ),
-                    verifier: verify_contracts,
+                    state_keys: &[state_key::<mfm_states_evm::ValidateEvmContractState>],
+                    intent_matcher: None,
+                    verifier: verify_evm_validation,
+                },
+                ReplayVerifierRegistration {
+                    state_keys: &[],
+                    intent_matcher: Some(mfm_adapters_evm::is_evm_transaction_replay_intent),
+                    verifier: verify_evm_transaction,
                 },
                 ReplayVerifierRegistration {
                     state_keys: &[],
@@ -133,12 +137,19 @@ fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Resul
     mfm_adapters_btc_jsonrpc::verify_btc_jsonrpc_replay(broker)
 }
 
-fn verify_evm(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_evm::verify_evm_native_balance_replay(broker)
+fn verify_evm_balance_collection(
+    broker: &ReplayBroker,
+    _registry: &CertificationRegistry,
+) -> Result<()> {
+    mfm_adapters_evm::verify_evm_balance_collection_replay(broker)
 }
 
-fn verify_contracts(broker: &ReplayBroker, registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(broker, registry)
+fn verify_evm_validation(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
+    mfm_adapters_evm::verify_evm_validation_replay(broker)
+}
+
+fn verify_evm_transaction(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
+    mfm_adapters_evm::verify_evm_transaction_replay(broker)
 }
 
 fn verify_proof(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {

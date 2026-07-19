@@ -1,75 +1,28 @@
-use std::collections::BTreeSet;
 use std::fmt;
 
+use mfm_canonical::CanonicalValue;
 use mfm_ids::ContentDigest;
+use mfm_ids::SchemaId;
 
 use crate::extraction::validate_scalar_size;
 use crate::*;
 
 /// Canonical subject namespace for a fact descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FactSubjectNamespaceV1 {
+pub(crate) struct FactSubjectNamespaceV2 {
     pub(crate) fact_kind: FactKind,
-    pub(crate) fields: Vec<FactSubjectNamespaceFieldV1>,
+    pub(crate) subject_schema_id: SchemaId,
 }
 
-impl FactSubjectNamespaceV1 {
+impl FactSubjectNamespaceV2 {
     /// Stable subject namespace version string.
-    pub const VERSION: &'static str = "mfm.fact-subject-namespace.v1";
+    pub const VERSION: &'static str = "mfm.fact-subject-namespace.v2";
 
-    /// Creates a subject namespace and sorts fields by field id.
-    pub(crate) fn new(
-        fact_kind: FactKind,
-        fields: Vec<FactSubjectNamespaceFieldV1>,
-    ) -> Result<Self> {
-        let mut namespace = Self { fact_kind, fields };
-        namespace.sort_and_validate()?;
-        Ok(namespace)
-    }
-
-    fn sort_and_validate(&mut self) -> Result<()> {
-        self.fields
-            .sort_by(|left, right| left.field_id.cmp(&right.field_id));
-        let mut seen = BTreeSet::new();
-        for field in &self.fields {
-            if !seen.insert(field.field_id.clone()) {
-                return Err(FactError::descriptor(format!(
-                    "duplicate subject namespace field {}",
-                    field.field_id
-                )));
-            }
-        }
-        if self.fields.is_empty() {
-            return Err(FactError::descriptor(
-                "subject namespace must contain at least one field",
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// Subject namespace field that participates in fact-key derivation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FactSubjectNamespaceFieldV1 {
-    pub(crate) field_id: FactFieldId,
-    pub(crate) value_type: FactFieldValueType,
-    pub(crate) unit: Option<FactUnit>,
-    pub(crate) scale: Option<FactScale>,
-}
-
-impl FactSubjectNamespaceFieldV1 {
-    /// Creates a subject namespace field.
-    pub(crate) fn new(
-        field_id: FactFieldId,
-        value_type: FactFieldValueType,
-        unit: Option<FactUnit>,
-        scale: Option<FactScale>,
-    ) -> Self {
+    /// Creates a namespace for one fact kind and typed subject schema.
+    pub(crate) fn new(fact_kind: FactKind, subject_schema_id: SchemaId) -> Self {
         Self {
-            field_id,
-            value_type,
-            unit,
-            scale,
+            fact_kind,
+            subject_schema_id,
         }
     }
 }
@@ -123,46 +76,29 @@ impl FactFieldValue {
     }
 }
 
-/// Canonical subject material for one fact claim.
+/// Canonical full typed subject material for one fact claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactSubjectMaterialV1 {
-    pub(crate) values: Vec<FactFieldValue>,
+pub struct FactSubjectMaterialV2 {
+    pub(crate) subject: CanonicalValue,
 }
 
-impl FactSubjectMaterialV1 {
+impl FactSubjectMaterialV2 {
     /// Stable subject material version string.
-    pub const VERSION: &'static str = "mfm.fact-subject-material.v1";
+    pub const VERSION: &'static str = "mfm.fact-subject-material.v2";
 
-    /// Creates subject material and sorts values by field id.
-    pub fn new(values: Vec<FactFieldValue>) -> Result<Self> {
-        let mut material = Self { values };
-        material.sort_and_validate()?;
-        Ok(material)
-    }
-
-    /// Returns subject values sorted by field id.
-    pub fn values(&self) -> &[FactFieldValue] {
-        &self.values
-    }
-
-    fn sort_and_validate(&mut self) -> Result<()> {
-        self.values
-            .sort_by(|left, right| left.field_id().cmp(right.field_id()));
-        let mut seen = BTreeSet::new();
-        for value in &self.values {
-            if !seen.insert(value.field_id().clone()) {
-                return Err(FactError::descriptor(format!(
-                    "duplicate subject material field {}",
-                    value.field_id()
-                )));
-            }
-        }
-        if self.values.is_empty() {
+    /// Creates subject material from the complete canonical typed subject object.
+    pub fn new(subject: CanonicalValue) -> Result<Self> {
+        if !matches!(subject, CanonicalValue::Object(_)) {
             return Err(FactError::descriptor(
-                "subject material must contain at least one value",
+                "fact subject material must retain a canonical object",
             ));
         }
-        Ok(())
+        Ok(Self { subject })
+    }
+
+    /// Returns the complete canonical typed subject object.
+    pub const fn subject(&self) -> &CanonicalValue {
+        &self.subject
     }
 }
 

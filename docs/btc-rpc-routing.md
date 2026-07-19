@@ -13,9 +13,9 @@ Normative architecture references:
 
 ## Runtime Config File
 
-Live CLI start/resume accepts `--runtime-config <PATH>`. CLI and REST also read
-`MFM_RUNTIME_CONFIG_FILE` when no explicit path is provided. Read-only commands and REST startup do
-not load this file.
+Live CLI start accepts `--runtime-config <PATH>`. A resume needs it only when verified history still
+has a pending Bitcoin live-source node. CLI and REST also read `MFM_RUNTIME_CONFIG_FILE` when no
+explicit path is provided. Read-only commands and REST startup do not load this file.
 
 Example TOML:
 
@@ -53,6 +53,14 @@ perform network IO.
 Provider diagnostics may carry stable operation ids and closed public fields such as network tags,
 heights, hashes, and numeric status codes. They must never carry RPC URLs, credentials, file paths,
 provider messages, request bodies, or response bodies.
+
+Ingress distinguishes absence from invalid input. No runtime file, no `btc` family, or no selected
+semantic route yields `RuntimeConfigRequired` with a `provider_configuration_missing` or
+`route_unavailable` diagnostic. The diagnostic retains only the certified `network_id`,
+`source_identity`, and `bitcoin_network`. An unreadable, malformed, or semantically invalid supplied
+file yields `RuntimeConfigInvalid`; it is never presented as a missing route. Admission aggregates
+and deduplicates all missing BTC and EVM routes before any `RunAdmitted` event is appended. Resume
+performs the same check only for nonterminal live-source nodes.
 
 ## Strict Portfolio Snapshots
 

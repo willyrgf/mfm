@@ -128,6 +128,7 @@ pub(super) fn cell_replay_authority(
             .clone(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: Vec::new(),
         artifact_evidence,
         artifact_bytes: BTreeMap::from([(descriptor_artifact_key, descriptor_bytes.to_vec())]),
         additional_artifact_evidence: Vec::new(),

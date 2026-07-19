@@ -562,7 +562,7 @@ fn parse_state_descriptor_identity(value: &serde_json::Value) -> Result<StateDes
             "emitted_fact_descriptors",
         )?)?,
         runner: required_str(object, "runner")?.to_owned(),
-        side_effect_contract_digest: optional_identity(object, "side_effect_contract_digest")?,
+        effect_contract_digest: optional_identity(object, "effect_contract_digest")?,
     })
 }
 

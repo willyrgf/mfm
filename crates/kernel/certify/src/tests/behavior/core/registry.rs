@@ -137,7 +137,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:9df4bb9724a7c4c452319e57e897cfee33c88120ce9a2f98a25a16f8f42c6b97"
+        "content:sha256-jcs-v1:68d5c5e6181297ec4e7734210e1a41c3b5e66bad87af0e25412bee879f9ca6cc"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,

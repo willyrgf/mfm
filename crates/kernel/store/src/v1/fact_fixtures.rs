@@ -257,7 +257,7 @@ pub fn fact_projection_fixture_for_test(
 
 #[derive(Debug, Clone)]
 struct FactClaimFixtureForTest {
-    subject_material: mfm_facts::FactSubjectMaterialV1,
+    subject_material: mfm_facts::FactSubjectMaterialV2,
     claim: mfm_facts::FactClaim,
     response_artifact_evidence: ArtifactEvidenceRef,
     response_bytes: Vec<u8>,
@@ -329,7 +329,7 @@ fn fact_claim_fixture_for_test(
 /// One Platform holding fact to append into an in-memory store for report SelectHoldings tests.
 #[derive(Debug, Clone)]
 pub struct PlatformHoldingFactSeedForTest {
-    /// Holding fact descriptor (BTC address balance or EVM native balance at cutover).
+    /// Holding fact descriptor admitted by the source-run fixture.
     pub descriptor: mfm_facts::FactDescriptor,
     /// Fact-record input appended through the typed store.
     pub input: FactRecordFixtureInputForTest,
@@ -389,14 +389,11 @@ pub async fn append_platform_holding_facts_for_test(
         let run_admitted = events::KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
             run_id: source_run_id.clone(),
             identity_material,
-            entry_point: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new("mfm.test.fact_fixture.record.v1")
-                    .map_err(|error| StoreError::Identity(error.to_string()))?,
-                entry_point_registry_digest: ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256JcsV1,
-                    sha256_digest_bytes(b"mfm.test.fact_fixture.registry.v1"),
-                ),
-            },
+            entry_point: events::EntryPointLaunchEvidence::new(
+                "mfm.test/fact_fixture_record@1",
+                Vec::new(),
+            )
+            .map_err(|error| StoreError::Identity(error.to_string()))?,
             spec_hash: source_spec_hash.clone(),
             spec_artifact: run_artifact_ref_from_store_artifact_for_test(&spec_evidence),
             certificate_artifact: run_artifact_ref_from_store_artifact_for_test(
@@ -421,6 +418,7 @@ pub async fn append_platform_holding_facts_for_test(
             descriptor_identities: Vec::new(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),
+            capability_implementations: Vec::new(),
             admitted_binding_digest: ContentDigest::from_digest(
                 DigestAlgorithm::Sha256JcsV1,
                 sha256_digest_bytes(b"mfm.test.fact_fixture.bindings.v1"),
@@ -772,7 +770,7 @@ fn fact_source_spec_for_test(
                 capabilities,
                 emitted_fact_descriptors: Vec::new(),
                 runner: "mfm.test.fact_fixture_runner".to_owned(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             })),
             DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
         ],

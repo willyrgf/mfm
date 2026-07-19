@@ -3,7 +3,7 @@
 //!
 //! This crate defines the state/adapter-facing authority contracts for:
 //! - internal Control and Platform reads from the MFM fact index
-//! - managed Platform fact recording (shared write role for collectors)
+//! - managed Platform fact publication
 //!
 //! Concrete store implementations, SQL query execution, app wiring, and public
 //! fact DTO services live outside this crate. Platform index reads still require
@@ -68,8 +68,8 @@ impl CapabilitySpec for FactIndexReadCapability {
 
 /// Shared managed Platform-write capability for recording fact claims.
 ///
-/// Used by BTC and EVM collector record states. Family monomorphism lives in the
-/// fact types and observe transports, not in a second capability identity.
+/// Used by Bitcoin fact-record states and portfolio EVM publication. Family
+/// monomorphism lives in fact types, not in a second capability identity.
 pub struct FactRecordCapability;
 
 impl CapabilitySpec for FactRecordCapability {
@@ -101,6 +101,9 @@ pub trait FactIndexReadProvider: Send + Sync {
     fn implementation_id(&self) -> &'static str;
 
     /// Executes an already-compiled canonical fact query plan.
+    ///
+    /// Providers must apply the complete canonical query shape, including any exact fact-content
+    /// identity narrowing evidence, before ordering and limiting returned rows.
     ///
     /// Default path runs a one-element [`Self::read_fact_index_batch`] so single and multi
     /// reads share one provider implementation.

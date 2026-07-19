@@ -146,17 +146,33 @@ impl StateSpec for AppFactState {
 }
 
 impl ReadState for AppFactState {
-    type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
+    type Plan = AppFactValue;
+    type Evidence = AppFactValue;
 
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        std::future::ready(Ok(AppFactValue {
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        Ok(AppFactValue {
             amount: input.amount * self.config.multiplier,
-        }))
+        })
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &mfm_program::ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        if !evidence.fact_query_evidence().is_empty()
+            || evidence.primary_evidence() != &self.plan(input, context)?
+        {
+            return Err(mfm_program::StateError::Message(
+                "app fact fixture evidence did not match its plan".to_owned(),
+            ));
+        }
+        Ok(evidence.primary_evidence().clone())
     }
 }
 
@@ -226,6 +242,7 @@ impl mfm_runtime::ErasedNodeRunner for AppFactRecordingRunner {
             let output_artifact = artifacts.state_output(&value)?;
             let output_payload = payloads.cell_produced(&output_artifact)?;
             let mut output = mfm_runtime::RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&value)?;
             output.stage_attempt_artifact(&output_artifact)?;
             output.record_fact(
                 mfm_runtime::FactRecordInput::new(
@@ -319,11 +336,12 @@ pub(super) fn app_fact_runner_registry(
 
 pub(super) fn prepare_app_fact_launch(
     include_fact_descriptor: bool,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     prepare_app_fact_launch_with_invocation_key(include_fact_descriptor, None)
 }
 
-pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppError> {
+pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, PublicError>
+{
     let draft = mfm_op_btc_collectors::btc_chain_head_collector_cycle_program_draft(
         mfm_op_btc_collectors::BtcChainHeadCollectorConfig::default(),
     )
@@ -352,15 +370,11 @@ pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRe
             )
             .expect("store scope"),
             invocation_key_digest: default_invocation_key_digest(),
-            entry_point_evidence: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new(
-                    "mfm.bitcoin.btc_chain_head_collector_internal_test",
-                )
-                .expect("entry point"),
-                entry_point_registry_digest: content_digest_for_bytes(
-                    b"mfm.app.test.btc-collector-internal-registry",
-                ),
-            },
+            entry_point_evidence: events::EntryPointLaunchEvidence::new(
+                "mfm.bitcoin/btc_chain_head_internal_test@1",
+                Vec::new(),
+            )
+            .expect("entry point evidence"),
         },
         config_inputs,
         seed_inputs,
@@ -370,7 +384,7 @@ pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRe
 pub(super) fn prepare_app_fact_launch_with_invocation_key(
     include_fact_descriptor: bool,
     invocation_key_digest: Option<ContentDigest>,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     prepare_app_fact_launch_with_invocation_key_and_state_key(
         include_fact_descriptor,
         invocation_key_digest,
@@ -382,7 +396,7 @@ pub(super) fn prepare_app_fact_launch_with_invocation_key_and_state_key(
     include_fact_descriptor: bool,
     invocation_key_digest: Option<ContentDigest>,
     state_key: &str,
-) -> Result<RunLaunchRequest, AppError> {
+) -> Result<RunLaunchRequest, PublicError> {
     let plan = app_fact_launch_plan_with_state_key(state_key);
     let registry = app_fact_certification_registry(include_fact_descriptor);
     let (certified_spec, scoped, config_inputs, seed_inputs) =
@@ -398,11 +412,11 @@ pub(super) fn prepare_app_fact_launch_with_invocation_key_and_state_key(
             .expect("store scope"),
             invocation_key_digest: invocation_key_digest
                 .unwrap_or_else(default_invocation_key_digest),
-            entry_point_evidence: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new("mfm.app.test.fact-launch")
-                    .expect("entry point"),
-                entry_point_registry_digest: content_digest_for_bytes(b"mfm.app.test.registry"),
-            },
+            entry_point_evidence: events::EntryPointLaunchEvidence::new(
+                "mfm.app.test/fact_launch@1",
+                Vec::new(),
+            )
+            .expect("entry point evidence"),
         },
         config_inputs,
         seed_inputs,
@@ -471,6 +485,7 @@ pub(super) async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
             request.evidence,
             store.expected_next_seq(&run_id).await.expect("next seq"),
         )
+        .await
         .expect("prepare fact run launch");
     scheduler
         .start_run(&store, launch)

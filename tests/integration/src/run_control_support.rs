@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use mfm_ids::RunId;
+use mfm_program::{CanonicalSeed, TypedProgramDraft};
 use mfm_store::v1 as store;
 
 /// Environment variable carrying the runtime config file path.
@@ -36,55 +37,31 @@ impl Drop for EnvVarRestore {
     }
 }
 
-/// Starts a local JSON-RPC mock for portfolio balance reads.
-pub async fn start_portfolio_rpc_mock(expected_chain_id: u64) -> String {
-    let app = axum::Router::new()
-        .route("/", axum::routing::post(portfolio_rpc_handler))
-        .with_state(expected_chain_id);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind rpc mock");
-    let addr = listener.local_addr().expect("rpc mock addr");
+/// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by portfolio integration tests.
+pub async fn start_portfolio_rpc_mock() -> String {
+    let app = axum::Router::new().route("/", axum::routing::post(portfolio_rpc_handler));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind portfolio RPC mock");
+    let addr = listener.local_addr().expect("portfolio RPC mock address");
     listener
         .set_nonblocking(true)
-        .expect("set rpc mock nonblocking");
+        .expect("set portfolio RPC mock nonblocking");
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("rpc mock runtime");
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio rpc listener");
-            axum::serve(listener, app).await.expect("rpc mock serve");
-        });
-    });
-    format!("http://{addr}")
-}
-
-/// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by the production collector
-/// registry integration test.
-pub async fn start_collectors_rpc_mock() -> String {
-    let app = axum::Router::new().route("/", axum::routing::post(collectors_rpc_handler));
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind collector rpc mock");
-    let addr = listener.local_addr().expect("collector rpc mock addr");
-    listener
-        .set_nonblocking(true)
-        .expect("set collector rpc mock nonblocking");
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("collector rpc mock runtime");
+            .expect("portfolio RPC mock runtime");
         runtime.block_on(async move {
             let listener =
-                tokio::net::TcpListener::from_std(listener).expect("tokio collector rpc listener");
+                tokio::net::TcpListener::from_std(listener).expect("tokio portfolio RPC listener");
             axum::serve(listener, app)
                 .await
-                .expect("collector rpc mock serve");
+                .expect("portfolio RPC mock serve");
         });
     });
     format!("http://{addr}")
 }
 
-async fn collectors_rpc_handler(
+async fn portfolio_rpc_handler(
     axum::Json(request): axum::Json<serde_json::Value>,
 ) -> axum::Json<serde_json::Value> {
     let id = request
@@ -94,10 +71,9 @@ async fn collectors_rpc_handler(
     let method = request
         .get("method")
         .and_then(|value| value.as_str())
-        .expect("collector json-rpc method");
+        .expect("portfolio JSON-RPC method");
     let result = match method {
         "eth_chainId" => serde_json::json!("0x1"),
-        "web3_clientVersion" => serde_json::json!("mfm-test-rpc"),
         "eth_getBlockByNumber" => serde_json::json!({
             "number": format!("0x{:x}", 21_000_000u64),
             "hash": format!("0x{}", "cd".repeat(32))
@@ -142,34 +118,6 @@ async fn collectors_rpc_handler(
     }))
 }
 
-async fn portfolio_rpc_handler(
-    axum::extract::State(expected_chain_id): axum::extract::State<u64>,
-    axum::Json(request): axum::Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    let id = request
-        .get("id")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(1));
-    let method = request
-        .get("method")
-        .and_then(|value| value.as_str())
-        .expect("json-rpc method");
-    let result = match method {
-        "eth_chainId" => serde_json::json!(format!("0x{expected_chain_id:x}")),
-        "eth_getBlockByNumber" => serde_json::json!({
-            "number": "0x64",
-            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
-        }),
-        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
-        other => panic!("unexpected rpc method {other}"),
-    };
-    axum::Json(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    }))
-}
-
 /// Writes a runtime config file for one EVM source/route and returns its path.
 pub fn write_evm_runtime_config_for_test(
     dir: &Path,
@@ -180,11 +128,9 @@ pub fn write_evm_runtime_config_for_test(
     let config_path = dir.join("runtime.toml");
     let mut config = format!(
         r#"
-[evm.sources.{network}]
-rpc_url = {rpc_url}
-
 [evm.routes.{network}]
 source_ref = {network}
+rpc_url = {rpc_url}
 "#,
         network = toml_string(network_id),
         rpc_url = toml_string(rpc_url),
@@ -211,23 +157,21 @@ entry_id = {entry_id}
     config_path
 }
 
-/// Writes a runtime config containing both collector routes for the production registry test.
-pub fn write_collectors_runtime_config_for_test(dir: &Path, rpc_url: &str) -> std::path::PathBuf {
+/// Writes a runtime config containing the Bitcoin and EVM routes for a portfolio test.
+pub fn write_portfolio_runtime_config_for_test(dir: &Path, rpc_url: &str) -> std::path::PathBuf {
     let config_path = dir.join("runtime.toml");
     let config = format!(
         r#"
-[evm.sources.ethereum-mainnet]
-rpc_url = {rpc_url}
-
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
+rpc_url = {rpc_url}
 
 [btc.routes.public-bitcoin-core]
 rpc_url = {rpc_url}
 "#,
         rpc_url = toml_string(rpc_url),
     );
-    std::fs::write(&config_path, config).expect("write collector runtime config");
+    std::fs::write(&config_path, config).expect("write portfolio runtime config");
     config_path
 }
 
@@ -255,61 +199,40 @@ fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("toml-compatible string")
 }
 
-/// Prepares a portfolio snapshot entry-point launch against the supplied store scope.
-pub async fn prepare_portfolio_launch_for_store<S>(
+/// Prepares the retained Bitcoin chain-head control-cycle launch against the supplied store scope.
+pub async fn prepare_btc_chain_head_launch_for_store<S>(
     store: &S,
-    config: &serde_json::Value,
     invocation_key: Option<&str>,
-) -> mfm_app::PreparedEntryPointRunLaunch
+) -> mfm_app::RunLaunchRequest
 where
     S: store::StoreScopeStore,
 {
-    prepare_entry_point_launch_for_store(store, "portfolio_snapshot", None, config, invocation_key)
-        .await
-}
-
-/// Prepares an entry-point launch against the supplied store scope.
-pub async fn prepare_entry_point_launch_for_store<S>(
-    store: &S,
-    op_name: &str,
-    op_version: Option<mfm_app::OpVersion>,
-    config: &serde_json::Value,
-    invocation_key: Option<&str>,
-) -> mfm_app::PreparedEntryPointRunLaunch
-where
-    S: store::StoreScopeStore,
-{
-    let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
-    let certification_registry = mfm_app::production_certification_registry().expect("cert");
-    let store_scope_id = store
-        .load_store_scope_id()
-        .await
-        .unwrap_or_else(|error| panic!("store scope: {error}"));
-    let authored_config = mfm_authored_config::AuthoredConfig::new(
-        mfm_authored_config::AuthoredConfigFormat::Json,
-        serde_json::to_vec(config).expect("entry-point config json"),
+    let draft = mfm_op_btc_collectors::btc_chain_head_collector_cycle_program_draft(
+        mfm_op_btc_collectors::BtcChainHeadCollectorConfig::default(),
     )
-    .expect("authored config");
-    mfm_app::prepare_entry_point_run_launch(mfm_app::EntryPointRunLaunchInput {
-        entry_point_registry: &entry_point_registry,
-        public_op_name: mfm_app::PublicOpName::new(op_name).expect("op name"),
-        op_version,
-        authored_config,
-        certification_registry: &certification_registry,
-        store_scope_id,
-        invocation_key: invocation_key
-            .map(mfm_app::InvocationKey::new)
-            .transpose()
-            .expect("invocation key"),
-    })
-    .expect("prepared entry-point launch")
+    .expect("Bitcoin chain-head control-cycle draft");
+    let seed_material = draft
+        .seeds()
+        .iter()
+        .map(|seed| {
+            let bytes =
+                CanonicalSeed::from_value(&mfm_op_btc_collectors::BtcChainHeadObservationContext {
+                    observed_at_unix_ms: None,
+                })
+                .expect("Bitcoin chain-head observation seed")
+                .canonical_json()
+                .clone();
+            (seed.seed_id.clone(), bytes)
+        })
+        .collect();
+    prepare_typed_launch_for_store(store, draft, seed_material, invocation_key).await
 }
 
-/// Admits a portfolio run without driving it so tests can append history before resume.
-pub async fn admit_portfolio_run_without_driving<S>(
+/// Admits a Bitcoin chain-head control run without driving live runners so status tests can append history.
+pub async fn admit_btc_chain_head_run_without_driving<S>(
     store: &S,
-    config: &serde_json::Value,
-) -> (RunId, mfm_certify::CertifiedTypedSpec)
+    runtime_config_path: &Path,
+) -> (mfm_ids::RunId, mfm_certify::CertifiedTypedSpec)
 where
     S: store::RunEventStore
         + store::StoreScopeStore
@@ -319,32 +242,60 @@ where
         + Sync
         + 'static,
 {
-    let prepared = prepare_portfolio_launch_for_store(store, config, None).await;
-    let run_id = prepared.request.run_id.clone();
-    let certified = prepared.request.certified_spec.clone();
+    let prepared = prepare_btc_chain_head_launch_for_store(store, None).await;
+    let run_id = prepared.run_id.clone();
+    let certified = prepared.certified_spec.clone();
     let runners = mfm_app::production_runner_registry(
         Arc::new(store.clone()),
         mfm_app::ProjectionFactIndexProvider::empty_arc(),
-        None,
+        Some(runtime_config_path),
     )
     .expect("production runners");
     let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
-    let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(prepared.request.certified_spec)
-        .expect("runtime spec");
+    let runtime_spec =
+        mfm_runtime::CertifiedRuntimeSpec::new(prepared.certified_spec).expect("runtime spec");
     let launch = scheduler
         .prepare_run_launch(
             &runtime_spec,
-            prepared.request.identity_material,
-            prepared.request.evidence,
+            prepared.identity_material,
+            prepared.evidence,
             store
                 .expected_next_seq(&run_id)
                 .await
                 .unwrap_or_else(|error| panic!("expected next seq: {error}")),
         )
+        .await
         .expect("prepared launch");
     scheduler
         .start_run(store, launch)
         .await
         .expect("start fixture run");
     (run_id, certified)
+}
+
+async fn prepare_typed_launch_for_store<S>(
+    store: &S,
+    draft: TypedProgramDraft,
+    seed_material: BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
+    invocation_key: Option<&str>,
+) -> mfm_app::RunLaunchRequest
+where
+    S: store::StoreScopeStore,
+{
+    let certification_registry = mfm_app::production_certification_registry().expect("cert");
+    let store_scope_id = store
+        .load_store_scope_id()
+        .await
+        .unwrap_or_else(|error| panic!("store scope: {error}"));
+    mfm_app::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        &certification_registry,
+        store_scope_id,
+        invocation_key
+            .map(mfm_app::InvocationKey::new)
+            .transpose()
+            .expect("invocation key"),
+    )
+    .expect("prepared typed launch")
 }

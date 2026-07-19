@@ -1,0 +1,443 @@
+//! Adapter tests for reusable EVM balance collection.
+
+use super::*;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use alloy_primitives::{address, b256, Address, Bytes, B256, U256};
+use mfm_evm_capabilities::{
+    evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence,
+    EvmSessionFuture, ProviderDiagnosticCode,
+};
+use mfm_ids::LocalPublicId;
+use mfm_program::{ReadState, StateSpec, ValidatedConfig};
+use mfm_states_evm::{
+    reduce_evm_balance_collection, CollectEvmBalancesState, EvmBalanceAsset,
+    EvmBalanceCollectionConfig, EvmBalanceCollectionPlan, EvmBalanceSource,
+};
+
+use crate::balance_collection::{
+    collect_evm_balances, ERC20_BALANCE_OF_SELECTOR, ERC20_DECIMALS_SELECTOR,
+    EVM_READ_CONCURRENCY_LIMIT,
+};
+
+const ACCOUNT: Address = address!("000000000000000000000000000000000000dead");
+const TOKEN: Address = address!("0000000000000000000000000000000000000001");
+const ANCHOR_HASH: B256 = b256!("1111111111111111111111111111111111111111111111111111111111111111");
+const REORG_HASH: B256 = b256!("2222222222222222222222222222222222222222222222222222222222222222");
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReadRecord {
+    Block(EvmBlockSelector),
+    Balance(Address, EvmBlockSelector),
+    Call(Address, Vec<u8>, EvmBlockSelector),
+}
+
+struct RecordingSession {
+    evidence: EvmSessionEvidence,
+    records: Mutex<Vec<ReadRecord>>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    final_hash: B256,
+}
+
+struct UnavailableSession {
+    evidence: EvmSessionEvidence,
+}
+
+impl UnavailableSession {
+    fn new(binding: &EvmNetworkBinding) -> Self {
+        Self {
+            evidence: EvmSessionEvidence::new(
+                binding,
+                LocalPublicId::new("primary").expect("source ref"),
+                LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
+                    .expect("implementation id"),
+            ),
+        }
+    }
+
+    fn unavailable<'a, T: Send + 'a>(&'a self) -> EvmSessionFuture<'a, T> {
+        Box::pin(std::future::ready(Err(temporary_provider_failure())))
+    }
+}
+
+impl EvmReadSession for UnavailableSession {
+    fn evidence(&self) -> &EvmSessionEvidence {
+        &self.evidence
+    }
+
+    fn read_block<'a>(
+        &'a self,
+        _selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
+        self.unavailable()
+    }
+
+    fn read_balance<'a>(
+        &'a self,
+        _account: Address,
+        _block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, U256> {
+        self.unavailable()
+    }
+
+    fn read_code<'a>(
+        &'a self,
+        _address: Address,
+        _block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmCode> {
+        self.unavailable()
+    }
+
+    fn call<'a>(&'a self, _request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes> {
+        self.unavailable()
+    }
+}
+
+impl RecordingSession {
+    fn new(binding: &EvmNetworkBinding, final_hash: B256) -> Self {
+        Self {
+            evidence: EvmSessionEvidence::new(
+                binding,
+                LocalPublicId::new("primary").expect("source ref"),
+                LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
+                    .expect("implementation id"),
+            ),
+            records: Mutex::new(Vec::new()),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            final_hash,
+        }
+    }
+
+    fn record(&self, record: ReadRecord) {
+        self.records.lock().expect("records").push(record);
+    }
+
+    fn records(&self) -> Vec<ReadRecord> {
+        self.records.lock().expect("records").clone()
+    }
+
+    async fn concurrent_read(&self) {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        tokio::task::yield_now().await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl EvmReadSession for RecordingSession {
+    fn evidence(&self) -> &EvmSessionEvidence {
+        &self.evidence
+    }
+
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
+        self.record(ReadRecord::Block(selector.clone()));
+        let result = match selector {
+            EvmBlockSelector::Latest => Ok(EvmBlockAnchor::new(U256::from(100), ANCHOR_HASH)),
+            EvmBlockSelector::Number(number) if *number == U256::from(100) => {
+                Ok(EvmBlockAnchor::new(U256::from(100), self.final_hash))
+            }
+            _ => Err(provider_failure()),
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn read_balance<'a>(
+        &'a self,
+        account: Address,
+        block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, U256> {
+        let selector = block.clone();
+        self.record(ReadRecord::Balance(account, selector));
+        Box::pin(async move {
+            self.concurrent_read().await;
+            Ok(U256::from(42))
+        })
+    }
+
+    fn read_code<'a>(
+        &'a self,
+        _address: Address,
+        _block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmCode> {
+        Box::pin(std::future::ready(Err(provider_failure())))
+    }
+
+    fn call<'a>(&'a self, request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes> {
+        let input = request.input().to_vec();
+        self.record(ReadRecord::Call(
+            request.to(),
+            input.clone(),
+            request.block().clone(),
+        ));
+        Box::pin(async move {
+            self.concurrent_read().await;
+            let value = if input.starts_with(&ERC20_DECIMALS_SELECTOR) {
+                U256::from(6)
+            } else if input.starts_with(&ERC20_BALANCE_OF_SELECTOR) {
+                U256::from(99)
+            } else {
+                return Err(provider_failure());
+            };
+            let word = value.to_be_bytes::<32>();
+            Ok(Bytes::copy_from_slice(&word))
+        })
+    }
+}
+
+fn provider_failure() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(evm_diagnostic(
+        ProviderDiagnosticCode::ProviderConfigurationInvalid,
+    ))
+}
+
+fn temporary_provider_failure() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(evm_diagnostic(ProviderDiagnosticCode::TransportFailed))
+}
+
+fn source(account: Address, asset: EvmBalanceAsset) -> EvmBalanceSource {
+    EvmBalanceSource::new(account, asset).expect("EVM source")
+}
+
+fn plan_for(sources: Vec<EvmBalanceSource>) -> EvmBalanceCollectionPlan {
+    let config = EvmBalanceCollectionConfig::new("ethereum-mainnet", 1, 18, sources)
+        .expect("collection config");
+    let state = <CollectEvmBalancesState as StateSpec>::new(
+        ValidatedConfig::new(config).expect("validated config"),
+    )
+    .expect("collection state");
+    state
+        .plan(&(), &mfm_program::CertifiedContext::no_context())
+        .expect("collection plan")
+}
+
+fn capabilities(
+    session: Arc<RecordingSession>,
+    binds: Arc<AtomicUsize>,
+) -> EvmReadRunnerCapabilities {
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
+        Arc::new(store::AsyncInMemoryRunStore::default());
+    EvmReadRunnerCapabilities::new(
+        artifacts,
+        |binding| {
+            Box::pin(async move {
+                if binding.network_id().as_str() == "ethereum-mainnet"
+                    && binding.expected_chain_id() == 1
+                {
+                    Ok(())
+                } else {
+                    Err(provider_failure())
+                }
+            })
+        },
+        move |_binding| {
+            let session = Arc::clone(&session);
+            let binds = Arc::clone(&binds);
+            Box::pin(async move {
+                binds.fetch_add(1, Ordering::SeqCst);
+                Ok(session as Arc<dyn EvmReadSession>)
+            })
+        },
+    )
+}
+
+#[test]
+fn balance_runner_registration_keeps_factory_identity_explicit() {
+    assert_eq!(READ_FACTORY, "read_external");
+    assert_eq!(ADAPTER_FACTORY, "evm_jsonrpc_adapter");
+}
+
+#[tokio::test]
+async fn one_session_uses_latest_then_exact_hash_reads_then_number_recheck() {
+    let plan = plan_for(vec![
+        source(ACCOUNT, EvmBalanceAsset::Native),
+        source(ACCOUNT, EvmBalanceAsset::erc20(TOKEN).expect("token asset")),
+    ]);
+    let binding = plan.binding().expect("binding");
+    let session = Arc::new(RecordingSession::new(&binding, ANCHOR_HASH));
+    let binds = Arc::new(AtomicUsize::new(0));
+    let capabilities = capabilities(Arc::clone(&session), Arc::clone(&binds));
+
+    let evidence = collect_evm_balances(&plan, &capabilities)
+        .await
+        .expect("collection evidence");
+    let batch = reduce_evm_balance_collection(&plan, &evidence).expect("reduced evidence");
+    assert_eq!(batch.balances().len(), 2);
+    assert_eq!(binds.load(Ordering::SeqCst), 1);
+
+    let records = session.records();
+    assert_eq!(
+        records.first(),
+        Some(&ReadRecord::Block(EvmBlockSelector::Latest))
+    );
+    assert_eq!(
+        records.last(),
+        Some(&ReadRecord::Block(EvmBlockSelector::Number(U256::from(
+            100
+        ))))
+    );
+    let mut decimals_calls = 0;
+    let mut balance_of_calls = 0;
+    for record in &records[1..records.len() - 1] {
+        match record {
+            ReadRecord::Balance(_, EvmBlockSelector::ExactHash(hash)) => {
+                assert_eq!(*hash, ANCHOR_HASH);
+            }
+            ReadRecord::Call(_, input, EvmBlockSelector::ExactHash(hash)) => {
+                assert_eq!(*hash, ANCHOR_HASH);
+                decimals_calls += usize::from(input.starts_with(&ERC20_DECIMALS_SELECTOR));
+                balance_of_calls += usize::from(input.starts_with(&ERC20_BALANCE_OF_SELECTOR));
+            }
+            unexpected => panic!("unexpected EVM read between anchor checks: {unexpected:?}"),
+        }
+    }
+    assert_eq!(decimals_calls, 1);
+    assert_eq!(balance_of_calls, 1);
+}
+
+#[tokio::test]
+async fn final_number_recheck_exposes_reorg_to_the_deterministic_reducer() {
+    let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
+    let session = Arc::new(RecordingSession::new(
+        &plan.binding().expect("binding"),
+        REORG_HASH,
+    ));
+    let capabilities = capabilities(session, Arc::new(AtomicUsize::new(0)));
+    let evidence = collect_evm_balances(&plan, &capabilities)
+        .await
+        .expect("retained evidence");
+    assert!(reduce_evm_balance_collection(&plan, &evidence)
+        .expect_err("reorg must fail reduction")
+        .to_string()
+        .contains("no longer canonical"));
+}
+
+#[tokio::test]
+async fn temporary_provider_outage_blocks_the_balance_collector() {
+    let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
+    let session = Arc::new(UnavailableSession::new(&plan.binding().expect("binding")));
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
+        Arc::new(store::AsyncInMemoryRunStore::default());
+    let capabilities = EvmReadRunnerCapabilities::new(
+        artifacts,
+        |_| Box::pin(async { Ok(()) }),
+        move |_| {
+            let session = Arc::clone(&session);
+            Box::pin(async move { Ok(session as Arc<dyn EvmReadSession>) })
+        },
+    );
+
+    let error = collect_evm_balances(&plan, &capabilities)
+        .await
+        .expect_err("temporary outage must block collection");
+
+    assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
+}
+
+#[tokio::test]
+async fn balance_reads_never_exceed_the_hard_concurrency_limit() {
+    let sources = (1_u64..=40)
+        .map(|index| {
+            source(
+                Address::from_word(U256::from(index).into()),
+                EvmBalanceAsset::Native,
+            )
+        })
+        .collect();
+    let plan = plan_for(sources);
+    let session = Arc::new(RecordingSession::new(
+        &plan.binding().expect("binding"),
+        ANCHOR_HASH,
+    ));
+    let capabilities = capabilities(Arc::clone(&session), Arc::new(AtomicUsize::new(0)));
+    collect_evm_balances(&plan, &capabilities)
+        .await
+        .expect("bounded collection");
+    let max_active = session.max_active.load(Ordering::SeqCst);
+    assert!(max_active > 1, "test must exercise concurrent reads");
+    assert!(max_active <= EVM_READ_CONCURRENCY_LIMIT);
+}
+
+#[tokio::test]
+async fn concurrent_reads_are_issued_in_certified_plan_order() {
+    let first_token = Address::from_word(U256::from(11).into());
+    let second_token = Address::from_word(U256::from(12).into());
+    let plan = plan_for(vec![
+        source(
+            Address::from_word(U256::from(3).into()),
+            EvmBalanceAsset::Native,
+        ),
+        source(
+            Address::from_word(U256::from(2).into()),
+            EvmBalanceAsset::Native,
+        ),
+        source(
+            Address::from_word(U256::from(1).into()),
+            EvmBalanceAsset::erc20(second_token).expect("second token"),
+        ),
+        source(
+            Address::from_word(U256::from(1).into()),
+            EvmBalanceAsset::erc20(first_token).expect("first token"),
+        ),
+    ]);
+    let session = Arc::new(RecordingSession::new(
+        &plan.binding().expect("binding"),
+        ANCHOR_HASH,
+    ));
+    let capabilities = capabilities(Arc::clone(&session), Arc::new(AtomicUsize::new(0)));
+
+    collect_evm_balances(&plan, &capabilities)
+        .await
+        .expect("ordered collection");
+    let records = session.records();
+    let decimals_targets = records
+        .iter()
+        .filter_map(|record| match record {
+            ReadRecord::Call(target, input, _) if input.starts_with(&ERC20_DECIMALS_SELECTOR) => {
+                Some(*target)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(decimals_targets, vec![first_token, second_token]);
+
+    let planned_accounts = plan
+        .sources()
+        .iter()
+        .map(|source| source.account_address().expect("planned account"))
+        .collect::<Vec<_>>();
+    let issued_accounts = records
+        .iter()
+        .filter_map(|record| match record {
+            ReadRecord::Balance(account, _) => Some(*account),
+            ReadRecord::Call(_, input, _) if input.starts_with(&ERC20_BALANCE_OF_SELECTOR) => {
+                Some(Address::from_slice(&input[16..36]))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(issued_accounts, planned_accounts);
+}
+
+#[tokio::test]
+async fn wrong_chain_session_is_rejected_before_any_network_read() {
+    let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
+    let wrong_binding = EvmNetworkBinding::new(
+        LocalPublicId::new("ethereum-mainnet").expect("network id"),
+        2,
+    )
+    .expect("wrong binding");
+    let session = Arc::new(RecordingSession::new(&wrong_binding, ANCHOR_HASH));
+    let capabilities = capabilities(Arc::clone(&session), Arc::new(AtomicUsize::new(0)));
+
+    collect_evm_balances(&plan, &capabilities)
+        .await
+        .expect_err("wrong-chain session must fail binding");
+    assert!(session.records().is_empty());
+}

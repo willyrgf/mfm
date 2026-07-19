@@ -74,10 +74,14 @@ fn run_id(byte: u8) -> RunId {
 }
 
 fn subject_field(id: &str) -> FactFieldDescriptor {
+    required_subject_field(id, "chain")
+}
+
+fn required_subject_field(id: &str, path: &str) -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new(id).expect("field id"),
         FactFieldValueType::String,
-        FactFieldExtraction::Subject(CanonicalValuePath::new("chain").expect("path")),
+        FactFieldExtraction::Subject(CanonicalValuePath::new(path).expect("path")),
         FactFieldPolicy::new(
             vec![FactQueryOperator::Equal],
             FactFieldExposure::Returnable,
@@ -85,6 +89,19 @@ fn subject_field(id: &str) -> FactFieldDescriptor {
         .required(),
     )
     .expect("subject field")
+}
+
+fn optional_subject_field(id: &str, path: &str) -> FactFieldDescriptor {
+    FactFieldDescriptor::new(
+        FactFieldId::new(id).expect("field id"),
+        FactFieldValueType::String,
+        FactFieldExtraction::Subject(CanonicalValuePath::new(path).expect("path")),
+        FactFieldPolicy::new(
+            vec![FactQueryOperator::Equal],
+            FactFieldExposure::Returnable,
+        ),
+    )
+    .expect("optional subject field")
 }
 
 fn sortable_result_field(id: &str) -> FactFieldDescriptor {

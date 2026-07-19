@@ -1,33 +1,22 @@
 # mfm-adapters-portfolio
 
-Portfolio adapter runners for **fact-backed, report-only** portfolio snapshots.
-
-This crate binds certified portfolio state descriptors to executable typed runners. It receives
-store-verified input evidence, artifact-read capabilities, and a Platform `FactIndexReadProvider`
-from runtime/app assembly.
+Executable runner bindings for certified portfolio states.
 
 ## Live path
 
-1. `SelectHoldings` hydrates retained `FactResponse` artifacts via the shared kit
-   (`fact_response_artifact_requirement`, `hydrate_fact_response_json`), runs pure network-coherent
-   selection, and records fact-query evidence for replay.
-2. Downstream pure states assemble valuations, snapshot, and report from certified config and the
-   selected holdings.
-
-There is **no** live portfolio transport factory, pin/observe runners, or chain crawl path.
+`SelectHoldings` consumes the typed Bitcoin and EVM receipt vectors directly. The adapter submits
+all receipt-derived requests in one fact-index batch, requires one shared snapshot frontier,
+hydrates each returned response artifact, and records the state-produced query evidence. Portfolio
+assembly therefore receives only store-reread and identity-reverified observations; an all-EVM
+portfolio follows exactly the same path.
 
 ## Replay path
 
-`verify_portfolio_replay` recomputes the **full pure graph** from certified node configs and
-verified fact-query evidence, then compares each produced cell byte-for-byte:
+`verify_portfolio_replay` uses only certified configs, the append-only stream, and retained
+artifacts. BTC/EVM selection is recomputed from retained fact-query evidence, and the pure
+snapshot/report outputs are compared byte-for-byte. EVM collection/publication replay lives only
+in `mfm-adapters-evm`.
 
-| State | Replay behavior |
-| --- | --- |
-| `ResolveSubjects` | recompute from certified config (not history deserialization alone) |
-| `SelectHoldings` | recompute from recorded query evidence + selection policy |
-| `ResolveValuations` | recompute from certified valuation config |
-| `AssembleSnapshot` | recompute from recomputed subjects/holdings/valuations |
-| `ProjectReport` | recompute from assembled snapshot + report config |
-
-Replay and resume authority remains with the certified spec and typed run stream. This crate does
-not create workflow topology or own collector source IO.
+This crate binds portfolio fact-index reads and pure projections. It does not create workflow
+topology, select runtime routes, implement JSON-RPC/ERC-20 codecs, publish family facts, or own
+family state semantics.

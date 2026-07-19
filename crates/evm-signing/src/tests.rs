@@ -1,181 +1,370 @@
 use super::*;
-use alloy_primitives::address;
-use mfm_signing::PublicSigningIdentity;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use alloy_primitives::{address, b256, hex, PrimitiveSignature};
+use mfm_signing::{
+    DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
+    SigningProfileId, SigningProvider,
+};
+
+const EXPECTED_SENDER: Address = address!("dd6b8b3dc6b7ad97db52f08a275ff4483e024cea");
 
 fn signer_ref() -> SignerRef {
     SignerRef::new("deployer").expect("signer ref")
 }
 
-fn legacy_tx() -> LegacyTxToSign {
-    LegacyTxToSign {
-        to: None,
-        value_wei: 0,
-        chain_id: 1,
-        nonce: 7,
-        gas_price_wei: 1,
-        gas_limit: 21_000,
-        data: vec![0xde, 0xad, 0xbe, 0xef],
+fn alloy_vector_envelope() -> UnsignedEip1559Envelope {
+    UnsignedEip1559Envelope::new(
+        U256::from(1),
+        U256::from(0x42),
+        U256::from(0x3b9aca00_u64),
+        U256::from(0x4a817c800_u64),
+        U256::from(44_386),
+        address!("6069a6c32cf691f5982febae4faf8a6f3ab2f0f6").into(),
+        U256::ZERO,
+        AccessList::default(),
+        hex!("a22cb4650000000000000000000000005eee75727d804a2b13038928d36f8b188945a57a0000000000000000000000000000000000000000000000000000000000000000").into(),
+    )
+    .expect("envelope")
+}
+
+fn alloy_vector_signature() -> SignatureBytes {
+    let signature = PrimitiveSignature::from_scalars_and_parity(
+        b256!("840cfc572845f5786e702984c2a582528cad4b49b2a10b9db1be7fca90058565"),
+        b256!("25e7109ceb98168d95b09b18bbf6b685130e0562f233877d492b94eee0c5b6d1"),
+        false,
+    );
+    SignatureBytes::new(signature.as_bytes().to_vec()).expect("signature")
+}
+
+fn identity(account: Address, algorithm: SigningAlgorithmId) -> PublicSigningIdentity {
+    PublicSigningIdentity::new(algorithm, None, Some(format!("{account:?}"))).expect("identity")
+}
+
+struct FixedProvider {
+    calls: AtomicUsize,
+    signature: SignatureBytes,
+    account: Address,
+}
+
+impl FixedProvider {
+    fn alloy_vector() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            signature: alloy_vector_signature(),
+            account: EXPECTED_SENDER,
+        }
     }
 }
 
-fn eip1559_tx() -> Eip1559TxToSign {
-    Eip1559TxToSign {
-        to: Some(Address::from([0x11; 20])),
-        value_wei: 0,
-        chain_id: 1,
-        nonce: 7,
-        max_fee_per_gas: 2,
-        max_priority_fee_per_gas: 1,
-        gas_limit: 21_000,
-        data: vec![0xca, 0xfe],
+impl SigningProvider for FixedProvider {
+    fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let result = SigningResult::for_request(
+            request,
+            identity(self.account, request.algorithm().clone()),
+            self.signature.clone(),
+        );
+        Box::pin(async move { result })
     }
 }
 
-fn expected_sender() -> Address {
-    address!("0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e")
+impl DeterministicSigningProvider for FixedProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.fixed-signer"
+    }
+
+    fn deterministic_profile_id(&self) -> &'static str {
+        SECP256K1_RFC6979_LOW_S_PROFILE_ID
+    }
 }
 
-fn recovered_signature_bytes() -> SignatureBytes {
-    SignatureBytes::new(
-        hex_literal(
-            "48b55bfa915ac795c431978d8a6a992b628d557da5ff759b307d495a36649353\
-             efffd310ac743f371de3b9f7f9cb56c0b28ad43601b4ab949f53faa07bd2c8041b",
-        )
-        .to_vec(),
-    )
-    .expect("signature bytes")
+struct WrongProfileProvider(FixedProvider);
+
+impl SigningProvider for WrongProfileProvider {
+    fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a> {
+        self.0.sign(request)
+    }
 }
 
-fn provider_identity(account: Address) -> PublicSigningIdentity {
-    PublicSigningIdentity::new(
-        evm_signing_algorithm_id().expect("algorithm"),
-        None,
-        Some(format!("{account:?}")),
-    )
-    .expect("identity")
-}
+impl DeterministicSigningProvider for WrongProfileProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.test.wrong-profile-signer"
+    }
 
-fn legacy_request_for_signed_payload(
-    signing_hash: B256,
-    expected_from: Address,
-) -> EvmSigningRequest {
-    EvmSigningRequest {
-        transaction: EvmSigningTransaction::Legacy(legacy_tx()),
-        signing_request: SigningRequest::from_digest(
-            signer_ref(),
-            evm_signing_algorithm_id().expect("algorithm"),
-            evm_transaction_domain_id().expect("domain"),
-            legacy_transaction_purpose_id().expect("purpose"),
-            digest_from_hash(signing_hash),
-        )
-        .require_public_identity(
-            ExpectedSignerIdentity::account_id(format!("{expected_from:?}")).expect("expected"),
-        ),
-        signing_hash,
-        expected_from,
+    fn deterministic_profile_id(&self) -> &'static str {
+        "secp256k1.other.deterministic.v1"
     }
 }
 
 #[test]
-fn default_transaction_style_is_eip1559() {
-    assert_eq!(EvmTransactionStyle::default(), EvmTransactionStyle::Eip1559);
-}
+fn admits_u256_inputs_only_when_alloy_can_represent_them_exactly() {
+    let overflow_u64 = U256::from(u64::MAX) + U256::from(1);
+    let overflow_u128 = U256::from(u128::MAX) + U256::from(1);
 
-#[test]
-fn transaction_signing_hashes_are_stable() {
-    enum Case {
-        Legacy,
-        Eip1559,
-    }
-
-    for (case, expected_hash, expected_purpose) in [
+    for (chain_id, nonce, priority, max, gas, expected_field) in [
         (
-            Case::Legacy,
-            "0x7b5763c12ba4587de9d52aac395936808bf4d52eb0d6cc0a8803011825d8aa55",
-            EVM_LEGACY_TRANSACTION_PURPOSE_ID,
+            overflow_u64,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            Eip1559QuantityField::ChainId,
         ),
         (
-            Case::Eip1559,
-            "0x57806671c35732b1b46a1f8c8a7d63844b94639d997b46c482ea0062d86a8185",
-            EVM_EIP1559_TRANSACTION_PURPOSE_ID,
+            U256::from(1),
+            overflow_u64,
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            Eip1559QuantityField::Nonce,
+        ),
+        (
+            U256::from(1),
+            U256::ZERO,
+            overflow_u128,
+            overflow_u128,
+            U256::ZERO,
+            Eip1559QuantityField::MaxPriorityFeePerGas,
+        ),
+        (
+            U256::from(1),
+            U256::ZERO,
+            U256::ZERO,
+            overflow_u128,
+            U256::ZERO,
+            Eip1559QuantityField::MaxFeePerGas,
+        ),
+        (
+            U256::from(1),
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            overflow_u64,
+            Eip1559QuantityField::GasLimit,
         ),
     ] {
-        let request = match case {
-            Case::Legacy => EvmSigningRequest::legacy(signer_ref(), legacy_tx(), expected_sender()),
-            Case::Eip1559 => {
-                EvmSigningRequest::eip1559(signer_ref(), eip1559_tx(), expected_sender())
+        let error = UnsignedEip1559Envelope::new(
+            chain_id,
+            nonce,
+            priority,
+            max,
+            gas,
+            TxKind::Create,
+            U256::MAX,
+            AccessList::default(),
+            Bytes::new(),
+        )
+        .expect_err("overflow");
+        assert_eq!(
+            error,
+            EvmSigningError::QuantityOutOfRange {
+                field: expected_field
             }
-        }
+        );
+    }
+
+    let envelope = UnsignedEip1559Envelope::new(
+        U256::from(u64::MAX),
+        U256::from(u64::MAX),
+        U256::from(u128::MAX),
+        U256::from(u128::MAX),
+        U256::from(u64::MAX),
+        TxKind::Create,
+        U256::MAX,
+        AccessList::default(),
+        Bytes::new(),
+    )
+    .expect("exact maxima");
+    assert_eq!(envelope.value(), U256::MAX);
+}
+
+#[test]
+fn rejects_zero_chain_and_invalid_fee_relation() {
+    let zero_chain = UnsignedEip1559Envelope::new(
+        U256::ZERO,
+        U256::ZERO,
+        U256::ZERO,
+        U256::ZERO,
+        U256::ZERO,
+        TxKind::Create,
+        U256::ZERO,
+        AccessList::default(),
+        Bytes::new(),
+    )
+    .expect_err("zero chain");
+    assert_eq!(zero_chain, EvmSigningError::ZeroChainId);
+
+    let fees = UnsignedEip1559Envelope::new(
+        U256::from(1),
+        U256::ZERO,
+        U256::from(3),
+        U256::from(2),
+        U256::from(21_000),
+        TxKind::Create,
+        U256::ZERO,
+        AccessList::default(),
+        Bytes::new(),
+    )
+    .expect_err("fee relation");
+    assert_eq!(fees, EvmSigningError::PriorityFeeExceedsMaxFee);
+}
+
+#[test]
+fn alloy_known_vector_uses_one_hash_and_encoding_path() {
+    let envelope = alloy_vector_envelope();
+    assert_eq!(
+        envelope.signing_digest(),
+        b256!("0d5688ac3897124635b6cf1bc0e29d6dfebceebdc10a54d74f2ef8b56535b682")
+    );
+    let request = envelope
+        .signing_request(signer_ref(), EXPECTED_SENDER)
+        .expect("request");
+    assert_eq!(
+        request.algorithm().as_str(),
+        SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID
+    );
+    assert_eq!(
+        request.profile().as_str(),
+        SECP256K1_RFC6979_LOW_S_PROFILE_ID
+    );
+    let result = SigningResult::for_request(
+        &request,
+        identity(EXPECTED_SENDER, request.algorithm().clone()),
+        alloy_vector_signature(),
+    )
+    .expect("result");
+    let signed = envelope
+        .finalize_signed(&request, EXPECTED_SENDER, &result)
+        .expect("signed");
+
+    assert_eq!(
+        signed.transaction_hash(),
+        b256!("0ec0b6a2df4d87424e5f6ad2a654e27aaeb7dac20ae9e8385cc09087ad532ee0")
+    );
+    assert_eq!(keccak256(signed.bytes()), signed.transaction_hash());
+    assert!(signed.bytes().starts_with(&[0x02]));
+    let rendered = format!("{signed:?}");
+    assert!(rendered.contains("<redacted>"));
+    assert!(!rendered.contains(&hex::encode(signed.bytes())));
+}
+
+#[tokio::test]
+async fn canonical_service_calls_provider_exactly_once() {
+    let provider = FixedProvider::alloy_vector();
+    let signed = sign_eip1559(
+        &alloy_vector_envelope(),
+        signer_ref(),
+        EXPECTED_SENDER,
+        &provider,
+    )
+    .await
+    .expect("signed");
+
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(keccak256(signed.bytes()), signed.transaction_hash());
+}
+
+#[tokio::test]
+async fn canonical_service_rejects_the_wrong_deterministic_provider_before_signing() {
+    let provider = WrongProfileProvider(FixedProvider::alloy_vector());
+    let error = sign_eip1559(
+        &alloy_vector_envelope(),
+        signer_ref(),
+        EXPECTED_SENDER,
+        &provider,
+    )
+    .await
+    .expect_err("wrong deterministic provider profile");
+
+    assert_eq!(error, EvmSigningError::DeterministicProfileMismatch);
+    assert_eq!(provider.0.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn finalization_rejects_profile_mismatch_before_signature_use() {
+    let envelope = alloy_vector_envelope();
+    let request = envelope
+        .signing_request(signer_ref(), EXPECTED_SENDER)
+        .expect("request");
+    let other_request = SigningRequest::from_digest(
+        signer_ref(),
+        request.algorithm().clone(),
+        SigningProfileId::new("secp256k1.other.profile.v1").expect("profile"),
+        request.domain().clone(),
+        request.purpose().clone(),
+        *request.digest(),
+    )
+    .require_public_identity(
+        ExpectedSignerIdentity::account_id(format!("{EXPECTED_SENDER:?}")).expect("identity"),
+    );
+    let result = SigningResult::for_request(
+        &other_request,
+        identity(EXPECTED_SENDER, other_request.algorithm().clone()),
+        SignatureBytes::new(vec![0xff]).expect("bounded signature"),
+    )
+    .expect("result");
+
+    assert_eq!(
+        envelope.finalize_signed(&request, EXPECTED_SENDER, &result),
+        Err(EvmSigningError::SigningResultMismatch { field: "profile" })
+    );
+}
+
+#[test]
+fn finalization_rejects_noncanonical_parity_high_s_and_wrong_sender() {
+    let envelope = alloy_vector_envelope();
+    let request = envelope
+        .signing_request(signer_ref(), EXPECTED_SENDER)
         .expect("request");
 
-        assert_eq!(format!("{:?}", request.signing_hash()), expected_hash);
-        assert_eq!(
-            request.signing_request().purpose().as_str(),
-            expected_purpose
-        );
-        assert_eq!(request.expected_from(), expected_sender());
-        assert!(request.signing_request().expected_identity().is_some());
-    }
-}
-
-#[test]
-fn recovered_address_matches_expected_signer_address() {
-    let signing_hash = "0x5eb4f5a33c621f32a8622d5f943b6b102994dfe4e5aebbefe69bb1b2aa0fc93e"
-        .parse::<B256>()
-        .expect("hash");
-    let signature =
-        primitive_signature_from_bytes(&recovered_signature_bytes()).expect("signature");
-
+    let mut bad_parity = alloy_vector_signature().as_bytes().to_vec();
+    bad_parity[64] = 0;
+    let result = SigningResult::for_request(
+        &request,
+        identity(EXPECTED_SENDER, request.algorithm().clone()),
+        SignatureBytes::new(bad_parity).expect("signature"),
+    )
+    .expect("result");
     assert_eq!(
-        recover_signing_address(signing_hash, signature).expect("recover"),
-        address!("0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e")
+        envelope.finalize_signed(&request, EXPECTED_SENDER, &result),
+        Err(EvmSigningError::InvalidSignature {
+            reason: EvmSignatureError::InvalidParity
+        })
     );
-}
 
-#[test]
-fn materializes_transient_legacy_raw_transaction() {
-    let expected = expected_sender();
-    let signing_hash = "0x5eb4f5a33c621f32a8622d5f943b6b102994dfe4e5aebbefe69bb1b2aa0fc93e"
-        .parse::<B256>()
-        .expect("hash");
-    let request = legacy_request_for_signed_payload(signing_hash, expected);
+    let mut high_s = vec![0_u8; 65];
+    high_s[31] = 1;
+    high_s[32..64].copy_from_slice(
+        &hex::decode("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140")
+            .expect("curve order minus one"),
+    );
+    high_s[64] = 27;
     let result = SigningResult::for_request(
-        request.signing_request(),
-        provider_identity(expected),
-        recovered_signature_bytes(),
+        &request,
+        identity(EXPECTED_SENDER, request.algorithm().clone()),
+        SignatureBytes::new(high_s).expect("signature"),
     )
-    .expect("signing result");
-
-    let raw = request
-        .materialize_signed_payload(&result)
-        .expect("raw transaction");
-
-    assert!(raw.hex().starts_with("0x"));
-    assert!(raw.transaction_hash().starts_with("0x"));
-    assert!(!format!("{raw:?}").contains(raw.hex().as_str()));
-}
-
-#[test]
-fn materialize_rejects_recovered_address_mismatch() {
-    let expected = address!("0x1111111111111111111111111111111111111111");
-    let signing_hash = "0x5eb4f5a33c621f32a8622d5f943b6b102994dfe4e5aebbefe69bb1b2aa0fc93e"
-        .parse::<B256>()
-        .expect("hash");
-    let request = legacy_request_for_signed_payload(signing_hash, expected);
-    let result = SigningResult::for_request(
-        request.signing_request(),
-        provider_identity(expected),
-        recovered_signature_bytes(),
-    )
-    .expect("signing result");
-
+    .expect("result");
     assert_eq!(
-        request.materialize_signed_payload(&result),
+        envelope.finalize_signed(&request, EXPECTED_SENDER, &result),
+        Err(EvmSigningError::InvalidSignature {
+            reason: EvmSignatureError::HighS
+        })
+    );
+
+    let wrong_sender = address!("1111111111111111111111111111111111111111");
+    let wrong_request = envelope
+        .signing_request(signer_ref(), wrong_sender)
+        .expect("request");
+    let result = SigningResult::for_request(
+        &wrong_request,
+        identity(wrong_sender, wrong_request.algorithm().clone()),
+        alloy_vector_signature(),
+    )
+    .expect("result");
+    assert_eq!(
+        envelope.finalize_signed(&wrong_request, wrong_sender, &result),
         Err(EvmSigningError::RecoveredAddressMismatch)
     );
-}
-
-fn hex_literal(raw: &str) -> Vec<u8> {
-    let compact = raw.split_whitespace().collect::<String>();
-    hex::decode(compact).expect("hex")
 }

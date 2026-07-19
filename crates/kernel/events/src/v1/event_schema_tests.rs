@@ -17,7 +17,7 @@ pub(super) fn v1_event_schema_golden() {
     assert_eq!(all_event_schema_descriptors().len(), 31);
     assert_eq!(
         rows,
-        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:9da01b57ef30318cc98621ddeef1092fe3b6fd8b1fce3b49b739af4278a83ba4
+        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:cda48aaa4d423db38f798386851a3d91992801b524768ab69bc3c41cf3fd0850
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:b60ebe4bc262799c154a596362ae57672801f54e1b18d703572848626ccef3f0
@@ -28,7 +28,7 @@ mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:
 mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:abdc3cb22d1022954df00d0fa18ea5ddf0f71f576b9a9c7e0dca08de2a0f5acf
 mfm_events::v1::ResourceLaneClaimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:c9b27a3f52464ad34d1cb80fc41947bbfa71bfcba8ab4d78cc09e4b1a9286e4c
 mfm_events::v1::ResourceLaneClaimIntent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:14ec3899b92dc1182f8b5865e2c5597b053ae648290b9b900eb161014dd7b4ed
-mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:71fcef6b4e021f3c49cf1702377b49db1461f6e5918d17a45fda924b8e680fbd
+mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:727f477650e620a3526593d80d0a9afbc75359009b19003722bde42c1325c309
 mfm_events::v1::side_effect::InvocationStarted schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:7d4cf3ffbd5109af4251e207927b0b4819e3ec058a948b1d106d022eeddfa3fc
 mfm_events::v1::side_effect::NotSubmittedProven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:c1ccc7c56931f0f14fa86e233899beb7b744b5cff47f68ec74e53e7f8cf6af12
 mfm_events::v1::side_effect::SubmissionObserved schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:612411db371d86f8cc7033745692bcd88018b632ded4b156b0c96935bc4532cb
@@ -411,9 +411,10 @@ pub(super) fn artifact_requirement_accessor_covers_artifact_bearing_variants() {
                 claim_generation: 1,
                 claim_fencing_token: side_effect::ClaimFencingToken::new("token-1").expect("token"),
                 resource_key: None,
-                prepared_artifact_id: Some(artifact_id(119)),
-                prepared_hash: Some(content_digest(120)),
-                prepared_artifact_evidence_hash: Some(content_digest(220)),
+                prepared_schema_id: schema_id("mfm.test.prepared", 219),
+                prepared_artifact_id: artifact_id(119),
+                prepared_hash: content_digest(120),
+                prepared_artifact_evidence_hash: content_digest(220),
             }),
             vec![EventArtifactReferenceSource::PreparedInvocation],
         ),

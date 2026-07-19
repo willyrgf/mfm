@@ -388,6 +388,125 @@ impl Default for QueryCollectorCheckpointConfig {
 #[mfm(schema = "mfm.bitcoin.state.input.query_collector_checkpoint")]
 pub struct QueryCollectorCheckpointInput {}
 
+/// Complete deterministic plan for loading the latest collector checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "collector_checkpoint_read_plan",
+    version = "1",
+    schema = "mfm.bitcoin.external_read.collector_checkpoint.plan"
+)]
+pub struct QueryCollectorCheckpointReadPlan {
+    collector_kind: String,
+    semantic_source_identity: String,
+    partition: String,
+    network: String,
+    bitcoin_network: String,
+    store_scope: String,
+}
+
+impl QueryCollectorCheckpointReadPlan {
+    /// Creates a plan from a validated checkpoint-query config.
+    pub fn from_config(config: &QueryCollectorCheckpointConfig) -> Result<Self, BtcStateError> {
+        validate_query_collector_checkpoint_config(config)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        Ok(Self {
+            collector_kind: config.collector_kind.clone(),
+            semantic_source_identity: config.semantic_source_identity.clone(),
+            partition: config.partition.clone(),
+            network: config.network.clone(),
+            bitcoin_network: config.bitcoin_network.clone(),
+            store_scope: config.store_scope.clone(),
+        })
+    }
+
+    /// Reconstructs the exact fact-index request declared by this plan.
+    pub fn request(&self) -> Result<FactIndexReadRequest, BtcStateError> {
+        self.config().request()
+    }
+
+    /// Returns the sole retained response ref admitted by the latest-checkpoint plan.
+    pub fn selected_response_ref<'a>(
+        &self,
+        response: &'a mfm_facts::FactQueryResult,
+    ) -> Result<Option<&'a mfm_facts::InternalFactRef>, BtcStateError> {
+        latest_checkpoint_response_ref(response)
+    }
+
+    /// Builds the state-owned latest-checkpoint selection evidence.
+    pub fn selection_evidence(
+        &self,
+        response: &mfm_facts::FactQueryResult,
+    ) -> Result<FactSelectionEvidence, BtcStateError> {
+        let selected_indices = if has_latest_checkpoint_row(response)? {
+            vec![0]
+        } else {
+            Vec::new()
+        };
+        FactSelectionEvidence::new(selection_policy_hash(), selected_indices, None).map_err(
+            |error| BtcStateError::InvalidInput {
+                reason: error.to_string(),
+            },
+        )
+    }
+
+    fn config(&self) -> QueryCollectorCheckpointConfig {
+        QueryCollectorCheckpointConfig {
+            collector_kind: self.collector_kind.clone(),
+            semantic_source_identity: self.semantic_source_identity.clone(),
+            partition: self.partition.clone(),
+            network: self.network.clone(),
+            bitcoin_network: self.bitcoin_network.clone(),
+            store_scope: self.store_scope.clone(),
+        }
+    }
+}
+
+/// Canonical retained evidence for a collector-checkpoint fact query.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "collector_checkpoint_read_evidence",
+    version = "1",
+    schema = "mfm.bitcoin.external_read.collector_checkpoint.evidence"
+)]
+pub struct QueryCollectorCheckpointReadEvidence {
+    fact_query_evidence_hashes: Vec<String>,
+    checkpoint_response: Option<CollectorCheckpointResponse>,
+}
+
+impl QueryCollectorCheckpointReadEvidence {
+    /// Binds hydrated checkpoint material to the exact retained fact-query evidence.
+    pub fn new(
+        query: &mfm_facts::FactQueryEvidence,
+        checkpoint_response: Option<CollectorCheckpointResponse>,
+    ) -> Result<Self, BtcStateError> {
+        let hash = mfm_facts::fact_query_evidence_hash(query).map_err(|error| {
+            BtcStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?;
+        Ok(Self {
+            fact_query_evidence_hashes: vec![hash.as_str().to_owned()],
+            checkpoint_response,
+        })
+    }
+
+    fn validate_query(&self, query: &mfm_facts::FactQueryEvidence) -> Result<(), BtcStateError> {
+        let hash = mfm_facts::fact_query_evidence_hash(query).map_err(|error| {
+            BtcStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?;
+        if self.fact_query_evidence_hashes.as_slice() != [hash.as_str()] {
+            return Err(BtcStateError::InvalidInput {
+                reason: "checkpoint evidence does not bind the retained fact query".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Output from loading a collector checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -463,16 +582,7 @@ impl QueryCollectorCheckpointState {
         &self,
         response: &mfm_facts::FactQueryResult,
     ) -> Result<FactSelectionEvidence, BtcStateError> {
-        let selected_indices = if has_latest_checkpoint_row(response)? {
-            vec![0]
-        } else {
-            Vec::new()
-        };
-        FactSelectionEvidence::new(selection_policy_hash(), selected_indices, None).map_err(
-            |error| BtcStateError::InvalidInput {
-                reason: error.to_string(),
-            },
-        )
+        QueryCollectorCheckpointReadPlan::from_config(&self.config)?.selection_evidence(response)
     }
 }
 
@@ -520,16 +630,53 @@ impl StateSpec for QueryCollectorCheckpointState {
 }
 
 impl ReadState for QueryCollectorCheckpointState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+    type Plan = QueryCollectorCheckpointReadPlan;
+    type Evidence = QueryCollectorCheckpointReadEvidence;
 
-    fn run<'a>(
-        &'a self,
-        _input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        let _request = self.request();
-        future::ready(Err(adapter_required_error(Self::name())))
+    fn plan(
+        &self,
+        _input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        QueryCollectorCheckpointReadPlan::from_config(&self.config).map_err(StateError::from)
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        let [query] = evidence.fact_query_evidence() else {
+            return Err(StateError::Message(
+                "checkpoint read requires exactly one fact-query evidence value".to_owned(),
+            ));
+        };
+        mfm_facts::validate_fact_query_evidence(query)
+            .map_err(|error| StateError::Message(error.to_string()))?;
+        evidence.primary_evidence().validate_query(query)?;
+        let plan = self.plan(input, context)?;
+        let request = plan.request()?;
+        if query.plan() != request.plan() {
+            return Err(StateError::Message(
+                "checkpoint fact-query evidence does not match the state-authored plan".to_owned(),
+            ));
+        }
+        let rows = mfm_facts::fact_query_result_rows_from_receipt(query.receipt());
+        let result = mfm_facts::FactQueryResult::new(rows, query.receipt().clone())
+            .map_err(|error| StateError::Message(error.to_string()))?;
+        let expected_selection = self.selection_evidence(&result)?;
+        if query.selection() != &expected_selection {
+            return Err(StateError::Message(
+                "checkpoint fact-query selection does not match state policy".to_owned(),
+            ));
+        }
+        self.config
+            .loaded_checkpoint_from_replay_evidence(
+                query,
+                evidence.primary_evidence().checkpoint_response.clone(),
+            )
+            .map_err(StateError::from)
     }
 }
 

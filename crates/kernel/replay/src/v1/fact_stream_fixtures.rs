@@ -318,12 +318,13 @@ pub(super) fn replay_stream_other_fact_descriptor() -> mfm_facts::FactDescriptor
 pub(super) fn replay_stream_fact_subject_evidence(
     descriptor: &mfm_facts::FactDescriptor,
 ) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
-        mfm_facts::FactFieldId::new("subject.account").expect("field id"),
-        mfm_facts::FactFieldValueType::String,
-        mfm_facts::FactCanonicalScalar::string("same-subject"),
+    let material = mfm_facts::FactSubjectMaterialV2::new(
+        mfm_canonical::CanonicalValue::object([(
+            "account",
+            mfm_canonical::CanonicalValue::String("same-subject".into()),
+        )])
+        .expect("subject"),
     )
-    .expect("subject value")])
     .expect("subject material");
     let namespace_hash =
         mfm_facts::fact_subject_namespace_hash(descriptor).expect("subject namespace hash");
@@ -470,11 +471,8 @@ pub(super) fn fact_run_admitted_for_stream_with_descriptors(
     events::RunAdmitted {
         run_id,
         identity_material,
-        entry_point: events::EntryPointLaunchEvidence {
-            resolved_op_id: events::EntryPointOpId::new("mfm.replay.test.fact")
-                .expect("entry point"),
-            entry_point_registry_digest: content_digest(0xc2),
-        },
+        entry_point: events::EntryPointLaunchEvidence::new("mfm.replay.test/fact@1", Vec::new())
+            .expect("entry point evidence"),
         spec_hash,
         spec_artifact: stream_run_admitted_spec_artifact_for_hash(&certified_spec.spec_hash),
         certificate_artifact: stream_run_admitted_certificate_artifact(),
@@ -487,7 +485,8 @@ pub(super) fn fact_run_admitted_for_stream_with_descriptors(
         descriptor_identities: certified_spec.spec.descriptor_identities.clone(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
-        admitted_binding_digest: admitted_binding_digest(&[], &[]).expect("binding digest"),
+        capability_implementations: Vec::new(),
+        admitted_binding_digest: admitted_binding_digest(&[], &[], &[]).expect("binding digest"),
         canonicalizer_identity: certified_spec
             .spec
             .public_outputs

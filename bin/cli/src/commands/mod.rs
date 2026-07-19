@@ -11,6 +11,8 @@ mod ops;
 pub(crate) mod result;
 /// Run lifecycle and artifact commands.
 mod run;
+/// Current target-keyed configuration setup commands.
+mod setup;
 
 pub(crate) const OUTPUT_FORMAT_ENV: &str = "MFM_OUTPUT_FORMAT";
 const DEFAULT_OUTPUT_FORMAT: OutputFormat = OutputFormat::Text;
@@ -131,6 +133,12 @@ enum Commands {
         #[command(subcommand)]
         command: ops::OpsCommand,
     },
+    /// Current target-keyed configuration setup
+    Setup {
+        /// Nested setup command to execute.
+        #[command(subcommand)]
+        command: setup::SetupCommand,
+    },
     /// Run operations (start/resume/inspect)
     Run {
         /// Nested run command to execute.
@@ -148,6 +156,7 @@ impl Cli {
             Commands::Facts { command } => command.execute(&ctx).await,
             Commands::Keystore { command } => command.execute(&ctx).await,
             Commands::Ops { command } => command.execute(&ctx).await,
+            Commands::Setup { command } => command.execute(&ctx).await,
             Commands::Run { command } => command.execute(&ctx).await,
         }
     }

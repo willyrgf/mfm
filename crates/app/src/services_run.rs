@@ -1,4 +1,5 @@
 use super::*;
+use crate::errors::runtime_error_with_launch_context;
 
 impl<S, A> RunServices<S, A>
 where
@@ -6,7 +7,7 @@ where
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Resumes a certified typed run from its stored spec artifact.
-    pub async fn resume_stored_run(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
+    pub async fn resume_stored_run(&self, run_id: &RunId) -> Result<RunResponse, PublicError> {
         let runtime_spec = self
             .trusted_run_reader()
             .load_run_context(run_id)
@@ -21,7 +22,7 @@ where
     pub async fn record_manual_resolution(
         &self,
         req: ManualResolutionRecordRequest,
-    ) -> Result<RunResponse, AppError> {
+    ) -> Result<RunResponse, PublicError> {
         let run_id = req.run_id.clone();
         let runtime_spec = self
             .trusted_run_reader()
@@ -39,7 +40,7 @@ where
     }
 
     /// Starts a certified typed run against a durable async typed store.
-    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
+    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, PublicError> {
         self.trusted_run_reader()
             .validate_identity_material_store_scope(&req.identity_material)
             .await?;
@@ -47,7 +48,7 @@ where
             return Err(run_identity_material_mismatch());
         }
         let run_id = req.identity_material.derive_run_id().map_err(|_| {
-            AppError::backend(
+            PublicError::backend(
                 ErrorClass::Internal,
                 "RunIdentityMaterialInvalid",
                 "Run identity material is invalid",
@@ -83,12 +84,18 @@ where
                     .attach_to_existing_run(&run_id, &identity_material)
                     .await;
             }
-            let launch = self.scheduler.prepare_run_launch(
-                &runtime_spec,
-                identity_material.clone(),
-                req.evidence.clone(),
-                expected_next_seq,
-            )?;
+            let launch = self
+                .scheduler
+                .prepare_run_launch(
+                    &runtime_spec,
+                    identity_material.clone(),
+                    req.evidence.clone(),
+                    expected_next_seq,
+                )
+                .await
+                .map_err(|error| {
+                    runtime_error_with_launch_context(error, &req.evidence.entry_point)
+                })?;
             let execution_claim_token = new_execution_claim_token()?;
             let execution_claim = store::PreparedExecutionClaim::new(
                 execution_scope.clone(),
@@ -147,7 +154,7 @@ where
                     }
                 }
                 Ok(store::CommitOutcome::AdmissionBlocked(_)) => {
-                    return Err(AppError::backend(
+                    return Err(PublicError::backend(
                         ErrorClass::Internal,
                         "RunAdmissionBlockedUnexpectedly",
                         "run admission was blocked by a resource lane",
@@ -171,21 +178,20 @@ where
         }
     }
 
-    /// Starts a prepared entry-point run and renders public output if the launch completes.
-    pub async fn launch_prepared_entry_point_run(
+    /// Starts a prepared run and renders public output if the launch completes.
+    pub async fn launch_run_and_render(
         &self,
-        prepared: PreparedEntryPointRunLaunch,
-    ) -> Result<RunStartReport, AppError> {
-        let run_id = prepared.request.run_id.clone();
-        let public_output_schema_id = prepared
-            .request
+        request: RunLaunchRequest,
+    ) -> Result<RunStartReport, PublicError> {
+        let run_id = request.run_id.clone();
+        let public_output_schema_id = request
             .certified_spec
             .envelope()
             .spec
             .public_outputs
             .public_schema_id
             .clone();
-        let launch = self.launch_run(prepared.request).await?;
+        let launch = self.launch_run(request).await?;
         let (outcome, run, active_run_id) = launch.into_response_parts();
         let public_output = if matches!(
             run.as_ref().map(|run| run.run_mode),
@@ -210,7 +216,7 @@ where
         &self,
         run_id: &RunId,
         identity_material: &events::RunIdentityMaterialV1,
-    ) -> Result<RunLaunchOutcome, AppError> {
+    ) -> Result<RunLaunchOutcome, PublicError> {
         let context = self
             .trusted_run_reader()
             .load_status_context(run_id)
@@ -249,7 +255,7 @@ where
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-    ) -> Result<DriveStatus, AppError> {
+    ) -> Result<DriveStatus, PublicError> {
         let context = self
             .trusted_run_reader()
             .load_status_context(run_id)
@@ -274,7 +280,16 @@ where
         )
         .await?;
         self.scheduler
-            .validate_admitted_run_ingress(runtime_spec, &launch_evidence)?;
+            .validate_admitted_run_ingress_for_pending_nodes(
+                runtime_spec,
+                run_id,
+                context.read.view().projection_snapshot(),
+                &launch_evidence,
+            )
+            .await
+            .map_err(|error| {
+                runtime_error_with_launch_context(error, &launch_evidence.entry_point)
+            })?;
         let mut lease = match self
             .acquire_execution_claim_for_drive(&execution_scope, run_id)
             .await?
@@ -292,7 +307,7 @@ where
         run_id: &RunId,
         execution_scope: &store::ExecutionClaimScope,
         token: &store::AdmissionToken,
-    ) -> Result<DriveStatus, AppError> {
+    ) -> Result<DriveStatus, PublicError> {
         let mut lease = match self
             .read
             .store()
@@ -319,7 +334,7 @@ where
         run_id: &RunId,
         execution_scope: &store::ExecutionClaimScope,
         lease: &mut store::AdmissionLease,
-    ) -> Result<DriveStatus, AppError> {
+    ) -> Result<DriveStatus, PublicError> {
         loop {
             if !self
                 .renew_execution_claim_or_lost(execution_scope, run_id, lease)
@@ -359,7 +374,7 @@ where
         &self,
         execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
-    ) -> Result<ExecutionClaimAcquire, AppError> {
+    ) -> Result<ExecutionClaimAcquire, PublicError> {
         loop {
             match self
                 .read
@@ -403,7 +418,7 @@ where
         &self,
         execution_scope: &store::ExecutionClaimScope,
         _run_id: &RunId,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), PublicError> {
         if let store::ExecutionClaimStatus::Expired(lease) = self
             .read
             .store()
@@ -426,7 +441,7 @@ where
         run_id: &RunId,
         execution_scope: &store::ExecutionClaimScope,
         lease: &mut store::AdmissionLease,
-    ) -> Result<ClaimedDriveStep, AppError> {
+    ) -> Result<ClaimedDriveStep, PublicError> {
         let scheduler = self.scheduler.clone();
         let step = scheduler.drive_once(
             self.read.store(),
@@ -472,7 +487,7 @@ where
         execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
         lease: &mut store::AdmissionLease,
-    ) -> Result<bool, AppError> {
+    ) -> Result<bool, PublicError> {
         match self
             .read
             .store()
@@ -493,7 +508,7 @@ where
         execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
         lease: &store::AdmissionLease,
-    ) -> Result<(), AppError> {
+    ) -> Result<(), PublicError> {
         self.read
             .store()
             .release_execution_claim(execution_scope, run_id, &lease.token)
@@ -507,7 +522,7 @@ fn run_projection_has_terminal_completion(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
     projection: &store::ProjectionSnapshot,
-) -> Result<bool, AppError> {
+) -> Result<bool, PublicError> {
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     let saga =
         projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;

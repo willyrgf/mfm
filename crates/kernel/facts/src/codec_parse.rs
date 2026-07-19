@@ -471,10 +471,11 @@ pub(super) struct CompiledQueryWire {
     return_fields: Vec<FactFieldId>,
     ordering: FactOrderingName,
     limit: Option<u64>,
+    content_identity: Option<FactContentIdentityEvidence>,
 }
 
 impl CompiledQueryWire {
-    const VERSION: &'static str = "mfm.fact-query.v1";
+    const VERSION: &'static str = "mfm.fact-query.v2";
 
     pub(super) fn from_parts(
         descriptor: &FactDescriptor,
@@ -483,6 +484,7 @@ impl CompiledQueryWire {
         return_fields: &[FactFieldId],
         ordering: &FactOrderingName,
         limit: Option<u64>,
+        content_identity: Option<&FactContentIdentityEvidence>,
     ) -> Self {
         Self {
             fact_kind: descriptor.fact_kind().clone(),
@@ -491,6 +493,7 @@ impl CompiledQueryWire {
             return_fields: return_fields.to_vec(),
             ordering: ordering.clone(),
             limit,
+            content_identity: content_identity.cloned(),
         }
     }
 
@@ -512,6 +515,13 @@ impl CompiledQueryWire {
             return_fields,
             ordering: FactOrderingName::new(json_str(object, "ordering")?)?,
             limit: json_optional_u64(object, "limit")?,
+            content_identity: match json_required(object, "content_identity")? {
+                serde_json::Value::Null => None,
+                value => Some(
+                    serde_json::from_value(value.clone())
+                        .map_err(|error| FactError::canonical(error.to_string()))?,
+                ),
+            },
         })
     }
 
@@ -535,7 +545,7 @@ impl CompiledQueryWire {
     }
 
     pub(super) fn into_shape(self) -> Result<CompiledFactQueryShape> {
-        CompiledFactQueryShape::new(self.predicates, self.return_fields)
+        CompiledFactQueryShape::new(self.predicates, self.return_fields, self.content_identity)
     }
 
     fn canonical_value(&self) -> Result<CanonicalValue> {
@@ -569,6 +579,14 @@ impl CompiledQueryWire {
                 "limit",
                 self.limit
                     .map(CanonicalValue::Unsigned)
+                    .unwrap_or(CanonicalValue::Null),
+            ),
+            (
+                "content_identity",
+                self.content_identity
+                    .as_ref()
+                    .map(FactContentIdentityEvidence::canonical_query_value)
+                    .transpose()?
                     .unwrap_or(CanonicalValue::Null),
             ),
         ])

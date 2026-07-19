@@ -10,26 +10,28 @@ mod address_balance;
 mod address_balance_collect;
 mod chain_head;
 mod collector_checkpoint;
+mod external_read;
 
 pub use address_balance::{
     address_balance_fact_visibility, normalize_btc_address_balance,
-    normalize_btc_address_balance_fact, platform_address_balance_candidate_plan,
-    BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact, BtcAddressBalanceSubject,
-    NormalizedBtcAddressHolding,
+    normalize_btc_address_balance_fact, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
+    BtcAddressBalanceSubject, NormalizedBtcAddressHolding,
 };
 pub use address_balance_collect::{
-    address_balance_record_visibility, assemble_btc_address_balance_batch,
-    materialize_btc_joint_tip, normalize_btc_address_balance_observation, require_shared_joint_tip,
+    address_balance_record_visibility, assemble_btc_network_collection_receipt,
+    materialize_btc_joint_tip, normalize_btc_address_balance_observation,
     validate_observe_btc_address_balance_config, validate_resolve_btc_joint_tip_config,
-    AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
-    AssembleBtcAddressBalanceBatchInputHandles, AssembleBtcAddressBalanceBatchState,
-    BtcAddressBalanceBatchSummary, BtcAddressBalanceObservation,
-    BtcAddressBalanceObservationContext, BtcJointTip, ObserveBtcAddressBalanceConfig,
+    AssembleBtcNetworkCollectionReceiptConfig, AssembleBtcNetworkCollectionReceiptInput,
+    AssembleBtcNetworkCollectionReceiptInputHandles, AssembleBtcNetworkCollectionReceiptState,
+    BtcAddressBalanceObservation, BtcJointTip, BtcNativeBalanceReceiptEntry,
+    BtcNativeBalanceSourceKey, BtcNetworkCollectionReceipt, ObserveBtcAddressBalanceConfig,
     ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceInputHandles,
     ObserveBtcAddressBalanceState, RecordBtcAddressBalanceFactConfig,
     RecordBtcAddressBalanceFactInput, RecordBtcAddressBalanceFactInputHandles,
     RecordBtcAddressBalanceFactState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
-    ResolveBtcJointTipInputHandles, ResolveBtcJointTipState,
+    ResolveBtcJointTipInputHandles, ResolveBtcJointTipState, BTC_JOINT_TIP_SOURCE_READS,
+    BTC_NATIVE_BALANCE_COVERAGE, BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    BTC_NATIVE_BALANCE_SOURCE_STATUS,
 };
 
 pub use chain_head::{
@@ -44,9 +46,14 @@ pub use collector_checkpoint::{
     validate_record_collector_checkpoint_config, CollectorCheckpointFact,
     CollectorCheckpointResponse, CollectorCheckpointSubject, LoadedCollectorCheckpoint,
     QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
-    QueryCollectorCheckpointInputHandles, QueryCollectorCheckpointState,
+    QueryCollectorCheckpointInputHandles, QueryCollectorCheckpointReadEvidence,
+    QueryCollectorCheckpointReadPlan, QueryCollectorCheckpointState,
     RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
     RecordCollectorCheckpointInputHandles, RecordCollectorCheckpointState,
+};
+pub use external_read::{
+    BtcAddressBalanceReadEvidence, BtcAddressBalanceReadPlan, BtcChainHeadReadEvidence,
+    BtcChainHeadReadPlan,
 };
 
 use std::future;
@@ -68,8 +75,9 @@ use mfm_facts::{
 use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, CanonicalSeed, FactDescriptorRef, ManagedWriteState,
-    MfmFactType, NoContext, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, CanonicalSeed, ExternalReadEvidenceSet,
+    FactDescriptorRef, ManagedWriteState, MfmFactType, NoContext, ReadState, StateError,
+    StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, StateInput};
 use serde::{Deserialize, Serialize};
@@ -133,10 +141,6 @@ fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
 fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
     StateVersion::new(format!("mfm.bitcoin.state.{name}.v1"))
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-}
-
-fn adapter_required_error(state_name: &'static str) -> StateError {
-    StateError::Message(format!("{state_name} requires a Bitcoin adapter runner"))
 }
 
 /// Redaction-safe state error for Bitcoin fact normalization contracts.

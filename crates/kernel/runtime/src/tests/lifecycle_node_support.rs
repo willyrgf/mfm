@@ -83,7 +83,7 @@ pub(super) fn append_runtime_retention_lifecycle_node(
                 capabilities: no_caps.clone(),
                 runner: "managed_platform_write".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             },
         )));
     typed.config_refs.push(config_ref.clone());
@@ -206,7 +206,7 @@ pub(super) fn append_runtime_complete_lifecycle_node(
                 capabilities: no_caps.clone(),
                 runner: "managed_platform_write".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             },
         )));
     typed.config_refs.push(config_ref.clone());
@@ -323,7 +323,7 @@ pub(super) fn append_runtime_resolve_saga_terminal_lifecycle_node(
                 capabilities: no_caps.clone(),
                 runner: "managed_platform_write".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
-                side_effect_contract_digest: None,
+                effect_contract_digest: None,
             },
         )));
     typed.config_refs.push(config_ref.clone());

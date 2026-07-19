@@ -437,7 +437,7 @@ fn generated_state_input_handle_type_tokens(
             let last = handles_path
                 .segments
                 .iter_mut()
-                .last()
+                .next_back()
                 .expect("last segment exists");
             last.ident = format_ident!("{}Handles", last.ident);
             last.arguments = PathArguments::AngleBracketed(

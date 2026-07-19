@@ -22,17 +22,12 @@ error[E0277]: the trait bound `Box<(dyn Any + Send + Sync + 'static)>: mfm_value
 8 |         Box<dyn Any + Send + Sync>,
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Box<(dyn Any + Send + Sync + 'static)>`
   |
-help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
-  |
-  | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
-...
-  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
-...
-  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            FactContentIdentity
+            FactContentIdentityEvidence
+            mfm_values::generic_values::ArtifactRef<T>
+            mfm_values::generic_values::ContextRefValue
+            mfm_values::generic_values::MaybeValue<T>
   = note: required for `Box<(dyn Any + Send + Sync + 'static)>` to implement `mfm_values::StateInput`
 note: required by a bound in `into_binding`
  --> src/input_binding.rs
@@ -54,17 +49,12 @@ error[E0277]: the trait bound `Box<(dyn Any + Send + Sync + 'static)>: mfm_value
 9 | |     >>::into_binding(erased);
   | |____________________________^ the trait `mfm_values::MfmValue` is not implemented for `Box<(dyn Any + Send + Sync + 'static)>`
   |
-help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
-  |
-  | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
-...
-  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
-...
-  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            FactContentIdentity
+            FactContentIdentityEvidence
+            mfm_values::generic_values::ArtifactRef<T>
+            mfm_values::generic_values::ContextRefValue
+            mfm_values::generic_values::MaybeValue<T>
   = note: required for `Box<(dyn Any + Send + Sync + 'static)>` to implement `mfm_values::StateInput`
 note: required by a bound in `InputBinding`
  --> src/input_binding.rs

@@ -12,7 +12,7 @@ use super::dto::PublicFactQueryPage;
 use super::query::PublicFactQueryRequest;
 #[cfg(any(test, feature = "test-support"))]
 use crate::async_app_store_error;
-use crate::{content_digest_for_bytes, AppError, ErrorClass, ProductionRunStore};
+use crate::{content_digest_for_bytes, ErrorClass, PostgresStore, PublicError};
 
 /// App public fact query service.
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ where
     E: PublicFactQueryExecutor,
 {
     /// Creates a public fact query service from a public catalog and store executor.
-    pub fn new(catalog: FactCatalogService, executor: E) -> Result<Self, AppError> {
+    pub fn new(catalog: FactCatalogService, executor: E) -> Result<Self, PublicError> {
         Ok(Self {
             catalog,
             executor,
@@ -43,7 +43,7 @@ where
     pub async fn query(
         &self,
         request: PublicFactQueryRequest,
-    ) -> Result<PublicFactQueryPage, AppError> {
+    ) -> Result<PublicFactQueryPage, PublicError> {
         query_public_facts(
             &self.catalog,
             &self.executor,
@@ -61,7 +61,7 @@ pub(crate) async fn query_public_facts<E>(
     store_scope: &mfm_facts::StoreScopeRef,
     scope_decision_evidence: &mfm_facts::ScopeDecisionEvidence,
     request: PublicFactQueryRequest,
-) -> Result<PublicFactQueryPage, AppError>
+) -> Result<PublicFactQueryPage, PublicError>
 where
     E: PublicFactQueryExecutor,
 {
@@ -75,7 +75,7 @@ where
     let plan = mfm_facts::compile_fact_query_plan(descriptor, input)?;
     if !is_public_default_fact_visibility(plan.query_scope().audience(), plan.query_scope().scope())
     {
-        return Err(AppError::backend(
+        return Err(PublicError::backend(
             ErrorClass::Internal,
             "FactPublicScopeInvalid",
             "Public fact query scope was invalid",
@@ -94,7 +94,7 @@ where
 
 /// Boxed future returned by public fact query executors.
 pub type PublicFactQueryFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<PublicFactQueryExecution, AppError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<PublicFactQueryExecution, PublicError>> + Send + 'a>>;
 
 /// Store capability required by app public fact query services.
 pub trait PublicFactQueryExecutor: Clone + Send + Sync + 'static {
@@ -110,7 +110,7 @@ pub type PublicFactQueryExecution = Vec<mfm_facts::FactQueryResultRow>;
 
 pub(crate) type AppFactQueryRow = mfm_facts::FactQueryResultRow;
 
-impl PublicFactQueryExecutor for ProductionRunStore {
+impl PublicFactQueryExecutor for PostgresStore {
     fn execute_public_fact_query_plan<'a>(
         &'a self,
         plan: &'a mfm_facts::CanonicalFactQueryPlan,
@@ -119,7 +119,7 @@ impl PublicFactQueryExecutor for ProductionRunStore {
             let result = self
                 .execute_fact_query(plan)
                 .await
-                .map_err(AppError::from)?;
+                .map_err(PublicError::from)?;
             Ok(result.rows().to_vec())
         })
     }
@@ -139,7 +139,7 @@ impl PublicFactQueryExecutor for store::AsyncInMemoryRunStore {
 fn execute_in_memory_app_fact_query(
     store: &store::AsyncInMemoryRunStore,
     plan: &mfm_facts::CanonicalFactQueryPlan,
-) -> Result<PublicFactQueryExecution, AppError> {
+) -> Result<PublicFactQueryExecution, PublicError> {
     let projection = store.projection_snapshot().map_err(async_app_store_error)?;
     execute_projection_app_fact_query(&projection, plan)
 }
@@ -148,7 +148,7 @@ fn execute_in_memory_app_fact_query(
 fn execute_projection_app_fact_query(
     projection: &store::ProjectionSnapshot,
     plan: &mfm_facts::CanonicalFactQueryPlan,
-) -> Result<PublicFactQueryExecution, AppError> {
+) -> Result<PublicFactQueryExecution, PublicError> {
     Ok(store::test_support::execute_fact_query_projection_for_test(
         projection, plan,
     )?)

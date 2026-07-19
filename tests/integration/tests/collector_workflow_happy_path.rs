@@ -459,11 +459,11 @@ impl MockBtcProvider {
 }
 
 impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for MockBtcProvider {
-    fn validate_source_binding(
-        &self,
-        _binding: &BtcSourceBinding,
-    ) -> mfm_btc_capabilities::Result<()> {
-        Ok(())
+    fn validate_source_binding<'a>(
+        &'a self,
+        _binding: BtcSourceBinding,
+    ) -> mfm_adapters_btc_jsonrpc::BtcSourceBindingValidationFuture<'a> {
+        Box::pin(async { Ok(()) })
     }
 
     fn bind_source(
@@ -558,11 +558,11 @@ impl BlockingBtcProvider {
 }
 
 impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for BlockingBtcProvider {
-    fn validate_source_binding(
-        &self,
-        _binding: &BtcSourceBinding,
-    ) -> mfm_btc_capabilities::Result<()> {
-        Ok(())
+    fn validate_source_binding<'a>(
+        &'a self,
+        _binding: BtcSourceBinding,
+    ) -> mfm_adapters_btc_jsonrpc::BtcSourceBindingValidationFuture<'a> {
+        Box::pin(async { Ok(()) })
     }
 
     fn bind_source(

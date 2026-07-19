@@ -34,6 +34,7 @@ impl mfm_values::MfmDefault for WalletSubjectKind {}
 /// Canonical wallet subject selected by one wallet declaration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "wallet-subject",
@@ -189,6 +190,7 @@ impl From<BitcoinAddress> for String {
 
 /// Canonical wallet config referenced by portfolio configs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "wallet-config",
@@ -263,6 +265,7 @@ impl WalletConfig {
 /// Canonical wallet implementation selection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "wallet-implementation-config",

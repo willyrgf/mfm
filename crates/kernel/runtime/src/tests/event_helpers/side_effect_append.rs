@@ -36,12 +36,15 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
 
     let ledger =
         events::SideEffectLedgerKey::new(format!("holder-{commit_key}")).expect("holder ledger");
-    let intent_hash = content_digest_json(serde_json::json!({
-        "key": key,
-        "ledger": ledger.as_str(),
-        "run": run_id.as_str(),
-    }))
-    .expect("intent digest");
+    let intent = fixture_side_effect_evidence(21, node.node_id.as_str(), attempt_id.as_str());
+    let idempotency = fixture_side_effect_evidence(34, node.node_id.as_str(), attempt_id.as_str());
+    let intent_hash = content_digest_json(serde_json::to_value(&intent).expect("intent value"))
+        .expect("intent digest");
+    let idempotency_hash =
+        content_digest_json(serde_json::to_value(&idempotency).expect("idempotency value"))
+            .expect("idempotency digest");
+    let evidence_schema = <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
+        .expect("side-effect evidence schema");
     let resource_key = exclusive_resource_key(fixture, key);
     let resource_lane_requirement_digest = content_digest_json(serde_json::json!({
         "acquisition": "pre_state_invocation",
@@ -58,11 +61,27 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
         digest: intent_hash.clone(),
         byte_len: 17,
         media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(node.config_ref.schema_id.clone()),
+        schema_id: Some(evidence_schema.clone()),
         semantic_type_id: None,
         producer_node_id: Some(node.node_id.clone()),
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::SideEffectIntent,
+    };
+    let prepared_hash = content_digest_json(serde_json::json!({
+        "intent_hash": intent_hash.as_str(),
+        "prepared": true,
+    }))
+    .expect("prepared digest");
+    let prepared_artifact = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(prepared_hash.algorithm(), *prepared_hash.digest()),
+        digest: prepared_hash.clone(),
+        byte_len: 17,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(evidence_schema.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::PreparedInvocation,
     };
     let side_effect = SyntheticSideEffectAppend::new(fixture, run_id, node, &attempt_id);
     let ledger_purpose = side_effect.ledger_purpose();
@@ -82,16 +101,18 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
                     pair_id: pair_id.clone(),
                     pair_role,
                     invocation_epoch: 1,
-                    intent_schema_id: node.config_ref.schema_id.clone(),
+                    intent_schema_id: evidence_schema.clone(),
                     intent_hash: intent_hash.clone(),
                     intent_artifact_id,
                     intent_artifact_evidence_hash: intent_artifact
                         .evidence_hash()
                         .expect("intent evidence hash"),
-                    idempotency_input_schema_id: node.config_ref.schema_id.clone(),
-                    idempotency_input_hash: content(0xc3),
-                    idempotency_key: events::IdempotencyKeyRef::new(format!("idem-{commit_key}"))
-                        .expect("idempotency key"),
+                    idempotency_input_schema_id: evidence_schema.clone(),
+                    idempotency_input_hash: idempotency_hash,
+                    idempotency_key: crate::side_effect_driver::side_effect_idempotency_key(
+                        &idempotency,
+                    )
+                    .expect("idempotency key"),
                     capability_kind: side_effect_capability_kind(),
                     capability_version: side_effect_capability_version(),
                     adapter_kind: fixture.adapter_kind.clone(),
@@ -142,13 +163,16 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
                     claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
                         .expect("fencing token"),
                     resource_key: Some(resource_key),
-                    prepared_artifact_id: None,
-                    prepared_hash: None,
-                    prepared_artifact_evidence_hash: None,
+                    prepared_schema_id: evidence_schema,
+                    prepared_artifact_id: prepared_artifact.artifact_id.clone(),
+                    prepared_hash,
+                    prepared_artifact_evidence_hash: prepared_artifact
+                        .evidence_hash()
+                        .expect("prepared evidence hash"),
                 },
             ),
         ],
-        vec![intent_artifact],
+        vec![intent_artifact, prepared_artifact],
         store::RequiredSideEffectState::Absent,
         true,
     );

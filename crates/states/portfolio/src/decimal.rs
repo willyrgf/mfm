@@ -27,12 +27,8 @@ pub(super) struct DecimalValue {
 }
 
 impl DecimalValue {
-    fn parse_non_negative(input: &str) -> Result<Self, DecimalArithmeticError> {
+    pub(super) fn parse_non_negative(input: &str) -> Result<Self, DecimalArithmeticError> {
         Self::parse(input, false)
-    }
-
-    pub(super) fn parse_signed(input: &str) -> Result<Self, DecimalArithmeticError> {
-        Self::parse(input, true)
     }
 
     fn parse(input: &str, allow_negative: bool) -> Result<Self, DecimalArithmeticError> {
@@ -90,14 +86,6 @@ impl DecimalValue {
         }
     }
 
-    pub(super) fn sub(&self, other: &Self) -> Self {
-        let scale = self.scale.max(other.scale);
-        Self {
-            digits: self.scaled_digits(scale) - other.scaled_digits(scale),
-            scale,
-        }
-    }
-
     fn scaled_digits(&self, scale: u32) -> BigInt {
         if self.scale == scale {
             self.digits.clone()
@@ -107,7 +95,7 @@ impl DecimalValue {
     }
 
     pub(super) fn to_canonical_string(&self) -> String {
-        self.to_string_with_min_scale(self.scale)
+        self.to_string_with_min_scale(0)
     }
 
     fn to_string_with_min_scale(&self, min_scale: u32) -> String {
@@ -131,7 +119,11 @@ impl DecimalValue {
             if frac.len() < min_scale as usize {
                 frac.push_str(&"0".repeat(min_scale as usize - frac.len()));
             }
-            out = format!("{whole}.{frac}");
+            out = if frac.is_empty() {
+                whole.to_owned()
+            } else {
+                format!("{whole}.{frac}")
+            };
         } else if min_scale > 0 {
             out.push('.');
             out.push_str(&"0".repeat(min_scale as usize));

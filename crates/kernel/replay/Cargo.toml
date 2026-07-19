@@ -22,13 +22,15 @@ mfm-events = { path = "../events" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
+mfm-program = { path = "../program" }
 mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
+mfm-values = { path = "../values" }
 serde_json = { version = "1.0" }
+serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-store = { path = "../store", features = ["test-support"] }
 trybuild = "1.0"

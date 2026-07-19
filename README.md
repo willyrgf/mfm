@@ -48,6 +48,15 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 - Security-hardened Ethereum keystore (tamper checks + signing utilities).
 - Typed storage backends for run events and artifacts.
 
+## Current workflow surface
+
+The compiled application exposes exactly one public run objective:
+`mfm.portfolio/snapshot@1`. Its root composes reusable Bitcoin and EVM collector operations, then
+passes their typed receipts to one store-backed portfolio report operation. The internal EVM
+collector cycle, transaction state, and contract-validation state are reusable certified
+substrate; none is a second app entry point. See the
+[exact EVM package/state/entry-point inventory](docs/architecture.md#current-evm-inventory).
+
 ## Documentation
 
 Start here:
@@ -63,8 +72,10 @@ User-facing docs:
 
 - CLI docs + output contract: [`bin/cli/README.md`](bin/cli/README.md)
 - REST API docs: [`bin/rest-api/README.md`](bin/rest-api/README.md)
-- EVM contract lifecycle contract: [`docs/evm-contract-lifecycle.md`](docs/evm-contract-lifecycle.md)
+- Portfolio snapshot workflow: [`docs/portfolio-snapshot.md`](docs/portfolio-snapshot.md)
 - EVM runtime routing runbook: [`docs/evm-rpc-routing.md`](docs/evm-rpc-routing.md)
+- EVM transaction contract: [`docs/evm-transactions.md`](docs/evm-transactions.md)
+- Persisted/public surface inventory: [`docs/persisted-public-surfaces.md`](docs/persisted-public-surfaces.md)
 
 Crate docs:
 
@@ -73,7 +84,11 @@ Crate docs:
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
-- Storage (typed run events, Postgres): [`crates/storages/stream-store-postgres/README.md`](crates/storages/stream-store-postgres/README.md)
+- EVM collector operation: [`crates/ops/evm-collectors-op/README.md`](crates/ops/evm-collectors-op/README.md)
+- Portfolio snapshot/report operations: [`crates/ops/portfolio-snapshot-op/README.md`](crates/ops/portfolio-snapshot-op/README.md)
+- Reusable EVM states: [`crates/states/evm/README.md`](crates/states/evm/README.md)
+- EVM runtime/replay adapters: [`crates/adapters/evm/README.md`](crates/adapters/evm/README.md)
+- Storage (typed run events and current configuration, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
 
 Development and operations:
 
@@ -145,22 +160,28 @@ ordinary worktree target.
 `nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
 against a migrated schema, and runs Postgres-backed parity tests.
 `.#ci` is full by definition: it starts the managed services required by feature-gated parity
-tests. There is no `--mode` or `--full` alias flag.
+tests, then records the full closing Git SHA in the retained `closing-source-revision` task log.
+Pair that artifact with `git status --short` for clean-worktree closure evidence. There is no
+`--mode` or `--full` alias flag.
 
 Run binaries locally:
 
 ```bash
 nix run .#mfm -- --help
-nix run .#mfm-start -- --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
+nix run .#mfm -- ops list
+nix run .#mfm -- setup import examples/setup/organization.toml
+nix run .#mfm -- setup list
 cargo run -p mfm -- --help
 cargo run -p mfm-rest-api
 ```
 
-`.#mfm-start` is a local development wrapper for `mfm run start`. It starts a
-Nixfied-managed PostgreSQL process in slot 9, keeps the dev database under the
-Nixfied state root for `mfm/dev/9`, applies the typed run-store migrations
-idempotently, sets `DATABASE_URL`, and then delegates to the existing CLI. The
-raw packaged CLI remains `.#mfm`.
+The `.#mfm` app runs the packaged CLI with a Nixfied-managed PostgreSQL process
+in slot 9. It keeps the development database under the Nixfied state root for
+`mfm/dev/9`, applies the typed store migrations idempotently, sets `DATABASE_URL`,
+delegates all arguments to the raw binary, and stops PostgreSQL afterward without
+removing its data. Separate `nix run .#mfm` commands therefore share setup and run
+state. For raw execution with caller-managed infrastructure, use
+`cargo run -p mfm -- <ARGS>` or the binary produced by `nix build .#mfm`.
 
 ## License
 MIT (see [`LICENSE`](LICENSE)).

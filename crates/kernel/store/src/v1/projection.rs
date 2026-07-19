@@ -157,8 +157,9 @@ impl FactRecordProjection {
     /// Builds the store-owned fact record projection for a `FactRecorded` event.
     ///
     /// The fact claim id is derived from the event envelope's run-stream coordinates. Attempt
-    /// state validation, duplicate response-artifact checks, and indexed visibility checks remain
-    /// the caller's responsibility because they depend on the surrounding projection state.
+    /// State validation and indexed visibility checks remain the caller's responsibility because
+    /// they depend on the surrounding projection state. Content-addressed response artifacts may
+    /// be referenced by multiple append occurrences.
     pub fn from_recorded_event(
         envelope: &KernelEventEnvelope,
         payload: &mfm_events::v1::FactRecorded,

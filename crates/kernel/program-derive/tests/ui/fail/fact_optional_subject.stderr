@@ -1,4 +1,4 @@
-error: MfmFactType derive does not allow optional subject fields
+error: MfmFactType derive requires at least one required subject field
   --> tests/ui/fail/fact_optional_subject.rs:26:51
    |
 26 | #[derive(Clone, Serialize, Deserialize, MfmValue, MfmFactType)]

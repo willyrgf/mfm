@@ -1,8 +1,12 @@
 use super::*;
+use std::num::NonZeroU64;
+
+use mfm_evm_capabilities::EvmBlockAnchor;
 
 /// Concrete execution anchor captured for one pinned network.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "family", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "execution-anchor",
@@ -12,11 +16,9 @@ pub enum ExecutionAnchor {
     /// EVM execution pinned to one block hash and number on one chain id.
     Evm {
         /// EVM chain id.
-        chain_id: u64,
-        /// Concrete pinned block number.
-        block_number: u64,
-        /// Concrete pinned block hash.
-        block_hash: String,
+        chain_id: NonZeroU64,
+        /// Concrete checked EVM block anchor.
+        block: EvmBlockAnchor,
     },
     /// Bitcoin execution pinned to one height and block hash.
     Bitcoin {
@@ -51,10 +53,8 @@ pub struct NetworkPin {
 pub struct WalletSnapshot {
     /// Stable wallet identifier.
     pub wallet_id: String,
-    /// Canonical wallet address.
-    pub address: String,
-    /// Canonical wallet subject kind.
-    pub subject_kind: WalletSubjectKind,
+    /// Canonical checked wallet subject.
+    pub subject: WalletSubject,
     /// Stable network identifier.
     pub network_id: String,
     /// Observations collected for the wallet.
@@ -86,8 +86,6 @@ pub struct PortfolioSnapshot {
     pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
-    /// Generation timestamp in milliseconds since epoch.
-    pub generated_at_ms: u64,
     /// One pin per referenced network.
     pub network_pins: Vec<NetworkPin>,
     /// Per-wallet observations.
@@ -97,6 +95,9 @@ pub struct PortfolioSnapshot {
 }
 
 impl PortfolioSnapshot {
+    /// The only supported public snapshot schema version.
+    pub const SCHEMA_VERSION: u64 = 1;
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.network_pins
@@ -126,8 +127,6 @@ pub struct PortfolioReport {
     pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
-    /// Generation timestamp in milliseconds since epoch.
-    pub generated_at_ms: u64,
     /// One pin per referenced network.
     pub network_pins: Vec<NetworkPin>,
     /// Per-wallet quote summaries.
@@ -137,6 +136,9 @@ pub struct PortfolioReport {
 }
 
 impl PortfolioReport {
+    /// The only supported public report schema version.
+    pub const SCHEMA_VERSION: u64 = 1;
+
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {
         self.network_pins
@@ -183,14 +185,6 @@ impl WalletReport {
 pub struct PortfolioQuoteTotal {
     /// Quote unit.
     pub quote: QuoteCode,
-    /// Assets total in the quote unit.
-    pub assets_value_dec: String,
-    /// Collateral total in the quote unit.
-    pub collateral_value_dec: String,
-    /// Debt total in the quote unit.
-    pub debt_value_dec: String,
-    /// Staked total in the quote unit.
-    pub staked_value_dec: String,
-    /// Net total in the quote unit.
-    pub net_value_dec: String,
+    /// Direct total value in the quote unit.
+    pub total_value_dec: String,
 }

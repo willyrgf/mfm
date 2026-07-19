@@ -35,6 +35,11 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 })?,
                 runner_executables: parse_vec(json, "runner_executables", parse_executable)?,
                 adapter_executables: parse_vec(json, "adapter_executables", parse_executable)?,
+                capability_implementations: parse_vec(
+                    json,
+                    "capability_implementations",
+                    parse_capability_implementation_identity,
+                )?,
                 canonicalizer_identity: CanonicalizerIdentity::new(required_str(
                     json,
                     "canonicalizer_identity",
@@ -241,18 +246,13 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 resource_key: optional_obj(json, "resource_key")?
                     .map(parse_resource_key_evidence)
                     .transpose()?,
-                prepared_artifact_id: optional_str(json, "prepared_artifact_id")?
-                    .map(parse_identity)
-                    .transpose()?,
-                prepared_hash: optional_str(json, "prepared_hash")?
-                    .map(parse_identity)
-                    .transpose()?,
-                prepared_artifact_evidence_hash: optional_str(
+                prepared_schema_id: parse_identity(required_str(json, "prepared_schema_id")?)?,
+                prepared_artifact_id: parse_identity(required_str(json, "prepared_artifact_id")?)?,
+                prepared_hash: parse_identity(required_str(json, "prepared_hash")?)?,
+                prepared_artifact_evidence_hash: parse_identity(required_str(
                     json,
                     "prepared_artifact_evidence_hash",
-                )?
-                .map(parse_identity)
-                .transpose()?,
+                )?)?,
             },
         )),
         "SideEffectInvocationStarted" => Ok(KernelEventPayload::SideEffectInvocationStarted(
@@ -635,7 +635,7 @@ fn parse_descriptor_identity(json: &serde_json::Value) -> Result<DescriptorIdent
                     parse_fact_descriptor_ref,
                 )?,
                 runner: required_str(json, "runner")?.to_owned(),
-                side_effect_contract_digest: optional_str(json, "side_effect_contract_digest")?
+                effect_contract_digest: optional_str(json, "effect_contract_digest")?
                     .map(parse_identity)
                     .transpose()?,
             },
@@ -794,6 +794,17 @@ fn parse_executable(json: &serde_json::Value) -> Result<events::ExecutableIdenti
         nix_output_hash: optional_str(json, "nix_output_hash")?
             .map(events::NixOutputHash::new)
             .transpose()?,
+    })
+}
+
+fn parse_capability_implementation_identity(
+    json: &serde_json::Value,
+) -> Result<events::CapabilityImplementationIdentity> {
+    Ok(events::CapabilityImplementationIdentity {
+        capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
+        capability_version: parse_identity(required_str(json, "capability_version")?)?,
+        implementation_id: RuntimeBindingId::new(required_str(json, "implementation_id")?)
+            .map_err(|error| StoreError::Identity(error.to_string()))?,
     })
 }
 
@@ -967,16 +978,43 @@ fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvi
 fn parse_entry_point_launch_evidence(
     json: &serde_json::Value,
 ) -> Result<events::EntryPointLaunchEvidence> {
-    Ok(events::EntryPointLaunchEvidence {
-        resolved_op_id: events::EntryPointOpId::new(required_str(json, "resolved_op_id")?)?,
-        entry_point_registry_digest: parse_identity(required_str(
-            json,
-            "entry_point_registry_digest",
-        )?)?,
-    })
+    require_exact_object_keys(json, &["configured_targets", "entry_point_id"])?;
+    let configured_targets = parse_vec(json, "configured_targets", |source| {
+        require_exact_object_keys(source, &["digest", "schema_id", "target"])?;
+        Ok(events::ConfiguredTargetEvidence::new(
+            mfm_ids::StableAuthorKey::new(required_str(source, "target")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            parse_identity(required_str(source, "schema_id")?)?,
+            parse_identity(required_str(source, "digest")?)?,
+        ))
+    })?;
+    Ok(events::EntryPointLaunchEvidence::new(
+        required_str(json, "entry_point_id")?,
+        configured_targets,
+    )?)
+}
+
+fn require_exact_object_keys(json: &serde_json::Value, expected: &[&'static str]) -> Result<()> {
+    let object = json
+        .as_object()
+        .ok_or_else(|| StoreError::Event("launch evidence must be an object".to_owned()))?;
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return Err(StoreError::Event(
+            "launch evidence contains unknown or missing fields".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_run_identity_material(json: &serde_json::Value) -> Result<events::RunIdentityMaterialV1> {
+    require_exact_object_keys(
+        json,
+        &[
+            "certified_spec_hash",
+            "invocation_key_digest",
+            "store_scope_id",
+        ],
+    )?;
     Ok(events::RunIdentityMaterialV1 {
         certified_spec_hash: parse_identity(required_str(json, "certified_spec_hash")?)?,
         store_scope_id: StoreScopeId::new(required_str(json, "store_scope_id")?)?,

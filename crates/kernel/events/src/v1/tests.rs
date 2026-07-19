@@ -143,12 +143,13 @@ fn fact_claim(
 }
 
 fn fact_subject_evidence(namespace_byte: u8) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
-        mfm_facts::FactFieldId::new("subject.chain").expect("field"),
-        mfm_facts::FactFieldValueType::String,
-        mfm_facts::FactCanonicalScalar::string(format!("chain_{namespace_byte}")),
+    let material = mfm_facts::FactSubjectMaterialV2::new(
+        mfm_canonical::CanonicalValue::object([(
+            "chain",
+            mfm_canonical::CanonicalValue::String(format!("chain_{namespace_byte}")),
+        )])
+        .expect("subject"),
     )
-    .expect("subject value")])
     .expect("subject material");
     mfm_facts::FactSubjectEvidence::from_material(content_digest(namespace_byte), &material)
         .expect("subject evidence")

@@ -1,180 +1,131 @@
 #![warn(missing_docs)]
-//! MFM keystore-backed signer provider.
+//! Generic MFM keystore-backed signing provider.
 //!
-//! This crate resolves process-local keystore runtime bindings, unlocks an MFM
-//! keystore for a single signing request, and returns only signatures plus
-//! public account metadata. Decrypted key wrappers never leave this provider.
+//! One provider instance binds exactly one process-local signer reference to
+//! one keystore entry. Protocol callers own signing domain and purpose policy;
+//! this provider enforces only the key algorithm, deterministic profile,
+//! binding, and expected public identity. File access, unlock/KDF, key access,
+//! and signing all run on a blocking worker, and decrypted key wrappers never
+//! leave the provider.
 //!
 //! ```rust
-//! use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
+//! use mfm_signers_keystore::KeystoreSignerProvider;
 //! use mfm_signing::SignerRef;
 //! use uuid::Uuid;
 //!
-//! let entry = KeystoreSignerRegistryEntry::new(
+//! let provider = KeystoreSignerProvider::new(
 //!     SignerRef::new("deployer")?,
 //!     Uuid::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8")?,
 //!     "/run/mfm/wallet.keystore",
 //!     "/run/mfm/wallet.password",
 //! );
-//! let provider = KeystoreSignerProvider::new([entry]);
-//! assert!(provider.contains_signer(&SignerRef::new("deployer")?));
+//! assert_eq!(provider.signer_ref().as_str(), "deployer");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use mfm_core::keystore::{Keystore, KeystoreConfig, KeystoreError};
-use mfm_evm_signing::{
-    EVM_EIP1559_TRANSACTION_PURPOSE_ID, EVM_LEGACY_TRANSACTION_PURPOSE_ID,
-    EVM_SIGNING_ALGORITHM_ID, EVM_TRANSACTION_DOMAIN_ID,
-};
 use mfm_signing::{
-    PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture, SigningProvider,
-    SigningRequest, SigningResult, MANUAL_RESOLUTION_SIGNING_DOMAIN_ID,
-    MANUAL_RESOLUTION_SIGNING_PURPOSE_ID,
+    DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SignerRef, SigningError,
+    SigningFuture, SigningProvider, SigningRequest, SigningResult,
+    SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-/// Result type for keystore signer provider operations.
-pub type Result<T> = std::result::Result<T, KeystoreSignerError>;
+/// Runtime implementation identity for the deterministic local-keystore signer.
+pub const KEYSTORE_SIGNING_IMPLEMENTATION_ID: &str = "mfm.signing.keystore.rfc6979.v1";
 
-/// Runtime signer registry entry mapping a signer reference to a keystore entry.
-#[derive(Clone, PartialEq, Eq)]
-pub struct KeystoreSignerRegistryEntry {
+/// One-binding MFM keystore signing provider.
+#[derive(Clone)]
+pub struct KeystoreSignerProvider {
     signer_ref: SignerRef,
     entry_id: Uuid,
     keystore_path: PathBuf,
     password_file: PathBuf,
+    keystore_config: KeystoreConfig,
 }
 
-impl KeystoreSignerRegistryEntry {
-    /// Creates a registry entry for one signer reference and keystore entry id.
+impl KeystoreSignerProvider {
+    /// Binds one signer using default keystore security settings.
     pub fn new(
         signer_ref: SignerRef,
         entry_id: Uuid,
         keystore_path: impl Into<PathBuf>,
         password_file: impl Into<PathBuf>,
     ) -> Self {
+        Self::new_with_config(
+            signer_ref,
+            entry_id,
+            keystore_path,
+            password_file,
+            KeystoreConfig::default(),
+        )
+    }
+
+    /// Binds one signer using explicit keystore security settings.
+    pub fn new_with_config(
+        signer_ref: SignerRef,
+        entry_id: Uuid,
+        keystore_path: impl Into<PathBuf>,
+        password_file: impl Into<PathBuf>,
+        keystore_config: KeystoreConfig,
+    ) -> Self {
         Self {
             signer_ref,
             entry_id,
             keystore_path: keystore_path.into(),
             password_file: password_file.into(),
-        }
-    }
-
-    /// Returns the process-local signer reference.
-    pub fn signer_ref(&self) -> &SignerRef {
-        &self.signer_ref
-    }
-
-    /// Returns the keystore entry id to sign with.
-    pub const fn entry_id(&self) -> Uuid {
-        self.entry_id
-    }
-
-    /// Returns the keystore path.
-    pub fn keystore_path(&self) -> &Path {
-        &self.keystore_path
-    }
-
-    /// Returns the password file path.
-    pub fn password_file(&self) -> &Path {
-        &self.password_file
-    }
-}
-
-impl fmt::Debug for KeystoreSignerRegistryEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KeystoreSignerRegistryEntry")
-            .field("signer_ref", &self.signer_ref)
-            .field("entry_id", &self.entry_id)
-            .field("keystore_path", &"<redacted>")
-            .field("password_file", &"<redacted>")
-            .finish()
-    }
-}
-
-/// MFM keystore-backed signing provider.
-pub struct KeystoreSignerProvider {
-    entries: BTreeMap<SignerRef, KeystoreSignerRegistryEntry>,
-    keystore_config: KeystoreConfig,
-}
-
-impl KeystoreSignerProvider {
-    /// Creates a provider using default keystore security settings.
-    pub fn new(entries: impl IntoIterator<Item = KeystoreSignerRegistryEntry>) -> Self {
-        Self::new_with_config(entries, KeystoreConfig::default())
-    }
-
-    /// Creates a provider using explicit keystore settings.
-    pub fn new_with_config(
-        entries: impl IntoIterator<Item = KeystoreSignerRegistryEntry>,
-        keystore_config: KeystoreConfig,
-    ) -> Self {
-        let entries = entries
-            .into_iter()
-            .map(|entry| (entry.signer_ref.clone(), entry))
-            .collect();
-        Self {
-            entries,
             keystore_config,
         }
     }
 
-    /// Returns true when a signer reference has a runtime binding.
-    pub fn contains_signer(&self, signer_ref: &SignerRef) -> bool {
-        self.entries.contains_key(signer_ref)
+    /// Returns the exact signer reference bound by this provider.
+    pub const fn signer_ref(&self) -> &SignerRef {
+        &self.signer_ref
     }
 
-    /// Signs a request and returns signature bytes plus public account metadata.
-    pub fn sign_request(&self, request: &SigningRequest) -> Result<SigningResult> {
-        if request.algorithm().as_str() != EVM_SIGNING_ALGORITHM_ID {
+    fn validate_request(&self, request: &SigningRequest) -> Result<(), KeystoreSignerError> {
+        if request.signer_ref() != &self.signer_ref {
+            return Err(KeystoreSignerError::UnknownSigner);
+        }
+        if request.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID {
             return Err(KeystoreSignerError::UnsupportedAlgorithm);
         }
-        if !matches!(
-            request.domain().as_str(),
-            EVM_TRANSACTION_DOMAIN_ID | MANUAL_RESOLUTION_SIGNING_DOMAIN_ID
-        ) {
-            return Err(KeystoreSignerError::UnsupportedDomain);
-        }
-        let supported_purpose = match request.domain().as_str() {
-            EVM_TRANSACTION_DOMAIN_ID => matches!(
-                request.purpose().as_str(),
-                EVM_LEGACY_TRANSACTION_PURPOSE_ID | EVM_EIP1559_TRANSACTION_PURPOSE_ID
-            ),
-            MANUAL_RESOLUTION_SIGNING_DOMAIN_ID => {
-                request.purpose().as_str() == MANUAL_RESOLUTION_SIGNING_PURPOSE_ID
-            }
-            _ => false,
-        };
-        if !supported_purpose {
-            return Err(KeystoreSignerError::UnsupportedPurpose);
+        if request.profile().as_str() != SECP256K1_RFC6979_LOW_S_PROFILE_ID {
+            return Err(KeystoreSignerError::UnsupportedProfile);
         }
         if request.expected_identity().is_none() {
             return Err(KeystoreSignerError::MissingExpectedIdentity);
         }
+        Ok(())
+    }
 
-        let entry = self.entries.get(request.signer_ref()).ok_or_else(|| {
-            KeystoreSignerError::UnknownSigner {
-                signer_ref: request.signer_ref().clone(),
-            }
-        })?;
-
+    fn sign_on_blocking_worker(
+        &self,
+        request: &SigningRequest,
+    ) -> Result<SigningResult, KeystoreSignerError> {
         let keystore_path =
-            checked_runtime_path(&entry.keystore_path, RuntimeSourceKind::KeystorePath)?;
-        let password = password_from_file(&entry.password_file)?;
+            checked_runtime_path(&self.keystore_path, RuntimeSourceKind::KeystorePath)?;
+        if !fs::metadata(keystore_path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            return Err(KeystoreSignerError::MissingRuntimeSource {
+                kind: RuntimeSourceKind::KeystorePath,
+            });
+        }
+        let password = password_from_file(&self.password_file)?;
         let mut keystore = Keystore::new_with_config(keystore_path, self.keystore_config.clone())
             .map_err(keystore_open_error)?;
         keystore
             .unlock(password.as_str())
             .map_err(keystore_unlock_error)?;
         let secure_key = keystore
-            .get_private_key(entry.entry_id)
+            .get_private_key(self.entry_id)
             .map_err(keystore_key_error)?;
         let address = secure_key
             .ethereum_address()
@@ -195,7 +146,10 @@ impl KeystoreSignerProvider {
 impl fmt::Debug for KeystoreSignerProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeystoreSignerProvider")
-            .field("entries", &self.entries)
+            .field("signer_ref", &self.signer_ref)
+            .field("entry_id", &self.entry_id)
+            .field("keystore_path", &"<redacted>")
+            .field("password_file", &"<redacted>")
             .field("keystore_config", &"<redacted>")
             .finish()
     }
@@ -203,10 +157,28 @@ impl fmt::Debug for KeystoreSignerProvider {
 
 impl SigningProvider for KeystoreSignerProvider {
     fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a> {
-        let result = self
-            .sign_request(request)
-            .map_err(keystore_provider_error_into_signing_error);
-        Box::pin(async move { result })
+        if let Err(error) = self.validate_request(request) {
+            return Box::pin(async move { Err(signing_error_from_provider(error)) });
+        }
+
+        let provider = self.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || provider.sign_on_blocking_worker(&request))
+                .await
+                .map_err(SigningError::redacted_provider_failure)?
+                .map_err(signing_error_from_provider)
+        })
+    }
+}
+
+impl DeterministicSigningProvider for KeystoreSignerProvider {
+    fn implementation_id(&self) -> &'static str {
+        KEYSTORE_SIGNING_IMPLEMENTATION_ID
+    }
+
+    fn deterministic_profile_id(&self) -> &'static str {
+        SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }
 }
 
@@ -218,27 +190,31 @@ impl ResolvedPassword {
     }
 }
 
-fn checked_runtime_path(path: &Path, kind: RuntimeSourceKind) -> Result<&Path> {
+fn checked_runtime_path(
+    path: &Path,
+    kind: RuntimeSourceKind,
+) -> Result<&Path, KeystoreSignerError> {
     if path.as_os_str().is_empty() {
         return Err(KeystoreSignerError::InvalidRuntimeSource { kind });
     }
     Ok(path)
 }
 
-fn password_from_file(path: impl AsRef<Path>) -> Result<ResolvedPassword> {
+fn password_from_file(path: impl AsRef<Path>) -> Result<ResolvedPassword, KeystoreSignerError> {
     let path = checked_runtime_path(path.as_ref(), RuntimeSourceKind::PasswordFile)?;
-    let contents = Zeroizing::new(fs::read_to_string(path).map_err(|_| {
+    let mut contents = Zeroizing::new(fs::read_to_string(path).map_err(|_| {
         KeystoreSignerError::MissingRuntimeSource {
             kind: RuntimeSourceKind::PasswordFile,
         }
     })?);
-    let trimmed = contents.trim_end_matches(['\r', '\n']).to_owned();
-    if trimmed.is_empty() {
+    let trimmed_len = contents.trim_end_matches(['\r', '\n']).len();
+    contents.truncate(trimmed_len);
+    if contents.is_empty() {
         return Err(KeystoreSignerError::InvalidRuntimeSource {
             kind: RuntimeSourceKind::PasswordFile,
         });
     }
-    Ok(ResolvedPassword(Zeroizing::new(trimmed)))
+    Ok(ResolvedPassword(contents))
 }
 
 fn keystore_open_error(_: KeystoreError) -> KeystoreSignerError {
@@ -263,68 +239,41 @@ fn keystore_key_error(error: KeystoreError) -> KeystoreSignerError {
     }
 }
 
-fn keystore_provider_error_into_signing_error(error: KeystoreSignerError) -> SigningError {
+fn signing_error_from_provider(error: KeystoreSignerError) -> SigningError {
     match error {
         KeystoreSignerError::SigningContract(error) => error,
         other => SigningError::redacted_provider_failure(other),
     }
 }
 
-/// Closed runtime source category used in redaction-safe errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeSourceKind {
-    /// Keystore path source.
+enum RuntimeSourceKind {
     KeystorePath,
-    /// Password file path source.
     PasswordFile,
 }
 
-/// Redaction-safe keystore signer provider error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum KeystoreSignerError {
-    /// No registry entry exists for the requested signer.
-    #[error("keystore signer provider has no binding for signer {signer_ref}")]
-    UnknownSigner {
-        /// Requested signer reference.
-        signer_ref: SignerRef,
-    },
-    /// The request used a signing algorithm this provider does not support.
-    #[error("keystore signer provider does not support the requested algorithm")]
+enum KeystoreSignerError {
+    #[error("keystore signer provider binding did not match request")]
+    UnknownSigner,
+    #[error("keystore signer provider does not support requested algorithm")]
     UnsupportedAlgorithm,
-    /// The request used a signing domain this provider does not support.
-    #[error("keystore signer provider does not support the requested domain")]
-    UnsupportedDomain,
-    /// The request used a signing purpose this provider does not support.
-    #[error("keystore signer provider does not support the requested purpose")]
-    UnsupportedPurpose,
-    /// The request did not bind the expected public identity.
+    #[error("keystore signer provider does not support requested profile")]
+    UnsupportedProfile,
     #[error("keystore signer provider requires expected public identity")]
     MissingExpectedIdentity,
-    /// A required process-local runtime source was missing.
     #[error("keystore signer provider runtime source was missing")]
-    MissingRuntimeSource {
-        /// Missing runtime source category.
-        kind: RuntimeSourceKind,
-    },
-    /// A process-local runtime source was malformed.
+    MissingRuntimeSource { kind: RuntimeSourceKind },
     #[error("keystore signer provider runtime source was invalid")]
-    InvalidRuntimeSource {
-        /// Invalid runtime source category.
-        kind: RuntimeSourceKind,
-    },
-    /// The keystore could not be opened.
+    InvalidRuntimeSource { kind: RuntimeSourceKind },
     #[error("keystore signer provider could not open keystore")]
     KeystoreUnavailable,
-    /// The keystore could not be unlocked.
     #[error("keystore signer provider could not unlock keystore")]
     KeystoreUnlockFailed,
-    /// The configured keystore entry was unavailable.
     #[error("keystore signer provider key entry was unavailable")]
     KeyUnavailable,
-    /// The provider could not produce a signature.
     #[error("keystore signer provider failed to sign request")]
     SigningFailed,
-    /// Generic signing contract validation failed.
     #[error("keystore signer provider result failed signing contract validation")]
     SigningContract(#[from] SigningError),
 }

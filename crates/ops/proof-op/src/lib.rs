@@ -110,6 +110,7 @@ mfm_certify::define_program_descriptor_registry! {
     state_registry: proof_state_registry,
     operation_registry: proof_operation_registry,
     certification: pub register_proof_certification_descriptors,
+    includes: [],
     states: [ProofReadFactState, ProofApplySideEffectState, ProofAssembleOutputState],
     operations: [ProofWorkflowOperation],
     after_registration: register_proof_manual_resolution_authority,

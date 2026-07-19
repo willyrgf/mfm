@@ -1,717 +1,389 @@
 use std::collections::BTreeMap;
 
-use mfm_portfolio_model::metadata::PublicMetadata;
-use mfm_portfolio_model::portfolio::*;
-use mfm_portfolio_model::symbol::{
-    BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
-    ObservationValue, QuoteCode, SymbolKind, SymbolRole,
+use mfm_portfolio_model::portfolio::{
+    decode_portfolio_config, NetworkConfig, NetworkFamilyConfig, PortfolioConfigError,
+    EVM_NETWORK_HOLDING_SOURCE_LIMIT, PORTFOLIO_HOLDING_RELATION_LIMIT, PORTFOLIO_NETWORK_LIMIT,
+    PORTFOLIO_SYMBOL_LIMIT, PORTFOLIO_WALLET_LIMIT,
 };
-use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
+use mfm_portfolio_model::symbol::{QuoteCode, SymbolConfigError};
 use serde_json::{json, Value};
 
-const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
+const TOKEN: &str = "0x0000000000000000000000000000000000000001";
 
 #[test]
-fn decode_canonical_portfolio_config() {
-    let cfg = decode_portfolio_config(&canonical_config_json()).expect("config should decode");
+fn direct_model_accepts_btc_native_evm_native_and_erc20() {
+    let config = decode_portfolio_config(&canonical_config()).expect("valid direct model");
 
-    assert_eq!(cfg.portfolio_id, "portfolio_main");
-    assert_eq!(cfg.quote_codes, vec![QuoteCode::Btc, QuoteCode::Usd]);
-    assert_eq!(cfg.networks.len(), 2);
-    assert_eq!(cfg.wallets.len(), 2);
-    assert_eq!(cfg.symbol_configs.len(), 3);
-    assert!(matches!(
-        cfg.wallets[0].implementation,
-        WalletImplementationConfig::AddressOnly {}
-    ));
-    assert_eq!(cfg.wallets[0].wallet_id, "wallet_ops_arb");
+    assert_eq!(config.quote_codes, vec![QuoteCode::Usd]);
+    assert_eq!(config.networks.len(), 2);
+    assert_eq!(config.wallets.len(), 2);
+    assert_eq!(config.symbol_configs.len(), 3);
+    assert_eq!(config.wallets[1].symbol_ids.len(), 2);
     assert_eq!(
-        cfg.wallets[0].subject.address_str(),
-        "0x000000000000000000000000000000000000beef"
-    );
-    assert!(matches!(
-        cfg.symbol_configs[0].balance_reader,
-        BalanceReaderConfig::NativeBalance {}
-    ));
-}
-
-#[test]
-fn validated_config_wrappers_roundtrip_and_reject_duplicate_ids() {
-    let network = NetworkConfig::new(
-        "ethereum-mainnet".to_owned(),
-        NetworkFamilyConfig::Evm,
-        Some(1),
-        None,
-        None,
-        BTreeMap::new(),
-    )
-    .expect("network config");
-
-    let authority = ValidatedNetworkConfigs::new(vec![network.clone()]).expect("network authority");
-    assert_eq!(authority.as_slice(), std::slice::from_ref(&network));
-    assert_eq!(authority.into_vec(), vec![network.clone()]);
-
-    assert!(matches!(
-        ValidatedNetworkConfigs::new(vec![network.clone(), network]),
-        Err(PortfolioConfigError::DuplicateNetworkId { network_id })
-            if network_id == "ethereum-mainnet"
-    ));
-
-    let cfg = decode_portfolio_config(&canonical_config_json()).expect("config should decode");
-    let wallet = cfg.wallets[0].clone();
-    let symbol = cfg.symbol_configs[0].clone();
-
-    let wallets = ValidatedWalletConfigs::new(vec![wallet.clone()]).expect("wallets");
-    assert_eq!(wallets.as_slice(), std::slice::from_ref(&wallet));
-    assert_eq!(wallets.into_vec(), vec![wallet.clone()]);
-    assert!(matches!(
-        ValidatedWalletConfigs::new(vec![wallet.clone(), wallet]),
-        Err(PortfolioConfigError::DuplicateWalletId { wallet_id })
-            if wallet_id == "wallet_ops_arb"
-    ));
-
-    let expected_symbol_id = symbol.symbol_id.clone();
-    let symbols = ValidatedSymbolConfigs::new(vec![symbol.clone()]).expect("symbols");
-    assert_eq!(symbols.as_slice(), std::slice::from_ref(&symbol));
-    assert_eq!(symbols.into_vec(), vec![symbol.clone()]);
-    assert!(matches!(
-        ValidatedSymbolConfigs::new(vec![symbol.clone(), symbol]),
-        Err(PortfolioConfigError::DuplicateSymbolId { symbol_id })
-            if symbol_id == expected_symbol_id.as_str()
-    ));
-}
-
-#[test]
-fn network_config_uses_bitcoin_source_identity_only() {
-    let evm_with_source = NetworkConfig::new(
-        "ethereum-mainnet".to_owned(),
-        NetworkFamilyConfig::Evm,
-        Some(1),
-        None,
-        Some("ethereum-mainnet".to_owned()),
-        BTreeMap::new(),
-    )
-    .expect_err("EVM source identity must be rejected");
-    assert!(matches!(
-        evm_with_source,
-        PortfolioConfigError::UnexpectedEvmSourceIdentity { network_id }
-            if network_id == "ethereum-mainnet"
-    ));
-
-    let bitcoin_missing_source = NetworkConfig::new(
-        "bitcoin-mainnet".to_owned(),
-        NetworkFamilyConfig::Bitcoin,
-        None,
-        Some("main".to_owned()),
-        None,
-        BTreeMap::new(),
-    )
-    .expect_err("Bitcoin source identity is required");
-    assert!(matches!(
-        bitcoin_missing_source,
-        PortfolioConfigError::MissingBitcoinSourceIdentity { network_id }
-            if network_id == "bitcoin-mainnet"
-    ));
-
-    let bitcoin_invalid_source = NetworkConfig::new(
-        "bitcoin-mainnet".to_owned(),
-        NetworkFamilyConfig::Bitcoin,
-        None,
-        Some("main".to_owned()),
-        Some("portfolio/main-wallet".to_owned()),
-        BTreeMap::new(),
-    )
-    .expect_err("Bitcoin source identity uses local public id grammar");
-    assert!(matches!(
-        bitcoin_invalid_source,
-        PortfolioConfigError::InvalidBitcoinSourceIdentity { network_id, .. }
-            if network_id == "bitcoin-mainnet"
-    ));
-}
-
-#[test]
-fn validated_portfolio_config_indexes_normalized_authority() {
-    let portfolio = decode_portfolio_config(&json!({
-        "portfolio_id": "portfolio_main",
-        "quote_codes": ["USD"],
-        "networks": [
-            {
-                "network_id": "ethereum-mainnet",
-                "family": "evm",
-                "chain_id": 1,
-                "metadata": {}
-            }
-        ],
-        "wallets": [
-            {
-                "wallet_id": "wallet_main",
-                "subject": {
-                    "kind": "evm_address",
-                    "address": "0x000000000000000000000000000000000000dead"
-                },
-                "network_id": "ethereum-mainnet",
-                "implementation": {"kind": "address_only"},
-                "symbol_ids": ["eth.native.ethereum-mainnet"],
-                "metadata": {}
-            }
-        ],
-        "symbol_configs": [
-            {
-                "symbol_id": "eth.native.ethereum-mainnet",
-                "display_symbol": "ETH",
-                "kind": "native_balance",
-                "role": "native",
-                "network_id": "ethereum-mainnet",
-                "protocol": null,
-                "balance_reader": {"kind": "native_balance"},
-                "valuation": {
-                    "quotes": [
-                        {
-                            "quote": "USD",
-                            "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "unit_price_dec": "1800.00"
-                        }
-                    ]
-                },
-                "underlying_symbol_id": null,
-                "metadata": {}
-            }
-        ],
-        "metadata": {}
-    }))
-    .expect("portfolio config");
-    let validated = ValidatedPortfolioConfig::new(portfolio).expect("validated portfolio");
-
-    assert_eq!(validated.quote(QuoteCode::Usd), Some(QuoteCode::Usd));
-    assert_eq!(
-        validated
-            .network("ethereum-mainnet")
-            .expect("network")
-            .chain_id_u64(),
-        Some(1)
-    );
-    assert_eq!(
-        validated
-            .wallet("wallet_main")
-            .expect("wallet")
-            .subject
-            .address_str(),
-        "0x000000000000000000000000000000000000dead"
-    );
-    assert!(validated.symbol("eth.native.ethereum-mainnet").is_some());
-
-    let portfolio = validated.into_config();
-    assert_eq!(portfolio.wallets[0].wallet_id, "wallet_main");
-}
-
-#[test]
-fn invalid_ref_detection_catches_cross_links() {
-    let mut wallet_network = canonical_config_json();
-    wallet_network["wallets"][0]["network_id"] = json!("unknown-network");
-    assert_decode_error(
-        &wallet_network,
-        PortfolioConfigError::UnknownWalletNetwork {
-            wallet_id: "wallet_treasury_eth".to_string(),
-            network_id: "unknown-network".to_string(),
-        },
-    );
-
-    let mut wallet_symbol = canonical_config_json();
-    wallet_symbol["wallets"][0]["symbol_ids"][0] = json!("unknown-symbol");
-    assert_decode_error(
-        &wallet_symbol,
-        PortfolioConfigError::UnknownWalletSymbol {
-            wallet_id: "wallet_treasury_eth".to_string(),
-            symbol_id: "unknown-symbol".to_string(),
-        },
-    );
-
-    let mut duplicate_wallet_symbol = canonical_config_json();
-    duplicate_wallet_symbol["wallets"][0]["symbol_ids"] =
-        json!(["eth.native.ethereum-mainnet", "eth.native.ethereum-mainnet"]);
-    assert_decode_error(
-        &duplicate_wallet_symbol,
-        PortfolioConfigError::DuplicateWalletSymbol {
-            wallet_id: "wallet_treasury_eth".to_string(),
-            symbol_id: "eth.native.ethereum-mainnet".to_string(),
-        },
-    );
-
-    let mut symbol_network = canonical_config_json();
-    symbol_network["symbol_configs"][0]["network_id"] = json!("unknown-network");
-    assert_decode_error(
-        &symbol_network,
-        PortfolioConfigError::UnknownSymbolNetwork {
-            symbol_id: "eth.native.ethereum-mainnet".to_string(),
-            network_id: "unknown-network".to_string(),
-        },
-    );
-
-    let mut priced_symbol = canonical_config_json();
-    priced_symbol["symbol_configs"][1]["valuation"]["quotes"][0]["priced_symbol_id"] =
-        json!("unknown-symbol");
-    assert_decode_error(
-        &priced_symbol,
-        PortfolioConfigError::UnknownPricedSymbol {
-            symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
-            quote: QuoteCode::Usd,
-            priced_symbol_id: "unknown-symbol".to_string(),
-        },
-    );
-
-    let mut underlying_symbol = canonical_config_json();
-    underlying_symbol["symbol_configs"][1]["underlying_symbol_id"] = json!("unknown-symbol");
-    assert_decode_error(
-        &underlying_symbol,
-        PortfolioConfigError::UnknownUnderlyingSymbol {
-            symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
-            underlying_symbol_id: "unknown-symbol".to_string(),
-        },
+        config
+            .networks
+            .iter()
+            .find(|network| network.network_id().as_str() == "ethereum-mainnet")
+            .expect("EVM network")
+            .native_decimals(),
+        Some(18)
     );
 }
 
 #[test]
-fn typed_metadata_rejects_non_string_values() {
-    let mut portfolio_metadata = canonical_config_json();
-    portfolio_metadata["metadata"] = json!({"threshold": 1.5});
+fn evm_token_only_wallet_and_unreferenced_symbol_are_valid() {
+    let mut token_only = canonical_config();
+    token_only["wallets"].as_array_mut().expect("wallets")[1]["symbol_ids"] =
+        json!(["usdc.wallet.ethereum-mainnet"]);
+    let config = decode_portfolio_config(&token_only).expect("token-only wallet is valid");
+    assert_eq!(config.wallets[1].symbol_ids.len(), 1);
+
+    let mut with_unreferenced = canonical_config();
+    with_unreferenced["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")
+        .push(symbol(
+            "eth.unreferenced.ethereum-mainnet",
+            "ethereum-mainnet",
+            json!({"kind": "native"}),
+        ));
+    let config = decode_portfolio_config(&with_unreferenced)
+        .expect("unreferenced symbols do not create demand");
+    assert!(config
+        .symbol_configs
+        .iter()
+        .any(|symbol| symbol.symbol_id.as_str() == "eth.unreferenced.ethereum-mainnet"));
+}
+
+#[test]
+fn no_explicit_wallet_to_symbol_edges_is_rejected() {
+    let mut config = canonical_config();
+    for wallet in config["wallets"].as_array_mut().expect("wallets") {
+        wallet["symbol_ids"] = json!([]);
+    }
+
+    assert_error(&config, PortfolioConfigError::EmptyHoldingDemand);
+}
+
+#[test]
+fn source_family_matrix_and_wallet_network_joins_are_enforced() {
+    let mut btc_erc20 = canonical_config();
+    btc_erc20["symbol_configs"].as_array_mut().expect("symbols")[0]["source"] =
+        json!({"kind": "erc20", "contract_address": TOKEN});
     assert!(matches!(
-        decode_portfolio_config(&portfolio_metadata),
+        decode_portfolio_config(&btc_erc20),
+        Err(PortfolioConfigError::UnsupportedHoldingSourceNetworkFamily { .. })
+    ));
+
+    let mut subject_mismatch = canonical_config();
+    subject_mismatch["wallets"].as_array_mut().expect("wallets")[1]["subject"] = json!({
+        "kind": "bitcoin_address",
+        "address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+    });
+    assert!(matches!(
+        decode_portfolio_config(&subject_mismatch),
+        Err(PortfolioConfigError::WalletSubjectNetworkFamilyMismatch { .. })
+    ));
+
+    let mut symbol_mismatch = canonical_config();
+    symbol_mismatch["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")[1]["network_id"] = json!("bitcoin-mainnet");
+    assert!(matches!(
+        decode_portfolio_config(&symbol_mismatch),
+        Err(PortfolioConfigError::WalletSymbolNetworkMismatch { .. })
+    ));
+}
+
+#[test]
+fn token_address_and_source_aliases_fail_closed() {
+    let mut zero_token = canonical_config();
+    zero_token["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")[2]["source"]["contract_address"] =
+        json!("0x0000000000000000000000000000000000000000");
+    assert!(matches!(
+        decode_portfolio_config(&zero_token),
+        Err(PortfolioConfigError::InvalidSymbolConfig {
+            source,
+            ..
+        }) if *source == SymbolConfigError::ZeroErc20ContractAddress
+    ));
+
+    let mut non_normalized = canonical_config();
+    non_normalized["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")[2]["source"]["contract_address"] =
+        json!("0x00000000000000000000000000000000000000AA");
+    assert!(matches!(
+        decode_portfolio_config(&non_normalized),
+        Err(PortfolioConfigError::Decode(_))
+    ));
+
+    let mut native_null_contract = canonical_config();
+    native_null_contract["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")[1]["source"]["contract_address"] = Value::Null;
+    assert!(matches!(
+        decode_portfolio_config(&native_null_contract),
+        Err(PortfolioConfigError::Decode(_))
+    ));
+
+    let mut alias = canonical_config();
+    alias["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")
+        .push(symbol(
+            "usdc.alias.ethereum-mainnet",
+            "ethereum-mainnet",
+            json!({"kind": "erc20", "contract_address": TOKEN}),
+        ));
+    alias["wallets"].as_array_mut().expect("wallets")[1]["symbol_ids"] = json!([
+        "eth.native.ethereum-mainnet",
+        "usdc.wallet.ethereum-mainnet",
+        "usdc.alias.ethereum-mainnet"
+    ]);
+    assert!(matches!(
+        decode_portfolio_config(&alias),
+        Err(PortfolioConfigError::AliasedHoldingSource { .. })
+    ));
+}
+
+#[test]
+fn duplicate_semantic_wallet_subject_is_rejected() {
+    let mut config = canonical_config();
+    let mut duplicate = config["wallets"][1].clone();
+    duplicate["wallet_id"] = json!("wallet_evm_alias");
+    config["wallets"]
+        .as_array_mut()
+        .expect("wallets")
+        .push(duplicate);
+
+    assert!(matches!(
+        decode_portfolio_config(&config),
+        Err(PortfolioConfigError::DuplicateWalletSubject { .. })
+    ));
+}
+
+#[test]
+fn valuation_routes_are_complete_and_float_free() {
+    let mut incomplete = canonical_config();
+    incomplete["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")[1]["valuation"]["quotes"] = json!([]);
+    assert!(matches!(
+        decode_portfolio_config(&incomplete),
+        Err(PortfolioConfigError::MissingValuationQuote { .. })
+    ));
+
+    let mut float_valued = canonical_config();
+    float_valued["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")[1]["valuation"]["quotes"][0]["unit_price_dec"] = json!(1800.5);
+    assert!(matches!(
+        decode_portfolio_config(&float_valued),
         Err(PortfolioConfigError::Decode(_))
     ));
 }
 
 #[test]
-fn report_symbol_scale_overrides_are_rejected() {
-    for (index, decimals) in [(0, 18), (2, 7)] {
-        let mut symbol_scale = canonical_config_json();
-        symbol_scale["symbol_configs"][index]["decimals"] = json!(decimals);
-        assert!(matches!(
-            decode_portfolio_config(&symbol_scale),
-            Err(PortfolioConfigError::Decode(message)) if message.contains("unknown field")
-        ));
-    }
-}
-
-#[test]
-fn typed_metadata_rejects_secret_markers() {
-    let mut portfolio_metadata = canonical_config_json();
-    portfolio_metadata["metadata"] = json!({"mnemonic": "redacted"});
-    assert_decode_rejects_public_metadata(&portfolio_metadata, "mnemonic");
-
-    let mut network_metadata = canonical_config_json();
-    network_metadata["networks"][0]["metadata"] = json!({"label": "password=redacted"});
-    assert_decode_rejects_public_metadata(&network_metadata, "label");
-
-    let mut wallet_metadata = canonical_config_json();
-    wallet_metadata["wallets"][0]["metadata"] = json!({"api_key": "redacted"});
-    assert_decode_rejects_public_metadata(&wallet_metadata, "api_key");
-
-    let mut symbol_metadata = canonical_config_json();
-    symbol_metadata["symbol_configs"][0]["metadata"] = json!({"note": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"});
-    assert_decode_rejects_public_metadata(&symbol_metadata, "note");
-}
-
-fn assert_decode_rejects_public_metadata(value: &Value, expected_key: &str) {
-    let error = decode_portfolio_config(value).expect_err("metadata must fail");
-    let PortfolioConfigError::Decode(message) = error else {
-        panic!("expected decode failure, got {error}");
-    };
-    assert!(
-        message.contains(expected_key),
-        "decode message `{message}` did not include `{expected_key}`"
-    );
-}
-
-fn assert_decode_error(value: &Value, expected: PortfolioConfigError) {
-    assert_eq!(decode_portfolio_config(value).unwrap_err(), expected);
-}
-
-#[test]
-fn validation_rejects_non_normalized_addresses() {
-    let mut wallet_address = canonical_config_json();
-    wallet_address["wallets"][0]["subject"]["address"] =
-        json!("0x000000000000000000000000000000000000DEAD");
-    let err = decode_portfolio_config(&wallet_address).unwrap_err();
-    assert!(matches!(err, PortfolioConfigError::Decode(message)
-        if message.contains("normalized EVM address")));
-
-    let mut token_address = canonical_config_json();
-    token_address["symbol_configs"][1]["balance_reader"]["token_address"] =
-        json!("0x000000000000000000000000000000000000000A");
-    let err = decode_portfolio_config(&token_address).unwrap_err();
-    assert!(matches!(err, PortfolioConfigError::Decode(message)
-        if message.contains("normalized EVM address")));
-}
-
-#[test]
-fn validation_rejects_quote_route_mismatches() {
-    let mut duplicate_quote_codes = canonical_config_json();
-    duplicate_quote_codes["quote_codes"] = json!(["USD", "USD"]);
-    assert_decode_error(
-        &duplicate_quote_codes,
-        PortfolioConfigError::DuplicateQuoteCode {
-            quote: QuoteCode::Usd,
-        },
-    );
-
-    let mut missing_quote = canonical_config_json();
-    missing_quote["symbol_configs"][0]["valuation"]["quotes"] = json!([
-        {
-            "quote": "USD",
-            "priced_symbol_id": "eth.native.ethereum-mainnet",
-            "unit_price_dec": "1.0"
-        }
+fn equivalent_input_orderings_normalize_to_the_same_config_and_demand_order() {
+    let canonical = decode_portfolio_config(&canonical_config()).expect("canonical config");
+    let mut reordered = canonical_config();
+    reordered["networks"]
+        .as_array_mut()
+        .expect("networks")
+        .reverse();
+    reordered["wallets"]
+        .as_array_mut()
+        .expect("wallets")
+        .reverse();
+    reordered["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")
+        .reverse();
+    reordered["wallets"].as_array_mut().expect("wallets")[0]["symbol_ids"] = json!([
+        "usdc.wallet.ethereum-mainnet",
+        "eth.native.ethereum-mainnet"
     ]);
-    assert_decode_error(
-        &missing_quote,
-        PortfolioConfigError::MissingValuationQuote {
-            symbol_id: "eth.native.ethereum-mainnet".to_string(),
-            quote: QuoteCode::Btc,
-        },
-    );
 
-    let mut unexpected_quote = canonical_config_json();
-    unexpected_quote["quote_codes"] = json!(["USD"]);
-    assert_decode_error(
-        &unexpected_quote,
-        PortfolioConfigError::UnexpectedValuationQuote {
-            symbol_id: "eth.native.ethereum-mainnet".to_string(),
-            quote: QuoteCode::Btc,
-        },
-    );
-}
-
-#[test]
-fn normalization_sorts_config_and_runtime_outputs() {
-    let mut cfg = decode_portfolio_config(&canonical_config_json()).expect("config should decode");
-    cfg.quote_codes.reverse();
-    cfg.networks.reverse();
-    cfg.wallets.reverse();
-    cfg.wallets[0].symbol_ids.reverse();
-    cfg.symbol_configs.reverse();
-    cfg.symbol_configs[0].valuation.quotes.reverse();
-    cfg.normalize();
-
-    assert_eq!(cfg.quote_codes, vec![QuoteCode::Btc, QuoteCode::Usd]);
+    let normalized = decode_portfolio_config(&reordered).expect("reordered config");
+    assert_eq!(canonical, normalized);
     assert_eq!(
-        cfg.networks
-            .iter()
-            .map(|network| network.network_id().as_str())
-            .collect::<Vec<_>>(),
-        vec!["arbitrum-mainnet", "ethereum-mainnet"]
-    );
-    assert_eq!(
-        cfg.wallets
-            .iter()
-            .map(|wallet| wallet.wallet_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["wallet_ops_arb", "wallet_treasury_eth"]
-    );
-    assert_eq!(
-        cfg.wallets[1]
+        normalized.wallets[1]
             .symbol_ids
             .iter()
-            .map(|symbol_id| symbol_id.as_str())
+            .map(ToString::to_string)
             .collect::<Vec<_>>(),
         vec![
-            "eth.native.ethereum-mainnet",
-            "usdc.wallet.ethereum-mainnet"
-        ]
-    );
-    assert_eq!(
-        cfg.symbol_configs
-            .iter()
-            .map(|symbol| symbol.symbol_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "eth.native.arbitrum-mainnet",
-            "eth.native.ethereum-mainnet",
-            "usdc.wallet.ethereum-mainnet",
-        ]
-    );
-    assert_eq!(
-        cfg.symbol_configs[1]
-            .valuation
-            .quotes
-            .iter()
-            .map(|quote| quote.quote)
-            .collect::<Vec<_>>(),
-        vec![QuoteCode::Btc, QuoteCode::Usd]
-    );
-
-    let mut snapshot = PortfolioSnapshot {
-        schema_version: 2,
-        portfolio_id: "portfolio_main".to_string(),
-        generated_at_ms: 1,
-        network_pins: vec![
-            NetworkPin {
-                network_id: "ethereum-mainnet".to_string(),
-                anchor: ExecutionAnchor::Evm {
-                    chain_id: 1,
-                    block_number: 10,
-                    block_hash: EVM_HASH.to_owned(),
-                },
-            },
-            NetworkPin {
-                network_id: "arbitrum-mainnet".to_string(),
-                anchor: ExecutionAnchor::Evm {
-                    chain_id: 42161,
-                    block_number: 20,
-                    block_hash: EVM_HASH.to_owned(),
-                },
-            },
-        ],
-        wallets: vec![
-            WalletSnapshot {
-                wallet_id: "wallet_treasury_eth".to_string(),
-                address: "0x000000000000000000000000000000000000dead".to_string(),
-                subject_kind: WalletSubjectKind::EvmAddress,
-                network_id: "ethereum-mainnet".to_string(),
-                observations: vec![
-                    observation(
-                        "wallet_treasury_eth",
-                        "usdc.wallet.ethereum-mainnet",
-                        vec![QuoteCode::Usd, QuoteCode::Btc],
-                    ),
-                    observation(
-                        "wallet_treasury_eth",
-                        "eth.native.ethereum-mainnet",
-                        vec![QuoteCode::Usd, QuoteCode::Btc],
-                    ),
-                ],
-            },
-            WalletSnapshot {
-                wallet_id: "wallet_ops_arb".to_string(),
-                address: "0x000000000000000000000000000000000000beef".to_string(),
-                subject_kind: WalletSubjectKind::EvmAddress,
-                network_id: "arbitrum-mainnet".to_string(),
-                observations: vec![observation(
-                    "wallet_ops_arb",
-                    "eth.native.arbitrum-mainnet",
-                    vec![QuoteCode::Usd, QuoteCode::Btc],
-                )],
-            },
-        ],
-        symbol_configs: cfg.symbol_configs.clone(),
-    };
-    snapshot.network_pins.reverse();
-    snapshot.wallets.reverse();
-    snapshot.wallets[0].observations.reverse();
-    snapshot.normalize();
-
-    assert_eq!(
-        snapshot
-            .network_pins
-            .iter()
-            .map(|pin| pin.network_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["arbitrum-mainnet", "ethereum-mainnet"]
-    );
-    assert_eq!(
-        snapshot
-            .wallets
-            .iter()
-            .map(|wallet| wallet.wallet_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["wallet_ops_arb", "wallet_treasury_eth"]
-    );
-    assert_eq!(
-        snapshot.wallets[1]
-            .observations
-            .iter()
-            .map(|observation| observation.symbol_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "eth.native.ethereum-mainnet",
-            "usdc.wallet.ethereum-mainnet",
+            "eth.native.ethereum-mainnet".to_owned(),
+            "usdc.wallet.ethereum-mainnet".to_owned()
         ]
     );
 }
 
-fn canonical_config_json() -> Value {
+#[test]
+fn evm_native_scale_is_explicit_and_bitcoin_cannot_carry_one() {
+    assert!(matches!(
+        NetworkConfig::new(
+            "ethereum-mainnet".to_owned(),
+            NetworkFamilyConfig::Evm,
+            Some(1),
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+        ),
+        Err(PortfolioConfigError::MissingEvmNativeDecimals { .. })
+    ));
+    assert!(matches!(
+        NetworkConfig::new(
+            "bitcoin-mainnet".to_owned(),
+            NetworkFamilyConfig::Bitcoin,
+            None,
+            Some(8),
+            Some("main".to_owned()),
+            Some("public-bitcoin-core".to_owned()),
+            BTreeMap::new(),
+        ),
+        Err(PortfolioConfigError::UnexpectedBitcoinNativeDecimals { .. })
+    ));
+}
+
+#[test]
+fn portfolio_cardinality_bounds_fail_before_graph_expansion() {
+    for (field, limit, collection) in [
+        ("networks", PORTFOLIO_NETWORK_LIMIT, "network"),
+        ("wallets", PORTFOLIO_WALLET_LIMIT, "wallet"),
+        ("symbol_configs", PORTFOLIO_SYMBOL_LIMIT, "symbol"),
+    ] {
+        let mut config = canonical_config();
+        let values = config[field].as_array_mut().expect("bounded collection");
+        let fixture = values[0].clone();
+        values.resize(limit + 1, fixture);
+        assert!(matches!(
+            decode_portfolio_config(&config),
+            Err(PortfolioConfigError::CollectionLimitExceeded {
+                collection: actual_collection,
+                limit: actual_limit,
+                actual,
+            }) if actual_collection == collection && actual_limit == limit && actual == limit + 1
+        ));
+    }
+
+    let mut relations = canonical_config();
+    relations["wallets"][1]["symbol_ids"] = json!(std::iter::repeat_n(
+        "eth.native.ethereum-mainnet",
+        PORTFOLIO_HOLDING_RELATION_LIMIT + 1
+    )
+    .collect::<Vec<_>>());
+    assert!(matches!(
+        decode_portfolio_config(&relations),
+        Err(PortfolioConfigError::CollectionLimitExceeded {
+            collection: "holding relation",
+            limit: PORTFOLIO_HOLDING_RELATION_LIMIT,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn per_evm_network_holding_source_bound_is_admitted_once_in_portfolio_validation() {
+    let mut config = canonical_config();
+    config["wallets"][1]["symbol_ids"] = json!(std::iter::repeat_n(
+        "eth.native.ethereum-mainnet",
+        EVM_NETWORK_HOLDING_SOURCE_LIMIT + 1
+    )
+    .collect::<Vec<_>>());
+    assert!(matches!(
+        decode_portfolio_config(&config),
+        Err(PortfolioConfigError::EvmNetworkHoldingSourceLimitExceeded {
+            network_id,
+            limit: EVM_NETWORK_HOLDING_SOURCE_LIMIT,
+            actual,
+        }) if network_id == "ethereum-mainnet"
+            && actual == EVM_NETWORK_HOLDING_SOURCE_LIMIT + 1
+    ));
+}
+
+fn assert_error(value: &Value, expected: PortfolioConfigError) {
+    assert_eq!(
+        decode_portfolio_config(value).expect_err("config should fail"),
+        expected
+    );
+}
+
+fn canonical_config() -> Value {
     json!({
         "portfolio_id": "portfolio_main",
-        "quote_codes": ["USD", "BTC"],
+        "quote_codes": ["USD"],
         "networks": [
+            {
+                "network_id": "bitcoin-mainnet",
+                "family": "bitcoin",
+                "bitcoin_network": "main",
+                "source_identity": "public-bitcoin-core",
+                "metadata": {}
+            },
             {
                 "network_id": "ethereum-mainnet",
                 "family": "evm",
                 "chain_id": 1,
-                "metadata": {}
-            },
-            {
-                "network_id": "arbitrum-mainnet",
-                "family": "evm",
-                "chain_id": 42161,
+                "native_decimals": 18,
                 "metadata": {}
             }
         ],
         "wallets": [
             {
-                "wallet_id": "wallet_treasury_eth",
+                "wallet_id": "wallet_btc",
                 "subject": {
-                    "kind": "evm_address",
-                    "address": "0x000000000000000000000000000000000000dead"
+                    "kind": "bitcoin_address",
+                    "address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
                 },
-                "implementation": {
-                    "kind": "address_only"
-                },
+                "network_id": "bitcoin-mainnet",
+                "implementation": {"kind": "address_only"},
+                "symbol_ids": ["btc.native.bitcoin-mainnet"],
+                "metadata": {}
+            },
+            {
+                "wallet_id": "wallet_evm",
+                "subject": {"kind": "evm_address", "address": EVM_ACCOUNT},
                 "network_id": "ethereum-mainnet",
+                "implementation": {"kind": "address_only"},
                 "symbol_ids": [
                     "eth.native.ethereum-mainnet",
                     "usdc.wallet.ethereum-mainnet"
                 ],
                 "metadata": {}
-            },
-            {
-                "wallet_id": "wallet_ops_arb",
-                "subject": {
-                    "kind": "evm_address",
-                    "address": "0x000000000000000000000000000000000000beef"
-                },
-                "implementation": {
-                    "kind": "address_only"
-                },
-                "network_id": "arbitrum-mainnet",
-                "symbol_ids": [
-                    "eth.native.arbitrum-mainnet"
-                ],
-                "metadata": {}
             }
         ],
         "symbol_configs": [
-            {
-                "symbol_id": "eth.native.ethereum-mainnet",
-                "display_symbol": "ETH",
-                "kind": "native_balance",
-                "role": "native",
-                "network_id": "ethereum-mainnet",
-                "protocol": null,
-                "balance_reader": {
-                    "kind": "native_balance"
-                },
-                "valuation": {
-                    "quotes": [
-                        {
-                            "quote": "USD",
-                            "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "unit_price_dec": "1800.0"
-                        },
-                        {
-                            "quote": "BTC",
-                            "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "unit_price_dec": "0.05"
-                        }
-                    ]
-                },
-                "underlying_symbol_id": null,
-                "metadata": {}
-            },
-            {
-                "symbol_id": "usdc.wallet.ethereum-mainnet",
-                "display_symbol": "USDC",
-                "kind": "erc20_balance",
-                "role": "asset",
-                "network_id": "ethereum-mainnet",
-                "protocol": null,
-                "balance_reader": {
-                    "kind": "erc20_balance",
-                    "token_address": "0x0000000000000000000000000000000000000001"
-                },
-                "valuation": {
-                    "quotes": [
-                        {
-                            "quote": "USD",
-                            "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
-                            "unit_price_dec": "1.0"
-                        },
-                        {
-                            "quote": "BTC",
-                            "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
-                            "unit_price_dec": "0.00001"
-                        }
-                    ]
-                },
-                "underlying_symbol_id": null,
-                "metadata": {}
-            },
-            {
-                "symbol_id": "eth.native.arbitrum-mainnet",
-                "display_symbol": "ETH",
-                "kind": "native_balance",
-                "role": "native",
-                "network_id": "arbitrum-mainnet",
-                "protocol": null,
-                "balance_reader": {
-                    "kind": "native_balance"
-                },
-                "valuation": {
-                    "quotes": [
-                        {
-                            "quote": "USD",
-                            "priced_symbol_id": "eth.native.arbitrum-mainnet",
-                            "unit_price_dec": "1800.0"
-                        },
-                        {
-                            "quote": "BTC",
-                            "priced_symbol_id": "eth.native.arbitrum-mainnet",
-                            "unit_price_dec": "0.05"
-                        }
-                    ]
-                },
-                "underlying_symbol_id": null,
-                "metadata": {}
-            }
+            symbol("btc.native.bitcoin-mainnet", "bitcoin-mainnet", json!({"kind": "native"})),
+            symbol("eth.native.ethereum-mainnet", "ethereum-mainnet", json!({"kind": "native"})),
+            symbol(
+                "usdc.wallet.ethereum-mainnet",
+                "ethereum-mainnet",
+                json!({"kind": "erc20", "contract_address": TOKEN})
+            )
         ],
         "metadata": {}
     })
 }
 
-fn observation(wallet_id: &str, symbol_id: &str, value_order: Vec<QuoteCode>) -> Observation {
-    Observation {
-        wallet_id: wallet_id.to_string(),
-        symbol_id: symbol_id.to_string(),
-        display_symbol: Some("ETH".to_string()),
-        kind: SymbolKind::NativeBalance,
-        role: SymbolRole::Native,
-        network_id: if symbol_id.contains("arbitrum") {
-            "arbitrum-mainnet".to_string()
-        } else {
-            "ethereum-mainnet".to_string()
+fn symbol(symbol_id: &str, network_id: &str, source: Value) -> Value {
+    json!({
+        "symbol_id": symbol_id,
+        "display_symbol": symbol_id,
+        "network_id": network_id,
+        "source": source,
+        "valuation": {
+            "quotes": [{
+                "quote": "USD",
+                "priced_symbol_id": symbol_id,
+                "unit_price_dec": "1.00"
+            }]
         },
-        protocol: None,
-        quantity: ObservationQuantity {
-            raw_dec: "1".to_string(),
-            decimals: 18,
-            amount_dec: "0.000000000000000001".to_string(),
-        },
-        values: value_order
-            .into_iter()
-            .map(|quote| ObservationValue {
-                quote,
-                priced_symbol_id: symbol_id.to_string(),
-                value_dec: "1".to_string(),
-                unit_price_dec: "1".to_string(),
-            })
-            .collect(),
-        source: ObservationSource {
-            balance_reader_kind: "native_balance".to_string(),
-            network_id: if symbol_id.contains("arbitrum") {
-                "arbitrum-mainnet".to_string()
-            } else {
-                "ethereum-mainnet".to_string()
-            },
-            anchor: ObservationAnchor::Evm {
-                chain_id: if symbol_id.contains("arbitrum") {
-                    42161
-                } else {
-                    1
-                },
-                block_number: 1,
-                block_hash: EVM_HASH.to_owned(),
-            },
-        },
-        coverage: "configured_only".to_string(),
-        metadata: PublicMetadata::default(),
-    }
+        "metadata": {}
+    })
 }

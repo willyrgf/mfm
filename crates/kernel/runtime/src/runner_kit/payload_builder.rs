@@ -241,12 +241,10 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     pub(crate) fn side_effect_invocation_prepared(
         &self,
         side_effect: RunnerSideEffectBinding,
-        prepared: Option<&RunnerJsonArtifact>,
+        prepared: &RunnerJsonArtifact,
         prepared_binding: RunnerPreparedInvocationBinding,
     ) -> Result<RunnerEventPayload> {
-        if let Some(artifact) = prepared {
-            ensure_artifact_role(artifact, events::ArtifactRole::PreparedInvocation)?;
-        }
+        ensure_artifact_role(prepared, events::ArtifactRole::PreparedInvocation)?;
         Ok(RunnerEventPayload::SideEffectInvocationPrepared(
             runner_side_effect_payload!(
                 self,
@@ -256,12 +254,10 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     claim_generation: prepared_binding.claim_generation,
                     claim_fencing_token: prepared_binding.claim_fencing_token,
                     resource_key: prepared_binding.resource_key,
-                    prepared_artifact_id: prepared
-                        .map(|artifact| artifact.evidence.artifact_id.clone()),
-                    prepared_hash: prepared.map(|artifact| artifact.evidence.digest.clone()),
-                    prepared_artifact_evidence_hash: prepared
-                        .map(|artifact| artifact.evidence.evidence_hash())
-                        .transpose()?,
+                    prepared_schema_id: artifact_schema_id(prepared)?,
+                    prepared_artifact_id: prepared.evidence.artifact_id.clone(),
+                    prepared_hash: prepared.evidence.digest.clone(),
+                    prepared_artifact_evidence_hash: prepared.evidence.evidence_hash()?,
                 }
             ),
         ))

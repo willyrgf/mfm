@@ -234,6 +234,27 @@ where
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
+/// Loads the complete materialized input tree as its certified state-input type.
+pub async fn load_materialized_input<T>(
+    inputs: &MaterializedInputs,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> Result<T>
+where
+    T: StateInput + DeserializeOwned,
+{
+    let expected_schema = T::input_schema_id()
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    if inputs.input_schema_id != expected_schema {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "materialized input schema {} did not match state input schema {}",
+            inputs.input_schema_id, expected_schema
+        )));
+    }
+    let value = materialized_input_node_json(&inputs.root, artifacts).await?;
+    serde_json::from_value(value)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
 /// Loads one field from a struct-shaped materialized input as a typed value.
 pub async fn load_materialized_struct_field_value<T>(
     inputs: &MaterializedInputs,
@@ -280,17 +301,16 @@ where
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-/// Loads a side-effect artifact and returned evidence produced by an explicit certified node.
-pub async fn load_side_effect_artifact_for_node<T>(
+/// Loads a side-effect artifact using the producer identity retained by the verified projection.
+pub async fn load_side_effect_artifact<T>(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
-    producer_node_id: &NodeId,
     artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<(T, store::ArtifactEvidenceRef)>
 where
     T: MfmValue + DeserializeOwned,
 {
-    let requirement = side_effect_artifact_requirement(artifact, role, producer_node_id)?;
+    let requirement = side_effect_artifact_requirement(artifact, role)?;
     let verified = read_retained_artifact(artifacts, &requirement).await?;
     let evidence = verified.evidence().clone();
     let value = decode_verified_json(&verified)?;
@@ -440,7 +460,6 @@ fn certified_config_requirement(node: &spec::NodeSpec) -> Result<store::EventArt
 fn side_effect_artifact_requirement(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
-    producer_node_id: &NodeId,
 ) -> Result<store::EventArtifactRequirement> {
     Ok(store::EventArtifactRequirement {
         source: side_effect_artifact_source(role)?,
@@ -451,7 +470,7 @@ fn side_effect_artifact_requirement(
         media_type: None,
         schema_id: artifact.schema_id.clone(),
         semantic_type_id: None,
-        producer_node_id: Some(producer_node_id.clone()),
+        producer_node_id: Some(artifact.producer_node_id.clone()),
         producer_seed_id: None,
         artifact_role: Some(role),
     })

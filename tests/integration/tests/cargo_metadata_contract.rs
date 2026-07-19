@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -24,6 +25,8 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
 
 const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
     ("mfm", "mfm_core"),
+    ("mfm-state-portfolio", "mfm-states-btc"),
+    ("mfm-state-portfolio", "mfm-states-evm"),
     ("mfm-transports-proof", "mfm-collectors-proof"),
 ];
 
@@ -44,7 +47,6 @@ enum CrateCategory {
     DomainConfig,
     State,
     Operation,
-    AdapterContract,
     Adapter,
     Transport,
     SignerContract,
@@ -65,7 +67,6 @@ impl CrateCategory {
             "domain-config" => Some(Self::DomainConfig),
             "state" => Some(Self::State),
             "operation" => Some(Self::Operation),
-            "adapter-contract" => Some(Self::AdapterContract),
             "adapter" => Some(Self::Adapter),
             "transport" => Some(Self::Transport),
             "signer-contract" => Some(Self::SignerContract),
@@ -87,7 +88,6 @@ impl CrateCategory {
             Self::DomainConfig => "domain-config",
             Self::State => "state",
             Self::Operation => "operation",
-            Self::AdapterContract => "adapter-contract",
             Self::Adapter => "adapter",
             Self::Transport => "transport",
             Self::SignerContract => "signer-contract",
@@ -180,7 +180,7 @@ fn category_dependency_rules_reject_forbidden_edges() {
         ),
         (
             "operation to runtime config",
-            "mfm-op-portfolio-tracker",
+            "mfm-op-portfolio-snapshot",
             "mfm-runtime-config",
             "crates/runtime-config",
             "operation",
@@ -193,6 +193,14 @@ fn category_dependency_rules_reject_forbidden_edges() {
             "crates/ops/proof-op",
             "transport",
             "operation",
+        ),
+        (
+            "capability contract to domain model",
+            "mfm-evm-capabilities",
+            "mfm-portfolio-model",
+            "crates/portfolio/model",
+            "capability-contract",
+            "domain-model",
         ),
     ] {
         let mut metadata = base_metadata.clone();
@@ -214,44 +222,6 @@ fn category_dependency_rules_reject_forbidden_edges() {
             "{name}: unexpected error: {error}"
         );
     }
-}
-
-#[test]
-fn state_category_allows_adapter_contracts_and_rejects_adapters() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-state-portfolio",
-        "mfm-adapter-contracts",
-        &root.join("crates/adapter-contracts"),
-    );
-
-    validate_category_dependency_rules(&metadata, &root)
-        .expect("state may depend on neutral adapter contract crate");
-
-    push_synthetic_workspace_package(
-        &mut metadata,
-        &root,
-        "mfm-adapter-fixture",
-        "crates/adapters/fixture/Cargo.toml",
-        "adapter",
-    );
-    push_path_dependency(
-        &mut metadata,
-        "mfm-state-portfolio",
-        "mfm-adapter-fixture",
-        &root.join("crates/adapters/fixture"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=state")
-            && error.contains("dependency_category=adapter")
-            && error.contains("mfm-adapter-fixture"),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
@@ -337,12 +307,458 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
     );
 }
 
+#[test]
+fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
+    let root = repo_root();
+    let metadata = workspace_metadata(&root);
+    let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
+    assert_eq!(
+        packages.len(),
+        44,
+        "the configured-target portfolio snapshot workspace has 44 packages"
+    );
+
+    for removed in [
+        "mfm-authored-config",
+        "mfm-portfolio-config",
+        "mfm-stream-store-postgres",
+        "mfm-op-portfolio-tracker",
+        "mfm-catalog-model",
+    ] {
+        assert!(
+            packages.iter().all(|package| package.name != removed),
+            "removed package remains in workspace metadata: {removed}"
+        );
+    }
+    assert!(
+        packages
+            .iter()
+            .any(|package| package.name == "mfm-op-portfolio-snapshot"),
+        "the complete portfolio snapshot operation must remain a workspace package"
+    );
+    assert_eq!(
+        packages
+            .iter()
+            .filter(|package| package.name.contains("evm"))
+            .map(|package| package.name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "mfm-adapters-evm",
+            "mfm-evm-capabilities",
+            "mfm-evm-signing",
+            "mfm-op-evm-collectors",
+            "mfm-states-evm",
+            "mfm-transports-evm",
+        ]),
+        "the reusable EVM surface must contain exactly six packages"
+    );
+
+    let by_name = packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        !by_name.contains_key("mfm-catalog-model"),
+        "the deleted catalog-model package must not remain in workspace metadata"
+    );
+    assert_eq!(
+        by_name
+            .get("mfm-runtime-config")
+            .map(|package| package.category),
+        Some(CrateCategory::RuntimeConfig)
+    );
+
+    let storage = by_name
+        .get("mfm-storage-postgres")
+        .expect("renamed PostgreSQL storage package");
+    for dependency in path_dependencies(&metadata, storage.name.as_str(), &by_name) {
+        assert!(!matches!(
+            dependency.category,
+            CrateCategory::DomainModel | CrateCategory::DomainConfig
+        ));
+    }
+
+    let evm_state_dependencies = path_dependencies(&metadata, "mfm-states-evm", &by_name);
+    assert!(
+        evm_state_dependencies.iter().all(|dependency| {
+            !matches!(
+                dependency.name,
+                "mfm-portfolio-model"
+                    | "mfm-app"
+                    | "mfm-runtime"
+                    | "mfm-transports-evm"
+                    | "mfm-signers-keystore"
+                    | "mfm-storage-postgres"
+            )
+        }),
+        "the EVM state package must remain independent of portfolio, app, runtime, transport, signer implementations, and storage"
+    );
+    assert!(
+        path_dependencies(&metadata, "mfm-adapters-evm", &by_name)
+            .iter()
+            .all(|dependency| dependency.category != CrateCategory::Operation),
+        "the EVM adapter package must not own operation topology"
+    );
+    let evm_operation_dependencies =
+        path_dependencies(&metadata, "mfm-op-evm-collectors", &by_name);
+    assert!(
+        evm_operation_dependencies
+            .iter()
+            .any(|dependency| dependency.name == "mfm-states-evm")
+            && evm_operation_dependencies.iter().all(|dependency| {
+                !matches!(
+                    dependency.name,
+                    "mfm-state-portfolio"
+                        | "mfm-app"
+                        | "mfm-runtime"
+                        | "mfm-store"
+                        | "mfm-transports-evm"
+                )
+            }),
+        "the EVM collector operation must depend on reusable states without app/runtime/storage/transport or portfolio ownership"
+    );
+    let portfolio_model_dependencies =
+        path_dependencies(&metadata, "mfm-portfolio-model", &by_name);
+    assert!(
+        portfolio_model_dependencies
+            .iter()
+            .any(|dependency| dependency.name == "mfm-evm-capabilities"),
+        "the portfolio model must consume the capability-owned EVM block identity"
+    );
+
+    for package in packages.iter().filter(|package| {
+        matches!(
+            package.category,
+            CrateCategory::Operation | CrateCategory::State
+        )
+    }) {
+        for dependency in path_dependencies(&metadata, package.name.as_str(), &by_name) {
+            assert!(
+                !matches!(
+                    dependency.name,
+                    "mfm"
+                        | "mfm-app"
+                        | "mfm-rest-api"
+                        | "mfm-storage-postgres"
+                        | "mfm-runtime-config"
+                ) && dependency.name != "sqlx",
+                "{} may not depend on binaries, app, PostgreSQL, runtime config, or SQLx: {}",
+                package.name,
+                dependency.name
+            );
+        }
+    }
+
+    for package in packages
+        .iter()
+        .filter(|package| package.category == CrateCategory::Binary)
+    {
+        for dependency in path_dependencies(&metadata, package.name.as_str(), &by_name)
+            .into_iter()
+            .filter(|dependency| dependency.kind.is_none())
+        {
+            assert!(
+                !matches!(
+                    dependency.category,
+                    CrateCategory::DomainConfig | CrateCategory::Operation
+                ),
+                "production binary {} must not own domain config or operation ingress: {}",
+                package.name,
+                dependency.name
+            );
+        }
+    }
+}
+
+#[test]
+fn configured_target_source_boundaries_are_enforced() {
+    let root = repo_root();
+    let metadata = workspace_metadata(&root);
+    let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
+    let by_name = packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+
+    let sources = rust_sources(&root);
+    assert!(
+        !root.join("crates/catalog-model/Cargo.toml").exists(),
+        "the deleted catalog-model package must not retain a manifest"
+    );
+
+    let storage_root = root.join("crates/storages");
+    for path in sources
+        .iter()
+        .filter(|path| path.starts_with(&storage_root))
+    {
+        let source = fs::read_to_string(path).expect("read storage Rust source");
+        for forbidden in ["MfmConfig", "ValidatedConfig<"] {
+            assert!(
+                !source.contains(forbidden),
+                "storage source {} imports or names domain type {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    let app_root = root.join("crates/app/src");
+    let configured_value_methods = [
+        "publish_configured_values(",
+        ".load_configured_value(",
+        ".list_configured_targets(",
+    ];
+    for path in &sources {
+        if path.starts_with(&storage_root) || path.starts_with(&app_root) {
+            continue;
+        }
+        let source = fs::read_to_string(path).expect("read Rust source");
+        assert!(
+            !configured_value_methods
+                .iter()
+                .any(|method| source.contains(method)),
+            "non-app source directly calls configured-value persistence: {}",
+            path.display()
+        );
+    }
+
+    let binary_root = root.join("bin");
+    for path in sources.iter().filter(|path| path.starts_with(&binary_root)) {
+        let source = fs::read_to_string(path).expect("read binary Rust source");
+        for forbidden in [
+            "SetupDocument",
+            "enum SetupConfig",
+            "toml::from_str",
+            "ValidatedConfig<",
+            "MfmConfig",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "binary source {} owns domain setup/config construction: {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    let composed_source =
+        fs::read_to_string(root.join("crates/ops/portfolio-snapshot-op/src/lib.rs"))
+            .expect("read composed operation source");
+    assert!(
+        !composed_source.contains("ConfiguredValue"),
+        "portfolio composition and its certified graph helpers must not retain configured storage"
+    );
+    assert!(
+        composed_source.contains("type Config = PortfolioConfig"),
+        "portfolio composition must take the aggregate PortfolioConfig as its only authority"
+    );
+    assert!(
+        composed_source.contains("struct PortfolioSnapshotOperation")
+            && composed_source.contains("struct PortfolioReportOperation"),
+        "portfolio composition must expose separate snapshot and report operations"
+    );
+    let snapshot_impl_start = composed_source
+        .find("impl Operation for PortfolioSnapshotOperation")
+        .expect("snapshot operation implementation");
+    let report_type_start = composed_source
+        .find("pub struct PortfolioReportOperation;")
+        .expect("report operation type");
+    let snapshot_impl_source = &composed_source[snapshot_impl_start..report_type_start];
+    assert!(
+        snapshot_impl_source.contains("call::<BtcNetworkCollectionOperation")
+            && snapshot_impl_source.contains("call::<EvmBalanceCollectionOperation")
+            && snapshot_impl_source.contains("call::<PortfolioReportOperation")
+            && !snapshot_impl_source.contains("builder.state"),
+        "the snapshot operation must contain only family and report operation composition"
+    );
+    let report_impl_start = composed_source
+        .find("impl Operation for PortfolioReportOperation")
+        .expect("report operation implementation");
+    let report_helper_start = composed_source
+        .find("fn holding_fact_descriptors")
+        .expect("report operation helper");
+    let report_impl_source = &composed_source[report_impl_start..report_helper_start];
+    assert!(
+        report_impl_source.contains("state_with_domain_keys::<SelectHoldingsState")
+            && report_impl_source.contains("state::<AssembleSnapshotState")
+            && report_impl_source.contains("state_with_domain_keys::<ProjectReportState")
+            && report_impl_source.contains("input.into_handles()"),
+        "the report operation must pass receipt handles directly into the exact three-state report topology"
+    );
+    assert!(
+        composed_source.contains("portfolio_snapshot_program_draft"),
+        "the snapshot operation must expose its single production root-draft helper"
+    );
+    for forbidden in ["mfm-events", "mfm-replay", "mfm-spec", "mfm-store"] {
+        assert!(
+            path_dependencies(&metadata, "mfm-op-portfolio-snapshot", &by_name)
+                .iter()
+                .all(|dependency| dependency.name != forbidden),
+            "portfolio operation must remain replay/store independent: {forbidden}"
+        );
+    }
+    assert!(
+        !root
+            .join("crates/ops/portfolio-snapshot-op/src/replay.rs")
+            .exists(),
+        "portfolio operation must not retain a replay module"
+    );
+    assert!(
+        !root.join("crates/app/src/portfolio_snapshot.rs").exists()
+            && !root
+                .join("crates/app/src/portfolio_snapshot_replay.rs")
+                .exists(),
+        "the deleted app-only portfolio runners and replay verifier must not remain"
+    );
+    let app_replay_source = fs::read_to_string(root.join("crates/app/src/replay_verifiers.rs"))
+        .expect("read app replay dispatch");
+    assert!(
+        app_replay_source.contains("verify_portfolio_replay(broker)"),
+        "app replay dispatch must call the portfolio adapter verifier directly"
+    );
+    let portfolio_state_root = root.join("crates/states/portfolio/src");
+    assert!(
+        !portfolio_state_root.join("evm_collection.rs").exists(),
+        "portfolio states must not retain an EVM collection implementation module"
+    );
+    for path in sources
+        .iter()
+        .filter(|path| path.starts_with(&portfolio_state_root))
+    {
+        let source = fs::read_to_string(path).expect("read portfolio state source");
+        for forbidden in ["EvmReadSession", "record_evm_balance_facts(", "#[mfm_fact"] {
+            assert!(
+                !source.contains(forbidden),
+                "portfolio state source {} retains EVM collection ownership: {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    let portfolio_adapter_root = root.join("crates/adapters/portfolio/src");
+    for path in sources
+        .iter()
+        .filter(|path| path.starts_with(&portfolio_adapter_root))
+    {
+        let source = fs::read_to_string(path).expect("read portfolio adapter source");
+        for forbidden in [
+            "EvmReadSession",
+            "EvmCall",
+            "ERC20_",
+            "FactRecordInput",
+            "record_evm_balance_facts",
+            "verify_evm_balance_collection_replay",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "portfolio adapter source {} retains EVM collection implementation: {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    let evm_operation_source =
+        fs::read_to_string(root.join("crates/ops/evm-collectors-op/src/lib.rs"))
+            .expect("read EVM collector operation source");
+    assert!(
+        evm_operation_source.contains("state::<CollectEvmBalancesState")
+            && evm_operation_source.contains("state::<RecordEvmBalanceFactsState")
+            && evm_operation_source.contains("EvmBalanceCollectionOperation"),
+        "the EVM collector operation must own exactly the reusable read-to-record topology"
+    );
+
+    let evm_state_root = root.join("crates/states/evm/src");
+    let evm_state_source = sources
+        .iter()
+        .filter(|path| path.starts_with(&evm_state_root))
+        .map(|path| fs::read_to_string(path).expect("read EVM state source"))
+        .collect::<String>();
+    assert_eq!(
+        evm_state_source.matches("impl StateSpec for ").count(),
+        4,
+        "the EVM state package must define exactly four state kinds"
+    );
+    for state in [
+        "impl StateSpec for CollectEvmBalancesState",
+        "impl StateSpec for RecordEvmBalanceFactsState",
+        "impl StateSpec for SubmitEvmTransactionState",
+        "impl StateSpec for ValidateEvmContractState",
+    ] {
+        assert!(
+            evm_state_source.contains(state),
+            "the exact EVM state inventory is missing {state}"
+        );
+    }
+
+    let entry_point_source = fs::read_to_string(root.join("crates/app/src/entry_point.rs"))
+        .expect("read app entry-point source");
+    assert!(
+        entry_point_source
+            .contains("const PORTFOLIO_SNAPSHOT_ID: &str = \"mfm.portfolio/snapshot@1\";")
+            && entry_point_source
+                .contains("const ENTRY_POINT_IDS: &[&str] = &[PORTFOLIO_SNAPSHOT_ID];"),
+        "app discovery must expose exactly the portfolio snapshot objective"
+    );
+}
+
+#[derive(Debug)]
+struct PathDependency<'a> {
+    name: &'a str,
+    category: CrateCategory,
+    kind: Option<&'a str>,
+}
+
+fn path_dependencies<'a>(
+    metadata: &'a Value,
+    source_name: &str,
+    by_name: &'a BTreeMap<&'a str, &'a WorkspacePackage>,
+) -> Vec<PathDependency<'a>> {
+    metadata_packages(metadata)
+        .expect("metadata packages")
+        .iter()
+        .find(|package| package.get("name").and_then(Value::as_str) == Some(source_name))
+        .and_then(|package| package.get("dependencies").and_then(Value::as_array))
+        .into_iter()
+        .flatten()
+        .filter_map(|dependency| {
+            let name = dependency.get("name").and_then(Value::as_str)?;
+            let package = by_name.get(name)?;
+            Some(PathDependency {
+                name,
+                category: package.category,
+                kind: dependency.get("kind").and_then(Value::as_str),
+            })
+        })
+        .collect()
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("integration crate lives under tests/integration")
         .to_path_buf()
+}
+
+fn rust_sources(root: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    for directory in [root.join("crates"), root.join("bin")] {
+        collect_rust_sources(&directory, &mut sources);
+    }
+    sources.sort();
+    sources
+}
+
+fn collect_rust_sources(path: &Path, sources: &mut Vec<PathBuf>) {
+    let entries =
+        fs::read_dir(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    for entry in entries {
+        let entry = entry.expect("read source directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, sources);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            sources.push(path);
+        }
+    }
 }
 
 fn workspace_metadata(root: &Path) -> Value {
@@ -417,6 +833,11 @@ fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(
         };
 
         for dependency in dependencies {
+            // Category rules describe runtime ownership boundaries. Test-only dependencies may
+            // exercise another binary surface without becoming a production binary edge.
+            if dependency.get("kind").and_then(Value::as_str) == Some("dev") {
+                continue;
+            }
             let Some(dependency_path) = dependency.get("path").and_then(Value::as_str) else {
                 continue;
             };
@@ -604,12 +1025,10 @@ fn validate_category_path(
         CrateCategory::DomainModel => {
             package.manifest_dir_rel.ends_with("-model")
                 || package.manifest_dir_rel.ends_with("/model")
-                || package.manifest_dir_rel == "crates/evm-core"
         }
         CrateCategory::DomainConfig => package.manifest_dir_rel.ends_with("-config"),
         CrateCategory::State => package.manifest_rel.starts_with("crates/states/"),
         CrateCategory::Operation => package.manifest_rel.starts_with("crates/ops/"),
-        CrateCategory::AdapterContract => package.manifest_dir_rel == "crates/adapter-contracts",
         CrateCategory::Adapter => package.manifest_rel.starts_with("crates/adapters/"),
         CrateCategory::Transport => package.manifest_rel.starts_with("crates/transports/"),
         CrateCategory::SignerContract => {
@@ -640,44 +1059,36 @@ fn validate_category_path(
 
 fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory) -> bool {
     use CrateCategory::{
-        Adapter, AdapterContract, App, Binary, CapabilityContract, DomainConfig, DomainModel,
-        Kernel, Operation, RuntimeConfig, SignerContract, SignerProvider, State, Storage,
-        TestSupport, Transport,
+        Adapter, App, Binary, CapabilityContract, DomainConfig, DomainModel, Kernel, Operation,
+        RuntimeConfig, SignerContract, SignerProvider, State, Storage, TestSupport, Transport,
     };
 
     match source {
         Kernel => dependency == Kernel,
-        CapabilityContract => matches!(dependency, Kernel | CapabilityContract | DomainModel),
-        DomainModel => matches!(dependency, Kernel | DomainModel),
+        CapabilityContract => matches!(dependency, Kernel | CapabilityContract),
+        DomainModel => matches!(dependency, Kernel | CapabilityContract | DomainModel),
         DomainConfig => matches!(
             dependency,
             Kernel | DomainModel | DomainConfig | SignerContract
         ),
         State => matches!(
             dependency,
-            Kernel
-                | CapabilityContract
-                | AdapterContract
-                | DomainModel
-                | DomainConfig
-                | SignerContract
+            Kernel | CapabilityContract | DomainModel | DomainConfig | SignerContract
         ),
         Operation => matches!(
             dependency,
             Kernel
                 | CapabilityContract
-                | AdapterContract
                 | DomainModel
                 | DomainConfig
                 | State
+                | Operation
                 | SignerContract
         ),
-        AdapterContract => matches!(dependency, Kernel | CapabilityContract | DomainModel),
         Adapter => matches!(
             dependency,
             Kernel
                 | CapabilityContract
-                | AdapterContract
                 | DomainModel
                 | DomainConfig
                 | State

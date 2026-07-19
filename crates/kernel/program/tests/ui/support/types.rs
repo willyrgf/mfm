@@ -152,44 +152,30 @@ macro_rules! impl_try_side_effect_state {
         impl mfm_program::SideEffectState for $state {
             type Intent = TryValue;
             type IdempotencyInput = TryValue;
+            type PreparedInvocation = TryValue;
             type Submission = TryValue;
+            type RecoveryEvidence = TryValue;
             type Receipt = TryValue;
             type Confirmation = TryValue;
-            type SubmitFuture<'a> = std::future::Ready<mfm_program::StateResult<Self::Submission>>;
 
-            fn prepare_intent(
+            fn intent(
                 &self,
                 input: &Self::Input,
                 _context: &mfm_program::CertifiedContext<Self::Context>,
-            ) -> mfm_program::StateResult<Self::Intent> {
-                Ok(TryValue {
+            ) -> mfm_program::StateResult<
+                mfm_program::SideEffectIntent<Self::Intent, Self::IdempotencyInput>,
+            > {
+                let intent = TryValue {
                     amount: input.amount * self.config.multiplier,
-                })
-            }
-
-            fn idempotency_input(
-                &self,
-                _input: &Self::Input,
-                intent: &Self::Intent,
-                _context: &mfm_program::CertifiedContext<Self::Context>,
-            ) -> mfm_program::StateResult<Self::IdempotencyInput> {
-                Ok(intent.clone())
-            }
-
-            fn submit<'a>(
-                &'a self,
-                intent: &'a Self::Intent,
-                _key: &'a mfm_program::IdempotencyKey<Self::IdempotencyInput>,
-                _caps: &'a Self::Caps,
-                _context: &'a mfm_program::CertifiedContext<Self::Context>,
-            ) -> Self::SubmitFuture<'a> {
-                std::future::ready(Ok(intent.clone()))
+                };
+                Ok(mfm_program::SideEffectIntent::new(intent.clone(), intent))
             }
 
             fn output_from_receipt(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
                 receipt: &Self::Receipt,
                 _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> mfm_program::StateResult<Self::Output> {
@@ -199,7 +185,9 @@ macro_rules! impl_try_side_effect_state {
             fn output_from_confirmation(
                 &self,
                 _input: &Self::Input,
-                _intent: &Self::Intent,
+                _prepared: &Self::PreparedInvocation,
+                _submission: &Self::Submission,
+                _receipt: &Self::Receipt,
                 confirmation: &Self::Confirmation,
                 _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> mfm_program::StateResult<Self::Output> {

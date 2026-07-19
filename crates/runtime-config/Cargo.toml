@@ -13,11 +13,11 @@ category = "runtime-config"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+http = { workspace = true }
 toml = "0.8"
 url = { workspace = true }
 uuid = { version = "1.8.0" }
 
-mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-btc-capabilities = { path = "../btc-capabilities" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-signing = { path = "../signing" }

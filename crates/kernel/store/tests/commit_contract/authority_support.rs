@@ -263,7 +263,7 @@ pub(super) fn saga_authority_spec_with_verification(
                 capabilities: capability_bindings.clone(),
                 emitted_fact_descriptors: Vec::new(),
                 runner: "mfm.test.runner".to_owned(),
-                side_effect_contract_digest: Some(contract.contract_digest.clone()),
+                effect_contract_digest: Some(contract.contract_digest.clone()),
             })),
             spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
         ],
@@ -420,6 +420,13 @@ pub(super) fn run_admitted_with_saga_policy(
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: vec![events::CapabilityImplementationIdentity {
+            capability_kind: capability_kind(20),
+            capability_version: CapabilityVersion::new("mfm.test.capability.v1")
+                .expect("capability version"),
+            implementation_id: RuntimeBindingId::new("mfm.test.capability.runtime.v1")
+                .expect("implementation id"),
+        }],
         admitted_binding_digest: content_digest(9),
         canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
         seed_cells: Vec::new(),
@@ -485,6 +492,7 @@ pub(super) fn run_admitted_with_fact_descriptor_for_node(
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: Vec::new(),
         admitted_binding_digest: content_digest(9),
         canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
         seed_cells: Vec::new(),

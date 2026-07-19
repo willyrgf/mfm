@@ -228,6 +228,19 @@ impl<C: MfmConfig> ValidatedConfig<C> {
     pub fn into_inner(self) -> C {
         self.config
     }
+
+    /// Serializes the validated config through the shared canonical JSON path.
+    ///
+    /// Program certification and configuration publication both use this method so a semantic config
+    /// has one canonical byte representation and one content digest implementation.
+    pub fn canonical_json(
+        &self,
+    ) -> std::result::Result<mfm_canonical::PlainCanonicalJsonBytes, ConfigError> {
+        let json = serde_json::to_string(&self.config)
+            .map_err(|error| ConfigError::new(format!("failed to serialize config: {error}")))?;
+        mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+            .map_err(|error| ConfigError::new(format!("failed to canonicalize config: {error}")))
+    }
 }
 
 /// Descriptor contract for public launch/render output surfaces.
@@ -1033,7 +1046,13 @@ impl<T> MfmDefault for Vec<T> {}
 
 impl<V> MfmDefault for BTreeMap<String, V> {}
 
-fn framework_value_descriptor(
+/// Builds a descriptor for a framework-owned, hand-written value contract.
+///
+/// Domain crates must use the derive path. This hidden helper exists only for
+/// typed kernel contracts that cannot use derives because their checked fields
+/// intentionally do not implement generic serde traits.
+#[doc(hidden)]
+pub fn framework_value_descriptor(
     semantic_type_id: SemanticTypeId,
     schema_name: &str,
     shape: SchemaShape,

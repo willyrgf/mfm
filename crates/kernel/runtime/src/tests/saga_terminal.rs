@@ -197,7 +197,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
     assert_eq!(saga.run_mode, store::RunMode::Remediating);
     assert_eq!(saga.obligations.len(), 2);
 
-    for _ in 0..12 {
+    for _ in 0..20 {
         let status = drive_ok!(scheduler, store, fixture, "drive remediation phase");
         assert!(
             matches!(
