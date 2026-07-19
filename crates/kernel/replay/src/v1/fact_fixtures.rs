@@ -33,6 +33,7 @@ pub(super) fn replay_broker_with_facts(
         intents: BTreeMap::new(),
         prepared_invocations: BTreeMap::new(),
         submissions: BTreeMap::new(),
+        submission_unknown: BTreeMap::new(),
         not_submitted: BTreeMap::new(),
         receipts: BTreeMap::new(),
         confirmations: BTreeMap::new(),
@@ -127,7 +128,7 @@ pub(super) fn fact_replay_spec() -> HashedSpecEnvelope {
         capabilities: node.capability_bindings.clone(),
         emitted_fact_descriptors: vec![descriptor_ref],
         runner: "mfm.replay.test.runner".to_owned(),
-        side_effect_contract_digest: None,
+        effect_contract_digest: None,
     }));
     let spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
         authoring: spec::AuthoringProvenance::StateComposition {
@@ -175,11 +176,8 @@ pub(super) fn fact_run_admitted() -> events::RunAdmitted {
             .expect("store scope"),
             invocation_key_digest: content_digest(0xc2),
         },
-        entry_point: events::EntryPointLaunchEvidence {
-            resolved_op_id: events::EntryPointOpId::new("mfm.replay.test.fact")
-                .expect("entry point"),
-            entry_point_registry_digest: content_digest(0xc2),
-        },
+        entry_point: events::EntryPointLaunchEvidence::new("mfm.replay.test/fact@1", Vec::new())
+            .expect("entry point evidence"),
         spec_hash,
         spec_artifact: run_artifact_ref(
             ArtifactRole::TypedExecutionSpec,
@@ -201,6 +199,7 @@ pub(super) fn fact_run_admitted() -> events::RunAdmitted {
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: Vec::new(),
         admitted_binding_digest: content_digest(0xcb),
         canonicalizer_identity: CanonicalizerIdentity::new("sha256-jcs-v1")
             .expect("canonicalizer identity"),
@@ -274,12 +273,13 @@ pub(super) fn fact_claim(artifact: &StoredArtifactEvidenceRef) -> mfm_facts::Fac
 }
 
 pub(super) fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
-        mfm_facts::FactFieldId::new("subject.account").expect("field id"),
-        mfm_facts::FactFieldValueType::String,
-        mfm_facts::FactCanonicalScalar::string("same-subject"),
+    let material = mfm_facts::FactSubjectMaterialV2::new(
+        mfm_canonical::CanonicalValue::object([(
+            "account",
+            mfm_canonical::CanonicalValue::String("same-subject".into()),
+        )])
+        .expect("subject"),
     )
-    .expect("subject value")])
     .expect("subject material");
     mfm_facts::FactSubjectEvidence::from_material(content_digest(0xcd), &material)
         .expect("subject evidence")
@@ -310,6 +310,7 @@ impl ReplayFactStreamFixture {
                 .clone(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),
+            capability_implementations: Vec::new(),
             artifact_evidence: self.artifact_evidence.clone(),
             artifact_bytes: self.artifact_bytes.clone(),
             additional_artifact_evidence: Vec::new(),

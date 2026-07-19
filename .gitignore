@@ -5,4 +5,5 @@
 /target
 /cache
 /contracts/out
-/*.toml
+/setup.local.toml
+/runtime.local.toml

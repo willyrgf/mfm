@@ -9,8 +9,8 @@ use crate::runners::{
     RunnerIngressContext,
 };
 use crate::{
-    canonical_json, executable_identity_json, CertifiedRuntimeSpec, Result, RunLaunchEvidence,
-    RuntimeError,
+    canonical_json, capability_implementation_identity_json, executable_identity_json,
+    CertifiedRuntimeSpec, Result, RunLaunchEvidence, RuntimeError,
 };
 
 /// Runtime binding authority for one certified execution spec.
@@ -25,6 +25,7 @@ pub struct BoundRuntimeContext {
     framework_handlers: BTreeMap<NodeId, BoundFrameworkHandlerAuthority>,
     runner_executables: Vec<events::ExecutableIdentity>,
     adapter_executables: Vec<events::ExecutableIdentity>,
+    capability_implementations: Vec<events::CapabilityImplementationIdentity>,
 }
 
 /// Bound capability authority for a certified node.
@@ -55,6 +56,8 @@ impl BoundCapabilityAuthority {
 /// Bound framework handler kind for a certified lifecycle node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BoundFrameworkHandlerKind {
+    /// Same-value child-scope bridge handler.
+    Bridge,
     /// Public output render handler.
     PublicOutputRender,
     /// Retention manifest projection handler.
@@ -104,6 +107,10 @@ impl BoundRuntimeContext {
             framework_handlers: accumulator.framework_handlers,
             runner_executables: accumulator.runner_executables,
             adapter_executables: accumulator.adapter_executables,
+            capability_implementations: accumulator
+                .capability_implementations
+                .into_iter()
+                .collect(),
         })
     }
 
@@ -117,9 +124,15 @@ impl BoundRuntimeContext {
         &self.adapter_executables
     }
 
+    /// Returns the concrete capability implementation identities admitted into `RunAdmitted`.
+    pub fn capability_implementations(&self) -> &[events::CapabilityImplementationIdentity] {
+        &self.capability_implementations
+    }
+
     pub(crate) fn admitted_binding_digest(&self) -> Result<ContentDigest> {
         let canonical = canonical_json(serde_json::json!({
             "adapter_executables": self.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+            "capability_implementations": self.capability_implementations.iter().map(capability_implementation_identity_json).collect::<Vec<_>>(),
             "runner_executables": self.runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
         }))?;
         Ok(ContentDigest::from_digest(
@@ -141,6 +154,12 @@ impl BoundRuntimeContext {
         if run_admitted.adapter_executables != self.adapter_executables {
             return Err(RuntimeError::RunnerBinding(
                 "RunAdmitted adapter executable identities do not match bound runtime context"
+                    .to_owned(),
+            ));
+        }
+        if run_admitted.capability_implementations != self.capability_implementations {
+            return Err(RuntimeError::RunnerBinding(
+                "RunAdmitted capability implementation identities do not match bound runtime context"
                     .to_owned(),
             ));
         }
@@ -194,17 +213,50 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
-    pub(crate) fn validate_launch_ingress(
+    pub(crate) async fn validate_launch_ingress(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         launch: &RunLaunchEvidence,
     ) -> Result<()> {
+        let mut required = Vec::new();
         for node in runtime_spec.executable_nodes() {
             if node.framework.is_none() {
-                self.validate_node_ingress(runtime_spec, node, launch)?;
+                collect_runtime_config_requirement(
+                    self.validate_node_ingress(runtime_spec, node, launch).await,
+                    &mut required,
+                )?;
             }
         }
-        Ok(())
+        runtime_config_requirement_result(required)
+    }
+
+    /// Validates process-local ingress only for domain nodes that may still execute.
+    ///
+    /// Admission validates every domain node before persisting `RunAdmitted`. On recovery, a
+    /// completed node cannot regain work, so revalidating its process-local provider would make
+    /// later deterministic work depend on configuration it no longer needs. Pending domain nodes
+    /// retain the same ingress check before the scheduler acquires a claim.
+    pub(crate) async fn validate_pending_launch_ingress(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &mfm_ids::RunId,
+        projection: &mfm_store::v1::ProjectionSnapshot,
+        launch: &RunLaunchEvidence,
+    ) -> Result<()> {
+        let mut required = Vec::new();
+        for node in runtime_spec.executable_nodes() {
+            if node.framework.is_none()
+                && projection
+                    .cell_terminal_for_run(run_id, &node.output_cell)
+                    .is_none()
+            {
+                collect_runtime_config_requirement(
+                    self.validate_node_ingress(runtime_spec, node, launch).await,
+                    &mut required,
+                )?;
+            }
+        }
+        runtime_config_requirement_result(required)
     }
 
     fn require_node_authority(&self, node: &spec::NodeSpec) -> Result<()> {
@@ -257,7 +309,7 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
-    fn validate_node_ingress(
+    async fn validate_node_ingress(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         node: &spec::NodeSpec,
@@ -267,6 +319,146 @@ impl BoundRuntimeContext {
         binding
             .runner
             .validate_ingress(RunnerIngressContext::new(runtime_spec, node, launch))
+            .await
+    }
+}
+
+fn collect_runtime_config_requirement(
+    result: Result<()>,
+    required: &mut Vec<mfm_capabilities::RedactedProviderDiagnostic>,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(RuntimeError::Failure(failure))
+            if failure.code().as_str() == "RuntimeConfigRequired" =>
+        {
+            required.extend_from_slice(failure.diagnostics());
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn runtime_config_requirement_result(
+    required: Vec<mfm_capabilities::RedactedProviderDiagnostic>,
+) -> Result<()> {
+    if required.is_empty() {
+        return Ok(());
+    }
+    let failure = crate::RuntimeFailure::new(
+        events::ErrorCode::new("RuntimeConfigRequired")?,
+        events::ErrorCategory::Capability,
+        "runtime configuration is required",
+        required,
+    )?;
+    Err(RuntimeError::Failure(failure))
+}
+
+#[cfg(test)]
+mod runtime_config_requirement_tests {
+    use super::*;
+    use mfm_capabilities::{ProviderDiagnosticCode, ProviderDiagnosticValue};
+    use mfm_ids::LocalPublicId;
+
+    fn id(value: &str) -> LocalPublicId {
+        LocalPublicId::new(value).expect("checked test id")
+    }
+
+    fn diagnostic(family: &str, network: &str) -> mfm_capabilities::RedactedProviderDiagnostic {
+        mfm_capabilities::RedactedProviderDiagnostic::new(
+            id(family),
+            ProviderDiagnosticCode::ProviderConfigurationMissing,
+        )
+        .with_field(id("network_id"), ProviderDiagnosticValue::Id(id(network)))
+    }
+
+    fn failure(
+        code: &str,
+        diagnostics: Vec<mfm_capabilities::RedactedProviderDiagnostic>,
+    ) -> RuntimeError {
+        RuntimeError::Failure(
+            crate::RuntimeFailure::new(
+                events::ErrorCode::new(code).expect("error code"),
+                events::ErrorCategory::Capability,
+                "reviewed failure",
+                diagnostics,
+            )
+            .expect("runtime failure"),
+        )
+    }
+
+    #[test]
+    fn mixed_requirements_are_sorted_and_deduplicated() {
+        let evm = diagnostic("evm", "test-evm");
+        let bitcoin = diagnostic("bitcoin", "test-btc");
+        let mut required = Vec::new();
+
+        collect_runtime_config_requirement(
+            Err(failure("RuntimeConfigRequired", vec![evm.clone(), evm])),
+            &mut required,
+        )
+        .expect("EVM requirement");
+        collect_runtime_config_requirement(
+            Err(failure("RuntimeConfigRequired", vec![bitcoin])),
+            &mut required,
+        )
+        .expect("Bitcoin requirement");
+
+        let RuntimeError::Failure(failure) =
+            runtime_config_requirement_result(required).expect_err("requirements reject admission")
+        else {
+            panic!("expected structured failure");
+        };
+        assert_eq!(failure.code().as_str(), "RuntimeConfigRequired");
+        assert_eq!(failure.diagnostics().len(), 2);
+        assert_eq!(
+            failure.diagnostics()[0].provider_family().as_str(),
+            "bitcoin"
+        );
+        assert_eq!(failure.diagnostics()[1].provider_family().as_str(), "evm");
+    }
+
+    #[test]
+    fn invalid_configuration_remains_fail_fast() {
+        let invalid = failure("RuntimeConfigInvalid", vec![diagnostic("evm", "test-evm")]);
+        let error = collect_runtime_config_requirement(Err(invalid), &mut Vec::new())
+            .expect_err("invalid configuration is not a missing requirement");
+        let RuntimeError::Failure(failure) = error else {
+            panic!("expected structured failure");
+        };
+        assert_eq!(failure.code().as_str(), "RuntimeConfigInvalid");
+    }
+
+    #[test]
+    fn admitted_binding_digest_binds_capability_implementation_identity() {
+        let context = |capability_implementations| BoundRuntimeContext {
+            bindings: BTreeMap::new(),
+            capability_authorities: BTreeMap::new(),
+            framework_handlers: BTreeMap::new(),
+            runner_executables: Vec::new(),
+            adapter_executables: Vec::new(),
+            capability_implementations,
+        };
+        let without_capability = context(Vec::new())
+            .admitted_binding_digest()
+            .expect("empty binding digest");
+        let with_capability = context(vec![events::CapabilityImplementationIdentity {
+            capability_kind: mfm_ids::CapabilityKind::new(
+                "mfm.test",
+                "capability",
+                DigestAlgorithm::Sha256JcsV1,
+                mfm_ids::DigestBytes::from_array([7; 32]),
+            )
+            .expect("capability kind"),
+            capability_version: mfm_ids::CapabilityVersion::new("mfm.test.capability.v1")
+                .expect("capability version"),
+            implementation_id: mfm_ids::RuntimeBindingId::new("mfm.test.capability.runtime.v1")
+                .expect("implementation id"),
+        }])
+        .admitted_binding_digest()
+        .expect("capability binding digest");
+
+        assert_ne!(without_capability, with_capability);
     }
 }
 
@@ -279,6 +471,7 @@ struct BindingAccumulator {
     seen_adapter_executables: BTreeSet<(String, String)>,
     runner_executables: Vec<events::ExecutableIdentity>,
     adapter_executables: Vec<events::ExecutableIdentity>,
+    capability_implementations: BTreeSet<events::CapabilityImplementationIdentity>,
 }
 
 /// Loader for runtime binding authority.
@@ -322,6 +515,18 @@ fn bind_node(
         )));
     }
     let capability_implementations = runners.resolve_capability_implementations(node)?;
+    for implementation in &capability_implementations {
+        accumulator
+            .capability_implementations
+            .insert(events::CapabilityImplementationIdentity {
+                capability_kind: implementation.descriptor().kind.clone(),
+                capability_version: implementation.descriptor().version.clone(),
+                implementation_id: implementation
+                    .implementation_id()
+                    .runtime_binding_id()
+                    .clone(),
+            });
+    }
     let adapter_executables = runners.resolve_adapter_executables(node)?;
     if accumulator
         .bindings
@@ -391,6 +596,7 @@ fn bind_node(
 
 fn framework_handler_kind(node: &spec::NodeSpec) -> Option<BoundFrameworkHandlerKind> {
     match &node.framework {
+        Some(spec::FrameworkNodeSpec::Bridge(_)) => Some(BoundFrameworkHandlerKind::Bridge),
         Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
             Some(BoundFrameworkHandlerKind::PublicOutputRender)
         }
@@ -406,6 +612,6 @@ fn framework_handler_kind(node: &spec::NodeSpec) -> Option<BoundFrameworkHandler
         Some(spec::FrameworkNodeSpec::SideEffectVerify(_)) => {
             Some(BoundFrameworkHandlerKind::SideEffectVerify)
         }
-        Some(spec::FrameworkNodeSpec::Bridge(_)) | None => None,
+        None => None,
     }
 }

@@ -5,8 +5,8 @@ pub use mfm_facts::StoreCommitOrder;
 use mfm_ids::{
     short_stable_id_fragment, AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind,
     CapabilityVersion, CellId, ContentDigest, ContextResourceKind, ContextStage, DescriptorId,
-    DigestAlgorithm, EventId, IdentityError, NodeId, RunId, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, SideEffectPairId, SpecHash, StateKind, StateVersion,
+    DigestAlgorithm, EventId, IdentityError, NodeId, RunId, RuntimeBindingId, SchemaId, ScopeId,
+    SeedId, SemanticTypeId, SideEffectPairId, SpecHash, StateKind, StateVersion,
 };
 #[cfg(any(test, feature = "test-support"))]
 use mfm_ids::{EffectKind, EffectVersion, LoweringVersion, SpecVersion};

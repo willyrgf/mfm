@@ -16,6 +16,14 @@ impl DriverSideEffectRunner {
         self.callbacks = self.callbacks.with_submission_decision(decision);
         self
     }
+
+    pub(super) fn with_preparation_settlement(
+        mut self,
+        settled: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.callbacks = self.callbacks.with_preparation_settlement(settled);
+        self
+    }
 }
 
 impl ErasedNodeRunner for DriverSideEffectRunner {
@@ -27,16 +35,18 @@ impl ErasedNodeRunner for DriverSideEffectRunner {
             let Some(resource_key) = test_driver_resource_key_for_node(ctx.node()) else {
                 return Ok(ErasedRunnerOutput::new(Vec::new()));
             };
-            let plan = self.callbacks.intent_plan_for(
-                ctx.node().node_id.as_str().to_owned(),
-                ctx.attempt_id().as_str().to_owned(),
-            )?;
+            let (intent, idempotency) = self
+                .callbacks
+                .authored_intent_for(
+                    ctx.node().node_id.as_str().to_owned(),
+                    ctx.attempt_id().as_str().to_owned(),
+                )
+                .into_parts();
             preclaim_side_effect_resource_lane(
                 ctx,
-                &plan.intent,
-                &plan.idempotency,
-                plan.idempotency_key,
-                plan.capability_binding,
+                &intent,
+                &idempotency,
+                self.callbacks.capability_binding()?,
                 resource_key,
             )
         })
@@ -88,16 +98,18 @@ impl ErasedNodeRunner for FailingAfterPreclaimRunner {
             let Some(resource_key) = test_driver_resource_key_for_node(ctx.node()) else {
                 return Ok(ErasedRunnerOutput::new(Vec::new()));
             };
-            let plan = self.callbacks.intent_plan_for(
-                ctx.node().node_id.as_str().to_owned(),
-                ctx.attempt_id().as_str().to_owned(),
-            )?;
+            let (intent, idempotency) = self
+                .callbacks
+                .authored_intent_for(
+                    ctx.node().node_id.as_str().to_owned(),
+                    ctx.attempt_id().as_str().to_owned(),
+                )
+                .into_parts();
             preclaim_side_effect_resource_lane(
                 ctx,
-                &plan.intent,
-                &plan.idempotency,
-                plan.idempotency_key,
-                plan.capability_binding,
+                &intent,
+                &idempotency,
+                self.callbacks.capability_binding()?,
                 resource_key,
             )
         })
@@ -297,13 +309,14 @@ fn prepared_boundary_side_effect_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedR
         staged_artifact,
         payload,
     } = side_effect_fixture_intent_output(&ctx, ledger_purpose, 1)?;
+    let prepared = side_effect_prepared_output(&ctx, ledger.clone(), 1, 1)?;
     Ok(ErasedRunnerOutput::from_parts(
-        vec![staged_artifact],
+        vec![staged_artifact, prepared.staged_artifact],
         Vec::new(),
         vec![
             payload,
             side_effect_claimed(&ctx, ledger.clone(), 1, 1),
-            side_effect_prepared(&ctx, ledger, 1, 1),
+            prepared.payload,
         ],
     ))
 }

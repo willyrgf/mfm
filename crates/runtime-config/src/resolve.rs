@@ -1,26 +1,15 @@
 use super::*;
-use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
+use mfm_ids::LocalPublicId;
 
-pub(super) fn parse_source_ref(raw: &str, location: RuntimeConfigLocation) -> Result<EvmSourceRef> {
-    EvmSourceRef::new(raw).map_err(|_| {
+pub(super) fn parse_local_public_id(
+    raw: &str,
+    location: RuntimeConfigLocation,
+) -> Result<LocalPublicId> {
+    LocalPublicId::new(raw).map_err(|_| {
         RuntimeConfigError::new(
             location,
             RuntimeConfigErrorKind::InvalidIdentifier {
                 kind: RuntimeConfigIdentifierKind::SourceRef,
-            },
-        )
-    })
-}
-
-pub(super) fn parse_policy_id(
-    raw: &str,
-    location: RuntimeConfigLocation,
-) -> Result<EvmSourcePolicyId> {
-    EvmSourcePolicyId::new(raw).map_err(|_| {
-        RuntimeConfigError::new(
-            location,
-            RuntimeConfigErrorKind::InvalidIdentifier {
-                kind: RuntimeConfigIdentifierKind::PolicyId,
             },
         )
     })
@@ -87,6 +76,33 @@ pub(super) fn resolve_optional_value(
         return Ok(None);
     };
     Ok(Some(resolve_selected_value(location, source)?))
+}
+
+pub(super) fn resolve_optional_http_authorization(
+    location: RuntimeConfigLocation,
+    direct: &Option<String>,
+    env_name: &Option<String>,
+    file_path: &Option<String>,
+    file_env: &Option<String>,
+) -> Result<Option<RuntimeSecretValue>> {
+    let authorization = resolve_optional_value(
+        location.clone(),
+        "auth_header",
+        direct,
+        env_name,
+        file_path,
+        file_env,
+    )?;
+    if authorization
+        .as_ref()
+        .is_some_and(|value| value.expose_secret().parse::<http::HeaderValue>().is_err())
+    {
+        return Err(RuntimeConfigError::new(
+            location.with_field("auth_header"),
+            RuntimeConfigErrorKind::InvalidHttpAuthorization,
+        ));
+    }
+    Ok(authorization)
 }
 
 pub(super) fn resolve_required_path(
@@ -233,6 +249,12 @@ pub(super) fn validate_rpc_url(
     let url = url::Url::parse(value.expose_secret()).map_err(|_| {
         RuntimeConfigError::new(location.clone(), RuntimeConfigErrorKind::InvalidUrl)
     })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(RuntimeConfigError::new(
+            location,
+            RuntimeConfigErrorKind::UnsupportedUrlScheme,
+        ));
+    }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(RuntimeConfigError::new(
             location,

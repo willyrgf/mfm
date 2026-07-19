@@ -6,10 +6,8 @@ pub(super) fn run_admitted_payload() -> KernelEventPayload {
     KernelEventPayload::RunAdmitted(Box::new(RunAdmitted {
         run_id,
         identity_material,
-        entry_point: EntryPointLaunchEvidence {
-            resolved_op_id: EntryPointOpId::new("mfm.portfolio/snapshot@1").expect("op id"),
-            entry_point_registry_digest: content_digest(18),
-        },
+        entry_point: EntryPointLaunchEvidence::new("mfm.test/example@1", Vec::new())
+            .expect("entry point evidence"),
         spec_hash: spec_hash(2),
         spec_artifact: run_artifact_ref(
             artifact_id(3),
@@ -39,6 +37,19 @@ pub(super) fn run_admitted_payload() -> KernelEventPayload {
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: vec![CapabilityImplementationIdentity {
+            capability_kind: CapabilityKind::new(
+                "mfm.test",
+                "capability",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(18),
+            )
+            .expect("capability kind"),
+            capability_version: CapabilityVersion::new("mfm.test.capability.v1")
+                .expect("capability version"),
+            implementation_id: RuntimeBindingId::new("mfm.test.capability.runtime.v1")
+                .expect("implementation id"),
+        }],
         admitted_binding_digest: content_digest(17),
         canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
         seed_cells: vec![SeedCellRef {
@@ -175,7 +186,7 @@ pub(super) fn artifact_role_baselines() -> &'static [ArtifactRoleBaseline] {
         ArtifactRoleBaseline {
             role: ArtifactRole::PreparedInvocation,
             tag: "prepared_invocation",
-            schema_policy: "absent",
+            schema_policy: "exact_evidence_schema",
             semantic_policy: "absent",
             producer_policy: "node_required",
             staging_class: "side_effect_prepared_invocation",
@@ -405,7 +416,7 @@ fact_response schema=exact_evidence_schema semantic=absent producer=node_require
 external_read_evidence schema=exact_evidence_schema semantic=absent producer=node_required staging=attempt_external_read_evidence retention=value_artifacts same_commit=payload_required_artifact\n\
 fact_query_evidence schema=exact_fact_query_evidence_schema semantic=absent producer=node_required staging=attempt_fact_query_evidence retention=value_artifacts same_commit=payload_required_artifact\n\
 side_effect_intent schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_intent retention=value_artifacts same_commit=payload_required_artifact\n\
-prepared_invocation schema=absent semantic=absent producer=node_required staging=side_effect_prepared_invocation retention=value_artifacts same_commit=payload_required_artifact\n\
+prepared_invocation schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_prepared_invocation retention=value_artifacts same_commit=payload_required_artifact\n\
 not_submitted_proof schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_not_submitted_proof retention=value_artifacts same_commit=payload_required_artifact\n\
 submission schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_submission retention=value_artifacts same_commit=payload_required_artifact\n\
 submission_unknown_evidence schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_submission_unknown retention=value_artifacts same_commit=payload_required_artifact\n\
@@ -476,7 +487,7 @@ pub(super) fn event_schema_descriptor_requirement_sources_golden() {
 
     assert_eq!(
         rows,
-        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:9da01b57ef30318cc98621ddeef1092fe3b6fd8b1fce3b49b739af4278a83ba4 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
+        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:cda48aaa4d423db38f798386851a3d91992801b524768ab69bc3c41cf3fd0850 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734 [FactResponse]
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:b60ebe4bc262799c154a596362ae57672801f54e1b18d703572848626ccef3f0 [ArtifactReferenced]
@@ -487,7 +498,7 @@ mfm.events.v1.side_effect.claimed schema:mfm.events.v1.side_effect.claimed:1:sha
 mfm.events.v1.side_effect.claim_taken_over schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:abdc3cb22d1022954df00d0fa18ea5ddf0f71f576b9a9c7e0dca08de2a0f5acf []
 mfm.events.v1.resource_lane.claimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:c9b27a3f52464ad34d1cb80fc41947bbfa71bfcba8ab4d78cc09e4b1a9286e4c []
 mfm.events.v1.resource_lane.claim_intent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:14ec3899b92dc1182f8b5865e2c5597b053ae648290b9b900eb161014dd7b4ed []
-mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:71fcef6b4e021f3c49cf1702377b49db1461f6e5918d17a45fda924b8e680fbd [PreparedInvocation]
+mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:727f477650e620a3526593d80d0a9afbc75359009b19003722bde42c1325c309 [PreparedInvocation]
 mfm.events.v1.side_effect.invocation_started schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:7d4cf3ffbd5109af4251e207927b0b4819e3ec058a948b1d106d022eeddfa3fc []
 mfm.events.v1.side_effect.not_submitted_proven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:c1ccc7c56931f0f14fa86e233899beb7b744b5cff47f68ec74e53e7f8cf6af12 [NotSubmittedProof]
 mfm.events.v1.side_effect.submission_observed schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:612411db371d86f8cc7033745692bcd88018b632ded4b156b0c96935bc4532cb [Submission]

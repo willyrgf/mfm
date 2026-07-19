@@ -1,118 +1,87 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
-use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
+use mfm_ids::LocalPublicId;
+use serde_json::Value;
 
-use super::raw::{RawEvmConfig, RawEvmPolicy, RawEvmRoute, RawEvmSource};
-use super::resolve::{parse_policy_id, parse_source_ref, resolve_optional_value, resolve_rpc_url};
+use super::raw::{RawEvmConfig, RawEvmRoute};
+use super::resolve::{parse_local_public_id, resolve_optional_http_authorization, resolve_rpc_url};
 use super::{
-    reject_extra_fields, Result, RuntimeConfigError, RuntimeConfigErrorKind,
+    deserialize_family, reject_extra_fields, Result, RuntimeConfigError, RuntimeConfigErrorKind,
     RuntimeConfigIdentifierKind, RuntimeConfigLocation, RuntimeSecretValue,
 };
 
-/// Runtime-local EVM descriptors.
+/// Runtime-local direct network-to-source configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmRuntimeConfig {
-    sources: BTreeMap<EvmSourceRef, EvmRpcSource>,
-    policies: BTreeMap<EvmSourcePolicyId, EvmSourcePolicy>,
-    routes: BTreeMap<EvmNetworkId, EvmRoute>,
+    routes: BTreeMap<LocalPublicId, EvmRpcRoute>,
 }
 
 impl EvmRuntimeConfig {
-    /// Returns configured EVM JSON-RPC sources.
-    pub const fn sources(&self) -> &BTreeMap<EvmSourceRef, EvmRpcSource> {
-        &self.sources
-    }
-
-    /// Returns configured and synthesized EVM source policies.
-    pub const fn policies(&self) -> &BTreeMap<EvmSourcePolicyId, EvmSourcePolicy> {
-        &self.policies
-    }
-
-    /// Returns semantic network routes.
-    pub const fn routes(&self) -> &BTreeMap<EvmNetworkId, EvmRoute> {
+    /// Returns direct semantic network routes.
+    pub const fn routes(&self) -> &BTreeMap<LocalPublicId, EvmRpcRoute> {
         &self.routes
+    }
+
+    /// Returns one direct route.
+    pub fn route(&self, network_id: &LocalPublicId) -> Option<&EvmRpcRoute> {
+        self.routes.get(network_id)
     }
 
     pub(super) fn from_raw(raw: RawEvmConfig) -> Result<Self> {
         reject_extra_fields(&raw.extra, RuntimeConfigLocation::Evm)?;
-
-        let mut sources = BTreeMap::new();
-        for (raw_id, raw_source) in raw.sources {
-            let source_ref = parse_source_ref(
-                &raw_id,
-                RuntimeConfigLocation::EvmSource { source_ref: None },
-            )?;
-            let location = RuntimeConfigLocation::EvmSource {
-                source_ref: Some(source_ref.to_string()),
-            };
-            let source = EvmRpcSource::from_raw(raw_source, location)?;
-            sources.insert(source_ref, source);
-        }
-
-        let mut policies = BTreeMap::new();
-        for (raw_id, raw_policy) in raw.policies {
-            let policy_id = parse_policy_id(
-                &raw_id,
-                RuntimeConfigLocation::EvmPolicy { policy_id: None },
-            )?;
-            let location = RuntimeConfigLocation::EvmPolicy {
-                policy_id: Some(policy_id.to_string()),
-            };
-            let policy = EvmSourcePolicy::from_raw(raw_policy, location)?;
-            for source_ref in policy.ordered_sources() {
-                if !sources.contains_key(source_ref) {
-                    return Err(RuntimeConfigError::new(
-                        RuntimeConfigLocation::EvmPolicy {
-                            policy_id: Some(policy_id.to_string()),
-                        },
-                        RuntimeConfigErrorKind::MissingSource,
-                    ));
-                }
-            }
-            policies.insert(policy_id, policy);
-        }
-
-        let explicit_policy_ids = policies.keys().cloned().collect::<BTreeSet<_>>();
         let mut routes = BTreeMap::new();
         for (raw_network_id, raw_route) in raw.routes {
-            let network_id = EvmNetworkId::new(&raw_network_id).map_err(|_| {
-                RuntimeConfigError::new(
-                    RuntimeConfigLocation::EvmRoute { network_id: None },
-                    RuntimeConfigErrorKind::InvalidIdentifier {
-                        kind: RuntimeConfigIdentifierKind::NetworkId,
-                    },
-                )
-            })?;
+            let network_id = parse_network_id(&raw_network_id)?;
             let location = RuntimeConfigLocation::EvmRoute {
                 network_id: Some(network_id.to_string()),
             };
-            let route = EvmRoute::from_raw(
+            let raw_route = deserialize_family(
                 raw_route,
                 location.clone(),
-                &sources,
-                &mut policies,
-                &explicit_policy_ids,
+                RuntimeConfigErrorKind::InvalidFamilyConfig,
             )?;
-            routes.insert(network_id, route);
+            routes.insert(network_id, EvmRpcRoute::from_raw(raw_route, location)?);
         }
+        Ok(Self { routes })
+    }
 
-        Ok(Self {
-            sources,
-            policies,
-            routes,
-        })
+    pub(super) fn select(raw: Value, network_id: &LocalPublicId) -> Result<EvmRpcRoute> {
+        let raw = deserialize_family::<RawEvmConfig>(
+            raw,
+            RuntimeConfigLocation::Evm,
+            RuntimeConfigErrorKind::InvalidFamilyConfig,
+        )?;
+        reject_extra_fields(&raw.extra, RuntimeConfigLocation::Evm)?;
+        let location = RuntimeConfigLocation::EvmRoute {
+            network_id: Some(network_id.to_string()),
+        };
+        let raw_route = raw.routes.get(network_id.as_str()).ok_or_else(|| {
+            RuntimeConfigError::new(location.clone(), RuntimeConfigErrorKind::MissingRoute)
+        })?;
+        let raw_route = deserialize_family::<RawEvmRoute>(
+            raw_route.clone(),
+            location.clone(),
+            RuntimeConfigErrorKind::InvalidFamilyConfig,
+        )?;
+        EvmRpcRoute::from_raw(raw_route, location)
     }
 }
 
-/// Runtime EVM JSON-RPC source descriptor.
+/// One direct runtime route with a redacted source id and private endpoint.
 #[derive(Clone, PartialEq, Eq)]
-pub struct EvmRpcSource {
+pub struct EvmRpcRoute {
+    source_ref: LocalPublicId,
     rpc_url: RuntimeSecretValue,
     auth_header: Option<RuntimeSecretValue>,
 }
 
-impl EvmRpcSource {
+impl EvmRpcRoute {
+    /// Returns the redacted process-local source reference.
+    pub const fn source_ref(&self) -> &LocalPublicId {
+        &self.source_ref
+    }
+
     /// Returns the resolved RPC URL.
     pub const fn rpc_url(&self) -> &RuntimeSecretValue {
         &self.rpc_url
@@ -123,9 +92,18 @@ impl EvmRpcSource {
         self.auth_header.as_ref()
     }
 
-    fn from_raw(raw: RawEvmSource, location: RuntimeConfigLocation) -> Result<Self> {
+    fn from_raw(raw: RawEvmRoute, location: RuntimeConfigLocation) -> Result<Self> {
         reject_extra_fields(&raw.extra, location.clone())?;
-
+        let source_ref = raw
+            .source_ref
+            .as_deref()
+            .ok_or_else(|| {
+                RuntimeConfigError::new(
+                    location.clone().with_field("source_ref"),
+                    RuntimeConfigErrorKind::MissingRequiredField,
+                )
+            })
+            .and_then(|value| parse_local_public_id(value, location.clone()))?;
         let rpc_url = resolve_rpc_url(
             location.clone(),
             &raw.rpc_url,
@@ -133,177 +111,38 @@ impl EvmRpcSource {
             &raw.rpc_url_file,
             &raw.rpc_url_file_env,
         )?;
-
-        let auth_header = resolve_optional_value(
+        let auth_header = resolve_optional_http_authorization(
             location,
-            "auth_header",
             &raw.auth_header,
             &raw.auth_header_env,
             &raw.auth_header_file,
             &raw.auth_header_file_env,
         )?;
-
         Ok(Self {
+            source_ref,
             rpc_url,
             auth_header,
         })
     }
 }
 
-impl fmt::Debug for EvmRpcSource {
+impl fmt::Debug for EvmRpcRoute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EvmRpcSource")
+        f.debug_struct("EvmRpcRoute")
+            .field("source_ref", &self.source_ref)
             .field("rpc_url", &self.rpc_url)
             .field("auth_header", &self.auth_header)
             .finish()
     }
 }
 
-/// Ordered EVM source fallback policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmSourcePolicy {
-    ordered_sources: Vec<EvmSourceRef>,
-    synthesized: bool,
-}
-
-impl EvmSourcePolicy {
-    /// Creates an explicit runtime EVM source policy.
-    pub fn explicit(ordered_sources: Vec<EvmSourceRef>) -> Self {
-        Self {
-            ordered_sources,
-            synthesized: false,
-        }
-    }
-
-    /// Returns ordered source references for this policy.
-    pub fn ordered_sources(&self) -> &[EvmSourceRef] {
-        &self.ordered_sources
-    }
-
-    /// Returns true when this policy was synthesized from a same-id route.
-    pub const fn is_synthesized(&self) -> bool {
-        self.synthesized
-    }
-
-    fn synthesized(source_ref: EvmSourceRef) -> Self {
-        Self {
-            ordered_sources: vec![source_ref],
-            synthesized: true,
-        }
-    }
-
-    fn from_raw(raw: RawEvmPolicy, location: RuntimeConfigLocation) -> Result<Self> {
-        reject_extra_fields(&raw.extra, location.clone())?;
-        let Some(raw_sources) = raw.ordered_sources else {
-            return Err(RuntimeConfigError::new(
-                location.with_field("ordered_sources"),
-                RuntimeConfigErrorKind::MissingRequiredField,
-            ));
-        };
-        if raw_sources.is_empty() {
-            return Err(RuntimeConfigError::new(
-                location.with_field("ordered_sources"),
-                RuntimeConfigErrorKind::EmptyPolicy,
-            ));
-        }
-
-        let mut seen = BTreeSet::new();
-        let mut ordered_sources = Vec::new();
-        for raw_source_ref in raw_sources {
-            let source_ref = parse_source_ref(&raw_source_ref, location.clone())?;
-            if !seen.insert(source_ref.clone()) {
-                return Err(RuntimeConfigError::new(
-                    location.with_field("ordered_sources"),
-                    RuntimeConfigErrorKind::DuplicatePolicySource,
-                ));
-            }
-            ordered_sources.push(source_ref);
-        }
-        Ok(Self::explicit(ordered_sources))
-    }
-}
-
-/// Runtime EVM route from a semantic network id to local source policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmRoute {
-    source_ref: EvmSourceRef,
-    policy_id: EvmSourcePolicyId,
-}
-
-impl EvmRoute {
-    /// Returns the preferred local source reference.
-    pub const fn source_ref(&self) -> &EvmSourceRef {
-        &self.source_ref
-    }
-
-    /// Returns the source policy id.
-    pub const fn policy_id(&self) -> &EvmSourcePolicyId {
-        &self.policy_id
-    }
-
-    fn from_raw(
-        raw: RawEvmRoute,
-        location: RuntimeConfigLocation,
-        sources: &BTreeMap<EvmSourceRef, EvmRpcSource>,
-        policies: &mut BTreeMap<EvmSourcePolicyId, EvmSourcePolicy>,
-        explicit_policy_ids: &BTreeSet<EvmSourcePolicyId>,
-    ) -> Result<Self> {
-        reject_extra_fields(&raw.extra, location.clone())?;
-
-        let Some(raw_source_ref) = raw.source_ref else {
-            return Err(RuntimeConfigError::new(
-                location.with_field("source_ref"),
-                RuntimeConfigErrorKind::MissingRequiredField,
-            ));
-        };
-        let source_ref = parse_source_ref(&raw_source_ref, location.clone())?;
-        if !sources.contains_key(&source_ref) {
-            return Err(RuntimeConfigError::new(
-                location.with_field("source_ref"),
-                RuntimeConfigErrorKind::MissingSource,
-            ));
-        }
-
-        let policy_id = match raw.policy_id {
-            Some(raw_policy_id) => parse_policy_id(&raw_policy_id, location.clone())?,
-            None => {
-                let same_id = EvmSourcePolicyId::new(source_ref.as_str()).map_err(|_| {
-                    RuntimeConfigError::new(
-                        location.clone().with_field("policy_id"),
-                        RuntimeConfigErrorKind::InvalidIdentifier {
-                            kind: RuntimeConfigIdentifierKind::PolicyId,
-                        },
-                    )
-                })?;
-                if explicit_policy_ids.contains(&same_id) {
-                    return Err(RuntimeConfigError::new(
-                        location.clone().with_field("policy_id"),
-                        RuntimeConfigErrorKind::SameIdPolicyRequiresExplicitPolicyId,
-                    ));
-                }
-                policies
-                    .entry(same_id.clone())
-                    .or_insert_with(|| EvmSourcePolicy::synthesized(source_ref.clone()));
-                same_id
-            }
-        };
-
-        let policy = policies.get(&policy_id).ok_or_else(|| {
-            RuntimeConfigError::new(
-                location.clone().with_field("policy_id"),
-                RuntimeConfigErrorKind::MissingPolicy,
-            )
-        })?;
-        if !policy.ordered_sources().contains(&source_ref) {
-            return Err(RuntimeConfigError::new(
-                location.with_field("source_ref"),
-                RuntimeConfigErrorKind::SourceNotInPolicy,
-            ));
-        }
-
-        Ok(Self {
-            source_ref,
-            policy_id,
-        })
-    }
+fn parse_network_id(raw: &str) -> Result<LocalPublicId> {
+    LocalPublicId::new(raw).map_err(|_| {
+        RuntimeConfigError::new(
+            RuntimeConfigLocation::EvmRoute { network_id: None },
+            RuntimeConfigErrorKind::InvalidIdentifier {
+                kind: RuntimeConfigIdentifierKind::NetworkId,
+            },
+        )
+    })
 }

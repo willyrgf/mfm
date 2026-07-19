@@ -177,24 +177,3 @@ fn response_json_round_trip_has_no_floats_or_secrets() {
     let decoded: BtcAddressBalanceSnapshotFact = serde_json::from_value(value).expect("round-trip");
     assert_eq!(decoded, fact);
 }
-
-#[test]
-fn platform_candidate_query_plan_is_exact_full_set_not_limit_one() {
-    use mfm_facts::{FactAudience, ScopeDecisionEvidence, StoreScopeRef};
-    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
-
-    let subject = valid_subject();
-    let store_scope = StoreScopeRef::new("mfm.store.default").expect("store");
-    let scope_decision = ScopeDecisionEvidence::new(ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0x31; 32]),
-    ));
-    let plan = platform_address_balance_candidate_plan(&store_scope, scope_decision, &subject)
-        .expect("plan");
-    assert_eq!(plan.query_scope().audience(), FactAudience::Platform);
-    assert_eq!(plan.limit(), None);
-    assert_eq!(plan.ordering().name().as_str(), "result.anchor_height.desc");
-    let query = plan.canonical_query().as_str();
-    assert!(query.contains("metadata.store_commit_order"));
-    assert!(query.contains("result.anchor_hash"));
-}

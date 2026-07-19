@@ -136,22 +136,7 @@ fn insert_fact_record_projection(
     projections: &mut ProjectionSnapshot,
     record: FactRecordProjection,
 ) -> Result<()> {
-    let claim = &record.claim;
     let claim_id = &record.fact_claim_id;
-    if projections.fact_records.values().any(|record| {
-        record.claim.response().artifact_id() == claim.response().artifact_id()
-            && record.claim.response().artifact_evidence_hash()
-                == claim.response().artifact_evidence_hash()
-    }) {
-        return Err(StoreError::ProjectionConflict {
-            key: format!(
-                "fact_response:{}:{}",
-                claim.response().artifact_id(),
-                claim.response().artifact_evidence_hash()
-            ),
-            message: "response artifact is already bound to a fact claim".to_owned(),
-        });
-    }
     if projections.fact_records.contains_key(claim_id) {
         return Err(StoreError::ProjectionConflict {
             key: fact_claim_projection_key("fact_record", claim_id),

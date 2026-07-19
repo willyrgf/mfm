@@ -1,44 +1,59 @@
 #![warn(missing_docs)]
-//! Reusable EVM capability contracts.
+//! Source-bound EVM capability contracts.
 //!
-//! This crate defines state/adapter-facing EVM authority contracts. It owns
-//! checked source references, redacted source evidence, request/response
-//! contracts, and provider traits. Concrete JSON-RPC clients and runtime
-//! routing live outside this crate.
+//! The capability surface has two coherent views: checked external reads and
+//! one-transaction authority. A live implementation binds one semantic
+//! network to one source before exposing either view. Endpoints and
+//! credentials never enter these contracts.
 //!
 //! ```rust
+//! use alloy_primitives::{B256, U256};
 //! use mfm_capabilities::CapabilitySpec;
-//! use mfm_evm_capabilities::{
-//!     EvmFeeReadCapability, EvmFeeReadRequest, EvmNetworkBinding, EvmNetworkId,
-//! };
+//! use mfm_evm_capabilities::{EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability};
+//! use mfm_ids::LocalPublicId;
 //!
-//! let binding = EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet")?, 1)?;
-//! let request = EvmFeeReadRequest::new();
+//! let binding = EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet")?, 1)?;
+//! let anchor = EvmBlockAnchor::new(U256::from(20_000_000), B256::from([0x11; 32]));
 //! assert_eq!(binding.network_id().as_str(), "ethereum-mainnet");
-//! assert_eq!(EvmFeeReadCapability::name(), "mfm.evm.fee.read");
-//! assert_eq!(request, EvmFeeReadRequest::new());
-//! # Ok::<(), mfm_evm_capabilities::EvmCapabilityError>(())
+//! assert_eq!(anchor.number(), "20000000");
+//! assert_eq!(EvmReadCapability::name(), "mfm.evm.read");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::fmt;
+mod block;
+
+pub use block::{EvmBlockAnchor, EvmBlockAnchorError};
+
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
-use std::str::FromStr;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_eips::eip2930::AccessList;
+use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_canonical::sha256_digest_bytes;
+pub use mfm_capabilities::ProviderDiagnosticCode;
 use mfm_capabilities::{
-    CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ProviderDiagnosticCode,
-    ProviderDiagnosticValue, ReadExternalRole, RedactedProviderDiagnostic,
+    CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ProviderDiagnosticValue,
+    ReadExternalRole, RedactedProviderDiagnostic,
 };
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
+use mfm_program_derive::MfmValue;
+use serde::{de, Deserialize, Serialize};
 
 /// Result type for EVM capability contracts.
 pub type Result<T> = std::result::Result<T, EvmCapabilityError>;
 
-/// Boxed future returned by EVM capability providers.
-pub type EvmCapabilityFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+/// Boxed future returned by an EVM session method.
+pub type EvmSessionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
+/// Stable implementation id for the bounded JSON-RPC session.
+pub const EVM_JSONRPC_SESSION_IMPLEMENTATION_ID: &str = "mfm.evm.jsonrpc.session.v1";
+/// EIP-2718 transaction type used by the one admitted EVM transaction flow.
+pub const EVM_EIP1559_TRANSACTION_TYPE: u8 = 2;
+/// Maximum decoded result bytes admitted by one read-only contract call.
+pub const EVM_CALL_MAX_RESPONSE_BYTES: usize = 128 * 1024;
+/// Maximum decoded deployed-code bytes admitted by one source-bound read.
+pub const EVM_CODE_MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
 macro_rules! evm_capability {
     ($(#[$meta:meta])* $ty:ident, $role:ty, $name:literal) => {
@@ -49,11 +64,18 @@ macro_rules! evm_capability {
             type Role = $role;
 
             fn kind() -> mfm_capabilities::Result<CapabilityKind> {
-                evm_capability_kind($name)
+                CapabilityKind::new(
+                    "mfm.evm",
+                    $name,
+                    DigestAlgorithm::Sha256JcsV1,
+                    sha256_digest_bytes(concat!("mfm.evm.capability:", $name).as_bytes()),
+                )
+                .map_err(|error| CapabilityError::Identity(error.to_string()))
             }
 
             fn version() -> mfm_capabilities::Result<CapabilityVersion> {
-                evm_capability_version($name)
+                CapabilityVersion::new(concat!("mfm.evm.", $name, ".v1"))
+                    .map_err(|error| CapabilityError::Identity(error.to_string()))
             }
 
             fn name() -> &'static str {
@@ -64,383 +86,28 @@ macro_rules! evm_capability {
 }
 
 evm_capability!(
-    /// EVM chain identity read authority.
-    EvmChainIdentityCapability,
+    /// Source-bound block, balance, code, and call read authority.
+    EvmReadCapability,
     ReadExternalRole,
-    "chain_identity.read"
+    "read"
 );
 evm_capability!(
-    /// EVM block read authority.
-    EvmBlockReadCapability,
-    ReadExternalRole,
-    "block.read"
-);
-evm_capability!(
-    /// EVM account balance read authority.
-    EvmBalanceReadCapability,
-    ReadExternalRole,
-    "balance.read"
-);
-evm_capability!(
-    /// EVM contract call read authority.
-    EvmCallReadCapability,
-    ReadExternalRole,
-    "call.read"
-);
-evm_capability!(
-    /// EVM contract bytecode read authority.
-    EvmCodeReadCapability,
-    ReadExternalRole,
-    "code.read"
-);
-evm_capability!(
-    /// EVM log read authority.
-    EvmLogsReadCapability,
-    ReadExternalRole,
-    "logs.read"
-);
-evm_capability!(
-    /// EVM account nonce read authority.
-    EvmNonceReadCapability,
-    ReadExternalRole,
-    "nonce.read"
-);
-evm_capability!(
-    /// EVM fee market read authority.
-    EvmFeeReadCapability,
-    ReadExternalRole,
-    "fee.read"
-);
-evm_capability!(
-    /// EVM gas estimate authority.
-    EvmGasEstimateCapability,
-    ReadExternalRole,
-    "gas_estimate.read"
-);
-evm_capability!(
-    /// EVM transaction submit authority.
-    EvmTransactionSubmitCapability,
+    /// Source-bound single-transaction preparation, submission, and observation authority.
+    EvmTransactionCapability,
     ExternalMutationAuthorityRole,
-    "transaction.submit"
-);
-evm_capability!(
-    /// EVM transaction receipt read authority.
-    EvmReceiptReadCapability,
-    ReadExternalRole,
-    "receipt.read"
-);
-evm_capability!(
-    /// EVM account nonce occupancy investigation authority.
-    EvmNonceOccupancyReadCapability,
-    ReadExternalRole,
-    "nonce_occupancy.read"
+    "transaction"
 );
 
-fn evm_capability_kind(name: &'static str) -> mfm_capabilities::Result<CapabilityKind> {
-    CapabilityKind::new(
-        "mfm.evm",
-        name,
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("mfm.evm.capability:{name}").as_bytes()),
-    )
-    .map_err(|error| CapabilityError::Identity(error.to_string()))
-}
-
-fn evm_capability_version(name: &'static str) -> mfm_capabilities::Result<CapabilityVersion> {
-    CapabilityVersion::new(format!("mfm.evm.{name}.v1"))
-        .map_err(|error| CapabilityError::Identity(error.to_string()))
-}
-
-/// Provider interface for EVM chain identity reads.
-pub trait EvmChainIdentityProvider: Send + Sync {
-    /// Reads chain identity from the selected EVM source.
-    ///
-    /// A successful response has already enforced the provider binding and chain
-    /// identity. Returned source evidence matches the provider binding by construction.
-    fn chain_identity<'a>(
-        &'a self,
-        request: &'a EvmChainIdentityRequest,
-    ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse>;
-}
-
-/// Provider interface for EVM block reads.
-pub trait EvmBlockReadProvider: Send + Sync {
-    /// Reads an EVM block summary.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_block<'a>(
-        &'a self,
-        request: &'a EvmBlockReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse>;
-}
-
-/// Provider interface for EVM account balance reads.
-pub trait EvmBalanceReadProvider: Send + Sync {
-    /// Reads an account balance at the selected block.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_balance<'a>(
-        &'a self,
-        request: &'a EvmBalanceReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmBalanceReadResponse>;
-}
-
-/// Provider interface for EVM contract call reads.
-pub trait EvmCallReadProvider: Send + Sync {
-    /// Executes a read-only EVM call.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_call<'a>(
-        &'a self,
-        request: &'a EvmCallReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmCallReadResponse>;
-}
-
-/// Provider interface for EVM contract code reads.
-pub trait EvmCodeReadProvider: Send + Sync {
-    /// Reads deployed bytecode at an address and block.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_code<'a>(
-        &'a self,
-        request: &'a EvmCodeReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmCodeReadResponse>;
-}
-
-/// Provider interface for EVM log reads.
-pub trait EvmLogsReadProvider: Send + Sync {
-    /// Reads EVM logs matching a filter.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_logs<'a>(
-        &'a self,
-        request: &'a EvmLogsReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse>;
-}
-
-/// Provider interface for EVM nonce reads.
-pub trait EvmNonceReadProvider: Send + Sync {
-    /// Reads the account transaction count.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_nonce<'a>(
-        &'a self,
-        request: &'a EvmNonceReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmNonceReadResponse>;
-}
-
-/// Provider interface for EVM fee-market reads.
-pub trait EvmFeeReadProvider: Send + Sync {
-    /// Reads fee-market inputs.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_fee<'a>(
-        &'a self,
-        request: &'a EvmFeeReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse>;
-}
-
-/// Provider interface for EVM gas estimates.
-pub trait EvmGasEstimateProvider: Send + Sync {
-    /// Estimates gas for an EVM transaction intent.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn estimate_gas<'a>(
-        &'a self,
-        request: &'a EvmGasEstimateRequest,
-    ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse>;
-}
-
-/// Provider interface for EVM transaction submission.
-pub trait EvmTransactionSubmitProvider: Send + Sync {
-    /// Submits a signed EVM payload.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn submit_transaction<'a>(
-        &'a self,
-        request: &'a EvmTransactionSubmitRequest,
-    ) -> EvmCapabilityFuture<'a, EvmTransactionSubmitResponse>;
-}
-
-/// Provider interface for EVM receipt reads.
-pub trait EvmReceiptReadProvider: Send + Sync {
-    /// Reads an EVM transaction receipt.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding, and the receipt transaction hash matches the request
-    /// by construction.
-    fn read_receipt<'a>(
-        &'a self,
-        request: &'a EvmReceiptReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse>;
-}
-
-/// Provider interface for EVM nonce occupancy investigations.
-pub trait EvmNonceOccupancyReadProvider: Send + Sync {
-    /// Reads explicit evidence for whether a concrete sender nonce is occupied by a non-anchor tx.
-    ///
-    /// A successful response has already enforced the provider binding. Returned source
-    /// evidence matches the provider binding by construction.
-    fn read_nonce_occupancy<'a>(
-        &'a self,
-        request: &'a EvmNonceOccupancyReadRequest,
-    ) -> EvmCapabilityFuture<'a, EvmNonceOccupancyReadResponse>;
-}
-
-/// Process-local EVM source reference.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvmSourceRef(LocalPublicId);
-
-impl EvmSourceRef {
-    /// Creates a checked EVM source reference.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
-        Ok(Self(value))
-    }
-
-    /// Returns the checked source reference string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Display for EvmSourceRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for EvmSourceRef {
-    type Err = EvmCapabilityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<String> for EvmSourceRef {
-    type Error = EvmCapabilityError;
-
-    fn try_from(value: String) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl From<EvmSourceRef> for String {
-    fn from(value: EvmSourceRef) -> Self {
-        value.0.into_string()
-    }
-}
-
-/// Semantic EVM network id from authored workflow config.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvmNetworkId(LocalPublicId);
-
-impl EvmNetworkId {
-    /// Creates a checked semantic EVM network id.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
-        Ok(Self(value))
-    }
-
-    /// Returns the checked network id string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Display for EvmNetworkId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for EvmNetworkId {
-    type Err = EvmCapabilityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<String> for EvmNetworkId {
-    type Error = EvmCapabilityError;
-
-    fn try_from(value: String) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl From<EvmNetworkId> for String {
-    fn from(value: EvmNetworkId) -> Self {
-        value.0.into_string()
-    }
-}
-
-/// Process-local EVM source policy id.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvmSourcePolicyId(LocalPublicId);
-
-impl EvmSourcePolicyId {
-    /// Creates a checked EVM source policy id.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
-        Ok(Self(value))
-    }
-
-    /// Returns the checked policy id string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Display for EvmSourcePolicyId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for EvmSourcePolicyId {
-    type Err = EvmCapabilityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<String> for EvmSourcePolicyId {
-    type Error = EvmCapabilityError;
-
-    fn try_from(value: String) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl From<EvmSourcePolicyId> for String {
-    fn from(value: EvmSourcePolicyId) -> Self {
-        value.0.into_string()
-    }
-}
-
-/// Checked semantic EVM network binding owned by a bound provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Checked semantic EVM network and chain binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvmNetworkBinding {
-    network_id: EvmNetworkId,
+    network_id: LocalPublicId,
     expected_chain_id: NonZeroU64,
 }
 
 impl EvmNetworkBinding {
-    /// Creates a checked semantic EVM network binding.
-    pub fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Result<Self> {
+    /// Creates a checked binding. Chain id zero is rejected.
+    pub fn new(network_id: LocalPublicId, expected_chain_id: u64) -> Result<Self> {
         let expected_chain_id =
             NonZeroU64::new(expected_chain_id).ok_or(EvmCapabilityError::InvalidRequest {
                 reason: EvmInvalidRequest::ZeroExpectedChainId,
@@ -452,621 +119,617 @@ impl EvmNetworkBinding {
     }
 
     /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
+    pub const fn network_id(&self) -> &LocalPublicId {
         &self.network_id
     }
 
-    /// Returns the expected EVM chain id.
+    /// Returns the expected chain id.
     pub const fn expected_chain_id(&self) -> u64 {
         self.expected_chain_id.get()
     }
 }
 
-/// Redacted EVM source evidence attached to provider responses.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RedactedEvmSourceEvidence {
-    /// Semantic network id from the provider binding.
-    pub network_id: EvmNetworkId,
-    /// Expected EVM chain id from the provider binding.
-    pub expected_chain_id: u64,
-    /// Observed EVM chain id.
-    pub observed_chain_id: u64,
-    /// Process-local source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id used by the provider.
-    pub policy_id: EvmSourcePolicyId,
+/// Redacted provenance for one checked, source-stable session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "session_evidence",
+    version = "1",
+    schema = "mfm.evm.session_evidence"
+)]
+pub struct EvmSessionEvidence {
+    network_id: String,
+    chain_id: u64,
+    source_ref: String,
+    implementation_id: String,
 }
 
-impl RedactedEvmSourceEvidence {
-    /// Builds redacted source evidence from a provider binding and selected runtime source.
-    pub fn from_binding(
+impl EvmSessionEvidence {
+    /// Creates evidence after bind-time chain verification succeeds.
+    pub fn new(
         binding: &EvmNetworkBinding,
-        observed_chain_id: u64,
-        source_ref: EvmSourceRef,
-        policy_id: EvmSourcePolicyId,
-    ) -> Result<Self> {
-        let evidence = Self {
-            network_id: binding.network_id().clone(),
-            expected_chain_id: binding.expected_chain_id(),
-            observed_chain_id,
-            source_ref,
-            policy_id,
-        };
-        if observed_chain_id == binding.expected_chain_id() {
-            Ok(evidence)
-        } else {
-            Err(EvmCapabilityError::SourceMismatch {
-                diagnostic: evidence.source_mismatch_diagnostic(),
-            })
-        }
-    }
-
-    /// Returns closed redacted source-mismatch diagnostic details.
-    pub fn source_mismatch_diagnostic(&self) -> RedactedProviderDiagnostic {
-        evm_diagnostic(ProviderDiagnosticCode::SourceMismatch)
-            .with_field(
-                evm_public_id("network_id"),
-                ProviderDiagnosticValue::Id(evm_public_id(self.network_id.as_str())),
-            )
-            .with_field(
-                evm_public_id("expected_chain_id"),
-                ProviderDiagnosticValue::U64(self.expected_chain_id),
-            )
-            .with_field(
-                evm_public_id("observed_chain_id"),
-                ProviderDiagnosticValue::U64(self.observed_chain_id),
-            )
-            .with_field(
-                evm_public_id("source_ref"),
-                ProviderDiagnosticValue::Id(evm_public_id(self.source_ref.as_str())),
-            )
-            .with_field(
-                evm_public_id("policy_id"),
-                ProviderDiagnosticValue::Id(evm_public_id(self.policy_id.as_str())),
-            )
-    }
-}
-
-/// EVM block selector.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvmBlockSelector {
-    /// Latest available block.
-    Latest,
-    /// Pending block, including known pool transactions when supported.
-    Pending,
-    /// Concrete block number.
-    Number(u64),
-    /// Concrete block hash.
-    Hash(B256),
-}
-
-/// Request for chain identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EvmChainIdentityRequest;
-
-impl EvmChainIdentityRequest {
-    /// Creates an EVM chain identity request.
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for EvmChainIdentityRequest {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Response for chain identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmChainIdentityResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// EVM chain id.
-    pub chain_id: u64,
-    /// Client version string, when returned.
-    pub client_version: Option<String>,
-}
-
-/// Request for an EVM block summary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmBlockReadRequest {
-    block: EvmBlockSelector,
-}
-
-impl EvmBlockReadRequest {
-    /// Creates an EVM block read request.
-    pub fn new(block: EvmBlockSelector) -> Self {
-        Self { block }
-    }
-
-    /// Returns the requested block selector.
-    pub const fn block(&self) -> &EvmBlockSelector {
-        &self.block
-    }
-}
-
-/// Response for an EVM block summary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmBlockReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Block number.
-    pub block_number: u64,
-    /// Block hash.
-    pub block_hash: B256,
-}
-
-/// Request for an EVM account balance.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmBalanceReadRequest {
-    account: Address,
-    block: EvmBlockSelector,
-}
-
-impl EvmBalanceReadRequest {
-    /// Creates an EVM balance read request.
-    pub const fn new(account: Address, block: EvmBlockSelector) -> Self {
-        Self { account, block }
-    }
-
-    /// Returns the account address.
-    pub const fn account(&self) -> Address {
-        self.account
-    }
-
-    /// Returns the requested block selector.
-    pub const fn block(&self) -> &EvmBlockSelector {
-        &self.block
-    }
-}
-
-/// Response for an EVM account balance.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmBalanceReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Account balance in wei.
-    pub balance_wei: U256,
-}
-
-/// Request for a read-only EVM call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmCallReadRequest {
-    to: Address,
-    calldata: Vec<u8>,
-    block: EvmBlockSelector,
-}
-
-impl EvmCallReadRequest {
-    /// Creates an EVM call read request.
-    pub fn new(to: Address, calldata: Vec<u8>, block: EvmBlockSelector) -> Self {
+        source_ref: LocalPublicId,
+        implementation_id: LocalPublicId,
+    ) -> Self {
         Self {
-            to,
-            calldata,
-            block,
+            network_id: binding.network_id.as_str().to_owned(),
+            chain_id: binding.expected_chain_id.get(),
+            source_ref: source_ref.as_str().to_owned(),
+            implementation_id: implementation_id.as_str().to_owned(),
         }
     }
 
-    /// Returns the destination contract address.
+    /// Returns the semantic network id.
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+
+    /// Returns the verified chain id.
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Returns the process-local source reference retained as audit provenance.
+    ///
+    /// The reference identifies the route used by this attempt. It is not
+    /// semantic binding policy and may change when a later attempt is resumed
+    /// under different process-local routing.
+    pub fn source_ref(&self) -> &str {
+        &self.source_ref
+    }
+
+    /// Returns the certified transport implementation identity.
+    pub fn implementation_id(&self) -> &str {
+        &self.implementation_id
+    }
+
+    /// Returns whether this evidence belongs to the binding.
+    pub fn matches_binding(&self, binding: &EvmNetworkBinding) -> bool {
+        self.network_id == binding.network_id.as_str()
+            && self.chain_id == binding.expected_chain_id.get()
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmSessionEvidence {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            network_id: String,
+            chain_id: u64,
+            source_ref: String,
+            implementation_id: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let network_id = LocalPublicId::new(&wire.network_id).map_err(de::Error::custom)?;
+        let binding =
+            EvmNetworkBinding::new(network_id, wire.chain_id).map_err(de::Error::custom)?;
+        let source_ref = LocalPublicId::new(&wire.source_ref).map_err(de::Error::custom)?;
+        let implementation_id =
+            LocalPublicId::new(&wire.implementation_id).map_err(de::Error::custom)?;
+        Ok(Self::new(&binding, source_ref, implementation_id))
+    }
+}
+
+/// EVM block selector used by checked sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvmBlockSelector {
+    /// Current head.
+    Latest,
+    /// Exact block number.
+    Number(U256),
+    /// Exact canonical block hash. Transports issue EIP-1898 `requireCanonical` reads.
+    ExactHash(B256),
+}
+
+/// Checked call request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmCall {
+    from: Address,
+    to: Address,
+    value: U256,
+    input: Bytes,
+    gas_limit: U256,
+    access_list: AccessList,
+    block: EvmBlockSelector,
+    max_response_bytes: usize,
+}
+
+impl EvmCall {
+    /// Creates a fully specified call request with an explicit decoded-result bound.
+    ///
+    /// A zero gas limit and a result bound above [`EVM_CALL_MAX_RESPONSE_BYTES`] are rejected. A
+    /// zero-byte result bound is valid for calls whose protocol contract requires an empty result.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        from: Address,
+        to: Address,
+        value: U256,
+        input: Bytes,
+        gas_limit: U256,
+        access_list: AccessList,
+        block: EvmBlockSelector,
+        max_response_bytes: usize,
+    ) -> Result<Self> {
+        if gas_limit.is_zero() {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ZeroCallGasLimit,
+            });
+        }
+        if max_response_bytes > EVM_CALL_MAX_RESPONSE_BYTES {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::CallResponseLimitExceeded,
+            });
+        }
+        Ok(Self {
+            from,
+            to,
+            value,
+            input,
+            gas_limit,
+            access_list,
+            block,
+            max_response_bytes,
+        })
+    }
+
+    /// Returns the explicit caller.
+    pub const fn from(&self) -> Address {
+        self.from
+    }
+
+    /// Returns the destination.
     pub const fn to(&self) -> Address {
         self.to
     }
 
-    /// Returns ABI-encoded call data.
-    pub fn calldata(&self) -> &[u8] {
-        &self.calldata
+    /// Returns the input bytes.
+    pub const fn input(&self) -> &Bytes {
+        &self.input
     }
 
-    /// Returns the requested block selector.
+    /// Returns the transferred wei value.
+    pub const fn value(&self) -> U256 {
+        self.value
+    }
+
+    /// Returns the call gas bound.
+    pub const fn gas_limit(&self) -> U256 {
+        self.gas_limit
+    }
+
+    /// Returns the EIP-2930 access list.
+    pub const fn access_list(&self) -> &AccessList {
+        &self.access_list
+    }
+
+    /// Returns the block selector.
     pub const fn block(&self) -> &EvmBlockSelector {
         &self.block
     }
-}
 
-/// Response for a read-only EVM call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmCallReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Returned call data.
-    pub return_data: Vec<u8>,
-}
-
-/// Request for deployed EVM bytecode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmCodeReadRequest {
-    address: Address,
-    block: EvmBlockSelector,
-}
-
-impl EvmCodeReadRequest {
-    /// Creates an EVM code read request.
-    pub const fn new(address: Address, block: EvmBlockSelector) -> Self {
-        Self { address, block }
-    }
-
-    /// Returns the contract/account address to inspect.
-    pub const fn address(&self) -> Address {
-        self.address
-    }
-
-    /// Returns the requested block selector.
-    pub const fn block(&self) -> &EvmBlockSelector {
-        &self.block
+    /// Returns the maximum decoded result bytes admitted for this call.
+    pub const fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
     }
 }
 
-/// Response for deployed EVM bytecode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmCodeReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Deployed bytecode bytes. Empty bytes mean no code was observed.
-    pub code: Vec<u8>,
-    /// Keccak-256 hash of `code`.
-    pub code_hash: B256,
+/// Deployed code plus its Keccak-256 identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvmCode {
+    /// Exact deployed bytes.
+    pub bytes: Bytes,
+    /// Keccak-256 of `bytes`.
+    pub hash: B256,
 }
 
-/// Request for EVM logs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmLogsReadRequest {
-    from_block: EvmBlockSelector,
-    to_block: EvmBlockSelector,
-    address: Option<Address>,
-    topics: Vec<B256>,
+/// Source-bound external read view.
+pub trait EvmReadSession: Send + Sync {
+    /// Returns the one bind-time provenance value for this session.
+    fn evidence(&self) -> &EvmSessionEvidence;
+
+    /// Reads one block identity.
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor>;
+
+    /// Reads an account balance.
+    fn read_balance<'a>(
+        &'a self,
+        account: Address,
+        block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, U256>;
+
+    /// Reads deployed code bounded by [`EVM_CODE_MAX_RESPONSE_BYTES`].
+    fn read_code<'a>(
+        &'a self,
+        address: Address,
+        block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmCode>;
+
+    /// Executes a read-only call.
+    fn call<'a>(&'a self, request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes>;
 }
 
-impl EvmLogsReadRequest {
-    /// Creates an EVM logs read request.
-    pub fn new(
-        from_block: EvmBlockSelector,
-        to_block: EvmBlockSelector,
-        address: Option<Address>,
-        topics: Vec<B256>,
-    ) -> Self {
-        Self {
-            from_block,
-            to_block,
-            address,
-            topics,
-        }
-    }
-
-    /// Returns the start block selector.
-    pub const fn from_block(&self) -> &EvmBlockSelector {
-        &self.from_block
-    }
-
-    /// Returns the end block selector.
-    pub const fn to_block(&self) -> &EvmBlockSelector {
-        &self.to_block
-    }
-
-    /// Returns the optional emitting contract address.
-    pub const fn address(&self) -> Option<Address> {
-        self.address
-    }
-
-    /// Returns topic filters.
-    pub fn topics(&self) -> &[B256] {
-        &self.topics
-    }
+/// Checked EIP-1559 fee inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvmFeeInputs {
+    /// Observed base fee per gas.
+    pub base_fee_per_gas: U256,
+    /// Suggested priority fee per gas.
+    pub max_priority_fee_per_gas: U256,
+    /// Checked `base_fee * 2 + priority_fee` maximum fee.
+    pub max_fee_per_gas: U256,
 }
 
-/// One EVM log entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmLogEntry {
-    /// Emitting contract address.
-    pub address: Address,
-    /// Log topics.
-    pub topics: Vec<B256>,
-    /// Log data bytes.
-    pub data: Vec<u8>,
-    /// Block number, when known.
-    pub block_number: Option<u64>,
-    /// Transaction hash, when known.
-    pub transaction_hash: Option<B256>,
-    /// Log index, when known.
-    pub log_index: Option<u64>,
-}
-
-/// Response for EVM logs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmLogsReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Matching log entries.
-    pub logs: Vec<EvmLogEntry>,
-}
-
-/// Request for an account nonce.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmNonceReadRequest {
-    account: Address,
-    block: EvmBlockSelector,
-}
-
-impl EvmNonceReadRequest {
-    /// Creates an EVM nonce read request.
-    pub const fn new(account: Address, block: EvmBlockSelector) -> Self {
-        Self { account, block }
-    }
-
-    /// Returns the account address.
-    pub const fn account(&self) -> Address {
-        self.account
-    }
-
-    /// Returns the requested block selector.
-    pub const fn block(&self) -> &EvmBlockSelector {
-        &self.block
-    }
-}
-
-/// Response for an account nonce.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmNonceReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Account nonce.
-    pub nonce: u64,
-}
-
-/// Request for EVM fee-market data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EvmFeeReadRequest;
-
-impl EvmFeeReadRequest {
-    /// Creates an EVM fee read request.
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for EvmFeeReadRequest {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Response for EVM fee-market data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmFeeReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Current base fee, when available.
-    pub base_fee_per_gas: Option<u128>,
-    /// Suggested priority fee, when available.
-    pub priority_fee_per_gas: Option<u128>,
-    /// Suggested EIP-1559 max fee, when available.
-    pub max_fee_per_gas: Option<u128>,
-    /// Legacy gas price, when available.
-    pub legacy_gas_price: Option<u128>,
-}
-
-/// Request for an EVM gas estimate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmGasEstimateRequest {
-    from: Option<Address>,
-    to: Option<Address>,
-    value_wei: u128,
-    data: Vec<u8>,
-}
-
-impl EvmGasEstimateRequest {
-    /// Creates an EVM gas estimate request.
-    pub fn new(from: Option<Address>, to: Option<Address>, value_wei: u128, data: Vec<u8>) -> Self {
-        Self {
-            from,
-            to,
-            value_wei,
-            data,
-        }
-    }
-
-    /// Returns the sender address, when supplied.
-    pub const fn from(&self) -> Option<Address> {
-        self.from
-    }
-
-    /// Returns the destination address, or none for contract creation.
-    pub const fn to(&self) -> Option<Address> {
-        self.to
-    }
-
-    /// Returns the value in wei.
-    pub const fn value_wei(&self) -> u128 {
-        self.value_wei
-    }
-
-    /// Returns transaction input bytes.
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-}
-
-/// Response for an EVM gas estimate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmGasEstimateResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Estimated gas limit.
-    pub gas_limit: u64,
-}
-
-/// Transient signed EVM payload for submission.
-#[derive(Clone, PartialEq, Eq)]
-pub struct SignedEvmPayload {
-    bytes: Vec<u8>,
-    transaction_hash: B256,
-}
-
-impl SignedEvmPayload {
-    /// Creates a transient signed payload from verified bytes and transaction hash.
-    pub fn from_verified_bytes(bytes: Vec<u8>, transaction_hash: B256) -> Result<Self> {
-        if bytes.is_empty() {
-            return Err(EvmCapabilityError::InvalidRequest {
-                reason: EvmInvalidRequest::EmptySignedPayload,
-            });
-        }
+impl EvmFeeInputs {
+    /// Builds the one admitted fee policy with checked arithmetic.
+    pub fn from_base_and_priority(
+        base_fee_per_gas: U256,
+        max_priority_fee_per_gas: U256,
+    ) -> Result<Self> {
+        let max_fee_per_gas = base_fee_per_gas
+            .checked_mul(U256::from(2))
+            .and_then(|fee| fee.checked_add(max_priority_fee_per_gas))
+            .ok_or(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::FeeOverflow,
+            })?;
         Ok(Self {
-            bytes,
-            transaction_hash,
+            base_fee_per_gas,
+            max_priority_fee_per_gas,
+            max_fee_per_gas,
         })
     }
-
-    /// Returns the signed payload bytes.
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    /// Returns the expected EVM transaction hash.
-    pub const fn transaction_hash(&self) -> B256 {
-        self.transaction_hash
-    }
 }
 
-impl fmt::Debug for SignedEvmPayload {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SignedEvmPayload")
-            .field("bytes", &"<redacted>")
-            .field("transaction_hash", &self.transaction_hash)
-            .finish()
-    }
-}
-
-/// Request for EVM transaction submission.
+/// Exact pre-gas-limit EIP-1559 transaction description supplied to `eth_estimateGas`.
+///
+/// Construction admits nonce and fee observations into Alloy's narrower
+/// EIP-1559 widths before any estimation IO. Adding the returned gas limit to
+/// this description produces the signing authority; callers must not rebuild
+/// transaction fields from the original intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmTransactionSubmitRequest {
-    signed_payload: SignedEvmPayload,
+pub struct EvmTransactionEstimate {
+    chain_id: U256,
+    nonce: U256,
+    from: Address,
+    to: TxKind,
+    value: U256,
+    input: Bytes,
+    access_list: AccessList,
+    max_fee_per_gas: U256,
+    max_priority_fee_per_gas: U256,
 }
 
-impl EvmTransactionSubmitRequest {
-    /// Creates an EVM transaction submission request.
-    pub const fn new(signed_payload: SignedEvmPayload) -> Self {
-        Self { signed_payload }
-    }
-
-    /// Returns the transient signed payload.
-    pub const fn signed_payload(&self) -> &SignedEvmPayload {
-        &self.signed_payload
-    }
-}
-
-/// Response for EVM transaction submission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmTransactionSubmitResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Submitted transaction hash.
-    pub transaction_hash: B256,
-}
-
-/// Request for an EVM transaction receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmReceiptReadRequest {
-    transaction_hash: B256,
-}
-
-impl EvmReceiptReadRequest {
-    /// Creates an EVM receipt read request.
-    pub const fn new(transaction_hash: B256) -> Self {
-        Self { transaction_hash }
-    }
-
-    /// Returns the transaction hash.
-    pub const fn transaction_hash(&self) -> B256 {
-        self.transaction_hash
-    }
-}
-
-/// Response for an EVM transaction receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmReceiptReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Transaction hash.
-    pub transaction_hash: B256,
-    /// Block number that included the transaction.
-    pub block_number: u64,
-    /// Receipt status success flag.
-    pub status: bool,
-}
-
-/// Request for account nonce occupancy investigation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmNonceOccupancyReadRequest {
-    account: Address,
-    nonce: u64,
-    excluded_transaction_hash: B256,
-}
-
-impl EvmNonceOccupancyReadRequest {
-    /// Creates an EVM nonce occupancy read request.
-    pub fn new(account: Address, nonce: u64, excluded_transaction_hash: B256) -> Self {
-        Self {
-            account,
+impl EvmTransactionEstimate {
+    /// Creates one checked type-2 gas-estimation request.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        chain_id: U256,
+        nonce: U256,
+        from: Address,
+        to: TxKind,
+        value: U256,
+        input: Bytes,
+        access_list: AccessList,
+        max_fee_per_gas: U256,
+        max_priority_fee_per_gas: U256,
+    ) -> Result<Self> {
+        let request = Self {
+            chain_id,
             nonce,
-            excluded_transaction_hash,
-        }
+            from,
+            to,
+            value,
+            input,
+            access_list,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+        };
+        request.validate_alloy_widths()?;
+        Ok(request)
     }
 
-    /// Returns the sender account whose nonce is being investigated.
-    pub const fn account(&self) -> Address {
-        self.account
+    /// Returns the EIP-2718 transaction type.
+    pub const fn transaction_type(&self) -> u8 {
+        EVM_EIP1559_TRANSACTION_TYPE
     }
 
-    /// Returns the sender nonce being investigated.
-    pub const fn nonce(&self) -> u64 {
+    /// Returns the exact chain id.
+    pub const fn chain_id(&self) -> U256 {
+        self.chain_id
+    }
+
+    /// Returns the exact pending sender nonce.
+    pub const fn nonce(&self) -> U256 {
         self.nonce
     }
 
-    /// Returns the MFM recorded submission anchor that must not match an occupied transaction.
-    pub const fn excluded_transaction_hash(&self) -> B256 {
-        self.excluded_transaction_hash
+    /// Returns the maximum total fee per gas.
+    pub const fn max_fee_per_gas(&self) -> U256 {
+        self.max_fee_per_gas
+    }
+
+    /// Returns the maximum priority fee per gas.
+    pub const fn max_priority_fee_per_gas(&self) -> U256 {
+        self.max_priority_fee_per_gas
+    }
+
+    fn validate_alloy_widths(&self) -> Result<()> {
+        let chain_id =
+            u64::try_from(self.chain_id).map_err(|_| EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ChainIdOutOfRange,
+            })?;
+        if chain_id == 0 {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ZeroExpectedChainId,
+            });
+        }
+        u64::try_from(self.nonce).map_err(|_| EvmCapabilityError::InvalidRequest {
+            reason: EvmInvalidRequest::NonceOutOfRange,
+        })?;
+        let max_fee = u128::try_from(self.max_fee_per_gas).map_err(|_| {
+            EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::MaxFeePerGasOutOfRange,
+            }
+        })?;
+        let priority = u128::try_from(self.max_priority_fee_per_gas).map_err(|_| {
+            EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::MaxPriorityFeePerGasOutOfRange,
+            }
+        })?;
+        if priority > max_fee {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::PriorityFeeExceedsMaxFee,
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the sender.
+    pub const fn from(&self) -> Address {
+        self.from
+    }
+
+    /// Returns call or creation destination kind.
+    pub const fn to(&self) -> TxKind {
+        self.to
+    }
+
+    /// Returns transferred value.
+    pub const fn value(&self) -> U256 {
+        self.value
+    }
+
+    /// Returns calldata or init code.
+    pub const fn input(&self) -> &Bytes {
+        &self.input
+    }
+
+    /// Returns the access list.
+    pub const fn access_list(&self) -> &AccessList {
+        &self.access_list
     }
 }
 
-/// Response for account nonce occupancy investigation.
+/// Optional block placement of an observed transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmNonceOccupancyReadResponse {
-    /// Redacted source evidence.
-    pub evidence: RedactedEvmSourceEvidence,
-    /// Occupancy outcome.
-    pub outcome: EvmNonceOccupancy,
+pub struct EvmTransactionPlacement {
+    /// Exact inclusion block identity.
+    pub block: EvmBlockAnchor,
+    /// Transaction index within the block.
+    pub transaction_index: U256,
 }
 
-/// Explicit nonce occupancy outcome.
+/// Public fields of an observed EIP-1559 transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvmNonceOccupancy {
-    /// No defensible occupancy proof was available from this read.
-    Unknown,
-    /// A non-anchor transaction was observed occupying the sender nonce.
-    Occupied {
-        /// Occupying transaction hash.
+pub struct EvmObservedTransaction {
+    /// Transaction hash.
+    pub transaction_hash: B256,
+    /// Chain id.
+    pub chain_id: U256,
+    /// Sender nonce.
+    pub nonce: U256,
+    /// Sender.
+    pub from: Address,
+    /// Call or creation destination kind.
+    pub to: TxKind,
+    /// Transferred value.
+    pub value: U256,
+    /// Calldata or init code.
+    pub input: Bytes,
+    /// Gas limit.
+    pub gas_limit: U256,
+    /// Maximum fee per gas.
+    pub max_fee_per_gas: U256,
+    /// Maximum priority fee per gas.
+    pub max_priority_fee_per_gas: U256,
+    /// Access list.
+    pub access_list: AccessList,
+    /// Block placement, or none while pending.
+    pub placement: Option<EvmTransactionPlacement>,
+}
+
+/// Strict receipt execution status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvmReceiptStatus {
+    /// Execution succeeded.
+    Success,
+    /// Execution reverted after consuming nonce and gas.
+    Reverted,
+}
+
+/// Complete log entry carried by a transaction receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvmReceiptLog {
+    /// Emitting address.
+    pub address: Address,
+    /// Indexed topics.
+    pub topics: Vec<B256>,
+    /// Unindexed log data.
+    pub data: Bytes,
+    /// Exact inclusion block identity.
+    pub block: EvmBlockAnchor,
+    /// Enclosing transaction hash.
+    pub transaction_hash: B256,
+    /// Transaction index within the block.
+    pub transaction_index: U256,
+    /// Log index within the block.
+    pub log_index: U256,
+    /// Whether the provider marked the log removed.
+    pub removed: bool,
+}
+
+/// Strict transaction receipt observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvmReceipt {
+    /// Transaction hash.
+    pub transaction_hash: B256,
+    /// Transaction index within the block.
+    pub transaction_index: U256,
+    /// Exact inclusion block identity.
+    pub block: EvmBlockAnchor,
+    /// Sender.
+    pub from: Address,
+    /// Destination, or none for creation.
+    pub to: Option<Address>,
+    /// Created contract address, when reported.
+    pub contract_address: Option<Address>,
+    /// Execution status.
+    pub status: EvmReceiptStatus,
+    /// Gas used by this transaction.
+    pub gas_used: U256,
+    /// Cumulative gas used in the block.
+    pub cumulative_gas_used: U256,
+    /// Complete, internally coherent logs.
+    pub logs: Vec<EvmReceiptLog>,
+}
+
+impl EvmReceipt {
+    /// Validates execution status, log identity, and removal status.
+    pub fn validate(&self) -> Result<()> {
+        if matches!(self.status, EvmReceiptStatus::Reverted) && !self.logs.is_empty() {
+            return Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::IncoherentReceipt,
+            });
+        }
+        for log in &self.logs {
+            if log.removed
+                || log.transaction_hash != self.transaction_hash
+                || log.transaction_index != self.transaction_index
+                || log.block != self.block
+            {
+                return Err(EvmCapabilityError::InvalidRequest {
+                    reason: EvmInvalidRequest::IncoherentReceipt,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Source-bound one-transaction view.
+pub trait EvmTransactionSession: Send + Sync {
+    /// Returns the one bind-time provenance value for this session.
+    fn evidence(&self) -> &EvmSessionEvidence;
+
+    /// Reads the pending nonce for an account.
+    fn pending_nonce<'a>(&'a self, account: Address) -> EvmSessionFuture<'a, U256>;
+
+    /// Reads the checked EIP-1559 fee inputs.
+    fn fee_inputs(&self) -> EvmSessionFuture<'_, EvmFeeInputs>;
+
+    /// Estimates gas for one transaction intent.
+    fn estimate_gas<'a>(
+        &'a self,
+        request: &'a EvmTransactionEstimate,
+    ) -> EvmSessionFuture<'a, U256>;
+
+    /// Submits exact signed bytes and returns the provider-reported hash for caller validation.
+    fn submit_raw_transaction<'a>(
+        &'a self,
+        signed_bytes: &'a [u8],
+        expected_hash: B256,
+    ) -> EvmSessionFuture<'a, B256>;
+
+    /// Looks up a transaction by its exact hash.
+    fn transaction_by_hash(
+        &self,
         transaction_hash: B256,
-        /// Block number when the occupying transaction is mined.
-        block_number: Option<u64>,
-    },
+    ) -> EvmSessionFuture<'_, Option<EvmObservedTransaction>>;
+
+    /// Looks up a receipt by its exact transaction hash.
+    fn receipt_by_hash(&self, transaction_hash: B256) -> EvmSessionFuture<'_, Option<EvmReceipt>>;
+
+    /// Reads a block identity for confirmation checks.
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor>;
 }
 
 /// Closed invalid-request reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvmInvalidRequest {
-    /// Identifier was invalid.
-    InvalidIdentifier,
     /// Expected chain id was zero.
     ZeroExpectedChainId,
-    /// Signed payload was empty.
-    EmptySignedPayload,
+    /// Checked EIP-1559 fee arithmetic overflowed U256.
+    FeeOverflow,
+    /// Chain id exceeded Alloy's exact EIP-1559 representation.
+    ChainIdOutOfRange,
+    /// Sender nonce exceeded Alloy's exact EIP-1559 representation.
+    NonceOutOfRange,
+    /// Maximum fee exceeded Alloy's exact EIP-1559 representation.
+    MaxFeePerGasOutOfRange,
+    /// Priority fee exceeded Alloy's exact EIP-1559 representation.
+    MaxPriorityFeePerGasOutOfRange,
+    /// Priority fee exceeded the maximum total fee.
+    PriorityFeeExceedsMaxFee,
+    /// A read-only call supplied a zero gas limit.
+    ZeroCallGasLimit,
+    /// A read-only call requested more decoded result bytes than the capability maximum.
+    CallResponseLimitExceeded,
+    /// Signed transaction bytes were empty.
+    EmptySignedTransaction,
+    /// Receipt/log identities were inconsistent, a log was removed, or a reverted receipt had
+    /// logs.
+    IncoherentReceipt,
+    /// A persisted block anchor was malformed or non-canonical.
+    InvalidBlockAnchor,
+    /// A bound session violated the requested semantic or implementation authority.
+    SessionAuthorityMismatch,
+}
+
+/// Execution phase used to classify a typed EVM capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvmCapabilityPhase {
+    /// A read-only request with no external mutation authority.
+    ReadOnly,
+    /// Transaction preparation or guarded observation before a submission exchange.
+    BeforeSubmission,
+    /// Transaction observation or recovery after submission is durably possible.
+    AfterSubmission,
+}
+
+/// Closed runtime disposition of a typed EVM capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvmCapabilityFailureDisposition {
+    /// Process-local provider authority can be repaired and the same attempt resumed.
+    OperationalBlock,
+    /// The request or response violated a deterministic certified contract.
+    TerminalValidation,
 }
 
 /// Redaction-safe EVM capability error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvmCapabilityError {
-    /// Request failed contract validation.
-    #[error("EVM capability request was invalid")]
+    /// Request or result failed contract validation.
+    #[error("EVM capability request or result was invalid")]
     InvalidRequest {
         /// Closed invalid-request reason.
         reason: EvmInvalidRequest,
@@ -1077,15 +740,12 @@ pub enum EvmCapabilityError {
         /// Closed redacted provider diagnostic.
         diagnostic: RedactedProviderDiagnostic,
     },
-    /// Provider evidence did not match the provider binding.
-    #[error("EVM source evidence did not match provider binding: {diagnostic}")]
+    /// Bind-time chain identity did not match the semantic binding.
+    #[error("EVM source did not match semantic network binding: {diagnostic}")]
     SourceMismatch {
         /// Closed redacted source-mismatch diagnostic.
         diagnostic: RedactedProviderDiagnostic,
     },
-    /// A transaction receipt is not available yet.
-    #[error("EVM transaction receipt is pending")]
-    ReceiptPending,
 }
 
 impl EvmCapabilityError {
@@ -1094,28 +754,140 @@ impl EvmCapabilityError {
         Self::Provider { diagnostic }
     }
 
-    /// Returns the closed redacted provider diagnostic carried by this error.
+    /// Returns the closed diagnostic carried by this error.
     pub const fn redacted_diagnostic(&self) -> Option<&RedactedProviderDiagnostic> {
         match self {
             Self::Provider { diagnostic } | Self::SourceMismatch { diagnostic } => Some(diagnostic),
-            Self::InvalidRequest { .. } | Self::ReceiptPending => None,
+            Self::InvalidRequest { .. } => None,
+        }
+    }
+
+    /// Classifies this failure without inspecting provider text.
+    ///
+    /// Once submission is durably possible, no provider, route, transport,
+    /// response, or source-binding failure can prove that the transaction
+    /// failed or authorize another mutation. Invalid request material remains
+    /// terminal in every phase.
+    pub fn failure_disposition(
+        &self,
+        phase: EvmCapabilityPhase,
+    ) -> EvmCapabilityFailureDisposition {
+        use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+
+        match self {
+            Self::InvalidRequest { .. } => TerminalValidation,
+            Self::SourceMismatch { .. } => OperationalBlock,
+            Self::Provider { .. } if matches!(phase, EvmCapabilityPhase::AfterSubmission) => {
+                OperationalBlock
+            }
+            Self::Provider { diagnostic } => match diagnostic.code() {
+                ProviderDiagnosticCode::ProviderConfigurationMissing
+                | ProviderDiagnosticCode::ProviderConfigurationInvalid
+                | ProviderDiagnosticCode::RouteUnavailable
+                | ProviderDiagnosticCode::SourceUnavailable
+                | ProviderDiagnosticCode::TransportFailed
+                | ProviderDiagnosticCode::OperationIncomplete => OperationalBlock,
+                ProviderDiagnosticCode::RpcHttpStatus => http_failure_disposition(diagnostic),
+                ProviderDiagnosticCode::RpcJsonError => json_rpc_failure_disposition(diagnostic),
+                ProviderDiagnosticCode::SourceNotAllowed
+                | ProviderDiagnosticCode::ResponseInvalid
+                | ProviderDiagnosticCode::ResponseMissingResult
+                | ProviderDiagnosticCode::SourceMismatch
+                | ProviderDiagnosticCode::UnsupportedOperation => TerminalValidation,
+            },
         }
     }
 }
 
+fn http_failure_disposition(
+    diagnostic: &RedactedProviderDiagnostic,
+) -> EvmCapabilityFailureDisposition {
+    use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+
+    match diagnostic_u64(diagnostic, "http_status") {
+        Some(408 | 425 | 429 | 500 | 502 | 503 | 504 | 507) => OperationalBlock,
+        Some(_) | None => TerminalValidation,
+    }
+}
+
+fn json_rpc_failure_disposition(
+    diagnostic: &RedactedProviderDiagnostic,
+) -> EvmCapabilityFailureDisposition {
+    use EvmCapabilityFailureDisposition::{OperationalBlock, TerminalValidation};
+
+    match diagnostic_i64(diagnostic, "rpc_code") {
+        // JSON-RPC internal error plus the Ethereum resource-not-found,
+        // resource-unavailable, and limit-exceeded server errors.
+        Some(-32603 | -32001 | -32002 | -32005) => OperationalBlock,
+        Some(_) | None => TerminalValidation,
+    }
+}
+
+fn diagnostic_u64(diagnostic: &RedactedProviderDiagnostic, field: &str) -> Option<u64> {
+    diagnostic
+        .fields()
+        .iter()
+        .find(|(name, _)| name.as_str() == field)
+        .and_then(|(_, value)| match value {
+            ProviderDiagnosticValue::U64(value) => Some(*value),
+            ProviderDiagnosticValue::Id(_)
+            | ProviderDiagnosticValue::I64(_)
+            | ProviderDiagnosticValue::Bool(_) => None,
+        })
+}
+
+fn diagnostic_i64(diagnostic: &RedactedProviderDiagnostic, field: &str) -> Option<i64> {
+    diagnostic
+        .fields()
+        .iter()
+        .find(|(name, _)| name.as_str() == field)
+        .and_then(|(_, value)| match value {
+            ProviderDiagnosticValue::I64(value) => Some(*value),
+            ProviderDiagnosticValue::Id(_)
+            | ProviderDiagnosticValue::U64(_)
+            | ProviderDiagnosticValue::Bool(_) => None,
+        })
+}
+
+/// Builds a closed redacted source mismatch.
+pub fn source_mismatch_error(
+    binding: &EvmNetworkBinding,
+    observed_chain_id: U256,
+    source_ref: &LocalPublicId,
+) -> EvmCapabilityError {
+    let diagnostic = evm_diagnostic(ProviderDiagnosticCode::SourceMismatch)
+        .with_field(
+            public_id("network_id"),
+            ProviderDiagnosticValue::Id(binding.network_id.clone()),
+        )
+        .with_field(
+            public_id("expected_chain_id"),
+            ProviderDiagnosticValue::U64(binding.expected_chain_id()),
+        )
+        .with_field(
+            public_id("source_ref"),
+            ProviderDiagnosticValue::Id(source_ref.clone()),
+        );
+    let diagnostic = match u64::try_from(observed_chain_id) {
+        Ok(observed_chain_id) => diagnostic.with_field(
+            public_id("observed_chain_id"),
+            ProviderDiagnosticValue::U64(observed_chain_id),
+        ),
+        Err(_) => diagnostic.with_field(
+            public_id("observed_chain_id_out_of_range"),
+            ProviderDiagnosticValue::Bool(true),
+        ),
+    };
+    EvmCapabilityError::SourceMismatch { diagnostic }
+}
+
 /// Builds a closed redacted EVM provider diagnostic.
 pub fn evm_diagnostic(code: ProviderDiagnosticCode) -> RedactedProviderDiagnostic {
-    RedactedProviderDiagnostic::new(evm_public_id("evm"), code)
+    RedactedProviderDiagnostic::new(public_id("evm"), code)
 }
 
-fn evm_public_id(value: &str) -> LocalPublicId {
+fn public_id(value: &str) -> LocalPublicId {
     LocalPublicId::new(value).expect("EVM diagnostic id must be checked public text")
-}
-
-fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> EvmCapabilityError {
-    EvmCapabilityError::InvalidRequest {
-        reason: EvmInvalidRequest::InvalidIdentifier,
-    }
 }
 
 #[cfg(test)]

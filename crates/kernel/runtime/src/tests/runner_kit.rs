@@ -436,6 +436,70 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     });
 }
 
+struct PendingIngressExecutor {
+    started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl ExternalReadPlanExecutor<RuntimeReadState> for PendingIngressExecutor {
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: RunnerIngressContext<'a>,
+        _state: &'a RuntimeReadState,
+    ) -> RunnerIngressFuture<'a> {
+        Box::pin(async move {
+            self.started
+                .lock()
+                .expect("started signal")
+                .take()
+                .expect("one ingress validation")
+                .send(())
+                .expect("started receiver");
+            let release = self
+                .release
+                .lock()
+                .expect("release signal")
+                .take()
+                .expect("one ingress validation");
+            release.await.expect("release sender");
+            Ok(())
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _plan: &'a FixtureOutputValue,
+        _ctx: &'a ErasedRunCtx<'_>,
+    ) -> ExternalReadExecutionFuture<'a, FixtureOutputValue> {
+        Box::pin(async { unreachable!("ingress validation must not execute the read plan") })
+    }
+}
+
+#[tokio::test]
+async fn external_read_runner_awaits_pending_async_ingress_validation() {
+    let fixture = fixture_with_first_side_effect_state();
+    let node = node_by_output(&fixture, &fixture.cell_b);
+    let launch = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let runner = ExternalReadRunner::<RuntimeReadState, _>::new(
+        Arc::new(RunnerKitArtifactProvider::default()),
+        PendingIngressExecutor {
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(Some(release_rx)),
+        },
+    );
+    let context = RunnerIngressContext::new(&fixture.runtime_spec, node, &launch);
+    let mut validation = ErasedNodeRunner::validate_ingress(&runner, context);
+
+    tokio::select! {
+        result = &mut validation => panic!("ingress returned before async validation: {result:?}"),
+        started = started_rx => started.expect("pending validator started"),
+    }
+    release_tx.send(()).expect("release pending validator");
+    validation.await.expect("async ingress validation");
+}
+
 #[tokio::test]
 async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     let fixture = fixture();

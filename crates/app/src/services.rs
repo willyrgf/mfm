@@ -52,7 +52,7 @@ where
         &self,
         run_id: &RunId,
         status: DriveStatus,
-    ) -> Result<RunResponse, AppError> {
+    ) -> Result<RunResponse, PublicError> {
         let context = self
             .trusted_run_reader()
             .load_status_context(run_id)

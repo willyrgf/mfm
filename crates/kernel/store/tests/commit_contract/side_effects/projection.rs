@@ -37,7 +37,26 @@ fn side_effect_ledger_state_exposes_valid_prepared_view() {
         panic!("expected prepared state");
     };
     assert_eq!(claim.claim_generation, 1);
-    assert!(prepared_invocation.is_none());
+    let prepared_invocation = prepared_invocation.expect("prepared invocation");
+    let prepared_evidence = prepared_artifact_ref();
+    assert_eq!(
+        prepared_invocation.schema_id.as_ref(),
+        prepared_evidence.schema_id.as_ref()
+    );
+    assert_eq!(
+        &prepared_invocation.artifact_id,
+        &prepared_evidence.artifact_id
+    );
+    assert_eq!(
+        &prepared_invocation.content_digest,
+        &prepared_evidence.digest
+    );
+    assert_eq!(
+        &prepared_invocation.evidence_hash,
+        &prepared_evidence
+            .evidence_hash()
+            .expect("prepared evidence hash")
+    );
     assert!(resource_key.is_none());
 }
 

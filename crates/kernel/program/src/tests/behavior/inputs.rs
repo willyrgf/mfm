@@ -229,6 +229,89 @@ fn derive_backed_state_input_handles_build_canonical_struct_bindings() {
 }
 
 #[test]
+fn structured_state_input_handles_flow_through_operation_boundaries() {
+    let mut operations = OperationRegistryBuilder::new();
+    operations
+        .register::<StructuredInputOperation>()
+        .expect("structured input operation registers");
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("scope key"),
+        StateRegistryBuilder::new().into_snapshot(),
+        operations.into_snapshot(),
+        |root| {
+            let primary = root.seed(SeedKey::new("primary")?, launch_seed(1, "primary"))?;
+            let optional = root.seed(
+                SeedKey::new("optional")?,
+                CanonicalSeed::from_value(&mfm_values::MaybeValue::Produced(LaunchValue {
+                    amount: 2,
+                    label: "optional".to_owned(),
+                }))?,
+            )?;
+            let ordered_first = root.seed(
+                SeedKey::new("ordered-first")?,
+                launch_seed(3, "ordered-first"),
+            )?;
+            let ordered_second = root.seed(
+                SeedKey::new("ordered-second")?,
+                launch_seed(4, "ordered-second"),
+            )?;
+            let artifact = root.seed(
+                SeedKey::new("artifact")?,
+                CanonicalSeed::from_value(&artifact_ref_fixture(0xbc)?)?,
+            )?;
+            let handles = LaunchInputHandles {
+                primary_value: primary,
+                optional_value: optional,
+                ordered_values: vec![ordered_first.clone(), ordered_second.clone()],
+                required_values: NonEmptyHandles::new(ordered_first, vec![ordered_second]),
+                artifact_value: artifact,
+            };
+            let output = root.scope().call::<StructuredInputOperation, _>(
+                OperationKey::new("structured-input")?,
+                StructuredInputOperation,
+                LaunchConfig { multiplier: 1 },
+                OperationInputHandles::new(handles),
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: output.result,
+                },
+            )
+        },
+    )
+    .expect("structured operation builds");
+
+    assert!(draft.state_nodes().is_empty());
+    assert_eq!(draft.operation_lineage().len(), 1);
+    let frame = &draft.operation_lineage()[0];
+    assert_eq!(
+        frame.input.input_schema_id,
+        LaunchInput::input_schema_id().expect("input schema id")
+    );
+    let InputBindingNodeKind::Struct { fields } = &frame.input.root.kind else {
+        panic!("structured operation input should retain its struct binding");
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.field_path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "artifactValue",
+            "optionalValue",
+            "orderedValues",
+            "primaryValue",
+            "requiredValues",
+        ]
+    );
+    assert_eq!(
+        frame.output_handles[0].cell_id(),
+        draft.public_output_spec().outputs()[0].cell().cell_id()
+    );
+}
+
+#[test]
 fn duplicate_input_field_paths_reject() {
     let first = NamedInputBinding::new(
         InputFieldPath::new("duplicate").expect("path"),

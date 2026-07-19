@@ -37,12 +37,43 @@ compatibility shims, and new-runtime state migrations are unsupported.
    nix run .#test
    nix run .#test-db
    nix run .#ci
+   nix run .#ps
    ```
 
 If retained state is rejected after repinning, do not move registry files,
 rewrite markers, or ask the new runtime to migrate them. Restore the old exact
 pin for any required inspection or supported cleanup. This guide deliberately
 defines no new-runtime adoption or migration procedure for abandoned state.
+
+## Local state drift triage
+
+If the compiled model is valid but the default state root fails before any
+task starts, compare it with a fresh temporary state root before changing the
+project model:
+
+```bash
+system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
+nix eval --json ".#apps.${system}" --apply builtins.attrNames
+nix run .#model-check
+tmpdir=$(mktemp -d)
+NIXFIED_STATE_DIR="$tmpdir" nix run .#check
+NIXFIED_STATE_DIR="$tmpdir" nix run .#clean
+```
+
+If the fresh root passes while the default root fails during registry or marker
+admission, treat the failure as local runtime-state drift. Check for live owned
+processes before cleanup:
+
+```bash
+nix run .#ps
+pgrep -af 'nixfied-runtime|postgres|reth|mfm_cli|cargo'
+```
+
+Control commands may fail when the old registry itself cannot be opened. Do
+not relocate registry files, rewrite markers, or delete state around matching
+live processes. Restore the old exact flake pin for supported inspection and
+cleanup; only abandon old state after deciding that all state under that root
+is disposable.
 
 ## Cargo verification artifacts
 
@@ -66,8 +97,8 @@ Direct development remains in the ordinary worktree target because
 ## Current local conventions
 
 - [`nixfied.nix`](../nixfied.nix) is the project-owned model. It exports
-  `check`, `test`, `test-db`, and `ci` and imports the upstream Postgres
-  adapter.
+  `check`, `test`, `test-db`, and `ci` and imports the upstream Postgres and
+  Reth adapters.
 - `.#ci` is full by definition and does not accept v1 `--mode`, `--full`, or
   `--summary` flags.
 - MFM's deterministic service window starts at port `28080`, below common OS

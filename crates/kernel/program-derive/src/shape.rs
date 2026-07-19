@@ -201,10 +201,10 @@ fn enum_shape_tokens(
                 format!("duplicate MFM enum variant wire name '{wire_name}'"),
             ));
         }
-        if internal_tagged && !matches!(variant.fields, Fields::Named(_)) {
+        if internal_tagged && matches!(variant.fields, Fields::Unnamed(_)) {
             return Err(syn::Error::new(
                 variant.ident.span(),
-                "internally tagged MFM enum variants must have named fields",
+                "internally tagged MFM enum variants must be unit or named-field variants",
             ));
         }
         variant_names.push(wire_name.clone());

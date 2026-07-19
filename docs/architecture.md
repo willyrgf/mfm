@@ -18,8 +18,12 @@ transport-only surfaces.
 ## Core Runtime Shape
 
 ```text
-typed or authored input
-  -> operation crate builds typed program draft
+setup TOML
+  -> app strictly decodes, validates, canonicalizes, scans for prohibited fields
+  -> app atomically upserts complete typed values by intrinsic stable target
+entry-point id plus target
+  -> app resolves and verifies the target's current configuration
+  -> operation crate builds a concrete typed program draft
   -> mfm-certify lowers, validates, and emits certified typed execution spec
   -> app verifies persisted spec/certificate evidence and assembles launch material
   -> runtime rebuilds verified history from the append-only run stream
@@ -39,11 +43,93 @@ live driver for a base work identity; resource lanes protect certified side effe
 stores, transports, signer providers, and driver loops cannot define run identity, side-effect
 authority, replay authority, public-output authority, or terminal status.
 
-For the proposed consolidation of public run-start ingress around registered entry-point
-operations, see `docs/RFC_ENTRYPOINT_OP.md`.
+Public run-start ingress uses an exact entry-point id plus one stable target, as described in
+`docs/design.md`. Current-configuration resolution is an app pre-admission concern; it is not
+runtime or replay authority.
 
-For fact-backed portfolio collectors and report-only `portfolio_snapshot` authority,
-see `docs/portfolio-collect-then-report.md`.
+The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
+normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
+Bitcoin collection resolves one shared tip per required network and emits checked receipts. Each
+EVM network becomes one child call to the reusable `EvmBalanceCollectionOperation`, whose read and
+atomic-record states return a checked receipt after recording `evm.balance_snapshot` facts. The
+typed BTC/EVM receipt vectors flow directly into one store-backed selection state; assembly
+receives only rehydrated and identity-reverified facts. The complete snapshot graph is the sole
+public objective, `mfm.portfolio/snapshot@1`.
+
+`mfm-op-portfolio-snapshot` owns that complete internal graph through two operations.
+`PortfolioSnapshotOperation` projects normalized `PortfolioConfig` into child Bitcoin/EVM
+collector calls and one `PortfolioReportOperation` call; it constructs no state directly. The
+report operation receives the typed family receipt handles and owns receipt-pinned selection,
+snapshot assembly, and report projection. Its one production draft helper binds exactly one
+`PortfolioPublicOutputs` root. Portfolio admission bounds networks, wallets, symbols,
+wallet-to-symbol relations, and distinct EVM sources per network before graph expansion. The app
+registers the needed runners and certification descriptors, strictly resolves one target-keyed
+`PortfolioConfig` at admission, and exposes that exact graph only through
+`mfm.portfolio/snapshot@1`.
+
+The snapshot operation registry composes the Bitcoin and EVM child registry functions, then adds
+only the report operation's own states and operations. Parent registries must never repeat a child
+crate's concrete inventory: child topology changes flow through the registry-composition primitive
+into authoring and certification together.
+
+## Current EVM Inventory
+
+This is the exact current inventory. Cargo metadata, state registration, or app discovery changing
+any row requires an architecture update in the same commit.
+
+### Packages
+
+Exactly six workspace packages have an EVM-specific package name:
+
+| Package | Path | Durable responsibility |
+|---|---|---|
+| `mfm-evm-capabilities` | `crates/evm-capabilities` | Checked source-bound read and transaction authority plus canonical protocol evidence |
+| `mfm-evm-signing` | `crates/evm-signing` | Canonical transient Alloy EIP-1559 signing and finalization |
+| `mfm-states-evm` | `crates/states/evm` | Reusable balance, transaction, and exact-anchor validation semantics |
+| `mfm-adapters-evm` | `crates/adapters/evm` | Live and evidence-only replay bindings for the EVM states |
+| `mfm-transports-evm` | `crates/transports/evm` | Bounded source-stable JSON-RPC sessions |
+| `mfm-op-evm-collectors` | `crates/ops/evm-collectors-op` | The reusable two-state balance collector operation and its internal cycle wrapper |
+
+Only capabilities and signing are top-level `crates/evm-*` directories. The other four packages
+follow the repository state/adapter/transport/operation taxonomy.
+
+This split is deliberate. Do not merge the five lower EVM layers merely to reduce manifest count:
+their dependency firebreaks keep protocol authority, signing, reusable state semantics, runtime
+binding, and live HTTP implementation independently reusable. Likewise, Bitcoin and EVM collector
+operations remain separate because they share the operation-composition mechanism, not protocol
+plans, facts, evidence, or state semantics.
+
+### State kinds
+
+`mfm-states-evm` owns exactly these four state kinds:
+
+| State type | Descriptor name | Effect |
+|---|---|---|
+| `CollectEvmBalancesState` | `mfm.evm.collect_balances` | `ReadExternal` |
+| `RecordEvmBalanceFactsState` | `mfm.evm.record_balance_facts` | `ManagedPlatformWrite` |
+| `SubmitEvmTransactionState` | `mfm.evm.transaction.submit` | `ApplySideEffect` |
+| `ValidateEvmContractState` | `mfm.evm.contract.validate` | `ReadExternal` |
+
+The adapter package binds all four and owns no operation topology. The collector operation expands
+only the first two and exports only `EvmBalanceCollectionReceipt`.
+
+### Entry points and composition
+
+`mfm-app::entry_point_ids()` contains exactly `mfm.portfolio/snapshot@1`. Its graph is:
+
+```text
+PortfolioSnapshotOperation
+  +-- BtcNetworkCollectionOperation(s)
+  +-- EvmBalanceCollectionOperation(s)
+  `-- PortfolioReportOperation
+        -> SelectHoldingsState
+        -> AssembleSnapshotState
+        `-> ProjectReportState
+```
+
+The EVM internal cycle draft calls `EvmBalanceCollectionOperation` and binds its receipt for
+scheduler-owned execution. It has no setup kind, configured target resolver, discovery id, CLI/REST
+start surface, app output renderer, or public entry point.
 
 ## Authority Contract
 
@@ -107,7 +193,47 @@ capability, public type, CLI command, REST route, or test fixture.
 | App assembly | Registry/store/artifact/capability wiring and typed run services | Workflow planning or state behavior |
 | Binary/API | Input decoding, routing, response envelopes | Domain semantics, runtime authority, direct state execution |
 
+Capability contracts are foundational protocol authority: they depend only on kernel or other
+capability contracts. Domain models may consume capability-owned checked protocol identities, but
+capability contracts never depend back on domain models.
+
 If a unit does not fit one category cleanly, the design is not ready.
+
+### Current Configuration And Runtime-Config Boundary
+
+The semantic configuration path has one ownership split:
+
+- `bin/cli` and `bin/rest-api` decode an entry-point id and target only;
+- `mfm-app` owns the closed setup TOML document, typed validation, canonical JSON, prohibited-field
+  scanning, target-keyed current-configuration persistence, and target resolution;
+- operation crates receive concrete typed values and deterministic joins; completed configs and
+  graphs do not contain target indirections;
+- configuration storage persists opaque canonical rows keyed by stable target and knows neither
+  domain config nor setup kinds;
+- kernel, state, adapter, transport, runtime, replay, and binaries do not depend on configuration
+  model types or configuration persistence.
+
+Target resolution ends before certification and `RunAdmitted`. Launch evidence records the exact
+entry-point id plus target/schema/digest so a run can be verified without consulting mutable
+current configuration. Resume, status, stream, public-output, and replay paths use retained
+certified artifacts and the append-only run stream only.
+
+Two v1 decisions are deliberate:
+
+- Family managed-write outputs are the completion authority for portfolio selection.
+  `PortfolioSnapshotOperation` passes typed Bitcoin and EVM receipt vectors into one
+  `PortfolioReportOperation`, whose structured input is passed unchanged to
+  `SelectHoldingsState`; neither operation has a generic receipt entry, logical-manifest wrapper,
+  count/readiness value, or fan-in state. Selection checks
+  exact portfolio demand and both family receipt contracts before issuing one shared-snapshot query
+  batch. The portfolio state package's dependencies on the Bitcoin and EVM state packages are the
+  explicit downstream typed-output/fact contracts; it owns neither family's runner, transport,
+  fact publication, replay, or workflow topology.
+- Runtime TOML remains a process-local routing and signer boundary rather than semantic
+  configuration data. Live assembly selectively resolves only the requested EVM route or requested
+  signer plus its referenced keystore, so malformed unrelated entries do not block that resource.
+  Read-only paths do not load it, and it is never persisted or used by replay. There is no
+  compatibility path or hidden fallback.
 
 ## Boundary Contract
 
@@ -118,7 +244,7 @@ Operations are deterministic planning only.
 Operations may:
 
 - parse and validate typed planning config
-- lower authored config into canonical typed config
+- lower validated config into canonical typed config
 - call other typed operation builders
 - create seeds, scopes, state nodes, bridge nodes, and public-output bindings
 - attach stable domain-key and lineage evidence
@@ -151,7 +277,7 @@ States may:
 - define config, input, output, public-output, and artifact value types
 - declare effect class and required capabilities
 - depend on capability contract crates that define typed authority contracts
-- define side-effect contract when applicable
+- define hash-bound external-read plans/evidence or side-effect contracts when applicable
 - validate domain config shape
 - construct deterministic domain intent
 - own deterministic transformation and validation semantics
@@ -171,8 +297,9 @@ States must not:
   implementations
 
 Side-effecting or external observation behavior is reached through typed capabilities supplied by
-runtime/app assembly. State code must not create its own live network, filesystem, clock, process,
-or signer access when that access is part of semantic execution.
+runtime/app assembly. External-read states own a deterministic plan and reducer; adapters execute
+the plan but do not own replay semantics. State code must not create its own live network,
+filesystem, clock, process, or signer access when that access is part of semantic execution.
 
 ### State Capability Boundary
 
@@ -180,7 +307,9 @@ States declare authority. Transports implement authority. Adapters bind the two 
 
 States may depend on capability contract crates because those crates define typed authority
 contracts. States must not depend on live transport implementation crates. Adapters translate
-state-owned intent into capability calls and recorded evidence. Transports perform protocol IO and
+state-owned plans or mutation intent into capability calls and recorded evidence. The generic
+runtime runner owns materialization, reduction, and evidence staging; the generic replay driver
+loads the same typed evidence and calls the same reducer. Transports perform protocol IO and
 implement capability contracts.
 
 For replay/resume semantics, including pure/read/side-effect behavior, see the authoritative
@@ -194,6 +323,7 @@ Adapters may:
 
 - bind certified state descriptors to executable runners
 - materialize typed inputs through runtime-provided surfaces
+- execute state-authored external-read plans without redefining their reducers
 - call generic transports
 - call generic signer providers
 - encode submit-time raw transaction bytes transiently
@@ -257,11 +387,12 @@ Signers provide generic key material and signature capabilities.
 Signer crates may:
 
 - define signer references
-- define signing algorithm and domain identifiers
+- define protocol-neutral signing algorithm, profile, domain, and purpose identifier types
 - define signing request/result traits
 - implement MFM keystore-backed signing
 - map runtime signer refs to keystore entries, hardware signers, remote signers, or future wallets
 - verify expected public identities
+- enforce an explicitly requested deterministic/canonical provider profile
 - redact all secret-bearing details from errors
 
 Signer crates must not:
@@ -273,7 +404,15 @@ Signer crates must not:
   raw signed transaction bytes in typed semantic surfaces
 
 Raw signed transactions are bearer mutation material. They remain transient submit-time bytes below
-the typed semantic boundary.
+the typed semantic boundary. `mfm-evm-signing` owns the sole domain-specific EIP-1559 envelope
+conversion/finalization path: Alloy supplies the signing digest, signed encoding, and transaction
+hash; MFM verifies the generic result profile, canonical low-s/parity, and recovered sender. The
+keystore provider is protocol-neutral and must not import EVM domain or purpose constants.
+
+The app layer may resolve one exact runtime signer binding and referenced keystore profile, build
+the generic provider, and call the canonical EVM signing function. Binaries may parse typed input,
+invoke that app service, and publish the returned bearer only to an explicit user-selected file;
+they must not open a signing key, construct a second signing path, or retain the bearer.
 
 ### Configuration
 
@@ -332,6 +471,11 @@ explicit workflow mode rather than weakening the existing mode.
 
 ## Architecture Doctrine
 
+When simplifying an existing subsystem, optimize in this order: fewer concepts, fewer execution and
+replay paths, fewer public types and schemas, fewer duplicated responsibilities, fewer places a
+future change must touch, and finally fewer lines once correctness, security, and replay guarantees
+are satisfied. Package count alone is not a useful simplification metric.
+
 ### Rule 1: One Stable Abstraction Per Crate
 
 A crate must own one durable abstraction. It must not own a parity slice.
@@ -343,7 +487,7 @@ Good crate reasons:
 - reusable domain state family
 - deterministic workflow topology
 - pure domain model
-- authored/canonical config pipeline
+- setup/canonical config pipeline
 - storage implementation
 - runtime/kernel primitive
 
@@ -378,14 +522,10 @@ Workflow topology names must not appear in:
 
 Capability names must describe the authority being granted, not the workflow requesting it.
 
-Allowed:
+Current authority names include:
 
-- `mfm.evm.chain_identity.read`
-- `mfm.evm.call.read`
-- `mfm.evm.logs.read`
-- `mfm.evm.nonce.read`
-- `mfm.evm.nonce_occupancy.read`
-- `mfm.evm.transaction.submit`
+- `mfm.evm.read`
+- `mfm.evm.transaction`
 - `mfm.signing.sign`
 - `mfm.artifact.read`
 
@@ -402,12 +542,11 @@ must check both.
 
 Public names should describe what the user means, not how the implementation was assembled.
 
-Allowed public names:
+Allowed domain terms in public documentation:
 
-- contract deployment
-- contract configuration
-- contract validation
-- contract lifecycle
+- EVM transaction creation action
+- EVM transaction call action
+- exact-anchor contract validation state
 - EVM transaction intent
 - EVM RPC source
 - signer reference
@@ -419,6 +558,30 @@ Disallowed public names:
 - parity fixture names
 - implementation recipe names
 - transport crate names exposed as route or command names
+
+Direct creation and ordinary calls share one transaction state; operation crates own
+any domain-specific deployment or configuration topology. A reusable descriptor still does not
+imply a public operation or setup surface, and the app publishes only certified objectives with a
+current consumer.
+
+`SubmitEvmTransactionState` is registered by app certification and runner assembly as reusable
+substrate. Its runner preclaims the exact `mfm.evm.sender_nonce` lane, prepares one immutable
+EIP-1559 envelope, and delegates submission/observation to one adapter contract. Preparation admits
+intent, exact nonce, and checked fees into one complete type-2 estimate request before IO, then adds
+the returned gas limit to that same representation for Alloy signing. Read-only services and
+existing portfolio execution do not resolve signer material merely because this descriptor is
+registered; the exact signer and referenced keystore are loaded only when a live transaction node
+is admitted or executed.
+
+`ValidateEvmContractState` is independently registered as signer-free reusable read substrate. Its
+plan fixes one address/number/hash anchor, mandatory non-empty runtime-code hash, and bounded ordered
+full-context calls. Its adapter binds one checked read session, executes code and calls at the exact
+hash, and finishes with a number-to-hash canonicality read. Live execution and evidence-only replay
+both use the state reducer; replay never binds a route or session.
+
+The exact EVM package, state-kind, operation-composition, and entry-point surface is recorded in
+[Current EVM Inventory](#current-evm-inventory). The metadata and discovery contracts enforce that
+inventory; reusable registration never implies public ingress.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 
@@ -485,7 +648,8 @@ Additional dependency rules:
   implementations, signer implementations, or operation crates
 - states may depend on capability contract crates, because those crates define typed authority
   contracts rather than live IO implementations
-- operations may depend on typed states and domain config/model crates, but not on transports,
+- operations may depend on typed states, domain config/model crates, and lower-level operations
+  when a deterministic parent operation composes their certified graphs, but not on transports,
   signer implementations, app, binaries, runtime scheduling, or storage implementations
 - adapters may depend on runtime runner contracts, states, capability contract crates, transport
   contracts, and signer contracts as needed for runner binding, but not on workflow operation
@@ -583,8 +747,11 @@ Before merging a change, verify:
 - the crate name describes a durable abstraction
 - typed specs remain the only runtime contract
 - new public values/configs use typed descriptors and no floats/secrets
-- side effects have typed intent, idempotency, receipt/recovery, one mutation authority, and no
-  retained signed raw transactions
+- side effects have one state-authored intent/idempotency pair, required typed prepared authority,
+  typed submission and receipt/recovery evidence, adapter-only mutation IO, and no retained signed
+  raw transactions
+- deterministic signing requirements are explicit profile ids checked by callers and providers,
+  with no unconstrained or fallback signer binding
 - certified saga and side-effect verification policy are hash-defining spec data, not policy
   resolved by a registry at admission, and compensation/manual outcomes are derived from certified
   policy plus stream evidence

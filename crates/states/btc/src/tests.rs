@@ -295,6 +295,88 @@ fn checkpoint_query_materializes_empty_and_single_row_receipts() {
 }
 
 #[test]
+fn external_read_reducers_bind_primary_and_auxiliary_evidence_to_state_plans() {
+    let context = mfm_program::CertifiedContext::no_context();
+    let chain_state =
+        ObserveBtcChainHeadState::new(ValidatedConfig::new(observe_config()).expect("config"))
+            .expect("chain state");
+    let chain_input = observe_input(None);
+    let chain_plan = chain_state
+        .plan(&chain_input, &context)
+        .expect("chain-head plan");
+    assert_eq!(
+        chain_plan
+            .binding()
+            .expect("source binding")
+            .network_id()
+            .as_str(),
+        "bitcoin-mainnet"
+    );
+    let chain_evidence = BtcChainHeadReadEvidence::from_response(&capability_response());
+    let chain_output = chain_state
+        .reduce(
+            &chain_input,
+            &ExternalReadEvidenceSet::new(chain_evidence.clone(), Vec::new()),
+            &context,
+        )
+        .expect("chain-head reduction");
+    assert_eq!(chain_output.response().block_height(), 850_000);
+
+    let mut wrong_source = serde_json::to_value(chain_evidence).expect("evidence JSON");
+    wrong_source["network"] = serde_json::json!("bitcoin-testnet");
+    let wrong_source = serde_json::from_value(wrong_source).expect("typed evidence");
+    assert!(chain_state
+        .reduce(
+            &chain_input,
+            &ExternalReadEvidenceSet::new(wrong_source, Vec::new()),
+            &context,
+        )
+        .is_err());
+
+    let checkpoint_state = QueryCollectorCheckpointState::new(
+        ValidatedConfig::new(checkpoint_query_config()).expect("config"),
+    )
+    .expect("checkpoint state");
+    let checkpoint_input = QueryCollectorCheckpointInput {};
+    let checkpoint_plan = checkpoint_state
+        .plan(&checkpoint_input, &context)
+        .expect("checkpoint plan");
+    let request = checkpoint_plan.request().expect("checkpoint request");
+    let receipt = fact_query_receipt(request.plan(), Vec::new());
+    let result = fact_query_result(receipt.clone());
+    let query = mfm_facts::FactQueryEvidence::new(
+        request.plan().clone(),
+        receipt,
+        checkpoint_state
+            .selection_evidence(&result)
+            .expect("checkpoint selection"),
+    );
+    let primary = QueryCollectorCheckpointReadEvidence::new(&query, None)
+        .expect("checkpoint primary evidence");
+    let loaded = checkpoint_state
+        .reduce(
+            &checkpoint_input,
+            &ExternalReadEvidenceSet::new(primary.clone(), vec![query.clone()]),
+            &context,
+        )
+        .expect("checkpoint reduction");
+    assert!(loaded.checkpoint().is_none());
+
+    let wrong_query = mfm_facts::FactQueryEvidence::new(
+        query.plan().clone(),
+        query.receipt().clone(),
+        FactSelectionEvidence::new(digest(42), Vec::new(), None).expect("wrong selection"),
+    );
+    assert!(checkpoint_state
+        .reduce(
+            &checkpoint_input,
+            &ExternalReadEvidenceSet::new(primary, vec![wrong_query]),
+            &context,
+        )
+        .is_err());
+}
+
+#[test]
 fn observe_rejects_invalid_loaded_checkpoints() {
     let response = capability_response();
     let state =
@@ -543,7 +625,7 @@ fn state_crate_manifest_stays_inside_state_boundaries() {
         "mfm-app",
         "mfm-runtime",
         "mfm-store",
-        "mfm-stream-store-postgres",
+        "mfm-storage-postgres",
         "mfm-btc-jsonrpc-http",
         "mfm-adapters-btc-jsonrpc",
         "mfm-op-btc-collectors",

@@ -411,6 +411,7 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
             .clone(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        capability_implementations: Vec::new(),
         artifact_evidence: vec![
             stored_artifact_from_run_ref(&stream_run_admitted_spec_artifact_for_hash(
                 &certified_spec.spec_hash,
@@ -464,6 +465,7 @@ fn side_effect_frame_requests_are_pair_keyed() {
         certified_context: CertifiedSideEffectContext::no_context(),
         prepared: None,
         submission: Some(&submission),
+        submission_unknown: None,
         not_submitted: None,
         receipt: None,
         confirmation: None,
@@ -476,6 +478,48 @@ fn side_effect_frame_requests_are_pair_keyed() {
     assert_eq!(request.invocation_epoch, 1);
     assert_eq!(request.evidence_schema_id, submission.submission_schema_id);
     assert_eq!(request.evidence_hash, submission_hash);
+}
+
+#[test]
+fn side_effect_frame_submission_unknown_request_is_pair_keyed() {
+    let pair_id = pair_id(0x45);
+    let ledger_key = events::SideEffectLedgerKey::new("unknown-ledger").expect("ledger key");
+    let intent = intent_persisted(pair_id.clone(), ledger_key.clone());
+    let evidence_hash = content_digest(0x46);
+    let unknown = side_effect::SubmissionUnknown {
+        spec_hash: intent.spec_hash.clone(),
+        node_id: intent.node_id.clone(),
+        attempt_id: intent.attempt_id.clone(),
+        ledger_key,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        pair_id: pair_id.clone(),
+        pair_role: events::SideEffectPairRole::Submit,
+        invocation_epoch: 1,
+        evidence_schema_id: schema_id("mfm.replay.test.submission_unknown", 0x47),
+        evidence_hash: evidence_hash.clone(),
+        evidence_artifact_id: artifact_id(0x48),
+        evidence_artifact_evidence_hash: content_digest(0x49),
+    };
+    let frame = SideEffectReplayFrame {
+        intent: &intent,
+        certified_context: CertifiedSideEffectContext::no_context(),
+        prepared: None,
+        submission: None,
+        submission_unknown: Some(&unknown),
+        not_submitted: None,
+        receipt: None,
+        confirmation: None,
+        ambiguity: None,
+    };
+
+    let request = frame
+        .submission_unknown_request()
+        .expect("submission-unknown request");
+
+    assert_eq!(request.pair_id, pair_id);
+    assert_eq!(request.invocation_epoch, 1);
+    assert_eq!(request.evidence_schema_id, unknown.evidence_schema_id);
+    assert_eq!(request.evidence_hash, evidence_hash);
 }
 
 #[test]
@@ -503,6 +547,7 @@ fn side_effect_frame_not_submitted_requests_are_pair_keyed() {
         certified_context: CertifiedSideEffectContext::no_context(),
         prepared: None,
         submission: None,
+        submission_unknown: None,
         not_submitted: Some(&proof),
         receipt: None,
         confirmation: None,
@@ -547,6 +592,7 @@ fn side_effect_frame_receipt_request_uses_recorded_verify_evidence() {
         certified_context: CertifiedSideEffectContext::no_context(),
         prepared: None,
         submission: None,
+        submission_unknown: None,
         not_submitted: None,
         receipt: Some(&receipt),
         confirmation: None,

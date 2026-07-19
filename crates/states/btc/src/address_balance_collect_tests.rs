@@ -3,7 +3,9 @@ use mfm_btc_capabilities::{
     BitcoinNetworkTag, BtcFinality, BtcHeadKind, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
     RedactedBtcSourceEvidence,
 };
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::StateSpec;
+use mfm_values::NonEmpty;
 
 const HASH_A: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
 const HASH_B: &str = "00000000000000000002b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
@@ -151,33 +153,156 @@ fn multi_subject_batch_must_share_one_joint_tip() {
         &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
     )
     .expect("tip");
-    let obs_a = normalize_btc_address_balance_observation(
-        &observe_config(ADDR_A),
-        &tip,
-        &balance_response(ADDR_A, 100, HASH_A, 1),
+    let facts = vec![balance_fact(&tip, ADDR_A, 1), balance_fact(&tip, ADDR_B, 2)];
+    let receipt =
+        assemble_btc_network_collection_receipt(AssembleBtcNetworkCollectionReceiptInput {
+            joint_tip: tip,
+            balance_facts: NonEmpty::try_from_vec(facts).expect("non-empty facts"),
+        })
+        .expect("receipt");
+    assert_eq!(receipt.entries().len(), 2);
+    assert_eq!(receipt.successful_observation_count(), 2);
+    assert_eq!(receipt.entries()[0].coverage(), BTC_NATIVE_BALANCE_COVERAGE);
+    assert_eq!(receipt.entries()[0].source_status(), "ok");
+}
+
+fn balance_fact(
+    tip: &BtcJointTip,
+    address: &str,
+    balance_sats: u64,
+) -> BtcAddressBalanceSnapshotFact {
+    normalize_btc_address_balance_observation(
+        &observe_config(address),
+        tip,
+        &balance_response(address, tip.block_height(), tip.block_hash(), balance_sats),
     )
-    .expect("a");
-    let obs_b = normalize_btc_address_balance_observation(
-        &observe_config(ADDR_B),
-        &tip,
-        &balance_response(ADDR_B, 100, HASH_A, 2),
+    .expect("observation")
+    .to_fact()
+}
+
+#[test]
+fn receipt_rejects_tampered_identity_fact_anchor_and_duplicate_source() {
+    let tip = materialize_btc_joint_tip(
+        &tip_config(),
+        &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
     )
-    .expect("b");
-    require_shared_joint_tip(&[&obs_a, &obs_b]).expect("shared");
+    .expect("tip");
+    let fact = balance_fact(&tip, ADDR_A, 1);
+    let receipt =
+        assemble_btc_network_collection_receipt(AssembleBtcNetworkCollectionReceiptInput {
+            joint_tip: tip.clone(),
+            balance_facts: NonEmpty::try_from_vec(vec![fact.clone()]).expect("one fact"),
+        })
+        .expect("receipt");
+
+    let mut tampered_identity = serde_json::to_value(&receipt).expect("receipt JSON");
+    tampered_identity["entries"][0]["fact_content_identity"]["response_hash"] = serde_json::json!(
+        "sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+    );
+    assert!(serde_json::from_value::<BtcNetworkCollectionReceipt>(tampered_identity).is_err());
+
+    let mut tampered_fact = serde_json::to_value(&receipt).expect("receipt JSON");
+    tampered_fact["entries"][0]["verified_fact"]["response"]["balance_sats"] =
+        serde_json::json!(2_u64);
+    assert!(serde_json::from_value::<BtcNetworkCollectionReceipt>(tampered_fact).is_err());
+
+    let duplicate =
+        assemble_btc_network_collection_receipt(AssembleBtcNetworkCollectionReceiptInput {
+            joint_tip: tip.clone(),
+            balance_facts: NonEmpty::try_from_vec(vec![fact.clone(), fact]).expect("facts"),
+        });
+    assert!(duplicate.is_err());
+
+    let non_fixed_coverage = BtcAddressBalanceSnapshotFact::new(
+        BtcAddressBalanceSubject::new("bitcoin-mainnet", "main", "public-bitcoin-core", ADDR_A)
+            .expect("subject"),
+        BtcAddressBalanceResponse::new(
+            tip.block_height(),
+            tip.block_hash(),
+            1,
+            CoverageStatus::CompleteAtAnchor,
+            HoldingSourceStatus::Ok,
+        )
+        .expect("response"),
+    );
+    assert!(
+        assemble_btc_network_collection_receipt(AssembleBtcNetworkCollectionReceiptInput {
+            joint_tip: tip.clone(),
+            balance_facts: NonEmpty::try_from_vec(vec![non_fixed_coverage]).expect("fact"),
+        })
+        .is_err()
+    );
 
     let other_tip = materialize_btc_joint_tip(
         &tip_config(),
         &chain_head_response(99, HASH_B, BtcSourceStatus::Synced),
     )
     .expect("other tip");
-    let obs_b_drifted = normalize_btc_address_balance_observation(
-        &observe_config(ADDR_B),
-        &other_tip,
-        &balance_response(ADDR_B, 99, HASH_B, 2),
+    let mismatched_anchor =
+        assemble_btc_network_collection_receipt(AssembleBtcNetworkCollectionReceiptInput {
+            joint_tip: other_tip,
+            balance_facts: NonEmpty::try_from_vec(vec![balance_fact(&tip, ADDR_A, 1)])
+                .expect("fact"),
+        });
+    assert!(mismatched_anchor.is_err());
+}
+
+#[test]
+fn balance_states_require_exact_state_owned_read_budgets() {
+    let mut bad_tip = tip_config();
+    bad_tip.max_source_reads = NonZeroU64::new(2).expect("non-zero");
+    assert!(validate_resolve_btc_joint_tip_config(&bad_tip).is_err());
+
+    let mut bad_observation = observe_config(ADDR_A);
+    bad_observation.max_source_reads = NonZeroU64::new(2).expect("non-zero");
+    assert!(validate_observe_btc_address_balance_config(&bad_observation).is_err());
+}
+
+#[test]
+fn balance_external_read_reducer_binds_address_source_and_anchor() {
+    let context = mfm_program::CertifiedContext::no_context();
+    let joint_tip = materialize_btc_joint_tip(
+        &tip_config(),
+        &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
     )
-    .expect("b drifted");
-    let error = require_shared_joint_tip(&[&obs_a, &obs_b_drifted]).expect_err("not shared");
-    assert!(error.to_string().contains("share one joint tip"));
+    .expect("joint tip");
+    let input = ObserveBtcAddressBalanceInput {
+        joint_tip: joint_tip.clone(),
+    };
+    let state = ObserveBtcAddressBalanceState::new(
+        ValidatedConfig::new(observe_config(ADDR_A)).expect("config"),
+    )
+    .expect("state");
+    let plan = state.plan(&input, &context).expect("balance plan");
+    assert_eq!(
+        plan.request()
+            .expect("balance request")
+            .block_hash()
+            .as_str(),
+        HASH_A
+    );
+
+    let primary =
+        BtcAddressBalanceReadEvidence::from_response(&balance_response(ADDR_A, 100, HASH_A, 42));
+    let output = state
+        .reduce(
+            &input,
+            &ExternalReadEvidenceSet::new(primary.clone(), Vec::new()),
+            &context,
+        )
+        .expect("balance reduction");
+    assert_eq!(output.response().balance_sats(), 42);
+
+    let mut wrong_anchor = serde_json::to_value(primary).expect("evidence JSON");
+    wrong_anchor["block_hash"] = serde_json::json!(HASH_B);
+    let wrong_anchor = serde_json::from_value(wrong_anchor).expect("typed evidence");
+    assert!(state
+        .reduce(
+            &input,
+            &ExternalReadEvidenceSet::new(wrong_anchor, Vec::new()),
+            &context,
+        )
+        .is_err());
 }
 
 #[test]

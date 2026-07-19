@@ -376,7 +376,15 @@ pub(super) fn side_effect_fixture_intent_output(
     let ledger = side_effect_ledger_key_for_ctx(ctx);
     let (pair_id, pair_role) =
         side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
-    let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(ctx, "intent");
+    let intent =
+        fixture_side_effect_evidence(21, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());
+    let idempotency =
+        fixture_side_effect_evidence(34, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());
+    let intent_hash =
+        content_digest_json(serde_json::to_value(&intent).expect("side-effect intent value"))
+            .expect("side-effect intent digest");
+    let intent_artifact_id =
+        ArtifactId::from_digest(intent_hash.algorithm(), *intent_hash.digest());
     let intent_evidence = side_effect_artifact(
         ctx,
         intent_artifact_id.clone(),
@@ -404,13 +412,20 @@ pub(super) fn side_effect_fixture_intent_output(
             pair_id,
             pair_role,
             invocation_epoch,
-            intent_schema_id: ctx.node().config_ref.schema_id.clone(),
+            intent_schema_id: <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
+                .expect("side-effect intent schema"),
             intent_hash,
             intent_artifact_id,
             intent_artifact_evidence_hash,
-            idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
-            idempotency_input_hash: side_effect_fixture_digest(ctx, "idempotency"),
-            idempotency_key: events::IdempotencyKeyRef::new("idem-1").expect("idempotency key"),
+            idempotency_input_schema_id:
+                <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
+                    .expect("side-effect idempotency schema"),
+            idempotency_input_hash: content_digest_json(
+                serde_json::to_value(&idempotency).expect("side-effect idempotency value"),
+            )
+            .expect("side-effect idempotency digest"),
+            idempotency_key: crate::side_effect_driver::side_effect_idempotency_key(&idempotency)
+                .expect("side-effect idempotency key"),
             capability_kind: side_effect_capability_kind(),
             capability_version: side_effect_capability_version(),
             adapter_kind: adapter_binding.adapter_kind.clone(),
@@ -539,7 +554,10 @@ pub(super) fn side_effect_artifact(
         digest,
         byte_len: 19,
         media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(ctx.node().config_ref.schema_id.clone()),
+        schema_id: Some(
+            <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
+                .expect("side-effect evidence schema"),
+        ),
         semantic_type_id: None,
         producer_node_id: Some(ctx.node().node_id.clone()),
         producer_seed_id: None,
@@ -586,24 +604,52 @@ pub(super) fn side_effect_claimed(
     )
 }
 
-pub(super) fn side_effect_prepared(
+pub(super) struct SideEffectFixturePreparedOutput {
+    pub(super) staged_artifact: StagedArtifact,
+    pub(super) payload: RunnerEventPayload,
+}
+
+pub(super) fn side_effect_prepared_output(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
     invocation_epoch: u32,
     claim_generation: u32,
-) -> RunnerEventPayload {
+) -> Result<SideEffectFixturePreparedOutput> {
+    let (artifact_id, digest) = side_effect_fixture_artifact_pair(ctx, "prepared");
+    let evidence = side_effect_artifact(
+        ctx,
+        artifact_id,
+        digest,
+        events::ArtifactRole::PreparedInvocation,
+    );
+    let staged_artifact =
+        staged_side_effect_artifact(ctx, evidence.clone(), ledger.clone(), invocation_epoch)?;
     let claim = runner_claim_binding_for_ctx(ctx, claim_generation);
-    RunnerPayloadBuilder::new(ctx)
-        .side_effect_invocation_prepared(
-            runner_side_effect_binding_for_ctx(ctx, ledger, invocation_epoch),
-            None,
-            RunnerPreparedInvocationBinding {
-                claim_generation: claim.claim_generation,
-                claim_fencing_token: claim.claim_fencing_token,
-                resource_key: None,
-            },
-        )
-        .expect("side-effect prepared payload")
+    let binding = runner_side_effect_binding_for_ctx(ctx, ledger, invocation_epoch);
+    let payload =
+        RunnerEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            ledger_key: binding.ledger_key,
+            ledger_purpose: binding.ledger_purpose,
+            pair_id: binding.pair_id,
+            pair_role: events::SideEffectPairRole::Submit,
+            invocation_epoch: binding.invocation_epoch,
+            claim_generation: claim.claim_generation,
+            claim_fencing_token: claim.claim_fencing_token,
+            resource_key: None,
+            prepared_schema_id: evidence.schema_id.clone().expect("prepared schema"),
+            prepared_artifact_id: evidence.artifact_id.clone(),
+            prepared_hash: evidence.digest.clone(),
+            prepared_artifact_evidence_hash: evidence.evidence_hash().map_err(|error| {
+                RuntimeError::InvalidRunnerOutput(format!("prepared evidence hash: {error}"))
+            })?,
+        });
+    Ok(SideEffectFixturePreparedOutput {
+        staged_artifact,
+        payload,
+    })
 }
 
 pub(super) fn side_effect_failed(

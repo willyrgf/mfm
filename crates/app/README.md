@@ -1,39 +1,63 @@
 # mfm-app
 
-Typed application assembly for certified MFM runs.
+Application assembly for target-keyed, certified MFM runs.
 
-`mfm-app` wires entry-point operation launch and certified typed runtime pieces only:
+`mfm-app` owns the boundary between transport input, semantic configuration, and runtime
+authority. It provides:
 
-- entry-point operation registries
-- app-owned typed spec certification
-- typed runner registries
-- the production run store
-- narrow artifact read providers over run-store evidence
-- typed start/resume/replay dispatch
-- typed public-output read authority and rendering
+- strict setup TOML decoding and secret-free canonicalization;
+- one-transaction target-keyed publication of complete typed values to Postgres;
+- current-target integrity/type/semantic verification at launch;
+- entry-point operation planning and typed certification;
+- production store, artifact, runner, and capability wiring;
+- exact runtime signer/keystore assembly for canonical EIP-1559 signing;
+- typed start/resume/replay dispatch and public-output read authority.
 
-Domain runner behavior lives in adapter crates. For EVM contract lifecycles,
-`mfm-app` only wires concrete process resources such as JSON-RPC clients,
-artifact read providers, and keystore-backed signer providers into the adapter runner
-factory.
+Current configuration is a pre-admission surface. A setup document is a closed set of supported
+typed values; import validates every value, derives its stable target from the intrinsic domain id,
+canonicalizes it, rejects prohibited fields, and atomically creates, updates, or leaves unchanged
+the current row for each target. Run start supplies an exact entry-point id plus a target. App
+resolves that current row before calling operation builders and records target/schema/digest as
+launch evidence. The resulting typed draft and certified spec contain concrete values.
 
-It depends on typed operation planning, typed certification, typed runtime dispatch, and explicit
-process capability wiring.
+The sole public objective is `mfm.portfolio/snapshot@1`. Its REST request has exactly these fields:
 
-Entry-point start resolves a registered public op name and version, normalizes authored config,
-plans a typed draft, certifies it through `mfm-certify`, verifies config and seed inputs against the
-certified spec, and hands typed launch material to runtime middleware. The runtime passes launch
-artifact bytes in the prepared commit bundle that appends `RunAdmitted`. Resume and replay reload
-stored spec/certificate artifacts, verify them against the
-production registry, compare them to `RunAdmitted`, and rebuild stream evidence before constructing
-runtime or replay authority.
+```json
+{
+  "entry_point": "mfm.portfolio/snapshot@1",
+  "target": "acme/primary"
+}
+```
 
-Run status exposes manual-resolution requirements from certified policy only: evidence schema,
-manual authorization verifier, signing scheme, certified operator authority id, allowed operator
-public identities, and quorum. It does not expose signer runtime sources such as keystore paths,
-environment variables, passwords, or provider configuration.
+The request carries no collector policy, child config, runtime route, or report-only/reuse mode.
+Setup publishes only `PortfolioConfig` in this domain. The app resolves and normalizes that value
+once at admission, records its target/schema/digest in `RunAdmitted`, and passes the concrete value to
+`PortfolioSnapshotOperation`. That operation calls the required family collectors and one
+`PortfolioReportOperation`; it constructs no state directly. Resume, replay, status, stream, and
+public-output reads never consult current configuration.
 
-Public-output JSON is an output/cache surface. `mfm-app` renders it only through
-`PublicOutputReadAuthority`, which is minted after stored certified spec/certificate artifacts are
-verified and the public-output projection is rebuilt from the authoritative typed run stream.
-Rendered JSON cannot authorize resume, replay, or another render.
+Domain runner behavior lives in adapter crates. `mfm-app` registers the shared reusable EVM read
+assembly for balance collection and exact-anchor validation, plus the reusable EVM transaction
+binding. The shared read-route validator loads selective runtime configuration on a blocking worker
+before admission; no external-read ingress path performs filesystem IO on an async worker. It also
+registers the EVM collector operation/fact descriptors needed by composed and internal runs. Public
+discovery remains the single certified portfolio objective; the internal EVM collector cycle has no
+app target, resolver, renderer, or discovery id.
+
+The standalone signing facade is not a second mutation workflow. It accepts raw command fields,
+canonically parses and constructs the checked unsigned envelope, resolves exactly the requested
+generic runtime signer and its referenced keystore, and invokes `mfm-evm-signing`. The returned
+signed envelope is transient bearer material; the app does not serialize, persist, clone, submit,
+or render its bytes. The CLI uses this facade for its explicit local bearer-output command, and the
+owned transaction adapter calls the same canonical `mfm-evm-signing` primitive during transaction
+preparation.
+
+After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
+reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They
+do not consult mutable current configuration. Public-output JSON is a cache surface and cannot
+authorize
+resume, replay, certification, or another render.
+
+Runtime TOML is a separate process-local routing and signer boundary. It is loaded only when a
+live capability family needs it and is never part of current configuration, certified specs, events,
+artifacts, or replay inputs.

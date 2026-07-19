@@ -17,7 +17,6 @@ uuid = { version = "1.0", features = ["v4"] }
 tempfile = "3.0"
 tokio = { workspace = true }
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
-mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
@@ -25,24 +24,24 @@ mfm-facts = { path = "../../crates/kernel/facts" }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
-mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
+mfm-storage-postgres = { path = "../../crates/storages/postgres" }
+mfm-values = { path = "../../crates/kernel/values" }
 mfm-adapters-btc-jsonrpc = { path = "../../crates/adapters/btc-jsonrpc" }
-mfm-adapters-evm = { path = "../../crates/adapters/evm" }
-mfm-adapters-portfolio = { path = "../../crates/adapters/portfolio" }
 mfm-btc-capabilities = { path = "../../crates/btc-capabilities" }
 mfm-evm-capabilities = { path = "../../crates/evm-capabilities" }
+mfm-evm-signing = { path = "../../crates/evm-signing" }
 mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
 mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
-mfm-states-btc = { path = "../../crates/states/btc" }
+mfm-op-portfolio-snapshot = { path = "../../crates/ops/portfolio-snapshot-op" }
 mfm-states-evm = { path = "../../crates/states/evm" }
+mfm-transports-evm = { path = "../../crates/transports/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-portfolio-model = { path = "../../crates/portfolio/model" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
-assert_cmd = "2.0"
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
-mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+mfm-signing = { path = "../../crates/signing" }
 tower = "0.5"

@@ -16,11 +16,10 @@ use sqlx::{AssertSqlSafe, PgPool};
 mod run_control_support;
 
 pub use run_control_support::{
-    admit_portfolio_run_without_driving, prepare_entry_point_launch_for_store,
-    prepare_portfolio_launch_for_store, set_evm_runtime_config_env_with_signer_for_test,
-    start_collectors_rpc_mock, start_portfolio_rpc_mock, write_collectors_runtime_config_for_test,
-    write_evm_runtime_config_for_test, EnvVarRestore, RuntimeConfigSignerBinding,
-    ENV_RUNTIME_CONFIG_FILE,
+    admit_btc_chain_head_run_without_driving, prepare_btc_chain_head_launch_for_store,
+    set_evm_runtime_config_env_with_signer_for_test, start_portfolio_rpc_mock,
+    write_evm_runtime_config_for_test, write_portfolio_runtime_config_for_test, EnvVarRestore,
+    RuntimeConfigSignerBinding, ENV_RUNTIME_CONFIG_FILE,
 };
 
 /// Re-export: merge-safe Platform holding seed for store-backed portfolio report tests.
@@ -79,19 +78,17 @@ pub async fn connect_postgres_with_retry(
     database_url: &str,
     max_attempts: u32,
     delay_ms: u64,
-) -> mfm_stream_store_postgres::PostgresRunStore {
-    let mut last_err: Option<mfm_stream_store_postgres::PostgresStoreError> = None;
+) -> mfm_storage_postgres::PostgresStore {
+    let mut last_err: Option<mfm_storage_postgres::PostgresStoreError> = None;
     for _ in 0..max_attempts {
-        match mfm_stream_store_postgres::PostgresSchema::migrate(database_url).await {
-            Ok(()) => {
-                match mfm_stream_store_postgres::PostgresRunStore::connect(database_url).await {
-                    Ok(store) => return store,
-                    Err(err) => {
-                        last_err = Some(err);
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    }
+        match mfm_storage_postgres::PostgresSchema::migrate(database_url).await {
+            Ok(()) => match mfm_storage_postgres::PostgresStore::connect(database_url).await {
+                Ok(store) => return store,
+                Err(err) => {
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
-            }
+            },
             Err(err) => {
                 last_err = Some(err);
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -125,6 +122,7 @@ pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         store,
+        configured_store: None,
         runtime_config_path: None,
         fact_index,
     }

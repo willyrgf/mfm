@@ -20,11 +20,33 @@
 //!             "network_id": "ethereum-mainnet",
 //!             "family": "evm",
 //!             "chain_id": 1,
+//!             "native_decimals": 18,
 //!             "metadata": {}
 //!         }
 //!     ],
-//!     "wallets": [],
-//!     "symbol_configs": [],
+//!     "wallets": [{
+//!         "wallet_id": "wallet_main",
+//!         "subject": {
+//!             "kind": "evm_address",
+//!             "address": "0x000000000000000000000000000000000000dead"
+//!         },
+//!         "network_id": "ethereum-mainnet",
+//!         "implementation": {"kind": "address_only"},
+//!         "symbol_ids": ["eth.native.ethereum-mainnet"],
+//!         "metadata": {}
+//!     }],
+//!     "symbol_configs": [{
+//!         "symbol_id": "eth.native.ethereum-mainnet",
+//!         "display_symbol": "ETH",
+//!         "network_id": "ethereum-mainnet",
+//!         "source": {"kind": "native"},
+//!         "valuation": {"quotes": [{
+//!             "quote": "USD",
+//!             "priced_symbol_id": "eth.native.ethereum-mainnet",
+//!             "unit_price_dec": "1800"
+//!         }]},
+//!         "metadata": {}
+//!     }],
 //!     "metadata": {}
 //! });
 //!
@@ -33,8 +55,6 @@
 //! # Ok::<(), mfm_portfolio_model::portfolio::PortfolioConfigError>(())
 //! ```
 
-/// Aave V3 portfolio-position config models and validation helpers.
-pub mod aave;
 /// Stable portfolio domain keys used by typed fanout/fanin planning.
 pub mod domain_key;
 /// Shared holding-observation status vocabulary and write-admission rules.

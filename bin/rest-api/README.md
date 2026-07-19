@@ -23,16 +23,15 @@ Environment variables:
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_REST_ROLE`: process role (`live` or `read`; default `live`)
-- `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
-alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
+alter tables. Apply the `mfm-storage-postgres` migrations before starting
 the server:
 
 ```bash
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
+cargo sqlx migrate run --source crates/storages/postgres/migrations
 ```
 
 Use a fresh or explicitly reset database for this typed Postgres baseline. There
@@ -61,7 +60,11 @@ config is reported only when a live start/resume request needs the affected capa
 All responses are JSON envelopes:
 
 - success: `{"status":"success","data": ...}`
-- error: `{"status":"error","error":{"code":"...","message":"..."}}`
+- error: `{"status":"error","error":{"code":"...","message":"...","diagnostics":[...]}}`
+
+REST error envelopes contain the same shared app `PublicError` payload used by CLI JSON. The
+`diagnostics` member is omitted when empty and, when present, contains only closed redaction-safe
+provider diagnostics. HTTP status is derived from the non-serialized public error classification.
 
 Endpoints:
 
@@ -211,40 +214,35 @@ Response shape:
 
 ## Start A Run
 
-`POST /v1/runs/start` accepts only entry-point operation requests. The REST layer decodes HTTP
-input and delegates registry resolution, planning, certification, launch preparation, run
-admission, and verified public-output rendering to app assembly.
+`POST /v1/runs/start` accepts one exact entry-point id and one stable target. The REST layer
+delegates current-target resolution, planning, certification, admission, and verified rendering to
+app assembly.
 
-Request shape:
+The endpoint shape is an `entry_point`, `target`, and optional `invocation_key` JSON object. The
+only accepted entry point is `mfm.portfolio/snapshot@1`:
 
 ```json
 {
-  "op": "portfolio_snapshot",
-  "op_version": 1,
-  "config_format": "json",
-  "config": {
-    "...": "entry-point config"
-  },
-  "invocation_key": "optional-key"
+  "entry_point": "mfm.portfolio/snapshot@1",
+  "target": "acme/primary"
 }
 ```
 
+No other run-start entry point or selector form is admitted.
+
 Request notes:
 
-- `op` is required and selects a public entry-point operation.
-- `op_version` is optional. When omitted, the latest registered version for `op` is used.
-- All currently registered public entry-point operations are published as version `1`.
-- `config_format` is `toml` or `json`; it defaults to `toml`.
-- `config` is required. With `config_format: "toml"`, it must be a string. With
-  `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
-- The production registry exposes all public entry-point operations at version `1`. It does not
-  register the internal BTC chain-head checkpoint op.
+- `entry_point` is required and must be one exact id, including namespace and version.
+- `target` is required, must be a stable target string, and is rejected when the envelope contains
+  unknown fields.
+- A published objective selects the target's current configuration only; catalog name/digest
+  objects, revision/history lookup, and latest resolution do not exist.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
   store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
   When omitted, the app mints a fresh opaque invocation key before deriving `run_id`. The raw key is
   not persisted; only a domain-separated digest enters run identity material.
-- `run_id` is not a normal start field.
+- `run_id` is not a start field.
 
 The response is `{"outcome": "...", "run": ..., "active_run_id": "...", "public_output": ...}`
 inside the standard success envelope. Fresh admissions report `admitted`. Duplicate starts for the
@@ -254,96 +252,31 @@ execution lane for the same base work identity, start reports `already_active` w
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
-Portfolio snapshot:
-
-```json
-{
-  "op": "portfolio_snapshot",
-  "config_format": "json",
-  "config": {
-    "portfolio": { "...": "PortfolioConfig JSON" }
-  }
-}
-```
-
-EVM contract deploy:
-
-```json
-{
-  "op": "evm_contract_deploy",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "deploy": { "...": "DeployAction JSON" }
-  }
-}
-```
-
-EVM contract configure:
-
-```json
-{
-  "op": "evm_contract_configure",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "import_deployed": { "...": "ImportDeployedSpec JSON" },
-    "configure": { "...": "ConfigureAction JSON" }
-  }
-}
-```
-
-EVM contract validate:
-
-```json
-{
-  "op": "evm_contract_validate",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "import_configured": { "...": "ImportConfiguredSpec JSON" },
-    "validate": { "...": "ValidateAction JSON" }
-  }
-}
-```
-
-EVM contract lifecycle:
-
-```json
-{
-  "op": "evm_contract_lifecycle",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "deploy": { "...": "DeployAction JSON" },
-    "configure": { "...": "ConfigureAction JSON" },
-    "validate": { "...": "ValidateAction JSON" }
-  }
-}
-```
-
-EVM contract entry configs carry certified lifecycle context, action specs, import specs, artifact
-evidence refs, and non-secret signer intent. The runtime resolves the certified context network id
-and action signer ref through `MFM_RUNTIME_CONFIG_FILE`. Process-local RPC endpoints, auth headers,
-keystore paths, unlock files, and private material never belong in the entry-point config.
-Source-run EVM imports use `kind: "from_mfm_run"` with both `source` and required retained
-`evidence`; identifiers, public output JSON, projection rows, and raw lifecycle payloads are not
-accepted as import authority.
-The full lifecycle contract is documented in
-[`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
+EVM transaction and validation state primitives are not direct REST operations. RPC endpoints,
+auth headers, keystore paths, unlock files, and private material remain runtime-only.
 
 Stable launch error codes:
 
 - `InvalidJson`: the request envelope is not accepted by the route schema.
-- `InvalidPublicOpName`: `op` is not a valid public entry-point name.
-- `InvalidOpVersion`: `op_version` is zero.
-- `EntryPointOpNotFound`: no op is registered for the supplied public name.
-- `EntryPointOpVersionNotFound`: the requested explicit version is not registered.
-- `AuthoredConfigDecodeFailed`: the supplied config cannot be decoded for the selected op.
-- `AuthoredConfigFormatShapeMismatch`: `config_format` and `config` shape do not match.
-- `PortfolioSnapshotConfigInvalid`: portfolio snapshot config validation failed.
-- `EvmContractPlanFailed`: EVM contract entry-point planning failed.
-- `EntryPointOpCertificationFailed`: the planned spec failed app-owned certification.
+- `EntryPointNotFound`: the exact entry-point id is not registered.
+- `ConfiguredStoreUnavailable`: current configuration is unavailable during new-run preparation.
+- `ConfiguredTargetInvalid`: the target is not valid for the selected entry point.
+- `ConfiguredValueNotFound`: the target has no current configuration.
+- `ConfiguredValueSchemaInvalid`: the target's current row has the wrong schema.
+- `ConfiguredValueTypeInvalid`: the target's current row does not decode as the expected type.
+- `ConfiguredValueCanonicalMismatch`: a current row fails canonical byte/digest verification.
+- `ConfiguredValueValidationFailed`: a current row fails semantic validation.
+- `ConfiguredTargetMismatch`: the stored embedded id differs from the selected target.
+- `PortfolioSnapshotPlanFailed`: portfolio snapshot planning failed.
+- `EntryPointCertificationFailed`: the planned spec failed app-owned certification.
+- `RuntimeConfigRequired`: one or more certified live-source routes are absent. The response message
+  identifies the configured target and required provider families, while diagnostics retain only
+  semantic network bindings.
+- `RuntimeConfigInvalid`: a supplied runtime config is unreadable, malformed, or semantically
+  invalid.
+
+Both runtime-config failures use HTTP 503. REST preserves the shared neutral app message and never
+adds CLI syntax such as `--runtime-config`.
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.
 

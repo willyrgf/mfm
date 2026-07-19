@@ -44,20 +44,6 @@ macro_rules! stable_domain_key_type {
 }
 
 stable_domain_key_type!(
-    SubjectDomainKey,
-    subject_key,
-    "subject-domain-key",
-    "mfm.portfolio.domain_key.subject",
-    "Stable domain key for a portfolio subject instance."
-);
-stable_domain_key_type!(
-    ValuationDomainKey,
-    valuation_key,
-    "valuation-domain-key",
-    "mfm.portfolio.domain_key.valuation",
-    "Stable domain key for a portfolio valuation instance."
-);
-stable_domain_key_type!(
     HoldingsDomainKey,
     holdings_key,
     "holdings-domain-key",
@@ -72,8 +58,6 @@ stable_domain_key_type!(
     "Stable domain key for a portfolio report instance."
 );
 
-impl mfm_program::StableDomainKey for SubjectDomainKey {}
-impl mfm_program::StableDomainKey for ValuationDomainKey {}
 impl mfm_program::StableDomainKey for HoldingsDomainKey {}
 impl mfm_program::StableDomainKey for ReportDomainKey {}
 

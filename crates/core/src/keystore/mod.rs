@@ -56,10 +56,6 @@
 //! - **Minimal attack surface**: Fewer features mean fewer vulnerabilities
 //! - **Clear separation of concerns**: Each component has a single responsibility
 //!
-//! ## Documentation
-//!
-//! For comprehensive documentation including security considerations, usage patterns,
-//! and troubleshooting, see [`KEYSTORE.md`](./KEYSTORE.md).
 /// Error types produced by keystore operations.
 pub mod error;
 

@@ -11,15 +11,13 @@
 //! use mfm_runtime_config::{RuntimeConfig, RuntimeConfigFormat};
 //!
 //! let runtime_toml = r#"
-//! [evm.sources.reth-local]
-//! rpc_url = "http://127.0.0.1:8545"
-//!
 //! [evm.routes.reth-dev]
 //! source_ref = "reth-local"
+//! rpc_url = "http://127.0.0.1:8545"
 //! "#;
 //!
 //! let config = RuntimeConfig::from_str(runtime_toml, RuntimeConfigFormat::Toml)?;
-//! assert_eq!(config.evm().expect("evm config").sources().len(), 1);
+//! assert_eq!(config.evm().expect("evm config").routes().len(), 1);
 //! # Ok::<(), mfm_runtime_config::RuntimeConfigError>(())
 //! ```
 //!
@@ -29,11 +27,11 @@
 //! let runtime_json = r#"
 //! {
 //!   "evm": {
-//!     "sources": {
-//!       "reth-local": { "rpc_url": "http://127.0.0.1:8545" }
-//!     },
 //!     "routes": {
-//!       "reth-dev": { "source_ref": "reth-local" }
+//!       "reth-dev": {
+//!         "source_ref": "reth-local",
+//!         "rpc_url": "http://127.0.0.1:8545"
+//!       }
 //!     }
 //!   }
 //! }
@@ -49,6 +47,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use mfm_ids::LocalPublicId;
 use mfm_ids::RuntimeEnvName;
 use mfm_signing::SignerRef;
 use serde::de::DeserializeOwned;
@@ -106,7 +105,7 @@ impl RuntimeConfigRequirement {
         }
     }
 
-    /// Creates a requirement for EVM routes, sources, and policies.
+    /// Creates a requirement for direct EVM routes.
     pub const fn evm() -> Self {
         Self {
             evm: true,
@@ -128,10 +127,21 @@ impl RuntimeConfigRequirement {
         }
     }
 
-    /// Creates a requirement for EVM routes, sources, policies, and signer bindings.
+    /// Creates a requirement for direct EVM routes and signer bindings.
     pub const fn evm_with_signers() -> Self {
         Self {
             evm: true,
+            btc: false,
+            keystores: true,
+            signers: true,
+            parse_all: false,
+        }
+    }
+
+    /// Creates a requirement for signer bindings and their referenced keystores.
+    pub const fn signers() -> Self {
+        Self {
+            evm: false,
             btc: false,
             keystores: true,
             signers: true,
@@ -237,6 +247,56 @@ impl RuntimeConfig {
         Self::from_str_with_requirements(&raw, format, requirements)
     }
 
+    /// Selects and validates exactly one EVM route from a string.
+    pub fn evm_route_from_str(
+        raw: &str,
+        format: RuntimeConfigFormat,
+        network_id: &LocalPublicId,
+    ) -> Result<EvmRpcRoute> {
+        let raw = parse_raw_config(raw, format)?;
+        reject_extra_fields(&raw.extra, RuntimeConfigLocation::Root)?;
+        let evm = raw.evm.ok_or_else(|| {
+            RuntimeConfigError::new(
+                RuntimeConfigLocation::Evm,
+                RuntimeConfigErrorKind::MissingFamily,
+            )
+        })?;
+        EvmRuntimeConfig::select(evm, network_id)
+    }
+
+    /// Loads and validates exactly one EVM route from a file.
+    pub fn load_evm_route(
+        path: impl AsRef<Path>,
+        network_id: &LocalPublicId,
+    ) -> Result<EvmRpcRoute> {
+        let path = path.as_ref();
+        let format = RuntimeConfigFormat::from_path(path)?;
+        let raw = read_config_file(path)?;
+        Self::evm_route_from_str(&raw, format, network_id)
+    }
+
+    /// Selects exactly one signer and its referenced keystore from a string.
+    pub fn signer_binding_from_str(
+        raw: &str,
+        format: RuntimeConfigFormat,
+        signer_ref: &SignerRef,
+    ) -> Result<RuntimeSignerBinding> {
+        let raw = parse_raw_config(raw, format)?;
+        reject_extra_fields(&raw.extra, RuntimeConfigLocation::Root)?;
+        select_signer_binding(raw.signers, raw.keystores, signer_ref)
+    }
+
+    /// Loads exactly one signer and its referenced keystore from a file.
+    pub fn load_signer_binding(
+        path: impl AsRef<Path>,
+        signer_ref: &SignerRef,
+    ) -> Result<RuntimeSignerBinding> {
+        let path = path.as_ref();
+        let format = RuntimeConfigFormat::from_path(path)?;
+        let raw = read_config_file(path)?;
+        Self::signer_binding_from_str(&raw, format, signer_ref)
+    }
+
     /// Returns the parsed EVM runtime config, when present.
     pub const fn evm(&self) -> Option<&EvmRuntimeConfig> {
         self.evm.as_ref()
@@ -326,6 +386,15 @@ impl RuntimeConfig {
     }
 }
 
+fn read_config_file(path: &Path) -> Result<String> {
+    fs::read_to_string(path).map_err(|_| {
+        RuntimeConfigError::new(
+            RuntimeConfigLocation::Root,
+            RuntimeConfigErrorKind::ConfigFileRead,
+        )
+    })
+}
+
 fn deserialize_family<T>(
     raw: Value,
     location: RuntimeConfigLocation,
@@ -345,7 +414,7 @@ pub use self::errors::{
 
 #[path = "evm.rs"]
 mod evm;
-pub use self::evm::{EvmRoute, EvmRpcSource, EvmRuntimeConfig, EvmSourcePolicy};
+pub use self::evm::{EvmRpcRoute, EvmRuntimeConfig};
 
 #[path = "btc.rs"]
 mod btc;
@@ -353,8 +422,10 @@ pub use self::btc::{BtcJsonRpcRuntimeConfig, BtcRuntimeConfig};
 
 #[path = "signers.rs"]
 mod signers;
-use self::signers::{parse_keystores, parse_signers};
-pub use self::signers::{KeystoreRef, KeystoreRuntimeConfig, RuntimeKeystoreSigner, RuntimeSigner};
+use self::signers::{parse_keystores, parse_signers, select_signer_binding};
+pub use self::signers::{
+    KeystoreRef, KeystoreRuntimeConfig, RuntimeKeystoreSigner, RuntimeSigner, RuntimeSignerBinding,
+};
 
 #[path = "values.rs"]
 mod values;

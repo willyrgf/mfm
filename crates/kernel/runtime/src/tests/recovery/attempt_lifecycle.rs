@@ -236,7 +236,7 @@ async fn recovery_sweep_includes_open_remediation_attempts() {
 }
 
 #[tokio::test]
-async fn recovery_interrupts_side_effect_attempts_before_prepare() {
+async fn recovery_preserves_committed_claim_before_prepare() {
     for (case_label, emit_claim) in [
         ("after intent before prepare", false),
         ("after claim before prepare", true),
@@ -266,24 +266,40 @@ async fn recovery_interrupts_side_effect_attempts_before_prepare() {
             1,
         )
         .expect("attempt id");
-        match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
+        let disposition = crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
             &fixture.runtime_spec,
             &view,
             &BTreeSet::new(),
         )
         .expect("recovery disposition")
-        .expect("open side-effect attempt")
-        {
-            crate::recovery::OpenAttemptDisposition::Interrupt {
-                node: recovered_node,
-                attempt_id: recovered_attempt,
-                attempt_no,
-            } => {
+        .expect("open side-effect attempt");
+        match (emit_claim, disposition) {
+            (
+                false,
+                crate::recovery::OpenAttemptDisposition::Interrupt {
+                    node: recovered_node,
+                    attempt_id: recovered_attempt,
+                    attempt_no,
+                },
+            ) => {
                 assert_eq!(recovered_node.node_id, node.node_id);
                 assert_eq!(recovered_attempt, attempt_id);
                 assert_eq!(attempt_no, 1);
             }
-            _ => panic!("{case_label}: pre-prepared side-effect attempt must interrupt"),
+            (
+                true,
+                crate::recovery::OpenAttemptDisposition::DelegateSideEffect {
+                    node: recovered_node,
+                    attempt_id: recovered_attempt,
+                    attempt_no,
+                },
+            ) => {
+                assert_eq!(recovered_node.node_id, node.node_id);
+                assert_eq!(recovered_attempt, attempt_id);
+                assert_eq!(attempt_no, 1);
+                continue;
+            }
+            _ => panic!("{case_label}: unexpected recovery disposition"),
         }
 
         assert_eq!(

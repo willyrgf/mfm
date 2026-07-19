@@ -10,16 +10,18 @@ license = "MIT"
 category = "signer-contract"
 
 [dependencies]
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true, features = ["k256"] }
+derive_more = { workspace = true }
 thiserror = { workspace = true }
 
-mfm-evm-core = { path = "../evm-core" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-signing = { path = "../signing" }
 
 [dev-dependencies]
 hex = { workspace = true }
-mfm-program-derive = { path = "../kernel/program-derive" }
 mfm-values = { path = "../kernel/values" }
 serde = { workspace = true }
+tokio = { workspace = true }
 trybuild = "1.0"

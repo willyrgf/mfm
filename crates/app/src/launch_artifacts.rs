@@ -1,82 +1,10 @@
 use super::*;
 
-pub(super) fn evm_contract_context_descriptor(
-) -> Result<spec::StateContextDescriptorRequirementSpec, AppError> {
-    let spec::StateContextDescriptorSpec::Required(descriptor) =
-        <EvmContractContext as mfm_program::StateContext>::descriptor()
-            .map_err(|_| certified_evm_context_artifact_error())?
-    else {
-        return Err(certified_evm_context_artifact_error());
-    };
-    Ok(*descriptor)
-}
-
-pub(super) fn evm_contract_profile_artifact_requirement(
-    reference: &LifecycleArtifactEvidenceRef,
-) -> Result<store::EventArtifactRequirement, AppError> {
-    let schema_id = reference
-        .schema_id()
-        .map_err(|_| certified_evm_context_artifact_error())?
-        .ok_or_else(certified_evm_context_artifact_error)?;
-    let expected_schema = <ContractArtifactConfig as MfmConfig>::schema_id()
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    if schema_id != expected_schema
-        || reference
-            .semantic_type_id()
-            .map_err(|_| certified_evm_context_artifact_error())?
-            .is_some()
-    {
-        return Err(certified_evm_context_artifact_error());
-    }
-    let artifact_id = reference
-        .artifact_id()
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    let digest = reference
-        .content_digest()
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    let media_type = spec::MediaType::new("application/json")
-        .map_err(|_| certified_evm_context_artifact_error())?;
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: artifact_id.clone(),
-        digest: digest.clone(),
-        byte_len: reference.byte_len(),
-        media_type: media_type.clone(),
-        schema_id: Some(schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    Ok(store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id,
-        evidence_hash: evidence
-            .evidence_hash()
-            .map_err(|_| certified_evm_context_artifact_error())?,
-        digest: Some(digest),
-        byte_len: Some(reference.byte_len()),
-        media_type: Some(media_type),
-        schema_id: Some(schema_id),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    })
-}
-
-pub(super) fn certified_evm_context_artifact_error() -> AppError {
-    AppError::backend(
-        ErrorClass::Internal,
-        "CertifiedEvmContextArtifactInvalid",
-        "Certified EVM context artifact failed replay verification",
-    )
-}
-
 pub(super) async fn retained_source_fact_events_from_query_evidence<S, A>(
     store: &S,
     artifacts: &A,
     stream: &[store::KernelEventEnvelope],
-) -> Result<Vec<RetainedSourceFactReplayEvent>, AppError>
+) -> Result<Vec<RetainedSourceFactReplayEvent>, PublicError>
 where
     S: store::RunEventStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + ?Sized,
@@ -95,7 +23,7 @@ where
             .map_err(async_app_store_error)?;
         let evidence = mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
             .map_err(|_| {
-                AppError::backend(
+                PublicError::backend(
                     ErrorClass::Internal,
                     "FactQueryEvidenceInvalid",
                     "Fact query evidence artifact is invalid",
@@ -117,7 +45,7 @@ where
                         && candidate.ordinal().as_u32() == fact_claim_id.source_ordinal()
                 })
                 .ok_or_else(|| {
-                    AppError::backend(
+                    PublicError::backend(
                         ErrorClass::Internal,
                         "FactQuerySourceFactMissing",
                         "Fact query evidence source fact event is missing",
@@ -132,10 +60,10 @@ where
 
 pub(super) fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<RunLaunchArtifact, AppError> {
+) -> Result<RunLaunchArtifact, PublicError> {
     let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
         let _ = error;
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "CertifiedSpecCanonicalError",
             "Certified typed spec canonicalization failed",
@@ -145,7 +73,7 @@ pub(super) fn certified_spec_launch_artifact(
         canonical.to_vec(),
         runtime_spec.spec().media_type.clone(),
         Some(spec::typed_execution_spec_schema_id().map_err(|_| {
-            AppError::backend(
+            PublicError::backend(
                 ErrorClass::Internal,
                 "TypedSpecSchemaInvalid",
                 "Typed execution spec schema identity is invalid",
@@ -159,13 +87,13 @@ pub(super) fn certified_spec_launch_artifact(
 
 pub(super) fn certified_spec_certificate_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<RunLaunchArtifact, AppError> {
+) -> Result<RunLaunchArtifact, PublicError> {
     let canonical = runtime_spec
         .certificate()
         .canonical_json()
         .map_err(|error| {
             let _ = error;
-            AppError::backend(
+            PublicError::backend(
                 ErrorClass::Internal,
                 "CertifiedCertificateCanonicalError",
                 "Certified typed spec certificate canonicalization failed",
@@ -174,7 +102,7 @@ pub(super) fn certified_spec_certificate_launch_artifact(
     let media_type =
         spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).map_err(|error| {
             let _ = error;
-            AppError::backend(
+            PublicError::backend(
                 ErrorClass::Internal,
                 "CertifiedCertificateMediaTypeInvalid",
                 "Certified typed spec certificate media type is invalid",
@@ -185,7 +113,7 @@ pub(super) fn certified_spec_certificate_launch_artifact(
         media_type,
         Some(
             mfm_certify::typed_spec_certificate_schema_id().map_err(|_| {
-                AppError::backend(
+                PublicError::backend(
                     ErrorClass::Internal,
                     "TypedSpecCertificateSchemaInvalid",
                     "Typed spec certificate schema identity is invalid",
@@ -202,7 +130,7 @@ pub(super) fn config_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     registry: &CertificationRegistry,
     configs: Vec<RunLaunchConfigArtifact>,
-) -> Result<Vec<RunLaunchArtifact>, AppError> {
+) -> Result<Vec<RunLaunchArtifact>, PublicError> {
     let mut supplied = BTreeMap::new();
     for config in configs {
         let artifact = launch_artifact(
@@ -216,7 +144,7 @@ pub(super) fn config_launch_artifacts_for_spec(
         let key = config_input_key(&config.schema_id, &artifact.evidence.digest);
         if let Some(existing) = supplied.get(&key) {
             if existing != &artifact {
-                return Err(AppError::new(
+                return Err(PublicError::new(
                     ErrorClass::BadRequest,
                     "DuplicateLaunchConfigArtifact",
                     "config input was supplied more than once with conflicting bytes",
@@ -225,7 +153,7 @@ pub(super) fn config_launch_artifacts_for_spec(
             continue;
         }
         if supplied.insert(key, artifact).is_some() {
-            return Err(AppError::new(
+            return Err(PublicError::new(
                 ErrorClass::BadRequest,
                 "DuplicateLaunchConfigArtifact",
                 "config input was supplied more than once",
@@ -237,7 +165,7 @@ pub(super) fn config_launch_artifacts_for_spec(
     for config_ref in &runtime_spec.spec().config_refs {
         let key = config_input_key(&config_ref.schema_id, &config_ref.digest);
         let artifact = supplied.remove(&key).ok_or_else(|| {
-            AppError::new(
+            PublicError::new(
                 ErrorClass::BadRequest,
                 "MissingLaunchConfigArtifact",
                 format!("missing config input for {}", config_ref.schema_id),
@@ -255,7 +183,7 @@ pub(super) fn config_launch_artifacts_for_spec(
             .is_none()
             && !framework_config_matches_ref(runtime_spec.spec(), config_ref, &artifact.bytes)?
         {
-            return Err(AppError::new(
+            return Err(PublicError::new(
                 ErrorClass::BadRequest,
                 "LaunchConfigValidatorMissing",
                 format!(
@@ -267,7 +195,7 @@ pub(super) fn config_launch_artifacts_for_spec(
         validated.push(artifact);
     }
     if !supplied.is_empty() {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::BadRequest,
             "UnknownLaunchConfigArtifact",
             "config input was supplied for a config not present in the certified spec",
@@ -279,9 +207,9 @@ pub(super) fn config_launch_artifacts_for_spec(
 pub(super) fn fact_descriptor_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     registry: &CertificationRegistry,
-) -> Result<Vec<RunLaunchArtifact>, AppError> {
+) -> Result<Vec<RunLaunchArtifact>, PublicError> {
     let schema_id = mfm_program::facts::fact_descriptor_schema_id().map_err(|_| {
-        AppError::backend(
+        PublicError::backend(
             ErrorClass::Internal,
             "FactDescriptorSchemaInvalid",
             "Fact descriptor schema identity is invalid",
@@ -304,7 +232,7 @@ pub(super) fn fact_descriptor_launch_artifacts_for_spec(
         let descriptor = registry
             .fact_descriptor_artifact(&descriptor_hash)
             .ok_or_else(|| {
-                AppError::backend(
+                PublicError::backend(
                     ErrorClass::Internal,
                     "FactDescriptorArtifactMissing",
                     "certified fact descriptor bytes are not available for launch",
@@ -321,7 +249,7 @@ pub(super) fn fact_descriptor_launch_artifacts_for_spec(
         if artifact.evidence.digest != *descriptor.descriptor_hash()
             || artifact.evidence.digest != descriptor_hash
         {
-            return Err(AppError::backend(
+            return Err(PublicError::backend(
                 ErrorClass::Internal,
                 "FactDescriptorArtifactTampered",
                 "certified fact descriptor bytes do not match their descriptor hash",
@@ -334,7 +262,7 @@ pub(super) fn fact_descriptor_launch_artifacts_for_spec(
 
 pub(super) fn framework_config_launch_artifacts_for_spec(
     execution_spec: &spec::TypedExecutionSpec,
-) -> Result<Vec<RunLaunchConfigArtifact>, AppError> {
+) -> Result<Vec<RunLaunchConfigArtifact>, PublicError> {
     let mut artifacts = Vec::new();
     for node in &execution_spec.nodes {
         let Some(framework) = &node.framework else {
@@ -345,7 +273,7 @@ pub(super) fn framework_config_launch_artifacts_for_spec(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let _ = error;
-                    return Err(AppError::backend(
+                    return Err(PublicError::backend(
                         ErrorClass::Internal,
                         "LaunchFrameworkConfigInvalid",
                         "Framework config canonicalization failed",
@@ -365,7 +293,7 @@ pub(super) fn framework_config_matches_ref(
     execution_spec: &spec::TypedExecutionSpec,
     config_ref: &spec::ConfigRef,
     bytes: &[u8],
-) -> Result<bool, AppError> {
+) -> Result<bool, PublicError> {
     for node in &execution_spec.nodes {
         if &node.config_ref != config_ref {
             continue;
@@ -377,7 +305,7 @@ pub(super) fn framework_config_matches_ref(
             spec::framework_config_canonical_json(framework.config_kind(), &node.node_id).map_err(
                 |error| {
                     let _ = error;
-                    AppError::backend(
+                    PublicError::backend(
                         ErrorClass::Internal,
                         "LaunchFrameworkConfigInvalid",
                         "Framework config canonicalization failed",
@@ -392,11 +320,11 @@ pub(super) fn framework_config_matches_ref(
 pub(super) fn seed_launch_cells_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     seeds: Vec<RunLaunchSeedArtifact>,
-) -> Result<Vec<RunLaunchSeedCell>, AppError> {
+) -> Result<Vec<RunLaunchSeedCell>, PublicError> {
     let mut supplied = std::collections::BTreeMap::new();
     for seed in seeds {
         if supplied.insert(seed.seed_id.clone(), seed).is_some() {
-            return Err(AppError::new(
+            return Err(PublicError::new(
                 ErrorClass::BadRequest,
                 "DuplicateLaunchSeedArtifact",
                 "seed input was supplied more than once",
@@ -407,7 +335,7 @@ pub(super) fn seed_launch_cells_for_spec(
     let mut seed_refs = Vec::with_capacity(runtime_spec.spec().seeds.len());
     for seed_spec in &runtime_spec.spec().seeds {
         let input = supplied.remove(&seed_spec.seed_id).ok_or_else(|| {
-            AppError::new(
+            PublicError::new(
                 ErrorClass::BadRequest,
                 "MissingLaunchSeedArtifact",
                 format!("missing seed input for {}", seed_spec.seed_id),
@@ -430,7 +358,7 @@ pub(super) fn seed_launch_cells_for_spec(
         )?;
         if let Some(required_digest) = &seed_spec.required_digest {
             if &artifact.evidence.digest != required_digest {
-                return Err(AppError::new(
+                return Err(PublicError::new(
                     ErrorClass::BadRequest,
                     "LaunchSeedDigestMismatch",
                     "seed input digest does not match the certified spec",
@@ -460,7 +388,7 @@ pub(super) fn seed_launch_cells_for_spec(
         });
     }
     if !supplied.is_empty() {
-        return Err(AppError::new(
+        return Err(PublicError::new(
             ErrorClass::BadRequest,
             "UnknownLaunchSeedArtifact",
             "seed input was supplied for a seed not present in the certified spec",
@@ -513,11 +441,11 @@ pub(super) fn validate_artifact_requirement_for_app(
     class: ErrorClass,
     code: &'static str,
     message: &'static str,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     store::validate_artifact_requirement_against_evidence(&requirement, evidence).map_err(|error| {
         match error {
             store::StoreError::ArtifactEvidenceMismatch { .. } => {
-                AppError::new(class, code, message)
+                PublicError::new(class, code, message)
             }
             error => error.into(),
         }
@@ -564,7 +492,7 @@ pub(super) fn artifact_referenced_artifact_requirement(
 
 pub(super) fn config_ref_artifact_requirement(
     config_ref: &spec::ConfigRef,
-) -> Result<store::EventArtifactRequirement, AppError> {
+) -> Result<store::EventArtifactRequirement, PublicError> {
     let evidence = store::ArtifactEvidenceRef {
         artifact_id: config_ref.artifact_id.clone(),
         digest: config_ref.digest.clone(),
@@ -594,7 +522,7 @@ pub(super) fn config_ref_artifact_requirement(
 pub(super) fn seed_artifact_requirement(
     seed_spec: &spec::SeedSpec,
     evidence: &store::ArtifactEvidenceRef,
-) -> Result<store::EventArtifactRequirement, AppError> {
+) -> Result<store::EventArtifactRequirement, PublicError> {
     Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::SeedCell,
         artifact_id: evidence.artifact_id.clone(),
@@ -661,12 +589,12 @@ pub(super) fn public_output_rendered_artifact_requirement(
     artifact_id: &ArtifactId,
     rendered_digest: &ContentDigest,
     media_type: spec::MediaType,
-) -> Result<store::EventArtifactRequirement, AppError> {
+) -> Result<store::EventArtifactRequirement, PublicError> {
     let evidence_hash = payload
         .rendered_artifact_evidence_hash
         .clone()
         .ok_or_else(|| {
-            AppError::new(
+            PublicError::new(
                 ErrorClass::Internal,
                 "RenderedArtifactEvidenceHashMissing",
                 "public output rendered artifact is missing evidence hash",

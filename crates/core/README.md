@@ -8,6 +8,6 @@ non-secret id or label from runtime code.
 Docs:
 
 - Ethereum private-key helpers: [`src/crypto.rs`](src/crypto.rs)
-- Keystore module: [`src/keystore/README.md`](src/keystore/README.md)
+- Keystore module and security model: [`src/keystore/mod.rs`](src/keystore/mod.rs)
 - Design contract: [`../../docs/design.md`](../../docs/design.md)
 - Architecture overview: [`../../docs/architecture.md`](../../docs/architecture.md)

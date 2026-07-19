@@ -631,21 +631,27 @@ pub fn execute_fact_query_projection_for_test(
 ) -> Result<Vec<FactQueryProjectionRowForTest>> {
     let shape = mfm_facts::parse_canonical_fact_query_shape(plan)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
-    let mut rows = projection
-        .fact_index_entries()
-        .filter(|(_claim_id, entry)| {
-            entry.fact_descriptor_hash == *plan.resolved_descriptor()
-                && entry.audience == plan.query_scope().audience()
-                && entry.visibility_scope == plan.query_scope().scope()
-        })
-        .filter(|(_claim_id, entry)| fact_entry_matches_predicates(projection, entry, &shape))
-        .map(|(_claim_id, entry)| {
-            Ok(FactQueryProjectionRowForTest::new(
-                entry.internal_ref()?,
-                returned_fields_from_projection(projection, entry, &shape)?,
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut rows = Vec::new();
+    for (_claim_id, entry) in projection.fact_index_entries() {
+        if entry.fact_descriptor_hash != *plan.resolved_descriptor()
+            || entry.audience != plan.query_scope().audience()
+            || entry.visibility_scope != plan.query_scope().scope()
+        {
+            continue;
+        }
+        let fact_ref = entry.internal_ref()?;
+        if shape
+            .content_identity()
+            .is_some_and(|identity| !identity.matches_internal_ref(&fact_ref))
+            || !fact_entry_matches_predicates(projection, entry, &shape)
+        {
+            continue;
+        }
+        rows.push(FactQueryProjectionRowForTest::new(
+            fact_ref,
+            returned_fields_from_projection(projection, entry, &shape)?,
+        ));
+    }
     rows.sort_by(|left, right| compare_fact_projection_rows(projection, plan, left, right));
     if let Some(limit) = plan.limit() {
         rows.truncate(limit as usize);

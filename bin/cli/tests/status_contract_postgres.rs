@@ -1,15 +1,14 @@
 #![cfg(feature = "parity-tests")]
 #![allow(clippy::disallowed_methods)]
 
-use assert_cmd::Command;
-use mfm_app::{ProductionPostgresSchema, ProductionRunStore};
-use mfm_store::v1 as store;
-use serde_json::Value;
-use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
 
-// Path-included support module is shared with other parity suites; this test only
-// uses admit/append helpers after report-only cutover (no live RPC seed path).
+use assert_cmd::Command;
+use mfm_app::{PostgresSchema, PostgresStore};
+use mfm_store::v1 as store;
+use sqlx::{AssertSqlSafe, PgPool};
+
+// This path-included shared support also serves other parity suites.
 #[allow(dead_code)]
 #[path = "../../../tests/integration/src/run_control_support.rs"]
 mod run_control_support;
@@ -18,25 +17,27 @@ mod run_control_support;
 mod support;
 
 #[tokio::test]
-async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
-    // Report-only cutover: no live RPC required to admit/resume. Without Platform
-    // holding facts the resumed run hard-fails (does not complete with a public snapshot).
-    // Mirrors rest_api_run_control portfolio status history contract.
+async fn run_status_and_stream_preserve_interrupted_chain_head_attempt_history() {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_schema();
     create_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
 
-    ProductionPostgresSchema::migrate(&scoped_database_url)
+    PostgresSchema::migrate(&scoped_database_url)
         .await
         .expect("migrate typed postgres schema");
-    let store = ProductionRunStore::connect(&scoped_database_url)
+    let store = PostgresStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
-    let config = sample_portfolio_config();
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_config_path = run_control_support::write_portfolio_runtime_config_for_test(
+        runtime_config_dir.path(),
+        "http://127.0.0.1:8332",
+    );
     let (run_id, certified) =
-        run_control_support::admit_portfolio_run_without_driving(&store, &config).await;
+        run_control_support::admit_btc_chain_head_run_without_driving(&store, &runtime_config_path)
+            .await;
 
     let interrupted_node = certified
         .envelope()
@@ -55,21 +56,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     )
     .await;
 
-    let resume = run_cli(&[
-        "--output-format".to_owned(),
-        "json".to_owned(),
-        "run".to_owned(),
-        "resume".to_owned(),
-        run_id.as_str().to_owned(),
-        "--database-url".to_owned(),
-        scoped_database_url.clone(),
-    ]);
-    assert_success(&resume);
-    let resume_json = support::parse_success_json(&resume.stdout);
-    // Without Platform holding facts the report path hard-fails after cutover.
-    assert_ne!(resume_json["run_mode"], "completed");
-    assert_eq!(resume_json["run_mode"], "failed_without_acdc_claim");
-
     let status = run_cli(&[
         "--output-format".to_owned(),
         "json".to_owned(),
@@ -81,7 +67,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     ]);
     assert_success(&status);
     let status_json = support::parse_success_json(&status.stdout);
-    assert_ne!(status_json["run_mode"], "interrupted");
     let attempts = status_json["attempt_dispositions"]
         .as_array()
         .expect("attempt dispositions");
@@ -93,17 +78,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         })
         .expect("interrupted attempt disposition");
     assert!(interrupted["retryable"].is_null());
-
-    // After cutover, resume without Platform facts hard-fails; framework public-output
-    // completion is not required. Status history must still surface the interrupted attempt.
-    assert!(
-        attempts.iter().any(|attempt| {
-            attempt["disposition"] == "failed"
-                || attempt["disposition"] == "interrupted"
-                || attempt["disposition"] == "completed"
-        }),
-        "expected attempt dispositions after resume: {attempts:?}"
-    );
 
     let stream = run_cli(&[
         "--output-format".to_owned(),
@@ -119,7 +93,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     let stream_events = stream_json["events"].as_array().expect("stream events");
     assert!(
         !stream_events.is_empty(),
-        "stream must retain history after failed report resume"
+        "stream must retain interrupted attempt history"
     );
 
     drop_schema(&database_url, &schema).await;
@@ -133,8 +107,6 @@ async fn create_schema(database_url: &str, schema: &str) {
     let pool = PgPool::connect(database_url)
         .await
         .expect("connect postgres");
-    // The schema name is UUID-derived and never comes from user input; dynamic DDL is required
-    // because PostgreSQL does not parameterize identifiers.
     sqlx::raw_sql(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&pool)
         .await
@@ -158,59 +130,6 @@ async fn drop_schema(database_url: &str, schema: &str) {
 fn schema_scoped_database_url(database_url: &str, schema: &str) -> String {
     let separator = if database_url.contains('?') { '&' } else { '?' };
     format!("{database_url}{separator}options=-csearch_path%3D{schema}")
-}
-
-fn sample_portfolio_config() -> Value {
-    serde_json::json!({
-        "portfolio": {
-            "portfolio_id": "portfolio_main",
-            "quote_codes": ["USD"],
-            "networks": [
-                {
-                    "network_id": "ethereum-mainnet",
-                    "family": "evm",
-                    "chain_id": 1,
-                    "metadata": {}
-                }
-            ],
-            "wallets": [
-                {
-                    "wallet_id": "wallet_main",
-                    "subject": {
-                        "kind": "evm_address",
-                        "address": "0x000000000000000000000000000000000000dead"
-                    },
-                    "implementation": { "kind": "address_only" },
-                    "network_id": "ethereum-mainnet",
-                    "symbol_ids": ["eth.native.ethereum-mainnet"],
-                    "metadata": {}
-                }
-            ],
-            "symbol_configs": [
-                {
-                    "symbol_id": "eth.native.ethereum-mainnet",
-                    "display_symbol": "ETH",
-                    "kind": "native_balance",
-                    "role": "native",
-                    "network_id": "ethereum-mainnet",
-                    "protocol": null,
-                    "balance_reader": { "kind": "native_balance" },
-                    "valuation": {
-                        "quotes": [
-                            {
-                                "quote": "USD",
-                                "priced_symbol_id": "eth.native.ethereum-mainnet",
-                                "unit_price_dec": "1800.00"
-                            }
-                        ]
-                    },
-                    "underlying_symbol_id": null,
-                    "metadata": {}
-                }
-            ],
-            "metadata": {}
-        }
-    })
 }
 
 fn run_cli(args: &[String]) -> Output {

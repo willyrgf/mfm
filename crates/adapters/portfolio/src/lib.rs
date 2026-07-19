@@ -1,63 +1,34 @@
 #![warn(missing_docs)]
-//! Portfolio adapter runners for fact-backed report-only portfolio snapshots.
+//! Portfolio adapter runners for certified portfolio snapshots.
 //!
-//! This crate binds certified portfolio state descriptors to typed runners over explicit artifact
-//! and Platform fact-index capability contracts. Live chain transports are not used by the report
-//! graph after the collectors cutover.
+//! The Platform fact-index binding rereads and verifies Bitcoin and generic EVM facts before
+//! portfolio assembly. Family collection execution belongs to the family adapters.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
-use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
-use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
-use mfm_facts::{
-    fact_query_result_rows_from_receipt, CanonicalFactQueryPlan, FactCanonicalScalar, FactClaimId,
-    FactQueryEvidence, QueryResultCardinality, ScopeDecisionEvidence, StoreReadFrontier,
-    StoreReadFrontierType, StoreScopeRef,
-};
-use mfm_portfolio_model::symbol::ObservationAnchor;
-use mfm_program::{StateSpec, ValidatedConfig};
+use mfm_fact_capabilities::FactIndexReadProvider;
+use mfm_program::StateSpec;
 use mfm_runtime::{
-    load_materialized_node_value, load_materialized_struct_input, load_runner_config_for_node,
-    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    RunnerExecutableIdentityTemplate, RunnerOutputBuilder, RunnerRegistrationBuilder,
+    load_materialized_struct_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, ExternalReadExecution,
+    ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
+    RunnerExecutableIdentityTemplate, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    assemble_snapshot, balance_reader_kind, expand_required_holdings,
-    holding_candidate_from_normalized, is_filter_empty_holding_error,
-    observations_from_selected_holdings, portfolio_adapter_kind, portfolio_adapter_version,
-    portfolio_holding_select_scope_decision_hash, project_network_pins_from_observations,
-    resolve_subjects_from_config, resolve_valuations_from_config, select_network_coherent,
-    symbols_by_id_map, AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState,
-    HoldingCandidate, HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, ProjectReportConfig, ProjectReportInput, ProjectReportState,
-    RequiredHoldingKey, RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
-    ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsState,
-    SelectedHoldings,
-};
-use mfm_states_btc::{
-    normalize_btc_address_balance, platform_address_balance_candidate_plan,
-    BtcAddressBalanceResponse, BtcAddressBalanceSubject,
-};
-use mfm_states_evm::{
-    normalize_evm_address_native_balance, platform_native_balance_candidate_plan,
-    EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSubject,
+    assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
+    AssembleSnapshotInput, AssembleSnapshotState, ProjectReportConfig, ProjectReportInput,
+    ProjectReportState, SelectHoldingsConfig, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
+    SelectHoldingsState, SelectedHoldings,
 };
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
-use serde::de::DeserializeOwned;
 
 #[path = "replay.rs"]
 mod replay;
 #[path = "selection.rs"]
 mod selection;
-#[cfg(test)]
-pub(crate) use self::replay::first_unmatched_plan_index;
 pub use self::replay::verify_portfolio_replay;
-#[cfg(test)]
-pub(crate) use self::selection::{holding_fact_index_request, select_holdings};
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
@@ -91,7 +62,7 @@ impl PortfolioRunnerCapabilities {
     }
 }
 
-/// Registers typed portfolio runners (report-only; Platform fact-index for SelectHoldings).
+/// Registers receipt-pinned selection and snapshot projection runners.
 pub fn register_portfolio_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: PortfolioRunnerCapabilities,
@@ -115,24 +86,15 @@ pub fn register_portfolio_runners(
         portfolio_adapter_version()?,
         &adapter_factory,
     )?;
-    registrations.register_state_runner_with_factory::<ResolveSubjectsState>(
-        &pure_factory,
-        Arc::new(ResolveSubjectsRunner {
-            artifacts: artifacts.clone(),
-        }),
-    )?;
     registrations.register_state_runner_with_factory::<SelectHoldingsState>(
         &read_factory,
-        Arc::new(SelectHoldingsRunner {
-            artifacts: artifacts.clone(),
-            fact_index,
-        }),
-    )?;
-    registrations.register_state_runner_with_factory::<ResolveValuationsState>(
-        &pure_factory,
-        Arc::new(ResolveValuationsRunner {
-            artifacts: artifacts.clone(),
-        }),
+        Arc::new(ExternalReadRunner::<SelectHoldingsState, _>::new(
+            artifacts.clone(),
+            SelectHoldingsExecutor {
+                artifacts: artifacts.clone(),
+                fact_index,
+            },
+        )),
     )?;
     registrations.register_state_runner_with_factory::<AssembleSnapshotState>(
         &pure_factory,
@@ -147,70 +109,46 @@ pub fn register_portfolio_runners(
     Ok(())
 }
 
-struct ResolveSubjectsRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for ResolveSubjectsRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config = load_runner_config_for_node::<ResolveSubjectsConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let output = resolve_subjects_from_config(config.as_ref());
-            state_output(ctx, &output)
-        })
-    }
-}
-
-struct SelectHoldingsRunner {
+struct SelectHoldingsExecutor {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn FactIndexReadProvider>,
 }
 
-impl ErasedNodeRunner for SelectHoldingsRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config = load_runner_config_for_node::<SelectHoldingsConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let subjects = load_materialized_node_value::<mfm_state_portfolio::ResolvedSubjects>(
-                &ctx.inputs().root,
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let (selected, evidences) = selection::select_holdings(
-                config,
-                subjects,
-                self.artifacts.as_ref(),
-                self.fact_index.as_ref(),
-            )
-            .await?;
-            selection::select_holdings_output(ctx, &selected, &evidences)
-        })
+impl ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor {
+    fn validate_ingress<'a>(
+        &'a self,
+        _ctx: mfm_runtime::RunnerIngressContext<'a>,
+        _state: &'a SelectHoldingsState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async { Ok(()) })
     }
-}
 
-struct ResolveValuationsRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for ResolveValuationsRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+    fn execute<'a>(
+        &'a self,
+        plan: &'a SelectHoldingsReadPlan,
+        _ctx: &'a ErasedRunCtx<'_>,
+    ) -> ExternalReadExecutionFuture<'a, SelectHoldingsReadEvidence> {
         Box::pin(async move {
-            let config = load_runner_config_for_node::<ResolveValuationsConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let output = resolve_valuations_from_config(config.as_ref()).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
-            state_output(ctx, &output)
+            let requests = plan.requests().map_err(portfolio_state_runtime_error)?;
+            let responses = if requests.is_empty() {
+                Vec::new()
+            } else {
+                self.fact_index
+                    .read_fact_index_batch(&requests)
+                    .await
+                    .map_err(fact_index_runtime_error)?
+            };
+            plan.validate_query_results(&responses)
+                .map_err(portfolio_state_runtime_error)?;
+            let hydrated =
+                selection::hydrate_holding_responses(plan, &responses, self.artifacts.as_ref())
+                    .await?;
+            let queries = plan
+                .query_evidence(&responses, &hydrated)
+                .map_err(portfolio_state_runtime_error)?;
+            let primary = SelectHoldingsReadEvidence::new(&queries, hydrated)
+                .map_err(portfolio_state_runtime_error)?;
+            Ok(ExternalReadExecution::new(primary, queries))
         })
     }
 }
@@ -232,7 +170,7 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = assemble_snapshot(config.as_ref(), input, 0).map_err(|error| {
+            let output = assemble_snapshot(config.as_ref(), input).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;
             state_output(ctx, &output)
@@ -247,7 +185,7 @@ struct ProjectReportRunner {
 impl ErasedNodeRunner for ProjectReportRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_runner_config_for_node::<ProjectReportConfig>(
+            let _config = load_runner_config_for_node::<ProjectReportConfig>(
                 ctx.node(),
                 self.artifacts.as_ref(),
             )
@@ -257,11 +195,10 @@ impl ErasedNodeRunner for ProjectReportRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = mfm_state_portfolio::project_report_from_snapshot(
-                input.snapshot,
-                config.as_ref().report_version(),
-            )
-            .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+            let output = mfm_state_portfolio::project_report_from_snapshot(input.snapshot)
+                .map_err(|error| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                })?;
             state_output(ctx, &output)
         })
     }
@@ -274,5 +211,53 @@ where
     ErasedRunnerOutput::state_output(&ctx, value)
 }
 
+fn fact_index_runtime_error(
+    error: mfm_fact_capabilities::FactIndexReadError,
+) -> mfm_runtime::RuntimeError {
+    match error {
+        mfm_fact_capabilities::FactIndexReadError::Provider { .. } => {
+            mfm_runtime::RuntimeError::Blocked("fact-index provider is unavailable".to_owned())
+        }
+        mfm_fact_capabilities::FactIndexReadError::InvalidRequest { .. } => {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+        }
+    }
+}
+
+fn portfolio_state_runtime_error(
+    error: mfm_state_portfolio::PortfolioHoldingSelectionError,
+) -> mfm_runtime::RuntimeError {
+    let code = error.code.as_str();
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("portfolio error code is a checked public code"),
+        events::ErrorCategory::Validation,
+        format!("{code}: portfolio holding selection failed"),
+        Vec::new(),
+    )
+    .expect("portfolio failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::Failure(failure)
+}
+
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fact_index_provider_failures_block_without_terminalizing_the_attempt() {
+        let provider = mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+            "private backend detail",
+        );
+        assert_eq!(
+            fact_index_runtime_error(provider),
+            mfm_runtime::RuntimeError::Blocked("fact-index provider is unavailable".to_owned())
+        );
+
+        let invalid = mfm_fact_capabilities::FactIndexReadError::InvalidRequest {
+            reason: mfm_fact_capabilities::FactIndexInvalidRequest::UnsupportedAudience,
+        };
+        assert!(matches!(
+            fact_index_runtime_error(invalid),
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+        ));
+    }
+}

@@ -6,7 +6,7 @@ The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a u
 
 Run the packaged CLI with `nix run .#mfm -- <ARGS>`, for example:
 - `nix run .#mfm -- keystore list`
-- `nix run .#mfm -- keystore tx-sign --to ...`
+- `nix run .#mfm -- keystore tx-sign --signer-ref deployer --from 0x... --to 0x...`
 - `nix run .#mfm -- facts kinds`
 - `nix run .#mfm -- ops list`
 - `nix run .#mfm -- run status <RUN_ID>`
@@ -86,10 +86,15 @@ failures return structured JSON responses. Parser failures use the stable error 
   "status": "error",
   "error": {
     "code": "ErrorCode",
-    "message": "Human-readable error message"
+    "message": "Human-readable error message",
+    "diagnostics": [ /* optional closed provider diagnostics */ ]
   }
 }
 ```
+
+CLI errors serialize the shared app `PublicError` payload. `diagnostics` is omitted when empty;
+when present it contains only closed redaction-safe provider-family diagnostics. Text mode renders
+`<code>: <message>` and may add command-specific remediation without changing the JSON payload.
 
 **Common Error Codes:**
 - `InvalidKeyMaterial`: Key material format is invalid
@@ -338,13 +343,26 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
 
 ### `keystore tx-sign`
 
-Signs an EIP-1559 transaction payload using a key already stored in the keystore and writes the signed raw transaction to a file.
+Signs one checked EIP-1559 transaction through the canonical app/library signing service and writes
+the signed raw transaction hex to an explicit bearer-output file. The command resolves exactly one
+`[signers.<REF>]` runtime binding and its referenced `[keystores.<REF>]` profile. It has no direct
+keystore/key selector, label lookup, private-key access, custom encoder, legacy transaction mode, or
+provider fallback.
 
-Implementation note: this command is a direct CLI helper over the keystore and EVM libraries. It
-does not start, resume, or certify a typed run.
+The unsigned envelope uses Alloy as its only signing-hash and encoding implementation. The app
+signing service parses canonical unsigned decimal or lowercase `0x`-prefixed quantities as `U256`,
+constructs the checked envelope, and rejects values outside Alloy's exact EIP-1559 field
+representation. The CLI binary only maps arguments into that raw app request, writes the returned
+bearer to the explicit protected file, and renders redacted metadata. The keystore provider enforces
+the deterministic RFC 6979 recoverable low-s profile and expected sender, and blocking
+file/unlock/KDF/key work runs outside async runtime workers.
 
-The command output includes metadata only (`from`, `to`, `nonce`, `chain_id`, `tx_type`, `payload_hash`) and intentionally excludes local output paths, raw tx hex, and signature bytes.
-The output file is created with restrictive permissions and must not already exist unless `--overwrite` is supplied. Symlink outputs and unsafe parent directories are rejected.
+Command output contains metadata only: `from`, `to`, canonical decimal-string `nonce` and
+`chain_id`, `signing_digest`, and `transaction_hash`. The two hashes are intentionally distinct.
+Output excludes local paths, raw transaction hex, signature bytes, keystore entry ids, and runtime
+configuration. The `--out` file is the only bearer boundary, is created with mode 0600, and must not
+already exist unless `--overwrite` is supplied. Symlink outputs and unsafe parent directories are
+rejected. This command does not start, resume, submit, or certify a typed run.
 
 **Usage:**
 ```sh
@@ -352,25 +370,27 @@ mfm_cli keystore tx-sign [OPTIONS]
 ```
 
 **Required options:**
-- Key selector: `--id <UUID>` or `--by-label <LABEL>`
+- `--signer-ref <REF>`: Exact signer binding under `[signers]`
+- `--from <ADDRESS>`: Expected sender; signing fails if the bound key differs
 - `--to <ADDRESS>`
 - `--value-wei <DEC_OR_0X_HEX>`
-- `--chain-id <U64>`
-- `--nonce <U64>`
+- `--chain-id <DEC_OR_0X_HEX>`
+- `--nonce <DEC_OR_0X_HEX>`
 - `--max-fee-per-gas <DEC_OR_0X_HEX>`
 - `--max-priority-fee-per-gas <DEC_OR_0X_HEX>`
-- `--gas-limit <U64>`
+- `--gas-limit <DEC_OR_0X_HEX>`
 - `--out <PATH>`
 
 **Optional options:**
 - `--data <0xHEX>` (default: `0x`)
-- `--keystore <PATH>`
+- `--runtime-config <PATH>` (default: `MFM_RUNTIME_CONFIG_FILE`)
 - `--overwrite`: Replace an existing regular output file. Without this flag, `--out` must be a new path.
 
 **Example:**
 ```sh
 mfm_cli --output-format json keystore tx-sign \
-  --by-label "my-main-wallet" \
+  --signer-ref deployer \
+  --from 0x2222222222222222222222222222222222222222 \
   --to 0x1111111111111111111111111111111111111111 \
   --value-wei 1000000000000000 \
   --chain-id 31337 \
@@ -381,23 +401,51 @@ mfm_cli --output-format json keystore tx-sign \
   --out /tmp/signed.tx
 ```
 
-## Public Operation Commands
+## Public Entry-Point Commands
 
 ### `ops list`
 
-Lists the public entry-point operations registered in the compiled CLI/app registry. It does not
-connect to PostgreSQL or load runtime configuration.
+Lists the exact public entry-point ids compiled into the binary. It does not connect to PostgreSQL
+or load runtime configuration.
 
 ```sh
 mfm_cli ops list
+mfm_cli --output-format json ops list
 ```
 
-Text output includes the public name, version, and accepted authored-config formats. JSON output
-uses the standard success envelope and returns the registry descriptors under `operations`.
+JSON output returns plain string ids under `entry_points`. The production surface contains exactly
+one entry point, `mfm.portfolio/snapshot@1`; that exact versioned id is the complete discovery
+surface.
 
-The current production surface contains `btc_address_balance`, `evm_native_balance`,
-`evm_contract_deploy`, `evm_contract_configure`, `evm_contract_validate`,
-`evm_contract_lifecycle`, and `portfolio_snapshot`, all at public version `1`.
+### `setup import`, `setup list`, and `setup export`
+
+Setup owns the current target-keyed configuration before admission:
+
+```sh
+nix run .#mfm -- setup import ./organization.toml
+nix run .#mfm -- setup list
+nix run .#mfm -- setup export acme/primary --output ./portfolio.json
+```
+
+For local development, the `.#mfm` app starts Nixfied-managed PostgreSQL in slot
+9, applies the typed store migrations, sets `DATABASE_URL`, delegates all
+arguments to the packaged CLI, and stops PostgreSQL afterward without removing
+its data. Separate invocations share setup and run state under the Nixfied state
+root for `mfm/dev/9`. When supplying an external `DATABASE_URL` or
+`--database-url`, use `mfm_cli`, `cargo run -p mfm -- <ARGS>`, or the raw binary
+produced by `nix build .#mfm`.
+
+The import document is strict TOML with a closed `configs` list. Each configuration derives its
+target from its intrinsic domain id; a portfolio config with `portfolio_id = "acme/primary"`
+publishes target `acme/primary`. Import is atomic and reports `created`, `updated`, or `unchanged`
+for every target. Documents larger than 4 MiB fail with `SetupFileTooLarge` without being read in
+full. `setup list` returns only current targets in stable order. `setup export` atomically publishes
+one target's verified canonical JSON to a new path and never overwrites an existing file; a failed
+write does not leave a partial final file.
+
+There is no setup name, catalog digest selector, revision/history lookup, cursor, or delete
+command. Importing a replacement configuration changes only that target's current row; already
+admitted runs retain their concrete certified configuration and are unaffected.
 
 ## Run Commands (Experimental)
 
@@ -407,7 +455,7 @@ These commands use the certified PostgreSQL run store (requires `DATABASE_URL` o
 `--database-url`).
 
 The CLI validates the PostgreSQL schema on connect and does not create or alter
-tables. Apply the `mfm-stream-store-postgres` migrations against a fresh or
+tables. Apply the `mfm-storage-postgres` migrations against a fresh or
 explicitly reset local database before running typed run commands.
 There is no downgrade migration for the current typed Postgres baseline; rolling
 back to another branch requires resetting the database or schema to that
@@ -422,91 +470,78 @@ mints a fresh opaque key before deriving the digest.
 The CLI starts only through registered entry-point ops that app assembly plans and certifies into
 typed execution specs, and it resumes/replays only from stored typed run streams.
 
-Keystore tx commands are direct CLI helpers over the keystore and EVM libraries. They do not submit
-or resume certified typed runs.
+`keystore tx-sign` is a thin client of the app-assembled canonical signing service. It does not
+submit or resume certified typed runs and is not an alternate transaction implementation.
 
 ### `run start`
 
-Starts a common workflow through a registered entry-point op. The CLI reads authored config,
-passes the public op name, optional version, config format, and config bytes to app assembly, and
-then starts the certified typed run prepared by the app layer. Config format defaults to TOML.
+Starts a run from an exact entry-point id and a target. The app resolves the target's current
+configuration and validates its schema, canonical bytes/digest, semantics, and embedded domain id
+before planning; the resulting typed spec is then certified and admitted.
 
 **Usage:**
 ```sh
-mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
+mfm_cli run start <ENTRY_POINT> <TARGET> [OPTIONS]
 ```
 
 **Key Options:**
-- `--op <NAME>`: Public entry-point operation name.
-- `--config <PATH>`: Authored op config file.
-- `--op-version <VERSION>`: Optional public op version. If omitted, the latest registered version is selected.
-- `--config-format <toml|json>`: Authored config format. Defaults to `toml`.
+- `<ENTRY_POINT>`: Exact public entry-point id, including namespace and version.
+- `<TARGET>`: Stable configuration target such as `acme/primary`.
 - `--invocation-key <KEY>`: Uses caller-provided invocation identity for retry-stable starts. When
   omitted, the app mints a fresh opaque invocation key. The raw key is not persisted; only a
   domain-separated digest enters run identity material.
-- `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
-- `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 - `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
   `$MFM_RUNTIME_CONFIG_FILE`). Read-only commands do not use this option.
 
-Examples:
+The repository includes a complete strict-import fixture at
+`examples/setup/organization.toml`; copy it to a local setup file before importing.
+`examples/setup/portfolio-erc20.toml` is the runnable token-only counterpart; pair it with an
+Ethereum runtime route and start it by its derived target after importing.
+
+`ops list` is the authoritative public surface. The setup fixture publishes portfolio config only;
+setup changes target configuration without changing the entry-point registry.
+
+For example:
 
 ```sh
-mfm_cli run start --op btc_address_balance --config examples/configs/btc-address-balance.toml
-mfm_cli run start --op evm_native_balance --config examples/configs/evm-native-balance.toml
-mfm_cli run start --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
-mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml
+mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
 ```
 
-Collector entry points (`btc_address_balance`, `evm_native_balance`) write Platform holding facts
-from live chain reads (joint tip once per same-network batch). They are external multi-run only and
-are not mixed into the report graph. See
-[`../../docs/portfolio-collect-then-report.md`](../../docs/portfolio-collect-then-report.md).
-
-`portfolio_snapshot` is **report-only**: it selects Platform holding facts (BTC/EVM native at
-cutover) under the network-coherent policy
-`mfm.portfolio.holding.latest-network-coherent.v1` and hard-fails when required facts are missing.
-It is published as public entry-point version `1`.
-It does not crawl live chain balances. Collect balances into Platform facts first, then run the
-report. Soft partial success (`error_count`) is not part of the public report surface. Public
-observations include selected holding `coverage` for configured-mode honesty.
-
-EVM contract entry-point config shapes and import authority rules are documented in
-[`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
-
-For local development against a managed persistent run-store database, use:
-
-```sh
-nix run .#mfm-start -- --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
-```
-
-`.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
-command, keeps the data directory under the Nixfied state root for `mfm/dev/9`,
-runs the typed store migrations, sets `DATABASE_URL`, and then delegates to
-`mfm run start`. It does not change the raw packaged CLI exposed by `.#mfm`.
+The target selects only its current `PortfolioConfig`. Old `--entry-point` and `--request` flags,
+JSON request files, catalog `{name,digest}` objects, old entry-point ids, unversioned ids, and
+latest-like forms are rejected. The target cannot select collector policies, child configs, native
+decimals, runtime routes, or a collect/reuse/report-only mode.
 
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
-contains the framework public-output renderer plus the portfolio, BTC collector, EVM native-balance,
-and EVM contract domain runners used by registered entry-point ops. All currently registered public
-entry-point operations use version `1`; the internal BTC chain-head checkpoint op is not registered.
+contains the portfolio EVM runner family and the reusable EVM transaction/validation bindings.
 
-JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
+JSON output exposes `outcome`; text output renders `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the
 execution lane for the same base work identity, start reports `already_active` with
 `active_run_id` and no `run` body.
 
 Stable launch errors include:
 
-- `EntryPointOpNotFound`: no registered op matches `--op`.
-- `EntryPointOpVersionNotFound`: `--op-version` selects no registered version for the public op.
-- `AuthoredConfigReadFailed`: the authored config file could not be read.
-- `AuthoredConfigDecodeFailed`: the authored config does not match the selected op schema.
-- `EntryPointOpCertificationFailed`: app assembly could not certify the planned typed spec.
+- `EntryPointNotFound`: the exact entry-point id is not registered.
+- `ConfiguredTargetInvalid`: the target is not a valid portfolio id.
+- `ConfiguredValueNotFound`: the target has no current configuration.
+- `ConfiguredValueSchemaInvalid`: the target's current row has the wrong schema.
+- `ConfiguredValueTypeInvalid`: the target's current row does not decode as a portfolio config.
+- `ConfiguredValueCanonicalMismatch`: a current row fails canonical byte/digest verification.
+- `ConfiguredValueValidationFailed`: a current row fails semantic portfolio validation.
+- `ConfiguredTargetMismatch`: the config's embedded portfolio id differs from the selected target.
+- `PortfolioSnapshotPlanFailed`: the concrete portfolio cannot expand into the snapshot objective.
+- `EntryPointCertificationFailed`: app assembly could not certify the planned typed spec.
 - `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.
+- `RuntimeConfigRequired`: one or more certified live-source routes are absent. The neutral shared
+  message identifies the configured target and required provider families; structured diagnostics
+  retain only semantic network bindings. Text output appends `; pass --runtime-config`.
+- `RuntimeConfigInvalid`: a supplied runtime config is unreadable, malformed, or semantically
+  invalid. It is not downgraded to a missing-route error.
 
 ### `run resume`
 
@@ -607,8 +642,9 @@ each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `
 `output_cell_id`. Failed portfolio SelectHoldings / assembly attempts surface domain codes in the
 failed attempt disposition and the stream event reference (`error_code`), not soft snapshot fields.
 Product cutover domain codes are the closed set
-`missing_fact`, `no_common_network_anchor`, `unsupported_requirement`, and `ambiguous_facts`.
-`inconsistent_network_anchors` is a residual hard-fail guard (not a product soft path). Generic
+`missing_fact`, `receipt_mismatch`, `unsupported_requirement`, and `ambiguous_facts`.
+`inconsistent_network_anchors` is a residual hard-fail guard (not a product
+soft path). Generic
 runtime classes such as `runner_output_invalid` remain for non-domain runner failures. `scheduler_status` is read-only `observed` for `run status`;
 start/resume responses set it to `observed` when an already-terminal run needs no scheduler
 dispatch, otherwise `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
@@ -674,7 +710,7 @@ The CLI's process-level configuration is intentionally narrow.
 - **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
   ```sh
   export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-  cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
+  cargo sqlx migrate run --source crates/storages/postgres/migrations
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 
@@ -683,11 +719,9 @@ The CLI's process-level configuration is intentionally narrow.
   precedence over this environment variable. Read-only run commands do not load runtime config.
 
   ```toml
-  [evm.sources.reth-local]
-  rpc_url = "http://127.0.0.1:8545"
-
   [evm.routes.reth-dev]
   source_ref = "reth-local"
+  rpc_url = "http://127.0.0.1:8545"
 
   [keystores.default]
   keystore_path = "/run/mfm/deployer.keystore"
@@ -699,20 +733,16 @@ The CLI's process-level configuration is intentionally narrow.
   entry_id = "<uuid>"
   ```
 
-- Direct keystore commands use either `--keystore <PATH>`, which prompts locally for credentials,
-  or a runtime-config keystore profile selected by `--runtime-config <PATH>` or
-  `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to `default` for runtime-config
-  selection.
-- Typed EVM contract runs bind certified network context to a live provider before issuing
-  operation-only requests. The bound provider resolves runtime routes and verifies the observed
-  chain id for each live call.
+- Keystore administration commands (`import`, `list`, and `delete`) use either `--keystore <PATH>`,
+  which prompts locally for credentials, or a runtime-config keystore profile selected by
+  `--runtime-config <PATH>` or `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to
+  `default` for those administration commands. `tx-sign` instead requires `--signer-ref` and loads
+  that exact signer-to-keystore binding; it does not accept direct keystore or key selectors.
 - Live BTC/EVM provider failures are reported with redacted diagnostic codes such as
   `bitcoin_rpc_http_status`, `bitcoin_rpc_json_error`, `evm_rpc_http_status`, or
   `evm_source_mismatch`. Diagnostics may include closed operation ids and numeric status/error
   codes, but never RPC URLs, authorization headers, provider messages, request/response bodies, or
   runtime config paths.
-- Typed EVM contract requests use non-secret `signer_ref`; app assembly resolves it against the
-  runtime config signer registry when mutation workflows require signing.
 - Bitcoin portfolio configs use non-secret `source_identity` to select the semantic runtime route.
 
 - Typed EVM RPC note: per-request `rpc_url` override is not supported.
@@ -720,10 +750,12 @@ The CLI's process-level configuration is intentionally narrow.
 
 ## Best Practices
 
-- **For interactive use**, pass `--keystore <PATH>` and rely on the built-in prompts for passwords
-  and confirmations.
+- **For interactive keystore administration**, pass `--keystore <PATH>` and rely on the built-in
+  prompts for passwords and confirmations.
 - **For scripting and automation**, use runtime-config keystore profiles with unlock files, the
-  `--stdin` flag for import material, and `--yes` to bypass confirmations where supported.
+  `--stdin` flag for import material, and `--yes` to bypass confirmations where supported. For
+  transaction signing, configure one exact `[signers]` binding and pass its `--signer-ref` plus the
+  expected `--from` address.
 - **For AI agents and programmatic use**, use `--output-format json` to get structured, machine-readable responses with predictable error codes.
 - **Secure your environment**: When using environment variables, ensure the security of your shell history and environment.
 - **Backup your keystore file**: The CLI manages keys, but you are responsible for securely backing up the keystore file itself.

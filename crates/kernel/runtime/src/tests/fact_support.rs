@@ -147,12 +147,13 @@ pub(super) fn test_fact_subject_evidence_for_descriptor(
     descriptor: &mfm_facts::FactDescriptor,
     subject_amount: u64,
 ) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
-        mfm_facts::FactFieldId::new("subject.amount").expect("field"),
-        mfm_facts::FactFieldValueType::UnsignedInteger,
-        mfm_facts::FactCanonicalScalar::UnsignedInteger(subject_amount),
+    let material = mfm_facts::FactSubjectMaterialV2::new(
+        mfm_canonical::CanonicalValue::object([(
+            "amount",
+            mfm_canonical::CanonicalValue::Unsigned(subject_amount),
+        )])
+        .expect("subject"),
     )
-    .expect("subject value")])
     .expect("subject material");
     let namespace_hash =
         mfm_facts::fact_subject_namespace_hash(descriptor).expect("fact subject namespace hash");

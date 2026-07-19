@@ -20,11 +20,6 @@ pub(super) fn validate_state_node_contract(input: StateNodeContractInput<'_>) ->
         || descriptor.input_schema_id != node.input_bindings.input_schema_id
         || descriptor.effect_kind != node.effect_kind
         || descriptor.capabilities != node.capability_bindings
-        || descriptor.side_effect_contract_digest
-            != node
-                .side_effect
-                .as_ref()
-                .map(|contract| contract.contract_digest.clone())
     {
         return Err(problem(
             ProblemClass::InvalidSemanticTransition,

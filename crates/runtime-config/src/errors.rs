@@ -39,16 +39,6 @@ pub enum RuntimeConfigLocation {
         /// Checked semantic source identity when available.
         source_identity: Option<String>,
     },
-    /// EVM source entry.
-    EvmSource {
-        /// Checked source ref when available.
-        source_ref: Option<String>,
-    },
-    /// EVM source policy entry.
-    EvmPolicy {
-        /// Checked policy id when available.
-        policy_id: Option<String>,
-    },
     /// EVM semantic network route entry.
     EvmRoute {
         /// Checked semantic network id when available.
@@ -91,14 +81,6 @@ impl fmt::Display for RuntimeConfigLocation {
             Self::BtcRoute { source_identity } => match source_identity {
                 Some(source_identity) => write!(f, "btc.routes[{source_identity}]"),
                 None => f.write_str("btc.routes[<invalid>]"),
-            },
-            Self::EvmSource { source_ref } => match source_ref {
-                Some(source_ref) => write!(f, "evm.sources[{source_ref}]"),
-                None => f.write_str("evm.sources[<invalid>]"),
-            },
-            Self::EvmPolicy { policy_id } => match policy_id {
-                Some(policy_id) => write!(f, "evm.policies[{policy_id}]"),
-                None => f.write_str("evm.policies[<invalid>]"),
             },
             Self::EvmRoute { network_id } => match network_id {
                 Some(network_id) => write!(f, "evm.routes[{network_id}]"),
@@ -160,20 +142,14 @@ pub enum RuntimeConfigErrorKind {
     EmptyResolvedValue,
     /// RPC URL was not syntactically valid.
     InvalidUrl,
+    /// RPC URL scheme was not HTTP or HTTPS.
+    UnsupportedUrlScheme,
     /// RPC URL contained userinfo.
     UrlUserInfo,
-    /// Source policy had no source refs.
-    EmptyPolicy,
-    /// Source policy contained the same source more than once.
-    DuplicatePolicySource,
-    /// Referenced source was missing.
-    MissingSource,
-    /// Referenced source policy was missing.
-    MissingPolicy,
-    /// Route source was not included in its selected policy.
-    SourceNotInPolicy,
-    /// Route omitted policy_id while an explicit same-id policy existed.
-    SameIdPolicyRequiresExplicitPolicyId,
+    /// Resolved HTTP authorization value was not a valid header value.
+    InvalidHttpAuthorization,
+    /// Requested semantic route was missing.
+    MissingRoute,
     /// Bitcoin JSON-RPC basic authentication had only one of user/password.
     IncompleteBasicAuth,
     /// Signer provider was unsupported.
@@ -184,6 +160,8 @@ pub enum RuntimeConfigErrorKind {
     InvalidKeystoreConfig,
     /// Referenced keystore profile was missing.
     MissingKeystore,
+    /// Requested signer binding was missing.
+    MissingSigner,
     /// Keystore entry id was malformed.
     InvalidEntryId,
 }
@@ -212,15 +190,10 @@ impl fmt::Display for RuntimeConfigErrorKind {
             Self::IndirectionFileRead => f.write_str("indirection file could not be read"),
             Self::EmptyResolvedValue => f.write_str("resolved value is empty"),
             Self::InvalidUrl => f.write_str("RPC URL is invalid"),
+            Self::UnsupportedUrlScheme => f.write_str("RPC URL scheme is unsupported"),
             Self::UrlUserInfo => f.write_str("RPC URL userinfo is forbidden"),
-            Self::EmptyPolicy => f.write_str("source policy is empty"),
-            Self::DuplicatePolicySource => f.write_str("source policy contains a duplicate source"),
-            Self::MissingSource => f.write_str("referenced source is missing"),
-            Self::MissingPolicy => f.write_str("referenced source policy is missing"),
-            Self::SourceNotInPolicy => f.write_str("route source is not in selected policy"),
-            Self::SameIdPolicyRequiresExplicitPolicyId => {
-                f.write_str("explicit same-id policy requires explicit policy_id")
-            }
+            Self::InvalidHttpAuthorization => f.write_str("HTTP authorization value is invalid"),
+            Self::MissingRoute => f.write_str("requested EVM route is missing"),
             Self::IncompleteBasicAuth => {
                 f.write_str("basic authentication requires both user and password")
             }
@@ -228,6 +201,7 @@ impl fmt::Display for RuntimeConfigErrorKind {
             Self::InvalidSignerConfig => f.write_str("signer config is invalid"),
             Self::InvalidKeystoreConfig => f.write_str("keystore config is invalid"),
             Self::MissingKeystore => f.write_str("referenced keystore profile is missing"),
+            Self::MissingSigner => f.write_str("requested signer binding is missing"),
             Self::InvalidEntryId => f.write_str("keystore entry id is invalid"),
         }
     }
@@ -240,8 +214,6 @@ pub enum RuntimeConfigIdentifierKind {
     SourceRef,
     /// Bitcoin semantic source identity.
     BtcSourceIdentity,
-    /// EVM source policy id.
-    PolicyId,
     /// EVM semantic network id.
     NetworkId,
     /// Signer reference.
@@ -257,7 +229,6 @@ impl fmt::Display for RuntimeConfigIdentifierKind {
         match self {
             Self::SourceRef => f.write_str("source_ref"),
             Self::BtcSourceIdentity => f.write_str("btc_source_identity"),
-            Self::PolicyId => f.write_str("policy_id"),
             Self::NetworkId => f.write_str("network_id"),
             Self::SignerRef => f.write_str("signer_ref"),
             Self::KeystoreRef => f.write_str("keystore_ref"),

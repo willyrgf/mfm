@@ -116,12 +116,21 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             .await
         {
             Ok(output) => output,
+            Err(RuntimeError::Blocked(_)) => {
+                return Ok(AttemptRunStatus::OperationalBlock);
+            }
             Err(error) => {
                 return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
-        let bundle = terminal_output.into_prepared_commit_bundle()?;
+        let (bundle, settlement) = terminal_output.into_prepared_commit_bundle()?;
         match store.append_prepared_commit_bundle(bundle).await {
+            Ok(store::CommitOutcome::Appended(_)) => {
+                if let Some(settlement) = settlement {
+                    settlement.settle_appended();
+                }
+                Ok(AttemptRunStatus::Advanced)
+            }
             Ok(_) => Ok(AttemptRunStatus::Advanced),
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                 Ok(AttemptRunStatus::StaleView)

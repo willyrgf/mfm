@@ -1,7 +1,7 @@
 use std::num::NonZeroU64;
 
 use super::query::{PublicFactPredicate, PublicFactQueryRequest, PublicFactShapeSelector};
-use crate::{AppError, ErrorClass};
+use crate::{ErrorClass, PublicError};
 
 const FACT_QUERY_INVALID_PARAMETER_CODE: &str = "FactQueryInvalidParameter";
 
@@ -30,7 +30,7 @@ impl PublicFactQueryRequest {
         fact_kind: impl AsRef<str>,
         pairs: impl IntoIterator<Item = (K, V)>,
         limit_override: Option<u64>,
-    ) -> Result<Self, AppError>
+    ) -> Result<Self, PublicError>
     where
         K: AsRef<str>,
         V: AsRef<str>,
@@ -45,7 +45,7 @@ impl PublicFactQueryRequest {
     pub fn from_selector(
         fact_kind: impl AsRef<str>,
         selector: PublicFactQuerySelector,
-    ) -> Result<Self, AppError> {
+    ) -> Result<Self, PublicError> {
         let limit = selector
             .limit
             .map(|limit| NonZeroU64::new(limit).ok_or_else(fact_query_limit_invalid))
@@ -75,7 +75,9 @@ impl PublicFactQueryRequest {
 
 impl PublicFactQuerySelector {
     /// Parses URL query pairs into a transport-neutral public fact query selector.
-    pub fn from_query_pairs<K, V>(pairs: impl IntoIterator<Item = (K, V)>) -> Result<Self, AppError>
+    pub fn from_query_pairs<K, V>(
+        pairs: impl IntoIterator<Item = (K, V)>,
+    ) -> Result<Self, PublicError>
     where
         K: AsRef<str>,
         V: AsRef<str>,
@@ -93,7 +95,7 @@ impl PublicFactQuerySelector {
         self
     }
 
-    fn push_query_pair(&mut self, key: &str, value: &str) -> Result<(), AppError> {
+    fn push_query_pair(&mut self, key: &str, value: &str) -> Result<(), PublicError> {
         match key {
             "shape" => self.shape = Some(value.to_owned()),
             "order" => self.ordering = Some(value.to_owned()),
@@ -114,24 +116,24 @@ impl PublicFactQuerySelector {
     }
 }
 
-fn fact_ordering_missing() -> AppError {
-    AppError::new(
+fn fact_ordering_missing() -> PublicError {
+    PublicError::new(
         ErrorClass::BadRequest,
         "FactOrderingMissing",
         "Fact queries must provide an explicit order parameter",
     )
 }
 
-fn fact_query_limit_invalid() -> AppError {
-    AppError::new(
+fn fact_query_limit_invalid() -> PublicError {
+    PublicError::new(
         ErrorClass::BadRequest,
         "FactQueryLimitInvalid",
         "Fact query limit must be greater than zero",
     )
 }
 
-fn fact_query_parse_invalid() -> AppError {
-    AppError::new(
+fn fact_query_parse_invalid() -> PublicError {
+    PublicError::new(
         ErrorClass::BadRequest,
         FACT_QUERY_INVALID_PARAMETER_CODE,
         "Fact query parameters are invalid",
@@ -139,7 +141,7 @@ fn fact_query_parse_invalid() -> AppError {
 }
 
 /// Returns whether an app error represents malformed public fact query parameters.
-pub fn is_public_fact_query_parameter_error(error: &AppError) -> bool {
+pub fn is_public_fact_query_parameter_error(error: &PublicError) -> bool {
     error.code == FACT_QUERY_INVALID_PARAMETER_CODE
 }
 
@@ -151,7 +153,7 @@ pub fn parse_public_fact_predicates<'a>(
     subjects: impl IntoIterator<Item = &'a str>,
     results: impl IntoIterator<Item = &'a str>,
     where_predicates: impl IntoIterator<Item = &'a str>,
-) -> Result<Vec<PublicFactPredicate>, AppError> {
+) -> Result<Vec<PublicFactPredicate>, PublicError> {
     let mut predicates = Vec::new();
     for value in subjects {
         predicates.push(parse_prefixed_public_fact_predicate("subject", value)?);
@@ -168,7 +170,7 @@ pub fn parse_public_fact_predicates<'a>(
 fn parse_prefixed_public_fact_predicate(
     prefix: &'static str,
     value: &str,
-) -> Result<PublicFactPredicate, AppError> {
+) -> Result<PublicFactPredicate, PublicError> {
     let predicate = parse_public_fact_predicate(value)?;
     let field_id = if predicate.field_id().as_str().starts_with("subject.")
         || predicate.field_id().as_str().starts_with("result.")
@@ -184,7 +186,7 @@ fn parse_prefixed_public_fact_predicate(
     ))
 }
 
-fn parse_public_fact_predicate(value: &str) -> Result<PublicFactPredicate, AppError> {
+fn parse_public_fact_predicate(value: &str) -> Result<PublicFactPredicate, PublicError> {
     let (left, raw_value) = value
         .split_once('=')
         .ok_or_else(invalid_public_fact_predicate)?;
@@ -201,7 +203,7 @@ fn parse_public_fact_predicate(value: &str) -> Result<PublicFactPredicate, AppEr
 
 fn parse_public_fact_field_and_operator(
     value: &str,
-) -> Result<(mfm_facts::FactFieldId, mfm_facts::FactQueryOperator), AppError> {
+) -> Result<(mfm_facts::FactFieldId, mfm_facts::FactQueryOperator), PublicError> {
     let operators = [
         (".lte", mfm_facts::FactQueryOperator::LessThanOrEqual),
         (".gte", mfm_facts::FactQueryOperator::GreaterThanOrEqual),
@@ -223,7 +225,9 @@ fn parse_public_fact_field_and_operator(
     ))
 }
 
-fn parse_public_fact_scalar_value(value: &str) -> Result<mfm_facts::FactCanonicalScalar, AppError> {
+fn parse_public_fact_scalar_value(
+    value: &str,
+) -> Result<mfm_facts::FactCanonicalScalar, PublicError> {
     if let Some((type_name, typed_value)) = value.split_once(':') {
         return match type_name {
             "string" => Ok(mfm_facts::FactCanonicalScalar::String(
@@ -249,7 +253,7 @@ fn parse_public_fact_scalar_value(value: &str) -> Result<mfm_facts::FactCanonica
             )?),
             "digest" => Ok(mfm_facts::FactCanonicalScalar::Digest(
                 mfm_ids::ContentDigest::parse(typed_value).map_err(|_| {
-                    AppError::new(
+                    PublicError::new(
                         ErrorClass::BadRequest,
                         "FactQueryDigestInvalid",
                         "Fact query digest value is invalid",
@@ -280,12 +284,12 @@ fn infer_public_fact_scalar_value(value: &str) -> mfm_facts::FactCanonicalScalar
     mfm_facts::FactCanonicalScalar::String(value.to_owned())
 }
 
-fn invalid_public_fact_predicate() -> AppError {
+fn invalid_public_fact_predicate() -> PublicError {
     public_fact_predicate_error("Fact predicates must use `field[.operator]=value`")
 }
 
-fn public_fact_predicate_error(message: &'static str) -> AppError {
-    AppError::new(ErrorClass::BadRequest, "FactPredicateInvalid", message)
+fn public_fact_predicate_error(message: &'static str) -> PublicError {
+    PublicError::new(ErrorClass::BadRequest, "FactPredicateInvalid", message)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::num::NonZeroU64;
 
-use crate::{AppError, ErrorClass};
+use crate::{ErrorClass, PublicError};
 
 /// Public descriptor shape selector used to disambiguate fact descriptors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +44,9 @@ pub struct PublicFactQueryRequest {
 
 impl PublicFactQueryRequest {
     /// Validates transport-independent public fact query invariants.
-    pub fn validate(&self) -> Result<(), AppError> {
+    pub fn validate(&self) -> Result<(), PublicError> {
         if self.return_fields.is_empty() {
-            return Err(AppError::new(
+            return Err(PublicError::new(
                 ErrorClass::BadRequest,
                 "FactReturnFieldMissing",
                 "Fact queries must request at least one return field",

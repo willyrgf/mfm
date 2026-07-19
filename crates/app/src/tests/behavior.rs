@@ -449,8 +449,8 @@ fn returned_fields_for_entry(
 
 fn internal_fact_ref_for_entry(
     entry: &store::FactIndexProjection,
-) -> Result<mfm_facts::InternalFactRef, AppError> {
-    entry.internal_ref().map_err(AppError::from)
+) -> Result<mfm_facts::InternalFactRef, PublicError> {
+    entry.internal_ref().map_err(PublicError::from)
 }
 
 #[test]
@@ -532,28 +532,24 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
             "expected_chain_id": 31337,
             "observed_chain_id": 31338,
             "source_ref": "primary",
-            "policy_id": "primary",
         }),
         serde_json::json!({
             "network_id": "rest-control-eth",
             "expected_chain_id": 0,
             "observed_chain_id": 31338,
             "source_ref": "primary",
-            "policy_id": "primary",
         }),
         serde_json::json!({
             "network_id": "rest-control-eth",
             "expected_chain_id": 31337,
             "observed_chain_id": 31337,
             "source_ref": "primary",
-            "policy_id": "primary",
         }),
         serde_json::json!({
             "network_id": "rest-control-eth",
             "expected_chain_id": 31337,
             "observed_chain_id": 31338,
             "source_ref": "primary",
-            "policy_id": "primary",
             "unexpected": true,
         }),
         serde_json::json!({
@@ -561,33 +557,27 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
             "expected_chain_id": 31337,
             "observed_chain_id": 31338,
             "source_ref": "bad source ref",
-            "policy_id": "primary",
         }),
     ] {
-        let envelope = serde_json::json!({
-            "kind": "provider",
-            "version": 1,
-            "details": {
-                "diagnostic_kind": "provider_source_mismatch",
+        let diagnostics = serde_json::json!([{
                 "provider_family": "evm",
                 "code": "source_mismatch",
                 "operation": null,
                 "fields": details,
-            },
-        });
-        let expected = RuntimeDiagnostic::from_json(&envelope)
-            .map(|diagnostic| {
-                events::RedactedJson::new(
-                    canonical_value_digest(&diagnostic.public_details_json())
-                        .expect("diagnostic digest"),
-                )
-            })
-            .unwrap_or_else(|_| {
-                events::RedactedJson::new(
-                    canonical_value_digest(&serde_json::Value::Null).expect("null digest"),
-                )
-            });
-        let error = verify_replay_diagnostic_json(Some(&expected), &envelope)
+        }]);
+        let expected =
+            serde_json::from_value::<Vec<RedactedProviderDiagnostic>>(diagnostics.clone())
+                .map(|_| {
+                    events::RedactedJson::new(
+                        canonical_value_digest(&diagnostics).expect("diagnostic digest"),
+                    )
+                })
+                .unwrap_or_else(|_| {
+                    events::RedactedJson::new(
+                        canonical_value_digest(&serde_json::Value::Null).expect("null digest"),
+                    )
+                });
+        let error = verify_replay_diagnostic_json(Some(&expected), &diagnostics)
             .expect_err("malformed typed diagnostic must fail replay");
 
         assert_eq!(error.code, "ReplayDiagnosticInvalid");
@@ -596,11 +586,7 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
 
 #[test]
 fn replay_diagnostic_accepts_generic_details_with_network_id() {
-    let envelope = serde_json::json!({
-        "kind": "provider",
-        "version": 1,
-        "details": {
-            "diagnostic_kind": "provider_failure",
+    let diagnostics = serde_json::json!([{
             "provider_family": "portfolio",
             "code": "response_invalid",
             "operation": null,
@@ -608,14 +594,11 @@ fn replay_diagnostic_accepts_generic_details_with_network_id() {
                 "domain_code": "missing_fact",
                 "network_id": "ethereum-mainnet",
             },
-        },
-    });
-    let diagnostic = RuntimeDiagnostic::from_json(&envelope).expect("typed diagnostic");
-    let expected = events::RedactedJson::new(
-        canonical_value_digest(&diagnostic.public_details_json()).expect("details digest"),
-    );
+    }]);
+    let expected =
+        events::RedactedJson::new(canonical_value_digest(&diagnostics).expect("details digest"));
 
-    verify_replay_diagnostic_json(Some(&expected), &envelope)
+    verify_replay_diagnostic_json(Some(&expected), &diagnostics)
         .expect("generic diagnostic details must not be classified as EVM mismatch evidence");
 }
 
@@ -631,7 +614,7 @@ async fn run_read_services_are_evidence_only() {
         .expect("production read constructor is bounded");
     assert!(!production_read_constructor.contains("production_runner_registry"));
     assert!(!production_read_constructor.contains("std::env"));
-    assert!(production_read_constructor.contains("connect_production_run_store"));
+    assert!(production_read_constructor.contains("connect_production_store"));
 
     let read_services_impl = include_str!("../services_read.rs");
     assert!(!read_services_impl.contains("production_runner_registry"));
@@ -667,11 +650,136 @@ fn production_registry_certifies_btc_collector_descriptors() {
         prepare_btc_collector_internal_test_launch().expect("btc collector certifies and prepares");
 
     assert_eq!(
-        request.evidence.entry_point.resolved_op_id.as_str(),
-        "mfm.bitcoin.btc_chain_head_collector_internal_test"
+        request.evidence.entry_point.entry_point_id.as_str(),
+        "mfm.bitcoin/btc_chain_head_internal_test@1"
     );
     assert!(!request.evidence.config_artifacts.is_empty());
     assert!(!request.evidence.seed_cells.is_empty());
+}
+
+#[test]
+fn production_registry_certifies_internal_evm_collector_descriptors() {
+    use alloy_primitives::address;
+
+    let config = mfm_op_evm_collectors::EvmBalanceCollectionConfig::new(
+        "ethereum-mainnet",
+        1,
+        18,
+        vec![mfm_op_evm_collectors::EvmBalanceSource::new(
+            address!("000000000000000000000000000000000000dead"),
+            mfm_op_evm_collectors::EvmBalanceAsset::Native,
+        )
+        .expect("EVM source")],
+    )
+    .expect("EVM collection config");
+    let plan = mfm_op_evm_collectors::evm_balance_collection_cycle_program_launch_plan(config)
+        .expect("internal EVM cycle launch plan");
+    assert_eq!(plan.draft.state_nodes().len(), 2);
+    assert_eq!(plan.draft.public_output_spec().outputs().len(), 1);
+
+    let registry = production_certification_registry().expect("production registry");
+    certify_launch_plan(&plan, &registry)
+        .expect("production registry certifies the internal EVM collector cycle");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn evm_balance_collection_validates_its_async_route_before_admission() {
+    use alloy_primitives::address;
+    use mfm_store::v1::StoreScopeStore as _;
+
+    let store = store::AsyncInMemoryRunStore::default();
+    let config = mfm_op_evm_collectors::EvmBalanceCollectionConfig::new(
+        "ethereum-mainnet",
+        1,
+        18,
+        vec![mfm_op_evm_collectors::EvmBalanceSource::new(
+            address!("000000000000000000000000000000000000dead"),
+            mfm_op_evm_collectors::EvmBalanceAsset::Native,
+        )
+        .expect("EVM source")],
+    )
+    .expect("EVM collection config");
+    let draft = mfm_op_evm_collectors::evm_balance_collection_cycle_program_draft(config.clone())
+        .expect("internal EVM collection draft");
+    let certification = production_certification_registry().expect("production registry");
+    let request = prepare_typed_program_run_launch_for_test(
+        draft,
+        BTreeMap::new(),
+        &certification,
+        store.load_store_scope_id().await.expect("store scope"),
+        None,
+    )
+    .expect("EVM collection launch request");
+    let run_id = request.run_id.clone();
+    let fact_index = crate::ProjectionFactIndexProvider::new(store.clone());
+    let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
+        .expect("production runners without EVM config");
+    let services = make_run_services(runners, store.clone(), store.clone(), certification.clone());
+
+    let error = services
+        .launch_run(request)
+        .await
+        .expect_err("missing EVM route rejects collection before admission");
+
+    assert_eq!(error.code, "RuntimeConfigRequired");
+    assert_eq!(error.diagnostics.len(), 1);
+    assert_eq!(error.diagnostics[0].provider_family().as_str(), "evm");
+    assert!(store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream")
+        .is_empty());
+
+    let invalid_store = store::AsyncInMemoryRunStore::default();
+    let invalid_draft = mfm_op_evm_collectors::evm_balance_collection_cycle_program_draft(config)
+        .expect("invalid-route EVM collection draft");
+    let invalid_request = prepare_typed_program_run_launch_for_test(
+        invalid_draft,
+        BTreeMap::new(),
+        &certification,
+        invalid_store
+            .load_store_scope_id()
+            .await
+            .expect("invalid-route store scope"),
+        None,
+    )
+    .expect("invalid-route EVM collection launch request");
+    let invalid_run_id = invalid_request.run_id.clone();
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = runtime_dir.path().join("runtime.toml");
+    std::fs::write(
+        &runtime_path,
+        r#"
+[evm.routes.ethereum-mainnet]
+source_ref = "invalid-route"
+rpc_url = "ws://example.invalid"
+"#,
+    )
+    .expect("write invalid runtime config");
+    let fact_index = crate::ProjectionFactIndexProvider::new(invalid_store.clone());
+    let runners = production_runner_registry(
+        Arc::new(invalid_store.clone()),
+        Arc::new(fact_index),
+        Some(&runtime_path),
+    )
+    .expect("production runners with invalid EVM config");
+    let services = make_run_services(
+        runners,
+        invalid_store.clone(),
+        invalid_store.clone(),
+        certification,
+    );
+    let error = services
+        .launch_run(invalid_request)
+        .await
+        .expect_err("invalid EVM route rejects collection before admission");
+    assert_eq!(error.code, "RuntimeConfigInvalid");
+    assert_eq!(error.diagnostics.len(), 1);
+    assert!(invalid_store
+        .load_run_stream(&invalid_run_id)
+        .await
+        .expect("invalid-route run stream")
+        .is_empty());
 }
 
 #[tokio::test]
@@ -695,7 +803,9 @@ async fn btc_collector_launch_defers_runtime_config_to_ingress() {
         .await
         .expect_err("missing BTC runtime config rejects at ingress before admission");
 
-    assert_eq!(error.code, "LaunchRuntimeError");
+    assert_eq!(error.code, "RuntimeConfigRequired");
+    assert_eq!(error.diagnostics.len(), 1);
+    assert_eq!(error.diagnostics[0].provider_family().as_str(), "bitcoin");
     assert!(store
         .load_run_stream(&run_id)
         .await
@@ -765,7 +875,7 @@ async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
 #[tokio::test]
 async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
     let database_url = "postgres://mfm_user:super-secret@127.0.0.1:notaport/mfm";
-    let error = match connect_production_run_store(Some(database_url)).await {
+    let error = match connect_production_store(Some(database_url)).await {
         Ok(_) => panic!("invalid postgres URL should not connect"),
         Err(error) => error,
     };

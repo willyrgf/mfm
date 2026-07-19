@@ -151,9 +151,9 @@ fn descriptor_accepts_valid_subject_result_and_ordering() {
 #[test]
 fn descriptor_rejects_invalid_field_sets() {
     let optional_subject = FactFieldDescriptor::new(
-        FactFieldId::new("subject.chain").expect("field id"),
+        FactFieldId::new("subject.network").expect("field id"),
         FactFieldValueType::String,
-        FactFieldExtraction::Subject(CanonicalValuePath::new("chain").expect("path")),
+        FactFieldExtraction::Subject(CanonicalValuePath::new("network").expect("path")),
         FactFieldPolicy::new(
             vec![FactQueryOperator::Equal],
             FactFieldExposure::Returnable,
@@ -174,15 +174,18 @@ fn descriptor_rejects_invalid_field_sets() {
             vec![sortable_result_field("result.height")],
             "at least one subject field",
         ),
-        (
-            vec![optional_subject, sortable_result_field("result.height")],
-            "subject fields must be required",
-        ),
     ] {
         let error = descriptor(fields).expect_err(expected);
 
         assert!(error.to_string().contains(expected));
     }
+
+    descriptor(vec![
+        subject_field("subject.chain"),
+        optional_subject,
+        sortable_result_field("result.height"),
+    ])
+    .expect("optional union-arm subject fields are valid");
 }
 
 #[test]

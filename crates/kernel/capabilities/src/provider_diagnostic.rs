@@ -2,14 +2,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use mfm_ids::LocalPublicId;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 
 /// Stable redaction-safe provider diagnostic.
 ///
 /// The diagnostic intentionally accepts only checked public identifiers, booleans, and integers.
 /// It has no field for raw provider text, URLs, request parameters, response bodies, headers, or
-/// transport error displays.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// transport error displays. Its derived serde object is the canonical representation shared by
+/// retained runtime artifacts and public application surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedactedProviderDiagnostic {
     provider_family: LocalPublicId,
     code: ProviderDiagnosticCode,
@@ -60,11 +62,6 @@ impl RedactedProviderDiagnostic {
         &self.fields
     }
 
-    /// Returns the generic diagnostic kind used in retained runtime public details.
-    pub const fn diagnostic_kind(&self) -> &'static str {
-        diagnostic_kind_for(self.code)
-    }
-
     /// Returns a stable machine-readable error code for public output envelopes.
     pub fn stable_error_code(&self) -> String {
         format!("{}_{}", self.provider_family.as_str(), self.code.as_str())
@@ -81,64 +78,6 @@ impl RedactedProviderDiagnostic {
         }
         parts.join(" ")
     }
-
-    /// Converts the diagnostic to a closed JSON object for runtime public diagnostic artifacts.
-    pub fn to_public_details_json(&self) -> serde_json::Value {
-        let mut fields = serde_json::Map::new();
-        for (key, value) in &self.fields {
-            fields.insert(key.to_string(), value.to_json());
-        }
-        serde_json::json!({
-            "diagnostic_kind": self.diagnostic_kind(),
-            "provider_family": self.provider_family.to_string(),
-            "code": self.code.as_str(),
-            "operation": self.operation.as_ref().map(ToString::to_string),
-            "fields": fields,
-        })
-    }
-
-    /// Parses the closed public-details representation of a provider diagnostic.
-    pub fn from_public_details_json(value: &Value) -> Option<Self> {
-        let object = value.as_object()?;
-        const FIELDS: [&str; 5] = [
-            "code",
-            "diagnostic_kind",
-            "fields",
-            "operation",
-            "provider_family",
-        ];
-        if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
-            return None;
-        }
-
-        let provider_family = LocalPublicId::new(object.get("provider_family")?.as_str()?).ok()?;
-        let code = ProviderDiagnosticCode::from_str(object.get("code")?.as_str()?)?;
-        let diagnostic_kind = object.get("diagnostic_kind")?.as_str()?;
-        if diagnostic_kind != diagnostic_kind_for(code) {
-            return None;
-        }
-        let operation = match object.get("operation")? {
-            Value::Null => None,
-            Value::String(value) => Some(LocalPublicId::new(value).ok()?),
-            _ => return None,
-        };
-        let fields = object.get("fields")?.as_object()?;
-        let fields = fields
-            .iter()
-            .map(|(key, value)| {
-                Some((
-                    LocalPublicId::new(key).ok()?,
-                    ProviderDiagnosticValue::from_json(value)?,
-                ))
-            })
-            .collect::<Option<BTreeMap<_, _>>>()?;
-        Some(Self {
-            provider_family,
-            code,
-            operation,
-            fields,
-        })
-    }
 }
 
 impl fmt::Display for RedactedProviderDiagnostic {
@@ -148,8 +87,11 @@ impl fmt::Display for RedactedProviderDiagnostic {
 }
 
 /// Closed provider diagnostic code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderDiagnosticCode {
+    /// Required provider runtime configuration was not supplied.
+    ProviderConfigurationMissing,
     /// Provider runtime configuration was invalid.
     ProviderConfigurationInvalid,
     /// Semantic network route was unavailable.
@@ -180,6 +122,7 @@ impl ProviderDiagnosticCode {
     /// Returns the stable code string.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ProviderConfigurationMissing => "provider_configuration_missing",
             Self::ProviderConfigurationInvalid => "provider_configuration_invalid",
             Self::RouteUnavailable => "route_unavailable",
             Self::SourceUnavailable => "source_unavailable",
@@ -194,24 +137,6 @@ impl ProviderDiagnosticCode {
             Self::OperationIncomplete => "operation_incomplete",
         }
     }
-
-    fn from_str(value: &str) -> Option<Self> {
-        Some(match value {
-            "provider_configuration_invalid" => Self::ProviderConfigurationInvalid,
-            "route_unavailable" => Self::RouteUnavailable,
-            "source_unavailable" => Self::SourceUnavailable,
-            "source_not_allowed" => Self::SourceNotAllowed,
-            "transport_failed" => Self::TransportFailed,
-            "rpc_http_status" => Self::RpcHttpStatus,
-            "rpc_json_error" => Self::RpcJsonError,
-            "response_invalid" => Self::ResponseInvalid,
-            "response_missing_result" => Self::ResponseMissingResult,
-            "source_mismatch" => Self::SourceMismatch,
-            "unsupported_operation" => Self::UnsupportedOperation,
-            "operation_incomplete" => Self::OperationIncomplete,
-            _ => return None,
-        })
-    }
 }
 
 impl fmt::Display for ProviderDiagnosticCode {
@@ -221,7 +146,8 @@ impl fmt::Display for ProviderDiagnosticCode {
 }
 
 /// Closed redaction-safe provider diagnostic value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ProviderDiagnosticValue {
     /// Checked public identifier.
     Id(LocalPublicId),
@@ -231,36 +157,6 @@ pub enum ProviderDiagnosticValue {
     I64(i64),
     /// Boolean.
     Bool(bool),
-}
-
-impl ProviderDiagnosticValue {
-    fn from_json(value: &Value) -> Option<Self> {
-        match value {
-            Value::String(value) => Some(Self::Id(LocalPublicId::new(value).ok()?)),
-            Value::Number(value) => value
-                .as_u64()
-                .map(Self::U64)
-                .or_else(|| value.as_i64().map(Self::I64)),
-            Value::Bool(value) => Some(Self::Bool(*value)),
-            Value::Null | Value::Array(_) | Value::Object(_) => None,
-        }
-    }
-
-    fn to_json(&self) -> serde_json::Value {
-        match self {
-            Self::Id(value) => serde_json::Value::String(value.to_string()),
-            Self::U64(value) => serde_json::json!(value),
-            Self::I64(value) => serde_json::json!(value),
-            Self::Bool(value) => serde_json::json!(value),
-        }
-    }
-}
-
-const fn diagnostic_kind_for(code: ProviderDiagnosticCode) -> &'static str {
-    match code {
-        ProviderDiagnosticCode::SourceMismatch => "provider_source_mismatch",
-        _ => "provider_failure",
-    }
 }
 
 impl fmt::Display for ProviderDiagnosticValue {

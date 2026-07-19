@@ -16,9 +16,3 @@ thiserror = { workspace = true }
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-ids = { path = "../kernel/ids" }
-
-[dev-dependencies]
-mfm-program-derive = { path = "../kernel/program-derive" }
-mfm-values = { path = "../kernel/values" }
-serde = { workspace = true }
-trybuild = "1.0"

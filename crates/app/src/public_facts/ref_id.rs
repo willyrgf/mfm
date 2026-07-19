@@ -4,7 +4,7 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use serde::{Deserialize, Serialize};
 
-use crate::{AppError, ErrorClass};
+use crate::{ErrorClass, PublicError};
 
 /// Opaque public identifier for a fact returned by app public fact services.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -12,13 +12,13 @@ pub struct PublicFactRefId(String);
 
 impl PublicFactRefId {
     /// Creates a public fact ref id from app-generated opaque text.
-    pub fn new(value: impl Into<String>) -> Result<Self, AppError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, PublicError> {
         let value = value.into();
         let valid = value
             .strip_prefix("pfr_")
             .is_some_and(|suffix| suffix.len() == 64 && suffix.bytes().all(is_lower_hex));
         if !valid {
-            return Err(AppError::new(
+            return Err(PublicError::new(
                 ErrorClass::BadRequest,
                 "PublicFactRefInvalid",
                 "Public fact reference is invalid",
@@ -45,7 +45,7 @@ impl fmt::Display for PublicFactRefId {
 
 pub(crate) fn public_ref_id(
     fact_ref: &mfm_facts::InternalFactRef,
-) -> Result<PublicFactRefId, AppError> {
+) -> Result<PublicFactRefId, PublicError> {
     let claim_id = mfm_facts::canonical_fact_claim_id_bytes(fact_ref.fact_claim_id())?;
     let material = [
         b"mfm.public-fact-ref.v1:".as_slice(),

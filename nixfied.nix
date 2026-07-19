@@ -39,6 +39,9 @@ let
     CARGO_PROFILE_TEST_DEBUG = "1";
     CARGO_PROFILE_DEV_SPLIT_DEBUGINFO = "off";
     CARGO_PROFILE_TEST_SPLIT_DEBUGINFO = "off";
+    # Keep managed Rust checks within the memory envelope of the smallest
+    # supported CI runner; Cargo can otherwise link too many proc macros at once.
+    CARGO_BUILD_JOBS = "2";
     RUST_BACKTRACE = "1";
     TMPDIR = "\${stateDir}";
   }
@@ -54,6 +57,9 @@ let
   postgresSqlxEnv = {
     DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
     SQLX_OFFLINE = "false";
+  };
+  rethEnv = {
+    MFM_RETH_PARITY_HTTP_URL = "http://127.0.0.1:\${port:reth}";
   };
 
   # A cargo leaf: argv + extra env + service requirements. Reuse is this Nix
@@ -86,10 +92,11 @@ let
     };
 in
 {
-  # Postgres comes from the upstream reference adapter: idempotent prepare,
+  # Postgres and Reth come from upstream reference adapters: idempotent prepare,
   # protocol probes, platform behavior, and lifecycle are framework-owned.
   imports = [
     adapters.postgres
+    adapters.reth
   ];
 
   nixfied.project.projectId = "mfm";
@@ -167,7 +174,7 @@ in
         "cargo"
         "check"
         "-p"
-        "mfm-stream-store-postgres"
+        "mfm-storage-postgres"
         "--features"
         "parity-tests"
         "--all-targets"
@@ -231,7 +238,7 @@ in
           fi
           export DATABASE_URL="$admin_database_url''${separator}options=-csearch_path%3D$schema"
 
-          cd crates/storages/stream-store-postgres
+          cd crates/storages/postgres
           cargo sqlx migrate run --source migrations
           prepare_check() {
             cargo sqlx prepare --check -- --all-targets --features parity-tests
@@ -262,6 +269,22 @@ in
       env = postgresSqlxEnv;
       requires = [ "postgres" ];
     };
+    mfm-store = {
+      serviceLifetime = "persistent-until-down";
+      invocation = {
+        tools = [ sqlxCli ];
+        run = [
+          "sqlx"
+          "migrate"
+          "run"
+          "--source"
+          "crates/storages/postgres/migrations"
+        ];
+        env = postgresSqlxEnv;
+        timeoutMs = 60000;
+      };
+      requires = [ "postgres" ];
+    };
     mfm-cli-build = cargoLeaf {
       run = [
         "cargo"
@@ -272,48 +295,16 @@ in
         "mfm_cli"
       ];
     };
-    mfm-start-store = {
-      serviceLifetime = "persistent-until-down";
-      invocation = {
-        tools = [ sqlxCli ];
-        run = [
-          "sqlx"
-          "migrate"
-          "run"
-          "--source"
-          "crates/storages/stream-store-postgres/migrations"
-        ];
-        env = postgresSqlxEnv;
-        timeoutMs = 60000;
-      };
-      requires = [ "postgres" ];
-    };
-    parity-postgres-rest-api = cargoLeaf {
+    parity-cli-setup = cargoLeaf {
       run = [
         "cargo"
         "test"
         "-p"
-        "mfm-integration-tests"
+        "mfm"
         "--features"
         "parity-tests"
         "--test"
-        "parity_rest_api_postgres_smoke"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-collect-then-report = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "collect_then_report_native_balances"
+        "setup_postgres"
         "--"
         "--nocapture"
       ];
@@ -336,12 +327,28 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    parity-postgres-rest-api = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_rest_api_postgres_smoke"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
     parity-postgres-state-events = cargoLeaf {
       run = [
         "cargo"
         "test"
         "-p"
-        "mfm-stream-store-postgres"
+        "mfm-storage-postgres"
         "--features"
         "parity-tests"
         "--"
@@ -350,8 +357,33 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    parity-reth-eip1559 = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_reth_eip1559"
+        "--"
+        "--nocapture"
+      ];
+      env = rethEnv;
+      requires = [ "reth" ];
+    };
+    closing-source-revision = cargoLeaf {
+      run = [
+        "git"
+        "rev-parse"
+        "--verify"
+        "HEAD^{commit}"
+      ];
+    };
     # Keep workspace tests and doctests as explicit leaves so each command has
-    # its own evidence.
+    # its own evidence. The workspace run enables app test support in-place to
+    # avoid executing the app's default tests a second time.
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
@@ -387,20 +419,17 @@ in
           task = "parity-postgres-state-events";
           dependsOn = [ "postgres-sqlx-check" ];
         };
-        parity-collect-then-report = {
-          task = "parity-collect-then-report";
-          dependsOn = [
-            "mfm-cli-build"
-            "parity-postgres-state-events"
-          ];
-        };
-        parity-postgres-rest-api = {
-          task = "parity-postgres-rest-api";
-          dependsOn = [ "parity-collect-then-report" ];
+        parity-cli-setup = {
+          task = "parity-cli-setup";
+          dependsOn = [ "mfm-cli-build" ];
         };
         parity-cli-postgres-status = {
           task = "parity-cli-postgres-status";
-          dependsOn = [ "parity-postgres-rest-api" ];
+          dependsOn = [ "mfm-cli-build" ];
+        };
+        parity-postgres-rest-api = {
+          task = "parity-postgres-rest-api";
+          dependsOn = [ "parity-postgres-state-events" ];
         };
       };
     };
@@ -425,6 +454,14 @@ in
         test-db = {
           task = "test-db";
           dependsOn = [ "parity-cli-keystore" ];
+        };
+        parity-reth-eip1559 = {
+          task = "parity-reth-eip1559";
+          dependsOn = [ "test-db" ];
+        };
+        closing-source-revision = {
+          task = "closing-source-revision";
+          dependsOn = [ "parity-reth-eip1559" ];
         };
       };
     };

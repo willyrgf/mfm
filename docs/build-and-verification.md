@@ -14,13 +14,18 @@ endpoints, runtime state, and run evidence.
 | --- | --- | --- | --- |
 | Focused development | `nix develop`, direct Cargo, `nix run .#quick` | normal worktree `target` | mutable, incremental, developer-owned |
 | Broad verification | `nix run .#check`, `.#test`, `.#test-db`, `.#ci` | worktree `target/verification` | mutable, compact, nonincremental |
-| Release packaging | `nix build .#mfm`, `nix run .#mfm` | Nix store | immutable package output |
+| Release packaging | `nix build .#mfm` | Nix store | immutable package output |
 
 These are assurance and artifact boundaries, not competing Cargo and Nix
 environments. Development and verification both use the pinned Rust toolchain
 and native dependencies supplied by Nix. Release packaging does not act as a
 test cache, and mutable Cargo artifacts are never release inputs or trusted
 verification results.
+
+`nix run .#mfm` is a local runtime convenience around the immutable package:
+it starts the Nixfied-managed PostgreSQL service, supplies `DATABASE_URL`, and
+then delegates to the packaged CLI. It is not a separate build lane or a raw
+package entry point.
 
 ## Responsibility boundary
 
@@ -66,6 +71,7 @@ CARGO_PROFILE_DEV_DEBUG=1
 CARGO_PROFILE_TEST_DEBUG=1
 CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off
 CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=off
+CARGO_BUILD_JOBS=2
 ```
 
 The task wrapper makes the target path absolute from the admitted worktree

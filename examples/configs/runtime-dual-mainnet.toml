@@ -1,8 +1,6 @@
-[evm.sources.ethereum-mainnet]
-rpc_url_env = "MFM_ETHEREUM_MAINNET_RPC_URL"
-
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
+rpc_url_env = "MFM_ETHEREUM_MAINNET_RPC_URL"
 
 [btc.routes.public-bitcoin-core]
 rpc_url_env = "MFM_BITCOIN_RPC_URL"

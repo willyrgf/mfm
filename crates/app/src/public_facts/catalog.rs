@@ -12,7 +12,7 @@ use super::dto::{
 use super::query::PublicFactQueryRequest;
 use super::ref_id::{public_ref_id, PublicFactRefId};
 use super::service::AppFactQueryRow;
-use crate::{async_app_store_error, json_media_type, AppError, ErrorClass};
+use crate::{async_app_store_error, json_media_type, ErrorClass, PublicError};
 
 /// App-owned public descriptor catalog for facts.
 #[derive(Debug, Clone, Default)]
@@ -22,7 +22,7 @@ pub struct FactCatalogService {
 
 impl FactCatalogService {
     /// Creates a catalog from descriptors that are already authorized for public discovery.
-    pub fn new<I>(descriptors: I) -> Result<Self, AppError>
+    pub fn new<I>(descriptors: I) -> Result<Self, PublicError>
     where
         I: IntoIterator<Item = mfm_facts::FactDescriptor>,
     {
@@ -42,7 +42,7 @@ impl FactCatalogService {
     pub async fn from_retained_public_projection<A>(
         artifacts: &A,
         projection: &store::ProjectionSnapshot,
-    ) -> Result<Self, AppError>
+    ) -> Result<Self, PublicError>
     where
         A: store::RetainedArtifactReadProvider + ?Sized,
     {
@@ -62,7 +62,7 @@ impl FactCatalogService {
     pub fn from_public_projection<I>(
         descriptors: I,
         projection: &store::ProjectionSnapshot,
-    ) -> Result<Self, AppError>
+    ) -> Result<Self, PublicError>
     where
         I: IntoIterator<Item = mfm_facts::FactDescriptor>,
     {
@@ -98,7 +98,7 @@ impl FactCatalogService {
     pub fn describe_kind(
         &self,
         fact_kind: &str,
-    ) -> Result<Vec<PublicFactDescriptorSummary>, AppError> {
+    ) -> Result<Vec<PublicFactDescriptorSummary>, PublicError> {
         let descriptors = self
             .descriptors
             .values()
@@ -112,7 +112,7 @@ impl FactCatalogService {
     }
 
     /// Explains public query and return fields for one kind.
-    pub fn explain_kind(&self, fact_kind: &str) -> Result<PublicFactExplain, AppError> {
+    pub fn explain_kind(&self, fact_kind: &str) -> Result<PublicFactExplain, PublicError> {
         Ok(PublicFactExplain {
             fact_kind: fact_kind.to_owned(),
             descriptors: self.describe_kind(fact_kind)?,
@@ -122,7 +122,7 @@ impl FactCatalogService {
     pub(super) fn resolve_descriptor(
         &self,
         request: &PublicFactQueryRequest,
-    ) -> Result<(&ContentDigest, &mfm_facts::FactDescriptor), AppError> {
+    ) -> Result<(&ContentDigest, &mfm_facts::FactDescriptor), PublicError> {
         let matches = self
             .descriptors
             .iter()
@@ -137,7 +137,7 @@ impl FactCatalogService {
         match matches.as_slice() {
             [(hash, descriptor)] => Ok((hash, descriptor)),
             [] => Err(redacted_fact_not_found()),
-            _ => Err(AppError::new(
+            _ => Err(PublicError::new(
                 ErrorClass::BadRequest,
                 "FactDescriptorAmbiguous",
                 "Fact kind resolves to more than one public descriptor; provide a shape",
@@ -170,7 +170,7 @@ impl FactPublicRefResolver {
     }
 
     /// Resolves a public fact ref, returning the same not-found class for unknown and non-public refs.
-    pub fn resolve(&self, public_ref: &PublicFactRefId) -> Result<PublicFactRef, AppError> {
+    pub fn resolve(&self, public_ref: &PublicFactRefId) -> Result<PublicFactRef, PublicError> {
         for (_claim_id, entry) in self.projection.fact_index_entries() {
             if !is_public_default_fact_index_entry(entry) {
                 continue;
@@ -234,7 +234,7 @@ fn public_fact_descriptor_hashes(
 async fn load_projected_fact_descriptor<A>(
     artifacts: &A,
     projection: &store::FactDescriptorProjection,
-) -> Result<mfm_facts::FactDescriptor, AppError>
+) -> Result<mfm_facts::FactDescriptor, PublicError>
 where
     A: store::RetainedArtifactReadProvider + ?Sized,
 {
@@ -251,7 +251,7 @@ where
 fn validate_projected_fact_descriptor(
     descriptor: &mfm_facts::FactDescriptor,
     projection: &store::FactDescriptorProjection,
-) -> Result<(), AppError> {
+) -> Result<(), PublicError> {
     let descriptor_hash = mfm_facts::fact_descriptor_hash(descriptor)
         .map_err(|_| fact_descriptor_artifact_invalid())?;
     let namespace_hash = mfm_facts::fact_subject_namespace_hash(descriptor)
@@ -263,7 +263,7 @@ fn validate_projected_fact_descriptor(
         || descriptor.response_schema_id() != &projection.response_schema_id
         || namespace_hash != projection.fact_subject_namespace_hash
     {
-        return Err(AppError::backend(
+        return Err(PublicError::backend(
             ErrorClass::Internal,
             "FactDescriptorProjectionMismatch",
             "Fact descriptor projection did not match retained descriptor authority",
@@ -274,7 +274,7 @@ fn validate_projected_fact_descriptor(
 
 fn fact_descriptor_artifact_requirement(
     projection: &store::FactDescriptorProjection,
-) -> Result<store::EventArtifactRequirement, AppError> {
+) -> Result<store::EventArtifactRequirement, PublicError> {
     Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::FactDescriptor,
         artifact_id: projection.descriptor_artifact_id.clone(),
@@ -282,7 +282,7 @@ fn fact_descriptor_artifact_requirement(
             .descriptor_artifact_evidence
             .evidence_hash()
             .map_err(|_| {
-                AppError::backend(
+                PublicError::backend(
                     ErrorClass::Internal,
                     "FactDescriptorEvidenceInvalid",
                     "Fact descriptor evidence identity was invalid",
@@ -292,7 +292,7 @@ fn fact_descriptor_artifact_requirement(
         byte_len: None,
         media_type: Some(json_media_type()?),
         schema_id: Some(mfm_facts::fact_descriptor_schema_id().map_err(|_| {
-            AppError::backend(
+            PublicError::backend(
                 ErrorClass::Internal,
                 "FactDescriptorSchemaInvalid",
                 "Fact descriptor schema identity is invalid",
@@ -305,16 +305,16 @@ fn fact_descriptor_artifact_requirement(
     })
 }
 
-fn fact_descriptor_projection_missing() -> AppError {
-    AppError::backend(
+fn fact_descriptor_projection_missing() -> PublicError {
+    PublicError::backend(
         ErrorClass::Internal,
         "FactDescriptorProjectionMissing",
         "Fact descriptor projection was missing retained descriptor authority",
     )
 }
 
-fn fact_descriptor_artifact_invalid() -> AppError {
-    AppError::backend(
+fn fact_descriptor_artifact_invalid() -> PublicError {
+    PublicError::backend(
         ErrorClass::Internal,
         "FactDescriptorArtifactInvalid",
         "Fact descriptor artifact failed verification",
@@ -407,7 +407,7 @@ pub(super) fn public_query_input(
     request: &PublicFactQueryRequest,
     store_scope: mfm_facts::StoreScopeRef,
     scope_decision_evidence: mfm_facts::ScopeDecisionEvidence,
-) -> Result<mfm_facts::FactQueryInput, AppError> {
+) -> Result<mfm_facts::FactQueryInput, PublicError> {
     let predicates = request.predicates.clone();
     let return_fields = request
         .return_fields
@@ -429,7 +429,7 @@ pub(super) fn public_query_input(
 pub(super) fn public_fact_from_query_row(
     catalog: &FactCatalogService,
     row: &AppFactQueryRow,
-) -> Result<Option<PublicFactRef>, AppError> {
+) -> Result<Option<PublicFactRef>, PublicError> {
     if !is_public_default_internal_fact_ref(row.fact_ref()) {
         return Ok(None);
     }
@@ -444,7 +444,7 @@ fn public_fact_from_parts(
     fact_ref: &mfm_facts::InternalFactRef,
     descriptor: &mfm_facts::FactDescriptor,
     fields: Vec<PublicFactFieldValue>,
-) -> Result<PublicFactRef, AppError> {
+) -> Result<PublicFactRef, PublicError> {
     Ok(PublicFactRef {
         public_ref: public_ref_id(fact_ref)?,
         fact_kind: fact_ref.fact_kind().as_str().to_owned(),
@@ -458,7 +458,7 @@ fn public_fact_from_parts(
 fn public_fields_from_summaries(
     descriptor: &mfm_facts::FactDescriptor,
     summaries: &[mfm_facts::FactFieldValue],
-) -> Result<Vec<PublicFactFieldValue>, AppError> {
+) -> Result<Vec<PublicFactFieldValue>, PublicError> {
     public_fields_from_values(
         descriptor,
         summaries
@@ -475,7 +475,7 @@ type PublicFieldSource<'a> = (
 fn public_fields_from_values<'a>(
     descriptor: &mfm_facts::FactDescriptor,
     values: impl Iterator<Item = PublicFieldSource<'a>>,
-) -> Result<Vec<PublicFactFieldValue>, AppError> {
+) -> Result<Vec<PublicFactFieldValue>, PublicError> {
     let fields = descriptor_fields_by_id(descriptor);
     values
         .filter_map(|term| {
@@ -489,7 +489,7 @@ fn public_fields_from_values<'a>(
 fn public_field_value(
     field: &mfm_facts::FactFieldDescriptor,
     value: &mfm_facts::FactCanonicalScalar,
-) -> Result<PublicFactFieldValue, AppError> {
+) -> Result<PublicFactFieldValue, PublicError> {
     Ok(PublicFactFieldValue {
         field_id: field.field_id().as_str().to_owned(),
         path: field.path().as_str().to_owned(),
@@ -501,8 +501,8 @@ fn public_field_value(
     })
 }
 
-fn redacted_fact_not_found() -> AppError {
-    AppError::not_found(
+fn redacted_fact_not_found() -> PublicError {
+    PublicError::not_found(
         "FactNotFound",
         "Fact was not found or is not available through the public fact service",
     )

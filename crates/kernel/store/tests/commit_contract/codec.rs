@@ -330,6 +330,109 @@ fn unknown_run_completion_outcome_tag_is_rejected() {
 }
 
 #[test]
+fn launch_evidence_codec_sorts_deduplicates_and_rejects_legacy_fields() {
+    let source_a = events::ConfiguredTargetEvidence::new(
+        StableAuthorKey::new("acme/a").expect("target a"),
+        schema_id("mfm.test.catalog", 101),
+        content_digest(102),
+    );
+    let source_b = events::ConfiguredTargetEvidence::new(
+        StableAuthorKey::new("acme/b").expect("target b"),
+        schema_id("mfm.test.catalog", 103),
+        content_digest(104),
+    );
+    let evidence = events::EntryPointLaunchEvidence::new(
+        "mfm.test/configured-target@1",
+        vec![source_b.clone(), source_a.clone(), source_a],
+    )
+    .expect("launch evidence");
+    assert_eq!(
+        evidence
+            .configured_targets
+            .iter()
+            .map(|source| source.target.as_str())
+            .collect::<Vec<_>>(),
+        vec!["acme/a", "acme/b"]
+    );
+
+    let mut payload = run_admitted(run_id(111));
+    if let KernelEventPayload::RunAdmitted(admitted) = &mut payload {
+        admitted.entry_point = evidence;
+    } else {
+        panic!("run-admitted fixture");
+    }
+    let current = payload_json_value(&payload);
+    assert_eq!(
+        payload_from_json_value(&current).expect("current payload roundtrip"),
+        payload
+    );
+
+    for legacy_field in ["resolved_op_id", "entry_point_registry_digest"] {
+        let mut legacy = current.clone();
+        legacy
+            .get_mut("entry_point")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("entry point object")
+            .insert(
+                legacy_field.to_owned(),
+                serde_json::Value::String("legacy".to_owned()),
+            );
+        assert!(
+            payload_from_json_value(&legacy).is_err(),
+            "legacy field {legacy_field} must be rejected"
+        );
+    }
+
+    let mut unknown_source = current.clone();
+    unknown_source
+        .get_mut("entry_point")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|entry_point| entry_point.get_mut("configured_targets"))
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|sources| sources.first_mut())
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("configured target")
+        .insert("unexpected".to_owned(), serde_json::json!(true));
+    assert!(payload_from_json_value(&unknown_source).is_err());
+
+    let mut mixed_identity = current.clone();
+    mixed_identity
+        .get_mut("identity_material")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("identity material")
+        .insert("legacy_identity_field".to_owned(), serde_json::json!(true));
+    assert!(payload_from_json_value(&mixed_identity).is_err());
+}
+
+#[test]
+fn unrelated_entry_point_summaries_do_not_change_admission_evidence() {
+    let payload = run_admitted(run_id(112));
+    let current = payload_json_value(&payload);
+    let mut with_unrelated_summaries = current.clone();
+    with_unrelated_summaries["entry_point_summaries"] = serde_json::json!([
+        {"entry_point_id": "mfm.unrelated/entry@1"}
+    ]);
+    let decoded = payload_from_json_value(&with_unrelated_summaries)
+        .expect("unrelated summaries are not admission evidence");
+    let KernelEventPayload::RunAdmitted(decoded) = decoded else {
+        panic!("run-admitted fixture");
+    };
+    let KernelEventPayload::RunAdmitted(original) = payload else {
+        panic!("run-admitted fixture");
+    };
+    assert_eq!(decoded.entry_point, original.entry_point);
+    assert_eq!(decoded.identity_material, original.identity_material);
+    assert_eq!(
+        serde_json::to_value(&with_unrelated_summaries["identity_material"])
+            .expect("identity material JSON")
+            .as_object()
+            .expect("identity material object")
+            .len(),
+        3
+    );
+}
+
+#[test]
 fn manual_resolution_outcome_is_closed() {
     let payload = manual_resolution_recorded_for_run(run_id(96), 96);
     assert!(matches!(

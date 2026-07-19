@@ -5,10 +5,8 @@ use std::fmt;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 
-use crate::aave::AaveProtocolPositionConfig;
 use crate::ids::{
-    NetworkId, NormalizedEvmAddress, PortfolioScalarError, ProtocolId, ProtocolReaderId, SymbolId,
-    UnitPriceDecimal,
+    NetworkId, NormalizedEvmAddress, PortfolioScalarError, SymbolId, UnitPriceDecimal,
 };
 use crate::metadata::PublicMetadata;
 
@@ -30,7 +28,7 @@ pub enum QuoteCode {
 
 impl QuoteCode {
     /// Returns the canonical string form used in JSON payloads.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Usd => "USD",
             Self::Btc => "BTC",
@@ -56,44 +54,103 @@ impl PartialOrd for QuoteCode {
     }
 }
 
-/// Canonical symbol kinds supported by the portfolio model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(rename_all = "snake_case")]
+/// The only source algebra supported by the portfolio model.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
-    name = "symbol-kind",
-    schema = "mfm.portfolio.symbol_kind"
+    name = "holding-source-config",
+    schema = "mfm.portfolio.holding_source_config"
 )]
-pub enum SymbolKind {
-    /// Native balance on a network.
-    NativeBalance,
-    /// ERC-20 token balance.
-    Erc20Balance,
-    /// Protocol-backed position.
-    ProtocolPosition,
-    /// Staked position.
-    StakedPosition,
+pub enum HoldingSourceConfig {
+    /// The native balance for the configured wallet and network.
+    Native,
+    /// An ERC-20 balance for the configured wallet and EVM network.
+    Erc20 {
+        /// Canonical non-zero ERC-20 contract address.
+        contract_address: NormalizedEvmAddress,
+    },
 }
 
-/// Canonical exposure roles for a symbol observation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "symbol-role",
-    schema = "mfm.portfolio.symbol_role"
-)]
-pub enum SymbolRole {
-    /// Native asset used for fees and transfers.
-    Native,
-    /// Plain asset exposure.
-    Asset,
-    /// Collateral exposure.
-    Collateral,
-    /// Debt exposure. Quantities stay positive and the role carries the semantics.
-    Debt,
-    /// Staked exposure.
-    Staked,
+struct PresentOptional<T> {
+    value: Option<T>,
+    is_present: bool,
+}
+
+impl<T> Default for PresentOptional<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            is_present: false,
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for PresentOptional<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self {
+            value: Option::<T>::deserialize(deserializer)?,
+            is_present: true,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for HoldingSourceConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct HoldingSourceWire {
+            kind: String,
+            #[serde(default)]
+            contract_address: PresentOptional<NormalizedEvmAddress>,
+        }
+
+        let wire = HoldingSourceWire::deserialize(deserializer)?;
+        match wire.kind.as_str() {
+            "native" => {
+                if wire.contract_address.is_present {
+                    return Err(serde::de::Error::custom(
+                        "native holding sources do not accept contract_address",
+                    ));
+                }
+                Ok(Self::Native)
+            }
+            "erc20" => {
+                let contract_address = wire.contract_address.value.ok_or_else(|| {
+                    serde::de::Error::custom("erc20 holding sources require contract_address")
+                })?;
+                Ok(Self::Erc20 { contract_address })
+            }
+            _ => Err(serde::de::Error::custom(
+                "holding source kind must be native or erc20",
+            )),
+        }
+    }
+}
+
+impl HoldingSourceConfig {
+    /// Returns whether this source is the native network balance.
+    pub const fn is_native(&self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    /// Returns the ERC-20 contract address when this is an ERC-20 source.
+    pub const fn contract_address(&self) -> Option<&NormalizedEvmAddress> {
+        match self {
+            Self::Native => None,
+            Self::Erc20 { contract_address } => Some(contract_address),
+        }
+    }
 }
 
 /// Canonical symbol configuration referenced from portfolio and wallet configs.
@@ -109,20 +166,12 @@ pub struct SymbolConfig {
     pub symbol_id: SymbolId,
     /// Optional human-facing display symbol.
     pub display_symbol: Option<String>,
-    /// Symbol implementation kind.
-    pub kind: SymbolKind,
-    /// Exposure role.
-    pub role: SymbolRole,
     /// Stable network identifier.
     pub network_id: NetworkId,
-    /// Optional protocol identifier.
-    pub protocol: Option<ProtocolId>,
-    /// Balance reader selection.
-    pub balance_reader: BalanceReaderConfig,
+    /// Direct balance source.
+    pub source: HoldingSourceConfig,
     /// Quote valuation routes for the symbol.
     pub valuation: SymbolValuationConfig,
-    /// Optional underlying symbol for protocol-backed exposures.
-    pub underlying_symbol_id: Option<SymbolId>,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: PublicMetadata,
@@ -130,31 +179,18 @@ pub struct SymbolConfig {
 
 impl SymbolConfig {
     /// Creates a normalized and validated symbol config.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         symbol_id: String,
         display_symbol: Option<String>,
-        kind: SymbolKind,
-        role: SymbolRole,
         network_id: String,
-        protocol: Option<String>,
-        balance_reader: BalanceReaderConfig,
+        source: HoldingSourceConfig,
         valuation: SymbolValuationConfig,
-        underlying_symbol_id: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, SymbolConfigError> {
         let symbol_id = SymbolId::new(symbol_id)
             .map_err(|source| SymbolConfigError::InvalidSymbolId { source })?;
         let network_id = NetworkId::new(network_id)
             .map_err(|source| SymbolConfigError::InvalidNetworkId { source })?;
-        let underlying_symbol_id = underlying_symbol_id
-            .map(SymbolId::new)
-            .transpose()
-            .map_err(|source| SymbolConfigError::InvalidUnderlyingSymbolId { source })?;
-        let protocol = protocol
-            .map(ProtocolId::new)
-            .transpose()
-            .map_err(|source| SymbolConfigError::InvalidProtocol { source })?;
         let metadata = PublicMetadata::new(metadata).map_err(|source| {
             SymbolConfigError::MetadataContainsSecret {
                 key: source.key().to_owned(),
@@ -163,13 +199,9 @@ impl SymbolConfig {
         Self {
             symbol_id,
             display_symbol,
-            kind,
-            role,
             network_id,
-            protocol,
-            balance_reader,
+            source,
             valuation,
-            underlying_symbol_id,
             metadata,
         }
         .validated()
@@ -194,35 +226,9 @@ impl SymbolConfig {
     }
 }
 
-/// Canonical balance reader selection.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "balance-reader-config",
-    schema = "mfm.portfolio.balance_reader_config"
-)]
-pub enum BalanceReaderConfig {
-    /// Read the native balance for the wallet on the configured network.
-    NativeBalance {},
-    /// Read an ERC-20 balance.
-    Erc20Balance {
-        /// Canonical token contract address.
-        token_address: NormalizedEvmAddress,
-    },
-    /// Read a protocol-backed position through a protocol-specific reader.
-    ProtocolPosition {
-        /// Stable protocol identifier.
-        protocol: ProtocolId,
-        /// Stable reader identifier inside the protocol module.
-        reader: ProtocolReaderId,
-        /// Typed protocol reader config.
-        config: AaveProtocolPositionConfig,
-    },
-}
-
 /// Quote valuation routes configured for a symbol.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "symbol-valuation-config",
@@ -242,6 +248,7 @@ impl SymbolValuationConfig {
 
 /// Valuation route for one requested quote code.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "quote-valuation-config",
@@ -270,24 +277,15 @@ pub struct Observation {
     pub symbol_id: String,
     /// Optional human-facing symbol display value.
     pub display_symbol: Option<String>,
-    /// Symbol kind.
-    pub kind: SymbolKind,
-    /// Exposure role.
-    pub role: SymbolRole,
     /// Stable network identifier.
     pub network_id: String,
-    /// Optional protocol identifier.
-    pub protocol: Option<String>,
     /// Quantity metadata.
     pub quantity: ObservationQuantity,
     /// Values in configured quote units.
     pub values: Vec<ObservationValue>,
-    /// Balance source information pinned to a block.
-    pub source: ObservationSource,
+    /// Direct holding source information pinned to a concrete anchor.
+    pub source: AnchoredHoldingSource,
     /// Selected holding coverage honesty tag (`configured_only` or `complete_at_anchor`).
-    ///
-    /// Populated from the selected Platform holding fact so public snapshot/report
-    /// success cannot be misread as full wallet discovery when coverage is configured-only.
     pub coverage: String,
     /// Canonical metadata surface.
     #[serde(default)]
@@ -335,47 +333,18 @@ pub struct ObservationValue {
     pub unit_price_dec: String,
 }
 
-/// Concrete execution anchor captured for one observation source.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "family", rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "observation-anchor",
-    schema = "mfm.portfolio.observation_anchor"
-)]
-pub enum ObservationAnchor {
-    /// EVM observation pinned to one block hash and number on one chain.
-    Evm {
-        /// EVM chain id.
-        chain_id: u64,
-        /// Concrete pinned block number.
-        block_number: u64,
-        /// Concrete pinned block hash.
-        block_hash: String,
-    },
-    /// Bitcoin observation pinned to one height and block hash.
-    Bitcoin {
-        /// Concrete pinned block height.
-        height: u64,
-        /// Concrete pinned block hash.
-        block_hash: String,
-    },
-}
-
-/// Concrete balance source pinned to a network anchor.
+/// One direct holding source pinned to a concrete observation anchor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.portfolio",
-    name = "observation-source",
-    schema = "mfm.portfolio.observation_source"
+    name = "anchored-holding-source",
+    schema = "mfm.portfolio.anchored_holding_source"
 )]
-pub struct ObservationSource {
-    /// Canonical balance reader kind.
-    pub balance_reader_kind: String,
-    /// Stable network identifier.
-    pub network_id: String,
+pub struct AnchoredHoldingSource {
+    /// The direct semantic holding source.
+    pub holding: HoldingSourceConfig,
     /// Concrete pinned execution anchor.
-    pub anchor: ObservationAnchor,
+    pub anchor: crate::portfolio::ExecutionAnchor,
 }
 
 /// Validation errors for canonical symbol configs.
@@ -396,24 +365,15 @@ pub enum SymbolConfigError {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
-    /// `protocol` was present but empty.
-    #[error("protocol is invalid: {source}")]
-    InvalidProtocol {
-        /// Underlying scalar validation failure.
-        source: PortfolioScalarError,
-    },
-    /// `underlying_symbol_id` did not satisfy the portfolio identifier grammar.
-    #[error("underlying_symbol_id is invalid: {source}")]
-    InvalidUnderlyingSymbolId {
-        /// Underlying scalar validation failure.
-        source: PortfolioScalarError,
-    },
     /// Symbol metadata contained a secret-shaped key or value.
     #[error("metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
         /// Metadata key associated with the rejected content.
         key: String,
     },
+    /// An ERC-20 contract address was the all-zero address.
+    #[error("ERC-20 contract_address must not be the zero address")]
+    ZeroErc20ContractAddress,
     /// A quote route appeared more than once.
     #[error("valuation quote `{quote}` must be unique per symbol")]
     DuplicateQuoteValuation {
@@ -432,10 +392,10 @@ pub enum SymbolConfigError {
 
 /// Validates a canonical symbol config.
 pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigError> {
-    match &cfg.balance_reader {
-        BalanceReaderConfig::NativeBalance {} => {}
-        BalanceReaderConfig::Erc20Balance { .. } => {}
-        BalanceReaderConfig::ProtocolPosition { .. } => {}
+    if let HoldingSourceConfig::Erc20 { contract_address } = &cfg.source {
+        if contract_address.is_zero() {
+            return Err(SymbolConfigError::ZeroErc20ContractAddress);
+        }
     }
 
     let mut seen_quotes = HashSet::new();

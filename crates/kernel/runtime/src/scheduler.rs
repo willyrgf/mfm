@@ -78,7 +78,7 @@ impl SerialTypedScheduler {
     }
 
     /// Prepares sealed admission launch authority for a certified run.
-    pub fn prepare_run_launch(
+    pub async fn prepare_run_launch(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         identity_material: events::RunIdentityMaterialV1,
@@ -86,7 +86,9 @@ impl SerialTypedScheduler {
         expected_next_seq: store::StreamSeq,
     ) -> Result<PreparedRunLaunch> {
         let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
-        bound_context.validate_launch_ingress(runtime_spec, &evidence)?;
+        bound_context
+            .validate_launch_ingress(runtime_spec, &evidence)
+            .await?;
         RunAdmissionLifecycle::prepare_run_launch(
             runtime_spec,
             identity_material,
@@ -111,13 +113,33 @@ impl SerialTypedScheduler {
     /// This is the resume-time counterpart to [`Self::prepare_run_launch`]. Callers must build
     /// `evidence` only from verified `RunAdmitted` retained artifacts, then call this before
     /// acquiring an execution claim or selecting a transition.
-    pub fn validate_admitted_run_ingress(
+    pub async fn validate_admitted_run_ingress(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         evidence: &RunLaunchEvidence,
     ) -> Result<()> {
         let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
-        bound_context.validate_launch_ingress(runtime_spec, evidence)
+        bound_context
+            .validate_launch_ingress(runtime_spec, evidence)
+            .await
+    }
+
+    /// Validates resume ingress for domain nodes whose output is not terminal in verified history.
+    ///
+    /// The original admission validates every domain node. Recovery only needs process-local
+    /// capability for work that can still execute; completed nodes must not make later
+    /// deterministic work depend on removed runtime configuration.
+    pub async fn validate_admitted_run_ingress_for_pending_nodes(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        projection: &store::ProjectionSnapshot,
+        evidence: &RunLaunchEvidence,
+    ) -> Result<()> {
+        let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
+        bound_context
+            .validate_pending_launch_ingress(runtime_spec, run_id, projection, evidence)
+            .await
     }
 
     /// Appends the prepared typed admission commit through an async typed store.

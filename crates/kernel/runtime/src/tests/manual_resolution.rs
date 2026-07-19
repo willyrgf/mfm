@@ -22,7 +22,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
     .await
     .expect("start run");
 
-    for _ in 0..2 {
+    for _ in 0..3 {
         assert_drive!(scheduler, store, fixture, Advanced, "advance to ambiguity");
     }
     let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
@@ -72,7 +72,7 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
     );
     let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    for _ in 0..2 {
+    for _ in 0..3 {
         assert_drive!(
             scheduler,
             store,
@@ -133,7 +133,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
     .await
     .expect("start run");
 
-    for _ in 0..2 {
+    for _ in 0..3 {
         assert_drive!(scheduler, store, fixture, Advanced, "advance to ambiguity");
     }
     append_manual_resolution(

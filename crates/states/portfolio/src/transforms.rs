@@ -1,150 +1,6 @@
 use super::*;
-
-/// One required holding expanded from portfolio config + resolved subjects.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RequiredHoldingRequirement {
-    /// Selection key.
-    pub key: RequiredHoldingKey,
-    /// Cutover fact projection kind.
-    pub projection: HoldingFactProjection,
-    /// Wallet address for subject predicates.
-    pub address: String,
-    /// Symbol config for observation join.
-    pub symbol: SymbolConfig,
-    /// Network config for subject predicates.
-    pub network: NetworkConfig,
-}
-
-/// Resolves configured wallets into typed subjects.
-pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedSubjects {
-    let mut subjects = config
-        .wallets
-        .iter()
-        .map(|wallet| ResolvedSubject {
-            wallet_id: wallet.wallet_id.to_string(),
-            address: wallet.subject.address_str().to_owned(),
-            subject_kind: wallet.subject.kind(),
-            network_id: wallet.network_id.to_string(),
-            implementation_kind: wallet_implementation_kind(&wallet.implementation).to_owned(),
-        })
-        .collect::<Vec<_>>();
-    subjects.sort_by(|left, right| left.wallet_id.cmp(&right.wallet_id));
-    ResolvedSubjects { subjects }
-}
-
-/// Expands wallet×symbol requirements into cutover-supported holding requirements.
-pub fn expand_required_holdings(
-    config: &SelectHoldingsConfig,
-    subjects: &ResolvedSubjects,
-) -> Result<Vec<RequiredHoldingRequirement>, PortfolioHoldingSelectionError> {
-    let networks = networks_by_id(&config.portfolio.networks)?;
-    let symbols = symbols_by_id(&config.portfolio.symbol_configs)?;
-    let subjects_by_wallet = subjects
-        .subjects
-        .iter()
-        .map(|subject| (subject.wallet_id.as_str(), subject))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut requirements = Vec::new();
-    for wallet in &config.portfolio.wallets {
-        let subject = subjects_by_wallet
-            .get(wallet.wallet_id.as_str())
-            .copied()
-            .ok_or_else(|| {
-                PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    format!("missing resolved subject for wallet {}", wallet.wallet_id),
-                    Some(wallet.wallet_id.to_string()),
-                    Some(wallet.network_id.to_string()),
-                )
-            })?;
-        for symbol_id in &wallet.symbol_ids {
-            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
-                PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::UnsupportedRequirement,
-                    format!(
-                        "wallet `{}` referenced unknown symbol `{symbol_id}`",
-                        wallet.wallet_id
-                    ),
-                    Some(format!("{}/{}", wallet.wallet_id, symbol_id)),
-                    Some(wallet.network_id.to_string()),
-                )
-            })?;
-            let network = networks
-                .get(symbol.network_id.as_str())
-                .copied()
-                .ok_or_else(|| {
-                    PortfolioHoldingSelectionError::new(
-                        PortfolioHoldingErrorCode::UnsupportedRequirement,
-                        format!(
-                            "missing network `{}` for symbol `{}`",
-                            symbol.network_id, symbol.symbol_id
-                        ),
-                        Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
-                        Some(symbol.network_id.to_string()),
-                    )
-                })?;
-            let family = match network.family() {
-                NetworkFamilyConfig::Bitcoin => "bitcoin",
-                NetworkFamilyConfig::Evm => "evm",
-            };
-            let is_native = matches!(
-                (&symbol.kind, &symbol.balance_reader),
-                (
-                    SymbolKind::NativeBalance,
-                    BalanceReaderConfig::NativeBalance {}
-                )
-            );
-            if matches!(
-                (&symbol.kind, &symbol.balance_reader),
-                (
-                    SymbolKind::Erc20Balance,
-                    BalanceReaderConfig::Erc20Balance { .. }
-                )
-            ) {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::UnsupportedRequirement,
-                    format!(
-                        "ERC-20 symbol `{}` is not supported at cutover",
-                        symbol.symbol_id
-                    ),
-                    Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
-                    Some(symbol.network_id.to_string()),
-                ));
-            }
-            let projection =
-                project_holding_fact_for_network(family, is_native).map_err(|mut err| {
-                    err.holding_key = Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id));
-                    err.network_id = Some(symbol.network_id.to_string());
-                    err
-                })?;
-            requirements.push(RequiredHoldingRequirement {
-                key: RequiredHoldingKey {
-                    wallet_id: wallet.wallet_id.to_string(),
-                    symbol_id: symbol.symbol_id.to_string(),
-                    network_id: symbol.network_id.to_string(),
-                },
-                projection,
-                address: subject.address.clone(),
-                symbol: symbol.clone(),
-                network: network.clone(),
-            });
-        }
-    }
-    requirements.sort_by(|left, right| {
-        (
-            left.key.network_id.as_str(),
-            left.key.wallet_id.as_str(),
-            left.key.symbol_id.as_str(),
-        )
-            .cmp(&(
-                right.key.network_id.as_str(),
-                right.key.wallet_id.as_str(),
-                right.key.symbol_id.as_str(),
-            ))
-    });
-    Ok(requirements)
-}
+use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig};
+use mfm_portfolio_model::symbol::HoldingSourceConfig;
 
 /// Builds quantity-only observations from selected holdings (valuation join deferred).
 pub fn observations_from_selected_holdings(
@@ -169,19 +25,15 @@ pub fn observations_from_selected_holdings(
             wallet_id: item.material.wallet_id.clone(),
             symbol_id: item.material.symbol_id.clone(),
             display_symbol: symbol.display_symbol.clone(),
-            kind: symbol.kind,
-            role: symbol.role,
             network_id: item.material.network_id.clone(),
-            protocol: symbol.protocol.as_ref().map(ToString::to_string),
             quantity: ObservationQuantity {
                 raw_dec: item.material.raw_dec.clone(),
                 decimals: item.material.decimals,
                 amount_dec,
             },
             values: Vec::new(),
-            source: ObservationSource {
-                balance_reader_kind: item.material.balance_reader_kind.clone(),
-                network_id: item.material.network_id.clone(),
+            source: AnchoredHoldingSource {
+                holding: item.material.holding.clone(),
                 anchor: item.material.observation_anchor.clone(),
             },
             coverage: item.material.coverage.clone(),
@@ -193,10 +45,12 @@ pub fn observations_from_selected_holdings(
     Ok(observations)
 }
 
-/// Joins fixed unit-price valuations onto observations (hard-fail on missing route).
-pub fn apply_valuations_to_observations(
+/// Derives configured display fields and fixed unit-price valuations onto observations.
+///
+/// The selected holdings are only authority for quantity and receipt-pinned collection evidence.
+/// Every public presentation and valuation field is rebuilt from the certified portfolio config.
+fn apply_configured_valuations_to_observations(
     mut observations: Vec<Observation>,
-    valuations: &ResolvedValuations,
     symbols_by_id: &BTreeMap<&str, &SymbolConfig>,
 ) -> StateResult<Vec<Observation>> {
     for observation in &mut observations {
@@ -209,31 +63,20 @@ pub fn apply_valuations_to_observations(
                     observation.symbol_id
                 ))
             })?;
+        observation.display_symbol = symbol.display_symbol.clone();
+        observation.metadata = symbol.metadata.clone();
         let mut values = Vec::new();
         for quote in &symbol.valuation.quotes {
-            let resolved = valuations
-                .valuations
-                .iter()
-                .find(|valuation| {
-                    valuation.symbol_id == observation.symbol_id.as_str()
-                        && valuation.quote == quote.quote
-                })
-                .ok_or_else(|| {
-                    StateError::Message(format!(
-                        "missing_fixed_unit_price: missing valuation for symbol `{}` quote `{}`",
-                        observation.symbol_id, quote.quote
-                    ))
-                })?;
             let value_dec = multiply_decimal_strings(
                 &observation.quantity.amount_dec,
-                &resolved.unit_price_dec,
+                quote.unit_price_dec.as_str(),
             )
             .map_err(|error| StateError::Message(error.to_string()))?;
             values.push(ObservationValue {
-                quote: resolved.quote,
-                priced_symbol_id: resolved.priced_symbol_id.clone(),
+                quote: quote.quote,
+                priced_symbol_id: quote.priced_symbol_id.to_string(),
                 value_dec,
-                unit_price_dec: resolved.unit_price_dec.clone(),
+                unit_price_dec: quote.unit_price_dec.to_string(),
             });
         }
         values.sort_by_key(|value| value.quote);
@@ -243,71 +86,135 @@ pub fn apply_valuations_to_observations(
     Ok(observations)
 }
 
-/// Resolves configured fixed unit-price valuation routes (hard-fail).
-pub fn resolve_valuations_from_config(
-    config: &ResolveValuationsConfig,
-) -> StateResult<ResolvedValuations> {
-    let mut valuations = Vec::new();
-    for symbol in &config.symbol_configs {
-        for quote in &symbol.valuation.quotes {
-            valuations.push(resolved_valuation_for_quote(symbol, quote)?);
-        }
-    }
-    valuations.sort_by(|left, right| {
-        (left.symbol_id.as_str(), left.quote).cmp(&(right.symbol_id.as_str(), right.quote))
-    });
-    Ok(ResolvedValuations { valuations })
-}
-
-fn resolved_valuation_for_quote(
-    symbol: &SymbolConfig,
-    quote: &QuoteValuationConfig,
-) -> StateResult<ResolvedValuation> {
-    Ok(ResolvedValuation {
-        symbol_id: symbol.symbol_id.to_string(),
-        quote: quote.quote,
-        priced_symbol_id: quote.priced_symbol_id.to_string(),
-        unit_price_dec: quote.unit_price_dec.to_string(),
-    })
-}
-
-/// Hard-fail when any configured wallet×symbol required holding lacks an observation.
+/// Proves that selected observations exactly realize normalized portfolio demand.
 ///
-/// Defense-in-depth for the pure assemble path: SelectHoldings is the graph authority, but
-/// assemble must not emit a successful snapshot with empty/partial required holdings.
-fn require_required_holdings_present(
+/// Receipt identity and anchor checks belong to selection. Assembly independently protects its
+/// public output against a substituted selection runner by rejecting missing, duplicate,
+/// unexpected, family-mismatched, or config-mismatched observations.
+fn require_exact_portfolio_observations(
     portfolio: &PortfolioConfig,
     observations: &[Observation],
 ) -> Result<(), PortfolioHoldingSelectionError> {
-    let present: BTreeSet<(String, String)> = observations
+    let networks = portfolio
+        .networks
         .iter()
-        .map(|observation| (observation.wallet_id.clone(), observation.symbol_id.clone()))
-        .collect();
+        .map(|network| (network.network_id().as_str(), network))
+        .collect::<BTreeMap<_, _>>();
+    let symbols = symbols_by_id(&portfolio.symbol_configs)?;
+    let mut expected = BTreeMap::new();
     for wallet in &portfolio.wallets {
+        let network = networks
+            .get(wallet.network_id.as_str())
+            .copied()
+            .ok_or_else(|| observation_error(None, "wallet network was missing"))?;
         for symbol_id in &wallet.symbol_ids {
-            let key = (wallet.wallet_id.to_string(), symbol_id.to_string());
-            if !present.contains(&key) {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    format!(
-                        "required holding missing observation for wallet `{}` symbol `{symbol_id}`",
-                        wallet.wallet_id
-                    ),
-                    Some(format!("{}/{}", wallet.wallet_id, symbol_id)),
-                    Some(wallet.network_id.to_string()),
+            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
+                observation_error(None, "wallet symbol was missing from portfolio config")
+            })?;
+            let key = HoldingRequirementKey {
+                wallet_id: wallet.wallet_id.to_string(),
+                symbol_id: symbol.symbol_id.to_string(),
+                network_id: wallet.network_id.to_string(),
+            };
+            if expected.insert(key.clone(), (network, symbol)).is_some() {
+                return Err(observation_error(
+                    Some(&key),
+                    "portfolio demand contained a duplicate holding requirement",
                 ));
             }
         }
     }
+    let mut actual = BTreeMap::new();
+    for observation in observations {
+        let key = HoldingRequirementKey {
+            wallet_id: observation.wallet_id.clone(),
+            symbol_id: observation.symbol_id.clone(),
+            network_id: observation.network_id.clone(),
+        };
+        let Some((network, symbol)) = expected.get(&key).copied() else {
+            return Err(observation_error(
+                Some(&key),
+                "selected observations contained an unexpected holding",
+            ));
+        };
+        if actual.insert(key.clone(), observation).is_some() {
+            return Err(observation_error(
+                Some(&key),
+                "selected observations contained a duplicate holding",
+            ));
+        }
+        if observation.source.holding != symbol.source {
+            return Err(observation_error(
+                Some(&key),
+                "selected observation source did not match portfolio config",
+            ));
+        }
+        match (network, &observation.source.anchor) {
+            (NetworkConfig::Bitcoin { .. }, ExecutionAnchor::Bitcoin { .. }) => {
+                if observation.quantity.decimals != 8 {
+                    return Err(observation_error(
+                        Some(&key),
+                        "Bitcoin selected observation did not use the fixed decimal scale",
+                    ));
+                }
+            }
+            (
+                NetworkConfig::Evm {
+                    chain_id,
+                    native_decimals,
+                    ..
+                },
+                ExecutionAnchor::Evm {
+                    chain_id: observed_chain,
+                    ..
+                },
+            ) if chain_id == observed_chain => {
+                if matches!(symbol.source, HoldingSourceConfig::Native)
+                    && observation.quantity.decimals != *native_decimals
+                {
+                    return Err(observation_error(
+                        Some(&key),
+                        "native EVM selected observation did not match the configured scale",
+                    ));
+                }
+            }
+            _ => {
+                return Err(observation_error(
+                    Some(&key),
+                    "selected observation anchor did not match its network family",
+                ));
+            }
+        }
+    }
+    if actual.len() != expected.len() {
+        let missing = expected.keys().find(|key| !actual.contains_key(*key));
+        return Err(observation_error(
+            missing,
+            "selected observations did not exactly cover portfolio demand",
+        ));
+    }
     Ok(())
+}
+
+fn observation_error(
+    key: Option<&HoldingRequirementKey>,
+    message: impl Into<String>,
+) -> PortfolioHoldingSelectionError {
+    PortfolioHoldingSelectionError::new(
+        PortfolioHoldingErrorCode::ReceiptMismatch,
+        message,
+        key.map(HoldingRequirementKey::as_key_str),
+        key.map(|key| key.network_id.clone()),
+    )
 }
 
 /// Assembles the canonical portfolio snapshot (hard-fail; pins from selected observations).
 pub fn assemble_snapshot(
     config: &AssembleSnapshotConfig,
     input: AssembleSnapshotInput,
-    generated_at_ms: u64,
 ) -> StateResult<PortfolioSnapshot> {
+    require_exact_portfolio_observations(&config.portfolio, &input.holdings.observations)
+        .map_err(|error| StateError::Message(error.to_string()))?;
     let symbols = symbols_by_id(&config.portfolio.symbol_configs).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -315,15 +222,15 @@ pub fn assemble_snapshot(
             message = error.message
         ))
     })?;
-    let observations =
-        apply_valuations_to_observations(input.holdings.observations, &input.valuations, &symbols)?;
-    require_required_holdings_present(&config.portfolio, &observations).map_err(|error| {
-        StateError::Message(format!(
-            "{code}: {message}",
-            code = error.code,
-            message = error.message
+    let mut observations = input.holdings.observations;
+    observations.sort_by(|left, right| {
+        (&left.wallet_id, &left.symbol_id, &left.network_id).cmp(&(
+            &right.wallet_id,
+            &right.symbol_id,
+            &right.network_id,
         ))
-    })?;
+    });
+    let observations = apply_configured_valuations_to_observations(observations, &symbols)?;
     let network_pins = project_network_pins_from_observations(&observations).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -331,7 +238,6 @@ pub fn assemble_snapshot(
             message = error.message
         ))
     })?;
-
     let mut observations_by_wallet: BTreeMap<String, Vec<Observation>> = BTreeMap::new();
     for observation in observations {
         observations_by_wallet
@@ -339,33 +245,16 @@ pub fn assemble_snapshot(
             .or_default()
             .push(observation);
     }
-    let mut subjects_by_wallet = BTreeMap::new();
-    for subject in input.subjects.subjects {
-        subjects_by_wallet.insert(subject.wallet_id.clone(), subject);
-    }
-
     let mut wallets = Vec::with_capacity(config.portfolio.wallets.len());
     for wallet_cfg in &config.portfolio.wallets {
-        let subject = subjects_by_wallet
-            .get(wallet_cfg.wallet_id.as_str())
-            .cloned()
-            .unwrap_or_else(|| ResolvedSubject {
-                wallet_id: wallet_cfg.wallet_id.to_string(),
-                address: wallet_cfg.subject.address_str().to_owned(),
-                subject_kind: wallet_cfg.subject.kind(),
-                network_id: wallet_cfg.network_id.to_string(),
-                implementation_kind: wallet_implementation_kind(&wallet_cfg.implementation)
-                    .to_owned(),
-            });
         // Required holdings already verified; absent wallet key means zero symbols configured.
         let observations = observations_by_wallet
             .remove(wallet_cfg.wallet_id.as_str())
             .unwrap_or_default();
         let mut wallet = WalletSnapshot {
             wallet_id: wallet_cfg.wallet_id.to_string(),
-            address: subject.address,
-            subject_kind: subject.subject_kind,
-            network_id: subject.network_id,
+            subject: wallet_cfg.subject.clone(),
+            network_id: wallet_cfg.network_id.to_string(),
             observations,
         };
         wallet.normalize();
@@ -380,9 +269,8 @@ pub fn assemble_snapshot(
     symbol_configs.sort_by(|left, right| left.symbol_id.cmp(&right.symbol_id));
 
     let mut snapshot = PortfolioSnapshot {
-        schema_version: config.snapshot_version(),
+        schema_version: PortfolioSnapshot::SCHEMA_VERSION,
         portfolio_id: config.portfolio.portfolio_id.to_string(),
-        generated_at_ms,
         network_pins,
         wallets,
         symbol_configs,
@@ -391,11 +279,13 @@ pub fn assemble_snapshot(
     Ok(snapshot)
 }
 
-/// Projects a canonical portfolio report from a snapshot.
-pub fn project_report_from_snapshot(
-    snapshot: PortfolioSnapshot,
-    report_version: u64,
-) -> StateResult<PortfolioReport> {
+/// Projects the version-1 canonical portfolio report from a version-1 snapshot.
+pub fn project_report_from_snapshot(snapshot: PortfolioSnapshot) -> StateResult<PortfolioReport> {
+    if snapshot.schema_version != PortfolioSnapshot::SCHEMA_VERSION {
+        return Err(StateError::Message(
+            "portfolio snapshot schema version is not supported".to_owned(),
+        ));
+    }
     let report_quotes = collect_report_quotes(&snapshot);
     let mut portfolio_totals = initialized_quote_totals(&report_quotes);
     let wallet_summaries = snapshot
@@ -413,9 +303,8 @@ pub fn project_report_from_snapshot(
         .collect::<StateResult<Vec<_>>>()?;
 
     let mut report = PortfolioReport {
-        schema_version: report_version,
+        schema_version: PortfolioReport::SCHEMA_VERSION,
         portfolio_id: snapshot.portfolio_id,
-        generated_at_ms: snapshot.generated_at_ms,
         network_pins: snapshot.network_pins,
         wallet_summaries,
         totals_by_quote: quote_totals_to_vec(portfolio_totals),
@@ -424,47 +313,11 @@ pub fn project_report_from_snapshot(
     Ok(report)
 }
 
-/// Returns the canonical balance reader kind string.
-pub fn balance_reader_kind(reader: &BalanceReaderConfig) -> &'static str {
-    match reader {
-        BalanceReaderConfig::NativeBalance {} => "native_balance",
-        BalanceReaderConfig::Erc20Balance { .. } => "erc20_balance",
-        BalanceReaderConfig::ProtocolPosition {
-            protocol, reader, ..
-        } if protocol.as_str() == AAVE_V3_PROTOCOL_ID => match reader.as_str() {
-            "reserve_position" => "aave_v3/reserve_position",
-            "debt_position" => "aave_v3/debt_position",
-            _ => "protocol_position",
-        },
-        BalanceReaderConfig::ProtocolPosition { .. } => "protocol_position",
-    }
-}
-
 /// Builds a symbols-by-id index for assemble / observation join.
 pub fn symbols_by_id_map(
     symbols: &[SymbolConfig],
 ) -> Result<BTreeMap<&str, &SymbolConfig>, PortfolioHoldingSelectionError> {
     symbols_by_id(symbols)
-}
-
-fn networks_by_id(
-    networks: &[NetworkConfig],
-) -> Result<BTreeMap<&str, &NetworkConfig>, PortfolioHoldingSelectionError> {
-    let mut by_id = BTreeMap::new();
-    for network in networks {
-        if by_id
-            .insert(network.network_id().as_str(), network)
-            .is_some()
-        {
-            return Err(PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::UnsupportedRequirement,
-                format!("duplicate network id `{}`", network.network_id()),
-                None,
-                Some(network.network_id().to_string()),
-            ));
-        }
-    }
-    Ok(by_id)
 }
 
 fn symbols_by_id(
@@ -512,15 +365,6 @@ fn format_decimal_amount(raw_dec: &str, decimals: u8) -> String {
     }
 }
 
-fn wallet_implementation_kind(implementation: &WalletImplementationConfig) -> &'static str {
-    match implementation {
-        WalletImplementationConfig::AddressOnly {} => "address_only",
-        WalletImplementationConfig::KeystoreEntry { .. } => "keystore_entry",
-        WalletImplementationConfig::NodeManagedAccount { .. } => "node_managed_account",
-        WalletImplementationConfig::ExternalSigner { .. } => "external_signer",
-    }
-}
-
 fn collect_report_quotes(snapshot: &PortfolioSnapshot) -> Vec<QuoteCode> {
     let mut quotes = BTreeSet::new();
     for symbol in &snapshot.symbol_configs {
@@ -546,22 +390,9 @@ fn derive_quote_totals(
     for observation in observations {
         for value in &observation.values {
             let entry = totals.entry(value.quote).or_default();
-            let value_dec = DecimalValue::parse_signed(&value.value_dec)
+            let value_dec = DecimalValue::parse_non_negative(&value.value_dec)
                 .map_err(|error| StateError::Message(error.to_string()))?;
-            match observation.role {
-                SymbolRole::Native | SymbolRole::Asset => {
-                    entry.assets_value = entry.assets_value.add(&value_dec);
-                }
-                SymbolRole::Collateral => {
-                    entry.collateral_value = entry.collateral_value.add(&value_dec);
-                }
-                SymbolRole::Debt => {
-                    entry.debt_value = entry.debt_value.add(&value_dec);
-                }
-                SymbolRole::Staked => {
-                    entry.staked_value = entry.staked_value.add(&value_dec);
-                }
-            }
+            entry.total_value = entry.total_value.add(&value_dec);
         }
     }
     Ok(totals)
@@ -600,33 +431,18 @@ fn quote_totals_to_vec(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct QuoteTotalsAccumulator {
-    assets_value: DecimalValue,
-    collateral_value: DecimalValue,
-    debt_value: DecimalValue,
-    staked_value: DecimalValue,
+    total_value: DecimalValue,
 }
 
 impl QuoteTotalsAccumulator {
     fn merge(&mut self, other: &Self) {
-        self.assets_value = self.assets_value.add(&other.assets_value);
-        self.collateral_value = self.collateral_value.add(&other.collateral_value);
-        self.debt_value = self.debt_value.add(&other.debt_value);
-        self.staked_value = self.staked_value.add(&other.staked_value);
+        self.total_value = self.total_value.add(&other.total_value);
     }
 
     fn into_report_total(self, quote: QuoteCode) -> PortfolioQuoteTotal {
-        let positive_value = self
-            .assets_value
-            .add(&self.collateral_value)
-            .add(&self.staked_value);
-        let net_value = positive_value.sub(&self.debt_value);
         PortfolioQuoteTotal {
             quote,
-            assets_value_dec: self.assets_value.to_canonical_string(),
-            collateral_value_dec: self.collateral_value.to_canonical_string(),
-            debt_value_dec: self.debt_value.to_canonical_string(),
-            staked_value_dec: self.staked_value.to_canonical_string(),
-            net_value_dec: net_value.to_canonical_string(),
+            total_value_dec: self.total_value.to_canonical_string(),
         }
     }
 }

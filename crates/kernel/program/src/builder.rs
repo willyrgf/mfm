@@ -530,23 +530,34 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
 
         let descriptor = &descriptor;
         validate_state_context_binding(descriptor, context.as_ref())?;
-        let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
+        let effect_contract_digest = descriptor.effect_contract_digest().cloned();
         let side_effect_contract =
             side_effect_contract.map(|(claim, verification)| (claim.into_spec(), verification));
-        match (&side_effect_contract_digest, &side_effect_contract) {
-            (Some(_), Some(_)) | (None, None) => {}
-            (Some(_), None) => {
+        match (
+            descriptor.runner(),
+            &effect_contract_digest,
+            &side_effect_contract,
+        ) {
+            (RunnerKind::ApplySideEffect, Some(_), Some(_)) => {}
+            (RunnerKind::ApplySideEffect, _, None) => {
                 return Err(PlanError::SideEffectClaimRequired(format!(
                     "state {} must be planned with side_effect or side_effect_with_compensation",
                     descriptor.name()
                 )));
             }
-            (None, Some(_)) => {
+            (RunnerKind::ApplySideEffect, None, Some(_)) => {
+                return Err(PlanError::SagaPolicyGraphMismatch(format!(
+                    "side-effect state {} did not declare an effect contract",
+                    descriptor.name()
+                )));
+            }
+            (_, _, Some(_)) => {
                 return Err(PlanError::SagaPolicyGraphMismatch(format!(
                     "non-side-effect state {} cannot declare a resource claim",
                     descriptor.name()
                 )));
             }
+            (_, _, None) => {}
         }
         let node_context = context
             .as_ref()
@@ -589,10 +600,15 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         let value_lineage = value_lineage_ref(&lineage)?;
         let output_context = output_context_from_contract(descriptor, context.as_ref())?;
         let side_effect_verify = match (
-            side_effect_contract_digest.as_ref(),
+            descriptor.runner(),
+            effect_contract_digest.as_ref(),
             side_effect_contract.as_ref(),
         ) {
-            (Some(contract_digest), Some((resource_claim, verification))) => {
+            (
+                RunnerKind::ApplySideEffect,
+                Some(contract_digest),
+                Some((resource_claim, verification)),
+            ) => {
                 let contract = mfm_spec::v1::SideEffectContractSpec {
                     contract_digest: contract_digest.clone(),
                     resource_claim: resource_claim.clone(),
@@ -667,7 +683,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 capability_bindings: descriptor.capabilities().clone(),
                 adapter_bindings,
                 fact_descriptor_allowlist: descriptor.emitted_fact_descriptors().to_vec(),
-                side_effect_contract_digest,
+                effect_contract_digest,
                 side_effect_resource_claim: side_effect_contract
                     .as_ref()
                     .map(|(claim, _)| claim.clone()),

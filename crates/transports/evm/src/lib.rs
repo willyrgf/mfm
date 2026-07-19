@@ -1,679 +1,1006 @@
 #![warn(missing_docs)]
-//! Generic EVM JSON-RPC transport.
+//! Bounded, source-stable EVM JSON-RPC sessions.
 //!
-//! This crate owns live EVM JSON-RPC communication and process-local source routing. Raw clients
-//! resolve runtime routes, while bound network providers implement reusable EVM capability traits.
+//! One transport owns the bounded HTTP pool and process-local concurrency
+//! guards shared by every session it binds. Binding probes `eth_chainId` once
+//! and returns a session fixed to that source for its entire lifetime. Code
+//! and contract-call body limits are enforced while reading the response,
+//! before JSON decoding. Routing and secret resolution stay in app assembly.
 //!
-//! ```rust
-//! use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
-//! use mfm_transports_evm::{
-//!     EvmJsonRpcClient, EvmRoute, EvmRouteRegistry, EvmRuntimeSource, EvmSourceRegistry,
-//! };
+//! ```no_run
+//! use mfm_evm_capabilities::EvmNetworkBinding;
+//! use mfm_ids::LocalPublicId;
+//! use mfm_transports_evm::EvmJsonRpcTransport;
 //!
-//! let source = EvmRuntimeSource::new(
-//!     EvmSourceRef::new("local")?,
-//!     "http://127.0.0.1:8545",
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let binding = EvmNetworkBinding::new(LocalPublicId::new("reth-dev")?, 31337)?;
+//! let transport = EvmJsonRpcTransport::new()?;
+//! let _session = transport.bind(
+//!     binding,
+//!     LocalPublicId::new("local")?,
+//!     "http://127.0.0.1:8545".to_owned(),
 //!     None,
-//! )?;
-//! let registry = EvmSourceRegistry::single_source(
-//!     source,
-//!     EvmSourcePolicyId::new("dev")?,
-//! )?;
-//! let routes = EvmRouteRegistry::new([EvmRoute::new(
-//!     EvmNetworkId::new("reth-dev")?,
-//!     EvmSourceRef::new("local")?,
-//!     EvmSourcePolicyId::new("dev")?,
-//! )])?;
-//! let _client = EvmJsonRpcClient::new(registry, routes);
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ).await?;
+//! # Ok(())
+//! # }
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
-use alloy_primitives::{keccak256, B256};
+use alloy_eips::eip2930::{AccessList, AccessListItem};
+use alloy_primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
 use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse,
-    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
-    EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
-    EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
-    EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
-    EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
-    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
-    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
-    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
-    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
-    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
-    RedactedEvmSourceEvidence,
+    evm_diagnostic, source_mismatch_error, EvmBlockAnchor, EvmBlockSelector, EvmCall,
+    EvmCapabilityError, EvmCode, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
+    EvmReadSession, EvmReceipt, EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence,
+    EvmSessionFuture, EvmTransactionEstimate, EvmTransactionPlacement, EvmTransactionSession,
+    EVM_CODE_MAX_RESPONSE_BYTES, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
-use mfm_evm_core::encoding::parse_u256_hex;
-use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
-use mfm_evm_core::tx::{parse_u128_quantity, parse_u64_quantity};
 use mfm_ids::LocalPublicId;
-use serde_json::{json, Value};
+use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
+use serde_json::{json, Map, Value};
+use tokio::sync::Semaphore;
 use tracing::debug;
 
-/// Result type for EVM transport setup.
-pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_JSON_RPC_ENVELOPE_BYTES: usize = 16 * 1024;
+const MAX_GLOBAL_IN_FLIGHT_EXCHANGES: usize = 64;
+const MAX_IN_FLIGHT_EXCHANGES_PER_SOURCE: usize = 16;
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 16;
+const JSON_RPC_ID: u64 = 1;
 
-mod registry;
-pub use self::registry::{
-    EvmRoute, EvmRouteRegistry, EvmRuntimeSource, EvmSourcePolicy, EvmSourceRegistry,
-};
-
-/// Generic EVM JSON-RPC client.
-#[derive(Clone)]
-pub struct EvmJsonRpcClient {
-    client: reqwest::Client,
-    registry: EvmSourceRegistry,
-    routes: EvmRouteRegistry,
+#[derive(Clone, Copy)]
+enum RpcResponseBodyLimit {
+    TransportMaximum,
+    HexResult { maximum_decoded_bytes: usize },
 }
 
-impl EvmJsonRpcClient {
-    /// Creates a client from runtime source and route registries.
-    pub fn new(registry: EvmSourceRegistry, routes: EvmRouteRegistry) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            registry,
-            routes,
+impl RpcResponseBodyLimit {
+    fn maximum_body_bytes(self) -> TransportResult<usize> {
+        match self {
+            Self::TransportMaximum => Ok(MAX_RESPONSE_BYTES),
+            Self::HexResult {
+                maximum_decoded_bytes,
+            } => maximum_decoded_bytes
+                .checked_mul(2)
+                .and_then(|hex_bytes| hex_bytes.checked_add(2))
+                .and_then(|result_bytes| result_bytes.checked_add(MAX_JSON_RPC_ENVELOPE_BYTES))
+                .filter(|maximum| *maximum <= MAX_RESPONSE_BYTES)
+                .ok_or(EvmTransportError::ResponseTooLarge),
         }
     }
+}
 
-    fn route_candidates<'a>(
-        &'a self,
-        network_id: &EvmNetworkId,
-    ) -> TransportResult<(&'a EvmRoute, Vec<&'a EvmRuntimeSource>)> {
-        let route = self.routes.route(network_id)?;
-        let candidates = self
-            .registry
-            .candidates(route.policy_id(), route.source_ref())?;
-        Ok((route, candidates))
+/// Result type for EVM transport setup and exchange.
+pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
+
+#[derive(Clone)]
+struct BoundEndpoint {
+    url: reqwest::Url,
+    authorization: Option<HeaderValue>,
+    source_limit: Arc<Semaphore>,
+}
+
+/// Shared bounded HTTP runtime used to bind checked EVM JSON-RPC sessions.
+///
+/// Clones share the same connection pool, global exchange bound, and
+/// `source_ref` exchange bounds. Redirects and implicit HTTP retries are
+/// disabled, so one capability call owns exactly one HTTP exchange.
+#[derive(Clone)]
+pub struct EvmJsonRpcTransport {
+    shared: Arc<SharedHttpRuntime>,
+}
+
+struct SharedHttpRuntime {
+    client: reqwest::Client,
+    global_limit: Arc<Semaphore>,
+    source_limits: Mutex<BTreeMap<String, Weak<Semaphore>>>,
+}
+
+impl EvmJsonRpcTransport {
+    /// Constructs the shared bounded HTTP runtime.
+    pub fn new() -> TransportResult<Self> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
+            .build()
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        Ok(Self {
+            shared: Arc::new(SharedHttpRuntime {
+                client,
+                global_limit: Arc::new(Semaphore::new(MAX_GLOBAL_IN_FLIGHT_EXCHANGES)),
+                source_limits: Mutex::new(BTreeMap::new()),
+            }),
+        })
     }
 
-    /// Validates that a network binding can resolve to configured runtime sources without I/O.
-    pub fn validate_network_binding(&self, binding: &EvmNetworkBinding) -> TransportResult<()> {
-        self.route_candidates(binding.network_id()).map(|_| ())
-    }
-
-    /// Binds a checked semantic network binding to a live capability provider.
-    pub fn bind_network(
+    /// Binds one source-stable session through this transport's shared pool.
+    pub async fn bind(
         &self,
         binding: EvmNetworkBinding,
-    ) -> TransportResult<EvmJsonRpcNetworkProvider> {
-        self.validate_network_binding(&binding)?;
-        Ok(EvmJsonRpcNetworkProvider {
-            client: self.clone(),
-            binding,
-        })
-    }
-
-    async fn chain_identity_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmChainIdentityRequest,
-    ) -> TransportResult<EvmChainIdentityResponse> {
-        let _request = request;
-        let client_version = self
-            .verified_rpc_call(selected, "web3_clientVersion", json!([]))
-            .await
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned));
-        Ok(EvmChainIdentityResponse {
-            evidence: selected.evidence.clone(),
-            chain_id: selected.chain_id,
-            client_version,
-        })
-    }
-
-    async fn block_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmBlockReadRequest,
-    ) -> TransportResult<EvmBlockReadResponse> {
-        let value = match request.block() {
-            EvmBlockSelector::Hash(hash) => {
-                self.verified_rpc_call(
-                    selected,
-                    "eth_getBlockByHash",
-                    json!([format!("{hash:?}"), false]),
-                )
-                .await?
-            }
-            selector => {
-                self.verified_rpc_call(
-                    selected,
-                    "eth_getBlockByNumber",
-                    json!([block_selector_tag(selector)?, false]),
-                )
-                .await?
-            }
+        source_ref: LocalPublicId,
+        rpc_url: String,
+        authorization: Option<String>,
+    ) -> TransportResult<EvmJsonRpcSession> {
+        let source_limit = self.source_limit(&source_ref)?;
+        let endpoint = checked_endpoint(rpc_url, authorization, source_limit)?;
+        let unbound = EvmJsonRpcSession {
+            shared: Arc::clone(&self.shared),
+            endpoint,
+            evidence: EvmSessionEvidence::new(
+                &binding,
+                source_ref.clone(),
+                LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
+                    .expect("static session implementation id"),
+            ),
         };
-        let block_number = value
-            .get("number")
-            .and_then(Value::as_str)
-            .ok_or(EvmTransportError::InvalidResponse)
-            .and_then(parse_u64)?;
-        let block_hash = parse_b256_field(&value, "hash")?;
-        validate_block_identity(request.block(), block_number, block_hash)?;
-        Ok(EvmBlockReadResponse {
-            evidence: selected.evidence.clone(),
-            block_number,
-            block_hash,
-        })
-    }
-
-    async fn call_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmCallReadRequest,
-    ) -> TransportResult<EvmCallReadResponse> {
-        let result = self
-            .verified_rpc_call(
-                selected,
-                "eth_call",
-                json!([{
-                    "to": format!("{:?}", request.to()),
-                    "data": bytes_to_hex_prefixed(request.calldata()),
-                }, block_selector_param(request.block())]),
+        let observed_chain_id = unbound
+            .rpc_call(
+                "eth_chainId",
+                json!([]),
+                RpcResponseBodyLimit::TransportMaximum,
             )
-            .await?;
-        let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
-        Ok(EvmCallReadResponse {
-            evidence: selected.evidence.clone(),
-            return_data: hex_to_bytes(raw).map_err(|_| EvmTransportError::InvalidResponse)?,
-        })
-    }
-
-    async fn code_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmCodeReadRequest,
-    ) -> TransportResult<EvmCodeReadResponse> {
-        let result = self
-            .verified_rpc_call(
-                selected,
-                "eth_getCode",
-                json!([
-                    format!("{:?}", request.address()),
-                    block_selector_param(request.block())
-                ]),
-            )
-            .await?;
-        let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
-        let code = hex_to_bytes(raw).map_err(|_| EvmTransportError::InvalidResponse)?;
-        let code_hash = keccak256(&code);
-        Ok(EvmCodeReadResponse {
-            evidence: selected.evidence.clone(),
-            code,
-            code_hash,
-        })
-    }
-
-    async fn balance_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmBalanceReadRequest,
-    ) -> TransportResult<EvmBalanceReadResponse> {
-        let result = self
-            .verified_rpc_call(
-                selected,
-                "eth_getBalance",
-                json!([
-                    format!("{:?}", request.account()),
-                    block_selector_param(request.block())
-                ]),
-            )
-            .await?;
-        let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
-        Ok(EvmBalanceReadResponse {
-            evidence: selected.evidence.clone(),
-            balance_wei: parse_u256_hex(raw).map_err(|_| EvmTransportError::InvalidResponse)?,
-        })
-    }
-
-    async fn logs_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmLogsReadRequest,
-    ) -> TransportResult<EvmLogsReadResponse> {
-        let mut filter = serde_json::Map::new();
-        filter.insert(
-            "fromBlock".to_owned(),
-            json!(block_selector_tag(request.from_block())?),
-        );
-        filter.insert(
-            "toBlock".to_owned(),
-            json!(block_selector_tag(request.to_block())?),
-        );
-        if let Some(address) = request.address() {
-            filter.insert("address".to_owned(), json!(format!("{address:?}")));
-        }
-        if !request.topics().is_empty() {
-            filter.insert(
-                "topics".to_owned(),
-                json!(request
-                    .topics()
-                    .iter()
-                    .map(|topic| format!("{topic:?}"))
-                    .collect::<Vec<_>>()),
-            );
-        }
-        let result = self
-            .verified_rpc_call(selected, "eth_getLogs", json!([Value::Object(filter)]))
-            .await?;
-        let values = result
-            .as_array()
-            .ok_or(EvmTransportError::InvalidResponse)?;
-        let logs = values
-            .iter()
-            .map(parse_log_entry)
-            .collect::<TransportResult<Vec<_>>>()?;
-        for log in &logs {
-            validate_log_matches_request(request, log)?;
-        }
-        Ok(EvmLogsReadResponse {
-            evidence: selected.evidence.clone(),
-            logs,
-        })
-    }
-
-    async fn nonce_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmNonceReadRequest,
-    ) -> TransportResult<EvmNonceReadResponse> {
-        let result = self
-            .verified_rpc_call(
-                selected,
-                "eth_getTransactionCount",
-                json!([
-                    format!("{:?}", request.account()),
-                    block_selector_param(request.block())
-                ]),
-            )
-            .await?;
-        let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
-        Ok(EvmNonceReadResponse {
-            evidence: selected.evidence.clone(),
-            nonce: parse_u64(raw)?,
-        })
-    }
-
-    async fn fee_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmFeeReadRequest,
-    ) -> TransportResult<EvmFeeReadResponse> {
-        let _request = request;
-        let legacy_gas_price = self
-            .verified_rpc_call(selected, "eth_gasPrice", json!([]))
             .await?
             .as_str()
             .ok_or(EvmTransportError::InvalidResponse)
-            .and_then(parse_u128)?;
-        let priority_fee_per_gas = match self
-            .verified_rpc_call(selected, "eth_maxPriorityFeePerGas", json!([]))
-            .await
-        {
-            Ok(value) => Some(
-                value
-                    .as_str()
-                    .ok_or(EvmTransportError::InvalidResponse)
-                    .and_then(parse_u128)?,
-            ),
-            Err(error) if error.can_try_next_source() => None,
-            Err(error) => return Err(error),
-        };
-        let latest_block = match self
-            .verified_rpc_call(selected, "eth_getBlockByNumber", json!(["latest", false]))
-            .await
-        {
-            Ok(value) => Some(value),
-            Err(error) if error.can_try_next_source() => None,
-            Err(error) => return Err(error),
-        };
-        let base_fee_per_gas = latest_block
-            .as_ref()
-            .and_then(|block| block.get("baseFeePerGas"))
-            .and_then(Value::as_str)
-            .map(parse_u128)
-            .transpose()?;
-        let max_fee_per_gas = base_fee_per_gas
-            .zip(priority_fee_per_gas)
-            .map(|(base_fee, priority_fee)| base_fee.saturating_mul(2) + priority_fee);
-        Ok(EvmFeeReadResponse {
-            evidence: selected.evidence.clone(),
-            base_fee_per_gas,
-            priority_fee_per_gas,
-            max_fee_per_gas,
-            legacy_gas_price: Some(legacy_gas_price),
-        })
-    }
-
-    async fn gas_estimate_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmGasEstimateRequest,
-    ) -> TransportResult<EvmGasEstimateResponse> {
-        let mut call = serde_json::Map::new();
-        if let Some(from) = request.from() {
-            call.insert("from".to_owned(), json!(format!("{from:?}")));
-        }
-        if let Some(to) = request.to() {
-            call.insert("to".to_owned(), json!(format!("{to:?}")));
-        }
-        call.insert(
-            "value".to_owned(),
-            json!(format!("0x{:x}", request.value_wei())),
-        );
-        call.insert(
-            "data".to_owned(),
-            json!(bytes_to_hex_prefixed(request.data())),
-        );
-        let result = self
-            .verified_rpc_call(selected, "eth_estimateGas", json!([Value::Object(call)]))
-            .await?;
-        let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
-        Ok(EvmGasEstimateResponse {
-            evidence: selected.evidence.clone(),
-            gas_limit: parse_u64(raw)?,
-        })
-    }
-
-    async fn submit_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmTransactionSubmitRequest,
-    ) -> TransportResult<EvmTransactionSubmitResponse> {
-        let result = self
-            .verified_rpc_call(
-                selected,
-                "eth_sendRawTransaction",
-                json!([bytes_to_hex_prefixed(request.signed_payload().bytes())]),
-            )
-            .await?;
-        let hash = parse_b256_str(result.as_str().ok_or(EvmTransportError::InvalidResponse)?)?;
-        if hash != request.signed_payload().transaction_hash() {
-            return Err(EvmTransportError::InvalidResponse);
-        }
-        Ok(EvmTransactionSubmitResponse {
-            evidence: selected.evidence.clone(),
-            transaction_hash: hash,
-        })
-    }
-
-    async fn receipt_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmReceiptReadRequest,
-    ) -> TransportResult<EvmReceiptReadResponse> {
-        let result = self
-            .verified_rpc_call(
-                selected,
-                "eth_getTransactionReceipt",
-                json!([format!("{:?}", request.transaction_hash())]),
-            )
-            .await?;
-        if result.is_null() {
-            return Err(EvmTransportError::ReceiptPending);
-        }
-        let transaction_hash = parse_b256_field(&result, "transactionHash")?;
-        if transaction_hash != request.transaction_hash() {
-            return Err(EvmTransportError::InvalidResponse);
-        }
-        let block_number = result
-            .get("blockNumber")
-            .and_then(Value::as_str)
-            .ok_or(EvmTransportError::InvalidResponse)
-            .and_then(parse_u64)?;
-        let status = result
-            .get("status")
-            .and_then(Value::as_str)
-            .map(|raw| raw == "0x1")
-            .unwrap_or(false);
-        Ok(EvmReceiptReadResponse {
-            evidence: selected.evidence.clone(),
-            transaction_hash,
-            block_number,
-            status,
-        })
-    }
-
-    async fn nonce_occupancy_read_impl(
-        &self,
-        selected: &VerifiedEvmCall<'_>,
-        request: &EvmNonceOccupancyReadRequest,
-    ) -> TransportResult<EvmNonceOccupancyReadResponse> {
-        let account = format!("{:?}", request.account()).to_ascii_lowercase();
-        for block_tag in ["latest", "pending"] {
-            let result = self
-                .verified_rpc_call(selected, "eth_getBlockByNumber", json!([block_tag, true]))
-                .await?;
-            let Some(transactions) = result.get("transactions").and_then(Value::as_array) else {
-                continue;
+            .and_then(parse_quantity)?;
+        if observed_chain_id != U256::from(binding.expected_chain_id()) {
+            let EvmCapabilityError::SourceMismatch { diagnostic } =
+                source_mismatch_error(&binding, observed_chain_id, &source_ref)
+            else {
+                return Err(EvmTransportError::InvalidResponse);
             };
-            for transaction in transactions {
-                let Some(from) = transaction.get("from").and_then(Value::as_str) else {
-                    continue;
-                };
-                if from.to_ascii_lowercase() != account {
-                    continue;
-                }
-                let Some(raw_nonce) = transaction.get("nonce").and_then(Value::as_str) else {
-                    continue;
-                };
-                if parse_u64(raw_nonce)? != request.nonce() {
-                    continue;
-                }
-                let hash = parse_b256_field(transaction, "hash")?;
-                if hash == request.excluded_transaction_hash() {
-                    return Ok(EvmNonceOccupancyReadResponse {
-                        evidence: selected.evidence.clone(),
-                        outcome: EvmNonceOccupancy::Unknown,
-                    });
-                }
-                let block_number = transaction
-                    .get("blockNumber")
-                    .and_then(Value::as_str)
-                    .map(parse_u64)
-                    .transpose()?;
-                return Ok(EvmNonceOccupancyReadResponse {
-                    evidence: selected.evidence.clone(),
-                    outcome: EvmNonceOccupancy::Occupied {
-                        transaction_hash: hash,
-                        block_number,
-                    },
-                });
-            }
+            return Err(EvmTransportError::SourceMismatch { diagnostic });
         }
-        Ok(EvmNonceOccupancyReadResponse {
-            evidence: selected.evidence.clone(),
-            outcome: EvmNonceOccupancy::Unknown,
-        })
+        Ok(unbound)
     }
 
-    async fn verified_source<'a>(
-        &'a self,
-        binding: &EvmNetworkBinding,
-    ) -> TransportResult<VerifiedEvmCall<'a>> {
-        let (route, candidates) = self.route_candidates(binding.network_id())?;
-        let mut last_failure = EvmTransportError::SourceUnavailable;
-        for source in candidates {
-            match self.probe_chain_id(source).await {
-                Ok(chain_id) if chain_id == binding.expected_chain_id() => {
-                    return Ok(VerifiedEvmCall {
-                        source,
-                        chain_id,
-                        evidence: RedactedEvmSourceEvidence::from_binding(
-                            binding,
-                            chain_id,
-                            source.id.clone(),
-                            route.policy_id().clone(),
-                        )
-                        .map_err(source_evidence_error_into_transport)?,
-                    });
-                }
-                Ok(chain_id) => {
-                    let error = RedactedEvmSourceEvidence::from_binding(
-                        binding,
-                        chain_id,
-                        source.id.clone(),
-                        route.policy_id().clone(),
-                    )
-                    .expect_err("mismatched chain id must fail closed");
-                    let EvmCapabilityError::SourceMismatch { diagnostic } = error else {
-                        return Err(EvmTransportError::InvalidResponse);
-                    };
-                    return Err(EvmTransportError::SourceMismatch { diagnostic });
-                }
-                Err(error) if error.can_try_next_source() => {
-                    last_failure = error;
-                }
-                Err(error) => return Err(error),
-            }
+    fn source_limit(&self, source_ref: &LocalPublicId) -> TransportResult<Arc<Semaphore>> {
+        let mut limits = self
+            .shared
+            .source_limits
+            .lock()
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        if let Some(limit) = limits.get(source_ref.as_str()).and_then(Weak::upgrade) {
+            return Ok(limit);
         }
-        Err(last_failure)
-    }
-
-    async fn probe_chain_id(&self, source: &EvmRuntimeSource) -> TransportResult<u64> {
-        json_rpc_pipeline::probe_chain_id(self, source).await
-    }
-
-    async fn verified_rpc_call(
-        &self,
-        verified: &VerifiedEvmCall<'_>,
-        method: &'static str,
-        params: Value,
-    ) -> TransportResult<Value> {
-        json_rpc_pipeline::verified_call(self, verified, method, params).await
+        let limit = Arc::new(Semaphore::new(MAX_IN_FLIGHT_EXCHANGES_PER_SOURCE));
+        limits.insert(source_ref.as_str().to_owned(), Arc::downgrade(&limit));
+        Ok(limit)
     }
 }
 
-mod json_rpc_pipeline {
-    use super::*;
+/// One checked JSON-RPC session bound to one source and chain.
+#[derive(Clone)]
+pub struct EvmJsonRpcSession {
+    shared: Arc<SharedHttpRuntime>,
+    endpoint: BoundEndpoint,
+    evidence: EvmSessionEvidence,
+}
 
-    struct RawJsonRpcExchange<'a> {
-        source: &'a EvmRuntimeSource,
-        operation: LocalPublicId,
-        method: &'static str,
-        params: Value,
+impl EvmJsonRpcSession {
+    async fn block(&self, selector: &EvmBlockSelector) -> TransportResult<EvmBlockAnchor> {
+        let value = match selector {
+            EvmBlockSelector::ExactHash(hash) => {
+                self.rpc_call(
+                    "eth_getBlockByHash",
+                    json!([format!("{hash:#x}"), false]),
+                    RpcResponseBodyLimit::TransportMaximum,
+                )
+                .await?
+            }
+            _ => {
+                self.rpc_call(
+                    "eth_getBlockByNumber",
+                    json!([selector_tag(selector)?, false]),
+                    RpcResponseBodyLimit::TransportMaximum,
+                )
+                .await?
+            }
+        };
+        let object = required_object(&value)?;
+        let number = quantity_field(object, "number")?;
+        let hash = hash_field(object, "hash")?;
+        match selector {
+            EvmBlockSelector::Number(expected) if *expected != number => {
+                Err(EvmTransportError::InvalidResponse)
+            }
+            EvmBlockSelector::ExactHash(expected) if *expected != hash => {
+                Err(EvmTransportError::InvalidResponse)
+            }
+            _ => Ok(EvmBlockAnchor::new(number, hash)),
+        }
     }
 
-    impl<'a> RawJsonRpcExchange<'a> {
-        fn chain_id_probe(source: &'a EvmRuntimeSource) -> Self {
-            Self {
-                source,
-                operation: operation_id("eth_chainId"),
-                method: "eth_chainId",
-                params: json!([]),
-            }
-        }
-
-        fn verified_operation(
-            verified: &VerifiedEvmCall<'a>,
-            method: &'static str,
-            params: Value,
-        ) -> Self {
-            Self {
-                source: verified.source,
-                operation: operation_id(method),
-                method,
-                params,
-            }
-        }
+    async fn balance(&self, account: Address, block: &EvmBlockSelector) -> TransportResult<U256> {
+        let value = self
+            .rpc_call(
+                "eth_getBalance",
+                json!([format!("{account:#x}"), selector_param(block)]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?;
+        parse_quantity(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
     }
 
-    pub(super) async fn probe_chain_id(
-        client: &EvmJsonRpcClient,
-        source: &EvmRuntimeSource,
-    ) -> TransportResult<u64> {
-        let result = send_json_rpc(client, RawJsonRpcExchange::chain_id_probe(source)).await?;
-        result
+    async fn code(&self, address: Address, block: &EvmBlockSelector) -> TransportResult<EvmCode> {
+        let value = self
+            .rpc_call(
+                "eth_getCode",
+                json!([format!("{address:#x}"), selector_param(block)]),
+                RpcResponseBodyLimit::HexResult {
+                    maximum_decoded_bytes: EVM_CODE_MAX_RESPONSE_BYTES,
+                },
+            )
+            .await?;
+        let bytes = parse_bounded_bytes(
+            value.as_str().ok_or(EvmTransportError::InvalidResponse)?,
+            EVM_CODE_MAX_RESPONSE_BYTES,
+        )?;
+        Ok(EvmCode {
+            hash: keccak256(&bytes),
+            bytes,
+        })
+    }
+
+    async fn call_contract(&self, request: &EvmCall) -> TransportResult<Bytes> {
+        let value = self
+            .rpc_call(
+                "eth_call",
+                json!([{
+                    "from": format!("{:#x}", request.from()),
+                    "to": format!("{:#x}", request.to()),
+                    "value": encode_quantity(request.value()),
+                    "data": encode_bytes(request.input()),
+                    "gas": encode_quantity(request.gas_limit()),
+                    "accessList": encode_access_list(request.access_list()),
+                }, selector_param(request.block())]),
+                RpcResponseBodyLimit::HexResult {
+                    maximum_decoded_bytes: request.max_response_bytes(),
+                },
+            )
+            .await?;
+        parse_bounded_bytes(
+            value.as_str().ok_or(EvmTransportError::InvalidResponse)?,
+            request.max_response_bytes(),
+        )
+    }
+
+    async fn pending_nonce_value(&self, account: Address) -> TransportResult<U256> {
+        let value = self
+            .rpc_call(
+                "eth_getTransactionCount",
+                json!([format!("{account:#x}"), "pending"]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?;
+        parse_quantity(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
+    }
+
+    async fn fee_input_values(&self) -> TransportResult<EvmFeeInputs> {
+        let priority = self
+            .rpc_call(
+                "eth_maxPriorityFeePerGas",
+                json!([]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?
             .as_str()
             .ok_or(EvmTransportError::InvalidResponse)
-            .and_then(parse_u64)
+            .and_then(parse_quantity)?;
+        let latest = self
+            .rpc_call(
+                "eth_getBlockByNumber",
+                json!(["latest", false]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?;
+        let base = quantity_field(required_object(&latest)?, "baseFeePerGas")?;
+        EvmFeeInputs::from_base_and_priority(base, priority)
+            .map_err(|_| EvmTransportError::InvalidResponse)
     }
 
-    pub(super) async fn verified_call<'a>(
-        client: &EvmJsonRpcClient,
-        verified: &VerifiedEvmCall<'a>,
+    async fn estimate(&self, request: &EvmTransactionEstimate) -> TransportResult<U256> {
+        let mut call = Map::new();
+        call.insert(
+            "type".to_owned(),
+            json!(encode_quantity(U256::from(request.transaction_type()))),
+        );
+        call.insert(
+            "chainId".to_owned(),
+            json!(encode_quantity(request.chain_id())),
+        );
+        call.insert("nonce".to_owned(), json!(encode_quantity(request.nonce())));
+        call.insert("from".to_owned(), json!(format!("{:#x}", request.from())));
+        if let TxKind::Call(to) = request.to() {
+            call.insert("to".to_owned(), json!(format!("{to:#x}")));
+        }
+        call.insert("value".to_owned(), json!(encode_quantity(request.value())));
+        call.insert("data".to_owned(), json!(encode_bytes(request.input())));
+        call.insert(
+            "accessList".to_owned(),
+            encode_access_list(request.access_list()),
+        );
+        call.insert(
+            "maxFeePerGas".to_owned(),
+            json!(encode_quantity(request.max_fee_per_gas())),
+        );
+        call.insert(
+            "maxPriorityFeePerGas".to_owned(),
+            json!(encode_quantity(request.max_priority_fee_per_gas())),
+        );
+        let value = self
+            .rpc_call(
+                "eth_estimateGas",
+                json!([Value::Object(call), "pending"]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?;
+        parse_quantity(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
+    }
+
+    async fn submit(&self, signed_bytes: &[u8], expected_hash: B256) -> TransportResult<B256> {
+        if signed_bytes.is_empty() || keccak256(signed_bytes) != expected_hash {
+            return Err(EvmTransportError::InvalidRequest);
+        }
+        let value = self
+            .rpc_call(
+                "eth_sendRawTransaction",
+                json!([encode_bytes(signed_bytes)]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?;
+        parse_hash(value.as_str().ok_or(EvmTransportError::InvalidResponse)?)
+    }
+
+    async fn transaction(
+        &self,
+        transaction_hash: B256,
+    ) -> TransportResult<Option<EvmObservedTransaction>> {
+        let value = self
+            .rpc_call(
+                "eth_getTransactionByHash",
+                json!([format!("{transaction_hash:#x}")]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let object = required_object(&value)?;
+        let observed_hash = hash_field(object, "hash")?;
+        if observed_hash != transaction_hash || quantity_field(object, "type")? != U256::from(2) {
+            return Err(EvmTransportError::InvalidResponse);
+        }
+        let placement = transaction_placement(object)?;
+        Ok(Some(EvmObservedTransaction {
+            transaction_hash: observed_hash,
+            chain_id: quantity_field(object, "chainId")?,
+            nonce: quantity_field(object, "nonce")?,
+            from: address_field(object, "from")?,
+            to: optional_address_field(object, "to")?.map_or(TxKind::Create, TxKind::Call),
+            value: quantity_field(object, "value")?,
+            input: bytes_field(object, "input")?,
+            gas_limit: quantity_field(object, "gas")?,
+            max_fee_per_gas: quantity_field(object, "maxFeePerGas")?,
+            max_priority_fee_per_gas: quantity_field(object, "maxPriorityFeePerGas")?,
+            access_list: access_list_field(object, "accessList")?,
+            placement,
+        }))
+    }
+
+    async fn receipt(&self, transaction_hash: B256) -> TransportResult<Option<EvmReceipt>> {
+        let value = self
+            .rpc_call(
+                "eth_getTransactionReceipt",
+                json!([format!("{transaction_hash:#x}")]),
+                RpcResponseBodyLimit::TransportMaximum,
+            )
+            .await?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let object = required_object(&value)?;
+        let observed_hash = hash_field(object, "transactionHash")?;
+        if observed_hash != transaction_hash {
+            return Err(EvmTransportError::InvalidResponse);
+        }
+        let status = match quantity_field(object, "status")? {
+            value if value == U256::ZERO => EvmReceiptStatus::Reverted,
+            value if value == U256::from(1) => EvmReceiptStatus::Success,
+            _ => return Err(EvmTransportError::InvalidResponse),
+        };
+        let logs = object
+            .get("logs")
+            .and_then(Value::as_array)
+            .ok_or(EvmTransportError::InvalidResponse)?
+            .iter()
+            .map(parse_receipt_log)
+            .collect::<TransportResult<Vec<_>>>()?;
+        let receipt = EvmReceipt {
+            transaction_hash: observed_hash,
+            transaction_index: quantity_field(object, "transactionIndex")?,
+            block: EvmBlockAnchor::new(
+                quantity_field(object, "blockNumber")?,
+                hash_field(object, "blockHash")?,
+            ),
+            from: address_field(object, "from")?,
+            to: optional_address_field(object, "to")?,
+            contract_address: optional_address_field(object, "contractAddress")?,
+            status,
+            gas_used: quantity_field(object, "gasUsed")?,
+            cumulative_gas_used: quantity_field(object, "cumulativeGasUsed")?,
+            logs,
+        };
+        receipt
+            .validate()
+            .map_err(|_| EvmTransportError::InvalidResponse)?;
+        Ok(Some(receipt))
+    }
+
+    async fn rpc_call(
+        &self,
         method: &'static str,
         params: Value,
+        response_limit: RpcResponseBodyLimit,
     ) -> TransportResult<Value> {
-        send_json_rpc(
-            client,
-            RawJsonRpcExchange::verified_operation(verified, method, params),
-        )
-        .await
-    }
-
-    async fn send_json_rpc(
-        client: &EvmJsonRpcClient,
-        exchange: RawJsonRpcExchange<'_>,
-    ) -> TransportResult<Value> {
-        let operation = exchange.operation;
-        let mut request = client.client.post(&exchange.source.rpc_url).json(&json!({
-            "jsonrpc": "2.0",
-            "id": 1u64,
-            "method": exchange.method,
-            "params": exchange.params,
-        }));
-        if let Some(authorization) = &exchange.source.authorization {
-            request = request.header(reqwest::header::AUTHORIZATION, authorization);
-        }
-        debug!(operation = %operation, "evm rpc request");
-        let response = request
-            .send()
+        let maximum_body_bytes = response_limit.maximum_body_bytes()?;
+        let operation = operation_id(method);
+        let _source_permit = Arc::clone(&self.endpoint.source_limit)
+            .acquire_owned()
             .await
             .map_err(|_| EvmTransportError::TransportFailed {
                 operation: operation.clone(),
             })?;
+        let _global_permit = Arc::clone(&self.shared.global_limit)
+            .acquire_owned()
+            .await
+            .map_err(|_| EvmTransportError::TransportFailed {
+                operation: operation.clone(),
+            })?;
+        let mut request = self
+            .shared
+            .client
+            .post(self.endpoint.url.clone())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": JSON_RPC_ID,
+                "method": method,
+                "params": params,
+            }));
+        if let Some(authorization) = &self.endpoint.authorization {
+            request = request.header(AUTHORIZATION, authorization.clone());
+        }
+        debug!(operation = %operation, "evm rpc request");
+        let mut response =
+            request
+                .send()
+                .await
+                .map_err(|_| EvmTransportError::TransportFailed {
+                    operation: operation.clone(),
+                })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             return Err(EvmTransportError::RpcHttpStatus { operation, status });
         }
-        let body = response
-            .json::<Value>()
-            .await
-            .map_err(|_| EvmTransportError::InvalidResponse)?;
-        if let Some(error) = body.get("error") {
-            let code = error
-                .get("code")
-                .and_then(Value::as_i64)
-                .ok_or(EvmTransportError::InvalidResponse)?;
-            return Err(EvmTransportError::RpcJsonError { operation, code });
+        if response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length > maximum_body_bytes)
+        {
+            return Err(EvmTransportError::ResponseTooLarge);
         }
-        body.get("result")
-            .cloned()
-            .ok_or(EvmTransportError::ResponseMissingResult { operation })
+        let mut bytes = Vec::new();
+        while let Some(chunk) =
+            response
+                .chunk()
+                .await
+                .map_err(|_| EvmTransportError::TransportFailed {
+                    operation: operation.clone(),
+                })?
+        {
+            let next_len = bytes
+                .len()
+                .checked_add(chunk.len())
+                .ok_or(EvmTransportError::ResponseTooLarge)?;
+            if next_len > maximum_body_bytes {
+                return Err(EvmTransportError::ResponseTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let body: Value =
+            serde_json::from_slice(&bytes).map_err(|_| EvmTransportError::InvalidResponse)?;
+        validate_rpc_response(body, operation)
     }
 }
 
-impl EvmTransportError {
-    fn can_try_next_source(&self) -> bool {
-        matches!(
-            self,
-            Self::TransportFailed { .. } | Self::RpcHttpStatus { .. } | Self::RpcJsonError { .. }
-        )
+impl EvmReadSession for EvmJsonRpcSession {
+    fn evidence(&self) -> &EvmSessionEvidence {
+        &self.evidence
     }
 
-    /// Converts the transport error into a closed redaction-safe provider diagnostic.
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
+        Box::pin(async move { self.block(selector).await.map_err(capability_error) })
+    }
+
+    fn read_balance<'a>(
+        &'a self,
+        account: Address,
+        block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, U256> {
+        Box::pin(async move { self.balance(account, block).await.map_err(capability_error) })
+    }
+
+    fn read_code<'a>(
+        &'a self,
+        address: Address,
+        block: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmCode> {
+        Box::pin(async move { self.code(address, block).await.map_err(capability_error) })
+    }
+
+    fn call<'a>(&'a self, request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes> {
+        Box::pin(async move { self.call_contract(request).await.map_err(capability_error) })
+    }
+}
+
+impl EvmTransactionSession for EvmJsonRpcSession {
+    fn evidence(&self) -> &EvmSessionEvidence {
+        &self.evidence
+    }
+
+    fn pending_nonce<'a>(&'a self, account: Address) -> EvmSessionFuture<'a, U256> {
+        Box::pin(async move {
+            self.pending_nonce_value(account)
+                .await
+                .map_err(capability_error)
+        })
+    }
+
+    fn fee_inputs(&self) -> EvmSessionFuture<'_, EvmFeeInputs> {
+        Box::pin(async move { self.fee_input_values().await.map_err(capability_error) })
+    }
+
+    fn estimate_gas<'a>(
+        &'a self,
+        request: &'a EvmTransactionEstimate,
+    ) -> EvmSessionFuture<'a, U256> {
+        Box::pin(async move { self.estimate(request).await.map_err(capability_error) })
+    }
+
+    fn submit_raw_transaction<'a>(
+        &'a self,
+        signed_bytes: &'a [u8],
+        expected_hash: B256,
+    ) -> EvmSessionFuture<'a, B256> {
+        Box::pin(async move {
+            self.submit(signed_bytes, expected_hash)
+                .await
+                .map_err(capability_error)
+        })
+    }
+
+    fn transaction_by_hash(
+        &self,
+        transaction_hash: B256,
+    ) -> EvmSessionFuture<'_, Option<EvmObservedTransaction>> {
+        Box::pin(async move {
+            self.transaction(transaction_hash)
+                .await
+                .map_err(capability_error)
+        })
+    }
+
+    fn receipt_by_hash(&self, transaction_hash: B256) -> EvmSessionFuture<'_, Option<EvmReceipt>> {
+        Box::pin(async move {
+            self.receipt(transaction_hash)
+                .await
+                .map_err(capability_error)
+        })
+    }
+
+    fn read_block<'a>(
+        &'a self,
+        selector: &'a EvmBlockSelector,
+    ) -> EvmSessionFuture<'a, EvmBlockAnchor> {
+        Box::pin(async move { self.block(selector).await.map_err(capability_error) })
+    }
+}
+
+impl fmt::Debug for EvmJsonRpcSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvmJsonRpcSession")
+            .field("endpoint", &"<redacted>")
+            .field("evidence", &self.evidence)
+            .finish()
+    }
+}
+
+fn checked_endpoint(
+    rpc_url: String,
+    authorization: Option<String>,
+    source_limit: Arc<Semaphore>,
+) -> TransportResult<BoundEndpoint> {
+    let url = reqwest::Url::parse(&rpc_url).map_err(|_| EvmTransportError::InvalidConfiguration)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(EvmTransportError::InvalidConfiguration);
+    }
+    let authorization = authorization
+        .map(|value| {
+            HeaderValue::from_str(&value).map_err(|_| EvmTransportError::InvalidConfiguration)
+        })
+        .transpose()?;
+    Ok(BoundEndpoint {
+        url,
+        authorization,
+        source_limit,
+    })
+}
+
+fn validate_rpc_response(mut body: Value, operation: LocalPublicId) -> TransportResult<Value> {
+    let object = body
+        .as_object_mut()
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || object.get("id").and_then(Value::as_u64) != Some(JSON_RPC_ID)
+    {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    match (object.contains_key("result"), object.get("error")) {
+        (true, None) => object
+            .remove("result")
+            .ok_or(EvmTransportError::InvalidResponse),
+        (false, Some(error)) => {
+            let code = error
+                .as_object()
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64)
+                .ok_or(EvmTransportError::InvalidResponse)?;
+            Err(EvmTransportError::RpcJsonError { operation, code })
+        }
+        (false, None) => Err(EvmTransportError::ResponseMissingResult { operation }),
+        (true, Some(_)) => Err(EvmTransportError::InvalidResponse),
+    }
+}
+
+fn selector_tag(selector: &EvmBlockSelector) -> TransportResult<String> {
+    match selector {
+        EvmBlockSelector::Latest => Ok("latest".to_owned()),
+        EvmBlockSelector::Number(number) => Ok(encode_quantity(*number)),
+        EvmBlockSelector::ExactHash(_) => Err(EvmTransportError::InvalidRequest),
+    }
+}
+
+fn selector_param(selector: &EvmBlockSelector) -> Value {
+    match selector {
+        EvmBlockSelector::Latest => json!("latest"),
+        EvmBlockSelector::Number(number) => json!(encode_quantity(*number)),
+        EvmBlockSelector::ExactHash(hash) => json!({
+            "blockHash": format!("{hash:#x}"),
+            "requireCanonical": true,
+        }),
+    }
+}
+
+fn encode_quantity(value: U256) -> String {
+    format!("0x{value:x}")
+}
+
+fn parse_quantity(raw: &str) -> TransportResult<U256> {
+    let digits = raw
+        .strip_prefix("0x")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if digits.is_empty()
+        || digits.len() > 64
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || !digits.as_bytes().iter().all(u8::is_ascii_hexdigit)
+    {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    U256::from_str_radix(digits, 16).map_err(|_| EvmTransportError::InvalidResponse)
+}
+
+fn encode_bytes(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn parse_bytes(raw: &str) -> TransportResult<Bytes> {
+    let digits = raw
+        .strip_prefix("0x")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if !digits.len().is_multiple_of(2) || !digits.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    hex::decode(digits)
+        .map(Bytes::from)
+        .map_err(|_| EvmTransportError::InvalidResponse)
+}
+
+fn parse_bounded_bytes(raw: &str, maximum: usize) -> TransportResult<Bytes> {
+    let digits = raw
+        .strip_prefix("0x")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if !digits.len().is_multiple_of(2) {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    if digits.len() / 2 > maximum {
+        return Err(EvmTransportError::ResponseTooLarge);
+    }
+    parse_bytes(raw)
+}
+
+fn parse_hash(raw: &str) -> TransportResult<B256> {
+    if raw.len() != 66 || !raw.starts_with("0x") {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    raw.parse().map_err(|_| EvmTransportError::InvalidResponse)
+}
+
+fn parse_address(raw: &str) -> TransportResult<Address> {
+    if raw.len() != 42 || !raw.starts_with("0x") {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    raw.parse().map_err(|_| EvmTransportError::InvalidResponse)
+}
+
+fn required_object(value: &Value) -> TransportResult<&Map<String, Value>> {
+    value.as_object().ok_or(EvmTransportError::InvalidResponse)
+}
+
+fn string_field<'a>(object: &'a Map<String, Value>, field: &str) -> TransportResult<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or(EvmTransportError::InvalidResponse)
+}
+
+fn quantity_field(object: &Map<String, Value>, field: &str) -> TransportResult<U256> {
+    parse_quantity(string_field(object, field)?)
+}
+
+fn hash_field(object: &Map<String, Value>, field: &str) -> TransportResult<B256> {
+    parse_hash(string_field(object, field)?)
+}
+
+fn address_field(object: &Map<String, Value>, field: &str) -> TransportResult<Address> {
+    parse_address(string_field(object, field)?)
+}
+
+fn bytes_field(object: &Map<String, Value>, field: &str) -> TransportResult<Bytes> {
+    parse_bytes(string_field(object, field)?)
+}
+
+fn optional_address_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> TransportResult<Option<Address>> {
+    let value = object
+        .get(field)
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if value.is_null() {
+        Ok(None)
+    } else {
+        parse_address(value.as_str().ok_or(EvmTransportError::InvalidResponse)?).map(Some)
+    }
+}
+
+fn encode_access_list(access_list: &AccessList) -> Value {
+    Value::Array(
+        access_list
+            .iter()
+            .map(|item| {
+                json!({
+                    "address": format!("{:#x}", item.address),
+                    "storageKeys": item.storage_keys.iter().map(|key| format!("{key:#x}")).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn access_list_field(object: &Map<String, Value>, field: &str) -> TransportResult<AccessList> {
+    let items = object
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    items
+        .iter()
+        .map(|item| {
+            let item = required_object(item)?;
+            let storage_keys = item
+                .get("storageKeys")
+                .and_then(Value::as_array)
+                .ok_or(EvmTransportError::InvalidResponse)?
+                .iter()
+                .map(|key| parse_hash(key.as_str().ok_or(EvmTransportError::InvalidResponse)?))
+                .collect::<TransportResult<Vec<_>>>()?;
+            Ok(AccessListItem {
+                address: address_field(item, "address")?,
+                storage_keys,
+            })
+        })
+        .collect::<TransportResult<Vec<_>>>()
+        .map(AccessList)
+}
+
+fn transaction_placement(
+    object: &Map<String, Value>,
+) -> TransportResult<Option<EvmTransactionPlacement>> {
+    let block_number = object
+        .get("blockNumber")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    let block_hash = object
+        .get("blockHash")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    let transaction_index = object
+        .get("transactionIndex")
+        .ok_or(EvmTransportError::InvalidResponse)?;
+    if block_number.is_null() && block_hash.is_null() && transaction_index.is_null() {
+        return Ok(None);
+    }
+    if block_number.is_null() || block_hash.is_null() || transaction_index.is_null() {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    Ok(Some(EvmTransactionPlacement {
+        block: EvmBlockAnchor::new(
+            parse_quantity(
+                block_number
+                    .as_str()
+                    .ok_or(EvmTransportError::InvalidResponse)?,
+            )?,
+            parse_hash(
+                block_hash
+                    .as_str()
+                    .ok_or(EvmTransportError::InvalidResponse)?,
+            )?,
+        ),
+        transaction_index: parse_quantity(
+            transaction_index
+                .as_str()
+                .ok_or(EvmTransportError::InvalidResponse)?,
+        )?,
+    }))
+}
+
+fn parse_receipt_log(value: &Value) -> TransportResult<EvmReceiptLog> {
+    let object = required_object(value)?;
+    let topics = object
+        .get("topics")
+        .and_then(Value::as_array)
+        .ok_or(EvmTransportError::InvalidResponse)?
+        .iter()
+        .map(|topic| parse_hash(topic.as_str().ok_or(EvmTransportError::InvalidResponse)?))
+        .collect::<TransportResult<Vec<_>>>()?;
+    Ok(EvmReceiptLog {
+        address: address_field(object, "address")?,
+        topics,
+        data: bytes_field(object, "data")?,
+        block: EvmBlockAnchor::new(
+            quantity_field(object, "blockNumber")?,
+            hash_field(object, "blockHash")?,
+        ),
+        transaction_hash: hash_field(object, "transactionHash")?,
+        transaction_index: quantity_field(object, "transactionIndex")?,
+        log_index: quantity_field(object, "logIndex")?,
+        removed: object
+            .get("removed")
+            .and_then(Value::as_bool)
+            .ok_or(EvmTransportError::InvalidResponse)?,
+    })
+}
+
+fn capability_error(error: EvmTransportError) -> EvmCapabilityError {
+    match error {
+        EvmTransportError::SourceMismatch { diagnostic } => {
+            EvmCapabilityError::SourceMismatch { diagnostic }
+        }
+        other => EvmCapabilityError::provider_failure(other.into_provider_diagnostic()),
+    }
+}
+
+fn operation_id(method: &'static str) -> LocalPublicId {
+    let value = match method {
+        "eth_chainId" => "eth_chain_id",
+        "eth_getBlockByHash" => "eth_get_block_by_hash",
+        "eth_getBlockByNumber" => "eth_get_block_by_number",
+        "eth_getBalance" => "eth_get_balance",
+        "eth_call" => "eth_call",
+        "eth_getCode" => "eth_get_code",
+        "eth_getTransactionCount" => "eth_get_transaction_count",
+        "eth_maxPriorityFeePerGas" => "eth_max_priority_fee_per_gas",
+        "eth_estimateGas" => "eth_estimate_gas",
+        "eth_sendRawTransaction" => "eth_send_raw_transaction",
+        "eth_getTransactionByHash" => "eth_get_transaction_by_hash",
+        "eth_getTransactionReceipt" => "eth_get_transaction_receipt",
+        _ => "evm_rpc",
+    };
+    diagnostic_id(value)
+}
+
+fn diagnostic_id(value: &str) -> LocalPublicId {
+    LocalPublicId::new(value).expect("static EVM diagnostic id")
+}
+
+/// Redaction-safe EVM transport failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EvmTransportError {
+    /// Session configuration was invalid.
+    #[error("EVM JSON-RPC session configuration was invalid")]
+    InvalidConfiguration,
+    /// A caller supplied invalid transient material.
+    #[error("EVM JSON-RPC request material was invalid")]
+    InvalidRequest,
+    /// Bind-time chain identity did not match the semantic binding.
+    #[error("EVM JSON-RPC source did not match semantic binding")]
+    SourceMismatch {
+        /// Closed mismatch diagnostic.
+        diagnostic: RedactedProviderDiagnostic,
+    },
+    /// HTTP exchange failed before a protocol response was available.
+    #[error("EVM JSON-RPC request failed")]
+    TransportFailed {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+    },
+    /// Endpoint returned a non-success HTTP status.
+    #[error("EVM JSON-RPC HTTP status {status}")]
+    RpcHttpStatus {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+        /// HTTP status code.
+        status: u16,
+    },
+    /// Endpoint returned a JSON-RPC error object.
+    #[error("EVM JSON-RPC error {code}")]
+    RpcJsonError {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+        /// JSON-RPC error code.
+        code: i64,
+    },
+    /// Response violated the strict protocol contract.
+    #[error("EVM JSON-RPC response was invalid")]
+    InvalidResponse,
+    /// Response omitted both result and error.
+    #[error("EVM JSON-RPC response missing result")]
+    ResponseMissingResult {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+    },
+    /// Response exceeded the configured HTTP-body or decoded method-result bound.
+    #[error("EVM JSON-RPC response exceeded size bound")]
+    ResponseTooLarge,
+}
+
+impl EvmTransportError {
+    /// Converts into one closed redacted provider diagnostic.
     pub fn into_provider_diagnostic(self) -> RedactedProviderDiagnostic {
         match self {
-            Self::InvalidRegistry => {
+            Self::InvalidConfiguration => {
                 evm_diagnostic(ProviderDiagnosticCode::ProviderConfigurationInvalid)
             }
-            Self::PolicyUnavailable | Self::RouteUnavailable => {
-                evm_diagnostic(ProviderDiagnosticCode::RouteUnavailable)
+            Self::InvalidRequest | Self::InvalidResponse | Self::ResponseTooLarge => {
+                evm_diagnostic(ProviderDiagnosticCode::ResponseInvalid)
             }
-            Self::SourceUnavailable => evm_diagnostic(ProviderDiagnosticCode::SourceUnavailable),
-            Self::SourceNotAllowed => evm_diagnostic(ProviderDiagnosticCode::SourceNotAllowed),
             Self::SourceMismatch { diagnostic } => diagnostic,
             Self::TransportFailed { operation } => {
                 evm_diagnostic(ProviderDiagnosticCode::TransportFailed).with_operation(operation)
@@ -694,398 +1021,12 @@ impl EvmTransportError {
                         ProviderDiagnosticValue::I64(code),
                     )
             }
-            Self::InvalidResponse => evm_diagnostic(ProviderDiagnosticCode::ResponseInvalid),
             Self::ResponseMissingResult { operation } => {
                 evm_diagnostic(ProviderDiagnosticCode::ResponseMissingResult)
                     .with_operation(operation)
             }
-            Self::ReceiptPending => evm_diagnostic(ProviderDiagnosticCode::OperationIncomplete)
-                .with_operation(diagnostic_id("eth_get_transaction_receipt")),
         }
     }
-}
-
-fn operation_id(method: &'static str) -> LocalPublicId {
-    match method {
-        "eth_chainId" => diagnostic_id("eth_chain_id"),
-        "web3_clientVersion" => diagnostic_id("web3_client_version"),
-        "eth_getBlockByHash" => diagnostic_id("eth_get_block_by_hash"),
-        "eth_getBlockByNumber" => diagnostic_id("eth_get_block_by_number"),
-        "eth_call" => diagnostic_id("eth_call"),
-        "eth_getCode" => diagnostic_id("eth_get_code"),
-        "eth_getBalance" => diagnostic_id("eth_get_balance"),
-        "eth_getTransactionCount" => diagnostic_id("eth_get_transaction_count"),
-        "eth_gasPrice" => diagnostic_id("eth_gas_price"),
-        "eth_maxPriorityFeePerGas" => diagnostic_id("eth_max_priority_fee_per_gas"),
-        "eth_estimateGas" => diagnostic_id("eth_estimate_gas"),
-        "eth_getLogs" => diagnostic_id("eth_get_logs"),
-        "eth_sendRawTransaction" => diagnostic_id("eth_send_raw_transaction"),
-        "eth_getTransactionReceipt" => diagnostic_id("eth_get_transaction_receipt"),
-        "eth_getTransactionByHash" => diagnostic_id("eth_get_transaction_by_hash"),
-        _ => diagnostic_id("evm_rpc"),
-    }
-}
-
-fn diagnostic_id(value: &str) -> LocalPublicId {
-    LocalPublicId::new(value).expect("EVM diagnostic label must be checked public text")
-}
-
-impl fmt::Debug for EvmJsonRpcClient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EvmJsonRpcClient")
-            .field("registry", &self.registry)
-            .field("routes", &self.routes)
-            .finish_non_exhaustive()
-    }
-}
-
-/// EVM JSON-RPC capability provider bound to a checked semantic network binding.
-#[derive(Clone)]
-pub struct EvmJsonRpcNetworkProvider {
-    client: EvmJsonRpcClient,
-    binding: EvmNetworkBinding,
-}
-
-impl fmt::Debug for EvmJsonRpcNetworkProvider {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EvmJsonRpcNetworkProvider")
-            .field("client", &self.client)
-            .field("binding", &self.binding)
-            .finish()
-    }
-}
-
-struct VerifiedEvmCall<'a> {
-    source: &'a EvmRuntimeSource,
-    chain_id: u64,
-    evidence: RedactedEvmSourceEvidence,
-}
-
-macro_rules! impl_network_provider {
-    ($trait:ident, $method:ident, $req:ty, $resp:ty, $inner:ident) => {
-        impl $trait for EvmJsonRpcNetworkProvider {
-            fn $method<'a>(&'a self, request: &'a $req) -> EvmCapabilityFuture<'a, $resp> {
-                Box::pin(async move {
-                    let selected = self
-                        .client
-                        .verified_source(&self.binding)
-                        .await
-                        .map_err(capability_error_from_transport)?;
-                    self.client
-                        .$inner(&selected, request)
-                        .await
-                        .map_err(capability_error_from_transport)
-                })
-            }
-        }
-    };
-}
-
-impl_network_provider!(
-    EvmChainIdentityProvider,
-    chain_identity,
-    EvmChainIdentityRequest,
-    EvmChainIdentityResponse,
-    chain_identity_impl
-);
-impl_network_provider!(
-    EvmBlockReadProvider,
-    read_block,
-    EvmBlockReadRequest,
-    EvmBlockReadResponse,
-    block_read_impl
-);
-impl_network_provider!(
-    EvmBalanceReadProvider,
-    read_balance,
-    EvmBalanceReadRequest,
-    EvmBalanceReadResponse,
-    balance_read_impl
-);
-impl_network_provider!(
-    EvmCallReadProvider,
-    read_call,
-    EvmCallReadRequest,
-    EvmCallReadResponse,
-    call_read_impl
-);
-impl_network_provider!(
-    EvmCodeReadProvider,
-    read_code,
-    EvmCodeReadRequest,
-    EvmCodeReadResponse,
-    code_read_impl
-);
-impl_network_provider!(
-    EvmLogsReadProvider,
-    read_logs,
-    EvmLogsReadRequest,
-    EvmLogsReadResponse,
-    logs_read_impl
-);
-impl_network_provider!(
-    EvmNonceReadProvider,
-    read_nonce,
-    EvmNonceReadRequest,
-    EvmNonceReadResponse,
-    nonce_read_impl
-);
-impl_network_provider!(
-    EvmFeeReadProvider,
-    read_fee,
-    EvmFeeReadRequest,
-    EvmFeeReadResponse,
-    fee_read_impl
-);
-impl_network_provider!(
-    EvmGasEstimateProvider,
-    estimate_gas,
-    EvmGasEstimateRequest,
-    EvmGasEstimateResponse,
-    gas_estimate_impl
-);
-impl_network_provider!(
-    EvmTransactionSubmitProvider,
-    submit_transaction,
-    EvmTransactionSubmitRequest,
-    EvmTransactionSubmitResponse,
-    submit_impl
-);
-impl_network_provider!(
-    EvmReceiptReadProvider,
-    read_receipt,
-    EvmReceiptReadRequest,
-    EvmReceiptReadResponse,
-    receipt_read_impl
-);
-impl_network_provider!(
-    EvmNonceOccupancyReadProvider,
-    read_nonce_occupancy,
-    EvmNonceOccupancyReadRequest,
-    EvmNonceOccupancyReadResponse,
-    nonce_occupancy_read_impl
-);
-
-fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityError {
-    match error {
-        EvmTransportError::ReceiptPending => EvmCapabilityError::ReceiptPending,
-        EvmTransportError::SourceMismatch { diagnostic } => {
-            EvmCapabilityError::SourceMismatch { diagnostic }
-        }
-        other => EvmCapabilityError::provider_failure(other.into_provider_diagnostic()),
-    }
-}
-
-fn source_evidence_error_into_transport(error: EvmCapabilityError) -> EvmTransportError {
-    match error {
-        EvmCapabilityError::SourceMismatch { diagnostic } => {
-            EvmTransportError::SourceMismatch { diagnostic }
-        }
-        _ => EvmTransportError::InvalidResponse,
-    }
-}
-
-fn block_selector_tag(selector: &EvmBlockSelector) -> TransportResult<String> {
-    match selector {
-        EvmBlockSelector::Latest => Ok("latest".to_owned()),
-        EvmBlockSelector::Pending => Ok("pending".to_owned()),
-        EvmBlockSelector::Number(number) => Ok(format!("0x{number:x}")),
-        EvmBlockSelector::Hash(_) => Err(EvmTransportError::InvalidResponse),
-    }
-}
-
-fn block_selector_param(selector: &EvmBlockSelector) -> Value {
-    match selector {
-        EvmBlockSelector::Latest => json!("latest"),
-        EvmBlockSelector::Pending => json!("pending"),
-        EvmBlockSelector::Number(number) => json!(format!("0x{number:x}")),
-        EvmBlockSelector::Hash(hash) => json!({
-            "blockHash": format!("{hash:?}"),
-            "requireCanonical": true,
-        }),
-    }
-}
-
-fn parse_u64(raw: &str) -> TransportResult<u64> {
-    parse_u64_quantity(raw, "evm_quantity").map_err(|_| EvmTransportError::InvalidResponse)
-}
-
-fn parse_u128(raw: &str) -> TransportResult<u128> {
-    parse_u128_quantity(raw, "evm_quantity").map_err(|_| EvmTransportError::InvalidResponse)
-}
-
-fn parse_b256_field(value: &Value, field: &'static str) -> TransportResult<B256> {
-    parse_b256_str(
-        value
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or(EvmTransportError::InvalidResponse)?,
-    )
-}
-
-fn parse_b256_str(value: &str) -> TransportResult<B256> {
-    value
-        .parse::<B256>()
-        .map_err(|_| EvmTransportError::InvalidResponse)
-}
-
-fn parse_log_entry(value: &Value) -> TransportResult<EvmLogEntry> {
-    let address = value
-        .get("address")
-        .and_then(Value::as_str)
-        .ok_or(EvmTransportError::InvalidResponse)?
-        .parse()
-        .map_err(|_| EvmTransportError::InvalidResponse)?;
-    let topics = value
-        .get("topics")
-        .and_then(Value::as_array)
-        .ok_or(EvmTransportError::InvalidResponse)?
-        .iter()
-        .map(|topic| parse_b256_str(topic.as_str().ok_or(EvmTransportError::InvalidResponse)?))
-        .collect::<TransportResult<Vec<_>>>()?;
-    let data = hex_to_bytes(
-        value
-            .get("data")
-            .and_then(Value::as_str)
-            .ok_or(EvmTransportError::InvalidResponse)?,
-    )
-    .map_err(|_| EvmTransportError::InvalidResponse)?;
-    let block_number = value
-        .get("blockNumber")
-        .and_then(Value::as_str)
-        .map(parse_u64)
-        .transpose()?;
-    let transaction_hash = value
-        .get("transactionHash")
-        .and_then(Value::as_str)
-        .map(parse_b256_str)
-        .transpose()?;
-    let log_index = value
-        .get("logIndex")
-        .and_then(Value::as_str)
-        .map(parse_u64)
-        .transpose()?;
-    Ok(EvmLogEntry {
-        address,
-        topics,
-        data,
-        block_number,
-        transaction_hash,
-        log_index,
-    })
-}
-
-fn validate_block_identity(
-    selector: &EvmBlockSelector,
-    block_number: u64,
-    block_hash: B256,
-) -> TransportResult<()> {
-    match selector {
-        EvmBlockSelector::Number(expected) if *expected != block_number => {
-            Err(EvmTransportError::InvalidResponse)
-        }
-        EvmBlockSelector::Hash(expected) if *expected != block_hash => {
-            Err(EvmTransportError::InvalidResponse)
-        }
-        _ => Ok(()),
-    }
-}
-
-fn validate_log_matches_request(
-    request: &EvmLogsReadRequest,
-    log: &EvmLogEntry,
-) -> TransportResult<()> {
-    if let Some(expected_address) = request.address() {
-        if expected_address != log.address {
-            return Err(EvmTransportError::InvalidResponse);
-        }
-    }
-    for (expected, observed) in request.topics().iter().zip(log.topics.iter()) {
-        if expected != observed {
-            return Err(EvmTransportError::InvalidResponse);
-        }
-    }
-    if log.topics.len() < request.topics().len() {
-        return Err(EvmTransportError::InvalidResponse);
-    }
-    let requires_block_number = matches!(request.from_block(), EvmBlockSelector::Number(_))
-        || matches!(request.to_block(), EvmBlockSelector::Number(_));
-    if requires_block_number && log.block_number.is_none() {
-        return Err(EvmTransportError::InvalidResponse);
-    }
-    if let Some(block_number) = log.block_number {
-        if let EvmBlockSelector::Number(from_block) = request.from_block() {
-            if block_number < *from_block {
-                return Err(EvmTransportError::InvalidResponse);
-            }
-        }
-        if let EvmBlockSelector::Number(to_block) = request.to_block() {
-            if block_number > *to_block {
-                return Err(EvmTransportError::InvalidResponse);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Redaction-safe EVM transport setup/runtime error.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EvmTransportError {
-    /// Runtime source registry was invalid.
-    #[error("EVM source registry was invalid")]
-    InvalidRegistry,
-    /// Requested source policy was unavailable.
-    #[error("EVM source policy was unavailable")]
-    PolicyUnavailable,
-    /// Requested semantic network route was unavailable.
-    #[error("EVM route was unavailable")]
-    RouteUnavailable,
-    /// Requested source was unavailable.
-    #[error("EVM source was unavailable")]
-    SourceUnavailable,
-    /// Requested source is not allowed by the policy.
-    #[error("EVM source was not allowed by policy")]
-    SourceNotAllowed,
-    /// Source evidence did not match the expected chain.
-    #[error("EVM source evidence did not match expected chain")]
-    SourceMismatch {
-        /// Closed redacted source-mismatch diagnostic.
-        diagnostic: RedactedProviderDiagnostic,
-    },
-    /// JSON-RPC transport request failed before a protocol response was available.
-    #[error("EVM JSON-RPC request failed")]
-    TransportFailed {
-        /// Redaction-safe operation id.
-        operation: LocalPublicId,
-    },
-    /// JSON-RPC endpoint returned a non-success HTTP status.
-    #[error("EVM JSON-RPC HTTP status {status}")]
-    RpcHttpStatus {
-        /// Redaction-safe operation id.
-        operation: LocalPublicId,
-        /// HTTP status code.
-        status: u16,
-    },
-    /// JSON-RPC endpoint returned an error object.
-    #[error("EVM JSON-RPC error {code}")]
-    RpcJsonError {
-        /// Redaction-safe operation id.
-        operation: LocalPublicId,
-        /// JSON-RPC error code.
-        code: i64,
-    },
-    /// JSON-RPC response failed contract validation.
-    #[error("EVM JSON-RPC response was invalid")]
-    InvalidResponse,
-    /// JSON-RPC response did not contain a result.
-    #[error("EVM JSON-RPC response missing result")]
-    ResponseMissingResult {
-        /// Redaction-safe operation id.
-        operation: LocalPublicId,
-    },
-    /// Transaction receipt is not yet available.
-    #[error("EVM transaction receipt is pending")]
-    ReceiptPending,
 }
 
 #[cfg(test)]

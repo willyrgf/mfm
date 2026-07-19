@@ -216,14 +216,30 @@ impl RecordingTypedRunStore {
 }
 pub(super) struct StaleOnceTypedRunStore {
     inner: store::AsyncInMemoryRunStore,
-    stale_terminal_injected: Mutex<bool>,
+    stale_injected: Mutex<bool>,
+    target: StaleAppendTarget,
+}
+
+#[derive(Clone, Copy)]
+enum StaleAppendTarget {
+    Terminal,
+    SideEffectPreparation,
 }
 
 impl StaleOnceTypedRunStore {
     pub(super) fn new() -> Self {
         Self {
             inner: store::AsyncInMemoryRunStore::new(),
-            stale_terminal_injected: Mutex::new(false),
+            stale_injected: Mutex::new(false),
+            target: StaleAppendTarget::Terminal,
+        }
+    }
+
+    pub(super) fn for_side_effect_preparation() -> Self {
+        Self {
+            inner: store::AsyncInMemoryRunStore::new(),
+            stale_injected: Mutex::new(false),
+            target: StaleAppendTarget::SideEffectPreparation,
         }
     }
 
@@ -315,19 +331,27 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
                 .payloads()
                 .iter()
                 .any(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)));
-            let has_terminal = bundle.request().payloads().iter().any(|payload| {
-                matches!(
-                    payload,
-                    events::KernelEventPayload::StateAttemptCompleted(_)
-                        | events::KernelEventPayload::StateAttemptFailed(_)
-                        | events::KernelEventPayload::StateAttemptInterrupted(_)
-                )
-            });
+            let has_target = bundle
+                .request()
+                .payloads()
+                .iter()
+                .any(|payload| match self.target {
+                    StaleAppendTarget::Terminal => matches!(
+                        payload,
+                        events::KernelEventPayload::StateAttemptCompleted(_)
+                            | events::KernelEventPayload::StateAttemptFailed(_)
+                            | events::KernelEventPayload::StateAttemptInterrupted(_)
+                    ),
+                    StaleAppendTarget::SideEffectPreparation => matches!(
+                        payload,
+                        events::KernelEventPayload::SideEffectInvocationPrepared(_)
+                    ),
+                });
             let should_inject = {
-                let mut injected = self.stale_terminal_injected.lock().map_err(|_| {
+                let mut injected = self.stale_injected.lock().map_err(|_| {
                     store::StoreError::Event("stale-once store lock poisoned".to_owned())
                 })?;
-                let should_inject = !*injected && !is_run_start && has_terminal;
+                let should_inject = !*injected && !is_run_start && has_target;
                 if should_inject {
                     *injected = true;
                 }

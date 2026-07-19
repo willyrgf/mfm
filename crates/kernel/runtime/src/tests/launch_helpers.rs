@@ -1,17 +1,19 @@
 use super::*;
 
-pub(super) fn prepare_fixture_launch(
+pub(super) async fn prepare_fixture_launch(
     scheduler: &SerialTypedScheduler,
     store: &TestTypedRunStore,
     fixture: &Fixture,
     seed_cells: Vec<events::SeedCellRef>,
 ) -> Result<PreparedRunLaunch> {
-    scheduler.prepare_run_launch(
-        &fixture.runtime_spec,
-        fixture_run_identity_material(fixture),
-        run_start_evidence(fixture, seed_cells),
-        store.expected_next_seq(&fixture.run_id),
-    )
+    scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(fixture),
+            run_start_evidence(fixture, seed_cells),
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .await
 }
 
 pub(super) async fn start_fixture_run(
@@ -20,7 +22,7 @@ pub(super) async fn start_fixture_run(
     fixture: &Fixture,
     seed_cells: Vec<events::SeedCellRef>,
 ) -> Result<store::CommitOutcome> {
-    let launch = prepare_fixture_launch(scheduler, store, fixture, seed_cells)?;
+    let launch = prepare_fixture_launch(scheduler, store, fixture, seed_cells).await?;
     scheduler_start_run(scheduler, store, launch).await
 }
 
@@ -75,6 +77,7 @@ pub(super) async fn started_fixture_run_with_registry_and_fact_descriptors(
             evidence,
             store.expected_next_seq(&fixture.run_id),
         )
+        .await
         .expect("start run with fact descriptors");
     scheduler_start_run(&scheduler, &mut store, launch)
         .await
@@ -100,12 +103,14 @@ pub(super) async fn start_fixture_run_async_store<S: store::RunEventStore + ?Siz
         .expected_next_seq(&fixture.run_id)
         .await
         .map_err(crate::error::async_store_error)?;
-    let launch = scheduler.prepare_run_launch(
-        &fixture.runtime_spec,
-        fixture_run_identity_material(fixture),
-        run_start_evidence(fixture, seed_cells),
-        expected_next_seq,
-    )?;
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(fixture),
+            run_start_evidence(fixture, seed_cells),
+            expected_next_seq,
+        )
+        .await?;
     scheduler.start_run(store, launch).await
 }
 
@@ -333,11 +338,8 @@ pub(super) fn run_start_evidence(
 }
 
 pub(super) fn entry_point_launch_evidence() -> events::EntryPointLaunchEvidence {
-    events::EntryPointLaunchEvidence {
-        resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
-            .expect("entry-point op id"),
-        entry_point_registry_digest: digest_for_bytes(b"entry-point-registry"),
-    }
+    events::EntryPointLaunchEvidence::new("mfm.test/portfolio_snapshot@1", Vec::new())
+        .expect("entry-point evidence")
 }
 
 pub(super) fn spec_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifact {

@@ -1,411 +1,204 @@
-use std::collections::BTreeMap;
-use std::fmt;
-use std::marker::PhantomData;
-use std::str::FromStr;
-use std::sync::Arc;
+use mfm_certify::CertificationRegistry;
+use mfm_ids::{StableAuthorKey, StoreScopeId};
+use mfm_op_portfolio_snapshot::portfolio_snapshot_program_launch_plan;
+use mfm_portfolio_model::ids::PortfolioId;
+use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_storage_postgres::PostgresStore;
+use mfm_values::{MfmConfig, ValidatedConfig};
 
-use mfm_authored_config::{AuthoredConfig, AuthoredConfigError, EntryPointDescriptor};
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, NameToken, ResourceNamespace};
-use mfm_program::TypedProgramLaunchPlan;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use crate::{
+    certify_launch_plan, entry_point_launch_internal_error, invocation_key_digest_or_mint,
+    prepare_certified_run_launch, CertifiedRunLaunchInput, ErrorClass, InvocationKey, PublicError,
+    RunLaunchRequest,
+};
 
-/// Public entry-point operation name accepted by CLI and REST transports.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PublicOpName(NameToken);
+const PORTFOLIO_SNAPSHOT_ID: &str = "mfm.portfolio/snapshot@1";
+const ENTRY_POINT_IDS: &[&str] = &[PORTFOLIO_SNAPSHOT_ID];
 
-impl PublicOpName {
-    /// Creates a checked public operation name.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpError> {
-        let value = value.as_ref();
-        NameToken::new(value).map(Self).map_err(|error| {
-            EntryPointOpError::new(
-                "InvalidPublicOpName",
-                format!("public op name is invalid: {error}"),
+/// Returns the exact compiled entry-point discovery surface.
+pub fn entry_point_ids() -> &'static [&'static str] {
+    ENTRY_POINT_IDS
+}
+
+/// Prepares one configured-target-backed run launch at admission.
+///
+/// The mutable configuration store is consulted only here. The resulting certified plan contains
+/// a concrete normalized configuration and retains its exact target, schema, and digest as
+/// admission evidence. Resume and replay use only retained run material.
+pub async fn prepare_entry_point_run_launch(
+    store: &PostgresStore,
+    entry_point_id: &str,
+    target: &str,
+    certification_registry: &CertificationRegistry,
+    store_scope_id: StoreScopeId,
+    invocation_key: Option<InvocationKey>,
+) -> Result<RunLaunchRequest, PublicError> {
+    match entry_point_id {
+        PORTFOLIO_SNAPSHOT_ID => {
+            prepare_portfolio_snapshot_run_launch(
+                store,
+                target,
+                certification_registry,
+                store_scope_id,
+                invocation_key,
             )
-        })
-    }
-
-    /// Returns the public name as transport text.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Display for PublicOpName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for PublicOpName {
-    type Err = EntryPointOpError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
-    }
-}
-
-/// Integer public version selector for an entry-point operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct OpVersion(u32);
-
-impl OpVersion {
-    /// Creates a checked non-zero public operation version.
-    pub fn new(value: u32) -> Result<Self, EntryPointOpError> {
-        if value == 0 {
-            return Err(EntryPointOpError::new(
-                "InvalidOpVersion",
-                "entry-point op version must be greater than zero",
-            ));
+            .await
         }
-        Ok(Self(value))
-    }
-
-    /// Returns the numeric public operation version.
-    pub const fn get(self) -> u32 {
-        self.0
+        _ => Err(entry_point_not_found()),
     }
 }
 
-impl fmt::Display for OpVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for OpVersion {
-    type Err = EntryPointOpError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let parsed = value.parse::<u32>().map_err(|_| {
-            EntryPointOpError::new(
-                "InvalidOpVersion",
-                "entry-point op version must be an unsigned integer",
-            )
-        })?;
-        Self::new(parsed)
-    }
-}
-
-/// Stable typed identity for a launchable entry-point operation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct EntryPointOpId {
-    /// Domain namespace for the entry-point operation.
-    pub namespace: ResourceNamespace,
-    /// Stable domain operation name within the namespace.
-    pub name: NameToken,
-    /// Public operation version.
-    pub version: OpVersion,
-}
-
-impl EntryPointOpId {
-    /// Creates a checked entry-point operation id.
-    pub fn new(
-        namespace: impl AsRef<str>,
-        name: impl AsRef<str>,
-        version: OpVersion,
-    ) -> Result<Self, EntryPointOpError> {
-        let namespace = namespace.as_ref();
-        let name = name.as_ref();
-        let namespace = ResourceNamespace::new(namespace).map_err(|error| {
-            EntryPointOpError::new(
-                "InvalidEntryPointOpId",
-                format!("entry-point op namespace is invalid: {error}"),
-            )
-        })?;
-        let name = NameToken::new(name).map_err(|error| {
-            EntryPointOpError::new(
-                "InvalidEntryPointOpId",
-                format!("entry-point op name is invalid: {error}"),
-            )
-        })?;
-        Ok(Self {
-            namespace,
-            name,
-            version,
-        })
-    }
-}
-
-impl fmt::Display for EntryPointOpId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}",
-            self.namespace.as_str(),
-            self.name.as_str(),
-            self.version
+async fn prepare_portfolio_snapshot_run_launch(
+    store: &PostgresStore,
+    target: &str,
+    certification_registry: &CertificationRegistry,
+    store_scope_id: StoreScopeId,
+    invocation_key: Option<InvocationKey>,
+) -> Result<RunLaunchRequest, PublicError> {
+    let (portfolio, source) = resolve_portfolio_target(store, target).await?;
+    let plan = portfolio_snapshot_program_launch_plan(portfolio).map_err(|_| {
+        PublicError::backend(
+            ErrorClass::BadRequest,
+            "PortfolioSnapshotPlanFailed",
+            "Entry-point planning failed",
         )
-    }
-}
-
-/// Operation that can plan a public entry-point run from authored config.
-pub trait LaunchableOp: Send + Sync {
-    /// Returns the static public entry-point metadata for this operation.
-    fn descriptor(&self) -> EntryPointDescriptor;
-
-    /// Returns the stable entry-point operation id.
-    fn op_id(&self) -> EntryPointOpId;
-
-    /// Deterministically plans the typed program draft and launch material.
-    fn plan(
-        &self,
-        authored_config: AuthoredConfig,
-    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError>;
-}
-
-/// Generic app adapter from a typed op-crate planner to [`LaunchableOp`].
-pub struct EntryPointPlannerAdapter<TConfig, E> {
-    descriptor: EntryPointDescriptor,
-    op_id: EntryPointOpId,
-    planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-    map_error: fn(E) -> EntryPointOpError,
-    _config: PhantomData<fn() -> TConfig>,
-}
-
-impl<TConfig, E> EntryPointPlannerAdapter<TConfig, E> {
-    /// Builds a launchable adapter from app-neutral descriptor and planner exports.
-    pub fn new(
-        descriptor: EntryPointDescriptor,
-        planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-        map_error: fn(E) -> EntryPointOpError,
-    ) -> Result<Self, EntryPointOpError> {
-        if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpConfigFormatsEmpty",
-                "entry-point op must accept at least one config format",
-            ));
-        }
-        let version = OpVersion::new(descriptor.version)?;
-        Ok(Self {
-            descriptor,
-            op_id: EntryPointOpId::new(descriptor.namespace, descriptor.name, version)?,
-            planner,
-            map_error,
-            _config: PhantomData,
-        })
-    }
-}
-
-impl<TConfig, E> LaunchableOp for EntryPointPlannerAdapter<TConfig, E>
-where
-    TConfig: DeserializeOwned + Serialize + Send + Sync + 'static,
-    E: Send + Sync + 'static,
-{
-    fn descriptor(&self) -> EntryPointDescriptor {
-        self.descriptor
-    }
-
-    fn op_id(&self) -> EntryPointOpId {
-        self.op_id.clone()
-    }
-
-    fn plan(
-        &self,
-        authored_config: AuthoredConfig,
-    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError> {
-        if !self
-            .descriptor
-            .accepted_config_formats
-            .contains(&authored_config.format())
-        {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpConfigFormatUnsupported",
-                "entry-point op does not accept the supplied config format",
-            ));
-        }
-
-        let normalized = authored_config.normalize::<TConfig>()?;
-        let planned = (self.planner)(normalized.value).map_err(self.map_error)?;
-        Ok(planned)
-    }
-}
-
-/// Registry that resolves public operation names and versions to launchable ops.
-#[derive(Clone, Default)]
-pub struct EntryPointOpRegistry {
-    ops: BTreeMap<PublicOpName, BTreeMap<OpVersion, Arc<dyn LaunchableOp>>>,
-}
-
-impl EntryPointOpRegistry {
-    /// Creates an empty entry-point operation registry.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Registers a launchable operation.
-    pub fn register(&mut self, op: impl LaunchableOp + 'static) -> Result<(), EntryPointOpError> {
-        self.register_arc(Arc::new(op))
-    }
-
-    /// Registers an already shared launchable operation.
-    pub fn register_arc(&mut self, op: Arc<dyn LaunchableOp>) -> Result<(), EntryPointOpError> {
-        let descriptor = op.descriptor();
-        if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpConfigFormatsEmpty",
-                "entry-point op must accept at least one config format",
-            ));
-        }
-        let public_name = PublicOpName::new(descriptor.public_name)?;
-        let version = OpVersion::new(descriptor.version)?;
-        let op_id = op.op_id();
-        if op_id.version != version {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpVersionMismatch",
-                "entry-point op id version must match registered version",
-            ));
-        }
-
-        let versions = self.ops.entry(public_name).or_default();
-        if versions.contains_key(&version) {
-            return Err(EntryPointOpError::new(
-                "DuplicateEntryPointOp",
-                "entry-point op public name and version are already registered",
-            ));
-        }
-        versions.insert(version, op);
-        Ok(())
-    }
-
-    /// Resolves a public name to the latest registered version.
-    pub fn resolve_latest(
-        &self,
-        public_name: &PublicOpName,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
-        let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
-        })?;
-        versions
-            .last_key_value()
-            .map(|(_version, op)| Arc::clone(op))
-            .ok_or_else(|| {
-                EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
-            })
-    }
-
-    /// Resolves a public name and optional explicit version.
-    pub fn resolve(
-        &self,
-        public_name: &PublicOpName,
-        version: Option<OpVersion>,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
-        match version {
-            Some(version) => self.resolve_version(public_name, version),
-            None => self.resolve_latest(public_name),
-        }
-    }
-
-    /// Returns every registered public entry-point descriptor in deterministic order.
-    pub fn registered_entry_points(&self) -> Vec<EntryPointDescriptor> {
-        self.ops
-            .values()
-            .flat_map(BTreeMap::values)
-            .map(|op| op.descriptor())
-            .collect()
-    }
-
-    /// Resolves a public name to a specific registered version.
-    pub fn resolve_version(
-        &self,
-        public_name: &PublicOpName,
-        version: OpVersion,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
-        let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
-        })?;
-        versions.get(&version).map(Arc::clone).ok_or_else(|| {
-            EntryPointOpError::new(
-                "EntryPointOpVersionNotFound",
-                "entry-point op version is not registered",
-            )
-        })
-    }
-
-    /// Returns the canonical digest of the registered public entry-point surface.
-    pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpError> {
-        let mut entries = Vec::new();
-        for (public_name, versions) in &self.ops {
-            for (version, op) in versions {
-                let descriptor = op.descriptor();
-                let op_id = op.op_id();
-                let mut formats = descriptor
-                    .accepted_config_formats
-                    .iter()
-                    .map(|format| format.as_str())
-                    .collect::<Vec<_>>();
-                formats.sort_unstable();
-                entries.push(serde_json::json!({
-                    "accepted_config_formats": formats,
-                    "op_id": {
-                        "name": op_id.name.as_str(),
-                        "namespace": op_id.namespace.as_str(),
-                        "version": op_id.version.get(),
-                    },
-                    "public_name": public_name.as_str(),
-                    "version": version.get(),
-                }));
-            }
-        }
-        let value = serde_json::json!({
-            "entries": entries,
-            "kind": "mfm.entry_point_op_registry.v1",
-        });
-        let json = serde_json::to_string(&value).map_err(|_| {
-            EntryPointOpError::new(
-                "EntryPointOpRegistryDigestFailed",
-                "entry-point registry digest could not be serialized",
-            )
-        })?;
-        PlainCanonicalJsonBytes::from_json_str(&json)
-            .map(|canonical| canonical.content_digest())
+    })?;
+    let (certified_spec, scoped_registry, config_inputs, seed_inputs) =
+        certify_launch_plan(&plan, certification_registry)?;
+    let invocation_key_digest = invocation_key_digest_or_mint(invocation_key.as_ref())?;
+    let entry_point_evidence =
+        mfm_events::v1::EntryPointLaunchEvidence::new(PORTFOLIO_SNAPSHOT_ID, vec![source])
             .map_err(|_| {
-                EntryPointOpError::new(
-                    "EntryPointOpRegistryDigestFailed",
-                    "entry-point registry digest could not be canonicalized",
+                entry_point_launch_internal_error(
+                    "EntryPointLaunchEvidenceInvalid",
+                    "entry-point launch evidence is invalid",
                 )
-            })
-    }
+            })?;
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: &scoped_registry,
+            store_scope_id,
+            invocation_key_digest,
+            entry_point_evidence,
+        },
+        config_inputs,
+        seed_inputs,
+    )
 }
 
-/// Error returned while resolving, registering, or planning entry-point operations.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct EntryPointOpError {
-    code: String,
-    message: String,
+fn entry_point_not_found() -> PublicError {
+    PublicError::new(
+        ErrorClass::BadRequest,
+        "EntryPointNotFound",
+        "The exact entry-point id is not registered",
+    )
 }
 
-impl EntryPointOpError {
-    /// Creates a public-safe entry-point operation error.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
+async fn resolve_portfolio_target(
+    store: &PostgresStore,
+    target: &str,
+) -> Result<(PortfolioConfig, mfm_events::v1::ConfiguredTargetEvidence), PublicError> {
+    let portfolio_id = PortfolioId::new(target.to_owned()).map_err(|_| {
+        PublicError::new(
+            ErrorClass::BadRequest,
+            "ConfiguredTargetInvalid",
+            "The portfolio target is invalid",
+        )
+    })?;
+    let stable_target = StableAuthorKey::new(portfolio_id.as_str()).map_err(|_| {
+        PublicError::backend(
+            ErrorClass::Internal,
+            "ConfiguredTargetInvalid",
+            "The portfolio target cannot be represented as a stable target",
+        )
+    })?;
+    let row = store
+        .load_configured_value(&stable_target)
+        .await
+        .map_err(PublicError::from)?
+        .ok_or_else(|| {
+            PublicError::not_found(
+                "ConfiguredValueNotFound",
+                "The current configuration target was not found",
+            )
+        })?;
+    let expected_schema_id = PortfolioConfig::schema_id().map_err(|_| {
+        PublicError::backend(
+            ErrorClass::Internal,
+            "ConfiguredValueSchemaInvalid",
+            "The portfolio configuration schema is invalid",
+        )
+    })?;
+    if row.schema_id != expected_schema_id {
+        return Err(PublicError::new(
+            ErrorClass::BadRequest,
+            "ConfiguredValueSchemaInvalid",
+            "The current configuration target has the wrong schema",
+        ));
     }
-
-    /// Returns the stable error code.
-    pub fn code(&self) -> &str {
-        &self.code
+    let config: PortfolioConfig = serde_json::from_slice(&row.canonical_json).map_err(|_| {
+        PublicError::new(
+            ErrorClass::BadRequest,
+            "ConfiguredValueTypeInvalid",
+            "The current configuration does not match the expected type",
+        )
+    })?;
+    let validated = ValidatedConfig::new(config.normalized()).map_err(|_| {
+        PublicError::new(
+            ErrorClass::BadRequest,
+            "ConfiguredValueValidationFailed",
+            "The current configuration failed semantic validation",
+        )
+    })?;
+    if validated.as_ref().portfolio_id != portfolio_id {
+        return Err(PublicError::new(
+            ErrorClass::BadRequest,
+            "ConfiguredTargetMismatch",
+            "The configured portfolio id does not match the selected target",
+        ));
     }
-
-    /// Returns the public-safe error message.
-    pub fn message(&self) -> &str {
-        &self.message
+    let canonical = validated.canonical_json().map_err(|_| {
+        PublicError::backend(
+            ErrorClass::Internal,
+            "ConfiguredValueCanonicalizationFailed",
+            "The current configuration could not be canonicalized",
+        )
+    })?;
+    if canonical.as_bytes() != row.canonical_json.as_slice()
+        || canonical.content_digest() != row.digest
+    {
+        return Err(PublicError::backend(
+            ErrorClass::Internal,
+            "ConfiguredValueCanonicalMismatch",
+            "The current configuration failed canonical integrity verification",
+        ));
     }
-}
-
-impl From<AuthoredConfigError> for EntryPointOpError {
-    fn from(error: AuthoredConfigError) -> Self {
-        Self::new(error.code().to_owned(), error.message().to_owned())
-    }
+    let source = mfm_events::v1::ConfiguredTargetEvidence::new(
+        stable_target,
+        expected_schema_id,
+        row.digest,
+    );
+    Ok((validated.into_inner(), source))
 }
 
 #[cfg(test)]
-#[path = "entry_point_tests.rs"]
-mod tests;
+mod tests {
+    use super::{entry_point_ids, PORTFOLIO_SNAPSHOT_ID};
+    use mfm_portfolio_model::ids::PortfolioId;
+
+    #[test]
+    fn discovery_exposes_only_the_portfolio_snapshot_objective() {
+        assert_eq!(entry_point_ids(), &[PORTFOLIO_SNAPSHOT_ID]);
+    }
+
+    #[test]
+    fn portfolio_target_parser_accepts_only_the_domain_id_grammar() {
+        for valid in ["acme/primary", "portfolio-main", "a"] {
+            PortfolioId::new(valid).expect("valid target");
+        }
+        for invalid in ["", "Mfm/primary", "mfm.reserved", "acme//primary"] {
+            PortfolioId::new(invalid).expect_err("invalid target");
+        }
+    }
+}

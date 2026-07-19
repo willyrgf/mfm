@@ -34,11 +34,9 @@ rpc_url = "http://127.0.0.1:8332"
             "portfolio-evm",
             Some(
                 r#"
-[evm.sources.ethereum-mainnet]
-rpc_url = "http://127.0.0.1:8545"
-
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
+rpc_url = "http://127.0.0.1:8545"
 "#,
             ),
             false,
@@ -48,11 +46,9 @@ source_ref = "ethereum-mainnet"
             "portfolio-btc-evm",
             Some(
                 r#"
-[evm.sources.ethereum-mainnet]
-rpc_url = "http://127.0.0.1:8545"
-
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
+rpc_url = "http://127.0.0.1:8545"
 
 [btc.routes.public-bitcoin-core]
 rpc_url = "http://127.0.0.1:8332"

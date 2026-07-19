@@ -46,8 +46,8 @@ pub use binding::{
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::{
-    RuntimeDiagnostic, RuntimeError, RuntimeFailure, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
-    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
+    attempt_failure_diagnostics_from_artifact_json, RuntimeError, RuntimeFailure,
+    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
 };
 pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistoryView};
 pub use invocation::{
@@ -60,26 +60,27 @@ pub use manual_resolution::{
     unresolved_manual_obligations_digest, ManualResolutionEvidenceArtifact,
 };
 pub use runner_kit::{
-    load_launch_config_for_node, load_materialized_node_value,
+    load_launch_config_for_node, load_materialized_input, load_materialized_node_value,
     load_materialized_struct_field_value, load_materialized_struct_input,
-    load_non_empty_materialized_input, load_runner_config_for_node,
-    load_side_effect_artifact_for_node, materialized_input_node_json, FactRecordInput,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerExecutableIdentityTemplate,
-    RunnerFactoryBinding, RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RunnerRegistrationBuilder, TypedContextOutputExtractor,
+    load_non_empty_materialized_input, load_runner_config_for_node, load_side_effect_artifact,
+    materialized_input_node_json, ExternalReadExecution, ExternalReadExecutionFuture,
+    ExternalReadPlanExecutor, ExternalReadRunner, FactRecordInput, RunnerArtifactBuilder,
+    RunnerCapabilityBinding, RunnerExecutableIdentityTemplate, RunnerFactoryBinding,
+    RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
+    TypedContextOutputExtractor,
 };
 pub use runners::{
     AdapterExecutableBinding, CapabilityImplementationBinding, CapabilityImplementationId,
     ContextOutputExtractor, ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload,
-    RunnerFactRecorded, RunnerIngressContext,
+    RunnerFactRecorded, RunnerIngressContext, RunnerIngressFuture, RunnerOutputSettlement,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
-    preclaim_side_effect_resource_lane, SideEffectDriver, SideEffectDriverCallbacks,
-    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
-    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    preclaim_side_effect_resource_lane, side_effect_idempotency_key, SideEffectAdapter,
+    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence,
+    SideEffectPreparedInvocation, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
 pub use spec_authority::CertifiedRuntimeSpec;
 
@@ -98,7 +99,7 @@ use framework::{
 #[cfg(test)]
 use history::RuntimeRunView;
 #[cfg(test)]
-use runner_kit::{RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding};
+use runner_kit::{RunnerClaimBinding, RunnerSideEffectBinding};
 #[cfg(test)]
 use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemptView};
 
@@ -259,6 +260,16 @@ fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json
         "factory_id": identity.factory_id.as_str(),
         "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(events::NixDerivationHash::as_str),
         "nix_output_hash": identity.nix_output_hash.as_ref().map(events::NixOutputHash::as_str),
+    })
+}
+
+fn capability_implementation_identity_json(
+    identity: &events::CapabilityImplementationIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "capability_kind": identity.capability_kind.as_str(),
+        "capability_version": identity.capability_version.as_str(),
+        "implementation_id": identity.implementation_id.as_str(),
     })
 }
 

@@ -44,24 +44,9 @@ fn test_ops_list_json_output() {
 
     assert!(output.status.success());
     let data = verify_success_response(&String::from_utf8(output.stdout).expect("UTF-8 output"));
-    let operations = data["operations"].as_array().expect("operations array");
-    assert_eq!(operations.len(), 7);
-    assert!(operations.iter().all(|operation| operation["version"] == 1));
-    assert_eq!(
-        operations
-            .iter()
-            .map(|operation| operation["public_name"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec![
-            "btc_address_balance",
-            "evm_contract_configure",
-            "evm_contract_deploy",
-            "evm_contract_lifecycle",
-            "evm_contract_validate",
-            "evm_native_balance",
-            "portfolio_snapshot",
-        ]
-    );
+    let entry_points = data["entry_points"].as_array().expect("entry-points array");
+    assert_eq!(entry_points.len(), 1);
+    assert_eq!(entry_points[0], "mfm.portfolio/snapshot@1");
 }
 
 fn json_cli_error_without_database(args: &[&str]) -> (Option<i32>, ErrorResponse) {
@@ -320,7 +305,7 @@ fn test_environment_variable_precedence() {
 }
 
 #[test]
-fn test_run_start_requires_entry_point_op_and_config_path() {
+fn test_run_start_requires_entry_point_and_target() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -332,16 +317,12 @@ fn test_run_start_requires_entry_point_op_and_config_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
     assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("--op"));
-    assert!(parsed.error.message.contains("--config"));
+    assert!(parsed.error.message.contains("<ENTRY_POINT>"));
+    assert!(parsed.error.message.contains("<TARGET>"));
 }
 
 #[test]
 fn test_run_start_run_id_flag_is_not_a_start_option() {
-    let temp_dir = TempDir::new().unwrap();
-    let config_path = temp_dir.path().join("portfolio.toml");
-    std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
-
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -350,10 +331,8 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
             "json",
             "run",
             "start",
-            "--op",
-            "portfolio_snapshot",
-            "--config",
-            config_path.to_str().unwrap(),
+            "mfm.unknown/missing@1",
+            "acme/primary",
             "--run-id",
             "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
         ])
@@ -369,12 +348,45 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
 }
 
 #[test]
-fn test_json_commands_reach_store_connection_after_local_validation() {
-    let temp_dir = TempDir::new().unwrap();
-    let config_path = temp_dir.path().join("portfolio.toml");
-    std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
-    let config_path = config_path.to_str().unwrap();
+fn test_run_start_rejects_legacy_config_flags() {
+    for flag in [
+        "--entry-point",
+        "--request",
+        "--op",
+        "--op-version",
+        "--config",
+        "--config-format",
+    ] {
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        let output = cmd
+            .env_remove("DATABASE_URL")
+            .args([
+                "--output-format",
+                "json",
+                "run",
+                "start",
+                "mfm.unknown/missing@1",
+                "acme/primary",
+                flag,
+                "legacy-value",
+            ])
+            .output()
+            .expect("run CLI");
 
+        assert!(!output.status.success(), "legacy flag {flag} was accepted");
+        assert!(output.stdout.is_empty());
+        let parsed = verify_error_response(&String::from_utf8(output.stderr).unwrap());
+        assert_eq!(parsed.error.code, "CliParseError");
+        assert!(
+            parsed.error.message.contains(flag),
+            "legacy flag {flag} missing from parse error: {}",
+            parsed.error.message
+        );
+    }
+}
+
+#[test]
+fn test_json_commands_reach_store_connection_after_local_validation() {
     struct Case<'a> {
         name: &'static str,
         args: Vec<&'a str>,
@@ -382,16 +394,14 @@ fn test_json_commands_reach_store_connection_after_local_validation() {
 
     for case in [
         Case {
-            name: "run start decodes valid launch input before store connection",
+            name: "run start decodes target ingress before store connection",
             args: vec![
                 "--output-format",
                 "json",
                 "run",
                 "start",
-                "--op",
-                "portfolio_snapshot",
-                "--config",
-                config_path,
+                "mfm.unknown/missing@1",
+                "acme/primary",
             ],
         },
         Case {
@@ -544,61 +554,12 @@ fn test_json_response_structure_consistency() {
     assert_eq!(success_json["status"], expected_success_structure["status"]);
     assert!(success_json.get("data").is_some());
 
-    let error_response = ErrorResponse::new("ErrorCode", "Error message");
+    let error_response = ErrorResponse::new(mfm_app::PublicError::bad_request(
+        "ErrorCode",
+        "Error message",
+    ));
     let error_json = serde_json::to_value(error_response).unwrap();
     assert_eq!(error_json["status"], expected_error_structure["status"]);
     assert_eq!(error_json["error"]["code"], "ErrorCode");
     assert_eq!(error_json["error"]["message"], "Error message");
-}
-
-fn sample_portfolio_config_toml() -> String {
-    r#"[portfolio]
-portfolio_id = "portfolio_main"
-quote_codes = ["USD"]
-
-[portfolio.metadata]
-
-[[portfolio.networks]]
-network_id = "ethereum-mainnet"
-family = "evm"
-chain_id = 1
-
-[portfolio.networks.metadata]
-
-[[portfolio.wallets]]
-wallet_id = "wallet_main"
-network_id = "ethereum-mainnet"
-symbol_ids = ["eth.native.ethereum-mainnet"]
-
-[portfolio.wallets.subject]
-kind = "evm_address"
-address = "0x000000000000000000000000000000000000dead"
-
-[portfolio.wallets.implementation]
-kind = "address_only"
-
-[portfolio.wallets.metadata]
-
-[[portfolio.symbol_configs]]
-symbol_id = "eth.native.ethereum-mainnet"
-display_symbol = "ETH"
-kind = "native_balance"
-role = "native"
-network_id = "ethereum-mainnet"
-
-[portfolio.symbol_configs.balance_reader]
-kind = "native_balance"
-
-[portfolio.symbol_configs.valuation]
-
-[[portfolio.symbol_configs.valuation.quotes]]
-quote = "USD"
-priced_symbol_id = "eth.native.ethereum-mainnet"
-
-unit_price_dec = "1800.00"
-
-[portfolio.symbol_configs.metadata]
-
-"#
-    .to_owned()
 }

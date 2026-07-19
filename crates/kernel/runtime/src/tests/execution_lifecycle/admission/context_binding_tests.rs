@@ -7,6 +7,7 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
     let mut store = TestTypedRunStore::new();
     let launch =
         prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+            .await
             .expect("prepare launch");
 
     let authority =
@@ -71,13 +72,17 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         run_admitted.adapter_executables,
         authority.bound_context().adapter_executables()
     );
+    assert_eq!(
+        run_admitted.capability_implementations,
+        authority.bound_context().capability_implementations()
+    );
     scheduler
         .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
         .expect("binding validation");
 }
 
-#[test]
-fn run_start_rejects_invalid_capability_implementation_bindings() {
+#[tokio::test]
+async fn run_start_rejects_invalid_capability_implementation_bindings() {
     #[derive(Clone, Copy, Debug)]
     enum Case {
         MissingImplementation,
@@ -130,6 +135,7 @@ fn run_start_rejects_invalid_capability_implementation_bindings() {
         let store = TestTypedRunStore::new();
         let error =
             prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+                .await
                 .err()
                 .expect("invalid capability implementation binding must reject launch");
         assert!(
@@ -146,6 +152,7 @@ async fn resume_rejects_binding_changes_before_attempt_start() {
         MissingDownstreamBinding,
         RunnerExecutableMismatch,
         AdapterExecutableMismatch,
+        CapabilityImplementationMismatch,
     }
 
     for (case, expected_message, direct_validation_rejects) in [
@@ -162,6 +169,11 @@ async fn resume_rejects_binding_changes_before_attempt_start() {
         (
             Case::AdapterExecutableMismatch,
             "adapter executable identities",
+            true,
+        ),
+        (
+            Case::CapabilityImplementationMismatch,
+            "capability implementation identities",
             true,
         ),
     ] {
@@ -198,6 +210,32 @@ async fn resume_rejects_binding_changes_before_attempt_start() {
                     &fixture,
                     changed_adapter,
                 ))
+            }
+            Case::CapabilityImplementationMismatch => {
+                let mut changed_registry = ErasedRunnerRegistry::new();
+                let implementation_id =
+                    CapabilityImplementationId::new("mfm.test.changed-capability")
+                        .expect("changed capability implementation");
+                for node in fixture.runtime_spec.executable_nodes() {
+                    changed_registry
+                        .register_capability_set(
+                            &node.capability_bindings,
+                            implementation_id.clone(),
+                        )
+                        .expect("changed capability binding");
+                    for adapter in &node.adapter_bindings {
+                        changed_registry
+                            .register_adapter_executable(AdapterExecutableBinding::new(
+                                adapter.adapter_kind.clone(),
+                                adapter.adapter_version.clone(),
+                                test_adapter_executable_identity(),
+                            ))
+                            .expect("adapter executable binding");
+                    }
+                }
+                register_default_fixture_pure_runner(&mut changed_registry, &fixture);
+                register_fixture_read_runner(&mut changed_registry, &fixture, "read");
+                test_scheduler(changed_registry)
             }
         };
 

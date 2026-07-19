@@ -1,0 +1,46 @@
+# Token-only portfolio snapshot example. Import it before starting the sole public objective.
+# The live EVM route remains process-local runtime configuration; no endpoint or token decimal
+# authority is stored here.
+
+[[configs]]
+kind = "portfolio"
+
+[configs.value]
+portfolio_id = "acme/erc20-mainnet"
+quote_codes = ["USD"]
+metadata = {}
+
+[[configs.value.networks]]
+family = "evm"
+network_id = "ethereum-mainnet"
+chain_id = 1
+native_decimals = 18
+metadata = {}
+
+[[configs.value.wallets]]
+wallet_id = "wallet_usdc_mainnet"
+network_id = "ethereum-mainnet"
+symbol_ids = ["usdc.ethereum-mainnet"]
+metadata = {}
+
+[configs.value.wallets.subject]
+kind = "evm_address"
+address = "0x000000000000000000000000000000000000dead"
+
+[configs.value.wallets.implementation]
+kind = "address_only"
+
+[[configs.value.symbol_configs]]
+symbol_id = "usdc.ethereum-mainnet"
+display_symbol = "USDC"
+network_id = "ethereum-mainnet"
+metadata = {}
+
+[configs.value.symbol_configs.source]
+kind = "erc20"
+contract_address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+
+[configs.value.symbol_configs.valuation]
+quotes = [
+  { quote = "USD", priced_symbol_id = "usdc.ethereum-mainnet", unit_price_dec = "1.00" },
+]

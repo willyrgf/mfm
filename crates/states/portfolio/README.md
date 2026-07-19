@@ -1,35 +1,28 @@
 # mfm-state-portfolio
 
-Typed portfolio state contracts for certified **fact-backed, report-only** portfolio snapshots.
+Typed portfolio state contracts for certified portfolio snapshots.
 
-This crate owns the portfolio state specs, typed inputs/outputs, pure selection policy helpers,
-and hard-fail assemble/report projection used by `mfm-op-portfolio-tracker`. Runtime capability
-execution is supplied by typed runners in `mfm-adapters-portfolio` (Platform fact-index only).
+Family collectors are external reusable operations. This crate consumes their typed Bitcoin and
+EVM receipts plus registered fact descriptors; it defines no family read, RPC, fact-publication,
+or collection-replay implementation.
 
-## Graph (cutover)
+`PortfolioReportOperation` owns the remaining snapshot projection:
 
 ```text
-ResolveSubjects
-  → SelectHoldings           // Platform fact-index + network-coherent select
-  → ResolveValuations        // FixedUnitPrice only
-  → AssembleSnapshot         // pins from selected holding anchors
-  → ProjectReport
+Bitcoin receipt vector ─┐
+EVM receipt vector ─────┴→ SelectHoldings → AssembleSnapshot → ProjectReport
+                              ↑
+                      one shared fact-index snapshot
 ```
 
-State contracts:
+`SelectHoldingsState` validates both typed receipt vectors against exact portfolio demand, issues
+all BTC/EVM queries as one bounded batch, rehydrates every candidate response, rederives its full
+fact identity, filters to the receipt-authorized content, and then applies deterministic ordering.
+`AssembleSnapshotState` consumes only those selected store-backed observations and validates exact
+wallet/symbol/source coverage before deriving totals and network pins. All-EVM portfolios use this
+same fact-index path.
 
-- `ResolveSubjectsState`
-- `SelectHoldingsState`
-- `ResolveValuationsState`
-- `AssembleSnapshotState`
-- `ProjectReportState`
-
-Selection policy: `mfm.portfolio.holding.latest-network-coherent.v1` (pure
-`select_network_coherent`). Cutover projections: BTC + EVM native holdings only; ERC-20 and
-protocol positions hard-fail as `unsupported_requirement`.
-
-There is no live pin/observe path, no soft-success `errors` / `error_count`, and no view-dependent
-valuation on the cutover surface.
-
-The crate does not own store commits, runner registration, CLI/REST rendering, or collector source
-IO (those live in family collector ops).
+Portfolio admission bounds networks, wallets, symbols, wallet-symbol relations, and distinct EVM
+sources per network before graph expansion. Generic EVM collection contracts live in
+`mfm-states-evm`. This crate does not own live IO, family fact publication, runner registration,
+store commits, CLI/REST rendering, or the complete graph/root binding.

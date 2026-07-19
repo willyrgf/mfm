@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::commands::{result::CommandResult, OutputFormat};
+use crate::commands::{
+    result::{CommandResult, PublicError},
+    OutputFormat,
+};
 
 /// Standardized error response structure for JSON output
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,7 +12,7 @@ pub struct ErrorResponse {
     /// Top-level response status.
     pub status: ResponseStatus,
     /// Structured error details payload.
-    pub error: ErrorDetails,
+    pub error: PublicError,
 }
 
 /// Status field used in JSON responses.
@@ -22,24 +25,12 @@ pub enum ResponseStatus {
     Error,
 }
 
-/// Machine-readable error details for JSON responses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorDetails {
-    /// Stable machine-readable error code.
-    pub code: String,
-    /// Human-readable error message.
-    pub message: String,
-}
-
 impl ErrorResponse {
-    /// Builds a JSON error response from a code and message.
-    pub fn new(code: &str, message: &str) -> Self {
+    /// Builds a JSON error response from the shared public error payload.
+    pub fn new(error: PublicError) -> Self {
         Self {
             status: ResponseStatus::Error,
-            error: ErrorDetails {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
+            error,
         }
     }
 }
@@ -105,19 +96,27 @@ pub(crate) fn print_success<T: Serialize>(data: T, format: &OutputFormat) {
 }
 
 /// Print an error response in the specified format  
-pub(crate) fn print_error(code: &str, message: &str, format: &OutputFormat) {
+pub(crate) fn print_error(error: PublicError, format: &OutputFormat) {
     if !format.is_json() {
-        eprintln!("Error: {message}");
+        eprintln!("{}", error_text(&error));
         return;
     }
 
-    let response = ErrorResponse::new(code, message);
+    let response = ErrorResponse::new(error);
     if let Ok(json) = serde_json::to_string_pretty(&response) {
         eprintln!("{json}");
     } else {
         eprintln!(
             r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize error response"}}}}"#
         );
+    }
+}
+
+fn error_text(error: &PublicError) -> String {
+    if error.code == "RuntimeConfigRequired" {
+        format!("{}: {}; pass --runtime-config", error.code, error.message)
+    } else {
+        format!("{}: {}", error.code, error.message)
     }
 }
 
@@ -129,7 +128,7 @@ pub(crate) fn handle_cli_parse_error(error: clap::Error, format: &OutputFormat) 
 
     let exit_code = error.exit_code();
     let message = sanitize_clap_error_message(&error.to_string());
-    print_error("CliParseError", &message, format);
+    print_error(PublicError::bad_request("CliParseError", message), format);
     std::process::exit(exit_code);
 }
 
@@ -267,8 +266,33 @@ where
             std::process::exit(0);
         }
         Err(error) => {
-            print_error(&error.code, &error.message, format);
-            std::process::exit(error.exit_code);
+            print_error(error, format);
+            std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_config_text_adds_cli_remediation() {
+        let error = PublicError::new(
+            mfm_app::ErrorClass::ServiceUnavailable,
+            "RuntimeConfigRequired",
+            "test/primary requires EVM and Bitcoin runtime routes",
+        );
+
+        assert_eq!(
+            error_text(&error),
+            "RuntimeConfigRequired: test/primary requires EVM and Bitcoin runtime routes; pass --runtime-config"
+        );
+    }
+
+    #[test]
+    fn other_error_text_has_no_runtime_config_remediation() {
+        let error = PublicError::bad_request("InvalidInput", "input is invalid");
+        assert_eq!(error_text(&error), "InvalidInput: input is invalid");
     }
 }

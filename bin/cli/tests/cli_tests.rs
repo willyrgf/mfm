@@ -43,24 +43,15 @@ fn test_ops_help_and_list() {
         .stdout
         .clone();
     let rendered = String::from_utf8(output).expect("ops output is UTF-8");
-    for operation in [
-        "btc_address_balance",
-        "evm_contract_configure",
-        "evm_contract_deploy",
-        "evm_contract_lifecycle",
-        "evm_contract_validate",
-        "evm_native_balance",
-        "portfolio_snapshot",
-    ] {
-        assert!(
-            rendered.contains(operation),
-            "missing {operation}: {rendered}"
-        );
-    }
-    assert!(rendered
+    let entry_points = rendered
         .lines()
-        .filter(|line| !line.is_empty())
-        .all(|line| line.contains("version=1")));
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(entry_points.len(), 1, "public operation output: {rendered}");
+    assert!(
+        entry_points[0] == "mfm.portfolio/snapshot@1",
+        "unexpected public operation: {rendered}"
+    );
 }
 
 #[test]
