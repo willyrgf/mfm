@@ -2,204 +2,124 @@
 
 - Status: accepted
 - Date: 2026-07-18
-- Accepted: 2026-07-18
+- Responsibility correction: 2026-07-18
 - Decision owner: MFM platform owner
 - Evidence: [slow-build baseline](../slow-build-baseline.md), R2-01 through R2-09
-- Governing plan: [RFC_SLOW_BUILDS.md](../../RFC_SLOW_BUILDS.md)
+- Experimental history: [RFC_SLOW_BUILDS.md](../../RFC_SLOW_BUILDS.md)
 
 ## Context
 
 MFM needs fast focused development, complete local verification, reproducible
-packaging, and bounded artifact ownership. These workloads do not have the same
-artifact semantics:
+packaging, and understandable artifact ownership. These workloads do not have
+the same artifact semantics:
 
 - direct development benefits from incremental, worktree-local Cargo state;
-- broad verification needs the exact live workspace, all 974 Nextest tests,
+- broad verification needs the live workspace, all 974 Nextest tests,
   doctests, Trybuild, SQLx, services, and parity evidence; and
 - packaging needs an immutable release output, not reusable test state.
 
-R2-09 found only the existing scoped Cargo verification target
-performance-qualified. Its clean median was 359.204s and its warm median was
-197.644s, a 161.560s/45.0% reduction. It preserved the complete verification
-surface. The target is approximately 10.49 GB when stable, is sensitive to
-worktree paths, and can grow without a first-class retention boundary.
+R2-09 found that retaining Cargo's verification target was the only
+performance-qualified candidate. Its clean median was 359.204s and its warm
+median was 197.644s, a 161.560s/45.0% reduction, while preserving the complete
+verification surface. The stable target occupied approximately 10.49 GB and
+remained sensitive to worktree paths.
 
-`sccache`, Crane, crate2nix, cargo2nix, and execution-topology changes each
-failed an independent performance or correctness screen. Combining rejected
-components has no approved additive hypothesis.
+The original decision treated those operational properties as a request for a
+Nixfied cache subsystem. The accepted upstream cache/port RFC corrected that
+responsibility: compiler artifacts are an invocation-specific concern owned by
+Cargo and MFM, while Nixfied owns execution, services, registry state, cleanup
+of its own state, and execution evidence.
 
 ## Decision
 
-MFM keeps Cargo as the only Rust unit-graph authority and adds no new compiler
-cache.
+MFM keeps Cargo as the only Rust unit-graph and compiler-artifact authority and
+adds no compiler cache.
 
 The platform has three explicit lanes:
 
 1. Development uses the Nix-pinned shell and direct Cargo with incremental
-   compilation in the current worktree's normal target.
-2. Broad local verification uses the current compact, nonincremental Cargo
-   policy in a durable Nixfied-owned target. Durable rollout is conditional on
-   the lifecycle prerequisites below.
+   compilation in the worktree's normal `target` directory. `nix develop` and
+   `.#quick` explicitly unset `CARGO_TARGET_DIR`.
+2. Broad local verification uses the compact nonincremental profile in the
+   project-owned `target/verification` directory. Nixfied tasks set this as an
+   ordinary child environment variable; Nixfied does not interpret or manage
+   it.
 3. Release packaging remains the Nix `buildRustPackage` derivation. Its output
-   is an immutable package and is not a verification artifact or test cache.
+   is immutable and is neither a verification artifact nor a test cache.
 
-Nix pins tools and builds immutable packages. Cargo resolves, fingerprints,
-compiles, links, and runs the live Rust graph. Nixfied declares and executes
-verification tasks, owns mutable verification placement and lifecycle, manages
-services, and records evidence. The CI provider invokes those public gates on
-supported platforms.
-
-Until the lifecycle prerequisites are implemented and reviewed, the existing
-verification target remains provisional. Broad slot cleanup is allowed only
-when broad slot deletion is intended; it is not the selected cache-retention
-mechanism.
+One worktree has one verification target shared by all Nixfied slots. Separate
+worktrees isolate naturally by filesystem path. Cargo owns fingerprints,
+writer locking, corruption recovery, and rebuild decisions inside the target.
+MFM owns its placement, inspection, retention, and deletion policy.
 
 ## Artifact authority
 
 | Surface | Authority | Contract |
 | --- | --- | --- |
 | Rust and native tools | Nix | Pinned per supported platform; immutable store closures |
-| Developer artifacts | Cargo and the developer | Mutable, incremental, worktree-local, non-authoritative |
-| Verification artifacts | Cargo for contents; Nixfied for placement/lifecycle | Mutable, compact, isolated by project/worktree/slot/policy |
-| Verification results | Nixfied run evidence | Never inferred from artifact presence; every selected test and check executes |
-| Services and parity state | Nixfied | Separate from compiler cache lifecycle |
+| Developer artifacts | Cargo and the developer | Mutable, incremental, normal worktree `target` |
+| Verification artifacts | Cargo and MFM | Mutable, compact, worktree-owned `target/verification` |
+| Verification results | Nixfied run evidence | Every selected task executes; never inferred from artifact presence |
+| Services and runtime state | Nixfied | Registry, lifecycle, logs, summaries, and marker-gated cleanup |
 | Release package | Nix | Immutable `buildRustPackage` output from locked source inputs |
-| Hosted job execution | CI provider | Runs repository gates; does not become an artifact authority |
+| Hosted job execution | CI provider | Runs repository gates; no persistent compiler cache is selected here |
 
-Cargo targets are accelerators, not trusted deliverables. A cache hit cannot
-replace test execution, and mutable target contents are never imported from an
-untrusted user, repository, archive, or remote backend.
+Cargo targets are accelerators, not trusted deliverables. Artifact presence
+never substitutes for task execution or evidence.
 
-## Identity and input contract
+## Placement and lifecycle
 
-The verification namespace must identify at least:
+`CARGO_TARGET_DIR=target/verification` remains the ordinary authored value.
+Each Cargo leaf makes it absolute from the invocation root before executing
+Cargo, so nested tools such as Trybuild and the crate-local SQLx script inherit
+one stable path before changing directories. Nixfied does not interpret this
+path rule.
 
-- project and codebase;
-- enforced worktree identity;
-- slot;
-- host platform and Rust target;
-- Rust/Cargo toolchain identity;
-- verification profile and policy version;
-- Nixfied cache schema and runtime ABI; and
-- cache family and mode.
+`NIXFIED_STATE_DIR` selects Nixfied runtime state and evidence only. It neither
+selects nor cleans Cargo artifacts. Likewise, `nixfied clean` does not touch
+`target/verification`.
 
-Cargo remains responsible inside that namespace for source, manifest,
-lockfile, feature, build-script, proc-macro, environment, rustdoc, link, and
-non-Rust input fingerprints. The namespace must not include the source digest:
-safe changed-source reuse is part of Cargo's contract and was measured by the
-RFC. A toolchain, target, cache schema, or verification-policy change must
-select a new namespace.
+Normal artifact cleanup is project-owned:
 
-The task summary must report the resolved identity, path, policy version,
-worktree, slot, and whether the run reused, created, bypassed, or evicted it.
+```sh
+cargo clean --target-dir target/verification
+```
 
-## Ownership, concurrency, and trust
+Deleting a worktree also deletes its verification target. MFM may add an
+independent retention policy later if new capacity evidence justifies one, but
+that policy will not become a Nixfied model or runtime contract.
 
-- One verification namespace belongs to one local MFM worktree and slot.
-- Two worktrees must not share target files, even at the same source revision.
-- Verification leaves within one namespace may reuse the target sequentially.
-- Nixfied must provide an exclusive writer lease or an equivalent enforced
-  wait/refusal contract. Cargo's internal lock alone is not the platform
-  ownership policy.
-- A conflicting writer receives a typed diagnostic naming the namespace and
-  owner; it never falls back to another mutable target silently.
-- The selected cache is local and same-user. Cross-user sharing, remote
-  upload/download, signing, credentials, and binary-cache trust are outside
-  this decision.
-- Slot-derived service ports need globally actionable collision diagnostics;
-  a separate state root does not make a colliding port safe.
+## Concurrency and trust
 
-## Inspection, retention, and cleanup
+Broad verification leaves may share one worktree target. Cargo's own locking
+serializes conflicting builds; `.config/nextest.toml` also keeps nested
+Trybuild Cargo suites in one test group to avoid wasting runner time on the
+same lock. Nixfied does not add a cache lease or synthesize reuse evidence.
 
-Nixfied must expose cache-family inspection without requiring MFM to traverse
-runtime-owned directories. Inspection reports identity, owner, path, size,
-creation and last-use times, policy version, and active leases.
+The target is local, same-user mutable state. Cross-user sharing, remote
+upload/download, signing, credentials, and binary-cache trust are outside this
+decision. Hosted CI remains cold and ephemeral unless a separate CI-provider
+cache decision establishes its trust and failure contract.
 
-The initial MFM retention policy is:
+## Endpoint responsibility
 
-- 20 GiB maximum per Cargo-target identity;
-- 32 GiB maximum for the project's Cargo-target family;
-- 14 days maximum idle age; and
-- least-recently-used eviction of inactive identities before admitting new
-  cache growth.
+The measured port-collision defect was a Nixfied runtime concern because
+deterministic service endpoints are runtime-owned OS resources. The upstream
+endpoint acquisition contract now coordinates same-user starts across roots,
+verifies exact listener ownership, and reports typed conflict evidence before
+service-specific mutation. This fix is independent of Cargo target placement:
+changing `NIXFIED_STATE_DIR` does not make a colliding host port safe.
 
-The 20 GiB identity budget covers the measured approximately 10.49 GB steady
-target and the 16.9 GB worst experimental accumulation while bounding the
-failure mode. The family budget supports normal worktree isolation without
-allowing indefinite multiplication. These are declarative MFM defaults, not
-hard-coded framework limits, and may change only with new capacity evidence.
+## Gate and evidence governance
 
-An identity that crosses its budget during an active lease is marked over
-budget and reported. It is not mutated underneath the writer; the next lease
-must evict it safely and rebuild cold. Cleanup and pruning must:
+The public gates remain `.#check`, `.#test`, `.#test-db`, and `.#ci`. Broad
+gates use `target/verification`; direct development and `.#quick` use the
+ordinary target. Runtime output reports execution progress, results, logs, and
+artifact pointers. It carries no compiler-cache identity or hit/miss evidence.
 
-- support dry-run and explicit execution;
-- operate on cache families or exact identities only;
-- refuse active leases, symlinks, marker mismatches, and path escapes;
-- be idempotent and auditable; and
-- preserve Postgres data, service state, run records, logs, registry records,
-  parity artifacts, and unrelated cache families.
-
-MFM will not implement this contract with a shell cleaner or recursive
-filesystem deletion.
-
-## Cacheless, failure, and recovery behavior
-
-An explicit Nixfied bypass must run the same task with a fresh ephemeral Cargo
-target while preserving toolchain, profile, source, features, services, and
-coverage. Bypass is diagnostic and rollback behavior, not a second normal
-cache lane.
-
-Cache absence and eviction are normal misses followed by a cold build. Identity
-or ownership ambiguity fails closed. A canceled or failed Cargo process
-releases its lease; a later run may reuse the target only after process
-reconciliation. Suspected corruption is handled by exact-identity eviction or
-bypass and a cold rebuild, with the action recorded. No successful test result
-is cached.
-
-There is no selected remote backend, so backend-unavailable behavior is not
-applicable. Adding one requires a separate trust, transport, credential,
-failure, and performance decision.
-
-## Evidence and gate governance
-
-The public gates remain `.#check`, `.#test`, `.#test-db`, and `.#ci`. The `ci`
-composite directly contains the other public task graphs with run-once
-semantics and adds keystore parity. Therefore one successful `.#ci` run is
-evidence-equivalent to separately rerunning the three component gates when all
-of the following are identical:
-
-- exact candidate source tree and lockfile digest;
-- compiled Nixfied model and task graph;
-- toolchain, target, profile, features, and cache policy; and
-- required service and coverage selection.
-
-Gate-policy simplification is selected but not activated by this ADR. A later
-rollout must update repository policy and prove the exact task/evidence mapping
-in the same change. Until then, the current requirement to run `.#check`,
-`.#test`, `.#test-db`, and final `.#ci` remains authoritative. Focused Cargo
-checks remain the normal development feedback loop.
-
-## Portability and hosted adoption
-
-The authority and lifecycle contract is portable across Linux and macOS, but
-artifacts and identities are platform-specific. R2 performance qualification
-applies only to the reference aarch64-linux host.
-
-The existing hosted Linux and macOS lanes remain correctness guards. A later
-rollout may enable the same local target lifecycle on either platform only
-after its public gates pass and any platform-specific implementation difference
-is documented. Ephemeral hosted runners may continue cold until persistence is
-separately justified. Linux timings do not predict hosted or macOS timings,
-and Rust artifacts are never shared across incompatible targets.
-
-## Execution topology
-
-No execution-topology implementation proceeds from this RFC. The measured
-worker, doctest-overlap, and parity-overlap cases all missed the simultaneous
-15% and 30-second end-to-end threshold. A separate plan requires new residual
-evidence and must preserve target ownership, service/schema isolation, and
-deterministic diagnostics.
+The existing repository policy still requires the three component gates
+before a commit and `.#ci` for final merge readiness. Focused Cargo commands
+remain the normal development feedback loop.
 
 ## Rejected alternatives
 
@@ -207,49 +127,30 @@ deterministic diagnostics.
   reuse missed materiality despite correct tested coverage.
 - Crane verification artifact: rejected because its warm full-gate median
   improved only 4.4%/9.05s and retained substantial mutable Trybuild state.
-- crate2nix: rejected because it could not represent required workspace inputs
-  or expose a supported authoritative verification artifact.
-- cargo2nix: rejected because its dependency/feature graph diverged from Cargo,
-  its locality was repository-wide, and complete Trybuild coverage failed.
+- crate2nix and cargo2nix: rejected because neither preserved Cargo's complete
+  dependency, feature, Trybuild, doctest, and parity semantics.
 - execution-topology changes: rejected because no measured end-to-end case met
-  both materiality thresholds.
-- combined candidates and remote caches: not selected because no standalone
-  components supplied a qualifying additive hypothesis and no remote trust or
-  transport evidence exists.
+  both the 15% and 30-second materiality thresholds.
+- a Nixfied compiler-cache contract: rejected because placement, writer
+  locking, retention, inspection, bypass, and recovery belong to Cargo/MFM,
+  not the generic execution runtime.
 
-## Rollback
+## Upgrade and rollback
 
-The architecture has a low-cost rollback because Cargo remains authoritative.
-If durable lifecycle support is faulty, MFM disables persistence through the
-explicit bypass, evicts only the affected identity after leases close, and
-runs the unchanged public gates cold. Developer Cargo and Nix release packaging
-are unaffected. No verification schema, output, or test contract changes.
+The Nixfied pin and authored model are upgraded together; mixed ABIs are not
+supported. Optional Nixfied-state cleanup must be performed with the old exact
+runtime before repinning. The new runtime does not migrate old registry or
+state layouts.
 
-## Rollout prerequisites
-
-R2-11 must turn this decision into a minimal Nixfied architect handoff. Durable
-rollout requires framework-level acceptance tests for:
-
-1. worktree/slot identity and exclusive writer ownership;
-2. inspection and accounting;
-3. configurable age/size retention and deterministic inactive eviction;
-4. cache-only cleanup with active-lease and path-safety refusal;
-5. explicit bypass, cancellation recovery, and lifecycle evidence; and
-6. actionable slot/port collision diagnostics.
-
-MFM-owned rollout then needs a separate, small plan to pin the accepted
-Nixfied revision, declare the policy, update gate governance if approved, test
-Linux and macOS correctness, and document rollback. This ADR does not enable
-those changes.
+The verification target needs no framework migration. If it is suspected or a
+cold comparison is required, MFM deletes exactly `target/verification` with
+Cargo's cleanup command and reruns the same gates. Developer Cargo state and
+Nix release packaging are unaffected.
 
 ## Consequences
 
 The decision preserves one Rust dependency graph, exact existing coverage,
-simple developer behavior, and ordinary Nix packaging. It avoids a new daemon,
-generated graph, verification archive, and remote trust boundary.
-
-The cost is deliberate: cold verification remains several minutes, each active
-worktree may own roughly 10.5 GB, execution and services dominate warm gates,
-and durable verification remains blocked on Nixfied lifecycle support. Those
-costs are measured and bounded by the selected contract rather than hidden by
-an unqualified cache.
+simple developer behavior, and ordinary Nix packaging without growing a cache
+protocol in the model seam. Cold verification still takes several minutes,
+each active worktree may retain roughly 10.5 GB, and execution/services
+dominate warm gates. Those are explicit project-owned operating costs.

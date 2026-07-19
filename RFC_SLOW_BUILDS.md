@@ -1,26 +1,29 @@
 # RFC: evidence-led Rust build architecture for MFM
 
-Status: architecture accepted; Nixfied handoff under final review
+Status: experimental history; final responsibility correction implemented
 
 Date: 2026-07-18
 
-This revision supersedes the previous forward plan in this file. The results of
-the original Phases 00–07 remain valid evidence. The attempted Phase 08 was
-reverted, and the old Phases 09–17 are withdrawn.
+This file preserves the measurements and experiment sequence that informed the
+build decision. It is not an active rollout plan. The original Nixfied cache
+handoff was rejected after upstream architectural review; references below to
+cache identities, leases, retention, cleanup, or bypass describe the historical
+experiment and must not be read as current Nixfied requirements.
 
 ## Executive decision
 
-MFM selects the existing Cargo/Nix/Nixfied boundary and adds no new compiler
-cache. The owner accepted the decision on 2026-07-18; it is recorded in
+MFM retains the measured Cargo reuse benefit without adding a compiler cache or
+a Nixfied cache contract. The corrected, accepted decision is recorded in
 [ADR 0001](docs/adr/0001-mfm-rust-build-architecture.md).
 
 MFM uses one pinned build environment with three explicit artifact lanes:
 
 1. developers enter the Nix-provided environment and let Cargo own fast,
    incremental, worktree-local compilation; and
-2. comprehensive verification runs through Nixfied, which lets Cargo compile
-   the live workspace under a compact, isolated verification policy and owns
-   services, task ordering, state, and evidence; while
+2. comprehensive verification runs through Nixfied, while Cargo compiles the
+   live workspace under a compact policy into the project-owned
+   `target/verification`; Nixfied owns services, task ordering, its runtime
+   state, and execution evidence; while
 3. release packaging remains a Nix `buildRustPackage` derivation and does not
    act as a verification cache.
 
@@ -28,20 +31,19 @@ This is not a Cargo environment competing with a Nix environment. Cargo runs
 inside the Nix-pinned environment in both lanes. The split is between mutable
 artifact policies and assurance levels, not between toolchains.
 
-The scoped verification target is the only performance-qualified candidate:
-R2-09 measured a 161.560s/45.0% clean-to-warm median reduction. It is selected
-conditionally, not silently rolled out as an unmanaged cache. Nixfied must
-first provide cache-family inspection, bounded retention, cache-only cleanup,
-explicit bypass, enforced worktree ownership, and same-cache writer semantics.
-Until then, the current provisional target and broad slot lifecycle remain the
-safe interim behavior.
+The retained verification target is the only performance-qualified candidate:
+R2-09 measured a 161.560s/45.0% clean-to-warm median reduction. One worktree
+owns one `target/verification`, shared across its Nixfied slots; different
+worktrees isolate by path. Cargo and MFM own locking, fingerprints, inspection,
+retention, cleanup, bypass, and corruption recovery. Nixfied does not create,
+identify, report, retain, or selectively clean compiler artifacts.
 
-`sccache`, Crane, crate2nix, cargo2nix, and execution-topology changes are
-rejected for this architecture because each failed its independent screening
-or correctness gate. No combination is selected. The final RFC phase will
-rewrite [the Nixfied capability-gap handoff](docs/nixfied-capability-gaps.md)
-from this decision; implementation and rollout require a separate reviewed
-plan after the framework contract is accepted.
+`sccache`, Crane, crate2nix, cargo2nix, and execution-topology changes remain
+rejected because each failed its independent screening or correctness gate. No
+combination is selected. The obsolete capability-gap handoff was deleted; its
+useful forcing case is retained here as experimental history. The separate
+Nixfied endpoint defect was fixed by the accepted upstream endpoint acquisition
+contract.
 
 ### Revision 2 measurement platform
 
@@ -179,15 +181,19 @@ The correct optimization order is therefore:
 
 Nix currently provides the pinned Rust toolchain, Cargo Nextest, SQLx CLI,
 native tools, Nixfied runtime, model, launchers, and packaged CLI closure.
-Nixfied's `cacheEnv` gives verification Cargo a stable runtime-owned target
-path. It is a placement and identity mechanism, not result memoization; each
-leaf still executes.
+Broad verification sets the ordinary child environment variable
+`CARGO_TARGET_DIR=target/verification`. Cargo resolves that project-owned path
+from the worktree and every selected leaf still executes. Direct development,
+`nix develop`, and `.#quick` leave `CARGO_TARGET_DIR` unset and use the normal
+target directory.
 
 The public verification launchers are Nix store outputs, but their Cargo
 artifacts are not. At runtime Cargo compiles the live checkout into mutable
-Nixfied state. Conversely, the packaged `mfm` CLI is a real Nix derivation, but
-it builds a release binary from the whole repository and does not supply the
-verification feature, test-binary, doctest, or parity surface.
+project state. `NIXFIED_STATE_DIR` neither selects nor cleans those artifacts,
+and runtime output reports execution evidence rather than cache evidence.
+Conversely, the packaged `mfm` CLI is a real Nix derivation, but it builds a
+release binary from the whole repository and does not supply the verification
+feature, test-binary, doctest, or parity surface.
 
 The GitHub workflow restores `~/.cache/nix`, while `NIXFIED_STATE_DIR` lives in
 ephemeral runner storage. That does not preserve the MFM Cargo target and does
@@ -204,8 +210,9 @@ failure, portability, and rollback contracts are in ADR 0001.
 | --- | --- |
 | Nix | Pin and realize Rust, Cargo tools, native dependencies, immutable packages, and any explicitly selected immutable verification artifacts. |
 | Cargo | Resolve and schedule the live Rust unit graph, fingerprints, features, profiles, build scripts, proc macros, rustdoc, linking, and developer incremental compilation. |
-| Nixfied model | Declare project tasks, closures, services, dependencies, cache identities, and public verbs. |
-| Nixfied runtime | Execute tasks, own mutable state and services, enforce placement and lifecycle, and retain run evidence. |
+| MFM project | Select `target/verification` and own compiler-artifact placement, inspection, retention, cleanup, and recovery. |
+| Nixfied model | Declare project tasks, closures, services, dependencies, ordinary child environment, and public verbs. |
+| Nixfied runtime | Execute tasks, own runtime state and services, enforce endpoint/lifecycle semantics, and retain run evidence. |
 | CI provider | Execute repository gates on supported platforms; hosted performance and artifact transport remain outside Revision 2. |
 
 The practical lanes are:
@@ -213,7 +220,7 @@ The practical lanes are:
 | Lane | Entry point | Source | Artifact policy | Purpose |
 | --- | --- | --- | --- | --- |
 | Focused development | persistent `nix develop` session, optionally activated by an environment tool, then direct Cargo | live worktree | incremental, full developer diagnostics, worktree-local target | edit/check/test feedback |
-| Broad local verification | `nix run .#check`, `.#test`, `.#test-db`, or `.#ci` | live worktree | compact, nonincremental, Nixfied-scoped target | comprehensive evidence and managed services |
+| Broad local verification | `nix run .#check`, `.#test`, `.#test-db`, or `.#ci` | live worktree | compact, nonincremental, project-owned `target/verification` | comprehensive evidence and managed services |
 | CI verification | `nix run .#ci` | clean checkout | current repository policy until a separately approved rollout | merge correctness and portability evidence; performance is outside Revision 2 |
 | Packaging | `nix build .#mfm` or `nix run .#mfm` | immutable Nix source | Nix derivation output | distributable CLI |
 
@@ -227,13 +234,13 @@ requirements and should not be forced into one writable tree.
 
 | Question | Evidence-led answer |
 | --- | --- |
-| Development and verification boundary | Keep separate worktree-local incremental development and compact Nixfied verification targets. Cross-worktree sharing is not selected. |
+| Development and verification boundary | Keep the normal incremental development target and a compact project-owned `target/verification`. Cross-worktree sharing is not selected. |
 | Value of cold compilation reuse | Durable Cargo state qualifies; another object cache or immutable verification artifact does not. |
 | Residual full-gate latency | Warm execution, rustdoc/doctests, services, and parity dominate after the approximately 21s median Nextest compile/link interval. |
 | Gate equivalence | Yes. Exact-candidate `.#ci` contains the component task graphs with run-once semantics, but policy changes only in the later rollout. |
 | Nix verification artifacts | Crane proved direct consumption is possible, but its end-to-end benefit missed materiality and retained mutable Trybuild state. |
 | Granular Nix graphs | Neither crate2nix nor cargo2nix preserved the complete authoritative MFM build and test semantics. |
-| Nixfied responsibility | Namespace ownership, writer semantics, inspection, bounded retention, cache-only cleanup, bypass, lifecycle evidence, and actionable slot/port diagnostics. |
+| Nixfied responsibility | Execute the declared graph, own runtime state/evidence and services, and coordinate deterministic endpoints. Compiler-artifact lifecycle is outside its contract. |
 
 ## Hard constraints
 
@@ -262,9 +269,9 @@ The following are non-negotiable:
   features, build policy, and every mechanism-specific correctness input;
 - Linux-only measurement does not authorize hard-coded Linux behavior in a
   platform-neutral Cargo, Nix, Nixfied, or generated-graph surface;
-- every persistent cache has one owner, bounded retention, inspection,
-  concurrency semantics, and safe cleanup before adoption;
-- every candidate has a cache-bypass or cacheless path; and
+- persistent compiler artifacts have an explicit project owner, concurrency
+  semantics, and exact cleanup operation;
+- every compiler-cache candidate has a bypass or cacheless path; and
 - missing framework support is reported and designed properly rather than
   replaced by shell deletion, target copying, path rewriting, or generated
   stand-in crates.
@@ -997,8 +1004,7 @@ the architecture and any upstream dependencies are accepted.
 Decision accepted by the owner on 2026-07-18:
 
 - keep direct incremental Cargo in a worktree-local target for development;
-- keep the compact Cargo target as the broad local verification mechanism,
-  conditional on the Nixfied lifecycle and ownership contract in ADR 0001;
+- keep the compact Cargo target as the broad local verification mechanism;
 - keep Nix `buildRustPackage` as the release packaging authority;
 - add no `sccache`, Crane verification archive, crate2nix/cargo2nix graph,
   remote artifact backend, or execution-topology rollout;
@@ -1006,8 +1012,13 @@ Decision accepted by the owner on 2026-07-18:
   final `.#check`, `.#test`, and `.#test-db` runs only after repository policy
   is changed in the later rollout; the current required gates remain in force;
   and
-- proceed to R2-11 only after the owner accepts
+- record the ownership decision in
   [ADR 0001](docs/adr/0001-mfm-rust-build-architecture.md).
+
+The later upstream review corrected the ownership part of this phase: the
+target is project-owned `target/verification`, not a conditional Nixfied cache
+family. The performance selection remains valid; the cache-lifecycle handoff
+does not.
 
 Expected commit subject:
 
@@ -1015,42 +1026,26 @@ Expected commit subject:
 docs: select mfm build architecture
 ```
 
-Stop decision: owner approval of the complete long-term definition and the
-minimal upstream capabilities it requires.
+Stop decision: owner approval of the measured Cargo target and its explicit
+project/runtime responsibility boundary.
 
-### R2-11: finalize the Nixfied architect handoff
+### R2-11: historical Nixfied architect handoff (superseded)
 
-This is the final phase of this RFC and cannot begin before R2-10 is accepted.
+This phase produced a capability request that upstream review rejected as a
+boundary error. It is retained only to explain the experiment sequence; the
+request document has been deleted and none of the following is an actionable
+rollout requirement.
 
-Change:
+The forcing case still exposed one framework-owned defect: independently
+selected runtime roots could race for the same deterministic service port.
+The accepted upstream endpoint contract fixes that defect through same-user
+cross-root acquisition, exact listener ownership, and typed conflict evidence.
 
-- rewrite [the Nixfied capability-gap document](docs/nixfied-capability-gaps.md)
-  from the selected architecture rather than the provisional Phase 06 design;
-- remove requests that belong only to rejected candidates;
-- separate capabilities required for rollout from optional future improvements;
-- include minimal reproductions, exact pinned revisions/ABIs, security and
-  lifecycle invariants, and framework-level acceptance tests; and
-- map each request to the experiment and decision evidence that justifies it.
-
-The handoff must answer, where applicable:
-
-- whether Nixfied owns Cargo cache-family inspection, leases, retention, and
-  garbage collection;
-- whether task-specific immutable closures can avoid eager realization by
-  unrelated tasks;
-- how a task reports the immutable or mutable artifact identity it consumed;
-- how cache cleanup preserves service state, run records, logs, and evidence;
-- how worktree, slot, process, and concurrent-writer identity are enforced; and
-- which behavior MFM will own locally instead of requesting from Nixfied.
-
-Evaluate:
-
-- every request has a selected-architecture consumer;
-- every P0 has a failing MFM scenario and a framework-level acceptance test;
-- no request asks Nixfied to reproduce Cargo's unit graph or become a Rust
-  compiler cache;
-- the document is understandable without the abandoned Phase 08 design; and
-- MFM's owner approves the document before it is sent to Nixfied's architects.
+The compiler-artifact requests were declined. Cargo and MFM own the
+worktree-local verification target, Cargo's writer locks and fingerprints,
+inspection, retention, cleanup, bypass, and corruption recovery. Nixfied owns
+only the execution graph, services, its state/registry, endpoint coordination,
+and execution evidence.
 
 Expected commit subject:
 
@@ -1058,8 +1053,8 @@ Expected commit subject:
 docs: finalize nixfied capability handoff
 ```
 
-Stop decision: send the reviewed document to Nixfied's architects, then create
-a separate implementation plan once required framework decisions are known.
+Stop decision: replace the handoff with the corrected project-owned target and
+the accepted upstream endpoint fix. No cache capability remains to roll out.
 
 ## Phase governance
 
@@ -1163,16 +1158,16 @@ The following are outside Revision 2 without a new RFC:
 Different boundaries intentionally retain different artifact policies:
 
 - developers use Nix-provided tools plus worktree-local incremental Cargo;
-- broad local verification uses the compact Nixfied Cargo target after its
-  lifecycle prerequisites are available;
+- broad local verification uses compact Cargo artifacts in the project-owned
+  `target/verification` directory;
 - packaging remains a coarse `buildRustPackage` derivation; and
 - the public Cargo/Nixfied gates remain the coverage and evidence authority.
 
-The same mechanism may later be proposed for hosted CI and macOS, with
-platform-specific identities and artifacts. Revision 2 does not claim remote
-transfer, hosted-runner, or macOS performance evidence. This remains one
-coherent platform because every boundary has one documented artifact authority
-and preserves the same source, toolchain, coverage, and evidence contract.
+Cargo/MFM own compiler-artifact locking, fingerprints, inspection, retention,
+cleanup, bypass, and recovery. `NIXFIED_STATE_DIR` has no bearing on the target,
+and Nixfied runtime output carries execution evidence only. Hosted CI stays
+cold and ephemeral unless a separate provider-cache decision is made. Revision
+2 does not claim remote-transfer, hosted-runner, or macOS performance evidence.
 
 ## External technical references
 
@@ -1189,4 +1184,4 @@ and preserves the same source, toolchain, coverage, and evidence contract.
   [test support](https://nix-community.github.io/crate2nix/30_building/40_tests/),
   and [known restrictions](https://nix-community.github.io/crate2nix/90_reference/20_known_restrictions/)
 - [cargo2nix granular-build design](https://github.com/cargo2nix/cargo2nix)
-- [Pinned Nixfied architecture](https://github.com/willyrgf/nixfied/blob/b0681e45ab76d5023d9c5e033087d34adf98e90b/docs/ARCHITECTURE.md)
+- [Accepted Nixfied architecture](https://github.com/willyrgf/nixfied/blob/3eff1a10625fd28cc9f85a16b36f325bbbe8cd69/docs/ARCHITECTURE.md)

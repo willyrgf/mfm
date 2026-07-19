@@ -1,7 +1,12 @@
 # Controlled slow-build baseline
 
-Status: Phase 01 baseline, Phase 02--07 follow-up, and Revision 2 R2-01/R2-02
-experiments for RFC_SLOW_BUILDS.md
+Status: historical measurements through Revision 2 R2-11; current
+responsibility correction recorded in the final section
+
+The timings, sizes, inventories, hashes, and failure observations below are
+preserved as measured. References to Nixfied cache identities and lifecycle
+requests describe the experimental configuration at that time, not the current
+architecture. Broad gates now use project-owned `target/verification`.
 
 This report measures the clean Phase 00 RFC commit
 `51a5f9a07808cd9a92b218a028dd2424c04ac76d` (`docs: rfc builds tt3`). The
@@ -622,7 +627,7 @@ concurrent focused run passed; and exact-path cleanup preserved non-cache
 state. Disk growth was flat across the unchanged clean/warm pair. The
 remaining limitation is that cleanup is manual for this pilot because the
 locked Nixfied runtime still has no first-class cache-family cleanup surface;
-that limitation is tracked in `docs/nixfied-capability-gaps.md`.
+the later, now-superseded handoff recorded that historical limitation.
 
 Before the Phase 06 commit, the required gates passed on the dirty candidate:
 
@@ -1477,12 +1482,12 @@ collection, and explicit bypass are missing. The target-only control remains
 in the candidate comparison, but final selection requires framework support
 rather than an MFM shell cleaner.
 
-The final Nixfied handoff must include at least cache-family inspection and
-accounting, cache-only cleanup with active-lease refusal, bounded age/size
-retention, lifecycle evidence, explicit bypass, enforced worktree namespace
-ownership, documented same-cache writer semantics, and globally actionable
-slot/port collision diagnostics. R2-04 adds no implementation workaround;
-these capabilities are the stop decision carried forward.
+At R2-04 this report carried cache-family inspection, accounting, cleanup,
+retention, bypass, worktree ownership, writer semantics, and actionable port
+diagnostics forward as proposed Nixfied requirements. The final responsibility
+correction rejects the compiler-cache items and assigns them to Cargo/MFM; only
+the host-global endpoint diagnostic and acquisition defect remained an
+upstream runtime responsibility.
 
 ## R2-05 follow-up: bounded `sccache` experiment
 
@@ -2212,18 +2217,16 @@ does not mean a passing result.
 | `cargo2nix` artifacts | no full gate; dependency/feature and coverage vetoes before timing qualification | every tracked edit, including README, invalidated every reachable local MFM crate | exact Nix reuse for simple leaf; generator bootstrap 12:22.42 and 1.44 GB unique closure | leaf library/test closures 74.9/61.8 MB; partial all-test graph had 3,029 closure paths | failed Cargo dependency fidelity, 35 test crates, Trybuild, doctests, and parity | 488 KB generated graph has lock drift guard, but older generator/toolchain, overlay order, and overrides add maintenance | rejected at screening: incorrect graph and incomplete coverage |
 | Execution topology | no qualifying full-gate distribution; four workers saved 1.6%/1.264s, doctest overlap 4.9%/4.64s, execution-only parity overlap 18.0%/9.05s | n/a | n/a | duplicate execution target reached approximately 11 GB; shared target serializes Cargo writers | focused probes retained exact selected tests; public graph unchanged | true Cargo overlap requires separate targets; current shared target prevents nominal graph concurrency | rejected at screening: every end-to-end saving missed 15% and 30s |
 
-The scoped Cargo target is the sole performance-qualified candidate. It is not
-an operationally complete architecture: retaining it without the R2-04
-framework requirements would leave unbounded mutable storage and ambiguous
-ownership. Every alternative has an independent screening veto, so the
-evidence gives no approved additive hypothesis and no basis for a combined
-pilot.
+The scoped Cargo target is the sole performance-qualified candidate. At R2-09,
+the report interpreted its operational properties as missing Nixfied cache
+requirements. The table preserves that then-current interpretation alongside
+the measurements. The final responsibility correction below rejects it:
+compiler-artifact placement and lifecycle belong to Cargo/MFM, while the
+independently observed host-port defect belongs to Nixfied.
 
-The comparison is decision-quality for R2-10. That phase can select the least
-complex long-term boundary, including no new compilation cache, while treating
-the scoped target's inspection, ownership, retention, cleanup, bypass, and
-writer-semantics gaps as explicit design requirements. R2-09 makes no
-architecture selection and requests no additional measurement.
+Every alternative has an independent screening veto, so the evidence gives no
+approved additive hypothesis and no basis for a combined pilot. The comparison
+is decision-quality without introducing another compiler cache.
 
 ## R2-10 follow-up: MFM Rust build architecture decision
 
@@ -2241,8 +2244,8 @@ R2-10 stop condition now reflect that architecture.
 
 - Development remains direct incremental Cargo in the Nix-pinned environment
   with a worktree-local target.
-- Broad local verification retains the compact Cargo policy in a
-  Nixfied-owned target, conditional on first-class lifecycle support.
+- Broad local verification retains the compact Cargo policy in the
+  worktree-owned `target/verification` directory.
 - Release packaging remains the Nix `buildRustPackage` output and is not used
   as a verification cache.
 - No `sccache`, Crane archive, crate2nix/cargo2nix graph, remote backend,
@@ -2271,21 +2274,20 @@ R2-03 through R2-08 screening decisions.
 ### Acceptance and operational contract
 
 The selected verification target is performance-qualified only on the
-reference aarch64-linux host. Durable rollout requires Nixfied to provide
-enforced worktree/slot ownership, exclusive writer semantics, inspection,
-configurable bounded retention, cache-only cleanup, explicit bypass,
-cancellation recovery evidence, and actionable slot/port diagnostics.
+reference aarch64-linux host. One worktree owns one
+`target/verification`, shared across its Nixfied slots. Cargo owns writer
+locking, fingerprints, and rebuild decisions; MFM owns placement, inspection,
+retention, cleanup, bypass, and corruption recovery. These are ordinary
+project operations, not Nixfied cache-family semantics.
 
-The initial MFM policy is 20 GiB per target identity, 32 GiB for the project
-Cargo-target family, and 14 days maximum idle age, with inactive LRU eviction.
-Cleanup must preserve services and run evidence and fail closed for active
-leases or unsafe paths. Mutable artifacts are local same-user accelerators,
-never authoritative outputs or remotely trusted inputs.
+Mutable artifacts are local same-user accelerators, never authoritative
+outputs or remotely trusted inputs. Nixfied owns service/process lifecycle,
+its registry and state, endpoint coordination, and execution evidence.
 
 ### Risks and limitations
 
-- The selected target is not operationally complete in the pinned Nixfied
-  runtime; the current broad slot lifecycle remains provisional.
+- Storage remains project-owned and unbounded unless MFM applies ordinary
+  worktree retention or `cargo clean --target-dir target/verification`.
 - Hosted Linux and macOS retain correctness coverage, but neither environment
   is performance-qualified by this RFC.
 - Cold full verification remains several minutes, stable targets occupy about
@@ -2293,58 +2295,44 @@ never authoritative outputs or remotely trusted inputs.
 - A remote cache would introduce unmeasured transport, credential, poisoning,
   and failure contracts and therefore requires a separate decision.
 
-Recommendation: proceed only to R2-11's minimal Nixfied architect handoff.
-Implementation and rollout remain a separate reviewed plan after the framework
-contract is accepted.
+The cache-capability recommendation that originally followed was superseded by
+the responsibility correction below.
 
-## R2-11 follow-up: final Nixfied architect handoff
+## Final responsibility correction and adoption
 
-Phase: R2-11
+The R2-11 handoff was transmitted as a forcing case, but its cache requests
+were rejected because they would make the generic runtime own
+invocation-specific compiler artifacts. The handoff document is deleted. This
+does not invalidate any R2 timing, size, coverage, invalidation, or failure
+measurement; it changes the architectural conclusion drawn from them.
 
-Outcome: passed; owner transmission approval pending
+The implemented boundary is:
 
-R2-11 rewrites
-[the Nixfied capability handoff](nixfied-capability-gaps.md) from accepted ADR
-0001. It removes provisional Phase 06 language and all requests belonging only
-to rejected candidates. The handoff is self-contained and pins Nixfied
-revision `b0681e45ab76d5023d9c5e033087d34adf98e90b`, NAR hash
-`sha256-E2usrYJbA88cz1HgRo9TBvo5p2S6Mi6ke14g2/crk2M=`, runtime ABI
-`nixfied-runtime-abi:1-5ff3aa14f2bf`, model hash
-`d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84`,
-toolchain ID `nixfied-toolchain:1`, and the selected Cargo-target identity.
+- broad gates set ordinary `CARGO_TARGET_DIR=target/verification`;
+- direct development and `.#quick` leave `CARGO_TARGET_DIR` unset;
+- all slots in one worktree share the verification target, while separate
+  worktrees isolate naturally by path;
+- Cargo/MFM own writer locking, fingerprints, inspection, retention, cleanup,
+  bypass, and corruption recovery;
+- `NIXFIED_STATE_DIR` selects only runtime state/evidence and neither selects
+  nor cleans Cargo artifacts;
+- Nixfied output carries execution evidence, never compiler-cache evidence;
+  and
+- hosted CI remains cold/ephemeral unless a separate provider-cache decision
+  is made.
 
-### Required framework decisions
+The exact project cleanup operation is:
 
-Five P0 contracts block durable rollout:
+```sh
+cargo clean --target-dir target/verification
+```
 
-1. enforced worktree namespace plus exclusive writer ownership;
-2. inspectable identity/lifecycle evidence plus explicit bypass;
-3. configurable bounded retention and deterministic admission;
-4. cache-only cleanup with lease, marker, symlink, and confinement safety; and
-5. host-global, actionable slot/port collision diagnostics.
+Nixfied still owns the independently measured endpoint problem. Its accepted
+endpoint acquisition contract coordinates same-user starts across runtime
+roots, verifies exact listener ownership, and returns actionable typed
+conflicts before service-specific mutation. This fixes the port defect without
+creating a Cargo cache protocol, new semantic authority, or migration path.
 
-Every P0 names its broad-verification consumer, observed failing MFM scenario,
-required semantics, framework fixture, acceptance sequence, and R2/ADR
-evidence. Shared security and lifecycle invariants require fail-closed process
-reconciliation, active-lease protection, path confinement, redacted public
-diagnostics, evidence preservation, idempotence, and execution of every test on
-every authoritative gate.
-
-Optional P1 work is limited to cross-slot retention planning, bounded
-historical capacity trends, and effective-policy diagnostics. Immutable
-verification closures, sccache/remote backends, granular Rust graphs, Cargo
-fingerprints, test-result caching, cross-user trust, hosted persistence, and
-unit-level target pruning are explicit non-requests.
-
-### Ownership and next boundary
-
-MFM retains ownership of tool pins, task/coverage graphs, Cargo inputs and
-semantics, profile and retention values, developer targets, packaging, trust,
-platform validation, rollback, and gate governance. It will not add a shell
-cleaner, cache traversal, lease registry, or other local P0 workaround.
-
-No build, task, cache, service, runtime, or workflow implementation changes in
-R2-11. No new performance claim is made. The handoff requires MFM owner review
-before transmission. After the Nixfied architects accept, revise, or decline
-each P0, MFM must create a separate implementation plan; this RFC does not
-authorize rollout.
+No new performance claim is made by this correction. The R2-09 distribution
+remains the evidence for retaining native Cargo reuse; future changes to target
+placement or hosted persistence require new MFM measurements.

@@ -1,86 +1,72 @@
 # Nixfied Upgrade Notes
 
-This document tracks downstream expectations when the Nixfied v2 flake input changes.
+Nixfied uses an exact runtime ABI and toolchain contract. MFM updates the
+authored model and the exact flake pin as one coordinated cut; mixed contracts,
+compatibility shims, and new-runtime state migrations are unsupported.
 
-## What To Recheck After A Framework Upgrade
+## Coordinated upgrade
 
-- Update `flake.lock` so the exact Nixfied, nixpkgs, and Rust overlay revisions are recorded.
-- Recheck exposed app behavior and the compiled model when the change is specifically about Nixfied
-  behavior:
-  ```bash
-  system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
-  nix eval --json ".#apps.${system}" --apply builtins.attrNames
-  nix run .#model-check
-  ```
-- Run the repository's focused Cargo architecture checks after accepting the framework update.
+1. Start from a clean worktree and record the current `flake.lock` Nixfied
+   revision.
+2. Before repinning, use that old exact runtime to stop live services:
 
-## Local State Drift Triage
+   ```bash
+   nix run .#down
+   nix run .#ps
+   ```
 
-Nixfied runtime upgrades can intentionally reject local state drift instead of silently migrating it.
-For example, a run may fail before any task starts with `REGISTRY_CORRUPT` such as
-`expected registry user_version 5, got 3`, or with `STATE_UNOWNED` for a runtime ABI marker.
+3. If disposable Nixfied runtime state should be removed, do it now with the
+   old exact runtime:
 
-Use this sequence before changing the project model:
+   ```bash
+   nix run .#clean
+   ```
 
-1. Confirm the compiled model and generated app surface are valid:
+   Use an explicit purge only when protected or persistent state is also
+   intentionally disposable. Cleanup remains marker-, lease-, process-, and
+   path-safety gated.
+4. Update `nixfied.nix` for the new contract and update the exact Nixfied pin in
+   `flake.lock` in the same change.
+5. Check the generated surface and model, then run every repository gate:
+
    ```bash
    system=$(nix eval --raw --impure --expr 'builtins.currentSystem')
    nix eval --json ".#apps.${system}" --apply builtins.attrNames
    nix run .#model-check
-   ```
-2. Compare the default state root with a fresh temporary state root:
-   ```bash
    nix run .#check
-   tmpdir=$(mktemp -d)
-   NIXFIED_STATE_DIR="$tmpdir" timeout 30s nix run .#check
-   ```
-   If the fresh state root starts running tasks while the default state root fails at admission or
-   state setup, treat the problem as local runtime state drift rather than a malformed
-   `nixfied.nix`. A timeout or canceled run after tasks start is enough evidence that the fresh
-   state root passed the registry and marker gates.
-3. Check for live owned processes before cleanup:
-   ```bash
-   nix run .#ps
-   pgrep -af 'nixfied-runtime|postgres|reth|mfm_cli|cargo'
-   ```
-   `ps` may fail with the same registry schema error because control commands open the registry
-   first. In that case, rely on the process scan and avoid deleting state while matching processes
-   are still running.
-4. If the registry itself cannot be opened by control commands, back it up before recreating it.
-   On Linux, MFM's default slot registry is outside the slot root at:
-   `~/.local/state/nixfied/registry/mfm/dev/0/registry.sqlite3`.
-   Adjust this path if `NIXFIED_STATE_DIR` or `XDG_STATE_HOME` is set.
-   Move the per-slot registry directory aside, preserving it for inspection:
-   ```bash
-   backup_root="$HOME/.local/state/nixfied/registry-backups/mfm-dev-0-$(date +%Y%m%d%H%M%S)"
-   mkdir -p "$backup_root"
-   mv "$HOME/.local/state/nixfied/registry/mfm/dev/0" "$backup_root/0"
-   ```
-5. Rerun a small gate. If it now reports a slot marker such as `STATE_UNOWNED`, use Nixfied's
-   marker-gated cleanup:
-   ```bash
-   nix run .#check
-   nix run .#clean
-   nix run .#check
-   ```
-6. Finish with the original upgraded surface:
-   ```bash
+   nix run .#test
+   nix run .#test-db
    nix run .#ci
-   nix run .#ps
    ```
-   A healthy `ps` should reconcile completed tasks and run-scoped services as non-live/stopped.
 
-## Current Local Conventions
+If retained state is rejected after repinning, do not move registry files,
+rewrite markers, or ask the new runtime to migrate them. Restore the old exact
+pin for any required inspection or supported cleanup. This guide deliberately
+defines no new-runtime adoption or migration procedure for abandoned state.
 
-- [`nixfied.nix`](../nixfied.nix) is the project-owned model. It exports `check`, `test`, and `ci`
-  composite tasks as project verbs and imports the upstream Postgres adapter for full CI.
-- `.#ci` is full by definition and does not accept v1 `--mode`, `--full`, or `--summary` flags.
-- MFM's deterministic service window starts at port `28080`, below common OS ephemeral ranges. Keep
-  this range dedicated for managed Postgres.
+## Cargo verification artifacts
 
-## Notes For Future Upgrades
+Broad gates use the project-owned `target/verification` directory. It is not
+Nixfied state: `NIXFIED_STATE_DIR` neither relocates nor cleans it, and a
+Nixfied ABI upgrade does not migrate it.
 
-- If a new release changes state placement, re-audit secret exposure around `.env`, keystore files,
-  and other local-only inputs before accepting the new default.
-- If a new release changes service or task substitution semantics, re-run `nix run .#ci` before
-  accepting the update.
+No cleanup is normally required. For a deliberate cold rebuild or suspected
+Cargo artifact corruption, use the project-owned operation:
+
+```bash
+cargo clean --target-dir target/verification
+```
+
+Direct development remains in the ordinary worktree target because
+`nix develop` and `.#quick` unset `CARGO_TARGET_DIR`.
+
+## Current local conventions
+
+- [`nixfied.nix`](../nixfied.nix) is the project-owned model. It exports
+  `check`, `test`, `test-db`, and `ci` and imports the upstream Postgres
+  adapter.
+- `.#ci` is full by definition and does not accept v1 `--mode`, `--full`, or
+  `--summary` flags.
+- MFM's deterministic service window starts at port `28080`, below common OS
+  ephemeral ranges. The upstream endpoint contract coordinates starts across
+  state roots and reports ownership-aware conflicts.
