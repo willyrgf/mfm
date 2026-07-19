@@ -55,6 +55,7 @@ Start here:
 - Design contract (source of truth): [`docs/design.md`](docs/design.md)
 - Certified saga contract: [`docs/saga.md`](docs/saga.md)
 - Architecture taxonomy + placement rules: [`docs/architecture.md`](docs/architecture.md)
+- Rust build and verification contract: [`docs/build-and-verification.md`](docs/build-and-verification.md)
 - Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
 - Code quality policy: [`docs/code-quality.md`](docs/code-quality.md)
 
@@ -74,9 +75,8 @@ Crate docs:
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
 - Storage (typed run events, Postgres): [`crates/storages/stream-store-postgres/README.md`](crates/storages/stream-store-postgres/README.md)
 
-Design notes / planning:
+Development and operations:
 
-- Rust build architecture decision: [`docs/adr/0001-mfm-rust-build-architecture.md`](docs/adr/0001-mfm-rust-build-architecture.md)
 - Nixfied v2 project model: [`nixfied.nix`](nixfied.nix)
 - Framework upgrade notes: [`docs/UPGRADE.md`](docs/UPGRADE.md)
 
@@ -127,9 +127,11 @@ The broad Nixfied gates compile into the worktree-owned
 `target/verification` directory using the compact verification profile. All
 slots in one worktree share that target; another worktree gets a different one
 by path. Nixfied executes the tasks and owns their runtime evidence, but Cargo
-and MFM own the compiler artifacts. `NIXFIED_STATE_DIR` does not select or
-clean them, and `nixfied clean` leaves them untouched. To discard only broad
-verification artifacts, run:
+owns fingerprints, locking, invalidation, and recovery inside the target while
+MFM owns its placement, inspection, retention, and exact cleanup.
+`NIXFIED_STATE_DIR` does not select or clean compiler artifacts, and
+`nix run .#clean` leaves them untouched. To discard only broad verification
+artifacts, run:
 
 ```bash
 cargo clean --target-dir target/verification

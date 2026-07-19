@@ -46,6 +46,9 @@ defines no new-runtime adoption or migration procedure for abandoned state.
 
 ## Cargo verification artifacts
 
+The steady-state ownership and lifecycle contract is documented in
+[`build-and-verification.md`](build-and-verification.md).
+
 Broad gates use the project-owned `target/verification` directory. It is not
 Nixfied state: `NIXFIED_STATE_DIR` neither relocates nor cleans it, and a
 Nixfied ABI upgrade does not migrate it.

@@ -72,6 +72,7 @@ Run `nix run .#ci` after major work or for final merge-readiness validation.
 - `README.md`: project disclaimer.
 - `docs/code-quality.md`: mandatory quality policy for all changes.
 - `docs/architecture.md`: taxonomy, placement rules, and architecture boundaries.
+- `docs/build-and-verification.md`: Rust artifact ownership, build lanes, and gate contract.
 - `docs/design.md`: full design contract (authoritative).
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
 - `crates/kernel/runtime/README.md`: typed runtime scheduler and recovery concepts.
@@ -139,9 +140,10 @@ Environment variables you should expect:
   development uses the normal target directory.
 
 All Nixfied slots in one worktree share `target/verification`; separate
-worktrees isolate by path. Cargo/MFM own locking, fingerprints, inspection,
-retention, corruption recovery, and cleanup. Cargo leaves anchor the authored
-relative value at the invocation root before nested Cargo processes run. Use
+worktrees isolate by path. Cargo owns writer locking, fingerprints, rebuild
+decisions, and corruption recovery; MFM owns placement, inspection, retention,
+and exact cleanup. Cargo leaves anchor the authored relative value at the
+invocation root before nested Cargo processes run. Use
 `cargo clean --target-dir target/verification` to discard broad verification
 artifacts. Nixfied runtime output is execution evidence, not cache evidence.
 
