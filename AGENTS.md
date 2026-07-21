@@ -6,18 +6,30 @@ repository. `docs/build-and-verification.md` owns workflow mechanics and verific
 
 ## Non-Negotiables
 
-- Keep changes small and local; prefer 1 logical change per commit.
+- Divide non-trivial work into ordered logical commits. Each commit must leave one coherent current
+  design; keep inseparable cutovers together instead of staging compatibility paths.
 - Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
-- Do not introduce hacks, monkey patches, partial workarounds, or fragile schema shims.
-- If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
 - Verification is scope-driven, not commit-driven. Use the narrowest command that exercises the
   changed behavior, and expand only when the affected boundary or risk requires it.
 - Report exactly what verification ran and what did not.
 - Write commit subjects in lower case, for example `fix nix task wrappers to preserve caller cwd`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries and keep libraries usable without the CLI.
-- Do not add dependencies without strong justification or casually change public API/output schemas.
+- Add dependencies only with strong justification.
 - If you touch security-sensitive code (keystore/crypto), be explicit and add or strengthen tests.
+
+## When Architecture Is Unclear
+
+Before implementation, spawn a dedicated architect agent when architecture, ownership, or
+design-contract direction remains unclear after reading `docs/design.md` and
+`docs/architecture.md`. Pass it the relevant context and these requirements explicitly: minimize
+concepts, code paths, public types, duplicated responsibilities, future change sites, and LOC; allow
+breaking changes; delete superseded code without compatibility paths or fallbacks; and divide the
+work into logical commits.
+
+Ask the architect agent for one target design, the complete cutover and deletion scope, affected
+contracts and tests, and a logical commit sequence. Resolve the ambiguity before adding code; do not
+use parallel implementations as a substitute for a decision.
 
 ## Architecture and Design Invariants
 
@@ -81,10 +93,11 @@ pin/runtime changes. Two rules are non-negotiable:
 
 - Prefer explicit, readable code; avoid panics in libraries and accidental allocations in hot paths.
 - Prefer borrowing over cloning, async IO over blocking, and `spawn_blocking` for unavoidable blocking work.
-- Keep public APIs documented and consistent. Keep `#![warn(missing_docs)]` enabled in libraries.
+- Keep the one current public API documented and internally consistent. Keep
+  `#![warn(missing_docs)]` enabled in libraries.
 - Use typed library errors. Prefer `thiserror` and source-preserving `From` conversions; use manual
   conversions when classifying or redacting diagnostics. Reserve `anyhow` for executable glue.
-- Convert errors to stable, redaction-safe public codes/messages at CLI/API boundaries.
+- Convert errors to closed, redaction-safe public codes/messages at CLI/API boundaries.
 - Comments explain constraints and invariants, not the obvious code or the current PR.
 - Avoid `unsafe`. If unavoidable, document its safety invariant and add tests that exercise it.
 
@@ -94,8 +107,9 @@ pin/runtime changes. Two rules are non-negotiable:
   zeroization, and constant-time comparisons. Never expose secrets, fail closed on persisted-format
   changes, and add tamper/corruption tests. Do not make `Keystore` `Send`/`Sync` without a deliberate
   redesign.
-- CLI/REST: read the relevant binary README, preserve stable text/JSON contracts and redacted error
-  codes, support non-interactive use, and keep binaries as transport-only wrappers over run execution.
+- CLI/REST: read the relevant binary README, emit its one current text/JSON and redacted-error
+  contract, support non-interactive use, and keep binaries as transport-only wrappers over run
+  execution.
 - Typed runtime: keep scheduling/recovery deterministic outside explicit side-effect runners, do not
   block the async runtime, and test semantic changes.
 - Proc macros: keep expansion small and unsurprising, optimize diagnostics, and test behavior in a

@@ -1,35 +1,54 @@
 # Code Quality Policy
 
-This policy applies to every code, test, documentation, build, and workflow change in this repository.
+This policy applies to every code, test, documentation, build, and workflow change in this
+repository.
 
-## No Hacks
+## One Current Design
 
-The repository prioritizes code quality over immediate results.
+Optimize the repository as a whole for fewer concepts, code paths, public types and schemas,
+duplicated responsibilities, and places a future change must touch. Each responsibility should
+have one clear owner and one implementation.
 
-If a requested change cannot be completed without introducing a local hack, workaround, monkey patch, partial solution, or fragile schema shim, stop and choose one of these paths:
+Reducing lines of code is valuable when it removes duplication, indirection, or obsolete behavior.
+Do not obtain a smaller codebase by compressing readable code or removing validation, security
+controls, tests, or necessary documentation.
 
-- Fix the underlying flaw in a robust, well-designed, production-ready manner.
-- Explain honestly that the request cannot be completed without first adding missing support.
+## Replace; Do Not Preserve
 
-Do not commit code that could predictably break later because it avoided the real design problem. Do not preserve a bad design just to make the current task appear complete.
+MFM maintains no backward compatibility. Breaking APIs, CLI/REST contracts, schemas, persisted
+formats, and documented behavior is allowed. Prefer the best current design over preserving an
+inferior previous one.
 
-## Core Values
+When a design changes, complete the cutover and delete the superseded implementation, types, entry
+points, aliases, adapters, feature flags, readers/writers, tests, fixtures, and documentation. Do
+not deprecate old paths, hide them, or retain compatibility shims, dual paths, or fallbacks for old
+behavior. Git history is the source archive.
 
-- Absolute code quality over speed of delivery.
-- Correctness over convenience.
-- Clarity over cleverness.
-- Maintainability over short-term productivity.
-- Robust design over quick fixes.
-- Simplicity over complexity.
-- Doing it right over doing it now.
-- Honesty above everything.
+Update every current in-repository producer and consumer in the same logical change. For a changed
+persisted contract, update or reset its baseline and reject old data explicitly; never reinterpret
+old bytes, rewrite append-only history, or retain a legacy reader. Version identifiers may remain
+when the current contract needs them for hashing, domain separation, or hostile-input rejection.
 
-## Breaking Changes
+A breaking change never relaxes correctness, security, data-integrity, or design invariants.
 
-Assume this repository is not production software. Correctness, clarity, and maintainability take priority over preserving previous behavior.
+## Complete Changes
 
-Do not casually break documented public contracts. If a public API, CLI output shape, persisted format, or documented behavior is flawed, fix it deliberately and update the relevant docs and tests in the same change.
+Fix the underlying design or add missing support properly. Do not introduce hacks, monkey patches,
+partial workarounds, fragile schema shims, or parallel implementations. If a correct complete
+solution is not possible, report the blocker instead of approximating it.
+
+`docs/design.md` describes the one current design contract. Update it, the architecture
+documentation, and affected contract tests deliberately when that design changes; do not preserve
+obsolete code merely because the current documentation describes it.
+
+## Logical Commits
+
+Divide non-trivial work into a sequence of logical commits. Each commit must represent one coherent
+change, include its required tests and documentation, and leave the repository internally
+consistent. Do not mix unrelated cleanup with behavior changes or create temporary compatibility
+paths merely to stage a refactor; keep inseparable cutovers in one commit.
 
 ## Reporting
 
-After every change, provide a clear, honest report of any part of the change that is not fully verified or that could still be considered fragile.
+Report what changed, what was deleted, which verification ran, and any remaining unverified risk or
+blocker.
