@@ -69,21 +69,11 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
-          devTools = mkDevTools system;
         in
         {
           default = self.packages.${system}.model;
           model = nixfied.lib.${system}.compileModel ./nixfied.nix;
           sqlx-cli = mkSqlxCli system;
-          quick = pkgs.writeShellApplication {
-            name = "mfm-quick";
-            runtimeInputs = devTools;
-            text = ''
-              unset CARGO_TARGET_DIR
-              cargo fmt --all -- --check
-              cargo check --workspace --lib --bins
-            '';
-          };
           mfm = rustPlatform.buildRustPackage {
             pname = "mfm";
             version = "0.1.29";
@@ -171,10 +161,6 @@
           mfm = {
             type = "app";
             program = "${managedMfm}/bin/mfm";
-          };
-          quick = {
-            type = "app";
-            program = "${self.packages.${system}.quick}/bin/mfm-quick";
           };
         }
       );
