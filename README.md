@@ -44,7 +44,7 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 - Certified saga remediation with signed manual authorization decisions.
 - Content-addressed manifests, snapshots, facts, and outputs.
 - Deterministic typed-state orchestration for ops/pipelines.
-- Thin CLI and REST transport layers for stable automation surfaces.
+- Thin CLI and REST transport layers for typed automation surfaces.
 - Security-hardened Ethereum keystore (tamper checks + signing utilities).
 - Typed storage backends for run events and artifacts.
 

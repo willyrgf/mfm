@@ -105,8 +105,7 @@ Routes:
 
 Query parameters for `GET /v1/facts/:kind` and `GET /v1/facts/:kind/latest`:
 
-- `shape`: optional descriptor shape selector, matching a descriptor schema id or compatibility
-  group.
+- `shape`: optional descriptor shape selector, matching a descriptor schema id.
 - `order`: required descriptor ordering policy name.
 - `field`: required and repeatable returnable field id.
 - `subject`: repeatable subject predicate, such as `network=bitcoin-mainnet` or `subject.network.eq=bitcoin-mainnet`.

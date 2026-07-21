@@ -11,7 +11,6 @@ repository. `docs/build-and-verification.md` owns workflow mechanics and verific
 - Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
 - Verification is scope-driven, not commit-driven. Use the narrowest command that exercises the
   changed behavior, and expand only when the affected boundary or risk requires it.
-- Report exactly what verification ran and what did not.
 - Write commit subjects in lower case, for example `fix nix task wrappers to preserve caller cwd`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries and keep libraries usable without the CLI.
@@ -97,7 +96,7 @@ pin/runtime changes. Two rules are non-negotiable:
   `#![warn(missing_docs)]` enabled in libraries.
 - Use typed library errors. Prefer `thiserror` and source-preserving `From` conversions; use manual
   conversions when classifying or redacting diagnostics. Reserve `anyhow` for executable glue.
-- Convert errors to closed, redaction-safe public codes/messages at CLI/API boundaries.
+- Convert errors to reviewed, redaction-safe public codes/messages at CLI/API boundaries.
 - Comments explain constraints and invariants, not the obvious code or the current PR.
 - Avoid `unsafe`. If unavoidable, document its safety invariant and add tests that exercise it.
 

@@ -90,8 +90,7 @@ steady-state ownership and cleanup policy in
 - [`nixfied.nix`](../nixfied.nix) is the project-owned model. It exports
   `check`, `test`, `test-db`, and `ci` and imports the upstream Postgres and
   Reth adapters.
-- `.#ci` is full by definition and does not accept v1 `--mode`, `--full`, or
-  `--summary` flags.
+- `.#ci` is full by definition.
 - MFM's deterministic service window starts at port `28080`, below common OS
   ephemeral ranges. The upstream endpoint contract coordinates starts across
   state roots and reports ownership-aware conflicts.

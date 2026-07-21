@@ -28,9 +28,8 @@ rpc_password_env = "MFM_BITCOIN_RPC_PASSWORD"
 
 JSON with the same shape is also accepted by `mfm-runtime-config`.
 
-The only supported Bitcoin runtime shape is `btc.routes.<source_identity>`. The old singleton
-`btc.json_rpc` shape is intentionally rejected. Route keys are semantic `BtcSourceIdentity` values,
-not endpoint names, URLs, credential ids, or fallback policies.
+The Bitcoin runtime shape is `btc.routes.<source_identity>`. Route keys are semantic
+`BtcSourceIdentity` values, not endpoint names, URLs, credential ids, or routing policies.
 
 ## Provider-Bound Reads
 
@@ -50,7 +49,7 @@ network tags. If the observed tag differs from the provider binding, the provide
 source-mismatch diagnostic. `validate_source_binding` only checks that the route exists; it does not
 perform network IO.
 
-Provider diagnostics may carry stable operation ids and closed public fields such as network tags,
+Provider diagnostics may carry reviewed operation ids and public fields such as network tags,
 heights, hashes, and numeric status codes. They must never carry RPC URLs, credentials, file paths,
 provider messages, request bodies, or response bodies.
 
@@ -95,5 +94,4 @@ provider binding and verify recorded Bitcoin evidence against that binding and o
 - Bind live providers from certified semantic source intent before issuing operation-only requests.
 - Keep workflow-specific operation construction in adapters.
 - Keep binaries limited to parsing and passing runtime config paths.
-- Do not add fallback source routing, old singleton config compatibility, or current-only balance
-  semantics without a deliberate new design.
+- Keep one route-based source model and one exact-anchor balance semantic.
