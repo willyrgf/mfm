@@ -30,6 +30,13 @@ Ask the architect agent for one target design, the complete cutover and deletion
 contracts and tests, and a logical commit sequence. Resolve the ambiguity before adding code; do not
 use parallel implementations as a substitute for a decision.
 
+Every planning, architecture, and design response must include a `Material uncertainties` section
+before implementation begins. List every material choice or assumption for which confidence is not
+high. For each, state the choice or assumption, why it is uncertain, the consequence if it is wrong,
+and how to resolve or validate it. Write `none` when no material uncertainty remains. Do not pad the
+section with routine, low-impact choices. Any item involving architecture, ownership, or the design
+contract triggers the architect-agent rule above.
+
 ## Architecture and Design Invariants
 
 - `docs/design.md` is authoritative. If code disagrees with it, fix the code or deliberately update
