@@ -90,3 +90,46 @@ rpc_url = "http://127.0.0.1:8332"
         .unwrap_or_else(|error| panic!("{name} production registry: {error}"));
     }
 }
+
+#[test]
+fn production_certification_registers_balance_but_not_validation_or_transaction_states() {
+    let registry = production_certification_registry().expect("production certification registry");
+    let production_digest = registry.digest().expect("production registry digest");
+
+    let mut with_balance_states = registry.clone();
+    with_balance_states
+        .register_state::<mfm_states_evm::CollectEvmBalancesState>()
+        .expect("balance read descriptor");
+    with_balance_states
+        .register_state::<mfm_states_evm::RecordEvmBalanceFactsState>()
+        .expect("balance record descriptor");
+    assert_eq!(
+        with_balance_states
+            .digest()
+            .expect("balance-complete registry digest"),
+        production_digest,
+        "portfolio composition must register its EVM balance states"
+    );
+
+    for (name, digest) in [
+        ("validation", {
+            let mut expanded = registry.clone();
+            expanded
+                .register_state::<mfm_states_evm::ValidateEvmContractState>()
+                .expect("validation descriptor can be registered explicitly");
+            expanded.digest().expect("validation registry digest")
+        }),
+        ("transaction", {
+            let mut expanded = registry.clone();
+            expanded
+                .register_state::<mfm_states_evm::SubmitEvmTransactionState>()
+                .expect("transaction descriptor can be registered explicitly");
+            expanded.digest().expect("transaction registry digest")
+        }),
+    ] {
+        assert_ne!(
+            digest, production_digest,
+            "production certification must not register the {name} foundation"
+        );
+    }
+}

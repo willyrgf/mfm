@@ -315,6 +315,9 @@ always represents one transaction. Operation crates own constructor/call encodin
 dependency-ordered domain composition. The independent `ValidateEvmContractState` is the one
 exact-anchor code/call validation
 read state; neither primitive creates a public operation or application entry point by itself.
+The production application does not automatically register either primitive for certification,
+execution, or replay. Explicit library consumers and tests opt into their separate adapter
+registration functions; portfolio production assembly registers only EVM balance collection.
 
 Contract validation accepts an explicitly anchored address and a mandatory expected runtime-code
 hash other than the empty-code digest. Its bounded ordered checks retain full caller, target, value,

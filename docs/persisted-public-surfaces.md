@@ -3,9 +3,9 @@
 This inventory is the review checklist for data that is persisted by MFM or returned by CLI/REST.
 Every entry records whether the surface may contain secrets and what authority role it has.
 
-This data inventory does not create application ingress. The exact EVM package/state inventory and
-the sole public entry point are recorded in
-[`docs/architecture.md`](architecture.md#current-evm-inventory).
+This data inventory does not create application ingress. The sole public entry point and its
+composed runtime shape are recorded in
+[`docs/architecture.md`](architecture.md#core-runtime-shape).
 
 Authority roles:
 

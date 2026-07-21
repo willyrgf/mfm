@@ -52,10 +52,9 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 
 The compiled application exposes exactly one public run objective:
 `mfm.portfolio/snapshot@1`. Its root composes reusable Bitcoin and EVM collector operations, then
-passes their typed receipts to one store-backed portfolio report operation. The internal EVM
-collector cycle, transaction state, and contract-validation state are reusable certified
-substrate; none is a second app entry point. See the
-[exact EVM package/state/entry-point inventory](docs/architecture.md#current-evm-inventory).
+passes their typed receipts to one store-backed portfolio report operation. EVM contract validation
+and transaction submission remain reusable library/test foundations, but production app
+certification, runner, and replay assembly does not register them.
 
 ## Documentation
 

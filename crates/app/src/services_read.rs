@@ -77,6 +77,22 @@ where
         self.trusted_run_reader().verify_replay(run_id).await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn replay_broker_for_test(
+        &self,
+        run_id: &RunId,
+    ) -> Result<ReplayBroker, PublicError> {
+        let context = self.trusted_run_reader().load_run_context(run_id).await?;
+        let authority = replay_read_authority_for_run_with_retained_source_facts(
+            &self.store,
+            &self.artifacts,
+            context.runtime_spec(),
+            context.view(),
+        )
+        .await?;
+        Ok(ReplayBroker::from_read_authority(authority)?)
+    }
+
     /// Renders typed public output from store-owned projection and typed artifact bytes.
     pub async fn public_output(
         &self,

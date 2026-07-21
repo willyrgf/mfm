@@ -21,4 +21,15 @@ fn production_dispatch_scopes_are_explicit_and_unique() {
         let expected = expected.expect("portfolio replay state key");
         assert!(state_keys.contains(&(expected.kind, expected.version)));
     }
+
+    let validation =
+        state_key::<mfm_states_evm::ValidateEvmContractState>().expect("validation state key");
+    assert!(!state_keys.contains(&(validation.kind, validation.version)));
+    assert!(
+        registry
+            .registrations
+            .iter()
+            .all(|registration| registration.intent_matcher.is_none()),
+        "production replay must not register transaction intent dispatch"
+    );
 }

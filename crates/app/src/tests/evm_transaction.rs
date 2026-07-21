@@ -344,12 +344,19 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     drop(resume_services);
 
     // Read-only replay has no runner registry, transaction session, or signer binder.
-    let replay_services = make_run_read_services(store.clone(), store, certification);
+    let replay_services =
+        make_run_read_services(store.clone(), store.clone(), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
         .expect("evidence-only transaction replay");
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
+    let broker = replay_services
+        .replay_broker_for_test(&run_id)
+        .await
+        .expect("transaction replay broker");
+    mfm_adapters_evm::verify_evm_transaction_replay(&broker)
+        .expect("explicit transaction foundation replay verifier");
 }
 
 #[derive(Clone, Copy)]

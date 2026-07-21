@@ -8,7 +8,7 @@ use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B2
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
 use mfm_adapters_evm::{
-    register_evm_read_runners, register_evm_transaction_runner, EvmReadRunnerCapabilities,
+    register_evm_transaction_runner, register_evm_validation_runner, EvmReadRunnerCapabilities,
     EvmTransactionRunnerCapabilities,
 };
 use mfm_certify::CertificationRegistry;
@@ -316,12 +316,21 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
     drop(launch_services);
     drop(signing_key);
 
-    let replay_services = make_run_read_services(store.clone(), store, certification);
+    let replay_services =
+        make_run_read_services(store.clone(), store.clone(), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
         .expect("evidence-only failed composition replay");
     assert_eq!(replay.run_mode, RunModeStatus::FailedWithoutAcdcClaim);
+    let broker = replay_services
+        .replay_broker_for_test(&run_id)
+        .await
+        .expect("failed composition replay broker");
+    mfm_adapters_evm::verify_evm_transaction_replay(&broker)
+        .expect("explicit transaction foundation replay verifier");
+    mfm_adapters_evm::verify_evm_validation_replay(&broker)
+        .expect("explicit validation foundation replay verifier");
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 0);
 }
 
@@ -384,12 +393,21 @@ async fn assert_composition_replays(
     drop(launch_services);
     drop(signing_key);
 
-    let replay_services = make_run_read_services(store.clone(), store, certification);
+    let replay_services =
+        make_run_read_services(store.clone(), store.clone(), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
         .expect("evidence-only transaction composition replay");
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
+    let broker = replay_services
+        .replay_broker_for_test(&run_id)
+        .await
+        .expect("composition replay broker");
+    mfm_adapters_evm::verify_evm_transaction_replay(&broker)
+        .expect("explicit transaction foundation replay verifier");
+    mfm_adapters_evm::verify_evm_validation_replay(&broker)
+        .expect("explicit validation foundation replay verifier");
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 3);
 }
 
@@ -712,7 +730,7 @@ fn composition_runners(
     )
     .expect("register transaction runner");
 
-    register_evm_read_runners(
+    register_evm_validation_runner(
         &mut runners,
         EvmReadRunnerCapabilities::new(
             artifacts,

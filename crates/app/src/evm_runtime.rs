@@ -4,7 +4,7 @@ use mfm_store::v1 as store;
 
 use crate::{live_transports::LiveTransportRuntime, PublicError};
 
-pub(crate) fn register_evm_runners(
+pub(crate) fn register_evm_balance_runners(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: Arc<LiveTransportRuntime>,
@@ -12,7 +12,7 @@ pub(crate) fn register_evm_runners(
     let validate_runtime = Arc::clone(&runtime_config);
     let bind_runtime = Arc::clone(&runtime_config);
     let capabilities = mfm_adapters_evm::EvmReadRunnerCapabilities::new(
-        artifacts.clone(),
+        artifacts,
         move |binding| {
             let runtime = Arc::clone(&validate_runtime);
             Box::pin(async move { runtime.validate_evm_read_route(binding).await })
@@ -22,35 +22,6 @@ pub(crate) fn register_evm_runners(
             Box::pin(async move { runtime.bind_evm_read_session(binding).await })
         },
     );
-    mfm_adapters_evm::register_evm_read_runners(registry, capabilities)?;
-
-    let validate_runtime = Arc::clone(&runtime_config);
-    let bind_transaction_runtime = Arc::clone(&runtime_config);
-    let bind_signer_runtime = runtime_config;
-    let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
-        mfm_signers_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID,
-        move |signer_ref| {
-            let runtime = Arc::clone(&bind_signer_runtime);
-            Box::pin(async move { runtime.bind_evm_signer(signer_ref).await })
-        },
-    )
-    .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    let transaction_capabilities = mfm_adapters_evm::EvmTransactionRunnerCapabilities::new(
-        artifacts,
-        signer_binder,
-        move |binding, signer_ref| {
-            let runtime = Arc::clone(&validate_runtime);
-            Box::pin(async move {
-                runtime
-                    .validate_evm_mutation_binding(binding, signer_ref)
-                    .await
-            })
-        },
-        move |binding| {
-            let runtime = Arc::clone(&bind_transaction_runtime);
-            Box::pin(async move { runtime.bind_evm_transaction_session(binding).await })
-        },
-    );
-    mfm_adapters_evm::register_evm_transaction_runner(registry, transaction_capabilities)?;
+    mfm_adapters_evm::register_evm_balance_runners(registry, capabilities)?;
     Ok(())
 }

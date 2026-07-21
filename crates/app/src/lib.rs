@@ -4,8 +4,9 @@
 //! `mfm-app` is the typed boundary used by binaries and process adapters. Its sole published
 //! objective is `mfm.portfolio/snapshot@1`, selected with one target-keyed portfolio config. This
 //! crate resolves the current target, plans, certifies, stages launch material, and wires typed
-//! services for start, resume, replay, and public-output rendering. The registered internal EVM
-//! collector cycle, transaction state, and validation state are not application entry points.
+//! services for start, resume, replay, and public-output rendering. Production assembly registers
+//! EVM balance collection only as a child of the portfolio objective; transaction submission and
+//! contract validation remain explicit lower-level foundations.
 //!
 //! Production binaries should construct run services through the Postgres-backed factory exported by
 //! this crate, while tests can use explicit test-support stores.
@@ -250,7 +251,7 @@ pub fn production_runner_registry(
         artifacts.clone(),
         runtime_config.clone(),
     )?;
-    evm_runtime::register_evm_runners(&mut registry, artifacts.clone(), runtime_config)?;
+    evm_runtime::register_evm_balance_runners(&mut registry, artifacts.clone(), runtime_config)?;
     Ok(registry)
 }
 
@@ -337,8 +338,6 @@ fn capability_artifact_error_from_store(
 pub fn production_certification_registry() -> Result<CertificationRegistry, PublicError> {
     let mut registry = CertificationRegistry::new();
     registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
-    registry.register_state::<mfm_states_evm::SubmitEvmTransactionState>()?;
-    registry.register_state::<mfm_states_evm::ValidateEvmContractState>()?;
     registry.register_fact_type::<mfm_states_evm::EvmBalanceSnapshotFact>()?;
     mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
         &mut registry,

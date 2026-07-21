@@ -2,31 +2,20 @@
 //! Deterministic reusable EVM balance collection topology.
 //!
 //! [`EvmBalanceCollectionOperation`] always expands to one external read followed by one atomic
-//! fact record and exports only the resulting receipt. The cycle helpers wrap that same operation
-//! for scheduler-owned internal runs; they are not application entry points.
+//! fact record and exports only the resulting receipt. Parent operations compose it directly.
 //!
 //! # Examples
 //!
 //! ```rust
-//! use alloy_primitives::Address;
-//! use mfm_op_evm_collectors::{
-//!     evm_balance_collection_cycle_program_draft, EvmBalanceAsset,
-//!     EvmBalanceCollectionConfig, EvmBalanceSource,
-//! };
+//! use mfm_op_evm_collectors::EvmBalanceCollectionOperation;
+//! use mfm_program::Operation as _;
 //!
-//! let source = EvmBalanceSource::new(Address::ZERO, EvmBalanceAsset::Native)?;
-//! let config = EvmBalanceCollectionConfig::new("ethereum-mainnet", 1, 18, vec![source])?;
-//! let draft = evm_balance_collection_cycle_program_draft(config)?;
-//! assert_eq!(draft.state_nodes().len(), 2);
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! assert_eq!(EvmBalanceCollectionOperation::name(), "mfm.evm.balance_collection");
 //! ```
 
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
-use mfm_program::{
-    build_root_with_registries, NoContext, Operation, OperationExpansion, OperationKey,
-    PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
-};
-use mfm_program_derive::{OperationOutput, PublicOutputs};
+use mfm_program::{NoContext, Operation, OperationExpansion, StateKey};
+use mfm_program_derive::OperationOutput;
 pub use mfm_states_evm::{
     CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig,
     EvmBalanceCollectionReceipt, EvmBalanceSource, RecordEvmBalanceFactsInputHandles,
@@ -36,23 +25,12 @@ pub use mfm_states_evm::{
 const OP_NAMESPACE: &str = "mfm.evm";
 const OP_KIND_NAME: &str = "balance_collection";
 const OP_VERSION: &str = "mfm.evm.operation.balance_collection.v1";
-const CYCLE_ROOT_SCOPE: &str = "evm_balance_collection_cycle";
-const CYCLE_OPERATION_KEY: &str = "evm_balance_collection";
-const CYCLE_PUBLIC_OUTPUT_KEY: &str = "evm_balance_collection_receipt";
 
 /// Output of one reusable EVM balance collection operation.
 #[derive(OperationOutput)]
 #[mfm(schema = "mfm.evm.operation_outputs.balance_collection")]
 pub struct EvmBalanceCollectionOutputs<'program, 'scope> {
     /// Checked receipt returned by the atomic fact-recording state.
-    pub receipt: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
-}
-
-/// Internal scheduler-cycle root outputs.
-#[derive(PublicOutputs)]
-#[mfm(schema = "mfm.evm.internal_cycle_outputs.balance_collection")]
-pub struct EvmBalanceCollectionCycleOutputs<'program, 'scope> {
-    /// Checked collection receipt; the internal observation batch remains private.
     pub receipt: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
 }
 
@@ -107,38 +85,6 @@ impl Operation for EvmBalanceCollectionOperation {
     }
 }
 
-/// Builds one scheduler-owned internal EVM balance collection cycle draft.
-pub fn evm_balance_collection_cycle_program_draft(
-    config: EvmBalanceCollectionConfig,
-) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
-    build_root_with_registries(
-        ScopeKey::new(CYCLE_ROOT_SCOPE)?,
-        evm_collectors_state_registry()?,
-        evm_collectors_operation_registry()?,
-        |root: &mut RootBuilder<'_, '_>| {
-            let output = root.scope().call::<EvmBalanceCollectionOperation, _>(
-                OperationKey::new(CYCLE_OPERATION_KEY)?,
-                EvmBalanceCollectionOperation,
-                config,
-                (),
-            )?;
-            root.bind_public_outputs(
-                PublicOutputKey::new(CYCLE_PUBLIC_OUTPUT_KEY)?,
-                &EvmBalanceCollectionCycleOutputs {
-                    receipt: output.receipt,
-                },
-            )
-        },
-    )
-}
-
-/// Builds a launch plan for one scheduler-owned internal collection cycle.
-pub fn evm_balance_collection_cycle_program_launch_plan(
-    config: EvmBalanceCollectionConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    TypedProgramLaunchPlan::from_draft(evm_balance_collection_cycle_program_draft(config)?)
-}
-
 mfm_certify::define_program_descriptor_registry! {
     state_registry: pub evm_collectors_state_registry,
     operation_registry: pub evm_collectors_operation_registry,
@@ -157,7 +103,17 @@ mfm_certify::define_program_descriptor_registry! {
 mod tests {
     use super::*;
     use alloy_primitives::address;
-    use mfm_program::{BridgeKey, BridgePolicy, StateSpec};
+    use mfm_program::{
+        build_root_with_registries, BridgeKey, BridgePolicy, OperationKey, PublicOutputKey,
+        RootBuilder, ScopeKey, StateSpec,
+    };
+    use mfm_program_derive::PublicOutputs;
+
+    #[derive(PublicOutputs)]
+    #[mfm(schema = "mfm.evm.test.balance_operation_outputs")]
+    struct BalanceOperationOutputs<'program, 'scope> {
+        receipt: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
+    }
 
     #[derive(PublicOutputs)]
     #[mfm(schema = "mfm.evm.test.multi_parent_outputs")]
@@ -181,9 +137,30 @@ mod tests {
     }
 
     #[test]
-    fn operation_and_cycle_share_the_exact_two_state_topology() {
-        let first = evm_balance_collection_cycle_program_draft(config()).expect("first draft");
-        let second = evm_balance_collection_cycle_program_draft(config()).expect("second draft");
+    fn balance_operation_has_the_exact_deterministic_two_state_topology() {
+        let build = || {
+            build_root_with_registries(
+                ScopeKey::new("balance_operation_test")?,
+                evm_collectors_state_registry()?,
+                evm_collectors_operation_registry()?,
+                |root: &mut RootBuilder<'_, '_>| {
+                    let output = root.scope().call::<EvmBalanceCollectionOperation, _>(
+                        OperationKey::new("collect")?,
+                        EvmBalanceCollectionOperation,
+                        config(),
+                        (),
+                    )?;
+                    root.bind_public_outputs(
+                        PublicOutputKey::new("receipt")?,
+                        &BalanceOperationOutputs {
+                            receipt: output.receipt,
+                        },
+                    )
+                },
+            )
+        };
+        let first = build().expect("first draft");
+        let second = build().expect("second draft");
         assert_eq!(first, second);
         assert_eq!(first.state_nodes().len(), 2);
         assert_eq!(first.operation_lineage().len(), 1);
@@ -206,10 +183,7 @@ mod tests {
                 .as_str(),
             "receipt"
         );
-        mfm_certify::certify_program_draft(&first).expect("cycle certifies");
-        let launch =
-            evm_balance_collection_cycle_program_launch_plan(config()).expect("cycle launch plan");
-        assert_eq!(launch.draft, first);
+        mfm_certify::certify_program_draft(&first).expect("operation draft certifies");
     }
 
     #[test]

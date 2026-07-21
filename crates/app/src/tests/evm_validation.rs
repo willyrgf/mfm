@@ -3,7 +3,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
-use mfm_adapters_evm::{register_evm_read_runners, EvmReadRunnerCapabilities};
+use mfm_adapters_evm::{register_evm_validation_runner, EvmReadRunnerCapabilities};
 use mfm_certify::CertificationRegistry;
 use mfm_evm_capabilities::{
     evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
@@ -70,12 +70,19 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
     drop(launch_services);
 
     // Read services have no runner registry, session binder, transport, or runtime config.
-    let replay_services = make_run_read_services(store.clone(), store, certification);
+    let replay_services =
+        make_run_read_services(store.clone(), store.clone(), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
         .expect("evidence-only validation replay");
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
+    let broker = replay_services
+        .replay_broker_for_test(&run_id)
+        .await
+        .expect("validation replay broker");
+    mfm_adapters_evm::verify_evm_validation_replay(&broker)
+        .expect("explicit validation foundation replay verifier");
     assert_eq!(live_reads.load(Ordering::SeqCst), 3);
 }
 
@@ -83,7 +90,7 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
 async fn contract_validation_validates_its_async_route_before_admission() {
     let store = store::AsyncInMemoryRunStore::default();
     let (draft, seed_material) = validation_launch_material();
-    let certification = production_certification_registry().expect("production registry");
+    let certification = validation_certification_registry();
     let request = crate::prepare_typed_program_run_launch_for_test(
         draft,
         seed_material,
@@ -93,9 +100,16 @@ async fn contract_validation_validates_its_async_route_before_admission() {
     )
     .expect("validation launch request");
     let run_id = request.run_id.clone();
-    let fact_index = crate::ProjectionFactIndexProvider::new(store.clone());
-    let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
-        .expect("production runners without EVM config");
+    let mut runners = ErasedRunnerRegistry::new();
+    register_evm_validation_runner(
+        &mut runners,
+        EvmReadRunnerCapabilities::new(
+            Arc::new(store.clone()),
+            |_binding| Box::pin(async move { Err(missing_provider_failure()) }),
+            |_binding| Box::pin(async move { Err(missing_provider_failure()) }),
+        ),
+    )
+    .expect("explicit validation runner");
     let services = make_run_services(runners, store.clone(), store.clone(), certification);
 
     let error = services
@@ -183,7 +197,7 @@ fn validation_runners(
     live_reads: Arc<AtomicUsize>,
 ) -> ErasedRunnerRegistry {
     let mut runners = ErasedRunnerRegistry::new();
-    register_evm_read_runners(
+    register_evm_validation_runner(
         &mut runners,
         EvmReadRunnerCapabilities::new(
             Arc::new(store.clone()),
@@ -213,6 +227,12 @@ fn validate_binding(binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result
 fn provider_failure() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(evm_diagnostic(
         mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
+    ))
+}
+
+fn missing_provider_failure() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(evm_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationMissing,
     ))
 }
 

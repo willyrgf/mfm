@@ -9,7 +9,6 @@ use mfm_capabilities::{
 };
 use mfm_evm_capabilities::{EvmCapabilityError, EvmNetworkBinding};
 use mfm_ids::LocalPublicId;
-use mfm_signing::{DeterministicSigningProvider, SignerRef, SigningError};
 
 use crate::MFM_RUNTIME_CONFIG_FILE;
 
@@ -81,84 +80,6 @@ impl LiveTransportRuntime {
             .await
             .map(|session| Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmReadSession>)
             .map_err(|error| evm_transport_capability_error(&binding, error))
-    }
-
-    pub(crate) async fn bind_evm_transaction_session(
-        &self,
-        binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmTransactionSession>> {
-        let route = self.load_evm_route_async(binding.clone()).await?;
-        self.evm_transport(&binding)?
-            .bind(
-                binding.clone(),
-                route.source_ref().clone(),
-                route.rpc_url().expose_secret().to_owned(),
-                route
-                    .auth_header()
-                    .map(|value| value.expose_secret().to_owned()),
-            )
-            .await
-            .map(|session| {
-                Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmTransactionSession>
-            })
-            .map_err(|error| evm_transport_capability_error(&binding, error))
-    }
-
-    pub(crate) async fn validate_evm_mutation_binding(
-        &self,
-        binding: EvmNetworkBinding,
-        signer_ref: SignerRef,
-    ) -> mfm_runtime::Result<()> {
-        let runtime_config = self.runtime_config.clone();
-        tokio::task::spawn_blocking(move || {
-            let runtime = Self::new(runtime_config);
-            runtime
-                .load_evm_route(&binding)
-                .map(|_| ())
-                .map_err(mfm_adapters_evm::evm_ingress_runtime_error)?;
-            runtime
-                .assemble_evm_signer(signer_ref)
-                .map(|_| ())
-                .map_err(|_| {
-                    mfm_adapters_evm::evm_ingress_runtime_error(evm_provider_failure(
-                        &binding,
-                        ProviderDiagnosticCode::ProviderConfigurationInvalid,
-                    ))
-                })
-        })
-        .await
-        .map_err(|_| {
-            mfm_runtime::RuntimeError::RunnerBinding(
-                "EVM mutation ingress validation task failed".to_owned(),
-            )
-        })?
-    }
-
-    pub(crate) async fn bind_evm_signer(
-        &self,
-        signer_ref: SignerRef,
-    ) -> mfm_signing::Result<Arc<dyn DeterministicSigningProvider>> {
-        let path = self.runtime_config.path.clone().ok_or_else(|| {
-            SigningError::redacted_provider_failure("runtime signer config is absent")
-        })?;
-        tokio::task::spawn_blocking(move || {
-            crate::transaction_signing::assemble_keystore_signer(path, signer_ref)
-                .map(|provider| Arc::new(provider) as Arc<dyn DeterministicSigningProvider>)
-                .map_err(SigningError::redacted_provider_failure)
-        })
-        .await
-        .map_err(SigningError::redacted_provider_failure)?
-    }
-
-    fn assemble_evm_signer(
-        &self,
-        signer_ref: SignerRef,
-    ) -> mfm_signing::Result<mfm_signers_keystore::KeystoreSignerProvider> {
-        let path = self.runtime_config.path.clone().ok_or_else(|| {
-            SigningError::redacted_provider_failure("runtime signer config is absent")
-        })?;
-        crate::transaction_signing::assemble_keystore_signer(path, signer_ref)
-            .map_err(SigningError::redacted_provider_failure)
     }
 
     fn load_evm_route(

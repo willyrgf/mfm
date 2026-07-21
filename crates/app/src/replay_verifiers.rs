@@ -58,16 +58,6 @@ impl ReplayVerifierRegistry {
                     intent_matcher: None,
                     verifier: verify_evm_balance_collection,
                 },
-                ReplayVerifierRegistration {
-                    state_keys: &[state_key::<mfm_states_evm::ValidateEvmContractState>],
-                    intent_matcher: None,
-                    verifier: verify_evm_validation,
-                },
-                ReplayVerifierRegistration {
-                    state_keys: &[],
-                    intent_matcher: Some(mfm_adapters_evm::is_evm_transaction_replay_intent),
-                    verifier: verify_evm_transaction,
-                },
             ],
         }
     }
@@ -133,14 +123,6 @@ fn verify_evm_balance_collection(
     _registry: &CertificationRegistry,
 ) -> Result<()> {
     mfm_adapters_evm::verify_evm_balance_collection_replay(broker)
-}
-
-fn verify_evm_validation(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_evm::verify_evm_validation_replay(broker)
-}
-
-fn verify_evm_transaction(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_evm::verify_evm_transaction_replay(broker)
 }
 
 #[cfg(test)]
