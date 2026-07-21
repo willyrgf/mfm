@@ -43,6 +43,21 @@
         in
         assert pkgs.sqlx-cli.version == "0.9.0";
         pkgs.sqlx-cli;
+      mkDevTools =
+        system:
+        let
+          pkgs = mkPkgs system;
+          rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
+        in
+        [
+          rustToolchain
+          pkgs.cargo-nextest
+          pkgs.git
+          pkgs.pkg-config
+          pkgs.stdenv.cc
+          (mkSqlxCli system)
+        ]
+        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
     in
     {
       packages = forAllSystems (
@@ -77,6 +92,21 @@
             ];
             postInstall = ''
               ln -s "$out/bin/mfm_cli" "$out/bin/mfm"
+            '';
+          };
+        }
+      );
+
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = mkPkgs system;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = mkDevTools system;
+            shellHook = ''
+              unset CARGO_TARGET_DIR
             '';
           };
         }

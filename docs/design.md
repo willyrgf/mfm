@@ -177,8 +177,7 @@ Canonical fact-query v2 may carry one opaque `FactContentIdentityEvidence` narro
 compiler binds its descriptor component to the resolved descriptor, and providers compare all four
 compact components against trusted indexed references before ordering and limiting. This filter is
 only a bounded candidate-narrowing mechanism: the consumer must still hydrate canonical subject and
-response material and rederive the full content identity before trusting a returned fact. Query v1
-has no reader.
+response material and rederive the full content identity before trusting a returned fact.
 
 ## Current Semantic Configuration And Launch Boundary
 
@@ -711,10 +710,9 @@ attempt-terminal evidence; normal store/history validation rejects those malform
 scheduler recovery, and public status collapses any surviving operational block to blocked without
 minting semantic terminal events.
 
-Sync and async drive paths may remain separate IO wrappers. Shared lifecycle authority belongs in
-pure helpers for transition/recovery classification, attempt planning, invocation build, output
-validation, and commit planning. Full sync/async driver collapse is deferred to a later async-primary
-cleanup and must not change lifecycle semantics.
+The runtime exposes one async drive path. Lifecycle authority belongs in pure helpers for
+transition/recovery classification, attempt planning, invocation build, output validation, and
+commit planning.
 
 For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
 certified attempt authority. It then materializes state inputs from certified binding trees and
@@ -813,7 +811,7 @@ oracle/source identity instead of relying on process-local routing. A route that
 observes an incompatible semantic network or chain fails after `RunAdmitted` as an
 attempt/capability failure with a closed redacted provider diagnostic.
 Provider diagnostics carry a
-provider family, stable diagnostic code, optional redaction-safe operation id, and closed
+provider family, closed diagnostic code, optional redaction-safe operation id, and closed
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,
 response-shape failure, unsupported operation, operation incomplete, and source mismatch. They must
 not carry RPC URLs, authorization headers, file paths, provider messages, request/response bodies,
@@ -912,26 +910,6 @@ stored certified authority and rebuilding the projection from the authoritative 
 Rendered JSON cannot be used as resume, replay, certification, or render authority.
 
 CLI and REST outputs are public API surfaces, but they are not semantic execution authority.
-
-## CLI And REST Boundaries
-
-`bin/cli` and `bin/rest-api` may:
-
-- decode JSON/TOML/user input
-- build typed configs and certified specs through operation crates
-- construct the production Postgres run store and app services
-- start, resume, replay, inspect, and render typed runs through app services
-- read observation-only run list/watch pages through the shared app API
-- preserve stable response envelopes
-
-They must not:
-
-- plan workflow semantics directly
-- execute state behavior directly
-- bypass typed certification
-- infer public outputs from untyped snapshots
-- migrate uncertified historical runs into certified typed runs
-- depend directly on SQLx, filesystem artifact stores, or alternate production storage selectors
 
 ## Architecture Placement
 

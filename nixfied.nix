@@ -13,6 +13,7 @@ let
   # child PATH from these roots and nothing else (hermetic env).
   cargoTools = [
     "rust-toolchain"
+    pkgs.bash
     pkgs.cargo-nextest
     pkgs.git
     pkgs.pkg-config
@@ -23,15 +24,21 @@ let
     assert pkgs.sqlx-cli.version == "0.9.0";
     pkgs.sqlx-cli;
   sqlxTools = cargoTools ++ [
-    pkgs.bash
     "pg-psql"
     sqlxCli
   ];
 
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
-  # Hermetic environment values; no append-to-inherited behavior because the child env starts empty.
+  # Verification-only profile policy: keep line tables for file/line backtraces,
+  # avoid incremental and split-debug artifacts, and leave direct Cargo profiles unchanged.
+  # These values are inherited by nested Cargo invocations such as trybuild and SQLx.
   cargoEnv = {
-    CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
+    CARGO_TARGET_DIR = "target/verification";
+    CARGO_INCREMENTAL = "0";
+    CARGO_PROFILE_DEV_DEBUG = "1";
+    CARGO_PROFILE_TEST_DEBUG = "1";
+    CARGO_PROFILE_DEV_SPLIT_DEBUGINFO = "off";
+    CARGO_PROFILE_TEST_SPLIT_DEBUGINFO = "off";
     # Keep managed Rust checks within the memory envelope of the smallest
     # supported CI runner; Cargo can otherwise link too many proc macros at once.
     CARGO_BUILD_JOBS = "2";
@@ -67,7 +74,17 @@ let
     {
       invocation = {
         inherit tools;
-        inherit run;
+        run = [
+          "bash"
+          "-c"
+          ''
+            set -euo pipefail
+            export CARGO_TARGET_DIR="$(pwd -P)/$CARGO_TARGET_DIR"
+            exec "$@"
+          ''
+          "mfm-cargo"
+        ]
+        ++ run;
         env = cargoEnv // env;
         timeoutMs = 7200000;
       };
@@ -99,8 +116,9 @@ in
     slotStride = 100;
   };
 
-  # The toolchain closure anchors run[0] = "cargo"; cc anchors nothing (PATH
-  # member for build scripts). Effects are the one hand-declared attestation.
+  # Bash anchors the Cargo-leaf wrapper executable; the Rust toolchain and cc
+  # remain PATH members for Cargo and build scripts. Effects are the one
+  # hand-declared attestation.
   nixfied.closures.rust-toolchain = {
     package = rustToolchain;
     executable = "bin/cargo";
@@ -172,17 +190,8 @@ in
         "nextest"
         "run"
         "--workspace"
-      ];
-    };
-    app-test-support = cargoLeaf {
-      run = [
-        "cargo"
-        "nextest"
-        "run"
-        "-p"
-        "mfm-app"
         "--features"
-        "test-support"
+        "mfm-app/test-support"
       ];
     };
     doc-tests = cargoLeaf {
@@ -231,8 +240,30 @@ in
 
           cd crates/storages/postgres
           cargo sqlx migrate run --source migrations
-          cargo clean -p mfm-storage-postgres
-          cargo sqlx prepare --check -- --all-targets --features parity-tests
+          prepare_check() {
+            cargo sqlx prepare --check -- --all-targets --features parity-tests
+          }
+          prepare_check
+
+          # The migration-ledger query must notice schema changes even when Rust
+          # sources are unchanged and Cargo would otherwise reuse its artifacts.
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "ALTER TABLE \"$schema\"._sqlx_migrations DROP COLUMN checksum"
+          if mutation_output="$(prepare_check 2>&1)"; then
+            echo "schema mutation was not detected by cargo sqlx prepare --check" >&2
+            exit 1
+          fi
+          mutation_output="''${mutation_output,,}"
+          if [[ "$mutation_output" != *checksum* ]]; then
+            echo "schema mutation failed for an unexpected reason" >&2
+            exit 1
+          fi
+          echo "schema mutation correctly rejected by cargo sqlx prepare --check"
+
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS \"$schema\" CASCADE"
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA \"$schema\""
+          cargo sqlx migrate run --source migrations
+          prepare_check
+          echo "restored schema accepted by cargo sqlx prepare --check"
         ''
       ];
       env = postgresSqlxEnv;
@@ -350,12 +381,13 @@ in
         "HEAD^{commit}"
       ];
     };
-    # Keep workspace tests as explicit leaves so each command has its own evidence.
+    # Keep workspace tests and doctests as explicit leaves so each command has
+    # its own evidence. The workspace run enables app test support in-place to
+    # avoid executing the app's default tests a second time.
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
         "nextest-run"
-        "app-test-support"
         "doc-tests"
       ];
     };

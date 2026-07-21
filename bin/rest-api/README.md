@@ -6,15 +6,18 @@ The REST API is a typed assembly surface only. It can start, resume, inspect, re
 certified typed runs through `mfm-app`, `mfm-runtime`, `mfm-store`, and typed artifact storage. It
 accepts only certified typed run authority.
 
-## Running (Nixfied)
+## Running locally
 
 ```bash
-# Local dev workflow (starts Postgres + REST API)
-nix run .#dev
-
-# Run the server only (requires DATABASE_URL)
-nix run .#mfm_rest_api
+nix develop
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
+cargo sqlx migrate run --source crates/storages/postgres/migrations
+cargo run -p mfm-rest-api
 ```
+
+The repository does not expose a managed REST API app. The caller owns the
+PostgreSQL process and supplies its endpoint; the server validates the migrated
+schema on startup.
 
 ## Configuration
 
@@ -26,13 +29,8 @@ Environment variables:
 - `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
-alter tables. Apply the `mfm-storage-postgres` migrations before starting
-the server:
-
-```bash
-export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-cargo sqlx migrate run --source crates/storages/postgres/migrations
-```
+alter tables. Apply the `mfm-storage-postgres` migrations before starting the
+server, as shown in the local run sequence above.
 
 Use a fresh or explicitly reset database for this typed Postgres baseline. There
 is no downgrade migration; rollback to another branch requires resetting the
@@ -107,8 +105,7 @@ Routes:
 
 Query parameters for `GET /v1/facts/:kind` and `GET /v1/facts/:kind/latest`:
 
-- `shape`: optional descriptor shape selector, matching a descriptor schema id or compatibility
-  group.
+- `shape`: optional descriptor shape selector, matching a descriptor schema id.
 - `order`: required descriptor ordering policy name.
 - `field`: required and repeatable returnable field id.
 - `subject`: repeatable subject predicate, such as `network=bitcoin-mainnet` or `subject.network.eq=bitcoin-mainnet`.

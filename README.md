@@ -44,7 +44,7 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 - Certified saga remediation with signed manual authorization decisions.
 - Content-addressed manifests, snapshots, facts, and outputs.
 - Deterministic typed-state orchestration for ops/pipelines.
-- Thin CLI and REST transport layers for stable automation surfaces.
+- Thin CLI and REST transport layers for typed automation surfaces.
 - Security-hardened Ethereum keystore (tamper checks + signing utilities).
 - Typed storage backends for run events and artifacts.
 
@@ -64,7 +64,8 @@ Start here:
 - Design contract (source of truth): [`docs/design.md`](docs/design.md)
 - Certified saga contract: [`docs/saga.md`](docs/saga.md)
 - Architecture taxonomy + placement rules: [`docs/architecture.md`](docs/architecture.md)
-- Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
+- Rust build and verification contract: [`docs/build-and-verification.md`](docs/build-and-verification.md)
+- AI-agent contribution rules: [`AGENTS.md`](AGENTS.md)
 - Code quality policy: [`docs/code-quality.md`](docs/code-quality.md)
 
 User-facing docs:
@@ -89,49 +90,34 @@ Crate docs:
 - EVM runtime/replay adapters: [`crates/adapters/evm/README.md`](crates/adapters/evm/README.md)
 - Storage (typed run events and current configuration, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
 
-Design notes / planning:
+Development and operations:
 
 - Nixfied v2 project model: [`nixfied.nix`](nixfied.nix)
 - Framework upgrade notes: [`docs/UPGRADE.md`](docs/UPGRADE.md)
 
 ## Development
 
-Use focused Cargo verification by default. Start external services such as Postgres or Reth manually
-when a parity test needs them, then run the targeted test against those live endpoints.
+All developer-invoked Rust tools run in the pinned default Nix shell. Enter it
+once, then use package- or test-scoped Cargo commands:
 
 ```bash
+nix develop
 cargo fmt --all -- --check
-cargo test --workspace
-cargo test -p mfm-integration-tests --test cargo_metadata_contract
+cargo check -p <package>
+cargo test -p <package> <test-filter>
 ```
 
-Useful focused parity examples:
+For a non-interactive one-off, use `nix develop -c cargo ...`; never rely on
+host-installed Rust tooling. For a one-off managed check, run the exact current
+Nixfied task:
 
 ```bash
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm_test cargo test -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_smoke
+nix run .#run -- --task <task-id>
 ```
 
-Nixfied v2 gates are available when changing Nixfied behavior or running the repository CI
-surface:
-
-```bash
-nix run .#model-check
-nix run .#check
-nix run .#test
-nix run .#test-db
-nix run .#ci
-```
-
-`nix run .#model-check` validates the compiled model without executing project tasks.
-
-`nix run .#test` runs `cargo nextest run --workspace` followed by
-`cargo test --workspace --doc`, without managed external services.
-`nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
-against a migrated schema, and runs Postgres-backed parity tests.
-`.#ci` is full by definition: it starts the managed services required by feature-gated parity
-tests, then records the full closing Git SHA in the retained `closing-source-revision` task log.
-Pair that artifact with `git status --short` for clean-worktree closure evidence. There is no
-`--mode` or `--full` alias flag.
+Use the smallest check that covers the change. The selection matrix, exact gate
+composition, managed-leaf caveats, and artifact policy live only in the
+[build and verification contract](docs/build-and-verification.md).
 
 Run binaries locally:
 
@@ -140,8 +126,8 @@ nix run .#mfm -- --help
 nix run .#mfm -- ops list
 nix run .#mfm -- setup import examples/setup/organization.toml
 nix run .#mfm -- setup list
-cargo run -p mfm -- --help
-cargo run -p mfm-rest-api
+nix develop -c cargo run -p mfm -- --help
+nix develop -c cargo run -p mfm-rest-api
 ```
 
 The `.#mfm` app runs the packaged CLI with a Nixfied-managed PostgreSQL process
@@ -150,7 +136,8 @@ in slot 9. It keeps the development database under the Nixfied state root for
 delegates all arguments to the raw binary, and stops PostgreSQL afterward without
 removing its data. Separate `nix run .#mfm` commands therefore share setup and run
 state. For raw execution with caller-managed infrastructure, use
-`cargo run -p mfm -- <ARGS>` or the binary produced by `nix build .#mfm`.
+`nix develop -c cargo run -p mfm -- <ARGS>` or the binary produced by
+`nix build .#mfm`.
 
 ## License
 MIT (see [`LICENSE`](LICENSE)).
