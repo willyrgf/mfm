@@ -3,100 +3,132 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
-    "crates/kernel/ids/Cargo.toml",
-    "crates/kernel/canonical/Cargo.toml",
-    "crates/kernel/values/Cargo.toml",
-    "crates/kernel/facts/Cargo.toml",
-    "crates/kernel/effects/Cargo.toml",
-    "crates/kernel/capabilities/Cargo.toml",
-    "crates/kernel/program/Cargo.toml",
-    "crates/kernel/program-derive/Cargo.toml",
-    "crates/kernel/manual-auth/Cargo.toml",
-    "crates/kernel/replay/Cargo.toml",
-    "crates/kernel/runtime/Cargo.toml",
-    "crates/kernel/spec/Cargo.toml",
-    "crates/kernel/certify/Cargo.toml",
-    "crates/kernel/events/Cargo.toml",
-    "crates/kernel/store/Cargo.toml",
-];
-
-const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
-    ("mfm", "mfm_core"),
-    ("mfm-state-portfolio", "mfm-states-btc"),
-    ("mfm-state-portfolio", "mfm-states-evm"),
-    ("mfm-transports-proof", "mfm-collectors-proof"),
-];
-
-const PATH_CATEGORY_EXCEPTIONS: &[(&str, CrateCategory)] = &[
-    (
-        "crates/transports/btc-jsonrpc-http/Cargo.toml",
-        CrateCategory::Transport,
-    ),
-    ("crates/collectors/proof/Cargo.toml", CrateCategory::State),
-    ("crates/core/Cargo.toml", CrateCategory::SignerProvider),
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum CrateCategory {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layer {
     Kernel,
-    CapabilityContract,
-    DomainModel,
-    DomainConfig,
-    State,
-    Operation,
-    Adapter,
-    Transport,
-    SignerContract,
-    SignerProvider,
-    RuntimeConfig,
+    Domain,
+    Live,
+    Signing,
+    SecretProvider,
     Storage,
-    App,
+    Assembly,
     Binary,
-    TestSupport,
+    Test,
 }
 
-impl CrateCategory {
+impl Layer {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
             "kernel" => Some(Self::Kernel),
-            "capability-contract" => Some(Self::CapabilityContract),
-            "domain-model" => Some(Self::DomainModel),
-            "domain-config" => Some(Self::DomainConfig),
-            "state" => Some(Self::State),
-            "operation" => Some(Self::Operation),
-            "adapter" => Some(Self::Adapter),
-            "transport" => Some(Self::Transport),
-            "signer-contract" => Some(Self::SignerContract),
-            "signer-provider" => Some(Self::SignerProvider),
-            "runtime-config" => Some(Self::RuntimeConfig),
+            "domain" => Some(Self::Domain),
+            "live" => Some(Self::Live),
+            "signing" => Some(Self::Signing),
+            "secret-provider" => Some(Self::SecretProvider),
             "storage" => Some(Self::Storage),
-            "app" => Some(Self::App),
+            "assembly" => Some(Self::Assembly),
             "binary" => Some(Self::Binary),
-            "test-support" => Some(Self::TestSupport),
+            "test" => Some(Self::Test),
             _ => None,
         }
     }
 
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Kernel => "kernel",
-            Self::CapabilityContract => "capability-contract",
-            Self::DomainModel => "domain-model",
-            Self::DomainConfig => "domain-config",
-            Self::State => "state",
-            Self::Operation => "operation",
-            Self::Adapter => "adapter",
-            Self::Transport => "transport",
-            Self::SignerContract => "signer-contract",
-            Self::SignerProvider => "signer-provider",
-            Self::RuntimeConfig => "runtime-config",
+            Self::Domain => "domain",
+            Self::Live => "live",
+            Self::Signing => "signing",
+            Self::SecretProvider => "secret-provider",
             Self::Storage => "storage",
-            Self::App => "app",
+            Self::Assembly => "assembly",
             Self::Binary => "binary",
-            Self::TestSupport => "test-support",
+            Self::Test => "test",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainRole {
+    Source,
+    Aggregate,
+}
+
+impl DomainRole {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "source" => Some(Self::Source),
+            "aggregate" => Some(Self::Aggregate),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Aggregate => "aggregate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageSemantics {
+    layer: Layer,
+    domain: Option<String>,
+    domain_role: Option<DomainRole>,
+    domain_facing: Option<bool>,
+    binary_facing: Option<bool>,
+}
+
+impl PackageSemantics {
+    fn kernel(domain_facing: bool, binary_facing: bool) -> Self {
+        Self {
+            layer: Layer::Kernel,
+            domain: None,
+            domain_role: None,
+            domain_facing: Some(domain_facing),
+            binary_facing: Some(binary_facing),
+        }
+    }
+
+    fn domain(domain: &str, role: DomainRole) -> Self {
+        Self {
+            layer: Layer::Domain,
+            domain: Some(domain.to_owned()),
+            domain_role: Some(role),
+            domain_facing: None,
+            binary_facing: None,
+        }
+    }
+
+    fn live(domain: &str) -> Self {
+        Self {
+            layer: Layer::Live,
+            domain: Some(domain.to_owned()),
+            domain_role: None,
+            domain_facing: None,
+            binary_facing: None,
+        }
+    }
+
+    fn plain(layer: Layer) -> Self {
+        Self {
+            layer,
+            domain: None,
+            domain_role: None,
+            domain_facing: None,
+            binary_facing: None,
+        }
+    }
+
+    fn assembly(binary_facing: bool) -> Self {
+        Self {
+            layer: Layer::Assembly,
+            domain: None,
+            domain_role: None,
+            domain_facing: None,
+            binary_facing: Some(binary_facing),
         }
     }
 }
@@ -104,630 +136,386 @@ impl CrateCategory {
 #[derive(Debug, Clone)]
 struct WorkspacePackage {
     name: String,
-    manifest_rel: String,
     manifest_dir_rel: String,
-    category: CrateCategory,
+    semantics: PackageSemantics,
+    target_kinds: Vec<BTreeSet<String>>,
 }
 
 #[test]
-fn all_workspace_crates_have_mfm_category() {
+fn workspace_semantic_metadata_contract_holds() {
     let root = repo_root();
     let metadata = workspace_metadata(&root);
+    let packages = workspace_packages(&metadata, &root).expect("workspace package metadata");
 
-    validate_all_workspace_crates_have_mfm_category(&metadata).expect("workspace crate category");
+    domain_roles(&packages).expect("domain and live metadata");
+    for package in &packages {
+        validate_target_coherence(package).expect("Cargo target-kind coherence");
+    }
 }
 
 #[test]
-fn workspace_categories_are_known() {
+fn workspace_semantic_dependency_matrix_holds() {
     let root = repo_root();
     let metadata = workspace_metadata(&root);
+    let packages = workspace_packages(&metadata, &root).expect("workspace package metadata");
 
-    let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
-    validate_workspace_category_paths(&packages).expect("category path consistency");
+    validate_dependency_matrix(&metadata, &root, &packages).expect("semantic dependency matrix");
 }
 
 #[test]
-fn workspace_category_dependency_rules_hold_with_exact_allowlist() {
-    let root = repo_root();
-    let metadata = workspace_metadata(&root);
-
-    validate_category_dependency_rules(&metadata, &root).expect("category dependency rules");
-}
-
-#[test]
-fn category_dependency_rules_reject_forbidden_edges() {
-    let root = repo_root();
-    let base_metadata = workspace_metadata(&root);
-    for (
-        name,
-        source,
-        dependency,
-        dependency_path,
-        expected_source_category,
-        expected_dependency_category,
-    ) in [
-        (
-            "state to adapter",
-            "mfm-state-portfolio",
-            "mfm-adapters-portfolio",
-            "crates/adapters/portfolio",
-            "state",
-            "adapter",
-        ),
-        (
-            "state to live transport",
-            "mfm-state-portfolio",
-            "mfm-transports-evm",
-            "crates/transports/evm",
-            "state",
-            "transport",
-        ),
-        (
-            "transport to runtime config",
-            "mfm-transports-evm",
-            "mfm-runtime-config",
-            "crates/runtime-config",
-            "transport",
-            "runtime-config",
-        ),
-        (
-            "state to runtime config",
-            "mfm-state-portfolio",
-            "mfm-runtime-config",
-            "crates/runtime-config",
-            "state",
-            "runtime-config",
-        ),
-        (
-            "operation to runtime config",
-            "mfm-op-portfolio-snapshot",
-            "mfm-runtime-config",
-            "crates/runtime-config",
-            "operation",
-            "runtime-config",
-        ),
-        (
-            "transport to operation",
-            "mfm-transports-proof",
-            "mfm-op-proof",
-            "crates/ops/proof-op",
-            "transport",
-            "operation",
-        ),
-        (
-            "capability contract to domain model",
-            "mfm-evm-capabilities",
-            "mfm-portfolio-model",
-            "crates/portfolio/model",
-            "capability-contract",
-            "domain-model",
-        ),
-    ] {
-        let mut metadata = base_metadata.clone();
-        push_path_dependency(
-            &mut metadata,
-            source,
-            dependency,
-            &root.join(dependency_path),
-        );
-
-        let error =
-            validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-        assert!(
-            error.contains(&format!("source_category={expected_source_category}"))
-                && error.contains(&format!(
-                    "dependency_category={expected_dependency_category}"
-                ))
-                && error.contains(dependency),
-            "{name}: unexpected error: {error}"
-        );
-    }
-}
-
-#[test]
-fn category_dependency_rules_reject_forbidden_binary_edges() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm",
-        "mfm-adapters-portfolio",
-        &root.join("crates/adapters/portfolio"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=binary")
-            && error.contains("dependency_category=adapter")
-            && error.contains("mfm-adapters-portfolio"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn category_dependency_rules_reject_unapproved_binary_platform_edges() {
-    let root = repo_root();
-    let base_metadata = workspace_metadata(&root);
-    for (name, package, manifest, category, dependency_path) in [
-        (
-            "storage platform",
-            "mfm-storage-fixture",
-            "crates/storages/fixture/Cargo.toml",
-            "storage",
-            "crates/storages/fixture",
-        ),
-        (
-            "signer-provider platform",
-            "mfm-signer-provider-fixture",
-            "crates/signers/fixture/Cargo.toml",
-            "signer-provider",
-            "crates/signers/fixture",
-        ),
-    ] {
-        let mut metadata = base_metadata.clone();
-        push_synthetic_workspace_package(&mut metadata, &root, package, manifest, category);
-        push_path_dependency(&mut metadata, "mfm", package, &root.join(dependency_path));
-
-        let error =
-            validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-        assert!(
-            error.contains("source_category=binary")
-                && error.contains(&format!("dependency_category={category}"))
-                && error.contains(package),
-            "{name}: unexpected error: {error}"
-        );
-    }
-}
-
-#[test]
-fn kernel_workspace_crates_stay_inside_kernel_dependency_boundary() {
-    let root = repo_root();
-    let metadata = workspace_metadata(&root);
-
-    validate_kernel_dependency_boundary(&metadata, &root).expect("kernel dependency boundary");
-}
-
-#[test]
-fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-ids",
-        "mfm-app",
-        &root.join("crates/app"),
-    );
-
-    let error =
-        validate_kernel_dependency_boundary(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("mfm-app") && error.contains("crates/app"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn configured_target_ownership_and_dependency_boundaries_are_explicit() {
-    let root = repo_root();
-    let metadata = workspace_metadata(&root);
-    let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
-    assert_eq!(
-        packages.len(),
-        44,
-        "the configured-target portfolio snapshot workspace has 44 packages"
-    );
-
-    for removed in [
-        "mfm-authored-config",
-        "mfm-portfolio-config",
-        "mfm-stream-store-postgres",
-        "mfm-op-portfolio-tracker",
-        "mfm-catalog-model",
-    ] {
-        assert!(
-            packages.iter().all(|package| package.name != removed),
-            "removed package remains in workspace metadata: {removed}"
-        );
-    }
-    assert!(
-        packages
-            .iter()
-            .any(|package| package.name == "mfm-op-portfolio-snapshot"),
-        "the complete portfolio snapshot operation must remain a workspace package"
-    );
-    assert_eq!(
-        packages
-            .iter()
-            .filter(|package| package.name.contains("evm"))
-            .map(|package| package.name.as_str())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "mfm-adapters-evm",
-            "mfm-evm-capabilities",
-            "mfm-evm-signing",
-            "mfm-op-evm-collectors",
-            "mfm-states-evm",
-            "mfm-transports-evm",
-        ]),
-        "the reusable EVM surface must contain exactly six packages"
-    );
-
-    let by_name = packages
-        .iter()
-        .map(|package| (package.name.as_str(), package))
-        .collect::<BTreeMap<_, _>>();
-    assert!(
-        !by_name.contains_key("mfm-catalog-model"),
-        "the deleted catalog-model package must not remain in workspace metadata"
-    );
-    assert_eq!(
-        by_name
-            .get("mfm-runtime-config")
-            .map(|package| package.category),
-        Some(CrateCategory::RuntimeConfig)
-    );
-
-    let storage = by_name
-        .get("mfm-storage-postgres")
-        .expect("renamed PostgreSQL storage package");
-    for dependency in path_dependencies(&metadata, storage.name.as_str(), &by_name) {
-        assert!(!matches!(
-            dependency.category,
-            CrateCategory::DomainModel | CrateCategory::DomainConfig
-        ));
-    }
-
-    let evm_state_dependencies = path_dependencies(&metadata, "mfm-states-evm", &by_name);
-    assert!(
-        evm_state_dependencies.iter().all(|dependency| {
-            !matches!(
-                dependency.name,
-                "mfm-portfolio-model"
-                    | "mfm-app"
-                    | "mfm-runtime"
-                    | "mfm-transports-evm"
-                    | "mfm-signers-keystore"
-                    | "mfm-storage-postgres"
-            )
-        }),
-        "the EVM state package must remain independent of portfolio, app, runtime, transport, signer implementations, and storage"
-    );
-    assert!(
-        path_dependencies(&metadata, "mfm-adapters-evm", &by_name)
-            .iter()
-            .all(|dependency| dependency.category != CrateCategory::Operation),
-        "the EVM adapter package must not own operation topology"
-    );
-    let evm_operation_dependencies =
-        path_dependencies(&metadata, "mfm-op-evm-collectors", &by_name);
-    assert!(
-        evm_operation_dependencies
-            .iter()
-            .any(|dependency| dependency.name == "mfm-states-evm")
-            && evm_operation_dependencies.iter().all(|dependency| {
-                !matches!(
-                    dependency.name,
-                    "mfm-state-portfolio"
-                        | "mfm-app"
-                        | "mfm-runtime"
-                        | "mfm-store"
-                        | "mfm-transports-evm"
-                )
-            }),
-        "the EVM collector operation must depend on reusable states without app/runtime/storage/transport or portfolio ownership"
-    );
-    let portfolio_model_dependencies =
-        path_dependencies(&metadata, "mfm-portfolio-model", &by_name);
-    assert!(
-        portfolio_model_dependencies
-            .iter()
-            .any(|dependency| dependency.name == "mfm-evm-capabilities"),
-        "the portfolio model must consume the capability-owned EVM block identity"
-    );
-
-    for package in packages.iter().filter(|package| {
-        matches!(
-            package.category,
-            CrateCategory::Operation | CrateCategory::State
-        )
-    }) {
-        for dependency in path_dependencies(&metadata, package.name.as_str(), &by_name) {
-            assert!(
-                !matches!(
-                    dependency.name,
-                    "mfm"
-                        | "mfm-app"
-                        | "mfm-rest-api"
-                        | "mfm-storage-postgres"
-                        | "mfm-runtime-config"
-                ) && dependency.name != "sqlx",
-                "{} may not depend on binaries, app, PostgreSQL, runtime config, or SQLx: {}",
-                package.name,
-                dependency.name
-            );
-        }
-    }
-
-    for package in packages
-        .iter()
-        .filter(|package| package.category == CrateCategory::Binary)
-    {
-        for dependency in path_dependencies(&metadata, package.name.as_str(), &by_name)
-            .into_iter()
-            .filter(|dependency| dependency.kind.is_none())
-        {
-            assert!(
-                !matches!(
-                    dependency.category,
-                    CrateCategory::DomainConfig | CrateCategory::Operation
-                ),
-                "production binary {} must not own domain config or operation ingress: {}",
-                package.name,
-                dependency.name
-            );
-        }
-    }
-}
-
-#[test]
-fn configured_target_source_boundaries_are_enforced() {
-    let root = repo_root();
-    let metadata = workspace_metadata(&root);
-    let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
-    let by_name = packages
-        .iter()
-        .map(|package| (package.name.as_str(), package))
-        .collect::<BTreeMap<_, _>>();
-
-    let sources = rust_sources(&root);
-    assert!(
-        !root.join("crates/catalog-model/Cargo.toml").exists(),
-        "the deleted catalog-model package must not retain a manifest"
-    );
-
-    let storage_root = root.join("crates/storages");
-    for path in sources
-        .iter()
-        .filter(|path| path.starts_with(&storage_root))
-    {
-        let source = fs::read_to_string(path).expect("read storage Rust source");
-        for forbidden in ["MfmConfig", "ValidatedConfig<"] {
-            assert!(
-                !source.contains(forbidden),
-                "storage source {} imports or names domain type {forbidden}",
-                path.display()
-            );
-        }
-    }
-
-    let app_root = root.join("crates/app/src");
-    let configured_value_methods = [
-        "publish_configured_values(",
-        ".load_configured_value(",
-        ".list_configured_targets(",
+fn metadata_shape_is_closed_and_typed() {
+    let accepted = [
+        json!({"layer": "kernel", "domain-facing": true, "binary-facing": false}),
+        json!({"layer": "domain", "domain": "bitcoin", "domain-role": "source"}),
+        json!({"layer": "live", "domain": "bitcoin"}),
+        json!({"layer": "signing"}),
+        json!({"layer": "secret-provider"}),
+        json!({"layer": "storage"}),
+        json!({"layer": "assembly", "binary-facing": true}),
+        json!({"layer": "binary"}),
+        json!({"layer": "test"}),
     ];
-    for path in &sources {
-        if path.starts_with(&storage_root) || path.starts_with(&app_root) {
+    for value in accepted {
+        parse_semantics("fixture", value.as_object().expect("metadata object"))
+            .expect("valid semantic metadata");
+    }
+
+    for (name, rejected) in [
+        ("old category", json!({"category": "kernel"})),
+        ("unknown layer", json!({"layer": "adapter"})),
+        (
+            "missing kernel facing flag",
+            json!({"layer": "kernel", "domain-facing": true}),
+        ),
+        (
+            "domain missing role",
+            json!({"layer": "domain", "domain": "bitcoin"}),
+        ),
+        (
+            "live carrying role",
+            json!({"layer": "live", "domain": "bitcoin", "domain-role": "source"}),
+        ),
+        (
+            "binary carrying domain",
+            json!({"layer": "binary", "domain": "bitcoin"}),
+        ),
+        (
+            "unknown metadata key",
+            json!({"layer": "storage", "phase": "transition"}),
+        ),
+        (
+            "invalid domain",
+            json!({"layer": "domain", "domain": "Bitcoin/Core", "domain-role": "source"}),
+        ),
+        (
+            "invalid role",
+            json!({"layer": "domain", "domain": "bitcoin", "domain-role": "leaf"}),
+        ),
+    ] {
+        let error = parse_semantics("fixture", rejected.as_object().expect("metadata object"))
+            .expect_err("metadata fixture must fail");
+        assert!(!error.is_empty(), "{name} returned an empty diagnostic");
+    }
+}
+
+#[test]
+fn domain_metadata_rejects_role_conflicts_and_orphan_live_packages() {
+    let mut packages = vec![fixture_package(
+        "source",
+        PackageSemantics::domain("chain", DomainRole::Source),
+        &[&["lib"]],
+    )];
+    packages.push(fixture_package(
+        "conflict",
+        PackageSemantics::domain("chain", DomainRole::Aggregate),
+        &[&["lib"]],
+    ));
+    let error = domain_roles(&packages).expect_err("conflicting domain roles must fail");
+    assert!(error.contains("domain=chain") && error.contains("role conflict"));
+
+    let orphan = vec![fixture_package(
+        "orphan-live",
+        PackageSemantics::live("unowned"),
+        &[&["lib"]],
+    )];
+    let error = domain_roles(&orphan).expect_err("orphan live package must fail");
+    assert!(error.contains("domain=unowned") && error.contains("no matching domain package"));
+}
+
+#[test]
+fn semantic_matrix_accepts_each_layer_row() {
+    let roles = fixture_domain_roles();
+    let kernel_domain = PackageSemantics::kernel(true, false);
+    let kernel_platform = PackageSemantics::kernel(false, false);
+    let signing = PackageSemantics::plain(Layer::Signing);
+    let source = PackageSemantics::domain("bitcoin", DomainRole::Source);
+    let source_peer = PackageSemantics::domain("bitcoin", DomainRole::Source);
+    let aggregate = PackageSemantics::domain("portfolio", DomainRole::Aggregate);
+    let aggregate_peer = PackageSemantics::domain("portfolio", DomainRole::Aggregate);
+    let source_live = PackageSemantics::live("bitcoin");
+    let source_live_peer = PackageSemantics::live("bitcoin");
+    let aggregate_live = PackageSemantics::live("portfolio");
+    let aggregate_live_peer = PackageSemantics::live("portfolio");
+    let secret = PackageSemantics::plain(Layer::SecretProvider);
+    let storage = PackageSemantics::plain(Layer::Storage);
+    let assembly = PackageSemantics::assembly(true);
+    let binary = PackageSemantics::plain(Layer::Binary);
+    let test = PackageSemantics::plain(Layer::Test);
+
+    let allowed = [
+        (&kernel_platform, &kernel_domain, "kernel -> kernel"),
+        (&signing, &kernel_domain, "signing -> domain-facing kernel"),
+        (&source, &kernel_domain, "source domain -> kernel"),
+        (&source, &signing, "source domain -> signing"),
+        (&source, &source_peer, "source domain -> same domain"),
+        (&aggregate, &kernel_domain, "aggregate domain -> kernel"),
+        (&aggregate, &signing, "aggregate domain -> signing"),
+        (
+            &aggregate,
+            &aggregate_peer,
+            "aggregate domain -> same domain",
+        ),
+        (&aggregate, &source, "aggregate domain -> source domain"),
+        (&source_live, &kernel_platform, "source live -> kernel"),
+        (&source_live, &signing, "source live -> signing"),
+        (&source_live, &source, "source live -> own domain"),
+        (
+            &source_live,
+            &source_live_peer,
+            "source live -> same-domain live",
+        ),
+        (
+            &aggregate_live,
+            &kernel_platform,
+            "aggregate live -> kernel",
+        ),
+        (&aggregate_live, &signing, "aggregate live -> signing"),
+        (&aggregate_live, &aggregate, "aggregate live -> own domain"),
+        (&aggregate_live, &source, "aggregate live -> source domain"),
+        (
+            &aggregate_live,
+            &aggregate_live_peer,
+            "aggregate live -> same-domain live",
+        ),
+        (
+            &secret,
+            &kernel_domain,
+            "secret provider -> domain-facing kernel",
+        ),
+        (&secret, &signing, "secret provider -> signing"),
+        (&secret, &secret, "secret provider -> secret provider"),
+        (&storage, &kernel_platform, "storage -> kernel"),
+        (&assembly, &aggregate_live, "assembly -> lower layer"),
+        (&assembly, &assembly, "assembly -> assembly support"),
+        (
+            &binary,
+            &PackageSemantics::kernel(true, true),
+            "binary -> facing kernel",
+        ),
+        (&binary, &assembly, "binary -> assembly"),
+        (&test, &binary, "test -> unrestricted"),
+    ];
+
+    for (source, dependency, name) in allowed {
+        assert!(
+            dependency_allowed(source, dependency, &roles),
+            "allowed matrix row was rejected: {name}"
+        );
+    }
+}
+
+#[test]
+fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
+    let roles = fixture_domain_roles();
+    let kernel_domain = PackageSemantics::kernel(true, false);
+    let kernel_platform = PackageSemantics::kernel(false, false);
+    let signing = PackageSemantics::plain(Layer::Signing);
+    let source = PackageSemantics::domain("bitcoin", DomainRole::Source);
+    let other_source = PackageSemantics::domain("evm", DomainRole::Source);
+    let aggregate = PackageSemantics::domain("portfolio", DomainRole::Aggregate);
+    let other_aggregate = PackageSemantics::domain("reporting", DomainRole::Aggregate);
+    let source_live = PackageSemantics::live("bitcoin");
+    let other_source_live = PackageSemantics::live("evm");
+    let aggregate_live = PackageSemantics::live("portfolio");
+    let secret = PackageSemantics::plain(Layer::SecretProvider);
+    let storage = PackageSemantics::plain(Layer::Storage);
+    let assembly = PackageSemantics::assembly(true);
+    let binary = PackageSemantics::plain(Layer::Binary);
+
+    let forbidden = [
+        (&kernel_domain, &source, "kernel -> domain"),
+        (
+            &signing,
+            &kernel_platform,
+            "signing -> platform-only kernel",
+        ),
+        (
+            &source,
+            &other_source,
+            "source domain -> other source domain",
+        ),
+        (&source, &source_live, "source domain -> live"),
+        (
+            &aggregate,
+            &other_aggregate,
+            "aggregate domain -> other aggregate domain",
+        ),
+        (&aggregate, &aggregate_live, "aggregate domain -> live"),
+        (&source_live, &aggregate, "source live -> aggregate domain"),
+        (
+            &source_live,
+            &other_source_live,
+            "source live -> cross-domain live",
+        ),
+        (&source_live, &storage, "source live -> storage"),
+        (
+            &aggregate_live,
+            &source_live,
+            "aggregate live -> source live",
+        ),
+        (&aggregate_live, &storage, "aggregate live -> storage"),
+        (
+            &secret,
+            &kernel_platform,
+            "secret provider -> platform-only kernel",
+        ),
+        (&secret, &source, "secret provider -> domain"),
+        (&storage, &source, "storage -> domain"),
+        (&assembly, &binary, "assembly -> binary"),
+        (&binary, &source, "binary -> domain"),
+        (&binary, &source_live, "binary -> live"),
+    ];
+
+    for (source, dependency, name) in forbidden {
+        assert!(
+            !dependency_allowed(source, dependency, &roles),
+            "forbidden matrix edge was accepted: {name}"
+        );
+    }
+}
+
+#[test]
+fn cargo_target_kinds_constrain_declared_layers() {
+    let mislabeled_binary = fixture_package(
+        "mislabeled",
+        PackageSemantics::domain("bitcoin", DomainRole::Source),
+        &[&["bin"]],
+    );
+    let error = validate_target_coherence(&mislabeled_binary)
+        .expect_err("a binary target cannot self-label as a domain");
+    assert!(error.contains("bin target") && error.contains("layer=domain"));
+
+    let mixed_binary = fixture_package(
+        "mixed",
+        PackageSemantics::plain(Layer::Binary),
+        &[&["lib"], &["bin"], &["test"]],
+    );
+    validate_target_coherence(&mixed_binary).expect("a mixed binary package is valid");
+
+    let dedicated_proc_macro = fixture_package(
+        "derive",
+        PackageSemantics::kernel(true, false),
+        &[&["proc-macro"], &["test"]],
+    );
+    validate_target_coherence(&dedicated_proc_macro).expect("dedicated proc macro");
+
+    let mixed_proc_macro = fixture_package(
+        "derive-with-lib",
+        PackageSemantics::kernel(true, false),
+        &[&["proc-macro"], &["lib"]],
+    );
+    let error = validate_target_coherence(&mixed_proc_macro)
+        .expect_err("a proc macro package must remain dedicated");
+    assert!(error.contains("proc-macro") && error.contains("dedicated"));
+}
+
+#[test]
+fn mixed_binary_library_dependencies_obey_the_binary_row() {
+    let roles = fixture_domain_roles();
+    let mixed_binary = fixture_package(
+        "mixed",
+        PackageSemantics::plain(Layer::Binary),
+        &[&["lib"], &["bin"]],
+    );
+    validate_target_coherence(&mixed_binary).expect("mixed binary target shape");
+
+    let facing_app = PackageSemantics::assembly(true);
+    assert!(dependency_allowed(
+        &mixed_binary.semantics,
+        &facing_app,
+        &roles
+    ));
+
+    let live_library = PackageSemantics::live("bitcoin");
+    assert!(
+        !dependency_allowed(&mixed_binary.semantics, &live_library, &roles),
+        "a mixed package cannot hide a library dependency that violates its binary layer"
+    );
+}
+
+#[test]
+fn durable_source_boundaries_follow_semantic_metadata() {
+    let root = repo_root();
+    let metadata = workspace_metadata(&root);
+    let packages = workspace_packages(&metadata, &root).expect("workspace package metadata");
+
+    for package in packages {
+        if package.semantics.layer == Layer::Test {
             continue;
         }
-        let source = fs::read_to_string(path).expect("read Rust source");
-        assert!(
-            !configured_value_methods
-                .iter()
-                .any(|method| source.contains(method)),
-            "non-app source directly calls configured-value persistence: {}",
-            path.display()
-        );
-    }
+        let source_root = root.join(&package.manifest_dir_rel);
+        if !source_root.exists() {
+            continue;
+        }
+        let mut sources = Vec::new();
+        collect_rust_sources(&source_root, &mut sources);
 
-    let binary_root = root.join("bin");
-    for path in sources.iter().filter(|path| path.starts_with(&binary_root)) {
-        let source = fs::read_to_string(path).expect("read binary Rust source");
-        for forbidden in [
-            "SetupDocument",
-            "enum SetupConfig",
-            "toml::from_str",
-            "ValidatedConfig<",
-            "MfmConfig",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "binary source {} owns domain setup/config construction: {forbidden}",
-                path.display()
-            );
+        for path in sources {
+            let source = fs::read_to_string(&path).expect("read Rust source");
+            if package.semantics.layer == Layer::Storage {
+                for forbidden in ["MfmConfig", "ValidatedConfig<"] {
+                    assert!(
+                        !source.contains(forbidden),
+                        "storage source {} imports or names domain configuration {forbidden}",
+                        path.display()
+                    );
+                }
+            }
+
+            if package.semantics.layer == Layer::Binary {
+                for forbidden in [
+                    "SetupDocument",
+                    "enum SetupConfig",
+                    "toml::from_str",
+                    "ValidatedConfig<",
+                    "MfmConfig",
+                ] {
+                    assert!(
+                        !source.contains(forbidden),
+                        "binary source {} owns semantic setup/config construction: {forbidden}",
+                        path.display()
+                    );
+                }
+            }
+
+            let owns_configured_values = package.semantics.layer == Layer::Storage
+                || (package.semantics.layer == Layer::Assembly
+                    && package.semantics.binary_facing == Some(true));
+            if !owns_configured_values {
+                for forbidden in [
+                    "publish_configured_values(",
+                    ".load_configured_value(",
+                    ".list_configured_targets(",
+                ] {
+                    assert!(
+                        !source.contains(forbidden),
+                        "source {} bypasses app-owned configured-value services: {forbidden}",
+                        path.display()
+                    );
+                }
+            }
         }
     }
-
-    let composed_source =
-        fs::read_to_string(root.join("crates/ops/portfolio-snapshot-op/src/lib.rs"))
-            .expect("read composed operation source");
-    assert!(
-        !composed_source.contains("ConfiguredValue"),
-        "portfolio composition and its certified graph helpers must not retain configured storage"
-    );
-    assert!(
-        composed_source.contains("type Config = PortfolioConfig"),
-        "portfolio composition must take the aggregate PortfolioConfig as its only authority"
-    );
-    assert!(
-        composed_source.contains("struct PortfolioSnapshotOperation")
-            && composed_source.contains("struct PortfolioReportOperation"),
-        "portfolio composition must expose separate snapshot and report operations"
-    );
-    let snapshot_impl_start = composed_source
-        .find("impl Operation for PortfolioSnapshotOperation")
-        .expect("snapshot operation implementation");
-    let report_type_start = composed_source
-        .find("pub struct PortfolioReportOperation;")
-        .expect("report operation type");
-    let snapshot_impl_source = &composed_source[snapshot_impl_start..report_type_start];
-    assert!(
-        snapshot_impl_source.contains("call::<BtcNetworkCollectionOperation")
-            && snapshot_impl_source.contains("call::<EvmBalanceCollectionOperation")
-            && snapshot_impl_source.contains("call::<PortfolioReportOperation")
-            && !snapshot_impl_source.contains("builder.state"),
-        "the snapshot operation must contain only family and report operation composition"
-    );
-    let report_impl_start = composed_source
-        .find("impl Operation for PortfolioReportOperation")
-        .expect("report operation implementation");
-    let report_helper_start = composed_source
-        .find("fn holding_fact_descriptors")
-        .expect("report operation helper");
-    let report_impl_source = &composed_source[report_impl_start..report_helper_start];
-    assert!(
-        report_impl_source.contains("state_with_domain_keys::<SelectHoldingsState")
-            && report_impl_source.contains("state::<AssembleSnapshotState")
-            && report_impl_source.contains("state_with_domain_keys::<ProjectReportState")
-            && report_impl_source.contains("input.into_handles()"),
-        "the report operation must pass receipt handles directly into the exact three-state report topology"
-    );
-    assert!(
-        composed_source.contains("portfolio_snapshot_program_draft"),
-        "the snapshot operation must expose its single production root-draft helper"
-    );
-    for forbidden in ["mfm-events", "mfm-replay", "mfm-spec", "mfm-store"] {
-        assert!(
-            path_dependencies(&metadata, "mfm-op-portfolio-snapshot", &by_name)
-                .iter()
-                .all(|dependency| dependency.name != forbidden),
-            "portfolio operation must remain replay/store independent: {forbidden}"
-        );
-    }
-    assert!(
-        !root
-            .join("crates/ops/portfolio-snapshot-op/src/replay.rs")
-            .exists(),
-        "portfolio operation must not retain a replay module"
-    );
-    assert!(
-        !root.join("crates/app/src/portfolio_snapshot.rs").exists()
-            && !root
-                .join("crates/app/src/portfolio_snapshot_replay.rs")
-                .exists(),
-        "the deleted app-only portfolio runners and replay verifier must not remain"
-    );
-    let app_replay_source = fs::read_to_string(root.join("crates/app/src/replay_verifiers.rs"))
-        .expect("read app replay dispatch");
-    assert!(
-        app_replay_source.contains("verify_portfolio_replay(broker)"),
-        "app replay dispatch must call the portfolio adapter verifier directly"
-    );
-    let portfolio_state_root = root.join("crates/states/portfolio/src");
-    assert!(
-        !portfolio_state_root.join("evm_collection.rs").exists(),
-        "portfolio states must not retain an EVM collection implementation module"
-    );
-    for path in sources
-        .iter()
-        .filter(|path| path.starts_with(&portfolio_state_root))
-    {
-        let source = fs::read_to_string(path).expect("read portfolio state source");
-        for forbidden in ["EvmReadSession", "record_evm_balance_facts(", "#[mfm_fact"] {
-            assert!(
-                !source.contains(forbidden),
-                "portfolio state source {} retains EVM collection ownership: {forbidden}",
-                path.display()
-            );
-        }
-    }
-
-    let portfolio_adapter_root = root.join("crates/adapters/portfolio/src");
-    for path in sources
-        .iter()
-        .filter(|path| path.starts_with(&portfolio_adapter_root))
-    {
-        let source = fs::read_to_string(path).expect("read portfolio adapter source");
-        for forbidden in [
-            "EvmReadSession",
-            "EvmCall",
-            "ERC20_",
-            "FactRecordInput",
-            "record_evm_balance_facts",
-            "verify_evm_balance_collection_replay",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "portfolio adapter source {} retains EVM collection implementation: {forbidden}",
-                path.display()
-            );
-        }
-    }
-
-    let evm_operation_source =
-        fs::read_to_string(root.join("crates/ops/evm-collectors-op/src/lib.rs"))
-            .expect("read EVM collector operation source");
-    assert!(
-        evm_operation_source.contains("state::<CollectEvmBalancesState")
-            && evm_operation_source.contains("state::<RecordEvmBalanceFactsState")
-            && evm_operation_source.contains("EvmBalanceCollectionOperation"),
-        "the EVM collector operation must own exactly the reusable read-to-record topology"
-    );
-
-    let evm_state_root = root.join("crates/states/evm/src");
-    let evm_state_source = sources
-        .iter()
-        .filter(|path| path.starts_with(&evm_state_root))
-        .map(|path| fs::read_to_string(path).expect("read EVM state source"))
-        .collect::<String>();
-    assert_eq!(
-        evm_state_source.matches("impl StateSpec for ").count(),
-        4,
-        "the EVM state package must define exactly four state kinds"
-    );
-    for state in [
-        "impl StateSpec for CollectEvmBalancesState",
-        "impl StateSpec for RecordEvmBalanceFactsState",
-        "impl StateSpec for SubmitEvmTransactionState",
-        "impl StateSpec for ValidateEvmContractState",
-    ] {
-        assert!(
-            evm_state_source.contains(state),
-            "the exact EVM state inventory is missing {state}"
-        );
-    }
-
-    let entry_point_source = fs::read_to_string(root.join("crates/app/src/entry_point.rs"))
-        .expect("read app entry-point source");
-    assert!(
-        entry_point_source
-            .contains("const PORTFOLIO_SNAPSHOT_ID: &str = \"mfm.portfolio/snapshot@1\";")
-            && entry_point_source
-                .contains("const ENTRY_POINT_IDS: &[&str] = &[PORTFOLIO_SNAPSHOT_ID];"),
-        "app discovery must expose exactly the portfolio snapshot objective"
-    );
-}
-
-#[derive(Debug)]
-struct PathDependency<'a> {
-    name: &'a str,
-    category: CrateCategory,
-    kind: Option<&'a str>,
-}
-
-fn path_dependencies<'a>(
-    metadata: &'a Value,
-    source_name: &str,
-    by_name: &'a BTreeMap<&'a str, &'a WorkspacePackage>,
-) -> Vec<PathDependency<'a>> {
-    metadata_packages(metadata)
-        .expect("metadata packages")
-        .iter()
-        .find(|package| package.get("name").and_then(Value::as_str) == Some(source_name))
-        .and_then(|package| package.get("dependencies").and_then(Value::as_array))
-        .into_iter()
-        .flatten()
-        .filter_map(|dependency| {
-            let name = dependency.get("name").and_then(Value::as_str)?;
-            let package = by_name.get(name)?;
-            Some(PathDependency {
-                name,
-                category: package.category,
-                kind: dependency.get("kind").and_then(Value::as_str),
-            })
-        })
-        .collect()
 }
 
 fn repo_root() -> PathBuf {
@@ -736,29 +524,6 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("integration crate lives under tests/integration")
         .to_path_buf()
-}
-
-fn rust_sources(root: &Path) -> Vec<PathBuf> {
-    let mut sources = Vec::new();
-    for directory in [root.join("crates"), root.join("bin")] {
-        collect_rust_sources(&directory, &mut sources);
-    }
-    sources.sort();
-    sources
-}
-
-fn collect_rust_sources(path: &Path, sources: &mut Vec<PathBuf>) {
-    let entries =
-        fs::read_dir(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    for entry in entries {
-        let entry = entry.expect("read source directory entry");
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rust_sources(&path, sources);
-        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
-            sources.push(path);
-        }
-    }
 }
 
 fn workspace_metadata(root: &Path) -> Value {
@@ -776,50 +541,269 @@ fn workspace_metadata(root: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("parse cargo metadata")
 }
 
-fn validate_all_workspace_crates_have_mfm_category(metadata: &Value) -> Result<(), String> {
-    let workspace_members = workspace_members(metadata)?;
-    let packages = metadata_packages(metadata)?;
-    let mut missing = Vec::new();
+fn workspace_packages(metadata: &Value, root: &Path) -> Result<Vec<WorkspacePackage>, String> {
+    let members = workspace_members(metadata)?;
+    let mut packages = Vec::new();
 
-    for package in packages {
-        let Some(package_id) = package.get("id").and_then(Value::as_str) else {
+    for package in metadata_packages(metadata)? {
+        let Some(id) = package.get("id").and_then(Value::as_str) else {
             continue;
         };
-        if !workspace_members.contains(package_id) {
+        if !members.contains(id) {
             continue;
         }
-        if package_category_raw(package).is_none() {
-            missing.push(
-                package
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("<unknown>")
-                    .to_owned(),
-            );
+
+        let name = package
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "workspace package missing name".to_owned())?;
+        let manifest_path = package
+            .get("manifest_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("workspace package missing manifest path package={name}"))?;
+        let manifest_rel = repo_relative(root, manifest_path);
+        let manifest_dir_rel = Path::new(&manifest_rel)
+            .parent()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let mfm = package
+            .get("metadata")
+            .and_then(|value| value.get("mfm"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("package={name} missing object package.metadata.mfm"))?;
+        let semantics = parse_semantics(name, mfm)?;
+        let target_kinds = package
+            .get("targets")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("package={name} missing Cargo targets"))?
+            .iter()
+            .map(|target| {
+                target
+                    .get("kind")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("package={name} target missing kind"))?
+                    .iter()
+                    .map(|kind| {
+                        kind.as_str()
+                            .map(ToOwned::to_owned)
+                            .ok_or_else(|| format!("package={name} target kind is not a string"))
+                    })
+                    .collect::<Result<BTreeSet<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        packages.push(WorkspacePackage {
+            name: name.to_owned(),
+            manifest_dir_rel,
+            semantics,
+            target_kinds,
+        });
+    }
+
+    Ok(packages)
+}
+
+fn parse_semantics(name: &str, mfm: &Map<String, Value>) -> Result<PackageSemantics, String> {
+    let layer_raw = mfm
+        .get("layer")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("package={name} missing string mfm.layer"))?;
+    let layer = Layer::parse(layer_raw)
+        .ok_or_else(|| format!("package={name} has unknown mfm.layer={layer_raw}"))?;
+
+    let expected_keys = match layer {
+        Layer::Kernel => ["binary-facing", "domain-facing", "layer"].as_slice(),
+        Layer::Domain => ["domain", "domain-role", "layer"].as_slice(),
+        Layer::Live => ["domain", "layer"].as_slice(),
+        Layer::Assembly => ["binary-facing", "layer"].as_slice(),
+        Layer::Signing | Layer::SecretProvider | Layer::Storage | Layer::Binary | Layer::Test => {
+            ["layer"].as_slice()
+        }
+    };
+    let actual_keys = mfm.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected_keys = expected_keys.iter().copied().collect::<BTreeSet<_>>();
+    if actual_keys != expected_keys {
+        return Err(format!(
+            "package={name} metadata keys do not match layer={}: actual={actual_keys:?} expected={expected_keys:?}",
+            layer.as_str()
+        ));
+    }
+
+    let domain = mfm
+        .get("domain")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    if let Some(domain) = &domain {
+        if !valid_domain_id(domain) {
+            return Err(format!("package={name} has invalid domain={domain}"));
+        }
+    }
+    let domain_role = mfm
+        .get("domain-role")
+        .and_then(Value::as_str)
+        .map(|role| {
+            DomainRole::parse(role)
+                .ok_or_else(|| format!("package={name} has invalid domain-role={role}"))
+        })
+        .transpose()?;
+    let domain_facing = optional_bool(name, mfm, "domain-facing")?;
+    let binary_facing = optional_bool(name, mfm, "binary-facing")?;
+
+    Ok(PackageSemantics {
+        layer,
+        domain,
+        domain_role,
+        domain_facing,
+        binary_facing,
+    })
+}
+
+fn optional_bool(
+    name: &str,
+    metadata: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, String> {
+    metadata
+        .get(key)
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| format!("package={name} mfm.{key} must be a boolean"))
+        })
+        .transpose()
+}
+
+fn valid_domain_id(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 64 {
+        return false;
+    }
+    let bytes = domain.as_bytes();
+    if !bytes[0].is_ascii_lowercase() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    let mut previous_hyphen = false;
+    for byte in bytes {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            previous_hyphen = false;
+        } else if *byte == b'-' && !previous_hyphen {
+            previous_hyphen = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn domain_roles(packages: &[WorkspacePackage]) -> Result<BTreeMap<String, DomainRole>, String> {
+    let mut roles = BTreeMap::new();
+    for package in packages
+        .iter()
+        .filter(|package| package.semantics.layer == Layer::Domain)
+    {
+        let domain = package
+            .semantics
+            .domain
+            .as_ref()
+            .expect("domain metadata shape was parsed");
+        let role = package
+            .semantics
+            .domain_role
+            .expect("domain role metadata shape was parsed");
+        if let Some(previous) = roles.insert(domain.clone(), role) {
+            if previous != role {
+                return Err(format!(
+                    "domain role conflict domain={domain} first={} package={} second={}",
+                    previous.as_str(),
+                    package.name,
+                    role.as_str()
+                ));
+            }
         }
     }
 
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "workspace crates missing package.metadata.mfm.category: {}",
-            missing.join(", ")
-        ))
+    for package in packages
+        .iter()
+        .filter(|package| package.semantics.layer == Layer::Live)
+    {
+        let domain = package
+            .semantics
+            .domain
+            .as_ref()
+            .expect("live domain metadata shape was parsed");
+        if !roles.contains_key(domain) {
+            return Err(format!(
+                "live package={} domain={domain} has no matching domain package",
+                package.name
+            ));
+        }
     }
+
+    Ok(roles)
 }
 
-fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(), String> {
-    let packages = workspace_packages(metadata, root)?;
-    let by_manifest_dir = packages
+fn validate_target_coherence(package: &WorkspacePackage) -> Result<(), String> {
+    let has_bin = package
+        .target_kinds
         .iter()
-        .map(|package| (package.manifest_dir_rel.clone(), package))
-        .collect::<BTreeMap<_, _>>();
+        .any(|kinds| kinds.contains("bin"));
+    if has_bin && !matches!(package.semantics.layer, Layer::Binary | Layer::Test) {
+        return Err(format!(
+            "package={} has a bin target but declares layer={}",
+            package.name,
+            package.semantics.layer.as_str()
+        ));
+    }
+    if package.semantics.layer == Layer::Binary && !has_bin {
+        return Err(format!(
+            "package={} declares layer=binary without a bin target",
+            package.name
+        ));
+    }
+
+    let has_proc_macro = package
+        .target_kinds
+        .iter()
+        .any(|kinds| kinds.contains("proc-macro"));
+    if has_proc_macro {
+        if package.semantics.layer == Layer::Binary || has_bin {
+            return Err(format!(
+                "package={} proc-macro target must be non-binary",
+                package.name
+            ));
+        }
+        let non_test_targets = package
+            .target_kinds
+            .iter()
+            .filter(|kinds| {
+                !kinds.contains("test") && !kinds.contains("bench") && !kinds.contains("example")
+            })
+            .collect::<Vec<_>>();
+        let proc_macro_kind = BTreeSet::from(["proc-macro".to_owned()]);
+        if non_test_targets.len() != 1 || *non_test_targets[0] != proc_macro_kind {
+            return Err(format!(
+                "package={} proc-macro target must remain in a dedicated package",
+                package.name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_dependency_matrix(
+    metadata: &Value,
+    root: &Path,
+    packages: &[WorkspacePackage],
+) -> Result<(), String> {
+    let roles = domain_roles(packages)?;
     let by_name = packages
         .iter()
         .map(|package| (package.name.as_str(), package))
         .collect::<BTreeMap<_, _>>();
-    let mut used_allowlist = BTreeSet::new();
+    let by_manifest_dir = packages
+        .iter()
+        .map(|package| (package.manifest_dir_rel.as_str(), package))
+        .collect::<BTreeMap<_, _>>();
 
     for source in metadata_packages(metadata)? {
         let Some(source_name) = source.get("name").and_then(Value::as_str) else {
@@ -833,47 +817,30 @@ fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(
         };
 
         for dependency in dependencies {
-            // Category rules describe runtime ownership boundaries. Test-only dependencies may
-            // exercise another binary surface without becoming a production binary edge.
             if dependency.get("kind").and_then(Value::as_str) == Some("dev") {
                 continue;
             }
-            let Some(dependency_path) = dependency.get("path").and_then(Value::as_str) else {
+            let Some(path) = dependency.get("path").and_then(Value::as_str) else {
                 continue;
             };
-            let dependency_rel = repo_relative(root, dependency_path);
-            let Some(dependency_package) = by_manifest_dir.get(&dependency_rel) else {
+            let dependency_dir = repo_relative(root, path);
+            let Some(dependency_package) = by_manifest_dir.get(dependency_dir.as_str()) else {
                 continue;
             };
-            if category_dependency_allowed(source_package.category, dependency_package.category) {
-                continue;
-            }
-
-            let edge = (
-                source_package.name.as_str(),
-                dependency_package.name.as_str(),
-            );
-            if APPROVED_CATEGORY_DEPENDENCY_OVERRIDES.contains(&edge) {
-                used_allowlist
-                    .insert((source_package.name.clone(), dependency_package.name.clone()));
+            if dependency_allowed(
+                &source_package.semantics,
+                &dependency_package.semantics,
+                &roles,
+            ) {
                 continue;
             }
 
             return Err(format!(
-                "category dependency violation source={} source_category={} dependency={} dependency_category={} dependency_path={}",
+                "semantic dependency violation source={} source_layer={} dependency={} dependency_layer={}",
                 source_package.name,
-                source_package.category.as_str(),
+                source_package.semantics.layer.as_str(),
                 dependency_package.name,
-                dependency_package.category.as_str(),
-                dependency_package.manifest_dir_rel
-            ));
-        }
-    }
-
-    for &(source, dependency) in APPROVED_CATEGORY_DEPENDENCY_OVERRIDES {
-        if !used_allowlist.contains(&(source.to_owned(), dependency.to_owned())) {
-            return Err(format!(
-                "stale category dependency override source={source} dependency={dependency}"
+                dependency_package.semantics.layer.as_str()
             ));
         }
     }
@@ -881,248 +848,158 @@ fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(
     Ok(())
 }
 
-fn workspace_packages(metadata: &Value, root: &Path) -> Result<Vec<WorkspacePackage>, String> {
-    let workspace_members = workspace_members(metadata)?;
-    let packages = metadata_packages(metadata)?;
-    let mut workspace_packages = Vec::new();
-
-    for package in packages {
-        let Some(package_id) = package.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if !workspace_members.contains(package_id) {
-            continue;
+fn dependency_allowed(
+    source: &PackageSemantics,
+    dependency: &PackageSemantics,
+    roles: &BTreeMap<String, DomainRole>,
+) -> bool {
+    match source.layer {
+        Layer::Kernel => dependency.layer == Layer::Kernel,
+        Layer::Signing => {
+            dependency.layer == Layer::Kernel && dependency.domain_facing == Some(true)
         }
-        let package_name = package
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("<unknown>");
-        let manifest_path = package
-            .get("manifest_path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("workspace package missing manifest path: {package_name}"))?;
-        let manifest_rel = repo_relative(root, manifest_path);
-        let manifest_dir_rel = Path::new(&manifest_rel)
-            .parent()
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        let category = parse_package_category(package).map_err(|error| {
-            format!("workspace package category invalid package={package_name}: {error}")
-        })?;
-
-        workspace_packages.push(WorkspacePackage {
-            name: package_name.to_owned(),
-            manifest_rel,
-            manifest_dir_rel,
-            category,
-        });
+        Layer::Domain => domain_dependency_allowed(source, dependency),
+        Layer::Live => live_dependency_allowed(source, dependency, roles),
+        Layer::SecretProvider => match dependency.layer {
+            Layer::Kernel => dependency.domain_facing == Some(true),
+            Layer::Signing | Layer::SecretProvider => true,
+            _ => false,
+        },
+        Layer::Storage => dependency.layer == Layer::Kernel,
+        Layer::Assembly => !matches!(dependency.layer, Layer::Binary | Layer::Test),
+        // The final binary-facing refinement becomes active when implementation construction has
+        // moved behind app. Even before that cut, domain, live, signing, and storage edges are
+        // forbidden and mixed lib/bin packages are evaluated as one binary package.
+        Layer::Binary => matches!(
+            dependency.layer,
+            Layer::Kernel | Layer::Assembly | Layer::SecretProvider
+        ),
+        Layer::Test => true,
     }
-
-    Ok(workspace_packages)
 }
 
-fn push_path_dependency(
-    metadata: &mut Value,
-    source_name: &str,
-    dependency_name: &str,
-    path: &Path,
-) {
-    let packages = metadata
-        .get_mut("packages")
-        .and_then(Value::as_array_mut)
-        .expect("metadata packages");
-    let source = packages
-        .iter_mut()
-        .find(|package| package.get("name").and_then(Value::as_str) == Some(source_name))
-        .expect("source package");
-    source
-        .get_mut("dependencies")
-        .and_then(Value::as_array_mut)
-        .expect("source dependencies")
-        .push(json!({
-            "name": dependency_name,
-            "source": null,
-            "req": "*",
-            "kind": null,
-            "rename": null,
-            "optional": false,
-            "uses_default_features": true,
-            "features": [],
-            "target": null,
-            "registry": null,
-            "path": path.to_string_lossy(),
-        }));
+fn domain_dependency_allowed(source: &PackageSemantics, dependency: &PackageSemantics) -> bool {
+    let source_domain = source
+        .domain
+        .as_deref()
+        .expect("domain metadata shape was parsed");
+    let source_role = source
+        .domain_role
+        .expect("domain role metadata shape was parsed");
+
+    match dependency.layer {
+        // Source domains become domain-facing-only when the proof package's platform-spec edge is
+        // deleted. Aggregate domains already satisfy and enforce the final facing contract.
+        Layer::Kernel => {
+            source_role == DomainRole::Source || dependency.domain_facing == Some(true)
+        }
+        Layer::Signing => true,
+        Layer::Domain => {
+            let dependency_domain = dependency
+                .domain
+                .as_deref()
+                .expect("domain metadata shape was parsed");
+            let dependency_role = dependency
+                .domain_role
+                .expect("domain role metadata shape was parsed");
+            match source_role {
+                // The aggregate edge is removed with the last Bitcoin-to-portfolio state contract.
+                DomainRole::Source => {
+                    dependency_domain == source_domain || dependency_role == DomainRole::Aggregate
+                }
+                DomainRole::Aggregate => {
+                    dependency_domain == source_domain || dependency_role == DomainRole::Source
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
-fn push_synthetic_workspace_package(
-    metadata: &mut Value,
-    root: &Path,
+fn live_dependency_allowed(
+    source: &PackageSemantics,
+    dependency: &PackageSemantics,
+    roles: &BTreeMap<String, DomainRole>,
+) -> bool {
+    let source_domain = source
+        .domain
+        .as_deref()
+        .expect("live metadata shape was parsed");
+    let source_role = roles
+        .get(source_domain)
+        .copied()
+        .expect("live domain ownership was validated");
+
+    match dependency.layer {
+        Layer::Kernel | Layer::Signing => true,
+        Layer::Domain => {
+            let dependency_domain = dependency
+                .domain
+                .as_deref()
+                .expect("domain metadata shape was parsed");
+            let dependency_role = dependency
+                .domain_role
+                .expect("domain role metadata shape was parsed");
+            match source_role {
+                DomainRole::Source => {
+                    dependency_role == DomainRole::Source && dependency_domain == source_domain
+                }
+                DomainRole::Aggregate => {
+                    dependency_role == DomainRole::Source
+                        || (dependency_role == DomainRole::Aggregate
+                            && dependency_domain == source_domain)
+                }
+            }
+        }
+        Layer::Live => {
+            let dependency_domain = dependency
+                .domain
+                .as_deref()
+                .expect("live metadata shape was parsed");
+            dependency_domain == source_domain
+                && roles.get(dependency_domain).copied() == Some(source_role)
+        }
+        _ => false,
+    }
+}
+
+fn fixture_package(
     name: &str,
-    manifest_rel: &str,
-    category: &str,
-) {
-    let manifest_path = root.join(manifest_rel);
-    let package_id = format!("path+file://{}#{name}@0.0.0", manifest_path.display());
-    metadata
-        .get_mut("workspace_members")
-        .and_then(Value::as_array_mut)
-        .expect("workspace members")
-        .push(json!(package_id.clone()));
-    metadata
-        .get_mut("packages")
-        .and_then(Value::as_array_mut)
-        .expect("metadata packages")
-        .push(json!({
-            "name": name,
-            "id": package_id,
-            "manifest_path": manifest_path.to_string_lossy(),
-            "metadata": {
-                "mfm": {
-                    "category": category,
-                },
-            },
-            "dependencies": [],
-        }));
-}
-
-fn validate_workspace_category_paths(packages: &[WorkspacePackage]) -> Result<(), String> {
-    let mut used_exceptions = BTreeSet::new();
-
-    for package in packages {
-        if validate_category_path(package, &mut used_exceptions)? {
-            continue;
-        }
-    }
-
-    for &(manifest, category) in PATH_CATEGORY_EXCEPTIONS {
-        if !used_exceptions.contains(&(manifest.to_owned(), category)) {
-            return Err(format!(
-                "stale category path exception manifest={manifest} category={}",
-                category.as_str()
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_category_path(
-    package: &WorkspacePackage,
-    used_exceptions: &mut BTreeSet<(String, CrateCategory)>,
-) -> Result<bool, String> {
-    let exception = (package.manifest_rel.as_str(), package.category);
-    if PATH_CATEGORY_EXCEPTIONS.contains(&exception) {
-        used_exceptions.insert((package.manifest_rel.clone(), package.category));
-        return Ok(true);
-    }
-
-    let ok = match package.category {
-        CrateCategory::Kernel => package.manifest_rel.starts_with("crates/kernel/"),
-        CrateCategory::CapabilityContract => {
-            package.manifest_rel.starts_with("crates/")
-                && package.manifest_dir_rel.ends_with("-capabilities")
-        }
-        CrateCategory::DomainModel => {
-            package.manifest_dir_rel.ends_with("-model")
-                || package.manifest_dir_rel.ends_with("/model")
-        }
-        CrateCategory::DomainConfig => package.manifest_dir_rel.ends_with("-config"),
-        CrateCategory::State => package.manifest_rel.starts_with("crates/states/"),
-        CrateCategory::Operation => package.manifest_rel.starts_with("crates/ops/"),
-        CrateCategory::Adapter => package.manifest_rel.starts_with("crates/adapters/"),
-        CrateCategory::Transport => package.manifest_rel.starts_with("crates/transports/"),
-        CrateCategory::SignerContract => {
-            matches!(
-                package.manifest_dir_rel.as_str(),
-                "crates/signing" | "crates/evm-signing"
-            )
-        }
-        CrateCategory::SignerProvider => package.manifest_rel.starts_with("crates/signers/"),
-        CrateCategory::RuntimeConfig => package.manifest_rel == "crates/runtime-config/Cargo.toml",
-        CrateCategory::Storage => package.manifest_rel.starts_with("crates/storages/"),
-        CrateCategory::App => package.manifest_rel == "crates/app/Cargo.toml",
-        CrateCategory::Binary => package.manifest_rel.starts_with("bin/"),
-        CrateCategory::TestSupport => package.manifest_rel.starts_with("tests/"),
-    };
-
-    if ok {
-        Ok(true)
-    } else {
-        Err(format!(
-            "category path violation package={} category={} manifest={}",
-            package.name,
-            package.category.as_str(),
-            package.manifest_rel
-        ))
+    semantics: PackageSemantics,
+    target_kinds: &[&[&str]],
+) -> WorkspacePackage {
+    WorkspacePackage {
+        name: name.to_owned(),
+        manifest_dir_rel: format!("fixtures/{name}"),
+        semantics,
+        target_kinds: target_kinds
+            .iter()
+            .map(|kinds| kinds.iter().map(|kind| (*kind).to_owned()).collect())
+            .collect(),
     }
 }
 
-fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory) -> bool {
-    use CrateCategory::{
-        Adapter, App, Binary, CapabilityContract, DomainConfig, DomainModel, Kernel, Operation,
-        RuntimeConfig, SignerContract, SignerProvider, State, Storage, TestSupport, Transport,
-    };
+fn fixture_domain_roles() -> BTreeMap<String, DomainRole> {
+    BTreeMap::from([
+        ("bitcoin".to_owned(), DomainRole::Source),
+        ("evm".to_owned(), DomainRole::Source),
+        ("portfolio".to_owned(), DomainRole::Aggregate),
+        ("reporting".to_owned(), DomainRole::Aggregate),
+    ])
+}
 
-    match source {
-        Kernel => dependency == Kernel,
-        CapabilityContract => matches!(dependency, Kernel | CapabilityContract),
-        DomainModel => matches!(dependency, Kernel | CapabilityContract | DomainModel),
-        DomainConfig => matches!(
-            dependency,
-            Kernel | DomainModel | DomainConfig | SignerContract
-        ),
-        State => matches!(
-            dependency,
-            Kernel | CapabilityContract | DomainModel | DomainConfig | SignerContract
-        ),
-        Operation => matches!(
-            dependency,
-            Kernel
-                | CapabilityContract
-                | DomainModel
-                | DomainConfig
-                | State
-                | Operation
-                | SignerContract
-        ),
-        Adapter => matches!(
-            dependency,
-            Kernel
-                | CapabilityContract
-                | DomainModel
-                | DomainConfig
-                | State
-                | SignerContract
-                | Transport
-        ),
-        Transport => matches!(dependency, Kernel | CapabilityContract | DomainModel),
-        SignerContract => matches!(dependency, Kernel | DomainModel | SignerContract),
-        SignerProvider => matches!(
-            dependency,
-            Kernel | DomainModel | SignerContract | SignerProvider
-        ),
-        RuntimeConfig => matches!(dependency, Kernel | CapabilityContract | SignerContract),
-        Storage => matches!(dependency, Kernel | CapabilityContract),
-        App => !matches!(dependency, Binary | TestSupport),
-        Binary => matches!(
-            dependency,
-            Kernel | App | Operation | DomainModel | DomainConfig | RuntimeConfig
-        ),
-        TestSupport => true,
+fn collect_rust_sources(path: &Path, sources: &mut Vec<PathBuf>) {
+    let entries =
+        fs::read_dir(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    for entry in entries {
+        let entry = entry.expect("read source directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, sources);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            sources.push(path);
+        }
     }
-}
-
-fn parse_package_category(package: &Value) -> Result<CrateCategory, String> {
-    let raw = package_category_raw(package).ok_or_else(|| "missing mfm.category".to_owned())?;
-    CrateCategory::parse(raw).ok_or_else(|| format!("unknown category={raw}"))
-}
-
-fn package_category_raw(package: &Value) -> Option<&str> {
-    package
-        .get("metadata")
-        .and_then(|metadata| metadata.get("mfm"))
-        .and_then(|mfm| mfm.get("category"))
-        .and_then(Value::as_str)
 }
 
 fn workspace_members(metadata: &Value) -> Result<BTreeSet<&str>, String> {
@@ -1138,88 +1015,6 @@ fn metadata_packages(metadata: &Value) -> Result<&Vec<Value>, String> {
         .get("packages")
         .and_then(Value::as_array)
         .ok_or_else(|| "missing packages".to_owned())
-}
-
-fn validate_kernel_dependency_boundary(metadata: &Value, root: &Path) -> Result<(), String> {
-    let workspace_members = metadata
-        .get("workspace_members")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "missing workspace_members".to_owned())?
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<BTreeSet<_>>();
-    let packages = metadata
-        .get("packages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "missing packages".to_owned())?;
-
-    let mut found_kernel_manifests = BTreeSet::new();
-    for package in packages {
-        let Some(package_id) = package.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if !workspace_members.contains(package_id) {
-            continue;
-        }
-        let Some(manifest_path) = package.get("manifest_path").and_then(Value::as_str) else {
-            continue;
-        };
-        let manifest_rel = repo_relative(root, manifest_path);
-        if is_kernel_manifest(&manifest_rel) {
-            found_kernel_manifests.insert(manifest_rel);
-        }
-    }
-
-    for expected in EXPECTED_KERNEL_MANIFESTS {
-        if !found_kernel_manifests.contains(*expected) {
-            return Err(format!("missing expected kernel crate manifest={expected}"));
-        }
-    }
-
-    for package in packages {
-        let Some(package_id) = package.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if !workspace_members.contains(package_id) {
-            continue;
-        }
-        let package_name = package
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("<unknown>");
-        let Some(manifest_path) = package.get("manifest_path").and_then(Value::as_str) else {
-            continue;
-        };
-        let manifest_rel = repo_relative(root, manifest_path);
-        if !is_kernel_manifest(&manifest_rel) {
-            continue;
-        }
-        let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
-            continue;
-        };
-
-        for dependency in dependencies {
-            let Some(dependency_path) = dependency.get("path").and_then(Value::as_str) else {
-                continue;
-            };
-            let dependency_rel = repo_relative(root, dependency_path);
-            if !dependency_rel.starts_with("crates/kernel/") {
-                let dependency_name = dependency
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("<unknown>");
-                return Err(format!(
-                    "kernel crate dependency violation crate={package_name} manifest={manifest_rel} dependency={dependency_name} path={dependency_rel}"
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn is_kernel_manifest(path: &str) -> bool {
-    path.starts_with("crates/kernel/") && path.ends_with("/Cargo.toml")
 }
 
 fn repo_relative(root: &Path, path: &str) -> String {

@@ -7,7 +7,9 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "operation"
+layer = "domain"
+domain = "bitcoin"
+domain-role = "source"
 
 [dependencies]
 serde = { workspace = true }

@@ -78,59 +78,60 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 Persisted spec bytes, persisted certificate bytes, rendered JSON, and projection rows must be
 validated or rebuilt before they influence semantic execution.
 
-## Crate Layout
+## Semantic Package Boundaries
 
-Typed kernel crates are framework-owned and domain-free:
+Workspace packages declare semantic ownership through closed `package.metadata.mfm` fields. The
+contract is independent of package names, paths, and counts:
 
-| Crate | Responsibility |
+| Layer | Responsibility |
 |---|---|
-| `crates/kernel/ids` | Strong identity types for specs, states, events, values, artifacts, runs, and digests |
-| `crates/kernel/canonical` | Canonical JSON bytes and content digests |
-| `crates/kernel/values` | Typed value, context-bound output, config, artifact reference, and public-output descriptors |
-| `crates/kernel/effects` | Framework-owned effect classes |
-| `crates/kernel/capabilities` | Capability descriptors, roles, and effect-checked capability sets |
-| `crates/kernel/program` | Typed state-program authoring, handles, scopes, registries, lineage, and lowering evidence |
-| `crates/kernel/program-derive` | Derives for typed values, configs, state inputs, operation outputs, and public outputs |
-| `crates/kernel/spec` | Versioned typed execution-spec data model and hash-only spec envelopes |
-| `crates/kernel/certify` | Certification checks, non-forgeable certified typed-spec authority, and persisted certificate verification |
-| `crates/kernel/events` | Versioned typed kernel event schemas |
-| `crates/kernel/store` | Typed commit API, side-effect ledger rules, projection contract, and retention refs |
-| `crates/kernel/manual-auth` | Canonical manual-resolution authorization claims, proofs, and verifier contracts |
-| `crates/kernel/runtime` | Certified typed scheduler and erased runner boundary |
-| `crates/kernel/replay` | Replay authority, brokers, and verifier contracts |
+| `kernel` | Framework-owned, domain-free contracts and runtime infrastructure. |
+| `domain` | Pure domain model, capability, signing, state, and operation responsibilities. |
+| `live` | Domain adapter and reusable transport implementations. |
+| `signing` | Generic signing contracts. |
+| `secret-provider` | Secret-bearing keystore and signer implementations. |
+| `storage` | Concrete storage implementations. |
+| `assembly` | Runtime configuration, implementation construction, and application services. |
+| `binary` | Transport-only CLI and API executables. |
+| `test` | Test-only support and cross-boundary fixtures. |
 
-Domain and product crates sit outside the kernel:
+Every pure domain package declares its validated domain and whether that domain is a source or an
+aggregate. All packages for a domain agree on that role. A live package declares the same domain
+and is invalid without a pure-domain owner. Kernel packages explicitly declare whether domain code
+may consume them; kernel and assembly packages explicitly declare whether binaries may consume
+them. Cargo target kinds independently require every non-test package with a binary target to use
+layer `binary` and keep proc macros in dedicated non-binary packages.
 
-| Area | Responsibility |
-|---|---|
-| Domain capability contract crates | Typed capability specs, authority traits, request/response evidence types, and redacted error contracts used by state and adapter crates |
-| `crates/states/*` | Typed state contracts and deterministic state-owned behavior |
-| `crates/ops/*` | Typed operation planners that assemble state programs |
-| `crates/adapters/*` | Runner bindings from state intent to capabilities, evidence phases, and domain replay verifiers |
-| `crates/transports/*` | Live and replay capability backend implementations |
-| `crates/runtime-config` | Runtime-only config parsing, value-source resolution, validation, and redaction |
-| `crates/storages/*` | Implementations of typed store and typed artifact contracts |
-| `crates/app` | Assembly of registries, stores, artifacts, start/resume/replay, and public output |
-| `bin/cli`, `bin/rest-api` | Transport-only user surfaces |
+Model, capability, signing, state, operation, adapter, and transport remain architectural roles,
+not automatic package boundaries. Within one pure domain, the permitted private-module direction
+is `model <- capability <- signing <- state <- operation`. Within one live domain, the public typed
+transport and private adapter are siblings over the pure-domain capability contract. A new package
+is justified only by a real reuse, dependency, proc-macro, process, storage, or secret-isolation
+boundary.
 
-Dependency direction is strict:
+Kernel dependency direction remains strict:
 
 ```text
 ids -> canonical -> values -> effects/capabilities
   -> program/spec -> certify/events/store -> runtime/replay
 ```
 
-Kernel crates must not depend on domain crates, binaries, app assembly, storage implementations, or
-transport implementations. States must not depend on runtime/store implementations, binaries, live
-transport implementations, signer provider implementations, or operation crates. States may depend
-on capability contract crates because those crates define typed authority contracts, not live IO.
-Ops may depend on typed states and domain config/model crates, but not on runtime scheduling or
-storage implementations. Adapters may bind states to capability implementations, but must not
-depend on workflow operation crates, app assembly, binaries, or storage implementations. Storages
-implement storage contracts and know no domain semantics.
-Adapters bind state-owned intent to capabilities and evidence phases. Transports implement
-capability backends. Neither adapters nor transports mint production authority outside app/runtime
-assembly.
+Kernel packages depend only on kernel packages. Pure domains consume only domain-facing kernel and
+generic signing contracts; aggregate domains may also compose source domains. Live packages may
+consume kernel, signing, and the pure domains allowed by their source/aggregate role, but never app,
+binaries, concrete storage, or secret providers. Secret providers consume only domain-facing
+kernel, signing, and their own layer. Concrete storage consumes kernel contracts, never the reverse.
+Assembly is above those layers. Binaries consume only explicitly binary-facing kernel and assembly
+contracts. Tests are unrestricted. Normal and build dependencies are checked from Cargo metadata;
+dev-only edges do not establish production ownership. During the ordered repository cut, the
+metadata evaluator narrows monotonically as the proof platform-spec edge, the Bitcoin-to-portfolio
+source edge, and direct binary implementation edges are deleted; those current shapes are not
+future architecture or named exceptions.
+
+States remain free of runtime/store implementations, binaries, live transports, secret providers,
+and operation modules. Operations remain deterministic planning. Adapters bind state-owned intent
+to runtime capabilities and evidence phases. Transports implement reusable capability backends.
+Neither adapter nor transport code mints production authority outside app/runtime assembly.
 
 ## Typed Values And Configs
 
@@ -917,8 +918,8 @@ This design contract defines runtime authority. Crate placement, taxonomy, opera
 transport/signer/config boundaries, public naming rules, and reviewer checks are maintained in
 `docs/architecture.md`.
 
-The exact current EVM package, state-kind, operation-composition, and app-entry-point inventory is
-maintained in `docs/architecture.md#current-evm-inventory`.
+The semantic package metadata, responsibility taxonomy, dependency matrix, and placement rules are
+maintained in `docs/architecture.md#semantic-package-metadata`.
 
 ## Documentation Update Rules
 

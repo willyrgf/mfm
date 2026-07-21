@@ -6,7 +6,9 @@ description = "Manual resolution authorization claim and verifier contracts for 
 license = "MIT OR Apache-2.0"
 
 [package.metadata.mfm]
-category = "kernel"
+layer = "kernel"
+domain-facing = false
+binary-facing = false
 
 [dependencies]
 hex = { workspace = true }

@@ -7,7 +7,9 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "capability-contract"
+layer = "kernel"
+domain-facing = true
+binary-facing = false
 
 [dependencies]
 thiserror = { workspace = true }

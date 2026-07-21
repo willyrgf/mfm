@@ -7,7 +7,9 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "state"
+layer = "domain"
+domain = "portfolio"
+domain-role = "aggregate"
 
 [dependencies]
 alloy-primitives = { workspace = true }

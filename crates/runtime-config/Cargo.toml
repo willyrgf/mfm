@@ -7,7 +7,8 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "runtime-config"
+layer = "assembly"
+binary-facing = false
 
 [dependencies]
 serde = { workspace = true }

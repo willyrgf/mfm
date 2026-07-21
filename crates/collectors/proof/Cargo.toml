@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [package.metadata.mfm]
-category = "state"
+layer = "domain"
+domain = "proof"
+domain-role = "source"
 
 [dependencies]
 serde = { workspace = true }

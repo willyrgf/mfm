@@ -7,7 +7,7 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "signer-contract"
+layer = "signing"
 
 [dependencies]
 serde = { workspace = true }

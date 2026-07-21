@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [package.metadata.mfm]
-category = "storage"
+layer = "storage"
 
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }

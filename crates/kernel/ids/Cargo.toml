@@ -8,7 +8,9 @@ license = "MIT"
 readme = "README.md"
 
 [package.metadata.mfm]
-category = "kernel"
+layer = "kernel"
+domain-facing = true
+binary-facing = true
 
 [lib]
 name = "mfm_ids"

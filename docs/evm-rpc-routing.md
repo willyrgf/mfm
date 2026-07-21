@@ -157,5 +157,6 @@ Contributor ownership:
 - portfolio and reusable EVM states own their deterministic validation/reduction semantics;
   binaries only pass paths and render results.
 
-The exact package, state-kind, and app-entry-point inventory is recorded in
-[Current EVM Inventory](architecture.md#current-evm-inventory).
+Package boundaries are governed by the property-based
+[semantic package metadata](architecture.md#semantic-package-metadata), not an exact EVM package
+inventory.

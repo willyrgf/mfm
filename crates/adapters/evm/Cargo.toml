@@ -7,7 +7,8 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "adapter"
+layer = "live"
+domain = "evm"
 
 [dependencies]
 alloy-eips = { workspace = true }

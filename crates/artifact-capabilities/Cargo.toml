@@ -7,7 +7,9 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "capability-contract"
+layer = "kernel"
+domain-facing = false
+binary-facing = false
 
 [dependencies]
 serde = { workspace = true }

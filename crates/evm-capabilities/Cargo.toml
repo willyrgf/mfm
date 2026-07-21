@@ -7,7 +7,9 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "capability-contract"
+layer = "domain"
+domain = "evm"
+domain-role = "source"
 
 [dependencies]
 alloy-eips = { workspace = true }

@@ -7,7 +7,9 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "signer-contract"
+layer = "domain"
+domain = "evm"
+domain-role = "source"
 
 [dependencies]
 alloy-consensus = { workspace = true }

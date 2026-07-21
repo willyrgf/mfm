@@ -72,64 +72,37 @@ only the report operation's own states and operations. Parent registries must ne
 crate's concrete inventory: child topology changes flow through the registry-composition primitive
 into authoring and certification together.
 
-## Current EVM Inventory
+## Semantic Package Metadata
 
-This is the exact current inventory. Cargo metadata, state registration, or app discovery changing
-any row requires an architecture update in the same commit.
+Cargo metadata records package semantics, not directory taxonomy or a frozen package inventory.
+Every workspace package declares exactly one `package.metadata.mfm.layer`:
 
-### Packages
+| Layer | Package responsibility |
+|---|---|
+| `kernel` | Domain-free platform contracts and runtime infrastructure. |
+| `domain` | Pure domain model, capability, signing, state, or operation responsibilities. |
+| `live` | Domain adapter and transport implementations. |
+| `signing` | Generic signing contracts below domain code. |
+| `secret-provider` | Secret-bearing keystore and signer implementations. |
+| `storage` | Concrete storage implementations. |
+| `assembly` | Process configuration, implementation construction, and application services. |
+| `binary` | CLI or API executable surfaces. |
+| `test` | Unrestricted test-only support. |
 
-Exactly six workspace packages have an EVM-specific package name:
+Domain packages also declare a validated lower-kebab `domain` and a `domain-role` of `source` or
+`aggregate`. Every package for one domain must agree on its role. Live packages declare the domain
+and derive its role from the matching pure-domain packages; a live package without a pure-domain
+owner is invalid.
 
-| Package | Path | Durable responsibility |
-|---|---|---|
-| `mfm-evm-capabilities` | `crates/evm-capabilities` | Checked source-bound read and transaction authority plus canonical protocol evidence |
-| `mfm-evm-signing` | `crates/evm-signing` | Canonical transient Alloy EIP-1559 signing and finalization |
-| `mfm-states-evm` | `crates/states/evm` | Reusable balance, transaction, and exact-anchor validation semantics |
-| `mfm-adapters-evm` | `crates/adapters/evm` | Live and evidence-only replay bindings for the EVM states |
-| `mfm-transports-evm` | `crates/transports/evm` | Bounded source-stable JSON-RPC sessions |
-| `mfm-op-evm-collectors` | `crates/ops/evm-collectors-op` | The reusable two-state balance collector operation and its internal cycle wrapper |
+Kernel packages declare whether domain code may depend on them with `domain-facing`. Kernel and
+assembly packages declare whether binaries may depend on them with `binary-facing`. These flags are
+typed booleans and are required even when false. Other layers cannot carry them. Metadata keys are
+closed: path/category aliases, phase fields, package allowlists, and named exceptions are invalid.
 
-Only capabilities and signing are top-level `crates/evm-*` directories. The other four packages
-follow the repository state/adapter/transport/operation taxonomy.
-
-This split is deliberate. Do not merge the five lower EVM layers merely to reduce manifest count:
-their dependency firebreaks keep protocol authority, signing, reusable state semantics, runtime
-binding, and live HTTP implementation independently reusable. Likewise, Bitcoin and EVM collector
-operations remain separate because they share the operation-composition mechanism, not protocol
-plans, facts, evidence, or state semantics.
-
-### State kinds
-
-`mfm-states-evm` owns exactly these four state kinds:
-
-| State type | Descriptor name | Effect |
-|---|---|---|
-| `CollectEvmBalancesState` | `mfm.evm.collect_balances` | `ReadExternal` |
-| `RecordEvmBalanceFactsState` | `mfm.evm.record_balance_facts` | `ManagedPlatformWrite` |
-| `SubmitEvmTransactionState` | `mfm.evm.transaction.submit` | `ApplySideEffect` |
-| `ValidateEvmContractState` | `mfm.evm.contract.validate` | `ReadExternal` |
-
-The adapter package binds all four and owns no operation topology. The collector operation expands
-only the first two and exports only `EvmBalanceCollectionReceipt`.
-
-### Entry points and composition
-
-`mfm-app::entry_point_ids()` contains exactly `mfm.portfolio/snapshot@1`. Its graph is:
-
-```text
-PortfolioSnapshotOperation
-  +-- BtcNetworkCollectionOperation(s)
-  +-- EvmBalanceCollectionOperation(s)
-  `-- PortfolioReportOperation
-        -> SelectHoldingsState
-        -> AssembleSnapshotState
-        `-> ProjectReportState
-```
-
-The EVM internal cycle draft calls `EvmBalanceCollectionOperation` and binds its receipt for
-scheduler-owned execution. It has no setup kind, configured target resolver, discovery id, CLI/REST
-start surface, app output renderer, or public entry point.
+Cargo target kinds constrain metadata. A non-test package with any binary target is layer `binary`,
+and a mixed library/binary package applies the binary dependency row to the whole package. Proc
+macros remain in dedicated non-binary packages. Package renames, moves, additions, and deletions do
+not change this contract and do not require an inventory test update.
 
 ## Authority Contract
 
@@ -173,10 +146,12 @@ Use `docs/persisted-public-surfaces.md` when reviewing data that is persisted, r
 or exposed through app read paths. It classifies allowed data, forbidden secret classes, provenance
 authority, and tests for each surface.
 
-## Taxonomy
+## Responsibility Taxonomy
 
-Every new unit must declare which category it belongs to before it gets a crate, schema namespace,
-capability, public type, CLI command, REST route, or test fixture.
+Every new unit must declare which responsibility it owns before it gets a module, crate, schema
+namespace, capability, public type, CLI command, REST route, or test fixture. Responsibilities do
+not automatically become packages; one pure domain crate may preserve several roles through private
+modules, one-way source dependencies, narrow exports, and focused tests.
 
 | Category | Owns | Does Not Own |
 |---|---|---|
@@ -193,11 +168,11 @@ capability, public type, CLI command, REST route, or test fixture.
 | App assembly | Registry/store/artifact/capability wiring and typed run services | Workflow planning or state behavior |
 | Binary/API | Input decoding, routing, response envelopes | Domain semantics, runtime authority, direct state execution |
 
-Capability contracts are foundational protocol authority: they depend only on kernel or other
-capability contracts. Domain models may consume capability-owned checked protocol identities, but
-capability contracts never depend back on domain models.
-
-If a unit does not fit one category cleanly, the design is not ready.
+Capability contracts are foundational protocol authority. They remain below states whether the
+contract and state are separated by Cargo or by private modules inside one pure-domain package.
+Domain models may consume lower checked protocol identities, but capability code never depends on
+higher state or operation modules. If a unit does not fit one responsibility cleanly, the design is
+not ready.
 
 ### Current Configuration And Runtime-Config Boundary
 
@@ -475,20 +450,21 @@ Apply the repository-wide [one-current-design policy](code-quality.md#one-curren
 Package count alone is not a simplification metric when reducing it would merge distinct authority
 boundaries.
 
-### Rule 1: One Abstraction Per Crate
+### Rule 1: One Coherent Ownership Boundary Per Crate
 
-A crate must own one coherent abstraction. It must not own a parity slice.
+A crate must own one coherent reusable or enforcement boundary. Architectural roles remain
+distinct, but a role alone is not sufficient reason for a package. Use private modules and
+visibility when Cargo isolation would add only manifests, bridge types, and public plumbing.
 
 Good crate reasons:
 
-- reusable protocol transport
+- a reusable protocol transport colocated with its domain adapter behind a public/private module boundary
 - reusable signer provider
-- reusable domain state family
-- deterministic workflow topology
-- pure domain model
+- a pure domain whose model, capability, state, and operation roles share one bounded dependency surface
 - setup/canonical config pipeline
 - storage implementation
 - runtime/kernel primitive
+- a dependency, proc-macro, process-assembly, or secret-bearing firebreak that Cargo must enforce
 
 Bad crate reasons:
 
@@ -578,9 +554,8 @@ full-context calls. Its adapter binds one checked read session, executes code an
 hash, and finishes with a number-to-hash canonicality read. Live execution and evidence-only replay
 both use the state reducer; replay never binds a route or session.
 
-The exact EVM package, state-kind, operation-composition, and entry-point surface is recorded in
-[Current EVM Inventory](#current-evm-inventory). The metadata and discovery contracts enforce that
-inventory; reusable registration never implies public ingress.
+Reusable registration never implies public ingress. Product assembly is validated against its
+published authoring contract rather than inferred from package names or a package inventory.
 
 ### Rule 5: Runtime Routing Is Not Semantic Config
 
@@ -614,19 +589,19 @@ Source scans may be useful as guardrails, but they are not architecture proof by
 
 ## Placement Guide
 
-- New kernel semantic primitive: `crates/kernel/*`, with no domain dependencies.
-- New manual-resolution proof or verifier contract: `crates/kernel/manual-auth`.
-- New protocol/domain capability contract: a capability contract crate such as
-  `crates/evm-capabilities`.
-- New pure domain type or canonical config type: domain model/config crate.
-- New reusable state behavior: `crates/states/*` or another clearly named domain state crate.
-- New workflow topology: `crates/ops/*-op`.
-- New runner binding from state intent to capabilities: `crates/adapters/*`.
-- New reusable live/replay protocol backend: `crates/transports/*`.
-- New signer abstraction or provider: `crates/signing` or `crates/signers/*`.
-- New store implementation: `crates/storages/*`.
-- New start/resume/replay/public-output assembly: `crates/app`.
-- New command/API shape: `bin/cli` or `bin/rest-api`, backed by app services.
+- New domain-free semantic primitive: a `kernel` package, with no domain dependency.
+- New pure model, capability, signing, state, or operation behavior: the owning `domain` package and
+  its corresponding private role module.
+- New domain protocol IO or runtime binding: the owning `live` package; transports remain public
+  reusable modules and adapters remain private registration modules.
+- New generic signer contract: `signing`; secret-bearing implementation: `secret-provider`.
+- New concrete store: `storage`; the store contract remains `kernel`.
+- New process construction or application service: `assembly`.
+- New command/API shape: `binary`, backed by binary-facing assembly services.
+- Cross-package fixtures and parity harnesses: `test`.
+
+Directory names are navigation aids. Metadata and dependency behavior, not a suffix or path, prove
+placement.
 
 ## Dependency Rules
 
@@ -637,28 +612,32 @@ ids -> canonical -> values -> effects/capabilities
   -> program/spec -> certify/events/store/manual-auth -> runtime/replay
 ```
 
-Additional dependency rules:
+Normal and build dependencies use this semantic direction:
 
-- kernel crates must not depend on app, binaries, domain models, states, operations, transports,
-  signers, or storage implementations
-- context-bound output value traits belong in `mfm-values`; runtime owns extractor registration,
-  artifact decoding, and invocation-time enforcement
-- states must not depend on runtime, store implementations, app, binaries, transport
-  implementations, signer implementations, or operation crates
-- states may depend on capability contract crates, because those crates define typed authority
-  contracts rather than live IO implementations
-- operations may depend on typed states, domain config/model crates, and lower-level operations
-  when a deterministic parent operation composes their certified graphs, but not on transports,
-  signer implementations, app, binaries, runtime scheduling, or storage implementations
-- adapters may depend on runtime runner contracts, states, capability contract crates, transport
-  contracts, and signer contracts as needed for runner binding, but not on workflow operation
-  crates, app, binaries, or storage implementations
-- transports may depend on protocol/domain support crates, capability contract crates, and kernel
-  contracts, but not on workflow operation crates
-- signer providers may depend on security-sensitive core primitives, but not on workflow operation
-  or state crates
-- binaries may depend on app and operation/config crates for input compilation, but must not own
-  workflow semantics
+- `kernel` -> `kernel`;
+- `signing` -> domain-facing `kernel`;
+- source `domain` -> domain-facing `kernel`, `signing`, and same-domain packages;
+- aggregate `domain` -> domain-facing `kernel`, `signing`, same-domain packages, and source-domain
+  packages;
+- source `live` -> `kernel`, `signing`, its source-domain packages, and same-domain live packages;
+- aggregate `live` -> `kernel`, `signing`, its aggregate domain, source domains, and same-domain
+  live packages, never source-live packages;
+- `secret-provider` -> domain-facing `kernel`, `signing`, and `secret-provider`;
+- `storage` -> `kernel`;
+- `assembly` -> lower layers and assembly support;
+- `binary` -> binary-facing `kernel` or binary-facing `assembly`; and
+- `test` -> unrestricted.
+
+Source-domain to aggregate-domain, cross-domain live, live to concrete storage/secret/app, signing
+to secret-provider, and store-contract to storage-implementation edges are forbidden. Dev-only
+dependencies may exercise lower surfaces without becoming production ownership.
+
+The ordered repository cut currently has three broader semantic shapes which close with their
+owning deletions: source domains may still reach platform-only kernel while the proof workflow
+exists; Bitcoin source state still reaches the aggregate portfolio contract until the atomic
+collection replacement; and binaries may still reach non-facing kernel/assembly plus the secret
+provider until app services absorb implementation construction. These are not named exceptions or
+approved future edges. The metadata evaluator narrows monotonically at those cutovers.
 
 ## Store Boundary
 
@@ -743,8 +722,8 @@ Before adding or renaming a public surface, verify:
 
 Before merging a change, verify:
 
-- the new unit has exactly one taxonomy category
-- the crate name describes a coherent abstraction
+- the new unit has one clear responsibility and its package has one semantic layer
+- the crate boundary enforces a real reusable, build, process, proc-macro, storage, or security boundary
 - typed specs remain the only runtime contract
 - new public values/configs use typed descriptors and no floats/secrets
 - side effects have one state-authored intent/idempotency pair, required typed prepared authority,
@@ -787,18 +766,14 @@ Architecture guarantees should be enforced by:
 - redaction tests
 - production-path integration tests
 
-Required metadata checks should assert:
+Required metadata checks assert:
 
-- `crates/states/*` do not depend on transports, signer implementations, app, binaries, or storage
-  implementations
-- `crates/states/*` may depend on allowlisted capability contract crates
-- `crates/ops/*` do not depend on transports, signer implementations, app, binaries, runtime
-  scheduling, or storage implementations
-- `crates/adapters/*` do not depend on workflow operation crates, app, binaries, or storage
-  implementations
-- generic transports do not depend on workflow operation crates
-- signer providers do not depend on workflow operation or state crates
-- public schema namespaces do not use temporary recipe names
+- closed, typed layer/domain/role/facing metadata without name, path, count, or exception tables;
+- agreement of every domain role and a pure owner for every live package;
+- the semantic dependency matrix for normal and build dependencies;
+- binary target/layer coherence, including mixed library/binary packages;
+- a dedicated non-binary proc-macro boundary; and
+- positive and negative synthetic fixtures for every dependency row.
 
 ## Companion Docs
 

@@ -8,7 +8,7 @@ license = "MIT"
 readme = "README.md"
 
 [package.metadata.mfm]
-category = "signer-provider"
+layer = "secret-provider"
 
 [lib]
 name = "mfm_core"
