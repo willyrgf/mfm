@@ -97,9 +97,8 @@ Development and operations:
 
 ## Development
 
-The canonical workflow and gate-selection matrix are in
-[`docs/build-and-verification.md`](docs/build-and-verification.md). Enter the pinned shell and use
-package- or test-scoped Cargo commands for the normal inner loop:
+All developer-invoked Rust tools run in the pinned default Nix shell. Enter it
+once, then use package- or test-scoped Cargo commands:
 
 ```bash
 nix develop
@@ -108,36 +107,17 @@ cargo check -p <package>
 cargo test -p <package> <test-filter>
 ```
 
-For a one-off parity check, run its declared Nixfied task directly; this starts only the services
-that leaf requires:
+For a non-interactive one-off, use `nix develop -c cargo ...`; never rely on
+host-installed Rust tooling. For a one-off managed check, run the exact current
+Nixfied task:
 
 ```bash
-nix run .#run -- --task parity-postgres-rest-api
+nix run .#run -- --task <task-id>
 ```
 
-For repeated debugging, start the required service once and run the focused Cargo target against
-its explicit `DATABASE_URL` or `MFM_RUNTIME_CONFIG_FILE` instead.
-
-Use `nix run .#quick` when workspace-wide library/binary compile feedback is useful. It preserves
-the ordinary incremental target and runs rustfmt plus `cargo check --workspace --lib --bins`; it is
-not a test or merge gate.
-
-Managed gates are boundary checks, not a sequence to run after every edit:
-
-- `nix run .#model-check` admits the compiled Nixfied model without project tasks.
-- `nix run .#check` covers formatting, all-feature Clippy, architecture/Cargo metadata contracts,
-  and offline SQLx checking.
-- `nix run .#test` covers workspace tests and doctests without managed services.
-- `nix run .#test-db` covers SQLx schema drift and Postgres-backed parity.
-- `nix run .#ci` composes all three gates and adds the remaining parity and closing-revision
-  evidence.
-
-Choose the smallest gate that matches the changed surface. If `.#ci` is required for a major,
-cross-cutting, build-workflow, release, or explicit full local merge-readiness validation, run it
-once on the final revision; do not first run `.#check`, `.#test`, and `.#test-db` on the unchanged
-tree. Focused development uses `target`, while managed broad verification uses
-`target/verification`; artifact lifecycle and exact cleanup are documented in the canonical
-workflow.
+Use the smallest check that covers the change. The selection matrix, exact gate
+composition, managed-leaf caveats, and artifact policy live only in the
+[build and verification contract](docs/build-and-verification.md).
 
 Run binaries locally:
 
@@ -146,8 +126,8 @@ nix run .#mfm -- --help
 nix run .#mfm -- ops list
 nix run .#mfm -- setup import examples/setup/organization.toml
 nix run .#mfm -- setup list
-cargo run -p mfm -- --help
-cargo run -p mfm-rest-api
+nix develop -c cargo run -p mfm -- --help
+nix develop -c cargo run -p mfm-rest-api
 ```
 
 The `.#mfm` app runs the packaged CLI with a Nixfied-managed PostgreSQL process
@@ -156,7 +136,8 @@ in slot 9. It keeps the development database under the Nixfied state root for
 delegates all arguments to the raw binary, and stops PostgreSQL afterward without
 removing its data. Separate `nix run .#mfm` commands therefore share setup and run
 state. For raw execution with caller-managed infrastructure, use
-`cargo run -p mfm -- <ARGS>` or the binary produced by `nix build .#mfm`.
+`nix develop -c cargo run -p mfm -- <ARGS>` or the binary produced by
+`nix build .#mfm`.
 
 ## License
 MIT (see [`LICENSE`](LICENSE)).

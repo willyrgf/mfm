@@ -432,8 +432,8 @@ For local development, the `.#mfm` app starts Nixfied-managed PostgreSQL in slot
 arguments to the packaged CLI, and stops PostgreSQL afterward without removing
 its data. Separate invocations share setup and run state under the Nixfied state
 root for `mfm/dev/9`. When supplying an external `DATABASE_URL` or
-`--database-url`, use `mfm_cli`, `cargo run -p mfm -- <ARGS>`, or the raw binary
-produced by `nix build .#mfm`.
+`--database-url`, use `mfm_cli`, `nix develop -c cargo run -p mfm -- <ARGS>`, or
+the raw binary produced by `nix build .#mfm`.
 
 The import document is strict TOML with a closed `configs` list. Each configuration derives its
 target from its intrinsic domain id; a portfolio config with `portfolio_id = "acme/primary"`
@@ -710,7 +710,7 @@ The CLI's process-level configuration is intentionally narrow.
 - **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
   ```sh
   export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-  cargo sqlx migrate run --source crates/storages/postgres/migrations
+  nix develop -c cargo sqlx migrate run --source crates/storages/postgres/migrations
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 

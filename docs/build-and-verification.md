@@ -14,7 +14,7 @@ endpoints, runtime state, and run evidence.
 
 | Lane | Entry points | Artifact location | Policy |
 | --- | --- | --- | --- |
-| Focused development | `nix develop`, direct Cargo, `nix run .#quick` | normal worktree `target` | mutable, incremental, developer-owned |
+| Focused development | Cargo inside the default `nix develop` shell | normal worktree `target` | mutable, incremental, developer-owned |
 | Broad verification | `nix run .#check`, `.#test`, `.#test-db`, `.#ci` | worktree `target/verification` | mutable, compact, nonincremental |
 | Release packaging | `nix build .#mfm` | Nix store | immutable package output |
 
@@ -45,7 +45,16 @@ identities, hits, misses, or retention state.
 
 ## Focused development
 
-Enter the pinned shell and use targeted Cargo commands while iterating:
+All developer-invoked Cargo/Rust tools run through the default Nix development
+shell. Nix owns the toolchain and native dependency pins; Cargo remains
+authoritative for the Rust graph and artifacts. Do not rely on host-installed
+Rust tooling.
+
+A host Rust installation is not part of the supported workflow and may be
+absent. Editors and automation that invoke Rust tools must inherit the default
+development shell or use `nix develop -c`.
+
+Enter the shell once and use targeted Cargo commands while iterating:
 
 ```bash
 nix develop
@@ -54,10 +63,9 @@ cargo check -p <package>
 cargo test -p <package> <test-filter>
 ```
 
-`nix develop` and `.#quick` explicitly leave `CARGO_TARGET_DIR` unset, so they
-use Cargo's ordinary worktree target and retain incremental compilation.
-`.#quick` runs formatting and workspace library/binary checking only; it is a
-feedback loop, not a merge gate.
+For a non-interactive one-off command, use `nix develop -c cargo ...`.
+The development shell leaves `CARGO_TARGET_DIR` unset, so Cargo uses its
+ordinary worktree target and retains incremental compilation.
 
 Prefer a named test target or filter before a whole-package test, and prefer a
 whole-package test before a workspace test. Expand to affected dependents when
@@ -152,7 +160,7 @@ No routine cleanup is required. For a deliberate cold run or suspected Cargo
 artifact corruption, delete exactly the verification target through Cargo:
 
 ```bash
-cargo clean --target-dir target/verification
+nix develop -c cargo clean --target-dir target/verification
 ```
 
 Deleting a worktree also deletes its verification target. Capacity remains a

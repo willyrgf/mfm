@@ -43,7 +43,8 @@ running and use a package/test filter in Cargo's incremental target:
 
 ```sh
 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm_test \
-  cargo test -p mfm-storage-postgres --features parity-tests <test-filter> -- --nocapture
+  nix develop -c cargo test -p mfm-storage-postgres --features parity-tests \
+    <test-filter> -- --nocapture
 ```
 
 For a one-off managed check, run the smallest Nixfied leaf that covers the
@@ -75,9 +76,8 @@ crate's migrations and regenerate metadata from the crate directory:
 
 ```sh
 export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/mfm_test"
-nix shell .#sqlx-cli --command \
-  sqlx migrate run --source crates/storages/postgres/migrations
-nix shell .#sqlx-cli --command bash -lc \
+nix develop -c cargo sqlx migrate run --source crates/storages/postgres/migrations
+nix develop -c bash -lc \
   'cd crates/storages/postgres && cargo sqlx prepare -- --all-targets --features parity-tests'
 ```
 

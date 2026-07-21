@@ -81,15 +81,9 @@ is disposable.
 
 ## Cargo verification artifacts
 
-Broad gates use the project-owned `target/verification` directory; it is not
-Nixfied state, and an ABI upgrade does not migrate or require cleaning it. See
-the steady-state ownership and lifecycle contract in
-[`build-and-verification.md`](build-and-verification.md). For a deliberate cold
-rebuild or suspected Cargo artifact corruption only, run:
-
-```bash
-cargo clean --target-dir target/verification
-```
+An ABI upgrade does not migrate or require cleaning Cargo artifacts. Follow the
+steady-state ownership and cleanup policy in
+[`build-and-verification.md`](build-and-verification.md).
 
 ## Current local conventions
 
