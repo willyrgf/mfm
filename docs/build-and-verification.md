@@ -185,5 +185,5 @@ state roots are coordinated by the upstream endpoint contract; an occupied
 planned endpoint is reported as `PORT_CONFLICT`. This runtime responsibility
 is independent of Cargo target placement.
 
-For coordinated Nixfied pin and runtime ABI changes, follow
-[`UPGRADE.md`](UPGRADE.md).
+For framework integration and coordinated Nixfied pin/runtime changes, follow the upstream
+[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/main/docs/GUIDE.md).

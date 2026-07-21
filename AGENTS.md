@@ -88,8 +88,9 @@ Internal task ids are not stable public verbs and a leaf does not inherit predec
 enclosing composite. Confirm the id and dependencies in `nixfied.nix`.
 
 `docs/build-and-verification.md` is the sole source for the verification-selection matrix, build
-lanes, gate composition, and artifact lifecycle. Follow `docs/UPGRADE.md` for coordinated Nixfied
-pin/runtime changes. Two rules are non-negotiable:
+lanes, gate composition, and artifact lifecycle. Follow the upstream
+[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/main/docs/GUIDE.md) for framework
+integration and coordinated pin/runtime changes. Two rules are non-negotiable:
 
 - do not run broad gates merely because a commit is about to be created
 - do not run `.#check`, `.#test`, and `.#test-db` immediately before `.#ci` on the same tree;

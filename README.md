@@ -93,7 +93,8 @@ Crate docs:
 Development and operations:
 
 - Nixfied v2 project model: [`nixfied.nix`](nixfied.nix)
-- Framework upgrade notes: [`docs/UPGRADE.md`](docs/UPGRADE.md)
+- Nixfied integration and upgrade guide:
+  [upstream adopter guide](https://github.com/willyrgf/nixfied/blob/main/docs/GUIDE.md)
 
 ## Development
 
