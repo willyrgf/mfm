@@ -2,7 +2,7 @@
 name = "mfm-op-btc-collectors"
 version = "0.1.0"
 edition = "2021"
-description = "Deterministic Bitcoin collector family operations (chain-head and address-balance)"
+description = "Deterministic Bitcoin exact-anchor balance collection operations"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 

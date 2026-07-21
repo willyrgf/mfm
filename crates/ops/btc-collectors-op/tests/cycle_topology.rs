@@ -1,11 +1,8 @@
 use mfm_op_btc_collectors::{
-    btc_chain_head_collector_cycle_program_draft, btc_collectors_operation_registry,
-    btc_collectors_state_registry, BtcChainHeadCollectorConfig,
-    BtcChainHeadCollectorCycleOperation, BtcChainHeadFact, BtcNativeBalancesAtAnchorConfig,
-    BtcNetworkCollectionConfig, BtcNetworkCollectionOperation, BtcNetworkCollectionReceipt,
-    CollectorCheckpointFact, ObserveBtcAddressBalanceState, ObserveBtcChainHeadState,
-    QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactState,
-    RecordCollectorCheckpointState, ResolveBtcJointTipState,
+    btc_collectors_operation_registry, btc_collectors_state_registry,
+    BtcAddressBalanceSnapshotFact, BtcNativeBalancesAtAnchorConfig, BtcNetworkCollectionConfig,
+    BtcNetworkCollectionOperation, BtcNetworkCollectionReceipt, ObserveBtcAddressBalanceState,
+    RecordBtcAddressBalanceFactState, ResolveBtcJointTipState,
 };
 use mfm_program::{
     build_root_with_registries, InputBindingNodeRef, MfmFactType as _, OperationKey,
@@ -54,66 +51,6 @@ fn network_collection_draft(config: BtcNetworkCollectionConfig) -> mfm_program::
 }
 
 #[test]
-fn cycle_topology_is_deterministic_and_linear() {
-    let first =
-        btc_chain_head_collector_cycle_program_draft(BtcChainHeadCollectorConfig::default())
-            .expect("first draft");
-    let second =
-        btc_chain_head_collector_cycle_program_draft(BtcChainHeadCollectorConfig::default())
-            .expect("second draft");
-
-    assert_eq!(first, second);
-    assert_eq!(first.state_nodes().len(), 4);
-
-    let nodes = first.state_nodes();
-    assert_eq!(
-        nodes
-            .iter()
-            .map(|node| node.key.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "query_collector_checkpoint",
-            "observe_btc_chain_head",
-            "record_btc_chain_head_fact",
-            "record_collector_checkpoint",
-        ]
-    );
-    assert_eq!(
-        nodes[0].state_kind,
-        QueryCollectorCheckpointState::kind().unwrap()
-    );
-    assert_eq!(
-        nodes[1].state_kind,
-        ObserveBtcChainHeadState::kind().unwrap()
-    );
-    assert_eq!(
-        nodes[2].state_kind,
-        RecordBtcChainHeadFactState::kind().unwrap()
-    );
-    assert_eq!(
-        nodes[3].state_kind,
-        RecordCollectorCheckpointState::kind().unwrap()
-    );
-
-    assert!(state_input_cells(&nodes[0], nodes).is_empty());
-    assert_eq!(
-        state_input_cells(&nodes[1], nodes),
-        vec![nodes[0].output_cell_id.as_str()]
-    );
-    assert_eq!(
-        state_input_cells(&nodes[2], nodes),
-        vec![nodes[1].output_cell_id.as_str()]
-    );
-    assert_eq!(
-        state_input_cells(&nodes[3], nodes),
-        vec![
-            nodes[2].output_cell_id.as_str(),
-            nodes[0].output_cell_id.as_str()
-        ]
-    );
-}
-
-#[test]
 fn internal_native_collection_resolves_one_tip_before_all_managed_facts_and_receipt() {
     let first = network_collection_draft(network_collection_config());
     let second = network_collection_draft(network_collection_config());
@@ -159,43 +96,25 @@ fn internal_native_collection_resolves_one_tip_before_all_managed_facts_and_rece
 
 #[test]
 fn descriptor_allow_lists_are_attached_to_fact_recording_nodes_and_survive_certification() {
-    let draft =
-        btc_chain_head_collector_cycle_program_draft(BtcChainHeadCollectorConfig::default())
-            .expect("draft");
+    let draft = network_collection_draft(network_collection_config());
     let nodes = draft.state_nodes();
-    let chain_head_ref =
-        mfm_program::fact_descriptor_ref::<BtcChainHeadFact>().expect("chain-head descriptor ref");
-    let checkpoint_ref = mfm_program::fact_descriptor_ref::<CollectorCheckpointFact>()
-        .expect("checkpoint descriptor ref");
+    let balance_ref = mfm_program::fact_descriptor_ref::<BtcAddressBalanceSnapshotFact>()
+        .expect("balance descriptor ref");
     assert_eq!(
-        BtcChainHeadFact::descriptor()
-            .expect("chain-head descriptor")
+        BtcAddressBalanceSnapshotFact::descriptor()
+            .expect("balance descriptor")
             .fact_kind()
             .as_str(),
-        "chain.head"
-    );
-    assert_eq!(
-        CollectorCheckpointFact::descriptor()
-            .expect("checkpoint descriptor")
-            .fact_kind()
-            .as_str(),
-        "collector.checkpoint"
+        "bitcoin.address_balance_snapshot"
     );
 
     assert!(nodes[0].fact_descriptor_allowlist.is_empty());
     assert!(nodes[1].fact_descriptor_allowlist.is_empty());
     assert_eq!(
         nodes[2].fact_descriptor_allowlist.as_slice(),
-        std::slice::from_ref(&chain_head_ref)
+        std::slice::from_ref(&balance_ref)
     );
-    assert_eq!(
-        nodes[3].fact_descriptor_allowlist.as_slice(),
-        std::slice::from_ref(&checkpoint_ref)
-    );
-    assert_ne!(
-        chain_head_ref.descriptor_hash,
-        checkpoint_ref.descriptor_hash
-    );
+    assert!(nodes[3].fact_descriptor_allowlist.is_empty());
 
     let certified = mfm_certify::certify_program_draft(&draft).expect("certified");
 
@@ -210,24 +129,18 @@ fn descriptor_allow_lists_are_attached_to_fact_recording_nodes_and_survive_certi
     assert!(nodes[0].fact_descriptor_allowlist.is_empty());
     assert!(nodes[1].fact_descriptor_allowlist.is_empty());
     assert_eq!(nodes[2].fact_descriptor_allowlist.len(), 1);
-    assert_eq!(nodes[3].fact_descriptor_allowlist.len(), 1);
-    assert_ne!(
-        nodes[2].fact_descriptor_allowlist[0].descriptor_hash,
-        nodes[3].fact_descriptor_allowlist[0].descriptor_hash
-    );
+    assert_eq!(nodes[2].fact_descriptor_allowlist[0], balance_ref);
+    assert!(nodes[3].fact_descriptor_allowlist.is_empty());
 }
 
 #[test]
 fn operation_descriptor_registers() {
     let registry = btc_collectors_operation_registry().expect("operation registry");
     let descriptor = registry
-        .operation_descriptor::<BtcChainHeadCollectorCycleOperation>()
+        .operation_descriptor::<BtcNetworkCollectionOperation>()
         .expect("operation descriptor");
 
-    assert_eq!(
-        descriptor.name(),
-        "mfm.bitcoin.btc_chain_head_collector_cycle"
-    );
+    assert_eq!(descriptor.name(), "mfm.bitcoin.btc_network_collection");
 }
 
 #[test]

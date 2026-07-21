@@ -5,17 +5,12 @@ use mfm_replay::v1::{
     self as replay, decode_produced_value as decode_replay_value,
     load_node_config as replay_node_config, produced_input_frames as replay_input_frames,
 };
-use mfm_states_btc::{
-    record_collector_checkpoint_from_outputs, BtcAddressBalanceObservation,
-    BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact, LoadedCollectorCheckpoint,
-};
+use mfm_states_btc::{BtcAddressBalanceObservation, BtcJointTip};
 use mfm_values::{MfmValue, NonEmpty};
 
 /// Verifies Bitcoin JSON-RPC observation cell outputs from retained capability read evidence.
 pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
-    replay::verify_external_read_state::<QueryCollectorCheckpointState>(broker)?;
     replay::verify_external_read_state::<ResolveBtcJointTipState>(broker)?;
-    replay::verify_external_read_state::<ObserveBtcChainHeadState>(broker)?;
     replay::verify_external_read_state::<ObserveBtcAddressBalanceState>(broker)?;
 
     let balance_kind = ObserveBtcAddressBalanceState::kind().map_err(replay_adapter_error)?;
@@ -23,9 +18,7 @@ pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Resul
     let balance_frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
         Ok(node.state_kind == balance_kind && node.state_version == balance_version)
     })?;
-    verify_btc_chain_head_fact_replay(broker)?;
     verify_btc_address_balance_fact_replay(broker)?;
-    verify_btc_collector_checkpoint_fact_replay(broker)?;
     verify_btc_shared_joint_tips(broker, &balance_frames)?;
     verify_btc_network_collection_receipt_replay(broker)?;
     Ok(())
@@ -48,38 +41,6 @@ fn verify_btc_shared_joint_tips(
                 "Bitcoin same-network observations did not share one joint tip",
             ));
         }
-    }
-    Ok(())
-}
-
-fn verify_btc_chain_head_fact_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
-    let state_kind = RecordBtcChainHeadFactState::kind().map_err(replay_adapter_error)?;
-    let state_version = RecordBtcChainHeadFactState::version().map_err(replay_adapter_error)?;
-    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
-        Ok(node.state_kind == state_kind && node.state_version == state_version)
-    })?;
-    for frame in &frames {
-        let observation_frames = replay_input_frames(
-            broker,
-            &frame.node,
-            &BtcChainHeadObservation::semantic_id().map_err(replay_adapter_error)?,
-            &BtcChainHeadObservation::schema_id().map_err(replay_adapter_error)?,
-        )?;
-        if observation_frames.len() != 1 {
-            return Err(replay_btc_mismatch(
-                "Bitcoin chain-head fact input was incomplete",
-            ));
-        }
-        let observation: BtcChainHeadObservation = decode_replay_value(&observation_frames[0])?;
-        let fact = observation.to_fact();
-        ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
-        replay::verify_recorded_fact_evidence(
-            broker,
-            frame,
-            &BtcChainHeadFact::descriptor().map_err(replay_adapter_error)?,
-            fact.subject(),
-            fact.response(),
-        )?;
     }
     Ok(())
 }
@@ -111,52 +72,6 @@ fn verify_btc_address_balance_fact_replay(broker: &replay::ReplayBroker) -> repl
             broker,
             frame,
             &BtcAddressBalanceSnapshotFact::descriptor().map_err(replay_adapter_error)?,
-            fact.subject(),
-            fact.response(),
-        )?;
-    }
-    Ok(())
-}
-
-fn verify_btc_collector_checkpoint_fact_replay(
-    broker: &replay::ReplayBroker,
-) -> replay::Result<()> {
-    let state_kind = RecordCollectorCheckpointState::kind().map_err(replay_adapter_error)?;
-    let state_version = RecordCollectorCheckpointState::version().map_err(replay_adapter_error)?;
-    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
-        Ok(node.state_kind == state_kind && node.state_version == state_version)
-    })?;
-    for frame in &frames {
-        let config: mfm_states_btc::RecordCollectorCheckpointConfig =
-            replay_node_config(broker, &frame.node)?;
-        let chain_head_frames = replay_input_frames(
-            broker,
-            &frame.node,
-            &BtcChainHeadFact::semantic_id().map_err(replay_adapter_error)?,
-            &BtcChainHeadFact::schema_id().map_err(replay_adapter_error)?,
-        )?;
-        let loaded_checkpoint_frames = replay_input_frames(
-            broker,
-            &frame.node,
-            &LoadedCollectorCheckpoint::semantic_id().map_err(replay_adapter_error)?,
-            &LoadedCollectorCheckpoint::schema_id().map_err(replay_adapter_error)?,
-        )?;
-        if chain_head_frames.len() != 1 || loaded_checkpoint_frames.len() != 1 {
-            return Err(replay_btc_mismatch(
-                "Bitcoin collector checkpoint fact inputs were incomplete",
-            ));
-        }
-        let chain_head_fact: BtcChainHeadFact = decode_replay_value(&chain_head_frames[0])?;
-        let loaded_checkpoint: LoadedCollectorCheckpoint =
-            decode_replay_value(&loaded_checkpoint_frames[0])?;
-        let fact =
-            record_collector_checkpoint_from_outputs(&config, &chain_head_fact, &loaded_checkpoint)
-                .map_err(replay_adapter_error)?;
-        ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
-        replay::verify_recorded_fact_evidence(
-            broker,
-            frame,
-            &CollectorCheckpointFact::descriptor().map_err(replay_adapter_error)?,
             fact.subject(),
             fact.response(),
         )?;

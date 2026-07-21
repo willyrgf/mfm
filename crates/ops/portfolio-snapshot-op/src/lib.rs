@@ -615,7 +615,7 @@ mod tests {
             mfm_op_evm_collectors::evm_collectors_state_registry().expect("EVM states");
         assert_eq!(states.len(), btc_states.len() + evm_states.len() + 3);
         states
-            .state_descriptor::<mfm_op_btc_collectors::QueryCollectorCheckpointState>()
+            .state_descriptor::<mfm_op_btc_collectors::ResolveBtcJointTipState>()
             .expect("composed Bitcoin state");
         states
             .state_descriptor::<mfm_states_evm::CollectEvmBalancesState>()
@@ -631,7 +631,7 @@ mod tests {
             btc_operations.len() + evm_operations.len() + 2
         );
         operations
-            .operation_descriptor::<mfm_op_btc_collectors::BtcChainHeadCollectorCycleOperation>()
+            .operation_descriptor::<mfm_op_btc_collectors::BtcNetworkCollectionOperation>()
             .expect("composed Bitcoin operation");
         operations
             .operation_descriptor::<EvmBalanceCollectionOperation>()

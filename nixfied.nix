@@ -311,22 +311,6 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
-    parity-cli-postgres-status = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm"
-        "--features"
-        "parity-tests"
-        "--test"
-        "status_contract_postgres"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
     parity-postgres-rest-api = cargoLeaf {
       run = [
         "cargo"
@@ -421,10 +405,6 @@ in
         };
         parity-cli-setup = {
           task = "parity-cli-setup";
-          dependsOn = [ "mfm-cli-build" ];
-        };
-        parity-cli-postgres-status = {
-          task = "parity-cli-postgres-status";
           dependsOn = [ "mfm-cli-build" ];
         };
         parity-postgres-rest-api = {

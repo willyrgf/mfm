@@ -1,5 +1,5 @@
 use super::*;
-use mfm_program::StateSpec;
+use mfm_program::{MfmFactType, StateSpec};
 
 fn network_fixture() -> BtcNetworkCollectionConfig {
     BtcNetworkCollectionConfig {
@@ -10,12 +10,6 @@ fn network_fixture() -> BtcNetworkCollectionConfig {
             addresses: vec!["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned()],
         },
     }
-}
-
-#[test]
-fn default_chain_head_config_is_valid() {
-    validate_btc_chain_head_collector_config(&BtcChainHeadCollectorConfig::default())
-        .expect("default config");
 }
 
 #[test]
@@ -53,16 +47,16 @@ fn network_collection_rejects_unsorted_or_duplicate_addresses() {
 }
 
 #[test]
-fn fact_record_states_advertise_exact_fact_descriptor_allow_lists() {
-    let chain_head =
-        RecordBtcChainHeadFactState::emitted_fact_descriptors().expect("chain-head descriptors");
-    let checkpoint =
-        RecordCollectorCheckpointState::emitted_fact_descriptors().expect("checkpoint descriptors");
+fn fact_record_state_advertises_the_balance_descriptor() {
     let balance =
         RecordBtcAddressBalanceFactState::emitted_fact_descriptors().expect("balance descriptors");
 
-    assert_eq!(chain_head.len(), 1);
-    assert_eq!(checkpoint.len(), 1);
     assert_eq!(balance.len(), 1);
-    assert_ne!(chain_head[0].descriptor_hash, balance[0].descriptor_hash);
+    assert_eq!(
+        BtcAddressBalanceSnapshotFact::descriptor()
+            .expect("balance descriptor")
+            .fact_kind()
+            .as_str(),
+        "bitcoin.address_balance_snapshot"
+    );
 }

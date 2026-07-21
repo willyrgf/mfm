@@ -340,47 +340,6 @@ pub(super) fn prepare_app_fact_launch(
     prepare_app_fact_launch_with_invocation_key(include_fact_descriptor, None)
 }
 
-pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, PublicError>
-{
-    let draft = mfm_op_btc_collectors::btc_chain_head_collector_cycle_program_draft(
-        mfm_op_btc_collectors::BtcChainHeadCollectorConfig::default(),
-    )
-    .expect("btc collector draft");
-    let observation_context_seed =
-        CanonicalSeed::from_value(&mfm_op_btc_collectors::BtcChainHeadObservationContext {
-            observed_at_unix_ms: None,
-        })
-        .expect("observation context seed");
-    let seeds = BTreeMap::from([(
-        draft.seeds()[0].seed_id.clone(),
-        observation_context_seed.canonical_json().clone(),
-    )]);
-    let plan = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
-        .expect("btc collector launch plan");
-    let registry = production_certification_registry().expect("production registry");
-    let (certified_spec, scoped, config_inputs, seed_inputs) =
-        certify_launch_plan(&plan, &registry)?;
-
-    prepare_certified_run_launch(
-        CertifiedRunLaunchInput {
-            certified_spec,
-            registry: &scoped,
-            store_scope_id: StoreScopeId::new(
-                "mfm.store_scope.v1:00000000000000000000000000000000",
-            )
-            .expect("store scope"),
-            invocation_key_digest: default_invocation_key_digest(),
-            entry_point_evidence: events::EntryPointLaunchEvidence::new(
-                "mfm.bitcoin/btc_chain_head_internal_test@1",
-                Vec::new(),
-            )
-            .expect("entry point evidence"),
-        },
-        config_inputs,
-        seed_inputs,
-    )
-}
-
 pub(super) fn prepare_app_fact_launch_with_invocation_key(
     include_fact_descriptor: bool,
     invocation_key_digest: Option<ContentDigest>,

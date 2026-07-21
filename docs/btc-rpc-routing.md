@@ -1,6 +1,6 @@
 # Typed Bitcoin Runtime Config
 
-Status: typed transport runbook for Bitcoin-backed collector and portfolio workflows.
+Status: typed transport runbook for Bitcoin-backed portfolio workflows.
 
 Bitcoin RPC endpoints are live runtime inputs. They are not semantic run authority and must not be
 persisted in manifests, events, artifacts, public outputs, fixtures, or replay inputs.
@@ -74,12 +74,6 @@ only when the requested anchor is the node's current best tip:
 If the requested anchor is stale, the node advances during the scan, or the scan does not complete,
 the provider returns `operation_incomplete` as a fatal capability failure. The system does not add a
 current-only Bitcoin portfolio mode because that would introduce a second snapshot semantics.
-
-## Collector Checkpoints
-
-BTC collector state and checkpoint subjects include `bitcoin_network`. Checkpoint queries match the
-semantic network id, source identity, head kind, finality policy, confirmation depth, and Bitcoin
-network tag so checkpoints cannot cross expected Bitcoin networks.
 
 ## Replay
 

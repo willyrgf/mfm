@@ -43,9 +43,7 @@ impl ReplayVerifierRegistry {
                 },
                 ReplayVerifierRegistration {
                     state_keys: &[
-                        state_key::<mfm_states_btc::QueryCollectorCheckpointState>,
                         state_key::<mfm_states_btc::ResolveBtcJointTipState>,
-                        state_key::<mfm_states_btc::ObserveBtcChainHeadState>,
                         state_key::<mfm_states_btc::ObserveBtcAddressBalanceState>,
                         state_key::<mfm_states_btc::AssembleBtcNetworkCollectionReceiptState>,
                     ],

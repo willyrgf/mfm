@@ -14,11 +14,9 @@ domain = "bitcoin"
 serde = { workspace = true }
 thiserror = { workspace = true }
 
-mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-btc-capabilities = { path = "../../btc-capabilities" }
 mfm-events = { path = "../../kernel/events" }
 mfm-fact-capabilities = { path = "../../fact-capabilities" }
-mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-replay = { path = "../../kernel/replay" }

@@ -1,15 +1,12 @@
 #![warn(missing_docs)]
-//! Reusable Bitcoin fact state contracts.
+//! Reusable Bitcoin balance-collection state contracts.
 //!
-//! This crate owns typed Bitcoin facts and state-layer contracts used to observe bounded
-//! chain-head data, address balance snapshots, and collector checkpoints. It defines no
-//! JSON-RPC transport, runtime source routing, workflow topology, CLI, REST, or app
-//! registration.
+//! This crate owns typed Bitcoin balance facts and state-layer contracts used to resolve a shared
+//! internal tip and collect exact-anchor address balance snapshots. It defines no JSON-RPC
+//! transport, runtime source routing, workflow topology, CLI, REST, or app registration.
 
 mod address_balance;
 mod address_balance_collect;
-mod chain_head;
-mod collector_checkpoint;
 mod external_read;
 
 pub use address_balance::{
@@ -34,61 +31,19 @@ pub use address_balance_collect::{
     BTC_NATIVE_BALANCE_SOURCE_STATUS,
 };
 
-pub use chain_head::{
-    normalize_chain_head_response, validate_observe_chain_head_config, BtcChainHeadFact,
-    BtcChainHeadObservation, BtcChainHeadObservationContext, BtcChainHeadResponse,
-    BtcChainHeadSubject, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
-    ObserveBtcChainHeadInputHandles, ObserveBtcChainHeadState, RecordBtcChainHeadFactConfig,
-    RecordBtcChainHeadFactInput, RecordBtcChainHeadFactInputHandles, RecordBtcChainHeadFactState,
-};
-pub use collector_checkpoint::{
-    record_collector_checkpoint_from_outputs, validate_query_collector_checkpoint_config,
-    validate_record_collector_checkpoint_config, CollectorCheckpointFact,
-    CollectorCheckpointResponse, CollectorCheckpointSubject, LoadedCollectorCheckpoint,
-    QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
-    QueryCollectorCheckpointInputHandles, QueryCollectorCheckpointReadEvidence,
-    QueryCollectorCheckpointReadPlan, QueryCollectorCheckpointState,
-    RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
-    RecordCollectorCheckpointInputHandles, RecordCollectorCheckpointState,
-};
 pub use external_read::{
     BtcAddressBalanceReadEvidence, BtcAddressBalanceReadPlan, BtcChainHeadReadEvidence,
     BtcChainHeadReadPlan,
 };
 
-use std::future;
-use std::num::NonZeroU64;
-
-use mfm_btc_capabilities::{
-    BtcCapabilityError, BtcChainHeadReadCapability,
-    BtcChainHeadResponse as CapabilityChainHeadResponse, BtcFinality, BtcHeadKind,
-    BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
-};
+use mfm_btc_capabilities::BtcCapabilityError;
 use mfm_canonical::sha256_digest_bytes;
-use mfm_effects::{ManagedPlatformWrite, ReadExternal};
-use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactRecordCapability};
-use mfm_facts::{
-    compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
-    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactSelectionEvidence,
-    FactVisibility, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
-};
-use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
-use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
-use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, CanonicalSeed, ExternalReadEvidenceSet,
-    FactDescriptorRef, ManagedWriteState, MfmFactType, NoContext, ReadState, StateError,
-    StateResult, StateSpec, ValidatedConfig,
-};
-use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, StateInput};
-use serde::{Deserialize, Serialize};
+use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
+use mfm_program::{AdapterBindingSpec, StateError};
 
 const NAMESPACE: &str = "mfm.bitcoin";
-const DEFAULT_SCOPE: &str = "default";
-const DEFAULT_STORE_SCOPE: &str = "mfm.store.default";
 const BTC_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
 const BTC_JSONRPC_ADAPTER_VERSION: &str = "mfm.bitcoin.jsonrpc.adapter.v1";
-const CHECKPOINT_QUERY_SELECTION_POLICY: &[u8] =
-    b"mfm.bitcoin.collector-checkpoint.latest-selection.v1";
 
 /// Returns the stable Bitcoin JSON-RPC adapter kind.
 pub fn btc_jsonrpc_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
@@ -116,16 +71,6 @@ fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
             ))
         })?,
     }])
-}
-
-/// Returns the fact visibility for platform Bitcoin chain-head observations.
-pub fn chain_head_fact_visibility() -> FactVisibility {
-    FactVisibility::indexed_default(FactAudience::Platform)
-}
-
-/// Returns the fact visibility for internal collector checkpoint observations.
-pub fn collector_checkpoint_fact_visibility() -> FactVisibility {
-    FactVisibility::indexed_default(FactAudience::Control)
 }
 
 fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
@@ -178,65 +123,10 @@ impl From<BtcStateError> for StateError {
     }
 }
 
-fn checkpoint_material_hash(
-    checkpoint: &CollectorCheckpointFact,
-) -> Result<ContentDigest, BtcStateError> {
-    CanonicalSeed::from_value(checkpoint)
-        .map(|seed| seed.content_digest().clone())
-        .map_err(|error| BtcStateError::InvalidInput {
-            reason: format!("checkpoint material canonicalization failed: {error}"),
-        })
-}
-
 fn validate_bitcoin_network(value: &str) -> Result<(), String> {
     match value {
         "main" | "test" | "signet" | "regtest" => Ok(()),
         _ => Err("bitcoin_network must be `main`, `test`, `signet`, or `regtest`".to_owned()),
-    }
-}
-
-fn validate_non_secret_label(name: &str, value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err(format!("{name} must not be empty"));
-    }
-    for forbidden in [
-        "http://",
-        "https://",
-        "password",
-        "auth",
-        "token",
-        "secret",
-        "localhost",
-        "127.0.0.1",
-    ] {
-        if value.contains(forbidden) {
-            return Err(format!(
-                "{name} contains forbidden runtime routing or secret material"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn head_kind_tag(kind: BtcHeadKind) -> &'static str {
-    match kind {
-        BtcHeadKind::Best => "best",
-        BtcHeadKind::Confirmed => "confirmed",
-    }
-}
-
-fn source_status_tag(status: BtcSourceStatus) -> &'static str {
-    match status {
-        BtcSourceStatus::Synced => "synced",
-        BtcSourceStatus::InitialBlockDownload => "initial_block_download",
-        BtcSourceStatus::Unknown => "unknown",
-    }
-}
-
-fn finality_policy_tag(finality: BtcFinality) -> &'static str {
-    match finality {
-        BtcFinality::BestAvailable => "best_available",
-        BtcFinality::Confirmations(_) => "confirmations",
     }
 }
 

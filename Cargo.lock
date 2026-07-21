@@ -2215,7 +2215,6 @@ dependencies = [
  "mfm-events",
  "mfm-evm-signing",
  "mfm-ids",
- "mfm-op-btc-collectors",
  "mfm-program",
  "mfm-rest-api",
  "mfm-runtime",
@@ -2240,11 +2239,9 @@ dependencies = [
 name = "mfm-adapters-btc-jsonrpc"
 version = "0.1.0"
 dependencies = [
- "mfm-artifact-capabilities",
  "mfm-btc-capabilities",
  "mfm-events",
  "mfm-fact-capabilities",
- "mfm-facts",
  "mfm-ids",
  "mfm-program",
  "mfm-replay",
@@ -2516,9 +2513,7 @@ dependencies = [
  "alloy-primitives",
  "axum",
  "k256",
- "mfm-adapters-btc-jsonrpc",
  "mfm-app",
- "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-certify",
  "mfm-events",
@@ -2527,7 +2522,6 @@ dependencies = [
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
- "mfm-op-btc-collectors",
  "mfm-op-portfolio-snapshot",
  "mfm-portfolio-model",
  "mfm-program",

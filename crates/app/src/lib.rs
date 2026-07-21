@@ -191,7 +191,7 @@ pub async fn connect_production_run_services(
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, PublicError> {
     let store = connect_production_store(database_url).await?;
-    // Portfolio SelectHoldings and BTC collectors require the Postgres fact-index provider.
+    // Portfolio SelectHoldings requires the Postgres fact-index provider.
     let fact_index = production_fact_index_read_provider(store.clone());
     let runners =
         production_runner_registry(Arc::new(store.clone()), fact_index, runtime_config_path)?;
@@ -220,9 +220,9 @@ pub async fn connect_production_run_read_services(
 /// Builds the production typed runner registry for this process.
 ///
 /// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Domain runners
-/// register here as certified typed descriptor bindings. Portfolio snapshots and BTC collectors require
-/// an explicit Platform/Control [`mfm_fact_capabilities::FactIndexReadProvider`] — production wiring
-/// must supply the Postgres implementation from [`production_fact_index_read_provider`].
+/// register here as certified typed descriptor bindings. Portfolio snapshots require an explicit
+/// Platform/Control [`mfm_fact_capabilities::FactIndexReadProvider`] — production wiring must supply
+/// the Postgres implementation from [`production_fact_index_read_provider`].
 pub fn production_runner_registry(
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
@@ -248,7 +248,6 @@ pub fn production_runner_registry(
     btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),
-        fact_index,
         runtime_config.clone(),
     )?;
     evm_runtime::register_evm_runners(&mut registry, artifacts.clone(), runtime_config)?;
@@ -257,7 +256,7 @@ pub fn production_runner_registry(
 
 /// Builds the production Postgres Platform/Control fact-index provider.
 pub use fact_index::production_fact_index_read_provider;
-/// Platform/Control fact-index capability used by portfolio and BTC collector runners.
+/// Platform/Control fact-index capability used by portfolio runners.
 pub use mfm_fact_capabilities::FactIndexReadProvider;
 
 /// Projection-backed in-memory fact-index for store-backed tests and process assembly fixtures.
@@ -337,8 +336,6 @@ fn capability_artifact_error_from_store(
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, PublicError> {
     let mut registry = CertificationRegistry::new();
-    registry.register_fact_type::<mfm_op_btc_collectors::BtcChainHeadFact>()?;
-    registry.register_fact_type::<mfm_op_btc_collectors::CollectorCheckpointFact>()?;
     registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
     registry.register_state::<mfm_states_evm::SubmitEvmTransactionState>()?;
     registry.register_state::<mfm_states_evm::ValidateEvmContractState>()?;

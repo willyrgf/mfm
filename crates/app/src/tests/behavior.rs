@@ -645,19 +645,6 @@ async fn run_read_services_are_evidence_only() {
 }
 
 #[test]
-fn production_registry_certifies_btc_collector_descriptors() {
-    let request =
-        prepare_btc_collector_internal_test_launch().expect("btc collector certifies and prepares");
-
-    assert_eq!(
-        request.evidence.entry_point.entry_point_id.as_str(),
-        "mfm.bitcoin/btc_chain_head_internal_test@1"
-    );
-    assert!(!request.evidence.config_artifacts.is_empty());
-    assert!(!request.evidence.seed_cells.is_empty());
-}
-
-#[test]
 fn production_registry_certifies_internal_evm_collector_descriptors() {
     use alloy_primitives::address;
 
@@ -779,37 +766,6 @@ rpc_url = "ws://example.invalid"
         .load_run_stream(&invalid_run_id)
         .await
         .expect("invalid-route run stream")
-        .is_empty());
-}
-
-#[tokio::test]
-async fn btc_collector_launch_defers_runtime_config_to_ingress() {
-    let store = store::AsyncInMemoryRunStore::default();
-    let request =
-        prepare_btc_collector_internal_test_launch().expect("btc collector launch request");
-    let run_id = request.run_id.clone();
-    let fact_index = crate::ProjectionFactIndexProvider::new(store.clone());
-    let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
-        .expect("production runners without BTC config");
-    let services = make_run_services(
-        runners,
-        store.clone(),
-        store.clone(),
-        production_certification_registry().expect("production registry"),
-    );
-
-    let error = services
-        .launch_run(request)
-        .await
-        .expect_err("missing BTC runtime config rejects at ingress before admission");
-
-    assert_eq!(error.code, "RuntimeConfigRequired");
-    assert_eq!(error.diagnostics.len(), 1);
-    assert_eq!(error.diagnostics[0].provider_family().as_str(), "bitcoin");
-    assert!(store
-        .load_run_stream(&run_id)
-        .await
-        .expect("run stream")
         .is_empty());
 }
 
