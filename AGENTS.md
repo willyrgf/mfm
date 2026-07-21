@@ -1,7 +1,8 @@
 # MFM Development Guide for AI Agents
 
-This document is the source-of-truth for AI agents working in this repository.
-It is inspired by the practices used in large Rust codebases: modular crates, strong typing, careful performance work, and a bias toward small, reviewable changes.
+This document is the source of truth for AI-agent behavior and contribution rules in this
+repository. `docs/build-and-verification.md` owns workflow mechanics and verification selection;
+`nixfied.nix` owns the executable task graph.
 
 ## Read First (Non-Negotiables)
 
@@ -9,10 +10,10 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
 - Do not introduce hacks, monkey patches, partial workarounds, or fragile schema shims.
 - If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
-- Use focused Cargo verification while developing. Prefer targeted `cargo test`, `cargo check`,
-  `cargo metadata`, schema checks, and manually started service parity tests.
-- Before each commit, run `nix run .#check`, `nix run .#test`, and `nix run .#test-db`.
-- Run `nix run .#ci` after major work or for final merge-readiness validation.
+- Verification is scope-driven, not commit-driven. Use the narrowest command that exercises the
+  changed behavior, and expand only when the affected boundary or risk requires it.
+- Do not run broad gates merely because a commit is about to be created. Follow the verification
+  ladder below and report exactly what was and was not run.
 - Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `docs: refresh repo map for typed crates`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
@@ -46,30 +47,65 @@ Key invariants to preserve (high risk if violated):
 - Secrets must not appear in persisted surfaces:
   - manifests, events, artifacts (including fact payloads and context snapshots), CLI/API outputs, or error details.
 
-## Verification Entry Points
+## Verification Workflow
 
-Use Cargo and focused checks while developing:
+The exact build lanes, gate composition, artifact policy, and selection rules live in
+`docs/build-and-verification.md`. `nixfied.nix` is authoritative for the current task graph.
 
-- `cargo fmt --all -- --check`
-- `cargo check --workspace`
-- `cargo test --workspace`
-- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
-- targeted schema, metadata, and parity checks for touched surfaces
+Use the incremental development lane for the inner loop:
 
-For parity tests that need live services, start those services manually and run the focused Cargo
-test with explicit environment variables such as `DATABASE_URL` or `MFM_RUNTIME_CONFIG_FILE`.
+```bash
+nix develop
+cargo fmt --all -- --check
+cargo check -p <package>
+cargo test -p <package> [test-filter]
+```
 
-Before each commit, run the Nixfied managed gates:
+Run the smallest relevant test target when one exists. Add affected dependent packages when a
+public crate contract changes. Use `nix run .#quick` when workspace-wide library/binary checking is
+useful; it is an incremental feedback command, not a test or merge gate. Do not default to
+`cargo test --workspace` when a package or test target covers the change.
 
-- `nix run .#check`: rustfmt, clippy, and architecture/cargo metadata contracts.
-- `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
-- `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
+For a one-off parity check that already has a Nixfied leaf, run only that leaf so Nixfied starts its
+declared service requirements:
 
-Run `nix run .#ci` after major work or for final merge-readiness validation. Its terminal
-`closing-source-revision` stage retains the full tested Git SHA; pair it with clean
-`git status --short` output for closure evidence.
+```bash
+nix run .#run -- --task <task-id>
+```
 
-## Key Docs:
+For repeated debugging, it can be faster to start only the required service once and use focused
+Cargo tests with explicit variables such as `DATABASE_URL` or `MFM_RUNTIME_CONFIG_FILE`.
+
+Select final verification from the change surface:
+
+| Change surface | Verification before handoff |
+| --- | --- |
+| Documentation or comments only | Check the changed links, examples, and command claims; run `git diff --check`. No Rust build is required unless the documentation changes an executable/generated contract or makes claims that need validation against one. |
+| Local implementation in one crate | Run rustfmt, a package-scoped check or Clippy invocation, and the affected package/test targets. Test dependents when a public contract changed. |
+| Cargo manifest, workspace metadata, Cargo-enforced crate taxonomy, or dependency-boundary configuration | Run affected package checks/tests and `nix run .#run -- --task cargo-metadata-contract`. Add `.#check` when workspace resolution or all-feature lint coverage changed broadly. |
+| Cross-crate public API, proc-macro output, shared kernel/runtime semantics, or multi-crate behavior | Run `nix run .#check` and `nix run .#test`, unless the final `.#ci` run below will cover them. |
+| PostgreSQL migration, SQLx metadata/query, Postgres store behavior, or DB gate change | Run focused tests while iterating, then `nix run .#test-db`. Add `.#check` or `.#test` only when their surfaces also changed. |
+| Nixfied model or verification task graph | Run `nix run .#model-check` early, exercise the changed task/gate, and run `nix run .#ci` once on the final revision. Follow `docs/UPGRADE.md` for a Nixfied pin/runtime ABI change. |
+| Flake output, package/dev-shell definition, flake dependency pin, or CI workflow | Run `nix flake check --no-build` for early evaluation, then exercise the affected output or invocation. Add `.#ci` when the toolchain, Nixfied runtime, gate execution, or cross-platform behavior changed. |
+| Security-sensitive, persisted-contract, scheduler/recovery, cross-cutting, release, or explicit full local merge-readiness validation | Run focused checks first, then `nix run .#ci` once on the final revision. |
+
+When a change spans rows, combine only the non-overlapping coverage. Editing an architecture or
+workflow document does not by itself select the code/configuration row with the same subject.
+
+`nix run .#ci` already composes `.#check`, `.#test`, and `.#test-db`, then adds the remaining parity
+coverage and closing Git revision evidence. Do not run those three component gates immediately
+before `.#ci` on an unchanged tree. Use them independently when that is the smallest sufficient
+gate or when diagnosing a failure.
+
+The `closing-source-revision` evidence records `HEAD`, not uncommitted changes. Treat it as final
+closure evidence only when the tested worktree is clean; otherwise report that limitation.
+
+Broad gates use `target/verification`; focused Cargo and `.#quick` use the ordinary incremental
+`target`. Do not routinely clean either target. Use
+`cargo clean --target-dir target/verification` only for a deliberate cold run or suspected Cargo
+artifact corruption.
+
+## Key Docs
 
 - `README.md`: project disclaimer.
 - `docs/code-quality.md`: mandatory quality policy for all changes.
@@ -81,7 +117,6 @@ Run `nix run .#ci` after major work or for final merge-readiness validation. Its
 - `crates/kernel/program/README.md`: typed program authoring concepts.
 - `crates/kernel/program-derive/README.md`: proc-macro notes.
 
-
 ## Key Design Principles
 
 - Modularity: each crate should be usable as a library with minimal coupling.
@@ -92,94 +127,12 @@ Run `nix run .#ci` after major work or for final merge-readiness validation. Its
 - Correctness and security first: especially in security related modules (e.g. `mfm_core::keystore`).
 - Output stability: treat CLI JSON/text formats as public API.
 
-## Development Workflow
+## Nixfied Customization
 
-### Code Style and Standards
-
-1. **Formatting**:
-```bash
-cargo fmt --all -- --check
-```
-
-2. **Focused testing**:
-```bash
-cargo test -p <package>
-```
-
-3. **Workspace testing when feasible**:
-```bash
-cargo test --workspace
-```
-
-
-## Nixfied v2 Customization Surface
-
-Nixfied v2 is consumed as a flake input, not vendored as a framework tree.
-
-- `flake.nix`: pins the `nixfied` input, compiles `nixfied.nix`, and exposes `.#check`,
-  `.#test`, `.#test-db`, `.#ci`, and the managed local `.#mfm` app.
-- `flake.lock`: records the exact Nixfied/nixpkgs/Rust overlay inputs; the root
-  nixpkgs pin supplies the SQLx CLI used by `.#test-db`.
-- `nixfied.nix`: project-owned model for MFM tasks, composites, services, slots, and ports.
-
-Prefer editing `nixfied.nix` for Nixfied task/composite changes. Do not recreate v1-style `nixfied/project/`,
-`nixfied/framework/`, dispatcher, or introspection surfaces.
-
-Current Nixfied command contract:
-
-- `nix run .#model-check`: model admission only.
-- `nix run .#check`: rustfmt, clippy, and architecture/cargo metadata contracts.
-- `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
-- `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
-- `nix run .#ci`: full CI by definition; starts the managed services required by parity tests,
-  then retains the full tested Git SHA.
-- `nix run .#mfm -- <ARGS>`: runs the packaged MFM CLI with persistent slot-9
-  managed Postgres for local development.
-- `nix build .#mfm`: builds the raw MFM CLI with the Nixfied-pinned Rust toolchain.
-
-Environment variables you should expect:
-
-- `NIXFIED_STATE_DIR`: optional Nixfied runtime state and evidence root
-  override. It neither selects nor cleans Cargo artifacts.
-- `CARGO_TARGET_DIR`: broad Nixfied gates set the ordinary project-owned value
-  `target/verification`; `nix develop` and `.#quick` unset it so direct
-  development uses the normal target directory.
-
-All Nixfied slots in one worktree share `target/verification`; separate
-worktrees isolate by path. Cargo owns writer locking, fingerprints, rebuild
-decisions, and corruption recovery; MFM owns placement, inspection, retention,
-and exact cleanup. Cargo leaves anchor the authored relative value at the
-invocation root before nested Cargo processes run. Use
-`cargo clean --target-dir target/verification` to discard broad verification
-artifacts. Nixfied runtime output is execution evidence, not cache evidence.
-
-## Common Contribution Types
-
-These are typical, review-friendly change patterns (focus on a single outcome).
-
-1. Small bug fixes (1-20 lines)
-   - Fix off-by-one / validation edge case
-   - Tighten error messages or error variants
-   - Tighten malformed input rejection
-
-2. Security hardening
-   - Strengthen keystore tamper checks
-   - Add stricter file size/shape validation
-   - Reduce secret copies / ensure zeroization
-
-3. Adding comprehensive tests
-   - Regression tests for previously failing inputs
-   - Corruption/tamper tests for persisted formats
-   - CLI e2e tests for command workflows
-
-4. Making components more generic / reusable
-   - Prefer traits + bounds over hard-coded types when it improves reuse
-   - Keep crate boundaries intact (no `crates/*` -> `bin/*` coupling)
-
-5. Feature additions
-   - New CLI subcommand with stable JSON output
-   - New state machine scheduler/tracker implementation with tests
-
+Nixfied v2 is a flake input. Keep project task/composite/service changes in `nixfied.nix`; do not
+recreate v1 framework, dispatcher, or introspection trees. `flake.nix` owns the generated app and
+package exposure, and `flake.lock` owns exact upstream pins. See `docs/build-and-verification.md`
+for build-lane details and `docs/UPGRADE.md` for coordinated pin/runtime changes.
 
 ## Code Style & API Guidelines
 
@@ -188,7 +141,7 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 - Prefer explicit, readable code over cleverness.
 - Avoid panics in library code. Use `Result` and typed errors.
 - Keep public APIs documented and consistent (names, error behavior, invariants).
-- Avoid cloning in hot paths. Prefer `&str`/borrowing where possible. 
+- Avoid cloning in hot paths. Prefer `&str`/borrowing where possible.
 
 ### Error Handling
 
@@ -209,7 +162,6 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 - CLI:
   - Preserve stable, machine-readable error codes (see `bin/cli/README.md`).
   - Avoid breaking the JSON output schema.
-
 
 ### Op vs State Placement Contract
 
@@ -326,7 +278,6 @@ When changing CLI/REST behavior, update the relevant docs in the same change:
 - CLI logging: use `tracing::{debug, info, warn, error}` with a clear target.
 - For parity failures, keep service logs beside the manually started Postgres/Reth data directory
   and rerun the focused Cargo test with `-- --nocapture`.
-
 
 ## Commenting Guidelines (Keep Future Readers in Mind)
 

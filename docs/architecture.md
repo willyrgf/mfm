@@ -807,5 +807,7 @@ Required metadata checks should assert:
   contract
 - `docs/code-quality.md`: mandatory quality policy for code, test, documentation, build, and
   workflow changes
+- `docs/build-and-verification.md`: scope-driven development workflow, build lanes, and gate
+  contract
 - `bin/cli/README.md`: CLI command and JSON output contract
 - `bin/rest-api/README.md`: REST contract

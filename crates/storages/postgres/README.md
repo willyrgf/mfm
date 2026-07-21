@@ -38,7 +38,26 @@ credentials, schema object definitions, or row contents.
 
 ## Verification
 
-Use the repository DB gate for this crate:
+For repeated iteration, keep a disposable caller-managed PostgreSQL process
+running and use a package/test filter in Cargo's incremental target:
+
+```sh
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm_test \
+  cargo test -p mfm-storage-postgres --features parity-tests <test-filter> -- --nocapture
+```
+
+For a one-off managed check, run the smallest Nixfied leaf that covers the
+change:
+
+```sh
+nix run .#run -- --task parity-postgres-state-events
+nix run .#run -- --task postgres-sqlx-check
+```
+
+These current internal task ids start only their declared PostgreSQL service
+and avoid the unrelated CLI/REST parity leaves. When a change affects this
+crate's schema, queries, SQLx metadata, store behavior, or DB gate composition,
+close it with the repository DB boundary gate:
 
 ```sh
 nix run .#test-db

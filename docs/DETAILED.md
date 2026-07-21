@@ -6,6 +6,8 @@ Use these documents together:
 
 - [`docs/design.md`](design.md) for the full runtime, persistence, replay, and secret-handling contract.
 - [`docs/architecture.md`](architecture.md) for taxonomy, placement, and boundary rules.
+- [`docs/build-and-verification.md`](build-and-verification.md) for the scope-driven development
+  workflow, build lanes, and gate contract.
 - [`docs/portfolio-snapshot.md`](portfolio-snapshot.md) for the sole public portfolio workflow.
 - [`docs/btc-rpc-routing.md`](btc-rpc-routing.md) for Bitcoin runtime routing and strict snapshot semantics.
 - [`docs/evm-rpc-routing.md`](evm-rpc-routing.md) for bounded source-bound EVM runtime sessions.
