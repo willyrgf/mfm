@@ -163,10 +163,6 @@ artifact corruption, delete exactly the verification target through Cargo:
 nix develop -c cargo clean --target-dir target/verification
 ```
 
-Deleting a worktree also deletes its verification target. Capacity remains a
-project/worktree concern; Nixfied does not inventory, account for, retain, or
-garbage-collect compiler artifacts.
-
 ## Gates
 
 | Command | Contract |
@@ -184,67 +180,10 @@ the three component gates immediately before `.#ci` on the same revision: that
 repeats their work in separate Nixfied runs. Run a component independently when
 it is the smallest sufficient boundary gate or when isolating a failure.
 
-Local `.#ci` does not include `nix flake check`. The hosted workflow evaluates
-the flake separately and runs `.#ci` on Linux and macOS; flake and hosted-job
-changes therefore need their own affected-surface validation.
-
 Nixfied owns deterministic service endpoint placement. Starts from independent
 state roots are coordinated by the upstream endpoint contract; an occupied
 planned endpoint is reported as `PORT_CONFLICT`. This runtime responsibility
 is independent of Cargo target placement.
-
-## Evidence behind the policy
-
-The local Linux measurements that selected this policy established:
-
-- compact verification artifacts reduced the target from roughly 17–18 GiB
-  to 9.8 GiB while eliminating incremental artifacts and `.dwo` files and
-  retaining source-line diagnostics;
-- a stable native Cargo target measured a 359.204-second clean median and a
-  197.644-second warm median, saving 161.560 seconds or 45.0%;
-- the stable target occupied approximately 10.49 GB per worktree; and
-- the measured assurance inventory remained unchanged throughout the selected
-  candidate's qualification runs.
-
-Those timings were collected on one reference `aarch64-linux` host. They are
-selection evidence, not a performance SLA or a macOS measurement. The same
-portable mechanism is required on supported platforms, while local Linux is
-the performance-measurement authority.
-
-The alternatives were rejected independently:
-
-| Candidate | Reason not selected |
-| --- | --- |
-| `sccache` | Empty-cache verification regressed 17.4%, and second-worktree reuse missed the materiality threshold. |
-| Crane artifacts | Warm full-gate improvement was only 4.4%/9.05 seconds and still required mutable Trybuild state. |
-| `crate2nix` | Per-crate derivations did not preserve the complete repository, Trybuild, doctest, and parity verification surface. |
-| `cargo2nix` | The generated graph did not preserve Cargo dependency/feature fidelity or the complete test surface. |
-| Execution-topology changes | Measured end-to-end savings missed both the 15% and 30-second materiality thresholds. |
-
-No combination of rejected candidates is selected, and MFM does not maintain a
-second per-crate Nix representation of Cargo's build graph.
-
-## Changing this contract
-
-Changes to target placement, compiler wrappers, per-crate derivations, hosted
-persistence, or verification topology must be measured through the complete
-consumer workload. At minimum, a proposal must demonstrate:
-
-- unchanged current test identifiers, features, doctests, Trybuild cases,
-  SQLx checks, parity behavior, and public gate composition;
-- focused developer behavior remains incremental and independent of the broad
-  verification target;
-- correct invalidation for leaf, shared-crate, non-Rust, toolchain, and target
-  configuration changes;
-- nested Cargo path correctness, same-worktree concurrency, cancellation
-  recovery, exact cleanup, and repeated-run storage growth;
-- local Linux clean and warm distributions, with both relative and absolute
-  materiality reported; and
-- `nix run .#ci` passing on the final authored model.
-
-Remote or hosted caches additionally require an explicit trust, credentials,
-corruption, outage, retention, and cost contract. They must not be introduced
-as an implicit extension of local Cargo reuse.
 
 For coordinated Nixfied pin and runtime ABI changes, follow
 [`UPGRADE.md`](UPGRADE.md).
