@@ -65,7 +65,7 @@ Start here:
 - Certified saga contract: [`docs/saga.md`](docs/saga.md)
 - Architecture taxonomy + placement rules: [`docs/architecture.md`](docs/architecture.md)
 - Rust build and verification contract: [`docs/build-and-verification.md`](docs/build-and-verification.md)
-- Contribution rules / CI parity: [`AGENTS.md`](AGENTS.md)
+- AI-agent contribution rules: [`AGENTS.md`](AGENTS.md)
 - Code quality policy: [`docs/code-quality.md`](docs/code-quality.md)
 
 User-facing docs:
@@ -97,72 +97,47 @@ Development and operations:
 
 ## Development
 
-Use focused Cargo verification by default. Start external services such as Postgres or Reth manually
-when a parity test needs them, then run the targeted test against those live endpoints.
+The canonical workflow and gate-selection matrix are in
+[`docs/build-and-verification.md`](docs/build-and-verification.md). Enter the pinned shell and use
+package- or test-scoped Cargo commands for the normal inner loop:
 
 ```bash
+nix develop
 cargo fmt --all -- --check
-cargo test --workspace
-cargo test -p mfm-integration-tests --test cargo_metadata_contract
+cargo check -p <package>
+cargo test -p <package> <test-filter>
 ```
 
-Useful focused parity examples:
+For a one-off parity check, run its declared Nixfied task directly; this starts only the services
+that leaf requires:
 
 ```bash
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm_test cargo test -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_smoke
+nix run .#run -- --task parity-postgres-rest-api
 ```
 
-Nixfied v2 gates are available when changing Nixfied behavior or running the repository CI
-surface:
+For repeated debugging, start the required service once and run the focused Cargo target against
+its explicit `DATABASE_URL` or `MFM_RUNTIME_CONFIG_FILE` instead.
 
-```bash
-nix run .#model-check
-nix run .#check
-nix run .#test
-nix run .#test-db
-nix run .#ci
-```
+Use `nix run .#quick` when workspace-wide library/binary compile feedback is useful. It preserves
+the ordinary incremental target and runs rustfmt plus `cargo check --workspace --lib --bins`; it is
+not a test or merge gate.
 
-The pinned developer lane is available through `nix develop`. It provides the
-repository Rust toolchain, Cargo helpers, SQLx CLI, and native build tools while
-leaving Cargo's incremental development target in the current worktree. For the
-non-gating broad feedback loop, run:
+Managed gates are boundary checks, not a sequence to run after every edit:
 
-```bash
-nix run .#quick
-```
+- `nix run .#model-check` admits the compiled Nixfied model without project tasks.
+- `nix run .#check` covers formatting, all-feature Clippy, architecture/Cargo metadata contracts,
+  and offline SQLx checking.
+- `nix run .#test` covers workspace tests and doctests without managed services.
+- `nix run .#test-db` covers SQLx schema drift and Postgres-backed parity.
+- `nix run .#ci` composes all three gates and adds the remaining parity and closing-revision
+  evidence.
 
-`.#quick` runs only `cargo fmt --all -- --check` and
-`cargo check --workspace --lib --bins`. It does not replace or invoke the
-comprehensive Nixfied gates above.
-
-`nix run .#model-check` validates the compiled model without executing project tasks.
-
-The broad Nixfied gates compile into the worktree-owned
-`target/verification` directory using the compact verification profile. All
-slots in one worktree share that target; another worktree gets a different one
-by path. Nixfied executes the tasks and owns their runtime evidence, but Cargo
-owns fingerprints, locking, invalidation, and recovery inside the target while
-MFM owns its placement, inspection, retention, and exact cleanup.
-`NIXFIED_STATE_DIR` does not select or clean compiler artifacts, and
-`nix run .#clean` leaves them untouched. To discard only broad verification
-artifacts, run:
-
-```bash
-cargo clean --target-dir target/verification
-```
-
-Direct Cargo development, `nix develop`, and `.#quick` continue to use the
-ordinary worktree target.
-
-`nix run .#test` runs `cargo nextest run --workspace` followed by
-`cargo test --workspace --doc`, without managed external services.
-`nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
-against a migrated schema, and runs Postgres-backed parity tests.
-`.#ci` is full by definition: it starts the managed services required by feature-gated parity
-tests, then records the full closing Git SHA in the retained `closing-source-revision` task log.
-Pair that artifact with `git status --short` for clean-worktree closure evidence. There is no
-`--mode` or `--full` alias flag.
+Choose the smallest gate that matches the changed surface. If `.#ci` is required for a major,
+cross-cutting, build-workflow, release, or explicit full local merge-readiness validation, run it
+once on the final revision; do not first run `.#check`, `.#test`, and `.#test-db` on the unchanged
+tree. Focused development uses `target`, while managed broad verification uses
+`target/verification`; artifact lifecycle and exact cleanup are documented in the canonical
+workflow.
 
 Run binaries locally:
 

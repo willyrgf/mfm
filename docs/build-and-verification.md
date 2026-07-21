@@ -1,6 +1,8 @@
 # Rust build and verification
 
-Status: contributor and operator contract.
+Status: contributor and operator contract. This document owns workflow and
+verification-selection policy; `nixfied.nix` owns exact executable task
+composition.
 
 MFM uses one Nix-pinned tool environment with different artifact policies for
 development, verification, and release packaging. Cargo remains the sole
@@ -47,8 +49,9 @@ Enter the pinned shell and use targeted Cargo commands while iterating:
 
 ```bash
 nix develop
+cargo fmt --all -- --check
 cargo check -p <package>
-cargo test -p <package>
+cargo test -p <package> <test-filter>
 ```
 
 `nix develop` and `.#quick` explicitly leave `CARGO_TARGET_DIR` unset, so they
@@ -56,9 +59,60 @@ use Cargo's ordinary worktree target and retain incremental compilation.
 `.#quick` runs formatting and workspace library/binary checking only; it is a
 feedback loop, not a merge gate.
 
-Tests that need live infrastructure may be run directly after starting the
-required services manually and setting explicit variables such as
-`DATABASE_URL` or `MFM_RUNTIME_CONFIG_FILE`.
+Prefer a named test target or filter before a whole-package test, and prefer a
+whole-package test before a workspace test. Expand to affected dependents when
+a public crate contract changes. Do not duplicate broad verification in both
+the development and verification targets without a change-specific reason.
+
+For a one-off check that already exists as a Nixfied leaf, invoke that task
+directly instead of its enclosing gate:
+
+```bash
+nix run .#run -- --task cargo-metadata-contract
+nix run .#run -- --task parity-postgres-rest-api
+```
+
+The task invocation starts only its declared service requirements. Task ids
+come from `nixfied.nix`; the examples above run the metadata contract without a
+service and the REST parity target with managed PostgreSQL. Direct task runs use
+the broad verification target and retain Nixfied evidence.
+
+Leaf task ids are focused internal entry points, not stable public verbs.
+Confirm the current id in `nixfied.nix`. Selecting a leaf runs that leaf and its
+declared service requirements; it does not inherit predecessor tasks that an
+enclosing composite adds. Use a leaf only when its test is independently valid.
+
+For repeated parity debugging, the incremental lane can be faster: start the
+required service once, set explicit variables such as `DATABASE_URL` or
+`MFM_RUNTIME_CONFIG_FILE`, and repeatedly run the focused Cargo test. This
+caller-managed path does not produce Nixfied service or run evidence.
+
+## Selecting verification scope
+
+Verification follows the affected surface and risk, not the number of commits.
+There is no blanket requirement to run every broad gate before each commit.
+While iterating, use the focused lane above; when the change is coherent, run
+the smallest final gate set that covers it.
+
+| Change surface | Final local verification |
+| --- | --- |
+| Prose, comments, or non-executable documentation | Check changed links, examples, and command claims, then run `git diff --check`. No Rust or service gate is required unless the documentation changes an executable/generated contract or makes claims that need validation against one. |
+| Local behavior within one crate | Run rustfmt, a package-scoped check or Clippy invocation, and the affected package/test targets. Include dependent packages when a public contract changed. |
+| Cargo manifest, workspace metadata, Cargo-enforced crate taxonomy, or dependency-boundary configuration | Run affected package checks/tests and `nix run .#run -- --task cargo-metadata-contract`. Add `.#check` when workspace resolution or all-feature lint coverage changed broadly. |
+| Cross-crate public API, proc-macro output, shared kernel/runtime semantics, or multi-crate behavior | Run `nix run .#check` and `nix run .#test`, unless a final `.#ci` run will cover them. |
+| PostgreSQL migration, SQLx metadata/query, store behavior, or DB-backed CLI/REST behavior | Run focused tests during development, then `nix run .#test-db`. Add other gates only for surfaces they cover. |
+| Nixfied model or verification graph | Run `nix run .#model-check` early and exercise the changed task/gate. Run `nix run .#ci` once on the final revision; use component gates separately only for diagnosis. |
+| Flake output, package/dev-shell definition, flake dependency pin, or hosted workflow | Run `nix flake check --no-build` for early evaluation, then exercise the affected output or invocation. Add `.#ci` when the toolchain, Nixfied runtime, gate execution, or cross-platform behavior changed. |
+| Security-sensitive, persisted-contract, scheduler/recovery, cross-cutting, release, or explicit full local merge-readiness validation | Run targeted checks first, then `nix run .#ci` once on the final revision. |
+
+When a change spans rows, combine only non-overlapping coverage. Editing an
+architecture or workflow document does not by itself select the code or model
+row with the same subject.
+
+Low-risk isolated changes can close locally with targeted evidence; hosted CI
+remains the full cross-platform backstop after push. Always report the commands
+that ran and any broader gate that did not. If uncertainty about the blast
+radius remains, choose the broader applicable row.
 
 ## Broad verification
 
@@ -116,8 +170,15 @@ garbage-collect compiler artifacts.
 | `nix run .#ci` | Run the complete graph, including the component gates and feature-gated parity coverage. |
 
 The definitions in `nixfied.nix` are authoritative when individual tests or
-task counts evolve. Before a commit, run `.#check`, `.#test`, and `.#test-db`.
-Run `.#ci` after major work and for final merge readiness.
+task counts evolve. `.#ci` composes `.#check`, `.#test`, and `.#test-db`, then
+adds keystore/Reth parity coverage and the closing source revision. Do not run
+the three component gates immediately before `.#ci` on the same revision: that
+repeats their work in separate Nixfied runs. Run a component independently when
+it is the smallest sufficient boundary gate or when isolating a failure.
+
+Local `.#ci` does not include `nix flake check`. The hosted workflow evaluates
+the flake separately and runs `.#ci` on Linux and macOS; flake and hosted-job
+changes therefore need their own affected-surface validation.
 
 Nixfied owns deterministic service endpoint placement. Starts from independent
 state roots are coordinated by the upstream endpoint contract; an occupied
