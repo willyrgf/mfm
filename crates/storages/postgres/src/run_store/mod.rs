@@ -22,7 +22,7 @@ use mfm_store::v1::{
     ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
     RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
     RunState, StagedCommitOutcome, StoreCommitOrder, StoreError, StoreErrorInspection,
-    StoreScopeId, StoreScopeStore, StreamSeq, VerifiedRunArtifactBytes,
+    StoreScopeId, StoreScopeStore, StreamSeq, VerifiedRetainedArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{

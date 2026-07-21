@@ -27,7 +27,6 @@ members = [
 	"crates/btc-capabilities",
 	"crates/evm-capabilities",
 	"crates/fact-capabilities",
-	"crates/artifact-capabilities",
 	"crates/adapters/btc-jsonrpc",
 "crates/adapters/evm",
 	"crates/adapters/portfolio",

@@ -71,7 +71,7 @@ impl CommittedRunStream {
         let next_seq = next_seq_after_committed_stream(&events)?;
         let artifact_requirements = events
             .iter()
-            .flat_map(|event| event.payload().artifact_requirements())
+            .flat_map(|event| event_artifact_requirements(event.payload()))
             .collect();
         Ok(Self {
             run_id,
@@ -170,7 +170,7 @@ pub fn committed_run_stream_from_canonical_json_slice(
 
 /// Boxed future returned by retained artifact read providers.
 pub type RetainedArtifactReadFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<VerifiedRunArtifactBytes>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<VerifiedRetainedArtifactBytes>> + Send + 'a>>;
 
 /// Store-owned retained artifact reader for verified run-history construction.
 pub trait RetainedArtifactReadProvider: Send + Sync {
@@ -183,12 +183,12 @@ pub trait RetainedArtifactReadProvider: Send + Sync {
 
 /// Verified retained artifact bytes and full typed evidence for one run-history artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedRunArtifactBytes {
+pub struct VerifiedRetainedArtifactBytes {
     bytes: Vec<u8>,
     evidence: ArtifactEvidenceRef,
 }
 
-impl VerifiedRunArtifactBytes {
+impl VerifiedRetainedArtifactBytes {
     /// Verifies bytes and evidence against one event-derived artifact requirement.
     pub fn new(
         bytes: Vec<u8>,
@@ -221,7 +221,7 @@ impl VerifiedRunArtifactBytes {
 pub struct VerifiedRunArtifactStore {
     run_id: RunId,
     requirements: Vec<EventArtifactRequirement>,
-    artifacts: BTreeMap<ArtifactAuthorityKey, VerifiedRunArtifactBytes>,
+    artifacts: BTreeMap<ArtifactAuthorityKey, VerifiedRetainedArtifactBytes>,
 }
 
 impl VerifiedRunArtifactStore {
@@ -260,7 +260,7 @@ impl VerifiedRunArtifactStore {
     pub fn artifact_for_requirement(
         &self,
         requirement: &EventArtifactRequirement,
-    ) -> Option<&VerifiedRunArtifactBytes> {
+    ) -> Option<&VerifiedRetainedArtifactBytes> {
         let key = (
             requirement.artifact_id.clone(),
             requirement.evidence_hash.clone(),
@@ -274,7 +274,7 @@ impl VerifiedRunArtifactStore {
     /// Iterates verified retained artifacts by exact artifact authority key.
     pub fn artifacts(
         &self,
-    ) -> impl Iterator<Item = (&ArtifactAuthorityKey, &VerifiedRunArtifactBytes)> {
+    ) -> impl Iterator<Item = (&ArtifactAuthorityKey, &VerifiedRetainedArtifactBytes)> {
         self.artifacts.iter()
     }
 
@@ -331,8 +331,8 @@ impl VerifiedRunArtifactStore {
 }
 
 fn insert_verified_run_artifact(
-    artifacts: &mut BTreeMap<ArtifactAuthorityKey, VerifiedRunArtifactBytes>,
-    artifact: VerifiedRunArtifactBytes,
+    artifacts: &mut BTreeMap<ArtifactAuthorityKey, VerifiedRetainedArtifactBytes>,
+    artifact: VerifiedRetainedArtifactBytes,
 ) -> Result<()> {
     let key = artifact_authority_key(artifact.evidence())?;
     if let Some(existing) = artifacts.get(&key) {
@@ -527,5 +527,183 @@ mod stream_order_tests {
         let error = validate_run_stream_order(&[non_positive])
             .expect_err("non-positive first store coordinate must reject");
         assert!(error.to_string().contains("non-positive"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod retained_artifact_tests {
+    use super::*;
+
+    fn digest(bytes: &[u8]) -> ContentDigest {
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+    }
+
+    fn artifact_evidence(bytes: &[u8]) -> ArtifactEvidenceRef {
+        let digest = digest(bytes);
+        ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: bytes.len() as u64,
+            media_type: MediaType::new("application/json").expect("media type"),
+            schema_id: Some(
+                SchemaId::new(
+                    "mfm.test.retained",
+                    "1",
+                    DigestAlgorithm::Sha256JcsV1,
+                    sha256_digest_bytes(b"mfm.test.retained"),
+                )
+                .expect("schema id"),
+            ),
+            semantic_type_id: Some(
+                SemanticTypeId::new(
+                    "mfm.test",
+                    "retained",
+                    "1",
+                    DigestAlgorithm::Sha256JcsV1,
+                    sha256_digest_bytes(b"mfm.test:retained"),
+                )
+                .expect("semantic id"),
+            ),
+            producer_node_id: Some(NodeId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"retained-producer"),
+            )),
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::StateOutput,
+        }
+    }
+
+    fn exact_requirement(evidence: &ArtifactEvidenceRef) -> EventArtifactRequirement {
+        EventArtifactRequirement {
+            source: EventArtifactReferenceSource::StateOutput,
+            artifact_id: evidence.artifact_id.clone(),
+            evidence_hash: evidence.evidence_hash().expect("evidence hash"),
+            digest: Some(evidence.digest.clone()),
+            byte_len: Some(evidence.byte_len),
+            media_type: Some(evidence.media_type.clone()),
+            schema_id: evidence.schema_id.clone(),
+            semantic_type_id: evidence.semantic_type_id.clone(),
+            producer_node_id: evidence.producer_node_id.clone(),
+            producer_seed_id: None,
+            artifact_role: Some(evidence.artifact_role),
+        }
+    }
+
+    #[test]
+    fn verified_retained_bytes_and_prepared_bytes_share_exact_content_authority() {
+        let bytes = br#"{"retained":true}"#.to_vec();
+        let evidence = artifact_evidence(&bytes);
+        let requirement = exact_requirement(&evidence);
+
+        let verified =
+            VerifiedRetainedArtifactBytes::new(bytes.clone(), evidence.clone(), &requirement)
+                .expect("verified retained bytes");
+        assert_eq!(verified.bytes(), bytes);
+        assert_eq!(verified.evidence(), &evidence);
+        PreparedArtifactBytes::new(bytes.clone(), evidence.clone()).expect("prepared bytes");
+
+        for (name, candidate_bytes, candidate_evidence) in [
+            (
+                "tampered bytes",
+                br#"{"retained":false}"#.to_vec(),
+                evidence.clone(),
+            ),
+            ("wrong digest", bytes.clone(), {
+                let mut changed = evidence.clone();
+                changed.digest = digest(b"wrong digest");
+                changed
+            }),
+            ("wrong length", bytes.clone(), {
+                let mut changed = evidence.clone();
+                changed.byte_len += 1;
+                changed
+            }),
+        ] {
+            let candidate_requirement = exact_requirement(&candidate_evidence);
+            let error = VerifiedRetainedArtifactBytes::new(
+                candidate_bytes,
+                candidate_evidence,
+                &candidate_requirement,
+            )
+            .expect_err(name);
+            assert!(
+                matches!(error, StoreError::ArtifactEvidenceMismatch { .. }),
+                "{name}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_requirement_rejects_every_metadata_and_binding_mismatch() {
+        let bytes = br#"{"retained":true}"#;
+        let evidence = artifact_evidence(bytes);
+        let base = exact_requirement(&evidence);
+        let other_digest = digest(b"other");
+        let other_artifact =
+            ArtifactId::from_digest(other_digest.algorithm(), *other_digest.digest());
+        let other_schema = SchemaId::new(
+            "mfm.test.other",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.test.other"),
+        )
+        .expect("other schema");
+        let other_semantic = SemanticTypeId::new(
+            "mfm.test",
+            "other",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.test:other"),
+        )
+        .expect("other semantic");
+        let other_node = NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"other-node"),
+        );
+        let other_seed = SeedId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"other-seed"),
+        );
+
+        let mut mismatches = Vec::new();
+        let mut requirement = base.clone();
+        requirement.artifact_id = other_artifact;
+        mismatches.push(("artifact_id", requirement));
+        let mut requirement = base.clone();
+        requirement.evidence_hash = other_digest.clone();
+        mismatches.push(("evidence_hash", requirement));
+        let mut requirement = base.clone();
+        requirement.digest = Some(other_digest);
+        mismatches.push(("digest", requirement));
+        let mut requirement = base.clone();
+        requirement.byte_len = Some(evidence.byte_len + 1);
+        mismatches.push(("byte_len", requirement));
+        let mut requirement = base.clone();
+        requirement.media_type = Some(MediaType::new("application/octet-stream").expect("media"));
+        mismatches.push(("media_type", requirement));
+        let mut requirement = base.clone();
+        requirement.schema_id = Some(other_schema);
+        mismatches.push(("schema_id", requirement));
+        let mut requirement = base.clone();
+        requirement.semantic_type_id = Some(other_semantic);
+        mismatches.push(("semantic_type_id", requirement));
+        let mut requirement = base.clone();
+        requirement.producer_node_id = Some(other_node);
+        mismatches.push(("producer_node_id", requirement));
+        let mut requirement = base.clone();
+        requirement.producer_seed_id = Some(other_seed);
+        mismatches.push(("producer_seed_id", requirement));
+        let mut requirement = base;
+        requirement.artifact_role = Some(ArtifactRole::TypedConfig);
+        mismatches.push(("artifact_role", requirement));
+
+        for (name, requirement) in mismatches {
+            let error = validate_artifact_requirement_against_evidence(&requirement, &evidence)
+                .expect_err(name);
+            assert!(
+                matches!(error, StoreError::ArtifactEvidenceMismatch { .. }),
+                "{name}: {error:?}"
+            );
+        }
     }
 }

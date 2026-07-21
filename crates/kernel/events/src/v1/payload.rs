@@ -388,11 +388,6 @@ impl KernelEventPayload {
             kind: ledger.kind,
         })
     }
-
-    /// Returns artifact evidence requirements referenced by this payload.
-    pub fn artifact_requirements(&self) -> Vec<EventArtifactRequirement> {
-        event_artifact_requirements(self)
-    }
 }
 
 /// Side-effect payload kind used by read-only event views.

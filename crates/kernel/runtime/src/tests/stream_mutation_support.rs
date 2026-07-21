@@ -336,8 +336,7 @@ pub(super) fn assert_every_certified_node_has_attempt(
 pub(super) fn referenced_artifact_ids_for_payload(
     payload: &events::KernelEventPayload,
 ) -> Vec<ArtifactId> {
-    payload
-        .artifact_requirements()
+    store::event_artifact_requirements(payload)
         .into_iter()
         .map(|requirement| requirement.artifact_id)
         .collect()

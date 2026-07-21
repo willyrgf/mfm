@@ -119,7 +119,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
         TestSubmissionDecision::Ambiguous,
     );
     let mut store = TestTypedRunStore::new();
-    let artifact_store = Arc::new(FilteringRuntimeArtifactStore::new(store.clone()));
+    let artifact_store = Arc::new(FilteringRetainedArtifactStore::new(store.clone()));
     let scheduler = test_scheduler_with_artifacts(
         register_fixture_capabilities(registry, &fixture),
         artifact_store.clone(),

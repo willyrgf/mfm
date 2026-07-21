@@ -11,6 +11,11 @@ artifact admissions that must become run authority atomically with the event bat
 implementations own sequence, ordinal, event id, logical-key, precondition, artifact bytes,
 artifact evidence, and projection validation.
 
+`mfm-store` also owns the one retained-artifact read contract. It derives exact
+`EventArtifactRequirement` values from event reference facts, exposes
+`RetainedArtifactReadProvider`, and returns `VerifiedRetainedArtifactBytes` only after checking the
+bytes and every typed evidence and producer binding field.
+
 Synthetic direct mutation helpers are non-execution tooling only. They may be used by explicitly
 named storage contract, corruption, migration, or repair fixtures, but app, CLI, REST, transport,
 runtime scheduling, replay, public-output, and positive conformance paths must enter through

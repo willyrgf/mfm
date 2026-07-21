@@ -18,7 +18,7 @@ where
             continue;
         }
         let artifact = artifacts
-            .read_retained_artifact(&artifact_referenced_artifact_requirement(payload))
+            .read_retained_artifact(&store::artifact_referenced_artifact_requirement(payload))
             .await
             .map_err(async_app_store_error)?;
         let evidence = mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
@@ -172,7 +172,7 @@ pub(super) fn config_launch_artifacts_for_spec(
             )
         })?;
         validate_artifact_requirement_for_app(
-            config_ref_artifact_requirement(config_ref)?,
+            store::config_ref_artifact_requirement(config_ref)?,
             &artifact.evidence,
             ErrorClass::BadRequest,
             "LaunchConfigArtifactMismatch",
@@ -350,7 +350,7 @@ pub(super) fn seed_launch_cells_for_spec(
             events::ArtifactRole::SeedInput,
         );
         validate_artifact_requirement_for_app(
-            seed_artifact_requirement(seed_spec, &artifact.evidence)?,
+            store::seed_artifact_requirement(seed_spec, &artifact.evidence)?,
             &artifact.evidence,
             ErrorClass::BadRequest,
             "LaunchSeedArtifactMismatch",
@@ -449,168 +449,5 @@ pub(super) fn validate_artifact_requirement_for_app(
             }
             error => error.into(),
         }
-    })
-}
-
-pub(super) fn run_artifact_requirement(
-    source: store::EventArtifactReferenceSource,
-    expected: &events::RunArtifactEvidenceRef,
-    role: events::ArtifactRole,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
-        source,
-        artifact_id: expected.artifact_id.clone(),
-        evidence_hash: expected.evidence_hash.clone(),
-        digest: Some(expected.content_digest.clone()),
-        byte_len: Some(expected.byte_len),
-        media_type: Some(expected.media_type.clone()),
-        schema_id: expected.schema_id.clone(),
-        semantic_type_id: expected.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(role),
-    }
-}
-
-pub(super) fn artifact_referenced_artifact_requirement(
-    payload: &events::ArtifactReferenced,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: payload.artifact_ref.artifact_id.clone(),
-        evidence_hash: payload.artifact_ref.evidence_hash.clone(),
-        digest: Some(payload.artifact_ref.content_digest.clone()),
-        byte_len: Some(payload.artifact_ref.byte_len),
-        media_type: Some(payload.artifact_ref.media_type.clone()),
-        schema_id: Some(payload.artifact_ref.schema_id.clone()),
-        semantic_type_id: payload.artifact_ref.semantic_type_id.clone(),
-        producer_node_id: payload.node_id.clone(),
-        producer_seed_id: None,
-        artifact_role: Some(payload.artifact_ref.role),
-    }
-}
-
-pub(super) fn config_ref_artifact_requirement(
-    config_ref: &spec::ConfigRef,
-) -> Result<store::EventArtifactRequirement, PublicError> {
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: config_ref.artifact_id.clone(),
-        digest: config_ref.digest.clone(),
-        byte_len: config_ref.byte_len,
-        media_type: config_ref.media_type.clone(),
-        schema_id: Some(config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    Ok(store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::RunConfig,
-        artifact_id: config_ref.artifact_id.clone(),
-        evidence_hash: evidence.evidence_hash()?,
-        digest: Some(config_ref.digest.clone()),
-        byte_len: Some(config_ref.byte_len),
-        media_type: Some(config_ref.media_type.clone()),
-        schema_id: Some(config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    })
-}
-
-pub(super) fn seed_artifact_requirement(
-    seed_spec: &spec::SeedSpec,
-    evidence: &store::ArtifactEvidenceRef,
-) -> Result<store::EventArtifactRequirement, PublicError> {
-    Ok(store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::SeedCell,
-        artifact_id: evidence.artifact_id.clone(),
-        evidence_hash: evidence.evidence_hash()?,
-        digest: Some(evidence.digest.clone()),
-        byte_len: Some(evidence.byte_len),
-        media_type: Some(evidence.media_type.clone()),
-        schema_id: Some(seed_spec.schema_id.clone()),
-        semantic_type_id: Some(seed_spec.semantic_type_id.clone()),
-        producer_node_id: None,
-        producer_seed_id: Some(seed_spec.seed_id.clone()),
-        artifact_role: Some(events::ArtifactRole::SeedInput),
-    })
-}
-
-pub(super) fn seed_cell_artifact_requirement(
-    cell: &events::SeedCellRef,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::SeedCell,
-        artifact_id: cell.seed_artifact.artifact_id.clone(),
-        evidence_hash: cell.seed_artifact.evidence_hash.clone(),
-        digest: Some(cell.seed_artifact.content_digest.clone()),
-        byte_len: Some(cell.seed_artifact.byte_len),
-        media_type: Some(cell.seed_artifact.media_type.clone()),
-        schema_id: Some(cell.seed_artifact.schema_id.clone()),
-        semantic_type_id: cell.seed_artifact.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: Some(cell.seed_id.clone()),
-        artifact_role: Some(cell.seed_artifact.role),
-    }
-}
-
-pub(super) fn public_output_cell_artifact_requirement(
-    cell: &events::NamedTypedCellRef,
-) -> store::EventArtifactRequirement {
-    let (artifact_role, producer_node_id, producer_seed_id) = match &cell.producer {
-        spec::CellProducer::Node(node_id) => (
-            events::ArtifactRole::StateOutput,
-            Some(node_id.clone()),
-            None,
-        ),
-        spec::CellProducer::Seed(seed_id) => {
-            (events::ArtifactRole::SeedInput, None, Some(seed_id.clone()))
-        }
-    };
-    store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::PublicOutputCell,
-        artifact_id: cell.artifact_id.clone(),
-        evidence_hash: cell.evidence_hash.clone(),
-        digest: Some(cell.content_digest.clone()),
-        byte_len: None,
-        media_type: None,
-        schema_id: Some(cell.schema_id.clone()),
-        semantic_type_id: Some(cell.semantic_type_id.clone()),
-        producer_node_id,
-        producer_seed_id,
-        artifact_role: Some(artifact_role),
-    }
-}
-
-pub(super) fn public_output_rendered_artifact_requirement(
-    payload: &events::PublicOutputProduced,
-    artifact_id: &ArtifactId,
-    rendered_digest: &ContentDigest,
-    media_type: spec::MediaType,
-) -> Result<store::EventArtifactRequirement, PublicError> {
-    let evidence_hash = payload
-        .rendered_artifact_evidence_hash
-        .clone()
-        .ok_or_else(|| {
-            PublicError::new(
-                ErrorClass::Internal,
-                "RenderedArtifactEvidenceHashMissing",
-                "public output rendered artifact is missing evidence hash",
-            )
-        })?;
-    Ok(store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::PublicOutputRendered,
-        artifact_id: artifact_id.clone(),
-        evidence_hash,
-        digest: Some(rendered_digest.clone()),
-        byte_len: None,
-        media_type: Some(media_type),
-        schema_id: Some(payload.public_schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(payload.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::PublicOutput),
     })
 }

@@ -1,68 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn retained_artifact_adapter_preserves_read_request_expectations() {
-    let bytes = br#"{"answer":42}"#.to_vec();
-    let digest = content_digest_for_bytes(&bytes);
-    let schema_id = SchemaId::new(
-        "mfm.test.config",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"mfm.test.config"),
-    )
-    .expect("schema id");
-    let config_ref = spec::ConfigRef {
-        schema_id: schema_id.clone(),
-        artifact_id: artifact_id_for_digest(&digest),
-        digest: digest.clone(),
-        byte_len: bytes.len() as u64,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-    };
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: config_ref.artifact_id.clone(),
-        digest,
-        byte_len: bytes.len() as u64,
-        media_type: config_ref.media_type.clone(),
-        schema_id: Some(schema_id),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    let expected = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: config_ref.artifact_id.clone(),
-        evidence_hash: evidence.evidence_hash().expect("config evidence hash"),
-        digest: Some(config_ref.digest.clone()),
-        byte_len: Some(config_ref.byte_len),
-        media_type: Some(config_ref.media_type.clone()),
-        schema_id: Some(config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    };
-    let artifact = store::VerifiedRunArtifactBytes::new(bytes, evidence, &expected)
-        .expect("verified artifact");
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let provider = artifact_read_provider_from_retained(ExpectingRetainedArtifactProvider {
-        expected: expected.clone(),
-        artifact,
-        seen: Arc::clone(&seen),
-    });
-
-    provider
-        .read_artifact(
-            &mfm_artifact_capabilities::ArtifactReadRequest::from_certified_config_ref(&config_ref)
-                .expect("config request"),
-        )
-        .await
-        .expect("adapter preserves exact config expectation");
-
-    assert_eq!(*seen.lock().expect("seen lock"), vec![expected]);
-}
-
-#[tokio::test]
 async fn app_read_services_reconstruct_fact_bearing_status_from_committed_stream() {
     let (run_id, store, registry) = launch_app_fact_run().await;
     let read_services = make_run_read_services(store.clone(), store, registry);

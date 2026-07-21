@@ -14,7 +14,7 @@ pub struct FactDescriptorProjectionFixtureForTest {
     /// Descriptor artifact evidence.
     pub descriptor_evidence: ArtifactEvidenceRef,
     /// Verified descriptor artifact bytes.
-    pub descriptor_artifact: VerifiedRunArtifactBytes,
+    pub descriptor_artifact: VerifiedRetainedArtifactBytes,
     /// Descriptor projection row.
     pub projection: FactDescriptorProjection,
     /// Descriptor-derived subject namespace hash.
@@ -47,8 +47,8 @@ pub fn fact_descriptor_projection_fixture_for_test(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::FactDescriptor,
     };
-    let descriptor_requirement = events::EventArtifactRequirement {
-        source: events::EventArtifactReferenceSource::FactDescriptor,
+    let descriptor_requirement = EventArtifactRequirement {
+        source: EventArtifactReferenceSource::FactDescriptor,
         artifact_id: descriptor_artifact_id.clone(),
         evidence_hash: descriptor_evidence.evidence_hash()?,
         digest: Some(descriptor_hash.clone()),
@@ -60,7 +60,7 @@ pub fn fact_descriptor_projection_fixture_for_test(
         producer_seed_id: None,
         artifact_role: Some(events::ArtifactRole::FactDescriptor),
     };
-    let descriptor_artifact = VerifiedRunArtifactBytes::new(
+    let descriptor_artifact = VerifiedRetainedArtifactBytes::new(
         descriptor_bytes.clone(),
         descriptor_evidence.clone(),
         &descriptor_requirement,

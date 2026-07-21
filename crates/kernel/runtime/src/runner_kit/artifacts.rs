@@ -358,7 +358,7 @@ pub async fn materialized_input_node_json(
 async fn load_materialized_cell_artifact(
     cell: &MaterializedCell,
     artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<store::VerifiedRunArtifactBytes> {
+) -> Result<store::VerifiedRetainedArtifactBytes> {
     let requirement = match &cell.terminal {
         MaterializedCellTerminal::Produced {
             producer_node_id,
@@ -408,14 +408,14 @@ async fn load_materialized_cell_artifact(
 async fn read_retained_artifact(
     artifacts: &dyn store::RetainedArtifactReadProvider,
     requirement: &store::EventArtifactRequirement,
-) -> Result<store::VerifiedRunArtifactBytes> {
+) -> Result<store::VerifiedRetainedArtifactBytes> {
     artifacts
         .read_retained_artifact(requirement)
         .await
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-fn decode_verified_json<T>(artifact: &store::VerifiedRunArtifactBytes) -> Result<T>
+fn decode_verified_json<T>(artifact: &store::VerifiedRetainedArtifactBytes) -> Result<T>
 where
     T: DeserializeOwned,
 {

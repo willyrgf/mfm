@@ -5,11 +5,6 @@ use mfm_store::v1 as store;
 
 use crate::{ErasedRunCtx, PreInvocationRunCtx, Result, RuntimeError};
 
-/// Runtime artifact capability used by the scheduler.
-pub trait RuntimeArtifactStore: store::RetainedArtifactReadProvider {}
-
-impl<T> RuntimeArtifactStore for T where T: store::RetainedArtifactReadProvider {}
-
 /// Runtime-owned artifact binding kind for one staged attempt artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StagedArtifactBindingKind {

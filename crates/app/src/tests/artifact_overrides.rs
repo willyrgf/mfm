@@ -102,31 +102,3 @@ impl store::RetainedArtifactReadProvider for OverriddenCommittedStreamStore {
         self.inner.read_retained_artifact(requirement)
     }
 }
-
-#[derive(Clone)]
-pub(super) struct ExpectingRetainedArtifactProvider {
-    pub(super) expected: store::EventArtifactRequirement,
-    pub(super) artifact: store::VerifiedRunArtifactBytes,
-    pub(super) seen: Arc<Mutex<Vec<store::EventArtifactRequirement>>>,
-}
-
-impl store::RetainedArtifactReadProvider for ExpectingRetainedArtifactProvider {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        let result = if requirement == &self.expected {
-            self.seen
-                .lock()
-                .expect("seen lock")
-                .push(requirement.clone());
-            Ok(self.artifact.clone())
-        } else {
-            Err(store::StoreError::ArtifactEvidenceMismatch {
-                artifact_id: requirement.artifact_id.clone(),
-                field: "requirement",
-            })
-        };
-        Box::pin(std::future::ready(result))
-    }
-}

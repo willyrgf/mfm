@@ -1,4 +1,3 @@
-use mfm_artifact_capabilities::fact_response_artifact_requirement;
 use mfm_facts::FactQueryResult;
 use mfm_state_portfolio::{PortfolioHoldingFactResponse, SelectHoldingsReadPlan};
 use mfm_store::v1 as store;
@@ -20,7 +19,7 @@ pub(crate) async fn hydrate_holding_responses(
         let mut query_material = Vec::with_capacity(response.rows().len());
         for row in response.rows() {
             let fact_ref = row.fact_ref();
-            let requirement = fact_response_artifact_requirement(fact_ref);
+            let requirement = store::fact_response_artifact_requirement(fact_ref);
             let artifact = artifacts
                 .read_retained_artifact(&requirement)
                 .await

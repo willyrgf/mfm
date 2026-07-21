@@ -54,7 +54,7 @@ impl store::RetainedArtifactReadProvider for RunnerKitArtifactProvider {
                     artifact_id: requirement.artifact_id.clone(),
                 });
             };
-            store::VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
+            store::VerifiedRetainedArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
         })
     }
 }
@@ -414,11 +414,11 @@ pub(super) type TestArtifactMap =
     BTreeMap<store::ArtifactAuthorityKey, (Vec<u8>, store::ArtifactEvidenceRef)>;
 
 #[derive(Clone, Default)]
-pub(super) struct TestRuntimeArtifactStore {
+pub(super) struct TestRetainedArtifactStore {
     pub(super) artifacts: Arc<Mutex<TestArtifactMap>>,
 }
 
-impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStore {
+impl store::RetainedArtifactReadProvider for TestRetainedArtifactStore {
     fn read_retained_artifact<'a>(
         &'a self,
         requirement: &'a store::EventArtifactRequirement,
@@ -439,18 +439,18 @@ impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStore {
                 .ok_or_else(|| store::StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
                 })?;
-            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
+            store::VerifiedRetainedArtifactBytes::new(bytes, evidence, requirement)
         })
     }
 }
 
 #[derive(Clone)]
-pub(super) struct FilteringRuntimeArtifactStore {
+pub(super) struct FilteringRetainedArtifactStore {
     source: TestTypedRunStore,
     missing_artifacts: Arc<Mutex<BTreeSet<ArtifactId>>>,
 }
 
-impl FilteringRuntimeArtifactStore {
+impl FilteringRetainedArtifactStore {
     pub(super) fn new(source: TestTypedRunStore) -> Self {
         Self {
             source,
@@ -466,7 +466,7 @@ impl FilteringRuntimeArtifactStore {
     }
 }
 
-impl store::RetainedArtifactReadProvider for FilteringRuntimeArtifactStore {
+impl store::RetainedArtifactReadProvider for FilteringRetainedArtifactStore {
     fn read_retained_artifact<'a>(
         &'a self,
         requirement: &'a store::EventArtifactRequirement,

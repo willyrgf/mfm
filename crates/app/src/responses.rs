@@ -537,7 +537,7 @@ pub(super) async fn verify_replay_diagnostics_from_recorded_artifacts(
         let Some(diagnostic_ref) = &payload.error.diagnostic_ref else {
             continue;
         };
-        let requirement = diagnostic_artifact_requirement(diagnostic_ref);
+        let requirement = store::diagnostic_artifact_requirement(diagnostic_ref);
         let artifact = artifacts
             .read_retained_artifact(&requirement)
             .await

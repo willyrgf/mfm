@@ -1187,7 +1187,7 @@ impl store::RetainedArtifactReadProvider for TamperedSnapshotArtifactProvider {
                     serde_json::to_vec(&value).expect("tampered selected holdings JSON")
                 }
             };
-            store::VerifiedRunArtifactBytes::new(
+            store::VerifiedRetainedArtifactBytes::new(
                 tampered_bytes,
                 artifact.evidence().clone(),
                 requirement,

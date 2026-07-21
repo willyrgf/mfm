@@ -214,7 +214,7 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
         .refs
         .contains_key(&(artifact_id.clone(), second_hash.clone())));
 
-    let first_requirement = events::EventArtifactRequirement {
+    let first_requirement = EventArtifactRequirement {
         source: EventArtifactReferenceSource::RetentionRef,
         artifact_id: artifact_id.clone(),
         evidence_hash: first_hash.clone(),
@@ -227,7 +227,7 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
         producer_seed_id: None,
         artifact_role: Some(ArtifactRole::StateOutput),
     };
-    let second_requirement = events::EventArtifactRequirement {
+    let second_requirement = EventArtifactRequirement {
         source: EventArtifactReferenceSource::RetentionRef,
         artifact_id: artifact_id.clone(),
         evidence_hash: second_hash.clone(),
@@ -240,7 +240,7 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
         producer_seed_id: None,
         artifact_role: Some(ArtifactRole::StateOutput),
     };
-    let swapped_requirement = events::EventArtifactRequirement {
+    let swapped_requirement = EventArtifactRequirement {
         source: EventArtifactReferenceSource::RetentionRef,
         artifact_id: artifact_id.clone(),
         evidence_hash: second_hash,

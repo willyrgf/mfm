@@ -186,7 +186,7 @@ impl ReplayReadAuthority {
         runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
         verified_view: &mfm_runtime::VerifiedRunHistoryView,
         source_fact_events: Vec<RetainedSourceFactReplayEvent>,
-        additional_artifacts: Vec<store::VerifiedRunArtifactBytes>,
+        additional_artifacts: Vec<store::VerifiedRetainedArtifactBytes>,
     ) -> Result<Self> {
         if runtime_spec.spec_hash() != verified_view.spec_hash() {
             return Err(ReplayError::new(

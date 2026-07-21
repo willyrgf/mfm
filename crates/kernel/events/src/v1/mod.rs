@@ -6,7 +6,6 @@ mod artifact;
 mod diagnostics;
 #[path = "schema.rs"]
 mod schema;
-use self::artifact::event_artifact_requirements;
 pub use self::artifact::*;
 #[path = "payload.rs"]
 mod payload;

@@ -471,7 +471,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         .expect("binding b");
     let scheduler = test_scheduler_with_artifacts(
         register_fixture_capabilities(registry, &fixture),
-        Arc::new(TestRuntimeArtifactStore {
+        Arc::new(TestRetainedArtifactStore {
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
@@ -569,7 +569,7 @@ async fn run_launch_commits_single_admission_root_and_admits_launch_artifacts() 
     let fixture = fixture();
     let scheduler = test_scheduler_with_artifacts(
         registered_fixture_runners(&fixture),
-        Arc::new(TestRuntimeArtifactStore {
+        Arc::new(TestRetainedArtifactStore {
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );

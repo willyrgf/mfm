@@ -70,7 +70,7 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 | `CertifiedSideEffectContract` | yes, side-effect verification | Certified resource-claim and side-effect contract authority shared by live execution, resume, and replay. |
 | `SideEffectLedgerState` | yes, store transition | Typed ledger state used by store/runtime to admit only legal side-effect transitions. |
 | `SagaTerminalProof` | yes, terminal saga | Store-required proof object for completed, compensated, manually resolved, or failed-without-claim terminal saga outcomes. |
-| `CommittedRunStream` / `VerifiedRunArtifactStore` | yes, stream/history evidence | Store-owned committed stream authority plus retained-artifact authority tied to that stream. |
+| `CommittedRunStream` / `EventArtifactRequirement` / `VerifiedRunArtifactStore` | yes, stream/history evidence | Store-owned committed stream authority, event-derived retained-artifact requirements, and verified retained-artifact authority tied to that stream. |
 | Erased runner plans | no | Runtime implementation artifacts reproducibly derived from certified authority and runner registry. |
 | `PublicOutputReadAuthority` | yes, render-only | App authority minted after certified spec/certificate verification and projection rebuild from the authoritative stream. |
 | Rendered public-output JSON/artifacts | no | Output/cache material for users and integrations. They cannot authorize resume, replay, or another render. |
@@ -554,6 +554,13 @@ Each plan carries typed event payloads, commit preconditions, and the artifact e
 run authority in the same atomic append. The store constructs envelopes and maintains projections.
 Synthetic direct mutation is confined to explicitly named non-execution test, migration, repair,
 corruption, or low-level storage contract fixtures.
+
+Events carry typed artifact-reference facts but do not define storage requirements or artifact-read
+capabilities. `mfm-store` alone derives exact retained-artifact requirements from those facts and
+owns `RetainedArtifactReadProvider` plus `VerifiedRetainedArtifactBytes`. A retained read verifies
+artifact id, evidence hash, digest against the actual bytes, byte length, media type, schema id,
+semantic type id, producer binding, and role before the bytes can contribute to run-history
+authority.
 
 The authoritative event stream contains:
 

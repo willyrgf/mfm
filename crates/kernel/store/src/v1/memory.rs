@@ -341,7 +341,7 @@ impl AsyncInMemoryRunStore {
     pub fn seed_projection_snapshot_for_test(
         &self,
         projection: ProjectionSnapshot,
-        retained_artifacts: impl IntoIterator<Item = VerifiedRunArtifactBytes>,
+        retained_artifacts: impl IntoIterator<Item = VerifiedRetainedArtifactBytes>,
     ) -> Result<()> {
         let mut store = self.lock_inner()?;
         store.projections = projection;
@@ -705,7 +705,7 @@ impl RetainedArtifactReadProvider for AsyncInMemoryRunStore {
                     artifact_id: requirement.artifact_id.clone(),
                 });
             };
-            VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
+            VerifiedRetainedArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
         });
         Box::pin(std::future::ready(result))
     }

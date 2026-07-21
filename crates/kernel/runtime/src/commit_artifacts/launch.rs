@@ -7,7 +7,7 @@ pub(crate) fn required_artifacts_for_payloads(
 ) -> Result<Vec<store::ArtifactEvidenceRef>> {
     let mut required_artifacts = required_artifacts;
     for payload in payloads {
-        for requirement in payload.artifact_requirements() {
+        for requirement in store::event_artifact_requirements(payload) {
             if required_artifacts.iter().any(|evidence| {
                 evidence.artifact_id == requirement.artifact_id
                     && store::validate_artifact_requirement_against_evidence(&requirement, evidence)

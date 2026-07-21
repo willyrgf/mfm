@@ -7,9 +7,3 @@ mod refs;
 
 pub use self::contract::*;
 pub use self::refs::*;
-
-pub(super) fn event_artifact_requirements(
-    payload: &KernelEventPayload,
-) -> Vec<refs::EventArtifactRequirement> {
-    refs::event_artifact_requirements(payload)
-}

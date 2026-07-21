@@ -68,37 +68,6 @@ pub(super) fn mfm_error_info_rejects_public_diagnostic_boundary_violations() {
     ));
 }
 
-pub(super) fn error_with_diagnostic(
-    artifact_id: ArtifactId,
-    role: ArtifactRole,
-    schema_id: SchemaId,
-    content_digest: ContentDigest,
-) -> MfmErrorInfo {
-    MfmErrorInfo {
-        code: ErrorCode::new("event_accessor_test").expect("error code"),
-        category: ErrorCategory::Runtime,
-        retryable: false,
-        safe_message: "event accessor test".to_owned(),
-        public_details: None,
-        diagnostic_ref: Some(event_artifact_ref(
-            artifact_id,
-            role,
-            schema_id,
-            content_digest,
-        )),
-    }
-}
-
-pub(super) fn touched_set(byte: u8) -> ResourceTouchedSetEvidence {
-    ResourceTouchedSetEvidence {
-        namespace: ResourceNamespace::new("mfm.test.resource").expect("namespace"),
-        evidence_schema_id: schema_id("mfm.test.touched_set", byte),
-        evidence_hash: content_digest(byte.wrapping_add(1)),
-        evidence_artifact_id: artifact_id(byte.wrapping_add(2)),
-        evidence_artifact_evidence_hash: content_digest(byte.wrapping_add(3)),
-    }
-}
-
 pub(super) fn store_scope_id() -> StoreScopeId {
     StoreScopeId::new("mfm.store_scope.v1:20202020202020202020202020202020").expect("store scope")
 }

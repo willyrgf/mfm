@@ -500,7 +500,7 @@ fn staged_payload_artifact_requirements(
 ) -> Result<Vec<StagedArtifactRequirement>> {
     let mut requirements = Vec::new();
     for payload in payloads {
-        for requirement in payload.artifact_requirements() {
+        for requirement in store::event_artifact_requirements(payload) {
             let Some(binding) =
                 staged_payload_artifact_binding(node, attempt_id, payload, requirement.source)?
             else {

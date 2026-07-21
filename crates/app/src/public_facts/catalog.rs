@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_events::v1 as events;
 use mfm_ids::ContentDigest;
 use mfm_store::v1 as store;
 
@@ -12,7 +11,7 @@ use super::dto::{
 use super::query::PublicFactQueryRequest;
 use super::ref_id::{public_ref_id, PublicFactRefId};
 use super::service::AppFactQueryRow;
-use crate::{async_app_store_error, json_media_type, ErrorClass, PublicError};
+use crate::{async_app_store_error, ErrorClass, PublicError};
 
 /// App-owned public descriptor catalog for facts.
 #[derive(Debug, Clone, Default)]
@@ -239,7 +238,7 @@ where
     A: store::RetainedArtifactReadProvider + ?Sized,
 {
     let artifact = artifacts
-        .read_retained_artifact(&fact_descriptor_artifact_requirement(projection)?)
+        .read_retained_artifact(&store::fact_descriptor_artifact_requirement(projection)?)
         .await
         .map_err(async_app_store_error)?;
     let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(artifact.bytes())
@@ -270,39 +269,6 @@ fn validate_projected_fact_descriptor(
         ));
     }
     Ok(())
-}
-
-fn fact_descriptor_artifact_requirement(
-    projection: &store::FactDescriptorProjection,
-) -> Result<store::EventArtifactRequirement, PublicError> {
-    Ok(store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::FactDescriptor,
-        artifact_id: projection.descriptor_artifact_id.clone(),
-        evidence_hash: projection
-            .descriptor_artifact_evidence
-            .evidence_hash()
-            .map_err(|_| {
-                PublicError::backend(
-                    ErrorClass::Internal,
-                    "FactDescriptorEvidenceInvalid",
-                    "Fact descriptor evidence identity was invalid",
-                )
-            })?,
-        digest: Some(projection.descriptor_hash.clone()),
-        byte_len: None,
-        media_type: Some(json_media_type()?),
-        schema_id: Some(mfm_facts::fact_descriptor_schema_id().map_err(|_| {
-            PublicError::backend(
-                ErrorClass::Internal,
-                "FactDescriptorSchemaInvalid",
-                "Fact descriptor schema identity is invalid",
-            )
-        })?),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::FactDescriptor),
-    })
 }
 
 fn fact_descriptor_projection_missing() -> PublicError {

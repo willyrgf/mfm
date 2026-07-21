@@ -388,12 +388,12 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
 }
 
 fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
-    test_scheduler_with_artifacts(registry, Arc::new(TestRuntimeArtifactStore::default()))
+    test_scheduler_with_artifacts(registry, Arc::new(TestRetainedArtifactStore::default()))
 }
 
 fn test_scheduler_with_artifacts(
     registry: ErasedRunnerRegistry,
-    artifact_store: Arc<dyn RuntimeArtifactStore>,
+    artifact_store: Arc<dyn store::RetainedArtifactReadProvider>,
 ) -> SerialTypedScheduler {
     SerialTypedScheduler::new(registry, artifact_store)
 }

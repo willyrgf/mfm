@@ -502,7 +502,6 @@ Current authority names include:
 - `mfm.evm.read`
 - `mfm.evm.transaction`
 - `mfm.signing.sign`
-- `mfm.artifact.read`
 
 Disallowed:
 
@@ -649,12 +648,15 @@ new commit purposes must add a purpose marker and validator before stores will a
 Stores own:
 
 - event envelopes
+- event-to-retained-artifact requirement derivation
 - run-local sequence numbers
 - the durable store-wide append coordinate used by cross-run projections
 - ordinals
 - event ids
 - logical keys
 - commit preconditions
+- retained artifact bytes and typed evidence
+- the retained-artifact read provider and verified-byte contract
 - projections
 
 Projection data is derived from the run stream and is never the sole authority for semantic resume,
@@ -670,7 +672,7 @@ corruption, or low-level storage contract fixtures.
 - typed runner registries
 - typed capability backends
 - the production Postgres run store
-- narrow artifact read providers over run-store evidence
+- the store-owned retained-artifact reader
 - certified start/resume/replay services
 - typed public-output rendering
 

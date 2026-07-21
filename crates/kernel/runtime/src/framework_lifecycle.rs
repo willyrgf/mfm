@@ -4,7 +4,6 @@ use mfm_manual_auth::VerifiedManualResolutionForPrefix;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::artifacts::RuntimeArtifactStore;
 use crate::attempt::{
     async_error_is_stale_expected_next_seq, terminalize_observed_failure, AttemptRunStatus,
     ObservedFailureContext, ObservedFailureRetryabilityPolicy,
@@ -23,12 +22,12 @@ use crate::{attempt_id, CertifiedRuntimeSpec, Result, RuntimeError};
 
 /// Lifecycle for framework nodes that append `StateAttemptStarted` before running.
 pub(crate) struct FrameworkAttemptLifecycle<'a> {
-    artifact_store: &'a dyn RuntimeArtifactStore,
+    artifact_store: &'a dyn store::RetainedArtifactReadProvider,
 }
 
 impl<'a> FrameworkAttemptLifecycle<'a> {
-    /// Creates a framework attempt lifecycle over runtime-owned artifact storage.
-    pub(crate) fn new(artifact_store: &'a dyn RuntimeArtifactStore) -> Self {
+    /// Creates a framework attempt lifecycle over the store-owned retained-artifact reader.
+    pub(crate) fn new(artifact_store: &'a dyn store::RetainedArtifactReadProvider) -> Self {
         Self { artifact_store }
     }
 
@@ -283,9 +282,9 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         )
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
 
-        let requirements =
-            events::KernelEventPayload::ManualResolutionRecorded(manual_payload.clone())
-                .artifact_requirements();
+        let requirements = store::event_artifact_requirements(
+            &events::KernelEventPayload::ManualResolutionRecorded(manual_payload.clone()),
+        );
         let evidence_requirement = requirements
             .iter()
             .find(|requirement| requirement.artifact_id == manual_payload.evidence_artifact_id)

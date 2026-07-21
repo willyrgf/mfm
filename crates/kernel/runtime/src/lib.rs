@@ -39,7 +39,7 @@ mod spec_authority;
 mod transition;
 
 pub use admission::RunAdmissionAuthority;
-pub use artifacts::{RuntimeArtifactStore, StagedArtifact, StagedRetentionRefs};
+pub use artifacts::{StagedArtifact, StagedRetentionRefs};
 pub use binding::{
     BoundCapabilityAuthority, BoundFrameworkHandlerAuthority, BoundFrameworkHandlerKind,
     BoundRuntimeContext, BoundRuntimeContextLoader,

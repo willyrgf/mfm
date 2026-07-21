@@ -312,7 +312,7 @@ fn same_commit_typed_artifact_keys(
 ) -> Result<BTreeSet<TypedPayloadKey>> {
     Ok(commit
         .iter()
-        .flat_map(|event| event.payload().artifact_requirements())
+        .flat_map(|event| store::event_artifact_requirements(event.payload()))
         .filter(|requirement| {
             requirement.source.is_same_commit_payload_evidence()
                 || (requirement.source == store::EventArtifactReferenceSource::ArtifactReferenced

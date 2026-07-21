@@ -2284,7 +2284,6 @@ dependencies = [
 name = "mfm-adapters-portfolio"
 version = "0.1.0"
 dependencies = [
- "mfm-artifact-capabilities",
  "mfm-events",
  "mfm-fact-capabilities",
  "mfm-facts",
@@ -2307,7 +2306,6 @@ dependencies = [
  "mfm-adapters-btc-jsonrpc",
  "mfm-adapters-evm",
  "mfm-adapters-portfolio",
- "mfm-artifact-capabilities",
  "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
@@ -2349,22 +2347,6 @@ dependencies = [
  "trybuild",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "mfm-artifact-capabilities"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-events",
- "mfm-facts",
- "mfm-ids",
- "mfm-spec",
- "mfm-store",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

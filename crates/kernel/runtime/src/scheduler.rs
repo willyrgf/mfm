@@ -6,7 +6,6 @@ use mfm_ids::RunId;
 use mfm_store::v1 as store;
 
 use crate::admission::{RunAdmissionAuthority, RunAdmissionLifecycle};
-use crate::artifacts::RuntimeArtifactStore;
 use crate::attempt::{AttemptLifecycle, AttemptRunStatus, ResourceLaneBlockWitness};
 use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
 use crate::commit::{prepared_commit_bundle, PreparedRunLaunch, RunLaunchEvidence};
@@ -62,14 +61,14 @@ enum DriveStepStatus {
 #[derive(Clone)]
 pub struct SerialTypedScheduler {
     run_contexts: VerifiedRunContextLoader,
-    artifact_store: Arc<dyn RuntimeArtifactStore>,
+    artifact_store: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl SerialTypedScheduler {
-    /// Creates a scheduler using a certified runner registry and runtime artifact store.
+    /// Creates a scheduler using a certified runner registry and retained-artifact reader.
     pub fn new(
         runners: ErasedRunnerRegistry,
-        artifact_store: Arc<dyn RuntimeArtifactStore>,
+        artifact_store: Arc<dyn store::RetainedArtifactReadProvider>,
     ) -> Self {
         Self {
             run_contexts: VerifiedRunContextLoader::new(BoundRuntimeContextLoader::new(runners)),

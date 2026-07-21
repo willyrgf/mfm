@@ -108,7 +108,7 @@ pub use self::staging::{
 pub use self::stream::{
     committed_run_stream_canonical_json, committed_run_stream_from_canonical_json_slice,
     CommittedRunStream, CommittedRunStreamCommit, RetainedArtifactReadFuture,
-    RetainedArtifactReadProvider, VerifiedRunArtifactBytes, VerifiedRunArtifactStore,
+    RetainedArtifactReadProvider, VerifiedRetainedArtifactBytes, VerifiedRunArtifactStore,
 };
 use self::stream::{committed_run_stream_commits, validate_run_stream_order};
 
@@ -885,7 +885,15 @@ mod private {
     pub trait Sealed {}
 }
 
-pub use mfm_events::v1::{EventArtifactReferenceSource, EventArtifactRequirement};
+mod event_artifacts;
+pub use self::event_artifacts::{
+    artifact_referenced_artifact_requirement, config_ref_artifact_requirement,
+    diagnostic_artifact_requirement, event_artifact_requirements,
+    fact_descriptor_artifact_requirement, fact_response_artifact_requirement,
+    public_output_cell_artifact_requirement, public_output_rendered_artifact_requirement,
+    run_artifact_requirement, seed_artifact_requirement, seed_cell_artifact_requirement,
+    EventArtifactReferenceSource, EventArtifactRequirement,
+};
 
 use self::artifact_refs::referenced_artifact_ids;
 

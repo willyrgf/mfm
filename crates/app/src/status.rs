@@ -125,14 +125,14 @@ pub(super) async fn verify_public_output_authority_artifacts(
 ) -> Result<(), PublicError> {
     for cell in &payload.cells {
         let artifact = artifacts
-            .read_retained_artifact(&public_output_cell_artifact_requirement(cell))
+            .read_retained_artifact(&store::public_output_cell_artifact_requirement(cell))
             .await?;
         let evidence = artifact.evidence().clone();
         verify_public_output_cell_evidence(cell, &evidence)?;
     }
     if let Some(artifact_id) = rendered_artifact_id {
         let json_media_type = public_output_json_media_type()?;
-        let requirement = public_output_rendered_artifact_requirement(
+        let requirement = store::public_output_rendered_artifact_requirement(
             payload,
             artifact_id,
             rendered_digest,
@@ -215,7 +215,7 @@ pub(super) async fn render_public_output_json_from_authority(
     let mut root = Map::new();
     for cell in &authority.payload.cells {
         let artifact = artifacts
-            .read_retained_artifact(&public_output_cell_artifact_requirement(cell))
+            .read_retained_artifact(&store::public_output_cell_artifact_requirement(cell))
             .await?;
         let evidence = artifact.evidence().clone();
         verify_public_output_cell_evidence(cell, &evidence)?;
@@ -238,7 +238,7 @@ pub(super) fn verify_public_output_cell_evidence(
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), PublicError> {
     validate_artifact_requirement_for_app(
-        public_output_cell_artifact_requirement(cell),
+        store::public_output_cell_artifact_requirement(cell),
         evidence,
         ErrorClass::Internal,
         "PublicOutputArtifactMismatch",
@@ -293,7 +293,7 @@ pub(super) async fn load_public_output_json(
     payload: &events::PublicOutputProduced,
 ) -> Result<serde_json::Value, PublicError> {
     let json_media_type = public_output_json_media_type()?;
-    let requirement = public_output_rendered_artifact_requirement(
+    let requirement = store::public_output_rendered_artifact_requirement(
         payload,
         artifact_id,
         rendered_digest,
@@ -326,7 +326,7 @@ pub(super) fn verify_public_output_rendered_artifact_evidence(
 ) -> Result<(), PublicError> {
     let json_media_type = public_output_json_media_type()?;
     validate_artifact_requirement_for_app(
-        public_output_rendered_artifact_requirement(
+        store::public_output_rendered_artifact_requirement(
             payload,
             artifact_id,
             rendered_digest,
@@ -399,7 +399,7 @@ pub(super) fn validate_spec_artifact_evidence(
         ));
     }
     validate_artifact_requirement_for_app(
-        run_artifact_requirement(
+        store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunSpec,
             &run_admitted.spec_artifact,
             events::ArtifactRole::TypedExecutionSpec,
@@ -433,7 +433,7 @@ pub(super) fn validate_certificate_artifact_evidence(
         ));
     }
     validate_artifact_requirement_for_app(
-        run_artifact_requirement(
+        store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunCertificate,
             &run_admitted.certificate_artifact,
             events::ArtifactRole::TypedSpecCertificate,

@@ -183,7 +183,7 @@ pub(super) fn artifact_record_from_row(row: PgRow) -> Result<ArtifactRecord> {
 pub(super) async fn read_retained_artifact_from_pool(
     pool: &PgPool,
     requirement: &EventArtifactRequirement,
-) -> mfm_store::v1::Result<VerifiedRunArtifactBytes> {
+) -> mfm_store::v1::Result<VerifiedRetainedArtifactBytes> {
     let row = sqlx::query(
         "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, a.schema_id, \
          a.semantic_type_id, a.producer_node_id, a.producer_seed_id, a.artifact_role, b.bytes \
@@ -207,7 +207,7 @@ pub(super) async fn read_retained_artifact_from_pool(
     let record = artifact_record_from_row(row).map_err(|_| StoreError::ArtifactReadFailed {
         artifact_id: requirement.artifact_id.clone(),
     })?;
-    VerifiedRunArtifactBytes::new(record.artifact_bytes, record.evidence, requirement)
+    VerifiedRetainedArtifactBytes::new(record.artifact_bytes, record.evidence, requirement)
 }
 
 pub(super) async fn load_run_artifact_bytes_tx(

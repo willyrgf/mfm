@@ -17,7 +17,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
@@ -264,76 +263,6 @@ pub use mfm_fact_capabilities::FactIndexReadProvider;
 #[cfg(any(test, feature = "test-support"))]
 pub use fact_index::ProjectionFactIndexProvider;
 
-/// Builds an adapter-facing artifact read provider from a retained artifact reader.
-pub fn artifact_read_provider_from_retained<A>(artifacts: A) -> Arc<dyn ArtifactReadProvider>
-where
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
-{
-    Arc::new(RetainedArtifactReadAdapter { artifacts })
-}
-
-#[derive(Clone)]
-struct RetainedArtifactReadAdapter<A> {
-    artifacts: A,
-}
-
-impl<A> ArtifactReadProvider for RetainedArtifactReadAdapter<A>
-where
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
-{
-    fn read_artifact<'a>(
-        &'a self,
-        request: &'a mfm_artifact_capabilities::ArtifactReadRequest,
-    ) -> mfm_artifact_capabilities::ArtifactReadFuture<'a> {
-        Box::pin(async move {
-            let requirement = store::EventArtifactRequirement {
-                source: store::EventArtifactReferenceSource::ArtifactReferenced,
-                artifact_id: request.artifact_id().clone(),
-                evidence_hash: request.evidence_hash().clone(),
-                digest: request.digest().cloned(),
-                byte_len: request.byte_len(),
-                media_type: request.media_type().cloned(),
-                schema_id: request.schema_id().cloned(),
-                semantic_type_id: request.semantic_type_id().cloned(),
-                producer_node_id: request.producer_node_id().cloned(),
-                producer_seed_id: request.producer_seed_id().cloned(),
-                artifact_role: request.artifact_role(),
-            };
-            let artifact = self
-                .artifacts
-                .read_retained_artifact(&requirement)
-                .await
-                .map_err(capability_artifact_error_from_store)?;
-            let evidence =
-                mfm_artifact_capabilities::ArtifactEvidenceRef::from(artifact.evidence().clone());
-            mfm_artifact_capabilities::VerifiedArtifactBytes::new(
-                artifact.into_bytes(),
-                evidence,
-                request,
-            )
-        })
-    }
-}
-
-fn capability_artifact_error_from_store(
-    error: store::StoreError,
-) -> mfm_artifact_capabilities::ArtifactReadError {
-    match error {
-        store::StoreError::MissingArtifact { artifact_id } => {
-            mfm_artifact_capabilities::ArtifactReadError::NotFound {
-                artifact_id: Box::new(artifact_id),
-            }
-        }
-        store::StoreError::ArtifactEvidenceMismatch { artifact_id, field } => {
-            mfm_artifact_capabilities::ArtifactReadError::EvidenceMismatch {
-                artifact_id: Box::new(artifact_id),
-                field,
-            }
-        }
-        error => mfm_artifact_capabilities::ArtifactReadError::redacted_backend_failure(error),
-    }
-}
-
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, PublicError> {
     let mut registry = CertificationRegistry::new();
@@ -529,24 +458,6 @@ fn validate_replay_diagnostic(diagnostic: &RedactedProviderDiagnostic) -> Result
     Ok(())
 }
 
-fn diagnostic_artifact_requirement(
-    reference: &events::ArtifactEvidenceRef,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: reference.artifact_id.clone(),
-        evidence_hash: reference.evidence_hash.clone(),
-        digest: Some(reference.content_digest.clone()),
-        byte_len: Some(reference.byte_len),
-        media_type: Some(reference.media_type.clone()),
-        schema_id: Some(reference.schema_id.clone()),
-        semantic_type_id: reference.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(reference.role),
-    }
-}
-
 fn validate_evm_source_mismatch_diagnostic(
     diagnostic: &mfm_capabilities::RedactedProviderDiagnostic,
 ) -> Result<(), PublicError> {
@@ -624,7 +535,7 @@ pub async fn load_certified_spec_for_run(
 ) -> Result<CertifiedTypedSpec, PublicError> {
     let run_admitted = run_admitted_payload(run_id, stream)?;
     let spec_artifact = artifacts
-        .read_retained_artifact(&run_artifact_requirement(
+        .read_retained_artifact(&store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunSpec,
             &run_admitted.spec_artifact,
             events::ArtifactRole::TypedExecutionSpec,
@@ -634,7 +545,7 @@ pub async fn load_certified_spec_for_run(
     validate_spec_artifact_evidence(run_admitted, &spec_evidence)?;
     let spec_bytes = spec_artifact.into_bytes();
     let certificate_artifact = artifacts
-        .read_retained_artifact(&run_artifact_requirement(
+        .read_retained_artifact(&store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunCertificate,
             &run_admitted.certificate_artifact,
             events::ArtifactRole::TypedSpecCertificate,
@@ -658,7 +569,7 @@ async fn stored_launch_evidence_from_run_admitted(
 ) -> Result<RunLaunchEvidence, PublicError> {
     let spec_artifact = stored_run_launch_artifact(
         artifacts,
-        run_artifact_requirement(
+        store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunSpec,
             &run_admitted.spec_artifact,
             events::ArtifactRole::TypedExecutionSpec,
@@ -668,7 +579,7 @@ async fn stored_launch_evidence_from_run_admitted(
     .await?;
     let certificate_artifact = stored_run_launch_artifact(
         artifacts,
-        run_artifact_requirement(
+        store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunCertificate,
             &run_admitted.certificate_artifact,
             events::ArtifactRole::TypedSpecCertificate,
@@ -681,7 +592,7 @@ async fn stored_launch_evidence_from_run_admitted(
         config_artifacts.push(
             stored_run_launch_artifact(
                 artifacts,
-                run_artifact_requirement(
+                store::run_artifact_requirement(
                     store::EventArtifactReferenceSource::RunConfig,
                     config,
                     events::ArtifactRole::TypedConfig,
@@ -697,7 +608,7 @@ async fn stored_launch_evidence_from_run_admitted(
         fact_descriptor_artifacts.push(
             stored_run_launch_artifact(
                 artifacts,
-                run_artifact_requirement(
+                store::run_artifact_requirement(
                     store::EventArtifactReferenceSource::FactDescriptor,
                     descriptor,
                     events::ArtifactRole::FactDescriptor,
@@ -710,11 +621,11 @@ async fn stored_launch_evidence_from_run_admitted(
     let mut seed_cells = Vec::with_capacity(run_admitted.seed_cells.len());
     for cell in &run_admitted.seed_cells {
         let artifact = artifacts
-            .read_retained_artifact(&seed_cell_artifact_requirement(cell))
+            .read_retained_artifact(&store::seed_cell_artifact_requirement(cell))
             .await?;
         let evidence = artifact.evidence().clone();
         validate_artifact_requirement_for_app(
-            seed_cell_artifact_requirement(cell),
+            store::seed_cell_artifact_requirement(cell),
             &evidence,
             ErrorClass::Internal,
             "RunAdmittedSeedArtifactMismatch",
