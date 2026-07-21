@@ -252,7 +252,6 @@ pub fn production_runner_registry(
         runtime_config.clone(),
     )?;
     evm_runtime::register_evm_runners(&mut registry, artifacts.clone(), runtime_config)?;
-    mfm_transports_proof::register_deterministic_proof_runners(&mut registry, artifacts)?;
     Ok(registry)
 }
 
@@ -347,7 +346,6 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, Publ
     mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
         &mut registry,
     )?;
-    mfm_op_proof::register_proof_certification_descriptors(&mut registry)?;
     Ok(registry)
 }
 

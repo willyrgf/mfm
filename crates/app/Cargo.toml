@@ -38,7 +38,6 @@ mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }
 mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
 mfm-op-portfolio-snapshot = { path = "../ops/portfolio-snapshot-op" }
 mfm-portfolio-model = { path = "../portfolio/model" }
-mfm-op-proof = { path = "../ops/proof-op" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
@@ -52,7 +51,6 @@ mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
 mfm-storage-postgres = { path = "../storages/postgres" }
 mfm-transports-evm = { path = "../transports/evm" }
-mfm-transports-proof = { path = "../transports/proof" }
 mfm-values = { path = "../kernel/values" }
 toml = "0.8"
 url = { workspace = true }

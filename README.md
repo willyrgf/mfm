@@ -83,7 +83,6 @@ Crate docs:
 - Typed runtime: [`crates/kernel/runtime/README.md`](crates/kernel/runtime/README.md)
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
-- Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
 - EVM collector operation: [`crates/ops/evm-collectors-op/README.md`](crates/ops/evm-collectors-op/README.md)
 - Portfolio snapshot/report operations: [`crates/ops/portfolio-snapshot-op/README.md`](crates/ops/portfolio-snapshot-op/README.md)
 - Reusable EVM states: [`crates/states/evm/README.md`](crates/states/evm/README.md)

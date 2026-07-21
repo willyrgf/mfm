@@ -52,6 +52,40 @@ fn certification_lowers_side_effect_submit_verify_pair() {
 }
 
 #[test]
+fn test_local_manual_resolution_draft_certifies() {
+    let (draft, manual) = manual_resolution_draft();
+    let mut registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+    registry
+        .register_schema_role(
+            manual.evidence_schema.clone(),
+            CertifiedSchemaRole::ManualResolutionEvidence,
+        )
+        .expect("manual evidence role");
+    registry
+        .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
+        .expect("manual verifier");
+    registry
+        .register_operator_authority_snapshot(manual.authorization.authority.clone())
+        .expect("manual authority");
+
+    let lowered = lower_program_draft(&draft).expect("lowered manual draft");
+    let certified = certify_typed_spec(lowered, &registry).expect("certified manual draft");
+    assert!(matches!(
+        certified.validated_spec().spec().saga,
+        spec::SagaPolicySpec::ManualResolution { .. }
+    ));
+    assert!(certified
+        .validated_spec()
+        .spec()
+        .nodes
+        .iter()
+        .any(|node| matches!(
+            node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        )));
+}
+
+#[test]
 fn persisted_side_effect_verify_specs_reject_unknown_submit_output_cell_id() {
     let (_registry, typed) = side_effect_registry_and_spec();
     let submit_output_cell = side_effect_submit_node(&typed).output_cell.clone();

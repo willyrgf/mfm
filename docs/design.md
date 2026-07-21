@@ -124,9 +124,9 @@ kernel, signing, and their own layer. Concrete storage consumes kernel contracts
 Assembly is above those layers. Binaries consume only explicitly binary-facing kernel and assembly
 contracts. Tests are unrestricted. Normal and build dependencies are checked from Cargo metadata;
 dev-only edges do not establish production ownership. During the ordered repository cut, the
-metadata evaluator narrows monotonically as the proof platform-spec edge, the Bitcoin-to-portfolio
-source edge, and direct binary implementation edges are deleted; those current shapes are not
-future architecture or named exceptions.
+metadata evaluator narrows monotonically as the Bitcoin-to-portfolio source edge and direct binary
+implementation edges are deleted; those current shapes are not future architecture or named
+exceptions.
 
 States remain free of runtime/store implementations, binaries, live transports, secret providers,
 and operation modules. Operations remain deterministic planning. Adapters bind state-owned intent

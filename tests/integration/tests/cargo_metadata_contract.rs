@@ -351,6 +351,11 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
         ),
         (
             &source,
+            &kernel_platform,
+            "source domain -> platform-only kernel",
+        ),
+        (
+            &source,
             &other_source,
             "source domain -> other source domain",
         ),
@@ -888,11 +893,7 @@ fn domain_dependency_allowed(source: &PackageSemantics, dependency: &PackageSema
         .expect("domain role metadata shape was parsed");
 
     match dependency.layer {
-        // Source domains become domain-facing-only when the proof package's platform-spec edge is
-        // deleted. Aggregate domains already satisfy and enforce the final facing contract.
-        Layer::Kernel => {
-            source_role == DomainRole::Source || dependency.domain_facing == Some(true)
-        }
+        Layer::Kernel => dependency.domain_facing == Some(true),
         Layer::Signing => true,
         Layer::Domain => {
             let dependency_domain = dependency

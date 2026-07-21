@@ -2325,7 +2325,6 @@ dependencies = [
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
  "mfm-op-portfolio-snapshot",
- "mfm-op-proof",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
@@ -2342,7 +2341,6 @@ dependencies = [
  "mfm-store",
  "mfm-transports-btc-jsonrpc-http",
  "mfm-transports-evm",
- "mfm-transports-proof",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2422,22 +2420,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "trybuild",
-]
-
-[[package]]
-name = "mfm-collectors-proof"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-effects",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -2626,18 +2608,6 @@ dependencies = [
  "mfm-states-evm",
  "mfm-values",
  "serde_json",
-]
-
-[[package]]
-name = "mfm-op-proof"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-certify",
- "mfm-collectors-proof",
- "mfm-ids",
- "mfm-program",
- "mfm-spec",
 ]
 
 [[package]]
@@ -2948,25 +2918,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "mfm-transports-proof"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-collectors-proof",
- "mfm-events",
- "mfm-ids",
- "mfm-program",
- "mfm-replay",
- "mfm-runtime",
- "mfm-spec",
- "mfm-store",
- "mfm-values",
- "serde",
- "serde_json",
 ]
 
 [[package]]

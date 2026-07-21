@@ -677,6 +677,16 @@ fn side_effect_draft() -> program::TypedProgramDraft {
 fn side_effect_draft_with_verification(
     verification: program::SideEffectVerificationSpec,
 ) -> program::TypedProgramDraft {
+    side_effect_draft_with_policy(
+        verification,
+        program::SideEffectSagaPolicy::FailWithoutAcdcClaim,
+    )
+}
+
+fn side_effect_draft_with_policy(
+    verification: program::SideEffectVerificationSpec,
+    saga_policy: program::SideEffectSagaPolicy,
+) -> program::TypedProgramDraft {
     let mut states = StateRegistryBuilder::new();
     states
         .register::<MutatingState>()
@@ -686,7 +696,7 @@ fn side_effect_draft_with_verification(
         states.snapshot(),
         OperationRegistryBuilder::new().snapshot(),
         |root: &mut RootBuilder<'_, '_>| {
-            root.set_saga_policy(program::SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
+            root.set_saga_policy(saga_policy)?;
             let seed = root.seed(
                 mfm_program::SeedKey::new("initial").expect("seed key"),
                 CanonicalSeed::from_value(&TestValue { amount: 2 }).expect("seed"),
@@ -708,6 +718,48 @@ fn side_effect_draft_with_verification(
         },
     )
     .expect("side effect draft")
+}
+
+fn manual_resolution_draft() -> (
+    program::TypedProgramDraft,
+    spec::ManualResolutionEvidenceSpec,
+) {
+    let operator = program::OperatorAuthorityMemberSpec {
+        operator_id: program::OperatorId::new("mfm.certify.test.manual.operator")
+            .expect("operator id"),
+        public_identity: program::OperatorPublicIdentity::new(
+            "mfm.certify.test.manual.operator.identity",
+        )
+        .expect("operator identity"),
+    };
+    let authority = program::OperatorAuthoritySnapshotDraft::new(
+        program::OperatorAuthorityId::new("mfm.certify.test.manual.authority")
+            .expect("authority id"),
+        program::NonEmptyUniqueOperators::new(operator, Vec::new()).expect("operator authority"),
+    );
+    let authorization = program::ManualAuthorizationDraft::threshold(
+        program::ManualAuthorizationVerifierId::new("mfm.certify.test.manual.verifier")
+            .expect("verifier id"),
+        program::ManualSigningSchemeSpec::new(MANUAL_RESOLUTION_SIGNING_SCHEME)
+            .expect("signing scheme"),
+        authority,
+        program::ThresholdQuorum::new(1).expect("quorum"),
+    )
+    .expect("manual authorization");
+    let evidence_schema = mfm_ids::SchemaId::new(
+        "mfm.certify.test.manual.evidence",
+        "1",
+        mfm_ids::DigestAlgorithm::Sha256JcsV1,
+        digest_byte(0x7d),
+    )
+    .expect("manual evidence schema");
+    let manual = program::ManualResolutionPolicyDraft::new(evidence_schema, authorization);
+    let manual_spec = manual.to_spec();
+    let draft = side_effect_draft_with_policy(
+        program::SideEffectVerificationSpec::Receipt,
+        program::SideEffectSagaPolicy::ManualResolution { manual },
+    );
+    (draft, manual_spec)
 }
 
 fn compensating_draft() -> program::TypedProgramDraft {

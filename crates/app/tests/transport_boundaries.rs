@@ -3,11 +3,7 @@
 #[test]
 fn production_app_links_only_supported_transport_crates() {
     let manifest = include_str!("../Cargo.toml");
-    for required in [
-        "mfm-adapters-portfolio",
-        "mfm-transports-evm",
-        "mfm-transports-proof",
-    ] {
+    for required in ["mfm-adapters-portfolio", "mfm-transports-evm"] {
         assert!(
             manifest.contains(required),
             "production app manifest must link {required}"
@@ -30,29 +26,20 @@ fn production_app_links_only_supported_transport_crates() {
 }
 
 #[test]
-fn transport_sources_exclude_artifact_write_surfaces() {
-    for (name, source) in [
-        ("proof", include_str!("../../transports/proof/src/lib.rs")),
-        (
-            "portfolio",
-            include_str!("../../adapters/portfolio/src/lib.rs"),
-        ),
+fn portfolio_live_source_excludes_artifact_write_surfaces() {
+    let source = include_str!("../../adapters/portfolio/src/lib.rs");
+    for banned in [
+        concat!("request: serde_json::", "Value"),
+        "PortfolioArtifactStore",
+        "PortfolioArtifactStoreFuture",
+        "put_artifact(",
+        "put_verified_artifact(",
+        "persist_artifact(",
     ] {
-        for banned in [
-            concat!("request: serde_json::", "Value"),
-            "ProofArtifactSink",
-            "ProofArtifactSinkFuture",
-            "PortfolioArtifactStore",
-            "PortfolioArtifactStoreFuture",
-            "put_artifact(",
-            "put_verified_artifact(",
-            "persist_artifact(",
-        ] {
-            assert!(
-                !source.contains(banned),
-                "transport {name} must not expose artifact write surface {banned}"
-            );
-        }
+        assert!(
+            !source.contains(banned),
+            "portfolio live source must not expose artifact write surface {banned}"
+        );
     }
 }
 

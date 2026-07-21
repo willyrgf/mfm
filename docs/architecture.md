@@ -632,10 +632,9 @@ Source-domain to aggregate-domain, cross-domain live, live to concrete storage/s
 to secret-provider, and store-contract to storage-implementation edges are forbidden. Dev-only
 dependencies may exercise lower surfaces without becoming production ownership.
 
-The ordered repository cut currently has three broader semantic shapes which close with their
-owning deletions: source domains may still reach platform-only kernel while the proof workflow
-exists; Bitcoin source state still reaches the aggregate portfolio contract until the atomic
-collection replacement; and binaries may still reach non-facing kernel/assembly plus the secret
+The ordered repository cut currently has two broader semantic shapes which close with their owning
+deletions: Bitcoin source state still reaches the aggregate portfolio contract until the atomic
+collection replacement, and binaries may still reach non-facing kernel/assembly plus the secret
 provider until app services absorb implementation construction. These are not named exceptions or
 approved future edges. The metadata evaluator narrows monotonically at those cutovers.
 
