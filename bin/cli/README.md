@@ -69,7 +69,7 @@ MFM_OUTPUT_FORMAT=json mfm_cli --output-format text keystore list
 ## JSON Output Format
 
 When `--output-format json` or `MFM_OUTPUT_FORMAT=json` is used, commands and CLI argument parser
-failures return structured JSON responses. Parser failures use the stable error code
+failures return structured JSON responses. Parser failures use the documented error code
 `CliParseError` and preserve clap's exit code.
 
 **Success Response:**
@@ -345,9 +345,8 @@ mfm_cli keystore delete [OPTIONS] (<ID> | --by-label <LABEL>)
 
 Signs one checked EIP-1559 transaction through the canonical app/library signing service and writes
 the signed raw transaction hex to an explicit bearer-output file. The command resolves exactly one
-`[signers.<REF>]` runtime binding and its referenced `[keystores.<REF>]` profile. It has no direct
-keystore/key selector, label lookup, private-key access, custom encoder, legacy transaction mode, or
-provider fallback.
+`[signers.<REF>]` runtime binding and its referenced `[keystores.<REF>]` profile. It exposes no
+lower-level key selection, private-key access, transaction encoding, or provider-selection surface.
 
 The unsigned envelope uses Alloy as its only signing-hash and encoding implementation. The app
 signing service parses canonical unsigned decimal or lowercase `0x`-prefixed quantities as `U256`,
@@ -508,10 +507,8 @@ For example:
 mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
 ```
 
-The target selects only its current `PortfolioConfig`. Old `--entry-point` and `--request` flags,
-JSON request files, catalog `{name,digest}` objects, old entry-point ids, unversioned ids, and
-latest-like forms are rejected. The target cannot select collector policies, child configs, native
-decimals, runtime routes, or a collect/reuse/report-only mode.
+The target selects only its current `PortfolioConfig`. It cannot select collector policies, child
+configs, native decimals, runtime routes, or a collect/reuse/report-only mode.
 
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
@@ -765,7 +762,7 @@ The CLI's process-level configuration is intentionally narrow.
 The CLI is designed to be AI-friendly with consistent JSON output that makes it easy for AI agents to:
 
 - Parse command results reliably using the standardized `{"status": "success", "data": {...}}` format
-- Handle errors gracefully with structured error responses containing stable error codes
+- Handle errors gracefully with structured error responses containing machine-readable error codes
 - Integrate with automation pipelines using runtime config and non-interactive modes
 - Process keystore operations programmatically without human intervention
 

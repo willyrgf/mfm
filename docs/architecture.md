@@ -471,14 +471,13 @@ explicit workflow mode rather than weakening the existing mode.
 
 ## Architecture Doctrine
 
-When simplifying an existing subsystem, optimize in this order: fewer concepts, fewer execution and
-replay paths, fewer public types and schemas, fewer duplicated responsibilities, fewer places a
-future change must touch, and finally fewer lines once correctness, security, and replay guarantees
-are satisfied. Package count alone is not a useful simplification metric.
+Apply the repository-wide [one-current-design policy](code-quality.md#one-current-design).
+Package count alone is not a simplification metric when reducing it would merge distinct authority
+boundaries.
 
-### Rule 1: One Stable Abstraction Per Crate
+### Rule 1: One Abstraction Per Crate
 
-A crate must own one durable abstraction. It must not own a parity slice.
+A crate must own one coherent abstraction. It must not own a parity slice.
 
 Good crate reasons:
 
@@ -712,7 +711,7 @@ start/resume services may construct those live drivers because they are executio
 - construct app services over the Postgres run store
 - start, resume, replay, inspect, and render typed runs
 - read run list/watch observations through the shared app API
-- preserve stable response envelopes
+- emit only the current response envelopes documented by the relevant binary
 
 Read-only CLI/REST commands and routes must use evidence-only app services. Live start, resume, and
 manual-resolution drive paths may use live app services that bind runners and capabilities.
@@ -723,28 +722,29 @@ manual-resolution drive paths may use live app services that bind runners and ca
 - execute state behavior directly
 - bypass typed certification
 - infer public outputs from untyped snapshots
-- migrate uncertified historical runs into certified typed runs
+- accept uncertified run history as typed run authority
 - depend directly on SQLx, filesystem artifact stores, or alternate production storage selectors
 
 ## Public Naming Rules
 
 Public CLI commands, REST routes, request kinds, schema ids, error codes, executable identities, and
-public-output schema ids are durable contracts.
+public-output schema ids are exact identities in the current contract. They carry no cross-revision
+compatibility promise.
 
 Before adding or renaming a public surface, verify:
 
 - the name is domain language, not implementation scaffolding
 - the name would still make sense if the current operation topology changed
 - the name does not expose an adapter, transport, crate, parity fixture, or temporary acronym
-- the schema namespace is stable enough to persist in artifacts and run streams
-- tests assert the public domain name and reject stale recipe names
+- the schema namespace is domain-specific enough to persist in current artifacts and run streams
+- tests assert the public domain name and reject implementation-scaffolding names
 
 ## Review Checklist
 
 Before merging a change, verify:
 
 - the new unit has exactly one taxonomy category
-- the crate name describes a durable abstraction
+- the crate name describes a coherent abstraction
 - typed specs remain the only runtime contract
 - new public values/configs use typed descriptors and no floats/secrets
 - side effects have one state-authored intent/idempotency pair, required typed prepared authority,

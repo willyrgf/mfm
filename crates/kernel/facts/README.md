@@ -18,8 +18,7 @@ receipt identity or a claim-occurrence identifier.
 
 Canonical fact-query v2 can bind this evidence as an exact provider-side narrowing filter. The
 provider checks trusted indexed-reference components before ordering and limiting; that compact
-check never replaces subsequent artifact hydration and typed identity rederivation. There is no
-query-v1 compatibility reader.
+check never replaces subsequent artifact hydration and typed identity rederivation.
 
 `docs/design.md` is the normative typed-core authority contract. Portfolio collectors and
 fact-backed reporting authority live in `docs/design.md`. This crate is
