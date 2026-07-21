@@ -61,34 +61,12 @@ Key invariants to preserve (high risk if violated):
 
 ## Pinned Development and Verification
 
-Nix owns the pinned toolchain and native environment. Cargo owns the Rust dependency graph,
-fingerprints, and mutable compiler artifacts. All direct Cargo/Rust tooling must run inside the
-default development shell; never rely on a host-installed `cargo`, `rustc`, `rustfmt`, or Clippy.
+All direct Cargo/Rust tooling must run in the default Nix development shell; never rely on
+host-installed Rust tools. [`docs/build-and-verification.md`](docs/build-and-verification.md) owns
+the commands, verification-selection matrix, build lanes, gate composition, internal-task caveats,
+and artifact lifecycle. [`nixfied.nix`](nixfied.nix) owns the exact executable graph and task ids.
 
-Enter the shell once for an interactive development session:
-
-```bash
-nix develop
-cargo fmt --all -- --check
-cargo check -p <package>
-cargo test -p <package> [test-filter]
-```
-
-For a non-interactive one-off command, use `nix develop -c cargo ...`. Prefer a named test target or
-filter, then a package test, and expand to affected dependents only when a public contract changes.
-Do not default to workspace-wide commands.
-
-For a one-off managed check, run the exact current Nixfied leaf:
-
-```bash
-nix run .#run -- --task <task-id>
-```
-
-Internal task ids are not stable public verbs and a leaf does not inherit predecessor tasks from an
-enclosing composite. Confirm the id and dependencies in `nixfied.nix`.
-
-`docs/build-and-verification.md` is the sole source for the verification-selection matrix, build
-lanes, gate composition, and artifact lifecycle. Follow the upstream
+Follow the upstream
 [Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/main/docs/GUIDE.md) for framework
 integration and coordinated pin/runtime changes. Two rules are non-negotiable:
 

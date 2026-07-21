@@ -152,15 +152,13 @@
             '';
           };
         in
-        # The verification surface is generated: MFM's own task names become
-        # the verbs (`.#check`/`.#test`/`.#ci` via nixfied.surface.verbs),
-        # model admission lives at `.#model-check`. The only override is the
-        # managed local MFM app; the package remains the raw binary.
+        # Keep the generated control/verification apps and add the managed CLI.
         projectApps
         // {
           mfm = {
             type = "app";
             program = "${managedMfm}/bin/mfm";
+            meta.description = "Run the MFM CLI with managed PostgreSQL";
           };
         }
       );

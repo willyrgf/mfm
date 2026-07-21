@@ -5,11 +5,22 @@
 The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a user-friendly and scriptable way to interact with MFM modules, including keystore management, public fact discovery/query, and an experimental `run` subcommand for starting/resuming/inspecting runs. The CLI is built using the `clap` crate for robust argument parsing and command structure.
 
 Run the packaged CLI with `nix run .#mfm -- <ARGS>`, for example:
+
 - `nix run .#mfm -- keystore list`
 - `nix run .#mfm -- keystore tx-sign --signer-ref deployer --from 0x... --to 0x...`
 - `nix run .#mfm -- facts kinds`
 - `nix run .#mfm -- ops list`
 - `nix run .#mfm -- run status <RUN_ID>`
+
+### Managed local app
+
+The custom `.#mfm` app starts Nixfied-managed PostgreSQL in slot 9, applies the typed store
+migrations, sets `DATABASE_URL`, delegates all arguments to the packaged CLI, and stops PostgreSQL
+afterward without removing its data. Separate invocations share setup and run state under the
+Nixfied state root for `mfm/dev/9`.
+
+When supplying an external `DATABASE_URL` or `--database-url`, use `mfm_cli`,
+`nix develop -c cargo run -p mfm -- <ARGS>`, or the raw binary produced by `nix build .#mfm`.
 
 ## Design Philosophy
 
@@ -425,14 +436,6 @@ nix run .#mfm -- setup import ./organization.toml
 nix run .#mfm -- setup list
 nix run .#mfm -- setup export acme/primary --output ./portfolio.json
 ```
-
-For local development, the `.#mfm` app starts Nixfied-managed PostgreSQL in slot
-9, applies the typed store migrations, sets `DATABASE_URL`, delegates all
-arguments to the packaged CLI, and stops PostgreSQL afterward without removing
-its data. Separate invocations share setup and run state under the Nixfied state
-root for `mfm/dev/9`. When supplying an external `DATABASE_URL` or
-`--database-url`, use `mfm_cli`, `nix develop -c cargo run -p mfm -- <ARGS>`, or
-the raw binary produced by `nix build .#mfm`.
 
 The import document is strict TOML with a closed `configs` list. Each configuration derives its
 target from its intrinsic domain id; a portfolio config with `portfolio_id = "acme/primary"`

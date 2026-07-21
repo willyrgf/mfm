@@ -62,8 +62,6 @@ let
     MFM_RETH_PARITY_HTTP_URL = "http://127.0.0.1:\${port:reth}";
   };
 
-  # A cargo leaf: argv + extra env + service requirements. Reuse is this Nix
-  # function; the model carries the fully-applied copies.
   cargoLeaf =
     {
       run,
@@ -92,8 +90,7 @@ let
     };
 in
 {
-  # Postgres and Reth come from upstream reference adapters: idempotent prepare,
-  # protocol probes, platform behavior, and lifecycle are framework-owned.
+  # MFM supplies project bindings over the upstream Postgres and Reth services.
   imports = [
     adapters.postgres
     adapters.reth
@@ -434,11 +431,8 @@ in
       };
     };
 
-    # The full gate, composed from the public verbs: `.#ci` runs the same
-    # `check` and `test` composites that `.#check`/`.#test` expose (run-once is
-    # per step, so nesting reuses them without duplication), then the parity
-    # chain. The runtime starts the managed services declared by the parity
-    # leaves' `requires` before the nodes execute.
+    # Order service-free verification before database and Reth parity, then
+    # record the source revision that completed the gate.
     ci = {
       kind = "composite";
       steps = {
@@ -467,8 +461,6 @@ in
     };
   };
 
-  # MFM's public verbs, in MFM's vocabulary: `nix run .#check`, `.#test`,
-  # `.#ci`. Admission lives at the generated `.#model-check`.
   nixfied.surface.verbs = [
     "check"
     "test"
