@@ -1,6 +1,6 @@
 //! Bitcoin address balance snapshot fact (`bitcoin.address_balance_snapshot`).
 
-use mfm_btc_capabilities::BtcBlockHash;
+use mfm_btc_capabilities::BitcoinBlockHash;
 use mfm_facts::{FactAudience, FactVisibility};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program_derive::{MfmFactType, MfmValue};
@@ -391,8 +391,8 @@ pub fn normalize_btc_address_balance(
 /// Requires a 32-byte lowercase hex Bitcoin block hash (empty and malformed fail closed).
 fn require_btc_anchor_hash(anchor_hash: impl Into<String>) -> Result<String, BtcStateError> {
     let anchor_hash = anchor_hash.into();
-    BtcBlockHash::new(anchor_hash.trim())
-        .map(|hash| hash.as_str().to_owned())
+    BitcoinBlockHash::new(anchor_hash.trim())
+        .map(|hash| hash.to_string())
         .map_err(|_| BtcStateError::InvalidInput {
             reason: "address balance anchor_hash must be a 32-byte hex hash".to_owned(),
         })

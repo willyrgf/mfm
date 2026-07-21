@@ -1,9 +1,10 @@
 use std::num::NonZeroU64;
 
 use mfm_btc_capabilities::{
-    BitcoinNetworkTag, BtcAddress, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash,
-    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcHeadKind, BtcHeadSelection,
-    BtcNetworkId, BtcSourceBinding, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BitcoinAddress, BitcoinBlockHash, BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceBinding,
+    BitcoinSourceIdentity, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcChainHeadRequest,
+    BtcChainHeadResponse, BtcFinality, BtcHeadKind, BtcHeadSelection, BtcSourceStatus,
+    RedactedBtcSourceEvidence,
 };
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
@@ -49,13 +50,13 @@ impl BtcChainHeadReadPlan {
     }
 
     /// Reconstructs the checked process-local source binding.
-    pub fn binding(&self) -> Result<BtcSourceBinding, BtcStateError> {
-        let network_id = BtcNetworkId::new(&self.network)?;
-        let source_identity = BtcSourceIdentity::new(&self.semantic_source_identity)?;
+    pub fn binding(&self) -> Result<BitcoinSourceBinding, BtcStateError> {
+        let network_id = BitcoinNetworkId::new(&self.network)?;
+        let source_identity = BitcoinSourceIdentity::new(&self.semantic_source_identity)?;
         validate_bitcoin_network(&self.bitcoin_network)
             .map_err(|reason| BtcStateError::InvalidInput { reason })?;
         let bitcoin_network = BitcoinNetworkTag::new(&self.bitcoin_network)?;
-        Ok(BtcSourceBinding::new(
+        Ok(BitcoinSourceBinding::new(
             network_id,
             source_identity,
             bitcoin_network,
@@ -113,7 +114,7 @@ impl BtcChainHeadReadEvidence {
             finality: response.finality.as_str().to_owned(),
             confirmation_depth: response.finality.confirmation_depth(),
             block_height: response.block_height,
-            block_hash: response.block_hash.as_str().to_owned(),
+            block_hash: response.block_hash.to_string(),
             provider_time_unix_ms: response.provider_time_unix_ms,
             network: response.evidence.network_id.as_str().to_owned(),
             semantic_source_identity: response.evidence.source_identity.as_str().to_owned(),
@@ -151,7 +152,7 @@ impl BtcChainHeadReadEvidence {
             head_kind,
             finality,
             block_height: self.block_height,
-            block_hash: BtcBlockHash::new(&self.block_hash)?,
+            block_hash: BitcoinBlockHash::new(&self.block_hash)?,
             provider_time_unix_ms: self.provider_time_unix_ms,
         })
     }
@@ -198,13 +199,13 @@ impl BtcAddressBalanceReadPlan {
     }
 
     /// Reconstructs the checked process-local source binding.
-    pub fn binding(&self) -> Result<BtcSourceBinding, BtcStateError> {
-        let network_id = BtcNetworkId::new(&self.network)?;
-        let source_identity = BtcSourceIdentity::new(&self.semantic_source_identity)?;
+    pub fn binding(&self) -> Result<BitcoinSourceBinding, BtcStateError> {
+        let network_id = BitcoinNetworkId::new(&self.network)?;
+        let source_identity = BitcoinSourceIdentity::new(&self.semantic_source_identity)?;
         validate_bitcoin_network(&self.bitcoin_network)
             .map_err(|reason| BtcStateError::InvalidInput { reason })?;
         let bitcoin_network = BitcoinNetworkTag::new(&self.bitcoin_network)?;
-        Ok(BtcSourceBinding::new(
+        Ok(BitcoinSourceBinding::new(
             network_id,
             source_identity,
             bitcoin_network,
@@ -213,10 +214,13 @@ impl BtcAddressBalanceReadPlan {
 
     /// Reconstructs the exact capability request declared by this plan.
     pub fn request(&self) -> Result<BtcBalanceReadRequest, BtcStateError> {
+        let bitcoin_network = BitcoinNetworkTag::new(&self.bitcoin_network)?;
+        let address = BitcoinAddress::new(&self.address)?;
+        address.require_network(bitcoin_network)?;
         Ok(BtcBalanceReadRequest::new(
-            BtcAddress::new(&self.address)?,
+            address,
             self.block_height,
-            BtcBlockHash::new(&self.block_hash)?,
+            BitcoinBlockHash::new(&self.block_hash)?,
         ))
     }
 }
@@ -248,7 +252,7 @@ impl BtcAddressBalanceReadEvidence {
             address: response.address.as_str().to_owned(),
             balance_sats: response.balance_sats,
             block_height: response.block_height,
-            block_hash: response.block_hash.as_str().to_owned(),
+            block_hash: response.block_hash.to_string(),
             network: response.evidence.network_id.as_str().to_owned(),
             semantic_source_identity: response.evidence.source_identity.as_str().to_owned(),
             bitcoin_network: response.evidence.bitcoin_network.clone(),
@@ -269,7 +273,7 @@ impl BtcAddressBalanceReadEvidence {
             || self.bitcoin_network != binding.bitcoin_network().as_str()
             || self.address != request.address().as_str()
             || self.block_height != request.block_height()
-            || self.block_hash != request.block_hash().as_str()
+            || self.block_hash != request.block_hash().to_string()
         {
             return Err(BtcStateError::SourceMismatch);
         }
@@ -280,10 +284,10 @@ impl BtcAddressBalanceReadEvidence {
         )?;
         Ok(BtcBalanceReadResponse {
             evidence,
-            address: BtcAddress::new(&self.address)?,
+            address: request.address().clone(),
             balance_sats: self.balance_sats,
             block_height: self.block_height,
-            block_hash: BtcBlockHash::new(&self.block_hash)?,
+            block_hash: BitcoinBlockHash::new(&self.block_hash)?,
         })
     }
 }

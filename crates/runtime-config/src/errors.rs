@@ -213,7 +213,7 @@ pub enum RuntimeConfigIdentifierKind {
     /// EVM source reference.
     SourceRef,
     /// Bitcoin semantic source identity.
-    BtcSourceIdentity,
+    BitcoinSourceIdentity,
     /// EVM semantic network id.
     NetworkId,
     /// Signer reference.
@@ -228,7 +228,7 @@ impl fmt::Display for RuntimeConfigIdentifierKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SourceRef => f.write_str("source_ref"),
-            Self::BtcSourceIdentity => f.write_str("btc_source_identity"),
+            Self::BitcoinSourceIdentity => f.write_str("btc_source_identity"),
             Self::NetworkId => f.write_str("network_id"),
             Self::SignerRef => f.write_str("signer_ref"),
             Self::KeystoreRef => f.write_str("keystore_ref"),

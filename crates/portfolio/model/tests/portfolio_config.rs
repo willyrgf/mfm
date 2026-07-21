@@ -97,6 +97,39 @@ fn source_family_matrix_and_wallet_network_joins_are_enforced() {
 }
 
 #[test]
+fn bitcoin_wallet_addresses_follow_checked_network_encoding() {
+    for (network, address) in [
+        ("main", "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"),
+        (
+            "test",
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        ),
+        (
+            "testnet4",
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        ),
+        (
+            "signet",
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        ),
+        ("regtest", "bcrt1q2nfxmhd4n3c8834pj72xagvyr9gl57n5r94fsl"),
+    ] {
+        let mut config = canonical_config();
+        config["networks"][0]["bitcoin_network"] = json!(network);
+        config["wallets"][0]["subject"]["address"] = json!(address);
+        decode_portfolio_config(&config)
+            .unwrap_or_else(|error| panic!("{network} address should be compatible: {error}"));
+    }
+
+    let mut wrong_family = canonical_config();
+    wrong_family["networks"][0]["bitcoin_network"] = json!("testnet4");
+    assert!(matches!(
+        decode_portfolio_config(&wrong_family),
+        Err(PortfolioConfigError::BitcoinWalletAddressNetworkMismatch { .. })
+    ));
+}
+
+#[test]
 fn token_address_and_source_aliases_fail_closed() {
     let mut zero_token = canonical_config();
     zero_token["symbol_configs"]

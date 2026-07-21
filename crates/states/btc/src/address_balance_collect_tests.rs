@@ -1,7 +1,7 @@
 use super::*;
 use mfm_btc_capabilities::{
-    BitcoinNetworkTag, BtcFinality, BtcHeadKind, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
-    RedactedBtcSourceEvidence,
+    BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceBinding, BitcoinSourceIdentity, BtcFinality,
+    BtcHeadKind, RedactedBtcSourceEvidence,
 };
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::StateSpec;
@@ -37,10 +37,10 @@ fn joint_tip_selection_is_always_best() {
     assert_eq!(tip_config().selection(), BtcHeadSelection::best());
 }
 
-fn binding() -> BtcSourceBinding {
-    BtcSourceBinding::new(
-        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-        BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+fn binding() -> BitcoinSourceBinding {
+    BitcoinSourceBinding::new(
+        BitcoinNetworkId::new("bitcoin-mainnet").expect("network"),
+        BitcoinSourceIdentity::new("public-bitcoin-core").expect("source"),
         BitcoinNetworkTag::Main,
     )
 }
@@ -56,7 +56,7 @@ fn chain_head_response(
         head_kind: BtcHeadKind::Best,
         finality: BtcFinality::BestAvailable,
         block_height: height,
-        block_hash: BtcBlockHash::new(hash).expect("hash"),
+        block_hash: BitcoinBlockHash::new(hash).expect("hash"),
         provider_time_unix_ms: None,
     }
 }
@@ -74,10 +74,10 @@ fn balance_response(
             BtcSourceStatus::Synced,
         )
         .expect("evidence"),
-        address: BtcAddress::new(address).expect("address"),
+        address: BitcoinAddress::new(address).expect("address"),
         balance_sats,
         block_height: height,
-        block_hash: BtcBlockHash::new(hash).expect("hash"),
+        block_hash: BitcoinBlockHash::new(hash).expect("hash"),
     }
 }
 
@@ -278,7 +278,7 @@ fn balance_external_read_reducer_binds_address_source_and_anchor() {
         plan.request()
             .expect("balance request")
             .block_hash()
-            .as_str(),
+            .to_string(),
         HASH_A
     );
 

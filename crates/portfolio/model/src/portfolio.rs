@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::num::NonZeroU64;
 
+use mfm_btc_capabilities::{BitcoinAddress as CheckedBitcoinAddress, BitcoinNetworkTag};
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -156,7 +157,7 @@ pub enum NetworkConfig {
     Bitcoin {
         /// Stable machine identifier for the network.
         network_id: NetworkId,
-        /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+        /// Expected Bitcoin Core network tag.
         bitcoin_network: String,
         /// Semantic Bitcoin source identity used to bind runtime routes and evidence.
         source_identity: BitcoinSourceIdentityId,
@@ -607,6 +608,14 @@ pub enum PortfolioConfigError {
         /// Network family selected by the referenced network.
         network_family: NetworkFamilyConfig,
     },
+    /// A Bitcoin wallet address encoding did not match its configured network family.
+    #[error("wallet `{wallet_id}` Bitcoin address did not match network `{network_id}`")]
+    BitcoinWalletAddressNetworkMismatch {
+        /// Wallet id associated with the failure.
+        wallet_id: String,
+        /// Configured Bitcoin network id.
+        network_id: String,
+    },
     /// Wallet referenced an unknown symbol.
     #[error("wallet `{wallet_id}` referenced unknown symbol `{symbol_id}")]
     UnknownWalletSymbol {
@@ -742,10 +751,7 @@ fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfi
 }
 
 fn validate_bitcoin_network(value: &str) -> Result<(), ()> {
-    match value {
-        "main" | "test" | "signet" | "regtest" => Ok(()),
-        _ => Err(()),
-    }
+    BitcoinNetworkTag::new(value).map(|_| ()).map_err(|_| ())
 }
 
 fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
@@ -853,6 +859,7 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                 network_family: network.family(),
             });
         }
+        validate_bitcoin_wallet_network(wallet, network)?;
         let subject_key = (
             wallet.network_id.clone(),
             wallet.subject.address_str().to_owned(),
@@ -912,6 +919,40 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
     }
 
     Ok(())
+}
+
+fn validate_bitcoin_wallet_network(
+    wallet: &WalletConfig,
+    network: &NetworkConfig,
+) -> Result<(), PortfolioConfigError> {
+    let (
+        WalletSubject::BitcoinAddress { address },
+        NetworkConfig::Bitcoin {
+            bitcoin_network, ..
+        },
+    ) = (&wallet.subject, network)
+    else {
+        return Ok(());
+    };
+    let parsed = CheckedBitcoinAddress::new(address.as_str()).map_err(|_| {
+        PortfolioConfigError::BitcoinWalletAddressNetworkMismatch {
+            wallet_id: wallet.wallet_id.to_string(),
+            network_id: wallet.network_id.to_string(),
+        }
+    })?;
+    let expected = BitcoinNetworkTag::new(bitcoin_network).map_err(|_| {
+        PortfolioConfigError::InvalidBitcoinNetwork {
+            network_id: wallet.network_id.to_string(),
+        }
+    })?;
+    if parsed.require_network(expected).is_ok() {
+        Ok(())
+    } else {
+        Err(PortfolioConfigError::BitcoinWalletAddressNetworkMismatch {
+            wallet_id: wallet.wallet_id.to_string(),
+            network_id: wallet.network_id.to_string(),
+        })
+    }
 }
 
 fn require_collection_limit(

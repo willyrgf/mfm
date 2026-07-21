@@ -13,12 +13,11 @@ domain-role = "aggregate"
 
 [dependencies]
 alloy-primitives = { workspace = true }
-bech32 = { workspace = true }
-bs58 = { workspace = true, features = ["check"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+mfm-btc-capabilities = { path = "../../btc-capabilities" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }

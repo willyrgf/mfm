@@ -14,9 +14,9 @@ mod replay_verification;
 pub use self::replay_verification::verify_btc_jsonrpc_replay;
 
 use mfm_btc_capabilities::{
-    BitcoinNetworkTag, BtcBalanceReadCapability, BtcBalanceReadProvider, BtcCapabilityError,
-    BtcChainHeadReadCapability, BtcChainHeadReadProvider, BtcNetworkId, BtcSourceBinding,
-    BtcSourceIdentity, ProviderDiagnosticCode,
+    BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceBinding, BitcoinSourceIdentity,
+    BtcBalanceReadCapability, BtcBalanceReadProvider, BtcCapabilityError,
+    BtcChainHeadReadCapability, BtcChainHeadReadProvider, ProviderDiagnosticCode,
 };
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::FactRecordCapability;
@@ -59,19 +59,19 @@ pub trait BtcChainHeadProviderFactory: Send + Sync {
     /// Asynchronously validates that the binding can resolve without live network IO.
     fn validate_source_binding<'a>(
         &'a self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> BtcSourceBindingValidationFuture<'a>;
 
     /// Binds a checked source binding to a chain-head provider.
     fn bind_source(
         &self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcChainHeadReadProvider>>;
 
     /// Binds a checked source binding to an address-balance provider.
     fn bind_balance_source(
         &self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcBalanceReadProvider>>;
 }
 
@@ -195,7 +195,7 @@ pub enum BtcJsonRpcAdapterError {
     InvalidCapabilityRequest,
 }
 
-fn joint_tip_binding(config: &ResolveBtcJointTipConfig) -> Result<BtcSourceBinding> {
+fn joint_tip_binding(config: &ResolveBtcJointTipConfig) -> Result<BitcoinSourceBinding> {
     source_binding_from_parts(
         &config.network,
         &config.bitcoin_network,
@@ -203,7 +203,9 @@ fn joint_tip_binding(config: &ResolveBtcJointTipConfig) -> Result<BtcSourceBindi
     )
 }
 
-fn address_balance_binding(config: &ObserveBtcAddressBalanceConfig) -> Result<BtcSourceBinding> {
+fn address_balance_binding(
+    config: &ObserveBtcAddressBalanceConfig,
+) -> Result<BitcoinSourceBinding> {
     source_binding_from_parts(
         &config.network,
         &config.bitcoin_network,
@@ -215,14 +217,14 @@ fn source_binding_from_parts(
     network: &str,
     bitcoin_network: &str,
     semantic_source_identity: &str,
-) -> Result<BtcSourceBinding> {
-    let network_id =
-        BtcNetworkId::new(network).map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
-    let source_identity = BtcSourceIdentity::new(semantic_source_identity)
+) -> Result<BitcoinSourceBinding> {
+    let network_id = BitcoinNetworkId::new(network)
+        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    let source_identity = BitcoinSourceIdentity::new(semantic_source_identity)
         .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
     let bitcoin_network = BitcoinNetworkTag::new(bitcoin_network)
         .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
-    Ok(BtcSourceBinding::new(
+    Ok(BitcoinSourceBinding::new(
         network_id,
         source_identity,
         bitcoin_network,

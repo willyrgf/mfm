@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use mfm_btc_capabilities::BtcSourceIdentity;
+use mfm_btc_capabilities::BitcoinSourceIdentity;
 
 use super::raw::{RawBtcConfig, RawBtcJsonRpcConfig};
 use super::resolve::{resolve_optional_value, resolve_rpc_url};
@@ -13,12 +13,12 @@ use super::{
 /// Runtime Bitcoin JSON-RPC descriptor.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BtcRuntimeConfig {
-    routes: BTreeMap<BtcSourceIdentity, BtcJsonRpcRuntimeConfig>,
+    routes: BTreeMap<BitcoinSourceIdentity, BtcJsonRpcRuntimeConfig>,
 }
 
 impl BtcRuntimeConfig {
     /// Returns Bitcoin JSON-RPC routes keyed by semantic source identity.
-    pub const fn routes(&self) -> &BTreeMap<BtcSourceIdentity, BtcJsonRpcRuntimeConfig> {
+    pub const fn routes(&self) -> &BTreeMap<BitcoinSourceIdentity, BtcJsonRpcRuntimeConfig> {
         &self.routes
     }
 
@@ -32,16 +32,17 @@ impl BtcRuntimeConfig {
         }
         let mut routes = BTreeMap::new();
         for (raw_source_identity, raw_route) in raw.routes {
-            let source_identity = BtcSourceIdentity::new(&raw_source_identity).map_err(|_| {
-                RuntimeConfigError::new(
-                    RuntimeConfigLocation::BtcRoute {
-                        source_identity: None,
-                    },
-                    RuntimeConfigErrorKind::InvalidIdentifier {
-                        kind: RuntimeConfigIdentifierKind::BtcSourceIdentity,
-                    },
-                )
-            })?;
+            let source_identity =
+                BitcoinSourceIdentity::new(&raw_source_identity).map_err(|_| {
+                    RuntimeConfigError::new(
+                        RuntimeConfigLocation::BtcRoute {
+                            source_identity: None,
+                        },
+                        RuntimeConfigErrorKind::InvalidIdentifier {
+                            kind: RuntimeConfigIdentifierKind::BitcoinSourceIdentity,
+                        },
+                    )
+                })?;
             let location = RuntimeConfigLocation::BtcRoute {
                 source_identity: Some(source_identity.to_string()),
             };

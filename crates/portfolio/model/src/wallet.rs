@@ -3,7 +3,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 
-use bs58;
+use mfm_btc_capabilities::BitcoinAddress as CheckedBitcoinAddress;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 
@@ -123,7 +123,7 @@ impl BitcoinAddress {
     /// Creates a checked Bitcoin address.
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let raw = value.into();
-        validate_bitcoin_address(&raw)?;
+        CheckedBitcoinAddress::new(&raw).map_err(|_| "Bitcoin address was invalid".to_owned())?;
         Ok(Self { raw })
     }
 
@@ -331,44 +331,6 @@ pub enum WalletConfigError {
         /// Metadata key associated with the rejected content.
         key: String,
     },
-}
-
-fn validate_bitcoin_address(raw: &str) -> Result<(), String> {
-    if raw.trim() != raw {
-        return Err("address must not contain surrounding whitespace".to_string());
-    }
-    if raw.len() < 14 || raw.len() > 90 {
-        return Err("address length was outside the supported bitcoin envelope".to_string());
-    }
-    if !raw.is_ascii() {
-        return Err("address must be ASCII".to_string());
-    }
-
-    if raw.starts_with("bc1") || raw.starts_with("tb1") || raw.starts_with("bcrt1") {
-        if raw != raw.to_ascii_lowercase() {
-            return Err("bech32 bitcoin addresses must already be lowercase".to_string());
-        }
-        let (hrp, _, _) = bech32::segwit::decode(raw)
-            .map_err(|_| "bech32 bitcoin address failed segwit validation".to_string())?;
-        if !hrp.is_valid_on_mainnet() && !hrp.is_valid_on_testnet() && !hrp.is_valid_on_regtest() {
-            return Err("unsupported bitcoin bech32 human-readable prefix".to_string());
-        }
-        return Ok(());
-    }
-
-    let base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let first = raw.chars().next().unwrap_or_default();
-    if !matches!(first, '1' | '3' | '2' | 'm' | 'n') {
-        return Err("unsupported bitcoin address prefix".to_string());
-    }
-    if !raw.chars().all(|ch| base58.contains(ch)) {
-        return Err("base58 bitcoin address contained unsupported characters".to_string());
-    }
-    bs58::decode(raw)
-        .with_check(None)
-        .into_vec()
-        .map_err(|_| "base58 bitcoin address checksum validation failed".to_string())?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 use super::*;
 use std::sync::atomic::AtomicU64;
 
-use mfm_btc_capabilities::{BitcoinNetworkTag, BtcAddress, BtcHeadSelection, BtcNetworkId};
+use mfm_btc_capabilities::{
+    BitcoinAddress, BitcoinNetworkId, BitcoinNetworkTag, BtcHeadSelection, BtcInvalidRequest,
+};
 
 const BEST_BLOCK_HASH: &str = "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
 const NO_REQUESTED_BLOCK_HASH_HEIGHT: u64 = u64::MAX;
@@ -129,26 +131,26 @@ impl BtcJsonRpcChainHeadTransport for MockBtcTransport {
                 success: self.scan_success,
                 height: self.scan_height,
                 bestblock: self.scan_bestblock.clone(),
-                total_amount_sats: self.scan_total_sats,
+                total_amount: Amount::from_sat(self.scan_total_sats),
             })
         })
     }
 }
 
-fn source_identity() -> BtcSourceIdentity {
-    BtcSourceIdentity::new("public-bitcoin-core").expect("source")
+fn source_identity() -> BitcoinSourceIdentity {
+    BitcoinSourceIdentity::new("public-bitcoin-core").expect("source")
 }
 
-fn source_binding() -> BtcSourceBinding {
-    BtcSourceBinding::new(
-        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+fn source_binding() -> BitcoinSourceBinding {
+    BitcoinSourceBinding::new(
+        BitcoinNetworkId::new("bitcoin-mainnet").expect("network"),
         source_identity(),
         BitcoinNetworkTag::Main,
     )
 }
 
 fn router_with(
-    source_identity: BtcSourceIdentity,
+    source_identity: BitcoinSourceIdentity,
     transport: Arc<MockBtcTransport>,
 ) -> BtcJsonRpcRouter {
     let mut routes = BTreeMap::new();
@@ -160,7 +162,7 @@ fn router_with(
 }
 
 fn provider_with(
-    source_identity: BtcSourceIdentity,
+    source_identity: BitcoinSourceIdentity,
     transport: Arc<MockBtcTransport>,
 ) -> BtcJsonRpcSourceProvider {
     router_with(source_identity, transport)
@@ -177,10 +179,22 @@ fn balance_request() -> BtcBalanceReadRequest {
 }
 
 fn balance_request_at(height: u64, block_hash: &str) -> BtcBalanceReadRequest {
-    BtcBalanceReadRequest::new(
-        BtcAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address"),
+    balance_request_for_address(
+        "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw",
         height,
-        BtcBlockHash::new(block_hash).expect("block hash"),
+        block_hash,
+    )
+}
+
+fn balance_request_for_address(
+    address: &str,
+    height: u64,
+    block_hash: &str,
+) -> BtcBalanceReadRequest {
+    BtcBalanceReadRequest::new(
+        BitcoinAddress::new(address).expect("address"),
+        height,
+        BitcoinBlockHash::new(block_hash).expect("block hash"),
     )
 }
 
@@ -335,7 +349,7 @@ async fn successful_response_evidence_matches_binding_by_construction() {
     assert_eq!(response.head_kind, request.selection().head_kind());
     assert_eq!(response.finality, request.selection().finality());
     assert_eq!(response.block_height, 840_000);
-    assert_eq!(response.block_hash.as_str(), BEST_BLOCK_HASH);
+    assert_eq!(response.block_hash.to_string(), BEST_BLOCK_HASH);
     assert_eq!(response.provider_time_unix_ms, Some(1_713_571_767_000));
     assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
     assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 1);
@@ -459,6 +473,77 @@ async fn balance_reads_exact_tip_with_scan_tx_out_set() {
     assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 0);
     assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 0);
     assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn balance_reads_accept_every_checked_chain_family() {
+    for (chain, network, address) in [
+        (
+            "main",
+            BitcoinNetworkTag::Main,
+            "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw",
+        ),
+        (
+            "test",
+            BitcoinNetworkTag::Test,
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        ),
+        (
+            "testnet4",
+            BitcoinNetworkTag::Testnet4,
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        ),
+        (
+            "signet",
+            BitcoinNetworkTag::Signet,
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        ),
+        (
+            "regtest",
+            BitcoinNetworkTag::Regtest,
+            "bcrt1q2nfxmhd4n3c8834pj72xagvyr9gl57n5r94fsl",
+        ),
+    ] {
+        let transport = Arc::new(MockBtcTransport::new(chain));
+        let binding = BitcoinSourceBinding::new(
+            BitcoinNetworkId::new(format!("bitcoin-{chain}")).expect("semantic network id"),
+            source_identity(),
+            network,
+        );
+        let provider = router_with(source_identity(), transport.clone())
+            .bind_source(binding)
+            .expect("bind source");
+        let response = provider
+            .read_balance(&balance_request_for_address(
+                address,
+                840_000,
+                BEST_BLOCK_HASH,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{chain} balance should succeed: {error}"));
+
+        assert_eq!(response.address.as_str(), address);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[tokio::test]
+async fn balance_read_rejects_wrong_address_family_before_scan() {
+    let transport = Arc::new(MockBtcTransport::new("main"));
+    let provider = provider_with(source_identity(), transport.clone());
+    let request = balance_request_for_address(
+        "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+        840_000,
+        BEST_BLOCK_HASH,
+    );
+
+    assert_eq!(
+        provider.read_balance(&request).await.unwrap_err(),
+        BtcCapabilityError::InvalidRequest {
+            reason: BtcInvalidRequest::AddressNetworkMismatch,
+        }
+    );
+    assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -647,19 +732,20 @@ fn scan_tx_out_set_results_deserialize_populated_and_empty_responses() {
             result.bestblock, "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
             "{case}"
         );
-        assert_eq!(result.total_amount_sats, expected_total_sats, "{case}");
+        assert_eq!(result.total_amount.to_sat(), expected_total_sats, "{case}");
     }
 }
 
 #[test]
-fn btc_amount_json_to_sats_parses_exact_satoshis() {
+fn btc_amount_json_to_amount_parses_exact_satoshis() {
     for (amount, expected_sats) in [
         ("0.00000001", 1),
         ("0.05000000", 5_000_000),
         ("\"1.23000000\"", 123_000_000),
+        ("21000000.00000000", Amount::MAX_MONEY.to_sat()),
     ] {
         assert_eq!(
-            btc_amount_json_to_sats(amount).unwrap(),
+            btc_amount_json_to_amount(amount).unwrap().to_sat(),
             expected_sats,
             "{amount}"
         );
@@ -667,12 +753,17 @@ fn btc_amount_json_to_sats_parses_exact_satoshis() {
 }
 
 #[test]
-fn btc_amount_json_to_sats_rejects_invalid_amounts() {
+fn btc_amount_json_to_amount_rejects_invalid_amounts() {
     for (amount, expected_error) in [
         ("0.000000001", BtcAmountParseError::TooPrecise),
         ("-0.00000001", BtcAmountParseError::Negative),
+        ("2.1e7", BtcAmountParseError::Invalid),
         ("18446744073709551615", BtcAmountParseError::Overflow),
+        ("21000000.00000001", BtcAmountParseError::ExceedsMaxMoney),
     ] {
-        assert_eq!(btc_amount_json_to_sats(amount).unwrap_err(), expected_error);
+        assert_eq!(
+            btc_amount_json_to_amount(amount).unwrap_err(),
+            expected_error
+        );
     }
 }

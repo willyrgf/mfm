@@ -57,11 +57,11 @@ fn contracts_do_not_expose_concrete_source_details() {
 
 #[test]
 fn source_identity_is_semantic_not_route_material() {
-    let identity = BtcSourceIdentity::new("public-bitcoin-core").expect("source identity");
+    let identity = BitcoinSourceIdentity::new("public-bitcoin-core").expect("source identity");
 
     assert_eq!(identity.as_str(), "public-bitcoin-core");
 
-    let error = BtcSourceIdentity::new("http://node.invalid:8332")
+    let error = BitcoinSourceIdentity::new("http://node.invalid:8332")
         .expect_err("source identity should reject route material");
 
     assert_eq!(
@@ -75,12 +75,13 @@ fn source_identity_is_semantic_not_route_material() {
 #[test]
 fn balance_request_is_operation_only_and_evidence_uses_binding() {
     let block_hash =
-        BtcBlockHash::new("00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc")
+        BitcoinBlockHash::new("00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc")
             .expect("block hash");
-    let address = BtcAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address");
-    let binding = BtcSourceBinding::new(
-        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-        BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
+    let address =
+        BitcoinAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address");
+    let binding = BitcoinSourceBinding::new(
+        BitcoinNetworkId::new("bitcoin-mainnet").expect("network"),
+        BitcoinSourceIdentity::new("bitcoin-mainnet").expect("source"),
         BitcoinNetworkTag::Main,
     );
     let request = BtcBalanceReadRequest::new(address.clone(), 850_000, block_hash.clone());

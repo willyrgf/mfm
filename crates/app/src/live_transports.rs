@@ -3,7 +3,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use mfm_btc_capabilities::{BtcBalanceReadProvider, BtcChainHeadReadProvider, BtcSourceBinding};
+use mfm_btc_capabilities::{
+    BitcoinSourceBinding, BtcBalanceReadProvider, BtcChainHeadReadProvider,
+};
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
@@ -151,7 +153,7 @@ impl LiveTransportRuntime {
 
     fn cached_btc_router(
         &self,
-        binding: &BtcSourceBinding,
+        binding: &BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>> {
         self.btc_router
             .get()
@@ -173,7 +175,7 @@ impl LiveTransportRuntime {
 
     async fn validate_btc_source_binding(
         &self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<()> {
         self.btc_router_async(&binding)
             .await?
@@ -183,7 +185,7 @@ impl LiveTransportRuntime {
 
     async fn btc_router_async(
         &self,
-        binding: &BtcSourceBinding,
+        binding: &BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>> {
         if let Some(cached) = self.btc_router.get() {
             return cached
@@ -223,14 +225,14 @@ where
 impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRuntime {
     fn validate_source_binding<'a>(
         &'a self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> mfm_adapters_btc_jsonrpc::BtcSourceBindingValidationFuture<'a> {
         Box::pin(async move { self.validate_btc_source_binding(binding).await })
     }
 
     fn bind_source(
         &self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcChainHeadReadProvider>> {
         let router = self.cached_btc_router(&binding)?;
         router
@@ -241,7 +243,7 @@ impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRunt
 
     fn bind_balance_source(
         &self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcBalanceReadProvider>> {
         let router = self.cached_btc_router(&binding)?;
         router
@@ -327,7 +329,7 @@ fn enrich_evm_diagnostic(
 }
 
 fn btc_provider_failure(
-    binding: &BtcSourceBinding,
+    binding: &BitcoinSourceBinding,
     code: ProviderDiagnosticCode,
 ) -> mfm_btc_capabilities::BtcCapabilityError {
     mfm_btc_capabilities::BtcCapabilityError::provider_failure(enrich_btc_diagnostic(
@@ -337,7 +339,7 @@ fn btc_provider_failure(
 }
 
 fn enrich_btc_capability_error(
-    binding: &BtcSourceBinding,
+    binding: &BitcoinSourceBinding,
     error: mfm_btc_capabilities::BtcCapabilityError,
 ) -> mfm_btc_capabilities::BtcCapabilityError {
     match error {
@@ -351,7 +353,7 @@ fn enrich_btc_capability_error(
 }
 
 fn enrich_btc_diagnostic(
-    binding: &BtcSourceBinding,
+    binding: &BitcoinSourceBinding,
     diagnostic: RedactedProviderDiagnostic,
 ) -> RedactedProviderDiagnostic {
     diagnostic
@@ -372,17 +374,17 @@ fn enrich_btc_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_btc_capabilities::{BitcoinNetworkTag, BtcNetworkId, BtcSourceIdentity};
+    use mfm_btc_capabilities::{BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceIdentity};
 
     fn evm_binding() -> EvmNetworkBinding {
         EvmNetworkBinding::new(LocalPublicId::new("test-evm").expect("network"), 1)
             .expect("binding")
     }
 
-    fn btc_binding() -> BtcSourceBinding {
-        BtcSourceBinding::new(
-            BtcNetworkId::new("test-btc").expect("network"),
-            BtcSourceIdentity::new("primary").expect("source"),
+    fn btc_binding() -> BitcoinSourceBinding {
+        BitcoinSourceBinding::new(
+            BitcoinNetworkId::new("test-btc").expect("network"),
+            BitcoinSourceIdentity::new("primary").expect("source"),
             BitcoinNetworkTag::Test,
         )
     }

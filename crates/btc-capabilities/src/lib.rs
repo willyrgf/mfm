@@ -8,13 +8,13 @@
 //! ```rust
 //! use mfm_btc_capabilities::{
 //!     BitcoinNetworkTag, BtcChainHeadReadCapability, BtcChainHeadRequest, BtcHeadSelection,
-//!     BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
+//!     BitcoinNetworkId, BitcoinSourceBinding, BitcoinSourceIdentity,
 //! };
 //! use mfm_capabilities::CapabilitySpec;
 //!
-//! let binding = BtcSourceBinding::new(
-//!     BtcNetworkId::new("bitcoin-mainnet")?,
-//!     BtcSourceIdentity::new("public-bitcoin-core")?,
+//! let binding = BitcoinSourceBinding::new(
+//!     BitcoinNetworkId::new("bitcoin-mainnet")?,
+//!     BitcoinSourceIdentity::new("public-bitcoin-core")?,
 //!     BitcoinNetworkTag::Main,
 //! );
 //! let request = BtcChainHeadRequest::new(BtcHeadSelection::best());
@@ -31,6 +31,10 @@ use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::str::FromStr;
 
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::{
+    Address as RustBitcoinAddress, BlockHash as RustBitcoinBlockHash, Network, ScriptBuf,
+};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     CapabilityError, CapabilitySpec, ProviderDiagnosticValue, ReadExternalRole,
@@ -181,7 +185,7 @@ macro_rules! checked_btc_public_id {
 
 checked_btc_public_id!(
     /// Semantic Bitcoin network id from authored workflow config.
-    BtcNetworkId,
+    BitcoinNetworkId,
     "Creates a checked semantic Bitcoin network id.",
     "Returns the checked network id string."
 );
@@ -191,7 +195,7 @@ checked_btc_public_id!(
     ///
     /// This identifies what was observed when source identity is part of the claim semantics. It is
     /// not a process-local route, URL, credential label, or deployment handle.
-    BtcSourceIdentity,
+    BitcoinSourceIdentity,
     "Creates a checked semantic source identity.",
     "Returns the checked source identity string."
 );
@@ -203,6 +207,8 @@ pub enum BitcoinNetworkTag {
     Main,
     /// Bitcoin testnet (`test`).
     Test,
+    /// Bitcoin testnet4 (`testnet4`).
+    Testnet4,
     /// Bitcoin signet (`signet`).
     Signet,
     /// Bitcoin regtest (`regtest`).
@@ -212,24 +218,39 @@ pub enum BitcoinNetworkTag {
 impl BitcoinNetworkTag {
     /// Creates a checked Bitcoin network tag from its Bitcoin Core string representation.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        match value.as_ref() {
-            "main" => Ok(Self::Main),
-            "test" => Ok(Self::Test),
-            "signet" => Ok(Self::Signet),
-            "regtest" => Ok(Self::Regtest),
-            _ => Err(BtcCapabilityError::InvalidRequest {
+        let network = Network::from_core_arg(value.as_ref()).map_err(|_| {
+            BtcCapabilityError::InvalidRequest {
                 reason: BtcInvalidRequest::InvalidBitcoinNetwork,
-            }),
-        }
+            }
+        })?;
+        Ok(Self::from(network))
     }
 
-    /// Returns the Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
-    pub const fn as_str(self) -> &'static str {
+    /// Returns the Bitcoin Core network tag.
+    pub fn as_str(self) -> &'static str {
+        self.network().to_core_arg()
+    }
+
+    /// Returns the corresponding rust-bitcoin network.
+    pub const fn network(self) -> Network {
         match self {
-            Self::Main => "main",
-            Self::Test => "test",
-            Self::Signet => "signet",
-            Self::Regtest => "regtest",
+            Self::Main => Network::Bitcoin,
+            Self::Test => Network::Testnet,
+            Self::Testnet4 => Network::Testnet4,
+            Self::Signet => Network::Signet,
+            Self::Regtest => Network::Regtest,
+        }
+    }
+}
+
+impl From<Network> for BitcoinNetworkTag {
+    fn from(network: Network) -> Self {
+        match network {
+            Network::Bitcoin => Self::Main,
+            Network::Testnet => Self::Test,
+            Network::Testnet4 => Self::Testnet4,
+            Network::Signet => Self::Signet,
+            Network::Regtest => Self::Regtest,
         }
     }
 }
@@ -264,17 +285,17 @@ impl From<BitcoinNetworkTag> for String {
 
 /// Checked semantic Bitcoin source binding owned by a bound provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BtcSourceBinding {
-    network_id: BtcNetworkId,
-    source_identity: BtcSourceIdentity,
+pub struct BitcoinSourceBinding {
+    network_id: BitcoinNetworkId,
+    source_identity: BitcoinSourceIdentity,
     bitcoin_network: BitcoinNetworkTag,
 }
 
-impl BtcSourceBinding {
+impl BitcoinSourceBinding {
     /// Creates a semantic Bitcoin source binding from already-checked components.
     pub const fn new(
-        network_id: BtcNetworkId,
-        source_identity: BtcSourceIdentity,
+        network_id: BitcoinNetworkId,
+        source_identity: BitcoinSourceIdentity,
         bitcoin_network: BitcoinNetworkTag,
     ) -> Self {
         Self {
@@ -285,12 +306,12 @@ impl BtcSourceBinding {
     }
 
     /// Returns the semantic Bitcoin network id.
-    pub const fn network_id(&self) -> &BtcNetworkId {
+    pub const fn network_id(&self) -> &BitcoinNetworkId {
         &self.network_id
     }
 
     /// Returns the semantic source identity.
-    pub const fn source_identity(&self) -> &BtcSourceIdentity {
+    pub const fn source_identity(&self) -> &BitcoinSourceIdentity {
         &self.source_identity
     }
 
@@ -411,14 +432,18 @@ impl BtcChainHeadRequest {
 /// Request for a Bitcoin address balance read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcBalanceReadRequest {
-    address: BtcAddress,
+    address: BitcoinAddress,
     block_height: u64,
-    block_hash: BtcBlockHash,
+    block_hash: BitcoinBlockHash,
 }
 
 impl BtcBalanceReadRequest {
     /// Creates a Bitcoin balance request from operation parameters only.
-    pub const fn new(address: BtcAddress, block_height: u64, block_hash: BtcBlockHash) -> Self {
+    pub const fn new(
+        address: BitcoinAddress,
+        block_height: u64,
+        block_hash: BitcoinBlockHash,
+    ) -> Self {
         Self {
             address,
             block_height,
@@ -427,7 +452,7 @@ impl BtcBalanceReadRequest {
     }
 
     /// Returns the public Bitcoin address to observe.
-    pub const fn address(&self) -> &BtcAddress {
+    pub const fn address(&self) -> &BitcoinAddress {
         &self.address
     }
 
@@ -437,7 +462,7 @@ impl BtcBalanceReadRequest {
     }
 
     /// Returns the exact UTXO-set block hash requested from the provider.
-    pub const fn block_hash(&self) -> &BtcBlockHash {
+    pub const fn block_hash(&self) -> &BitcoinBlockHash {
         &self.block_hash
     }
 }
@@ -446,9 +471,9 @@ impl BtcBalanceReadRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedBtcSourceEvidence {
     /// Semantic network id from the provider binding.
-    pub network_id: BtcNetworkId,
+    pub network_id: BitcoinNetworkId,
     /// Semantic source identity observed by the provider.
-    pub source_identity: BtcSourceIdentity,
+    pub source_identity: BitcoinSourceIdentity,
     /// Expected Bitcoin Core network tag from the provider binding.
     pub bitcoin_network: String,
     /// Observed Bitcoin Core network tag from the provider.
@@ -460,12 +485,12 @@ pub struct RedactedBtcSourceEvidence {
 impl RedactedBtcSourceEvidence {
     /// Builds evidence from a provider binding and observed source status.
     pub fn from_binding(
-        binding: &BtcSourceBinding,
+        binding: &BitcoinSourceBinding,
         observed_bitcoin_network: impl Into<String>,
         source_status: BtcSourceStatus,
     ) -> Result<Self> {
         let observed_bitcoin_network = observed_bitcoin_network.into();
-        validate_bitcoin_network(&observed_bitcoin_network)?;
+        let observed_network = BitcoinNetworkTag::new(&observed_bitcoin_network)?;
         let evidence = Self {
             network_id: binding.network_id().clone(),
             source_identity: binding.source_identity().clone(),
@@ -473,7 +498,7 @@ impl RedactedBtcSourceEvidence {
             observed_bitcoin_network,
             source_status,
         };
-        if evidence.observed_bitcoin_network == binding.bitcoin_network().as_str() {
+        if observed_network == binding.bitcoin_network() {
             Ok(evidence)
         } else {
             Err(BtcCapabilityError::SourceMismatch {
@@ -530,41 +555,43 @@ impl BtcSourceStatus {
     }
 }
 
-/// Canonical Bitcoin block hash string.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BtcBlockHash(String);
+/// Canonical Bitcoin block hash.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BitcoinBlockHash(RustBitcoinBlockHash);
 
-impl BtcBlockHash {
-    /// Creates a checked lowercase hex block hash.
+impl BitcoinBlockHash {
+    /// Parses a block hash with rust-bitcoin and retains its canonical representation.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = value.as_ref();
-        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(BtcCapabilityError::InvalidRequest {
+        value
+            .as_ref()
+            .parse::<RustBitcoinBlockHash>()
+            .map(Self)
+            .map_err(|_| BtcCapabilityError::InvalidRequest {
                 reason: BtcInvalidRequest::InvalidBlockHash,
-            });
-        }
-        Ok(Self(value.to_ascii_lowercase()))
+            })
     }
 
-    /// Returns the canonical lowercase hex block hash.
-    pub fn as_str(&self) -> &str {
+    /// Returns the parsed rust-bitcoin block hash.
+    pub const fn as_block_hash(&self) -> &RustBitcoinBlockHash {
         &self.0
     }
 }
 
-impl fmt::Debug for BtcBlockHash {
+impl fmt::Debug for BitcoinBlockHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("BtcBlockHash").field(&self.0).finish()
+        f.debug_tuple("BitcoinBlockHash")
+            .field(&self.to_string())
+            .finish()
     }
 }
 
-impl fmt::Display for BtcBlockHash {
+impl fmt::Display for BitcoinBlockHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
-impl FromStr for BtcBlockHash {
+impl FromStr for BitcoinBlockHash {
     type Err = BtcCapabilityError;
 
     fn from_str(value: &str) -> Result<Self> {
@@ -572,7 +599,7 @@ impl FromStr for BtcBlockHash {
     }
 }
 
-impl TryFrom<String> for BtcBlockHash {
+impl TryFrom<String> for BitcoinBlockHash {
     type Error = BtcCapabilityError;
 
     fn try_from(value: String) -> Result<Self> {
@@ -580,47 +607,86 @@ impl TryFrom<String> for BtcBlockHash {
     }
 }
 
-impl From<BtcBlockHash> for String {
-    fn from(value: BtcBlockHash) -> Self {
-        value.0
+impl From<BitcoinBlockHash> for String {
+    fn from(value: BitcoinBlockHash) -> Self {
+        value.to_string()
     }
 }
 
-/// Canonical public Bitcoin address string.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BtcAddress(String);
+/// Canonical public Bitcoin address parsed by rust-bitcoin.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct BitcoinAddress {
+    address: RustBitcoinAddress<NetworkUnchecked>,
+    canonical: String,
+}
 
-impl BtcAddress {
+impl BitcoinAddress {
     /// Creates a checked public Bitcoin address.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
-        if !is_supported_bitcoin_address_envelope(value) {
-            return Err(BtcCapabilityError::InvalidRequest {
+        let address = value
+            .parse::<RustBitcoinAddress<NetworkUnchecked>>()
+            .map_err(|_| BtcCapabilityError::InvalidRequest {
                 reason: BtcInvalidRequest::InvalidAddress,
+            })?;
+        let canonical = address.assume_checked_ref().to_string();
+        if value != canonical {
+            return Err(BtcCapabilityError::InvalidRequest {
+                reason: BtcInvalidRequest::NonCanonicalAddress,
             });
         }
-        Ok(Self(value.to_owned()))
+        Ok(Self { address, canonical })
     }
 
     /// Returns the canonical address string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.canonical
+    }
+
+    /// Requires address-encoding compatibility with the configured Bitcoin network.
+    pub fn require_network(&self, network: BitcoinNetworkTag) -> Result<()> {
+        self.address
+            .clone()
+            .require_network(network.network())
+            .map(|_| ())
+            .map_err(|_| BtcCapabilityError::InvalidRequest {
+                reason: BtcInvalidRequest::AddressNetworkMismatch,
+            })
+    }
+
+    /// Derives the exact script pubkey bytes through rust-bitcoin.
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        self.address.assume_checked_ref().script_pubkey()
     }
 }
 
-impl fmt::Debug for BtcAddress {
+impl PartialOrd for BitcoinAddress {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BitcoinAddress {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.canonical.as_bytes().cmp(other.canonical.as_bytes())
+    }
+}
+
+impl fmt::Debug for BitcoinAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("BtcAddress").field(&self.0).finish()
+        f.debug_tuple("BitcoinAddress")
+            .field(&self.canonical)
+            .finish()
     }
 }
 
-impl fmt::Display for BtcAddress {
+impl fmt::Display for BitcoinAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for BtcAddress {
+impl FromStr for BitcoinAddress {
     type Err = BtcCapabilityError;
 
     fn from_str(value: &str) -> Result<Self> {
@@ -628,7 +694,7 @@ impl FromStr for BtcAddress {
     }
 }
 
-impl TryFrom<String> for BtcAddress {
+impl TryFrom<String> for BitcoinAddress {
     type Error = BtcCapabilityError;
 
     fn try_from(value: String) -> Result<Self> {
@@ -636,9 +702,9 @@ impl TryFrom<String> for BtcAddress {
     }
 }
 
-impl From<BtcAddress> for String {
-    fn from(value: BtcAddress) -> Self {
-        value.0
+impl From<BitcoinAddress> for String {
+    fn from(value: BitcoinAddress) -> Self {
+        value.canonical
     }
 }
 
@@ -654,7 +720,7 @@ pub struct BtcChainHeadResponse {
     /// Observed block height.
     pub block_height: u64,
     /// Observed block hash.
-    pub block_hash: BtcBlockHash,
+    pub block_hash: BitcoinBlockHash,
     /// Provider-reported block time as Unix milliseconds, when available.
     pub provider_time_unix_ms: Option<u64>,
 }
@@ -665,13 +731,13 @@ pub struct BtcBalanceReadResponse {
     /// Redacted source evidence.
     pub evidence: RedactedBtcSourceEvidence,
     /// Public Bitcoin address that was observed.
-    pub address: BtcAddress,
+    pub address: BitcoinAddress,
     /// Total confirmed UTXO amount in satoshis.
     pub balance_sats: u64,
     /// UTXO set height used by the provider.
     pub block_height: u64,
     /// UTXO set block hash used by the provider.
-    pub block_hash: BtcBlockHash,
+    pub block_hash: BitcoinBlockHash,
 }
 
 /// Closed invalid-request reasons.
@@ -681,10 +747,14 @@ pub enum BtcInvalidRequest {
     InvalidIdentifier,
     /// Confirmation depth was zero.
     ZeroConfirmations,
-    /// Block hash was not 32 bytes of hex.
+    /// Block hash could not be parsed by rust-bitcoin.
     InvalidBlockHash,
-    /// Address was not in a supported public Bitcoin address envelope.
+    /// Address could not be parsed by rust-bitcoin.
     InvalidAddress,
+    /// Address was valid but not rendered canonically.
+    NonCanonicalAddress,
+    /// Address encoding was incompatible with the configured network.
+    AddressNetworkMismatch,
     /// Bitcoin Core network tag was not one of the supported tags.
     InvalidBitcoinNetwork,
 }
@@ -740,31 +810,6 @@ fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> BtcCapabilityErro
     BtcCapabilityError::InvalidRequest {
         reason: BtcInvalidRequest::InvalidIdentifier,
     }
-}
-
-fn validate_bitcoin_network(value: &str) -> Result<()> {
-    match value {
-        "main" | "test" | "signet" | "regtest" => Ok(()),
-        _ => Err(BtcCapabilityError::InvalidRequest {
-            reason: BtcInvalidRequest::InvalidBitcoinNetwork,
-        }),
-    }
-}
-
-fn is_supported_bitcoin_address_envelope(value: &str) -> bool {
-    if value.trim() != value || value.len() < 14 || value.len() > 90 || !value.is_ascii() {
-        return false;
-    }
-    if !value.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return false;
-    }
-    if value.starts_with("bc1") || value.starts_with("tb1") || value.starts_with("bcrt1") {
-        return value == value.to_ascii_lowercase();
-    }
-    matches!(
-        value.as_bytes().first().copied(),
-        Some(b'1' | b'3' | b'2' | b'm' | b'n')
-    )
 }
 
 #[cfg(test)]

@@ -29,14 +29,19 @@ rpc_password_env = "MFM_BITCOIN_RPC_PASSWORD"
 JSON with the same shape is also accepted by `mfm-runtime-config`.
 
 The Bitcoin runtime shape is `btc.routes.<source_identity>`. Route keys are semantic
-`BtcSourceIdentity` values, not endpoint names, URLs, credential ids, or routing policies.
+`BitcoinSourceIdentity` values, not endpoint names, URLs, credential ids, or routing policies.
 
 ## Provider-Bound Reads
 
 App assembly creates one process-local live transport runtime from runtime config and caches the
-derived `BtcJsonRpcRouter`. Runners and adapters derive a `BtcSourceBinding` from certified
+derived `BtcJsonRpcRouter`. Runners and adapters derive a `BitcoinSourceBinding` from certified
 workflow semantics, validate that binding without network IO, and bind it to a
 `BtcJsonRpcSourceProvider` before any live call.
+
+`rust-bitcoin` is the primitive authority for address parsing and canonical rendering, address
+network compatibility, script derivation, hashes, outpoints, and amounts. Supported Bitcoin Core
+chain tags are `main`, `test`, `testnet4`, `signet`, and `regtest`. Test-family address encodings
+may be shared; the checked `getblockchaininfo.chain` value establishes the actual chain.
 
 BTC capability requests are operation-only. Chain-head requests carry only the requested head
 selection. Portfolio balance requests carry only the address, `block_height`, and `block_hash`

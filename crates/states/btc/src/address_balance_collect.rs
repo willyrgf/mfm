@@ -9,9 +9,9 @@ use std::num::NonZeroU64;
 use std::str::FromStr;
 
 use mfm_btc_capabilities::{
-    BtcAddress, BtcBalanceReadCapability, BtcBalanceReadResponse, BtcBlockHash,
-    BtcChainHeadReadCapability, BtcChainHeadResponse as CapabilityChainHeadResponse,
-    BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
+    BitcoinAddress, BitcoinBlockHash, BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceIdentity,
+    BtcBalanceReadCapability, BtcBalanceReadResponse, BtcChainHeadReadCapability,
+    BtcChainHeadResponse as CapabilityChainHeadResponse, BtcHeadSelection, BtcSourceStatus,
 };
 use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
@@ -96,7 +96,7 @@ impl BtcJointTip {
             .map_err(|reason| BtcStateError::InvalidInput { reason })?;
         validate_bitcoin_network(&observed_bitcoin_network)
             .map_err(|reason| BtcStateError::InvalidInput { reason })?;
-        BtcBlockHash::new(&block_hash).map_err(|_| BtcStateError::InvalidInput {
+        BitcoinBlockHash::new(&block_hash).map_err(|_| BtcStateError::InvalidInput {
             reason: "joint tip block_hash must be a 32-byte hex hash".to_owned(),
         })?;
         Ok(Self {
@@ -120,7 +120,7 @@ impl BtcJointTip {
             evidence.bitcoin_network.as_str(),
             evidence.source_identity.as_str(),
             response.block_height,
-            response.block_hash.as_str(),
+            &response.block_hash.to_string(),
             evidence.source_status.as_str(),
             evidence.observed_bitcoin_network.as_str(),
         )
@@ -178,7 +178,7 @@ impl BtcJointTip {
 pub struct ResolveBtcJointTipConfig {
     /// Semantic network id.
     pub network: String,
-    /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    /// Expected supported Bitcoin Core network tag.
     pub bitcoin_network: String,
     /// Non-secret semantic source identity.
     pub semantic_source_identity: String,
@@ -190,9 +190,10 @@ pub struct ResolveBtcJointTipConfig {
 pub fn validate_resolve_btc_joint_tip_config(
     config: &ResolveBtcJointTipConfig,
 ) -> Result<(), String> {
-    BtcNetworkId::new(&config.network).map_err(|error| error.to_string())?;
+    BitcoinNetworkId::new(&config.network).map_err(|error| error.to_string())?;
     validate_bitcoin_network(&config.bitcoin_network)?;
-    BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
+    BitcoinSourceIdentity::new(&config.semantic_source_identity)
+        .map_err(|error| error.to_string())?;
     if config.max_source_reads.get() != BTC_JOINT_TIP_SOURCE_READS {
         return Err(format!(
             "max_source_reads must equal {BTC_JOINT_TIP_SOURCE_READS} for Bitcoin joint-tip resolution"
@@ -349,11 +350,17 @@ pub struct ObserveBtcAddressBalanceConfig {
 pub fn validate_observe_btc_address_balance_config(
     config: &ObserveBtcAddressBalanceConfig,
 ) -> Result<(), String> {
-    BtcNetworkId::new(&config.network).map_err(|error| error.to_string())?;
+    BitcoinNetworkId::new(&config.network).map_err(|error| error.to_string())?;
     validate_bitcoin_network(&config.bitcoin_network)?;
-    BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
-    BtcAddress::new(&config.address)
-        .map_err(|_| "address is not a supported Bitcoin address".to_owned())?;
+    BitcoinSourceIdentity::new(&config.semantic_source_identity)
+        .map_err(|error| error.to_string())?;
+    let bitcoin_network = BitcoinNetworkTag::new(&config.bitcoin_network)
+        .map_err(|_| "bitcoin_network must name a supported Bitcoin Core chain".to_owned())?;
+    let address = BitcoinAddress::new(&config.address)
+        .map_err(|_| "address is not a canonical Bitcoin address".to_owned())?;
+    address
+        .require_network(bitcoin_network)
+        .map_err(|_| "address encoding is incompatible with bitcoin_network".to_owned())?;
     if config.max_source_reads.get() != BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS {
         return Err(format!(
             "max_source_reads must equal {BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS} for Bitcoin native balance observation"
@@ -478,7 +485,7 @@ pub fn normalize_btc_address_balance_observation(
         });
     }
     if balance.block_height != joint_tip.block_height()
-        || balance.block_hash.as_str() != joint_tip.block_hash()
+        || balance.block_hash.to_string() != joint_tip.block_hash()
     {
         return Err(BtcStateError::InvalidInput {
             reason: "balance tip drift or hash mismatch before Platform write".to_owned(),
@@ -725,9 +732,12 @@ impl BtcNativeBalanceSourceKey {
             subject.semantic_source_identity(),
             subject.address(),
         )?;
-        BtcAddress::new(subject.address()).map_err(|_| BtcStateError::InvalidInput {
-            reason: "receipt fact address is not a supported Bitcoin address".to_owned(),
-        })?;
+        let address =
+            BitcoinAddress::new(subject.address()).map_err(|_| BtcStateError::InvalidInput {
+                reason: "receipt fact address is not a supported Bitcoin address".to_owned(),
+            })?;
+        let network = BitcoinNetworkTag::new(subject.bitcoin_network())?;
+        address.require_network(network)?;
         Ok(Self {
             network: subject.network().to_owned(),
             bitcoin_network: subject.bitcoin_network().to_owned(),
@@ -967,7 +977,7 @@ impl BtcNetworkCollectionReceipt {
                     .to_owned(),
             });
         }
-        BtcBlockHash::new(&anchor_hash).map_err(|_| BtcStateError::InvalidInput {
+        BitcoinBlockHash::new(&anchor_hash).map_err(|_| BtcStateError::InvalidInput {
             reason: "Bitcoin network collection receipt anchor hash was malformed".to_owned(),
         })?;
         let mut previous = None;

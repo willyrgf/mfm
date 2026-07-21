@@ -36,7 +36,7 @@ pub use external_read::{
     BtcChainHeadReadPlan,
 };
 
-use mfm_btc_capabilities::BtcCapabilityError;
+use mfm_btc_capabilities::{BitcoinNetworkTag, BtcCapabilityError};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
 use mfm_program::{AdapterBindingSpec, StateError};
@@ -124,10 +124,9 @@ impl From<BtcStateError> for StateError {
 }
 
 fn validate_bitcoin_network(value: &str) -> Result<(), String> {
-    match value {
-        "main" | "test" | "signet" | "regtest" => Ok(()),
-        _ => Err("bitcoin_network must be `main`, `test`, `signet`, or `regtest`".to_owned()),
-    }
+    BitcoinNetworkTag::new(value)
+        .map(|_| ())
+        .map_err(|_| "bitcoin_network must name a supported Bitcoin Core chain".to_owned())
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ domain = "bitcoin"
 domain-role = "source"
 
 [dependencies]
+bitcoin = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../kernel/canonical" }

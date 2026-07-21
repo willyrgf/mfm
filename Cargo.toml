@@ -53,8 +53,8 @@ alloy-consensus = "0.8.3"
 alloy-eips = "0.8"
 # Alloy 0.8's EIP-7702 manifest omits the derive feature used by its source.
 derive_more = { version = "1.0.0", features = ["display"] }
-bech32 = "0.12"
-bs58 = "0.5.1"
+# Bitcoin protocol primitives
+bitcoin = { version = "0.32.102", default-features = false, features = ["std"] }
 # Cryptography dependency
 ring = "0.17.14"
 # Common dependencies

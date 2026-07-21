@@ -11,6 +11,7 @@ layer = "live"
 domain = "bitcoin"
 
 [dependencies]
+bitcoin = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

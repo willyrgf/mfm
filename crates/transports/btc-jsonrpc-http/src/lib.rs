@@ -30,11 +30,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bitcoin::{Amount, Denomination};
 use mfm_btc_capabilities::{
-    btc_diagnostic, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse,
-    BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider,
-    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcSourceBinding, BtcSourceIdentity,
-    BtcSourceStatus, RedactedBtcSourceEvidence,
+    btc_diagnostic, BitcoinBlockHash, BitcoinSourceBinding, BitcoinSourceIdentity,
+    BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcCapabilityError,
+    BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse,
+    BtcFinality, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
@@ -44,7 +45,6 @@ use reqwest::header::CONTENT_TYPE;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use tracing::debug;
 
-const SATOSHIS_PER_BTC: u64 = 100_000_000;
 const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 240;
 const REDACTED_SECRET: &str = "<redacted>";
 const REDACTED_DIAGNOSTIC: &str = "<redacted diagnostic message>";
@@ -143,12 +143,12 @@ impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
 /// validation and bind constructors only; it does not implement live capability provider traits.
 #[derive(Clone)]
 pub struct BtcJsonRpcRouter {
-    routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
+    routes: BTreeMap<BitcoinSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
 }
 
 impl BtcJsonRpcRouter {
     /// Creates a router over JSON-RPC transports keyed by semantic source identity.
-    pub fn new(routes: BTreeMap<BtcSourceIdentity, Arc<BtcJsonRpcClient>>) -> Self {
+    pub fn new(routes: BTreeMap<BitcoinSourceIdentity, Arc<BtcJsonRpcClient>>) -> Self {
         Self {
             routes: routes
                 .into_iter()
@@ -159,7 +159,7 @@ impl BtcJsonRpcRouter {
 
     #[cfg(test)]
     fn new_for_transport(
-        routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
+        routes: BTreeMap<BitcoinSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
     ) -> Self {
         Self { routes }
     }
@@ -167,7 +167,7 @@ impl BtcJsonRpcRouter {
     /// Validates that a source binding can resolve to a configured route without network IO.
     pub fn validate_source_binding(
         &self,
-        binding: &BtcSourceBinding,
+        binding: &BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<()> {
         self.transport_for_source_identity(binding.source_identity())
             .map(|_| ())
@@ -176,7 +176,7 @@ impl BtcJsonRpcRouter {
     /// Binds a checked semantic source binding to a live capability provider.
     pub fn bind_source(
         &self,
-        binding: BtcSourceBinding,
+        binding: BitcoinSourceBinding,
     ) -> mfm_btc_capabilities::Result<BtcJsonRpcSourceProvider> {
         self.validate_source_binding(&binding)?;
         Ok(BtcJsonRpcSourceProvider {
@@ -187,7 +187,7 @@ impl BtcJsonRpcRouter {
 
     fn transport_for_source_identity(
         &self,
-        source_identity: &BtcSourceIdentity,
+        source_identity: &BitcoinSourceIdentity,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcJsonRpcChainHeadTransport>> {
         self.routes
             .get(source_identity)
@@ -202,7 +202,7 @@ impl BtcJsonRpcRouter {
 #[derive(Clone)]
 pub struct BtcJsonRpcSourceProvider {
     router: BtcJsonRpcRouter,
-    binding: BtcSourceBinding,
+    binding: BitcoinSourceBinding,
 }
 
 /// Private verified-call token minted by the sealed call-prepare stage.
@@ -239,12 +239,13 @@ impl BtcJsonRpcSourceProvider {
         request: &BtcChainHeadRequest,
     ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
         let (height, hash) = selected_head(verified, request).await?;
+        let canonical_hash = hash.to_string();
         let header = verified
             .transport
-            .get_block_header(verified, hash.as_str())
+            .get_block_header(verified, &canonical_hash)
             .await
             .map_err(|error| btc_rpc_provider_error("getblockheader", error))?;
-        verify_header(&header, height, hash.as_str())?;
+        verify_header(&header, height, &hash)?;
         let provider_time_unix_ms = header.time.checked_mul(1000);
         Ok(BtcChainHeadResponse {
             evidence: verified.evidence.clone(),
@@ -261,6 +262,9 @@ impl BtcJsonRpcSourceProvider {
         verified: &VerifiedBtcCall,
         request: &BtcBalanceReadRequest,
     ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
+        request
+            .address()
+            .require_network(self.binding.bitcoin_network())?;
         verify_current_tip_matches_balance_request(verified, request)?;
         let scan = verified
             .transport
@@ -271,7 +275,7 @@ impl BtcJsonRpcSourceProvider {
         Ok(BtcBalanceReadResponse {
             evidence: verified.evidence.clone(),
             address: request.address().clone(),
-            balance_sats: scan.total_amount_sats,
+            balance_sats: scan.total_amount.to_sat(),
             block_height: request.block_height(),
             block_hash: request.block_hash().clone(),
         })
@@ -476,6 +480,8 @@ enum BtcAmountParseError {
     TooPrecise,
     #[error("bitcoin amount overflowed satoshi range")]
     Overflow,
+    #[error("bitcoin amount exceeded MAX_MONEY")]
+    ExceedsMaxMoney,
 }
 
 /// Response from `getblockchaininfo`.
@@ -502,7 +508,7 @@ struct ScanTxOutSetResult {
     success: bool,
     height: u64,
     bestblock: String,
-    total_amount_sats: u64,
+    total_amount: Amount,
 }
 
 #[derive(Deserialize)]
@@ -512,7 +518,7 @@ struct ScanTxOutSetResultWire {
     height: u64,
     #[serde(default)]
     bestblock: String,
-    total_amount: serde_json::Value,
+    total_amount: Box<serde_json::value::RawValue>,
 }
 
 impl<'de> Deserialize<'de> for ScanTxOutSetResult {
@@ -521,13 +527,13 @@ impl<'de> Deserialize<'de> for ScanTxOutSetResult {
         D: Deserializer<'de>,
     {
         let wire = ScanTxOutSetResultWire::deserialize(deserializer)?;
-        let total_amount_sats =
-            btc_amount_json_to_sats(&wire.total_amount.to_string()).map_err(de::Error::custom)?;
+        let total_amount =
+            btc_amount_json_to_amount(wire.total_amount.get()).map_err(de::Error::custom)?;
         Ok(Self {
             success: wire.success,
             height: wire.height,
             bestblock: wire.bestblock,
-            total_amount_sats,
+            total_amount,
         })
     }
 }
@@ -555,12 +561,12 @@ struct JsonRpcErrorObj {
     message: String,
 }
 
-/// Parses a Bitcoin BTC-denominated JSON amount into exact satoshis.
+/// Parses a Bitcoin BTC-denominated JSON amount into a bounded rust-bitcoin amount.
 ///
 /// The input must be the raw JSON token for an integer, decimal number, or string containing
 /// a plain decimal amount. Exponents, negative values, and fractional precision above eight
 /// places are rejected.
-fn btc_amount_json_to_sats(raw_json: &str) -> Result<u64, BtcAmountParseError> {
+fn btc_amount_json_to_amount(raw_json: &str) -> Result<Amount, BtcAmountParseError> {
     let raw = raw_json.trim();
     if raw.is_empty() {
         return Err(BtcAmountParseError::Empty);
@@ -571,10 +577,10 @@ fn btc_amount_json_to_sats(raw_json: &str) -> Result<u64, BtcAmountParseError> {
     } else {
         raw.to_string()
     };
-    parse_btc_decimal_to_sats(amount.trim())
+    parse_btc_decimal_to_amount(amount.trim())
 }
 
-fn parse_btc_decimal_to_sats(amount: &str) -> Result<u64, BtcAmountParseError> {
+fn parse_btc_decimal_to_amount(amount: &str) -> Result<Amount, BtcAmountParseError> {
     if amount.is_empty() {
         return Err(BtcAmountParseError::Empty);
     }
@@ -595,43 +601,23 @@ fn parse_btc_decimal_to_sats(amount: &str) -> Result<u64, BtcAmountParseError> {
         return Err(BtcAmountParseError::Invalid);
     }
 
-    let whole_btc = whole
-        .parse::<u64>()
-        .map_err(|_| BtcAmountParseError::Overflow)?;
-    let whole_sats = whole_btc
-        .checked_mul(SATOSHIS_PER_BTC)
-        .ok_or(BtcAmountParseError::Overflow)?;
-
-    let fractional_sats = match fractional {
-        None => 0,
+    match fractional {
+        None => {}
         Some("") => return Err(BtcAmountParseError::Invalid),
-        Some(frac) => parse_fractional_sats(frac)?,
-    };
-
-    whole_sats
-        .checked_add(fractional_sats)
-        .ok_or(BtcAmountParseError::Overflow)
-}
-
-fn parse_fractional_sats(fractional: &str) -> Result<u64, BtcAmountParseError> {
-    if fractional.len() > 8 {
-        return Err(BtcAmountParseError::TooPrecise);
-    }
-    if !fractional.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(BtcAmountParseError::Invalid);
+        Some(frac) if frac.len() > 8 => return Err(BtcAmountParseError::TooPrecise),
+        Some(frac) if !frac.bytes().all(|byte| byte.is_ascii_digit()) => {
+            return Err(BtcAmountParseError::Invalid);
+        }
+        Some(_) => {}
     }
 
-    let mut value = 0_u64;
-    for byte in fractional.bytes() {
-        value = value
-            .checked_mul(10)
-            .and_then(|current| current.checked_add(u64::from(byte - b'0')))
-            .ok_or(BtcAmountParseError::Overflow)?;
+    let amount = Amount::from_str_in(amount, Denomination::Bitcoin)
+        .map_err(|_| BtcAmountParseError::Overflow)?;
+    if amount <= Amount::MAX_MONEY {
+        Ok(amount)
+    } else {
+        Err(BtcAmountParseError::ExceedsMaxMoney)
     }
-    for _ in fractional.len()..8 {
-        value = value.checked_mul(10).ok_or(BtcAmountParseError::Overflow)?;
-    }
-    Ok(value)
 }
 
 impl BtcJsonRpcClient {
@@ -766,7 +752,7 @@ impl BtcJsonRpcClient {
 async fn selected_head(
     verified: &VerifiedBtcCall,
     request: &BtcChainHeadRequest,
-) -> mfm_btc_capabilities::Result<(u64, BtcBlockHash)> {
+) -> mfm_btc_capabilities::Result<(u64, BitcoinBlockHash)> {
     match request.selection().finality() {
         BtcFinality::BestAvailable => {
             let hash = provider_block_hash("getblockchaininfo", &verified.info.bestblockhash)?;
@@ -813,9 +799,10 @@ fn source_status(info: &BlockchainInfo) -> BtcSourceStatus {
 fn verify_header(
     header: &BlockHeaderInfo,
     height: u64,
-    hash: &str,
+    hash: &BitcoinBlockHash,
 ) -> mfm_btc_capabilities::Result<()> {
-    if header.height == height && header.hash.eq_ignore_ascii_case(hash) {
+    let observed_hash = provider_block_hash("getblockheader", &header.hash)?;
+    if header.height == height && &observed_hash == hash {
         Ok(())
     } else {
         Err(btc_provider_failure(btc_operation_diagnostic(
@@ -833,7 +820,7 @@ fn verify_current_tip_matches_balance_request(
     verify_balance_anchor(
         "getblockchaininfo",
         verified.info.blocks,
-        best_hash.as_str(),
+        &best_hash,
         request,
     )
 }
@@ -852,25 +839,23 @@ fn verify_scan_matches_balance_request(
         ));
     }
     let scan_hash = provider_block_hash("scantxoutset", &scan.bestblock)?;
-    verify_balance_anchor("scantxoutset", scan.height, scan_hash.as_str(), request)
+    verify_balance_anchor("scantxoutset", scan.height, &scan_hash, request)
 }
 
 fn verify_balance_anchor(
     operation: &'static str,
     observed_height: u64,
-    observed_hash: &str,
+    observed_hash: &BitcoinBlockHash,
     request: &BtcBalanceReadRequest,
 ) -> mfm_btc_capabilities::Result<()> {
-    if observed_height == request.block_height()
-        && observed_hash.eq_ignore_ascii_case(request.block_hash().as_str())
-    {
+    if observed_height == request.block_height() && observed_hash == request.block_hash() {
         Ok(())
     } else {
         Err(balance_anchor_unavailable_diagnostic(
             operation,
             request,
             observed_height,
-            observed_hash,
+            &observed_hash.to_string(),
         ))
     }
 }
@@ -893,7 +878,7 @@ fn balance_anchor_unavailable_diagnostic(
             )
             .with_field(
                 diagnostic_id("requested_block_hash"),
-                ProviderDiagnosticValue::Id(diagnostic_id(request.block_hash().as_str())),
+                ProviderDiagnosticValue::Id(diagnostic_id(&request.block_hash().to_string())),
             )
             .with_field(
                 diagnostic_id("observed_block_hash"),
@@ -905,8 +890,8 @@ fn balance_anchor_unavailable_diagnostic(
 fn provider_block_hash(
     operation: &'static str,
     hash: &str,
-) -> mfm_btc_capabilities::Result<BtcBlockHash> {
-    BtcBlockHash::new(hash).map_err(|_| {
+) -> mfm_btc_capabilities::Result<BitcoinBlockHash> {
+    BitcoinBlockHash::new(hash).map_err(|_| {
         btc_provider_failure(btc_operation_diagnostic(
             ProviderDiagnosticCode::ResponseInvalid,
             operation,
@@ -914,7 +899,7 @@ fn provider_block_hash(
     })
 }
 
-fn missing_route_diagnostic(source_identity: &BtcSourceIdentity) -> RedactedProviderDiagnostic {
+fn missing_route_diagnostic(source_identity: &BitcoinSourceIdentity) -> RedactedProviderDiagnostic {
     btc_operation_diagnostic(ProviderDiagnosticCode::RouteUnavailable, "route_lookup").with_field(
         diagnostic_id("source_identity"),
         ProviderDiagnosticValue::Id(diagnostic_id(source_identity.as_str())),
