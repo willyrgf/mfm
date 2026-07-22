@@ -8,8 +8,8 @@
 //! EVM balance collection only as a child of the portfolio objective; transaction submission and
 //! contract validation remain explicit lower-level foundations.
 //!
-//! Production binaries should construct run services through the Postgres-backed factory exported by
-//! this crate, while tests can use explicit test-support stores.
+//! Production binaries construct only the opaque [`Application`] facade. Tests may use explicit
+//! stores and the generic service assembly surface.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -156,9 +156,6 @@ where
     RunReadServices::new_with_certification_registry(store, certification_registry)
 }
 
-/// Production typed run services backed by the Postgres run store.
-pub type ProductionRunServices = RunServices<PostgresStore>;
-
 /// Production evidence-only run services backed by the Postgres run store.
 pub type ProductionRunReadServices = RunReadServices<PostgresStore>;
 
@@ -199,17 +196,6 @@ fn production_database_url(database_url: Option<&str>) -> Result<String, PublicE
     }
 }
 
-/// Builds production typed run services backed by the Postgres run store.
-pub async fn connect_production_run_services(
-    database_url: Option<&str>,
-    runtime_config_path: Option<&Path>,
-) -> Result<ProductionRunServices, PublicError> {
-    let store = Arc::new(connect_production_store(database_url).await?);
-    let runners = production_runner_registry(store.clone(), runtime_config_path).await?;
-    let certification_registry = production_certification_registry()?;
-    Ok(make_run_services(runners, store, certification_registry))
-}
-
 /// Builds production evidence-only run services backed by the Postgres run store.
 pub async fn connect_production_run_read_services(
     database_url: Option<&str>,
@@ -219,12 +205,7 @@ pub async fn connect_production_run_read_services(
     Ok(make_run_read_services(store, certification_registry))
 }
 
-/// Builds the production typed runner registry for this process.
-///
-/// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Domain runners
-/// register here as certified typed descriptor bindings. Portfolio fact queries and retained
-/// artifacts are bound to the same supplied store object.
-pub async fn production_runner_registry<S>(
+async fn production_runner_registry<S>(
     store: Arc<S>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, PublicError>
@@ -269,6 +250,21 @@ where
     )?;
     registry.validate_authoring_catalog(&production_authoring_catalog()?)?;
     Ok(registry)
+}
+
+/// Builds one production-equivalent runner registry for a single test dispatch.
+///
+/// This test-support boundary exists for integration fixtures that need to interrupt execution or
+/// supply a decorated store. Production callers must use [`Application`].
+#[cfg(any(test, feature = "test-support"))]
+pub async fn production_runner_registry_for_test<S>(
+    store: Arc<S>,
+    runtime_config_path: Option<&Path>,
+) -> Result<ErasedRunnerRegistry, PublicError>
+where
+    S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
+{
+    production_runner_registry(store, runtime_config_path).await
 }
 
 fn runner_factory_binding(

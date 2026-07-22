@@ -575,10 +575,12 @@ async fn snapshot_root_replay_verifies_each_downstream_output_prefix() {
             blocked_input_schema,
             entered_tx,
         ));
-        let runners =
-            mfm_app::production_runner_registry(blocked_store.clone(), Some(&runtime_path))
-                .await
-                .expect("production snapshot runners");
+        let runners = mfm_app::production_runner_registry_for_test(
+            blocked_store.clone(),
+            Some(&runtime_path),
+        )
+        .await
+        .expect("production snapshot runners");
         let services = mfm_app::make_run_services(
             runners,
             blocked_store,
@@ -829,7 +831,7 @@ async fn snapshot_services<S>(
 where
     S: SnapshotServiceStore,
 {
-    let runners = mfm_app::production_runner_registry(store.clone(), runtime_config_path)
+    let runners = mfm_app::production_runner_registry_for_test(store.clone(), runtime_config_path)
         .await
         .expect("production snapshot runners");
     mfm_app::make_run_services(
