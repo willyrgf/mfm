@@ -363,7 +363,7 @@ async fn validate_store_metadata(pool: &PgPool) -> Result<PostgresStoreAuthority
         .try_get("store_scope_id")
         .map_err(|_| authority_mismatch())?;
     if row_count != 1
-        || schema_contract_version.as_deref() != Some("mfm.postgres.store.v4")
+        || schema_contract_version.as_deref() != Some("mfm.postgres.store.v1")
         || !valid_store_epoch(store_epoch.as_deref())
     {
         return Err(authority_mismatch());
@@ -494,7 +494,7 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "fact_query_terms_u64_range",
     "fact_query_terms_value_shape",
     "fact_query_metadata_generation_positive",
-    "run_observation_cursors_version_v3",
+    "run_observation_cursors_version_v1",
     "run_observation_cursors_store_commit_order_nonnegative",
     "configured_values_target_bounds",
     "configured_values_schema_id_bounds",

@@ -23,7 +23,7 @@ INSERT INTO store_metadata (store_epoch, store_scope_id, schema_contract_version
 VALUES (
   'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'),
   'mfm.store_scope.v1:' || encode(public.gen_random_bytes(16), 'hex'),
-  'mfm.postgres.store.v4'
+  'mfm.postgres.store.v1'
 );
 
 CREATE TABLE store_commit_order (
@@ -391,7 +391,7 @@ CREATE TABLE run_observation_cursors (
   store_epoch TEXT NOT NULL,
   store_commit_order BIGINT NOT NULL,
   issued_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT run_observation_cursors_version_v3 CHECK (cursor_version = 'mfm.run_observation.cursor.v3'),
+  CONSTRAINT run_observation_cursors_version_v1 CHECK (cursor_version = 'mfm.run_observation.cursor.v1'),
   CONSTRAINT run_observation_cursors_store_commit_order_nonnegative CHECK (store_commit_order >= 0)
 );
 

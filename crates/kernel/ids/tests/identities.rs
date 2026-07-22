@@ -214,7 +214,9 @@ fn store_scope_id_accepts_only_stable_lowercase_hex_shape() {
         store_scope.to_string(),
         "mfm.store_scope.v1:0123456789abcdef0123456789abcdef"
     );
-    assert!(StoreScopeId::new("mfm.store_scope.v2:0123456789abcdef0123456789abcdef").is_err());
+    assert!(
+        StoreScopeId::new("mfm.store_scope.unsupported:0123456789abcdef0123456789abcdef").is_err()
+    );
     assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
     assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef").is_err());
 }
@@ -253,7 +255,7 @@ fn rejects_invalid_identity_strings() {
             |value| StateKind::parse(value).is_err(),
         ),
         (
-            "state:mfm:reader:sha256-jcs-v2:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "state:mfm:reader:sha256-jcs-unsupported:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             |value| StateKind::parse(value).is_err(),
         ),
         (

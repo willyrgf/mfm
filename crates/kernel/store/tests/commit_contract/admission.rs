@@ -90,7 +90,9 @@ fn store_scope_id_contract_is_store_owned_shape() {
         store_scope.as_str(),
         "mfm.store_scope.v1:0123456789abcdef0123456789abcdef"
     );
-    assert!(StoreScopeId::new("mfm.store_scope.v2:0123456789abcdef0123456789abcdef").is_err());
+    assert!(
+        StoreScopeId::new("mfm.store_scope.unsupported:0123456789abcdef0123456789abcdef").is_err()
+    );
     assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
     assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef").is_err());
 }

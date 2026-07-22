@@ -130,7 +130,7 @@ async fn store_authority_rejects_schema_drift_cases() {
             Case::InvalidStoreMetadata => {
                 mutate_store_metadata_unchecked(
                     &store.pool,
-                    &["UPDATE store_metadata SET schema_contract_version = 'mfm.postgres.run_store.v0'"],
+                    &["UPDATE store_metadata SET schema_contract_version = 'mfm.postgres.store.unsupported'"],
                 )
                 .await;
             }

@@ -346,14 +346,14 @@ async fn observation_cursor_lifecycle_rejects_stale_format() {
 
     disable_observation_cursor_mutation_guard(&store.pool).await;
     sqlx::query(
-        "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v3",
+        "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v1",
     )
     .execute(&store.pool)
     .await
     .expect("drop cursor version constraint for stale-format fixture");
     sqlx::query(
         "UPDATE run_observation_cursors \
-         SET cursor_version = 'mfm.run_observation.cursor.v0' \
+         SET cursor_version = 'mfm.run_observation.cursor.unsupported' \
          WHERE token_hash = $1",
     )
     .bind(&token_hash)
