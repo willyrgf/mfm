@@ -32,23 +32,6 @@ impl Keystore {
         Ok(())
     }
 
-    pub(super) fn save_to_disk_after_rekey(
-        &mut self,
-        current_file_master_key: &[u8; 32],
-    ) -> Result<(), KeystoreError> {
-        self.ensure_target_path_is_safe()?;
-        let parent = self.ensure_parent_directory_safe()?;
-        let _lock = self.acquire_mutation_lock(&parent)?;
-        self.verify_current_file_matches_memory_mac(current_file_master_key)?;
-        self.ensure_master_key_available()?;
-        let new_master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
-        let file_integrity_mac =
-            self.write_current_keystore_file_locked(&parent, new_master_key)?;
-        self.file_integrity_mac = Some(file_integrity_mac);
-
-        Ok(())
-    }
-
     fn write_current_keystore_file_locked(
         &self,
         parent: &Path,

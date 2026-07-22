@@ -122,21 +122,6 @@ fn test_successful_mutations_persist_exactly_one_audit_record() {
             .count(),
         1
     );
-
-    keystore
-        .change_password("strong_password_123", "new_password_123")
-        .unwrap();
-    assert_eq!(
-        persisted_audit_log(&keystore_path)
-            .iter()
-            .filter(|entry| matches!(entry.event, AuditEvent::ChangePassword) && entry.success)
-            .count(),
-        1
-    );
-
-    let mut reopened =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-    reopened.unlock("new_password_123").unwrap();
 }
 
 #[test]
@@ -248,18 +233,4 @@ fn test_audit_log_entries_created_for_operations() {
         .audit_log()
         .iter()
         .any(|e| matches!(e.event, AuditEvent::DeleteKey { id } if id == pk_id) && e.success));
-
-    // lock logs.
-    keystore.lock();
-    assert!(matches!(
-        keystore.audit_log().last().unwrap().event,
-        AuditEvent::Lock
-    ));
-
-    // Locked failures cannot be durably authenticated in the single-file format.
-    let previous_audit_len = keystore.audit_log().len();
-    assert!(keystore
-        .change_password("old_password", "new_password")
-        .is_err());
-    assert_eq!(keystore.audit_log().len(), previous_audit_len);
 }

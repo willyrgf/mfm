@@ -31,6 +31,24 @@
 //!     let _ = keystore.get_private_key(id);
 //! }
 //! ```
+//!
+//! Administration operations are deliberately absent from the current public surface:
+//!
+//! ```compile_fail
+//! use mfm_keystore::Keystore;
+//!
+//! fn explicit_lock(keystore: &mut Keystore) {
+//!     keystore.lock();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use mfm_keystore::Keystore;
+//!
+//! fn rotate_password(keystore: &mut Keystore) {
+//!     keystore.change_password("old password", "new password");
+//! }
+//! ```
 
 mod crypto;
 mod keystore;

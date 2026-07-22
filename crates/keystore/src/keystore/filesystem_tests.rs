@@ -74,11 +74,10 @@ fn test_early_file_validation_dos_protection() {
 fn test_password_policy_accepts_boundary_and_rejects_weak_values() {
     #[derive(Clone, Copy)]
     enum Case {
-        ShortCreate,
-        RepeatedChange,
-        StrongBoundaryCreate,
-        CommonCreate,
-        WhitespaceCreate,
+        Short,
+        StrongBoundary,
+        Common,
+        Whitespace,
     }
 
     fn assert_policy_rejects(result: Result<(), KeystoreError>, expected_message: Option<&str>) {
@@ -96,11 +95,10 @@ fn test_password_policy_accepts_boundary_and_rejects_weak_values() {
     }
 
     for (label, case) in [
-        ("short-create", Case::ShortCreate),
-        ("repeated-change", Case::RepeatedChange),
-        ("strong-boundary-create", Case::StrongBoundaryCreate),
-        ("common-create", Case::CommonCreate),
-        ("whitespace-create", Case::WhitespaceCreate),
+        ("short-create", Case::Short),
+        ("strong-boundary-create", Case::StrongBoundary),
+        ("common-create", Case::Common),
+        ("whitespace-create", Case::Whitespace),
     ] {
         let temp_dir = tempdir().unwrap();
         let keystore_path = temp_dir.path().join(format!("{label}.keystore"));
@@ -108,22 +106,15 @@ fn test_password_policy_accepts_boundary_and_rejects_weak_values() {
             Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
 
         match case {
-            Case::ShortCreate => assert_policy_rejects(keystore.unlock("short"), None),
-            Case::RepeatedChange => {
-                keystore.unlock("strong_password_123").unwrap();
-                assert_policy_rejects(
-                    keystore.change_password("strong_password_123", "aaaaaaaaaaaa"),
-                    None,
-                );
-            }
-            Case::StrongBoundaryCreate => {
+            Case::Short => assert_policy_rejects(keystore.unlock("short"), None),
+            Case::StrongBoundary => {
                 keystore.unlock("A1b2C3d4E5f6").unwrap();
                 assert_eq!(keystore.list_keys().unwrap().len(), 0);
             }
-            Case::CommonCreate => {
+            Case::Common => {
                 assert_policy_rejects(keystore.unlock("QWERTY123456"), Some("too weak"));
             }
-            Case::WhitespaceCreate => {
+            Case::Whitespace => {
                 assert_policy_rejects(keystore.unlock("            "), Some("too weak"));
             }
         }

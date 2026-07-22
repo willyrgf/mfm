@@ -145,8 +145,6 @@ pub enum AuditEvent {
         /// Identifier of the deleted entry.
         id: Uuid,
     },
-    /// A password rotation was attempted.
-    ChangePassword,
     /// Old audit records were compacted to keep the persisted log bounded.
     AuditLogCompacted {
         /// Number of oldest audit records represented by this summary.

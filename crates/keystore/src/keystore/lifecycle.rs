@@ -70,25 +70,13 @@ impl Keystore {
         result
     }
 
-    /// Lock keystore (clear master key from memory).
-    pub fn lock(&mut self) {
-        self.append_audit_event(AuditEvent::Lock, true);
-        self.master_key = None;
-        self.unlocked_at = None;
-    }
-
-    /// Set auto-lock timeout for unlocked sessions.
-    ///
-    /// `None` disables auto-lock.
-    pub fn set_auto_lock_timeout(&mut self, timeout: Option<Duration>) {
+    #[cfg(test)]
+    pub(super) fn set_auto_lock_timeout(&mut self, timeout: Option<Duration>) {
         self.auto_lock_timeout = timeout;
     }
 
-    /// Returns the bounded recent audit log for this keystore instance.
-    ///
-    /// When the log reaches [`MAX_AUDIT_LOG_ENTRIES`], older records are represented by an
-    /// [`AuditEvent::AuditLogCompacted`] summary entry.
-    pub fn audit_log(&self) -> &[AuditLogEntry] {
+    #[cfg(test)]
+    pub(super) fn audit_log(&self) -> &[AuditLogEntry] {
         &self.audit_log
     }
 

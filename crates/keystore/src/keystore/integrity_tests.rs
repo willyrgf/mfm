@@ -256,15 +256,13 @@ fn test_operations_after_external_tamper_fail_without_rewrite() {
     enum Case {
         Get,
         Delete,
-        ChangePassword,
     }
 
-    for case in [Case::Get, Case::Delete, Case::ChangePassword] {
+    for case in [Case::Get, Case::Delete] {
         let temp_dir = tempdir().unwrap();
         let (file_name, alias) = match case {
             Case::Get => ("get_after_tamper.keystore", "read-target"),
             Case::Delete => ("delete_after_tamper.keystore", "delete-target"),
-            Case::ChangePassword => ("change_password_after_tamper.keystore", "rekey-target"),
         };
         let keystore_path = temp_dir.path().join(file_name);
         let (mut keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, alias);
@@ -274,11 +272,6 @@ fn test_operations_after_external_tamper_fail_without_rewrite() {
             Case::Delete => {
                 value["entries"][0]["alias"] = serde_json::json!("tampered-delete-target")
             }
-            Case::ChangePassword => {
-                let salt = value["kdf_params"]["salt"].as_array_mut().unwrap();
-                let first = salt[0].as_u64().unwrap();
-                salt[0] = serde_json::json!((first + 1) % 256);
-            }
         });
         let tampered_bytes = std::fs::read(&keystore_path).unwrap();
 
@@ -287,12 +280,36 @@ fn test_operations_after_external_tamper_fail_without_rewrite() {
                 assert_concurrent_write_rejected(keystore.get_private_key(key_id).map(|_| ()))
             }
             Case::Delete => assert_concurrent_write_rejected(keystore.delete_key(key_id)),
-            Case::ChangePassword => assert_concurrent_write_rejected(
-                keystore.change_password("strong_password_123", "new_password_123"),
-            ),
         }
         assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
     }
+}
+
+#[test]
+fn removed_password_rotation_audit_event_is_rejected() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("removed-password-rotation.keystore");
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    keystore.unlock("strong_password_123").unwrap();
+    rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |value| {
+        value["audit_log"]
+            .as_array_mut()
+            .expect("audit log")
+            .push(serde_json::json!({
+                "timestamp": chrono::Utc::now(),
+                "event": "change_password",
+                "success": true,
+            }));
+    });
+    drop(keystore);
+
+    let mut reopened =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    assert!(matches!(
+        reopened.unlock("strong_password_123"),
+        Err(KeystoreError::InvalidInput(_))
+    ));
 }
 
 #[test]

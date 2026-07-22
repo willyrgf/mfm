@@ -144,23 +144,28 @@ fn test_unlock_edge_cases() {
     // Verify keystore file was created
     assert!(keystore_path.exists());
 
-    // Test unlock on existing keystore
-    keystore.lock();
+    // Test unlock on a freshly reopened existing keystore.
+    drop(keystore);
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     keystore.unlock("initial_password").unwrap();
 
     // Test multiple unlock calls (should be idempotent)
     keystore.unlock("initial_password").unwrap();
     keystore.unlock("initial_password").unwrap();
 
-    // Test empty password
-    keystore.lock();
+    // Test an empty password against a locked, reopened keystore.
+    drop(keystore);
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     let result = keystore.unlock("");
     assert!(result.is_err());
 }
 
 #[test]
-fn test_lock_comprehensive() {
-    let (_temp_dir, mut keystore) = test_keystore();
+fn test_reopened_keystore_requires_unlock() {
+    let (temp_dir, mut keystore) = test_keystore();
+    let keystore_path = temp_dir.path().join("test.keystore");
     keystore.unlock("test_password").unwrap();
 
     // Import a key while unlocked
@@ -169,8 +174,9 @@ fn test_lock_comprehensive() {
         .import_private_key(Some("test".to_string()), test_key)
         .unwrap();
 
-    // Lock the keystore
-    keystore.lock();
+    drop(keystore);
+    let mut keystore =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
 
     // Metadata access is locked behind an unlocked session.
     assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
@@ -183,10 +189,6 @@ fn test_lock_comprehensive() {
         ),
         Err(KeystoreError::Locked)
     ));
-
-    // Test multiple lock calls (should be idempotent)
-    keystore.lock();
-    keystore.lock();
 }
 
 #[test]
