@@ -326,8 +326,9 @@ Adapters must not:
 - depend on workflow operation crates for runtime behavior
 - persist secrets, raw signing material, or raw signed transaction bytes
 
-Adapter code belongs under `crates/adapters/*`. A workflow-specific runner crate is not a license
-to own generic transport or signer behavior.
+Adapter code belongs in the private adapter module of its domain live crate. A workflow-specific
+runner is not a license to own generic transport or signer behavior, and a private adapter is not a
+second package boundary.
 
 ### Transport
 
@@ -365,6 +366,15 @@ Transports must not:
 
 If two workflows can use the same protocol behavior, that behavior belongs in a shared transport
 before either workflow lands.
+
+`mfm-bitcoin-live` is the one Bitcoin live package. Its canonical reusable API lives under
+`mfm_bitcoin_live::transport`; the sibling adapter module is private and the crate root exports only
+the narrow registration and replay functions app assembly must call. The public transport owns the
+checked endpoint-bound session, resolved authentication input, strict bounded Bitcoin Core decoder,
+and redacted error. It implements the pure `BitcoinBalanceSession` contract without importing
+runtime, replay, store, app, or adapter code. The adapter accepts only that pure session trait and
+does not know the concrete transport. The former standalone Bitcoin transport and adapter packages
+are deleted.
 
 ### Signer
 

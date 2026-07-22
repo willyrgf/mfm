@@ -11,9 +11,8 @@ pub(crate) fn register_btc_collector_runners(
     read_factory: &mfm_runtime::RunnerFactoryBinding,
     adapter_factory: &mfm_runtime::RunnerFactoryBinding,
 ) -> Result<(), PublicError> {
-    runtime_config.initialize_bitcoin_routes();
-    let session: Arc<dyn mfm_bitcoin::BitcoinBalanceSession> = runtime_config;
-    mfm_adapters_btc_jsonrpc::register_bitcoin_jsonrpc_runners(
+    let session = runtime_config.bitcoin_session();
+    mfm_bitcoin_live::register_bitcoin_jsonrpc_runners(
         registry,
         artifacts,
         session,

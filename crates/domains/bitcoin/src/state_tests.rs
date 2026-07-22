@@ -166,8 +166,6 @@ fn pure_bitcoin_manifest_stays_inside_domain_boundaries() {
         "mfm-replay",
         "mfm-store",
         "mfm-storage-postgres",
-        "mfm-btc-jsonrpc-http",
-        "mfm-adapters-btc-jsonrpc",
         "mfm-bitcoin-live",
         "mfm-signers-keystore",
         "reqwest",

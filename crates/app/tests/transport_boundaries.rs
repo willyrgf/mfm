@@ -6,8 +6,7 @@ fn production_app_links_only_supported_transport_crates() {
     for required in [
         "mfm-adapters-portfolio",
         "mfm-transports-evm",
-        "mfm-adapters-btc-jsonrpc",
-        "mfm-transports-btc-jsonrpc-http",
+        "mfm-bitcoin-live",
     ] {
         assert!(
             manifest.contains(required),
@@ -87,54 +86,6 @@ fn transport_provider_boundaries_expose_only_checked_bound_sessions() {
             && !app_evm.contains("register_evm_transaction_runner")
             && !app_evm.contains("bind_evm_transaction_session"),
         "production app assembly must omit disconnected EVM validation and transaction runners"
-    );
-
-    let btc_transport = include_str!("../../transports/btc-jsonrpc-http/src/lib.rs");
-    let bitcoin_capabilities = include_str!("../../domains/bitcoin/src/capability.rs");
-    let bitcoin_model = include_str!("../../domains/bitcoin/src/model.rs");
-    let bitcoin_adapter = include_str!("../../adapters/btc-jsonrpc/src/lib.rs");
-    let app_live = include_str!("../src/live_transports.rs");
-    assert!(bitcoin_capabilities.contains("pub trait BitcoinBalanceSession"));
-    assert!(bitcoin_model.contains("pub struct BitcoinBalanceCollectionRequest"));
-    assert!(
-        btc_transport.contains("pub struct BitcoinRpcSession")
-            && btc_transport.contains("impl BitcoinBalanceSession for BitcoinRpcSession"),
-        "Bitcoin transport must expose one checked endpoint-bound aggregate session"
-    );
-    assert!(
-        btc_transport.contains("async fn rpc<T>(")
-            && !btc_transport.contains("pub async fn rpc<T>("),
-        "raw Bitcoin RPC must remain private to the checked session"
-    );
-    let collection = btc_transport
-        .split_once("async fn execute_collection")
-        .expect("aggregate collection function")
-        .1
-        .split_once("async fn rpc<T>")
-        .expect("private RPC helper")
-        .0;
-    let mut call_offsets = Vec::new();
-    for method in ["getblockchaininfo", "scantxoutset", "getblockhash"] {
-        assert_eq!(
-            collection.matches(&format!("\"{method}\"")).count(),
-            1,
-            "aggregate session must have one logical {method} call site"
-        );
-        call_offsets.push(collection.find(method).expect("method call"));
-    }
-    assert!(call_offsets.windows(2).all(|pair| pair[0] < pair[1]));
-    for forbidden_method in ["getblockheader", "\"status\"", "\"abort\""] {
-        assert!(
-            !collection.contains(forbidden_method),
-            "aggregate session must not call {forbidden_method}"
-        );
-    }
-    assert!(
-        bitcoin_adapter.contains("CollectBitcoinBalancesState")
-            && bitcoin_adapter.contains("register_bitcoin_jsonrpc_runners")
-            && app_live.contains("impl BitcoinBalanceSession for LiveTransportRuntime")
-            && app_live.contains("BitcoinRpcSession::new"),
-        "adapter and app must retain one routed aggregate Bitcoin session boundary"
     );
 
     let app = include_str!("../src/services_read.rs");

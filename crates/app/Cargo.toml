@@ -20,14 +20,13 @@ uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
 ring = { workspace = true }
 
-mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../adapters/evm" }
 mfm-adapters-portfolio = { path = "../adapters/portfolio" }
 mfm-bitcoin = { path = "../domains/bitcoin" }
+mfm-bitcoin-live = { path = "../live/bitcoin" }
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-certify = { path = "../kernel/certify" }
-mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-evm-signing = { path = "../evm-signing" }

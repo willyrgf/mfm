@@ -1,3 +1,5 @@
+//! Behavioral contract tests for the public Bitcoin transport.
+
 use std::sync::{Arc, Mutex};
 
 use mfm_bitcoin::{

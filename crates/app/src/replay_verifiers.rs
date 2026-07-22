@@ -110,7 +110,7 @@ fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) ->
 }
 
 fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_btc_jsonrpc::verify_bitcoin_jsonrpc_replay(broker)
+    mfm_bitcoin_live::verify_bitcoin_jsonrpc_replay(broker)
 }
 
 fn verify_evm_balance_collection(

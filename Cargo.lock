@@ -2324,18 +2324,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-adapters-btc-jsonrpc"
-version = "0.1.0"
-dependencies = [
- "mfm-bitcoin",
- "mfm-events",
- "mfm-ids",
- "mfm-replay",
- "mfm-runtime",
- "mfm-store",
-]
-
-[[package]]
 name = "mfm-adapters-evm"
 version = "0.1.0"
 dependencies = [
@@ -2377,10 +2365,10 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "k256",
- "mfm-adapters-btc-jsonrpc",
  "mfm-adapters-evm",
  "mfm-adapters-portfolio",
  "mfm-bitcoin",
+ "mfm-bitcoin-live",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2404,7 +2392,6 @@ dependencies = [
  "mfm-states-evm",
  "mfm-storage-postgres",
  "mfm-store",
- "mfm-transports-btc-jsonrpc-http",
  "mfm-transports-evm",
  "mfm-values",
  "ring",
@@ -2436,6 +2423,26 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "mfm-bitcoin-live"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "hex",
+ "mfm-bitcoin",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-replay",
+ "mfm-runtime",
+ "mfm-store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2881,21 +2888,6 @@ dependencies = [
  "mfm-spec",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "mfm-transports-btc-jsonrpc-http"
-version = "0.1.0"
-dependencies = [
- "bitcoin",
- "hex",
- "mfm-bitcoin",
- "mfm-capabilities",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
 ]
 
 [[package]]

@@ -820,7 +820,13 @@ runner registry, live transports, signer providers, keystores, or live capabilit
 Live provider identity is enforced by bound session implementations. Runners derive a certified
 semantic binding, such as EVM `network_id` plus expected chain id or Bitcoin `network_id`,
 `source_identity`, and expected network tag, before issuing operation-only capability requests. An
-EVM collection attempt binds one direct route, probes its chain once, and persists one redacted
+endpoint-bound Bitcoin session is a public reusable transport under
+`mfm_bitcoin_live::transport`. App assembly constructs those sessions and supplies one app-private
+routed implementation of the same pure `BitcoinBalanceSession` trait to the private live adapter;
+the adapter cannot import or construct the concrete transport. A route is selected by certified
+semantic source identity, and a cached session must keep the exact checked network binding.
+
+An EVM collection attempt binds one direct route, probes its chain once, and persists one redacted
 session identity: `network_id`, chain id, `source_ref`, and transport `implementation_id`. Every
 native balance, ERC-20 metadata, ERC-20 balance, and number-to-hash re-verification uses that same
 session. The canonical capability evidence is carried directly in the aggregate EVM collection

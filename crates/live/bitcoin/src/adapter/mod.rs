@@ -7,7 +7,7 @@ use mfm_bitcoin::{
     bitcoin_jsonrpc_adapter_kind, bitcoin_jsonrpc_adapter_version, BitcoinBalanceCollectionError,
     BitcoinBalanceCollectionEvidence, BitcoinBalanceCollectionPlan,
     BitcoinBalanceCollectionReadCapability, BitcoinBalanceSession, BitcoinCapabilityError,
-    BitcoinSourceBinding, CollectBitcoinBalancesState,
+    CollectBitcoinBalancesState,
 };
 use mfm_events::v1 as events;
 use mfm_runtime::{
@@ -145,5 +145,5 @@ fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::Runtime
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }
 
-#[allow(dead_code)]
-fn _binding_type_is_session_owned(_binding: &BitcoinSourceBinding) {}
+#[cfg(test)]
+mod tests;
