@@ -157,21 +157,26 @@ fn response_decoder_requires_canonical_closed_domain_valid_json() {
 }
 
 #[test]
-fn state_crate_manifest_stays_inside_pure_domain_boundaries() {
+fn pure_bitcoin_manifest_stays_inside_domain_boundaries() {
     let manifest = include_str!("../Cargo.toml");
 
     for forbidden in [
         "mfm-app",
         "mfm-runtime",
+        "mfm-replay",
         "mfm-store",
         "mfm-storage-postgres",
         "mfm-btc-jsonrpc-http",
         "mfm-adapters-btc-jsonrpc",
-        "mfm-op-btc-collectors",
+        "mfm-bitcoin-live",
+        "mfm-signers-keystore",
+        "reqwest",
+        "tokio",
+        "url",
     ] {
         assert!(
             !manifest.contains(forbidden),
-            "state crate must not depend on forbidden boundary crate {forbidden}"
+            "pure Bitcoin crate must not depend on forbidden boundary crate {forbidden}"
         );
     }
 }

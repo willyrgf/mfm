@@ -3,6 +3,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 use alloy_primitives::U256;
+use mfm_bitcoin::BitcoinBalanceSnapshotFact;
 use mfm_evm_capabilities::EvmBlockAnchor;
 use mfm_facts::MfmFactType;
 use mfm_portfolio_model::metadata::PublicMetadata;
@@ -16,7 +17,6 @@ use mfm_portfolio_model::symbol::{
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
 };
-use mfm_states_btc::BitcoinBalanceSnapshotFact;
 use mfm_states_evm::EvmBalanceSnapshotFact;
 
 const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";

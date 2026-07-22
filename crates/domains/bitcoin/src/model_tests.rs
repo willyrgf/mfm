@@ -1,6 +1,8 @@
-use super::*;
+use crate::*;
 
+use bitcoin::{BlockHash, Network};
 use mfm_capabilities::CapabilitySpec;
+use mfm_capabilities::ProviderDiagnosticCode;
 
 const LEGACY_MAIN: &str = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
 const SEGWIT_MAIN: &str = "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw";

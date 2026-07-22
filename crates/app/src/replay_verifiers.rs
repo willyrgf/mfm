@@ -42,7 +42,7 @@ impl ReplayVerifierRegistry {
                     verifier: verify_portfolio,
                 },
                 ReplayVerifierRegistration {
-                    state_keys: &[state_key::<mfm_states_btc::CollectBitcoinBalancesState>],
+                    state_keys: &[state_key::<mfm_bitcoin::CollectBitcoinBalancesState>],
                     intent_matcher: None,
                     verifier: verify_btc,
                 },

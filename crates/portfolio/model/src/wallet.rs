@@ -3,7 +3,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 
-use mfm_btc_capabilities::BitcoinAddress as CheckedBitcoinAddress;
+use mfm_bitcoin::BitcoinAddress as CheckedBitcoinAddress;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 

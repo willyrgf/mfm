@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bitcoin::{Amount, BlockHash, Txid};
-use mfm_btc_capabilities::{
+use mfm_bitcoin::{
     BitcoinAddressBalance, BitcoinBalanceCollectionRequest, BitcoinBalanceCollectionResponse,
     BitcoinBalanceSession, BitcoinCapabilityError, BitcoinSessionFuture, BitcoinSourceBinding,
     BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
@@ -258,7 +258,10 @@ impl BitcoinBalanceSession for BitcoinRpcSession {
         BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
     }
 
-    fn validate_binding(&self, binding: &BitcoinSourceBinding) -> mfm_btc_capabilities::Result<()> {
+    fn validate_binding(
+        &self,
+        binding: &BitcoinSourceBinding,
+    ) -> Result<(), BitcoinCapabilityError> {
         if binding == &self.binding {
             Ok(())
         } else {

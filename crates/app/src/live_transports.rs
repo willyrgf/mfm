@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use mfm_btc_capabilities::{
+use mfm_bitcoin::{
     BitcoinBalanceCollectionRequest, BitcoinBalanceCollectionResponse, BitcoinBalanceSession,
     BitcoinCapabilityError, BitcoinSessionFuture, BitcoinSourceBinding, BitcoinSourceIdentity,
     BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
@@ -167,7 +167,7 @@ impl LiveTransportRuntime {
     fn bitcoin_route(
         &self,
         binding: &BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<ResolvedBitcoinRoute> {
+    ) -> Result<ResolvedBitcoinRoute, BitcoinCapabilityError> {
         let routes = self
             .bitcoin_routes
             .get()
@@ -207,7 +207,10 @@ impl BitcoinBalanceSession for LiveTransportRuntime {
         BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
     }
 
-    fn validate_binding(&self, binding: &BitcoinSourceBinding) -> mfm_btc_capabilities::Result<()> {
+    fn validate_binding(
+        &self,
+        binding: &BitcoinSourceBinding,
+    ) -> Result<(), BitcoinCapabilityError> {
         self.bitcoin_route(binding).map(|_| ())
     }
 
@@ -332,7 +335,7 @@ fn bitcoin_provider_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_btc_capabilities::{BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceIdentity};
+    use mfm_bitcoin::{BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceIdentity};
 
     fn evm_binding() -> EvmNetworkBinding {
         EvmNetworkBinding::new(LocalPublicId::new("test-evm").expect("network"), 1)

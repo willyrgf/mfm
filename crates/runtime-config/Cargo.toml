@@ -19,7 +19,7 @@ toml = "0.8"
 url = { workspace = true }
 uuid = { version = "1.8.0" }
 
-mfm-btc-capabilities = { path = "../btc-capabilities" }
+mfm-bitcoin = { path = "../domains/bitcoin" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-signing = { path = "../signing" }
 

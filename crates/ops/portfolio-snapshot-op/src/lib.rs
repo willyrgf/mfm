@@ -19,9 +19,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use mfm_bitcoin::{
+    BitcoinBalanceCollectionConfig, BitcoinBalanceCollectionOperation, BitcoinBalanceSnapshotFact,
+};
 use mfm_facts::MfmFactType;
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
-use mfm_op_btc_collectors::{BitcoinBalanceCollectionConfig, BitcoinBalanceCollectionOperation};
 use mfm_op_evm_collectors::{
     EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceCollectionOperation, EvmBalanceSource,
 };
@@ -40,7 +42,6 @@ use mfm_state_portfolio::{
     SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput,
     SelectHoldingsInputHandles, SelectHoldingsState,
 };
-use mfm_states_btc::BitcoinBalanceSnapshotFact;
 use mfm_states_evm::EvmBalanceSnapshotFact;
 use mfm_values::ConfigError;
 
@@ -451,9 +452,9 @@ mfm_certify::define_program_descriptor_registry! {
     certification: pub register_portfolio_snapshot_certification_descriptors,
     includes: [
         {
-            state_registry: mfm_op_btc_collectors::bitcoin_collectors_state_registry,
-            operation_registry: mfm_op_btc_collectors::bitcoin_collectors_operation_registry,
-            certification: mfm_op_btc_collectors::register_bitcoin_collectors_certification_descriptors,
+            state_registry: mfm_bitcoin::bitcoin_collectors_state_registry,
+            operation_registry: mfm_bitcoin::bitcoin_collectors_operation_registry,
+            certification: mfm_bitcoin::register_bitcoin_collectors_certification_descriptors,
         },
         {
             state_registry: mfm_op_evm_collectors::evm_collectors_state_registry,
@@ -596,21 +597,20 @@ mod tests {
     #[test]
     fn snapshot_registries_compose_child_collector_inventories() {
         let states = portfolio_snapshot_state_registry().expect("snapshot states");
-        let btc_states =
-            mfm_op_btc_collectors::bitcoin_collectors_state_registry().expect("Bitcoin states");
+        let btc_states = mfm_bitcoin::bitcoin_collectors_state_registry().expect("Bitcoin states");
         let evm_states =
             mfm_op_evm_collectors::evm_collectors_state_registry().expect("EVM states");
         assert_eq!(states.len(), btc_states.len() + evm_states.len() + 3);
         states
-            .state_descriptor::<mfm_op_btc_collectors::CollectBitcoinBalancesState>()
+            .state_descriptor::<mfm_bitcoin::CollectBitcoinBalancesState>()
             .expect("composed Bitcoin state");
         states
             .state_descriptor::<mfm_states_evm::CollectEvmBalancesState>()
             .expect("composed EVM state");
 
         let operations = portfolio_snapshot_operation_registry().expect("snapshot operations");
-        let btc_operations = mfm_op_btc_collectors::bitcoin_collectors_operation_registry()
-            .expect("Bitcoin operations");
+        let btc_operations =
+            mfm_bitcoin::bitcoin_collectors_operation_registry().expect("Bitcoin operations");
         let evm_operations =
             mfm_op_evm_collectors::evm_collectors_operation_registry().expect("EVM operations");
         assert_eq!(
@@ -618,7 +618,7 @@ mod tests {
             btc_operations.len() + evm_operations.len() + 2
         );
         operations
-            .operation_descriptor::<mfm_op_btc_collectors::BitcoinBalanceCollectionOperation>()
+            .operation_descriptor::<mfm_bitcoin::BitcoinBalanceCollectionOperation>()
             .expect("composed Bitcoin operation");
         operations
             .operation_descriptor::<EvmBalanceCollectionOperation>()
@@ -628,7 +628,7 @@ mod tests {
         register_portfolio_snapshot_certification_descriptors(&mut actual)
             .expect("snapshot certification descriptors");
         let mut expected = mfm_certify::CertificationRegistry::new();
-        mfm_op_btc_collectors::register_bitcoin_collectors_certification_descriptors(&mut expected)
+        mfm_bitcoin::register_bitcoin_collectors_certification_descriptors(&mut expected)
             .expect("Bitcoin certification descriptors");
         mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut expected)
             .expect("EVM certification descriptors");

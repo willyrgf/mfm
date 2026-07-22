@@ -1,77 +1,18 @@
-#![warn(missing_docs)]
-//! Checked Bitcoin balance-collection capability contracts.
+//! Checked Bitcoin balance-collection model contracts.
 //!
-//! This crate owns semantic source bindings, rust-bitcoin-backed address identity, the one
-//! aggregate read request/response, and the route-aware session boundary. Protocol clients and
-//! runtime registration live outside this crate.
+//! This module owns semantic source bindings, rust-bitcoin-backed address identity, and aggregate
+//! request/response values. Protocol clients and runtime registration live outside this crate.
 
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 use std::str::FromStr;
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, BlockHash, Network, ScriptBuf};
-use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{
-    CapabilityError, CapabilitySpec, ProviderDiagnosticCode, ReadExternalRole,
-    RedactedProviderDiagnostic,
-};
-use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
-
-/// Stable implementation identity of the strict Bitcoin Core JSON-RPC session.
-pub const BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID: &str =
-    "mfm.bitcoin.jsonrpc.balance_collection.v1";
+use mfm_capabilities::{ProviderDiagnosticCode, RedactedProviderDiagnostic};
+use mfm_ids::LocalPublicId;
 
 /// Maximum addresses admitted by one aggregate Bitcoin balance read.
 pub const BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT: usize = 1_024;
-
-/// Result type for Bitcoin capability contracts.
-pub type Result<T> = std::result::Result<T, BitcoinCapabilityError>;
-
-/// Boxed future returned by a Bitcoin balance session.
-pub type BitcoinSessionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
-
-/// Aggregate Bitcoin balance-read authority.
-pub struct BitcoinBalanceCollectionReadCapability;
-
-impl CapabilitySpec for BitcoinBalanceCollectionReadCapability {
-    type Role = ReadExternalRole;
-
-    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
-        CapabilityKind::new(
-            "mfm.bitcoin",
-            "balance_collection.read",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.bitcoin.capability:balance_collection.read"),
-        )
-        .map_err(|error| CapabilityError::Identity(error.to_string()))
-    }
-
-    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
-        CapabilityVersion::new("mfm.bitcoin.balance_collection.read.v1")
-            .map_err(|error| CapabilityError::Identity(error.to_string()))
-    }
-
-    fn name() -> &'static str {
-        "mfm.bitcoin.balance_collection.read"
-    }
-}
-
-/// Route-aware aggregate Bitcoin balance session.
-pub trait BitcoinBalanceSession: Send + Sync {
-    /// Returns the stable implementation identity installed in the runtime registry.
-    fn implementation_id(&self) -> &'static str;
-
-    /// Validates that the semantic binding can be served without live network IO.
-    fn validate_binding(&self, binding: &BitcoinSourceBinding) -> Result<()>;
-
-    /// Executes one complete aggregate balance read for the checked request.
-    fn collect_balances<'a>(
-        &'a self,
-        request: &'a BitcoinBalanceCollectionRequest,
-    ) -> BitcoinSessionFuture<'a, BitcoinBalanceCollectionResponse>;
-}
 
 macro_rules! checked_public_id {
     ($(#[$meta:meta])* $name:ident, $reason:ident) => {
@@ -81,7 +22,9 @@ macro_rules! checked_public_id {
 
         impl $name {
             /// Creates a checked public identifier.
-            pub fn new(value: impl AsRef<str>) -> Result<Self> {
+            pub fn new(
+                value: impl AsRef<str>,
+            ) -> std::result::Result<Self, BitcoinCapabilityError> {
                 LocalPublicId::new(value)
                     .map(Self)
                     .map_err(|_| BitcoinCapabilityError::InvalidRequest {
@@ -104,7 +47,7 @@ macro_rules! checked_public_id {
         impl FromStr for $name {
             type Err = BitcoinCapabilityError;
 
-            fn from_str(value: &str) -> Result<Self> {
+            fn from_str(value: &str) -> std::result::Result<Self, BitcoinCapabilityError> {
                 Self::new(value)
             }
         }
@@ -139,7 +82,7 @@ pub enum BitcoinNetworkTag {
 
 impl BitcoinNetworkTag {
     /// Parses a supported Bitcoin Core chain tag.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+    pub fn new(value: impl AsRef<str>) -> std::result::Result<Self, BitcoinCapabilityError> {
         match value.as_ref() {
             "main" => Ok(Self::Main),
             "test" => Ok(Self::Test),
@@ -184,7 +127,7 @@ impl fmt::Display for BitcoinNetworkTag {
 impl FromStr for BitcoinNetworkTag {
     type Err = BitcoinCapabilityError;
 
-    fn from_str(value: &str) -> Result<Self> {
+    fn from_str(value: &str) -> std::result::Result<Self, BitcoinCapabilityError> {
         Self::new(value)
     }
 }
@@ -236,7 +179,7 @@ pub struct BitcoinAddress {
 
 impl BitcoinAddress {
     /// Parses a canonical address without claiming a concrete test-family chain.
-    pub fn parse_any(value: &str) -> Result<Self> {
+    pub fn parse_any(value: &str) -> std::result::Result<Self, BitcoinCapabilityError> {
         let unchecked = value.parse::<Address<NetworkUnchecked>>().map_err(|_| {
             BitcoinCapabilityError::InvalidRequest {
                 reason: BitcoinInvalidRequest::InvalidAddress,
@@ -256,7 +199,10 @@ impl BitcoinAddress {
     }
 
     /// Parses an address, checks network compatibility, and requires canonical rendering.
-    pub fn parse(value: &str, network: BitcoinNetworkTag) -> Result<Self> {
+    pub fn parse(
+        value: &str,
+        network: BitcoinNetworkTag,
+    ) -> std::result::Result<Self, BitcoinCapabilityError> {
         let unchecked = value.parse::<Address<NetworkUnchecked>>().map_err(|_| {
             BitcoinCapabilityError::InvalidRequest {
                 reason: BitcoinInvalidRequest::InvalidAddress,
@@ -295,7 +241,10 @@ impl BitcoinAddress {
     }
 
     /// Checks whether this canonical address encoding is compatible with a configured network.
-    pub fn require_network(self, network: BitcoinNetworkTag) -> Result<Self> {
+    pub fn require_network(
+        self,
+        network: BitcoinNetworkTag,
+    ) -> std::result::Result<Self, BitcoinCapabilityError> {
         Self::parse(&self.canonical, network)
     }
 }
@@ -309,7 +258,10 @@ pub struct BitcoinBalanceCollectionRequest {
 
 impl BitcoinBalanceCollectionRequest {
     /// Creates a bounded request and enforces canonical address and script ordering/uniqueness.
-    pub fn new(binding: BitcoinSourceBinding, addresses: Vec<String>) -> Result<Self> {
+    pub fn new(
+        binding: BitcoinSourceBinding,
+        addresses: Vec<String>,
+    ) -> std::result::Result<Self, BitcoinCapabilityError> {
         if addresses.is_empty() || addresses.len() > BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT {
             return Err(BitcoinCapabilityError::InvalidRequest {
                 reason: BitcoinInvalidRequest::AddressCount,
@@ -514,4 +466,5 @@ impl BitcoinCapabilityError {
 }
 
 #[cfg(test)]
+#[path = "model_tests.rs"]
 mod tests;

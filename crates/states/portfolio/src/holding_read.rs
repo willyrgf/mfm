@@ -1,5 +1,9 @@
 //! State-owned fact-query plan, evidence, and reducer for portfolio holding selection.
 
+use mfm_bitcoin::{
+    decode_bitcoin_balance_snapshot_response, BitcoinBalanceCollectionReceipt,
+    BitcoinBalanceSnapshotResponse,
+};
 use mfm_facts::{
     compile_fact_query_plan, fact_query_evidence_hash, fact_query_result_rows_from_receipt,
     CanonicalFactQueryPlan, FactCanonicalScalar, FactContentIdentityEvidence, FactFieldId,
@@ -10,10 +14,6 @@ use mfm_facts::{
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program_derive::MfmValue;
-use mfm_states_btc::{
-    decode_bitcoin_balance_snapshot_response, BitcoinBalanceCollectionReceipt,
-    BitcoinBalanceSnapshotResponse,
-};
 use mfm_states_evm::{
     decode_evm_balance_snapshot_response, EvmBalanceAsset, EvmBalanceCollectionReceipt,
     EvmBalanceSnapshotResponse, EvmBalanceSource,

@@ -2327,12 +2327,11 @@ dependencies = [
 name = "mfm-adapters-btc-jsonrpc"
 version = "0.1.0"
 dependencies = [
- "mfm-btc-capabilities",
+ "mfm-bitcoin",
  "mfm-events",
  "mfm-ids",
  "mfm-replay",
  "mfm-runtime",
- "mfm-states-btc",
  "mfm-store",
 ]
 
@@ -2381,7 +2380,7 @@ dependencies = [
  "mfm-adapters-btc-jsonrpc",
  "mfm-adapters-evm",
  "mfm-adapters-portfolio",
- "mfm-btc-capabilities",
+ "mfm-bitcoin",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2390,7 +2389,6 @@ dependencies = [
  "mfm-evm-signing",
  "mfm-facts",
  "mfm-ids",
- "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
  "mfm-op-portfolio-snapshot",
  "mfm-portfolio-model",
@@ -2403,7 +2401,6 @@ dependencies = [
  "mfm-signing",
  "mfm-spec",
  "mfm-state-portfolio",
- "mfm-states-btc",
  "mfm-states-evm",
  "mfm-storage-postgres",
  "mfm-store",
@@ -2424,13 +2421,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-btc-capabilities"
+name = "mfm-bitcoin"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-certify",
+ "mfm-facts",
  "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -2595,20 +2599,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-btc-collectors"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-certify",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-states-btc",
- "mfm-values",
- "serde",
-]
-
-[[package]]
 name = "mfm-op-evm-collectors"
 version = "0.1.0"
 dependencies = [
@@ -2626,17 +2616,16 @@ dependencies = [
 name = "mfm-op-portfolio-snapshot"
 version = "0.1.0"
 dependencies = [
+ "mfm-bitcoin",
  "mfm-canonical",
  "mfm-certify",
  "mfm-facts",
  "mfm-ids",
- "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
  "mfm-state-portfolio",
- "mfm-states-btc",
  "mfm-states-evm",
  "mfm-values",
  "serde_json",
@@ -2647,7 +2636,7 @@ name = "mfm-portfolio-model"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "mfm-btc-capabilities",
+ "mfm-bitcoin",
  "mfm-evm-capabilities",
  "mfm-ids",
  "mfm-program",
@@ -2763,7 +2752,7 @@ name = "mfm-runtime-config"
 version = "0.1.0"
 dependencies = [
  "http",
- "mfm-btc-capabilities",
+ "mfm-bitcoin",
  "mfm-ids",
  "mfm-signing",
  "serde",
@@ -2817,6 +2806,7 @@ name = "mfm-state-portfolio"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "mfm-bitcoin",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-evm-capabilities",
@@ -2825,29 +2815,10 @@ dependencies = [
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
- "mfm-states-btc",
  "mfm-states-evm",
  "mfm-values",
  "num-bigint",
  "num-traits",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mfm-states-btc"
-version = "0.1.0"
-dependencies = [
- "bitcoin",
- "mfm-btc-capabilities",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-facts",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2918,7 +2889,7 @@ version = "0.1.0"
 dependencies = [
  "bitcoin",
  "hex",
- "mfm-btc-capabilities",
+ "mfm-bitcoin",
  "mfm-capabilities",
  "reqwest",
  "serde",

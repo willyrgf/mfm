@@ -17,7 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-mfm-btc-capabilities = { path = "../../btc-capabilities" }
+mfm-bitcoin = { path = "../../domains/bitcoin" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }

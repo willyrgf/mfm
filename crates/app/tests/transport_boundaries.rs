@@ -90,11 +90,12 @@ fn transport_provider_boundaries_expose_only_checked_bound_sessions() {
     );
 
     let btc_transport = include_str!("../../transports/btc-jsonrpc-http/src/lib.rs");
-    let bitcoin_capabilities = include_str!("../../btc-capabilities/src/lib.rs");
+    let bitcoin_capabilities = include_str!("../../domains/bitcoin/src/capability.rs");
+    let bitcoin_model = include_str!("../../domains/bitcoin/src/model.rs");
     let bitcoin_adapter = include_str!("../../adapters/btc-jsonrpc/src/lib.rs");
     let app_live = include_str!("../src/live_transports.rs");
     assert!(bitcoin_capabilities.contains("pub trait BitcoinBalanceSession"));
-    assert!(bitcoin_capabilities.contains("pub struct BitcoinBalanceCollectionRequest"));
+    assert!(bitcoin_model.contains("pub struct BitcoinBalanceCollectionRequest"));
     assert!(
         btc_transport.contains("pub struct BitcoinRpcSession")
             && btc_transport.contains("impl BitcoinBalanceSession for BitcoinRpcSession"),

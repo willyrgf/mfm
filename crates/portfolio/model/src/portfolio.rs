@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::num::NonZeroU64;
 
-use mfm_btc_capabilities::{BitcoinAddress as CheckedBitcoinAddress, BitcoinNetworkTag};
+use mfm_bitcoin::{BitcoinAddress as CheckedBitcoinAddress, BitcoinNetworkTag};
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

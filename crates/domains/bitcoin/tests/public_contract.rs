@@ -1,4 +1,4 @@
-use mfm_btc_capabilities::*;
+use mfm_bitcoin::*;
 use mfm_capabilities::CapabilitySpec;
 
 #[test]
@@ -21,7 +21,10 @@ fn capability_identity_describes_one_aggregate_read_authority() {
 
 #[test]
 fn contracts_do_not_expose_concrete_source_details() {
-    let source = include_str!("../src/lib.rs");
+    let source = concat!(
+        include_str!("../src/model.rs"),
+        include_str!("../src/capability.rs")
+    );
     for term in [
         concat!("rpc", "_", "url"),
         concat!("end", "point"),

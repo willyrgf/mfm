@@ -1,7 +1,7 @@
 //! Typed family receipt input for receipt-pinned portfolio fact selection.
 
+use mfm_bitcoin::BitcoinBalanceCollectionReceipt;
 use mfm_program_derive::{MfmValue, StateInput};
-use mfm_states_btc::BitcoinBalanceCollectionReceipt;
 use mfm_states_evm::EvmBalanceCollectionReceipt;
 use serde::{Deserialize, Serialize};
 

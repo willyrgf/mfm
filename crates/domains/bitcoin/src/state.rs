@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Deterministic aggregate Bitcoin balance collection.
 //!
 //! One external-read state validates semantic demand, reduces one source-bound scan into an
@@ -6,12 +5,14 @@
 
 use std::str::FromStr;
 
-use bitcoin::{Amount, BlockHash};
-use mfm_btc_capabilities::{
-    BitcoinBalanceCollectionReadCapability, BitcoinBalanceCollectionRequest,
-    BitcoinBalanceCollectionResponse, BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceBinding,
-    BitcoinSourceIdentity, BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
+use crate::capability::{
+    BitcoinBalanceCollectionReadCapability, BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
 };
+use crate::model::{
+    BitcoinBalanceCollectionRequest, BitcoinBalanceCollectionResponse, BitcoinNetworkId,
+    BitcoinNetworkTag, BitcoinSourceBinding, BitcoinSourceIdentity,
+};
+use bitcoin::{Amount, BlockHash};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_facts::{FactContentIdentityEvidence, MfmFactType};
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
@@ -22,10 +23,6 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, MfmFactType as DeriveMfmFactType, MfmValue};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
-
-/// Maximum addresses admitted by one collection.
-pub const BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT: usize =
-    mfm_btc_capabilities::BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT;
 
 const ADAPTER_VERSION: &str = "mfm.bitcoin.jsonrpc.adapter.v2";
 const STATE_VERSION: &str = "mfm.bitcoin.state.collect_balances.v1";
@@ -123,7 +120,7 @@ impl BitcoinBalanceCollectionConfig {
 }
 
 /// Validates bounded, canonical, sorted, duplicate-free Bitcoin source demand.
-pub fn validate_bitcoin_balance_collection_config(
+fn validate_bitcoin_balance_collection_config(
     config: &BitcoinBalanceCollectionConfig,
 ) -> Result<(), String> {
     config
@@ -300,7 +297,7 @@ impl ReadState for CollectBitcoinBalancesState {
 }
 
 /// Reduces exact primary evidence into an ordered fact batch and minimal receipt.
-pub fn reduce_bitcoin_balance_collection(
+fn reduce_bitcoin_balance_collection(
     plan: &BitcoinBalanceCollectionPlan,
     evidence: &BitcoinBalanceCollectionEvidence,
 ) -> Result<
@@ -675,4 +672,5 @@ fn invalid(reason: impl Into<String>) -> BitcoinBalanceCollectionError {
 }
 
 #[cfg(test)]
+#[path = "state_tests.rs"]
 mod tests;

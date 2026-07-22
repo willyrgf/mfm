@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use mfm_btc_capabilities::BitcoinSourceIdentity;
+use mfm_bitcoin::BitcoinSourceIdentity;
 
 use super::raw::{RawBtcConfig, RawBtcJsonRpcConfig};
 use super::resolve::{resolve_optional_value, resolve_rpc_url};

@@ -58,6 +58,14 @@ into one store-backed selection state; assembly
 receives only rehydrated and identity-reverified facts. The complete snapshot graph is the sole
 public objective, `mfm.portfolio/snapshot@2`.
 
+`mfm-bitcoin` is the single pure Bitcoin package. Its private `model`, `capability`, `state`, and
+`operation` modules point only downward in that order, while the crate root explicitly exports the
+consumer-facing contracts. It owns no runtime, replay, store, app, keystore, filesystem, or network
+implementation. The former capability, state, and collector-operation package boundaries and their
+package-only re-export bridge are deleted. The consolidated public surface also drops the generic
+Bitcoin `Result` alias, raw validation/reduction helpers, and duplicate address-limit export that
+existed only to cross those package boundaries.
+
 `mfm-op-portfolio-snapshot` owns that complete internal graph through two operations.
 `PortfolioSnapshotOperation` projects normalized `PortfolioConfig` into child Bitcoin/EVM
 collector calls and one `PortfolioReportOperation` call; it constructs no state directly. The
@@ -203,8 +211,8 @@ Two current decisions are deliberate:
   `SelectHoldingsState`; neither operation has a generic receipt entry, logical-manifest wrapper,
   count/readiness value, or fan-in state. Selection checks
   exact portfolio demand and both family receipt contracts before issuing one shared-snapshot query
-  batch. The portfolio state package's dependencies on the Bitcoin and EVM state packages are the
-  explicit downstream typed-output/fact contracts; it owns neither family's runner, transport,
+  batch. The portfolio state package's dependencies on the Bitcoin and EVM pure-domain contracts
+  are the explicit downstream typed-output/fact contracts; it owns neither family's runner, transport,
   fact publication, replay, or workflow topology.
 - Runtime TOML remains a process-local routing and signer boundary rather than semantic
   configuration data. Live assembly selectively resolves only the requested EVM route or requested
@@ -634,11 +642,9 @@ Source-domain to aggregate-domain, cross-domain live, live to concrete storage/s
 to secret-provider, and store-contract to storage-implementation edges are forbidden. Dev-only
 dependencies may exercise lower surfaces without becoming production ownership.
 
-The ordered repository cut currently has two broader semantic shapes which close with their owning
-deletions: Bitcoin source state still reaches the aggregate portfolio contract until the atomic
-collection replacement, and binaries may still reach non-facing kernel/assembly plus the secret
-provider until app services absorb implementation construction. These are not named exceptions or
-approved future edges. The metadata evaluator narrows monotonically at those cutovers.
+The ordered repository cut still allows binaries to reach non-facing kernel/assembly plus the
+secret provider until app services absorb implementation construction. This is not a named
+exception or approved future edge. The metadata evaluator narrows at that cutover.
 
 ## Store Boundary
 

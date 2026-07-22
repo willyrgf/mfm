@@ -3,16 +3,17 @@
 
 use std::sync::Arc;
 
-use mfm_btc_capabilities::{BitcoinBalanceSession, BitcoinCapabilityError, BitcoinSourceBinding};
+use mfm_bitcoin::{
+    bitcoin_jsonrpc_adapter_kind, bitcoin_jsonrpc_adapter_version, BitcoinBalanceCollectionError,
+    BitcoinBalanceCollectionEvidence, BitcoinBalanceCollectionPlan,
+    BitcoinBalanceCollectionReadCapability, BitcoinBalanceSession, BitcoinCapabilityError,
+    BitcoinSourceBinding, CollectBitcoinBalancesState,
+};
 use mfm_events::v1 as events;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry, ExternalReadExecution,
     ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
     RunnerFactoryBinding, RunnerIngressContext, RunnerRegistrationBuilder,
-};
-use mfm_states_btc::{
-    bitcoin_jsonrpc_adapter_kind, bitcoin_jsonrpc_adapter_version,
-    BitcoinBalanceCollectionEvidence, BitcoinBalanceCollectionPlan, CollectBitcoinBalancesState,
 };
 use mfm_store::v1 as store;
 
@@ -27,10 +28,9 @@ pub fn register_bitcoin_jsonrpc_runners(
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
-    registry
-        .register_capability_spec::<mfm_btc_capabilities::BitcoinBalanceCollectionReadCapability>(
-            CapabilityImplementationId::new(session.implementation_id())?,
-        )?;
+    registry.register_capability_spec::<BitcoinBalanceCollectionReadCapability>(
+        CapabilityImplementationId::new(session.implementation_id())?,
+    )?;
 
     require_factory(read_factory, READ_FACTORY)?;
     require_factory(adapter_factory, ADAPTER_FACTORY)?;
@@ -135,9 +135,7 @@ fn bitcoin_capability_error(error: BitcoinCapabilityError) -> mfm_runtime::Runti
     }
 }
 
-fn bitcoin_state_error(
-    _error: mfm_states_btc::BitcoinBalanceCollectionError,
-) -> mfm_runtime::RuntimeError {
+fn bitcoin_state_error(_error: BitcoinBalanceCollectionError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(
         "certified Bitcoin collection material was invalid".to_owned(),
     )

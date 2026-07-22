@@ -124,9 +124,8 @@ kernel, signing, and their own layer. Concrete storage consumes kernel contracts
 Assembly is above those layers. Binaries consume only explicitly binary-facing kernel and assembly
 contracts. Tests are unrestricted. Normal and build dependencies are checked from Cargo metadata;
 dev-only edges do not establish production ownership. During the ordered repository cut, the
-metadata evaluator narrows monotonically as the Bitcoin-to-portfolio source edge and direct binary
-implementation edges are deleted; those current shapes are not future architecture or named
-exceptions.
+metadata evaluator narrows monotonically as direct binary implementation edges are deleted; that
+current shape is not future architecture or a named exception.
 
 States remain free of runtime/store implementations, binaries, live transports, secret providers,
 and operation modules. Operations remain deterministic planning. Adapters bind state-owned intent
@@ -225,7 +224,7 @@ projection. The state validates exact portfolio demand, receipt family/chain/sou
 receipt uniqueness before it authors any query. There is no portfolio manifest identity, generic
 receipt entry, count/readiness value, app-only fan-in runner, or separate replay verifier. This
 explicit downstream state-to-state contract is the sole approved reason for
-`mfm-state-portfolio` to depend on the Bitcoin and EVM state packages; state packages remain
+`mfm-state-portfolio` to depend on the Bitcoin and EVM pure-domain contracts; pure domains remain
 independent of adapters, transports, app assembly, and runtime config.
 
 ## Typed Program Authoring

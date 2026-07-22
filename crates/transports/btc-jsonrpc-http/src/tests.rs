@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use mfm_btc_capabilities::{
+use mfm_bitcoin::{
     BitcoinAddress, BitcoinBalanceCollectionRequest, BitcoinBalanceSession, BitcoinCapabilityError,
     BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceIdentity,
 };

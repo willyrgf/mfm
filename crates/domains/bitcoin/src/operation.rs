@@ -1,13 +1,11 @@
-#![warn(missing_docs)]
 //! Deterministic one-state aggregate Bitcoin balance collection topology.
 
+use crate::state::{
+    BitcoinBalanceCollectionConfig, BitcoinBalanceCollectionReceipt, CollectBitcoinBalancesState,
+};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{NoContext, Operation, OperationExpansion, StateKey};
 use mfm_program_derive::OperationOutput;
-pub use mfm_states_btc::{
-    BitcoinBalanceCollectionConfig, BitcoinBalanceCollectionReceipt, BitcoinBalanceSnapshotFact,
-    CollectBitcoinBalancesState,
-};
 
 const OP_VERSION: &str = "mfm.bitcoin.operation.balance_collection.v1";
 
@@ -77,4 +75,5 @@ mfm_certify::define_program_descriptor_registry! {
 }
 
 #[cfg(test)]
+#[path = "operation_tests.rs"]
 mod tests;

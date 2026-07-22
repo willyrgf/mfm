@@ -12,7 +12,7 @@ pub(crate) fn register_btc_collector_runners(
     adapter_factory: &mfm_runtime::RunnerFactoryBinding,
 ) -> Result<(), PublicError> {
     runtime_config.initialize_bitcoin_routes();
-    let session: Arc<dyn mfm_btc_capabilities::BitcoinBalanceSession> = runtime_config;
+    let session: Arc<dyn mfm_bitcoin::BitcoinBalanceSession> = runtime_config;
     mfm_adapters_btc_jsonrpc::register_bitcoin_jsonrpc_runners(
         registry,
         artifacts,
