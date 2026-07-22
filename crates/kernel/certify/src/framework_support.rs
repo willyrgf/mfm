@@ -85,7 +85,7 @@ pub(super) fn framework_side_effect_verify_descriptor(
         output_schema_id,
         output_semantic_type_id,
         context,
-        effect_kind: mfm_effects::ReadExternal::descriptor()
+        effect_kind: ReadExternal::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
         runner: "read_external",
@@ -550,7 +550,7 @@ pub(super) fn render_value_lineage_ref(
 
 pub(super) fn effect_descriptor_for_kind(
     effect_kind: &EffectKind,
-) -> Result<mfm_effects::EffectDescriptor> {
+) -> Result<mfm_capabilities::EffectDescriptor> {
     let pure = Pure::descriptor().map_err(|error| lower(error.to_string()))?;
     if effect_kind == &pure.kind {
         return Ok(pure);
@@ -559,7 +559,7 @@ pub(super) fn effect_descriptor_for_kind(
     if effect_kind == &side_effect.kind {
         return Ok(side_effect);
     }
-    let read = mfm_effects::ReadExternal::descriptor().map_err(|error| lower(error.to_string()))?;
+    let read = ReadExternal::descriptor().map_err(|error| lower(error.to_string()))?;
     if effect_kind == &read.kind {
         return Ok(read);
     }

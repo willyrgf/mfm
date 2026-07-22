@@ -8,8 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, NoCaps};
-use mfm_effects::{ApplySideEffect, EffectClass, EffectSpec, Pure};
+use mfm_capabilities::{
+    ApplySideEffect, CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, EffectClass,
+    EffectSpec, NoCaps, Pure, ReadExternal,
+};
 use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind,

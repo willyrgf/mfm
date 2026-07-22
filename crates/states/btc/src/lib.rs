@@ -225,7 +225,7 @@ impl StateSpec for CollectBitcoinBalancesState {
     type Context = NoContext;
     type Input = ();
     type Output = BitcoinBalanceCollectionReceipt;
-    type Effect = mfm_effects::ReadExternal;
+    type Effect = mfm_capabilities::ReadExternal;
     type Caps = (BitcoinBalanceCollectionReadCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {

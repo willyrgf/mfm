@@ -1,17 +1,34 @@
 #![warn(missing_docs)]
-//! Capability contracts for the MFM typed kernel.
+//! Effect and capability contracts for the MFM typed kernel.
+//!
+//! Effects classify the executable behavior a typed state may use. Their
+//! framework-owned marker types are sealed: downstream crates may name them
+//! in `StateSpec::Effect`, but cannot add effect classes or implement
+//! [`EffectSpec`] manually.
 //!
 //! Capability descriptors are extensible: domain crates may implement
 //! [`CapabilitySpec`] for their own token types. Capability-set evidence is
 //! framework-owned and sealed: domain crates compose capabilities with the
 //! closed tuple implementations in this crate, but cannot implement
 //! [`CapabilitySetFor`] manually to widen an effect's authority.
+//!
+//! ```compile_fail
+//! struct CustomEffect;
+//!
+//! impl mfm_capabilities::EffectSpec for CustomEffect {
+//!     fn kind() -> std::result::Result<mfm_ids::EffectKind, mfm_capabilities::EffectError> {
+//!         unimplemented!()
+//!     }
+//!     fn class() -> mfm_capabilities::EffectClass { unimplemented!() }
+//!     fn name() -> &'static str { "custom" }
+//! }
+//! ```
 
 use std::collections::BTreeSet;
 
-pub use mfm_effects::{ApplySideEffect, EffectClass, EffectSpec, Pure, ReadExternal};
-use mfm_ids::NameToken;
+use mfm_canonical::sha256_digest_bytes;
 pub use mfm_ids::{CapabilityKind, CapabilityVersion};
+use mfm_ids::{DigestAlgorithm, EffectKind, EffectVersion, NameToken};
 pub use provider_diagnostic::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
@@ -23,6 +40,129 @@ mod tests;
 
 /// Result type for capability descriptor helpers.
 pub type Result<T> = std::result::Result<T, CapabilityError>;
+
+/// Error returned by effect descriptor construction.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectError {
+    /// Effect identity or version construction failed.
+    #[error("effect identity error: {0}")]
+    Identity(String),
+}
+
+/// Pure deterministic computation with no external capability access.
+pub enum Pure {}
+
+/// External read effect; observes outside systems only through declared read
+/// capabilities and replayable facts.
+pub enum ReadExternal {}
+
+/// External mutation effect governed by the side-effect ledger protocol.
+pub enum ApplySideEffect {}
+
+/// Sealed effect marker descriptor contract.
+pub trait EffectSpec: private::EffectSealed + Send + Sync + 'static {
+    /// Returns the stable effect kind id.
+    fn kind() -> std::result::Result<EffectKind, EffectError>;
+
+    /// Returns the effect descriptor version.
+    fn version() -> std::result::Result<EffectVersion, EffectError> {
+        effect_version()
+    }
+
+    /// Returns the semantic effect class.
+    fn class() -> EffectClass;
+
+    /// Returns the stable framework-owned effect name.
+    fn name() -> &'static str;
+
+    /// Returns the stable effect descriptor.
+    fn descriptor() -> std::result::Result<EffectDescriptor, EffectError> {
+        Ok(EffectDescriptor {
+            kind: Self::kind()?,
+            version: Self::version()?,
+            class: Self::class(),
+            name: Self::name(),
+        })
+    }
+}
+
+/// Stable effect descriptor used by state descriptors and certification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectDescriptor {
+    /// Stable effect kind id.
+    pub kind: EffectKind,
+    /// Effect descriptor contract version.
+    pub version: EffectVersion,
+    /// Semantic effect class.
+    pub class: EffectClass,
+    /// Stable framework-owned effect name.
+    pub name: &'static str,
+}
+
+/// Framework-owned effect classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EffectClass {
+    /// Pure deterministic computation.
+    Pure,
+    /// External read through declared read/support capabilities.
+    ReadExternal,
+    /// External mutation with side-effect ledger authority.
+    ApplySideEffect,
+}
+
+impl EffectClass {
+    /// Returns the stable descriptor string for this effect class.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pure => "pure",
+            Self::ReadExternal => "read_external",
+            Self::ApplySideEffect => "apply_side_effect",
+        }
+    }
+}
+
+macro_rules! impl_effect_spec {
+    ($ty:ty, $class:expr, $name:literal) => {
+        impl private::EffectSealed for $ty {}
+
+        impl EffectSpec for $ty {
+            fn kind() -> std::result::Result<EffectKind, EffectError> {
+                effect_kind($name)
+            }
+
+            fn class() -> EffectClass {
+                $class
+            }
+
+            fn name() -> &'static str {
+                $name
+            }
+        }
+    };
+}
+
+impl_effect_spec!(Pure, EffectClass::Pure, "pure");
+impl_effect_spec!(ReadExternal, EffectClass::ReadExternal, "read_external");
+impl_effect_spec!(
+    ApplySideEffect,
+    EffectClass::ApplySideEffect,
+    "apply_side_effect"
+);
+
+fn effect_kind(name: &'static str) -> std::result::Result<EffectKind, EffectError> {
+    let digest = sha256_digest_bytes(format!("effect-kind:mfm.kernel.effect:{name}").as_bytes());
+    EffectKind::new(
+        "mfm.kernel.effect",
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        digest,
+    )
+    .map_err(|error| EffectError::Identity(error.to_string()))
+}
+
+fn effect_version() -> std::result::Result<EffectVersion, EffectError> {
+    EffectVersion::new("mfm.effect.v1").map_err(|error| EffectError::Identity(error.to_string()))
+}
 
 /// Error returned by capability descriptor and role validation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -365,8 +505,10 @@ fn invalid_set(effect: &'static str, message: &'static str) -> CapabilityError {
 }
 
 mod private {
+    use super::EffectSpec;
     use super::{ExternalMutationAuthorityRole, ReadExternalRole, SupportRole};
-    use mfm_effects::EffectSpec;
+
+    pub trait EffectSealed {}
 
     pub trait RoleSealed {}
 

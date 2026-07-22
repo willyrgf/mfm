@@ -2390,7 +2390,6 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
- "mfm-effects",
  "mfm-events",
  "mfm-evm-capabilities",
  "mfm-evm-signing",
@@ -2454,7 +2453,7 @@ dependencies = [
 name = "mfm-capabilities"
 version = "0.1.0"
 dependencies = [
- "mfm-effects",
+ "mfm-canonical",
  "mfm-ids",
  "serde",
  "serde_json",
@@ -2468,7 +2467,6 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-effects",
  "mfm-events",
  "mfm-facts",
  "mfm-ids",
@@ -2480,15 +2478,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "trybuild",
-]
-
-[[package]]
-name = "mfm-effects"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-ids",
- "thiserror",
 ]
 
 [[package]]
@@ -2679,7 +2668,6 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-effects",
  "mfm-facts",
  "mfm-ids",
  "mfm-program-derive",
@@ -2758,7 +2746,6 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
- "mfm-effects",
  "mfm-events",
  "mfm-facts",
  "mfm-ids",
@@ -2836,7 +2823,6 @@ dependencies = [
  "alloy-primitives",
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-effects",
  "mfm-evm-capabilities",
  "mfm-facts",
  "mfm-ids",
@@ -2861,7 +2847,6 @@ dependencies = [
  "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-effects",
  "mfm-facts",
  "mfm-ids",
  "mfm-program",
@@ -2880,7 +2865,7 @@ dependencies = [
  "alloy-primitives",
  "hex",
  "mfm-canonical",
- "mfm-effects",
+ "mfm-capabilities",
  "mfm-evm-capabilities",
  "mfm-evm-signing",
  "mfm-facts",

@@ -2,7 +2,7 @@
 name = "mfm-capabilities"
 version = "0.1.0"
 edition = "2021"
-description = "Capability contracts for the MFM typed kernel"
+description = "Effect and capability contracts for the MFM typed kernel"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -20,7 +20,7 @@ path = "src/lib.rs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-mfm-effects = { path = "../effects" }
+mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
 
 [dev-dependencies]

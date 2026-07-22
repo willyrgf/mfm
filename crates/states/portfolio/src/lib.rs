@@ -37,8 +37,7 @@ pub use selection::{
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::NoCaps;
-use mfm_effects::{Pure, ReadExternal};
+use mfm_capabilities::{NoCaps, Pure, ReadExternal};
 use mfm_facts::FactQueryReadCapability;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
 use mfm_portfolio_model::portfolio::{

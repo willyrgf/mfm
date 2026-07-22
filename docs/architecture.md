@@ -609,7 +609,7 @@ placement.
 Kernel crates point inward only through the kernel dependency DAG:
 
 ```text
-ids -> canonical -> values -> effects/capabilities
+ids -> canonical -> values -> capabilities
   -> program/spec -> certify/events/store/manual-auth -> runtime/replay
 ```
 

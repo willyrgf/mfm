@@ -2,7 +2,7 @@
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
-use mfm_effects::ApplySideEffect;
+use mfm_capabilities::ApplySideEffect;
 use mfm_evm_capabilities::{
     EvmBlockAnchor, EvmFeeInputs, EvmNetworkBinding,
     EvmObservedTransaction as CapabilityTransaction, EvmReceipt as CapabilityReceipt,

@@ -34,7 +34,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-effects = { path = "../effects" }
 mfm-program-derive = { path = "../program-derive" }
 mfm-store = { path = "../store", features = ["test-support"] }
 tokio = { workspace = true }

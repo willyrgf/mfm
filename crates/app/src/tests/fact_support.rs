@@ -105,7 +105,7 @@ impl StateSpec for AppFactState {
     type Context = NoContext;
     type Input = AppFactValue;
     type Output = AppFactValue;
-    type Effect = mfm_effects::ReadExternal;
+    type Effect = mfm_capabilities::ReadExternal;
     type Caps = (AppFactReadCap,);
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {

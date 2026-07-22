@@ -10,7 +10,7 @@ impl mfm_program::StateSpec for StateWithoutRunner {
     type Context = mfm_program::NoContext;
     type Input = TryValue;
     type Output = TryValue;
-    type Effect = mfm_effects::Pure;
+    type Effect = mfm_capabilities::Pure;
     type Caps = mfm_capabilities::NoCaps;
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {

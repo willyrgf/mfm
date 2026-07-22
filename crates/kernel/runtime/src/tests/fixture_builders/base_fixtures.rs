@@ -130,7 +130,7 @@ pub(in crate::tests::support) fn fixture() -> Fixture {
             .expect("render input digest"),
         root: render_input_root,
     };
-    let framework_effect = mfm_effects::Pure::descriptor().expect("framework effect");
+    let framework_effect = mfm_capabilities::Pure::descriptor().expect("framework effect");
     let render_state_kind = StateKind::new(
         "mfm.framework.state",
         "render_public_outputs",

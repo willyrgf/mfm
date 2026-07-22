@@ -39,7 +39,7 @@ impl mfm_program::StateSpec for TryPureState {
     type Context = mfm_program::NoContext;
     type Input = TryValue;
     type Output = TryValue;
-    type Effect = mfm_effects::Pure;
+    type Effect = mfm_capabilities::Pure;
     type Caps = mfm_capabilities::NoCaps;
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
@@ -120,7 +120,7 @@ macro_rules! impl_try_side_effect_state {
             type Context = mfm_program::NoContext;
             type Input = TryValue;
             type Output = TryValue;
-            type Effect = mfm_effects::ApplySideEffect;
+            type Effect = mfm_capabilities::ApplySideEffect;
             type Caps = (TryMutationCap,);
 
             fn kind() -> mfm_program::Result<mfm_ids::StateKind> {

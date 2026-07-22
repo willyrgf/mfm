@@ -483,7 +483,7 @@ impl StateSpec for CollectEvmBalancesState {
     type Context = NoContext;
     type Input = ();
     type Output = EvmBalanceCollectionReceipt;
-    type Effect = mfm_effects::ReadExternal;
+    type Effect = mfm_capabilities::ReadExternal;
     type Caps = (EvmReadCapability,);
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {

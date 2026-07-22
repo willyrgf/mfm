@@ -46,7 +46,7 @@ pub(super) fn append_runtime_retention_lifecycle_node(
         &input_cell,
     )
     .expect("input binding");
-    let pure = mfm_effects::Pure::descriptor().expect("pure effect");
+    let pure = mfm_capabilities::Pure::descriptor().expect("pure effect");
     let receipt_schema =
         spec::retention_manifest_receipt_schema_id().expect("retention receipt schema");
     let receipt_semantic =
@@ -170,7 +170,7 @@ pub(super) fn append_runtime_complete_lifecycle_node(
         &input_cell,
     )
     .expect("input binding");
-    let pure = mfm_effects::Pure::descriptor().expect("pure effect");
+    let pure = mfm_capabilities::Pure::descriptor().expect("pure effect");
     let receipt_schema = spec::complete_run_receipt_schema_id().expect("complete receipt schema");
     let receipt_semantic =
         spec::complete_run_receipt_semantic_type_id().expect("complete receipt semantic");
@@ -286,7 +286,7 @@ pub(super) fn append_runtime_resolve_saga_terminal_lifecycle_node(
         spec::framework_config_ref("resolve_saga_terminal", &node_id).expect("resolve config ref");
     let input_binding = spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
         .expect("input binding");
-    let pure = mfm_effects::Pure::descriptor().expect("pure effect");
+    let pure = mfm_capabilities::Pure::descriptor().expect("pure effect");
     let receipt_schema =
         spec::resolve_saga_terminal_receipt_schema_id().expect("resolve receipt schema");
     let receipt_semantic =

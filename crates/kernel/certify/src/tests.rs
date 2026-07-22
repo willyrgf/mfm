@@ -1,6 +1,7 @@
 use super::*;
-use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole, NoCaps, ReadExternalRole};
-use mfm_effects::ReadExternal;
+use mfm_capabilities::{
+    CapabilitySpec, ExternalMutationAuthorityRole, NoCaps, ReadExternal, ReadExternalRole,
+};
 use mfm_facts::MfmFactType as _;
 use mfm_ids::{
     AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, ContextRef,

@@ -13,8 +13,10 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, NoCaps};
-use mfm_effects::{ApplySideEffect, EffectDescriptor, EffectSpec, Pure, ReadExternal};
+use mfm_capabilities::{
+    ApplySideEffect, CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, EffectDescriptor,
+    EffectSpec, NoCaps, Pure, ReadExternal,
+};
 pub use mfm_facts as facts;
 use mfm_ids::{
     AdapterKind, AdapterVersion, CellId, ContentDigest, ContextDescriptorId, ContextRef,

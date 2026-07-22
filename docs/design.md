@@ -112,7 +112,7 @@ boundary.
 Kernel dependency direction remains strict:
 
 ```text
-ids -> canonical -> values -> effects/capabilities
+ids -> canonical -> values -> capabilities
   -> program/spec -> certify/events/store -> runtime/replay
 ```
 

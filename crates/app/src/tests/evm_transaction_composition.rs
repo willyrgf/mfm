@@ -74,7 +74,7 @@ macro_rules! impl_projection_state_spec {
             type Context = NoContext;
             type Input = $input;
             type Output = $output;
-            type Effect = mfm_effects::Pure;
+            type Effect = mfm_capabilities::Pure;
             type Caps = mfm_capabilities::NoCaps;
 
             fn kind() -> mfm_program::Result<mfm_ids::StateKind> {

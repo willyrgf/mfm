@@ -3,7 +3,7 @@
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_effects::ReadExternal;
+use mfm_capabilities::ReadExternal;
 use mfm_evm_capabilities::{
     EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
     EvmSessionEvidence, EVM_CALL_MAX_RESPONSE_BYTES, EVM_CODE_MAX_RESPONSE_BYTES,

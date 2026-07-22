@@ -61,7 +61,7 @@ impl StateSpec for SequenceTransactionState {
     type Context = NoContext;
     type Input = SequenceTransactionInput;
     type Output = EvmTransactionAction;
-    type Effect = mfm_effects::Pure;
+    type Effect = mfm_capabilities::Pure;
     type Caps = NoCaps;
 
     fn kind() -> mfm_program::Result<mfm_ids::StateKind> {

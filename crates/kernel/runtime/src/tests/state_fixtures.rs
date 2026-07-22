@@ -236,7 +236,7 @@ impl StateSpec for CertifierState {
     type Context = NoContext;
     type Input = CertifierValue;
     type Output = CertifierValue;
-    type Effect = mfm_effects::Pure;
+    type Effect = mfm_capabilities::Pure;
     type Caps = mfm_capabilities::NoCaps;
 
     fn kind() -> mfm_program::Result<StateKind> {
@@ -286,7 +286,7 @@ impl StateSpec for RuntimeContextSourceState {
     type Context = RuntimeContractContext;
     type Input = CertifierValue;
     type Output = RuntimeContextOutput;
-    type Effect = mfm_effects::Pure;
+    type Effect = mfm_capabilities::Pure;
     type Caps = mfm_capabilities::NoCaps;
 
     fn kind() -> mfm_program::Result<StateKind> {
@@ -340,7 +340,7 @@ impl StateSpec for RuntimeContextConsumerState {
     type Context = RuntimeContractContext;
     type Input = RuntimeContextOutput;
     type Output = CertifierValue;
-    type Effect = mfm_effects::Pure;
+    type Effect = mfm_capabilities::Pure;
     type Caps = mfm_capabilities::NoCaps;
 
     fn kind() -> mfm_program::Result<StateKind> {
@@ -478,7 +478,7 @@ macro_rules! impl_runtime_read_state {
             type Context = NoContext;
             type Input = $input;
             type Output = FixtureOutputValue;
-            type Effect = mfm_effects::ReadExternal;
+            type Effect = mfm_capabilities::ReadExternal;
             type Caps = (RuntimeReadCap,);
 
             fn kind() -> mfm_program::Result<StateKind> {
@@ -550,7 +550,7 @@ macro_rules! impl_runtime_side_effect_state {
             type Context = NoContext;
             type Input = $input;
             type Output = FixtureOutputValue;
-            type Effect = mfm_effects::ApplySideEffect;
+            type Effect = mfm_capabilities::ApplySideEffect;
             type Caps = (RuntimeMutationCap,);
 
             fn kind() -> mfm_program::Result<StateKind> {
@@ -670,7 +670,7 @@ impl StateSpec for RuntimeTailState {
     type Context = NoContext;
     type Input = FixtureOutputValue;
     type Output = FixtureOutputValue;
-    type Effect = mfm_effects::Pure;
+    type Effect = mfm_capabilities::Pure;
     type Caps = mfm_capabilities::NoCaps;
 
     fn kind() -> mfm_program::Result<StateKind> {
