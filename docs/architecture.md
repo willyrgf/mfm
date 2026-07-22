@@ -56,7 +56,7 @@ whose single fact-producing read state returns a checked receipt with its ordere
 `evm.balance_snapshot` facts in one settlement. The typed Bitcoin/EVM receipt vectors flow directly
 into one store-backed selection state; assembly
 receives only rehydrated and identity-reverified facts. The complete snapshot graph is the sole
-public objective, `mfm.portfolio/snapshot@2`.
+public objective, `mfm.portfolio/snapshot@1`.
 
 `mfm-bitcoin` is the single pure Bitcoin package. Its private `model`, `capability`, `state`, and
 `operation` modules point only downward in that order, while the crate root explicitly exports the
@@ -89,7 +89,7 @@ snapshot assembly, and report projection. Its one production draft helper binds 
 wallet-to-symbol relations, and distinct EVM sources per network before graph expansion. The app
 registers the needed runners and certification descriptors, strictly resolves one target-keyed
 `PortfolioConfig` at admission, and exposes that exact graph only through
-`mfm.portfolio/snapshot@2`.
+`mfm.portfolio/snapshot@1`.
 
 The snapshot operation registry composes the Bitcoin and EVM child registry functions, then adds
 only the report operation's own states and operations. Parent registries must never repeat a child

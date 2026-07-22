@@ -113,7 +113,7 @@ async fn run_start_recognizes_the_snapshot_entry_point_before_target_resolution(
         .oneshot(json_post(
             "/v1/runs/start",
             json!({
-                "entry_point": "mfm.portfolio/snapshot@2",
+                "entry_point": "mfm.portfolio/snapshot@1",
                 "target": "acme/primary"
             }),
         ))

@@ -29,11 +29,11 @@ the current row for each target. Run start supplies an exact entry-point id plus
 resolves that current row before calling operation builders and records target/schema/digest as
 launch evidence. The resulting typed draft and certified spec contain concrete values.
 
-The sole public objective is `mfm.portfolio/snapshot@2`. Its REST request has exactly these fields:
+The sole public objective is `mfm.portfolio/snapshot@1`. Its REST request has exactly these fields:
 
 ```json
 {
-  "entry_point": "mfm.portfolio/snapshot@2",
+  "entry_point": "mfm.portfolio/snapshot@1",
   "target": "acme/primary"
 }
 ```

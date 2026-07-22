@@ -46,7 +46,7 @@ fn test_ops_list_json_output() {
     let data = verify_success_response(&String::from_utf8(output.stdout).expect("UTF-8 output"));
     let entry_points = data["entry_points"].as_array().expect("entry-points array");
     assert_eq!(entry_points.len(), 1);
-    assert_eq!(entry_points[0], "mfm.portfolio/snapshot@2");
+    assert_eq!(entry_points[0], "mfm.portfolio/snapshot@1");
 }
 
 fn json_cli_error_without_database(args: &[&str]) -> (Option<i32>, ErrorResponse) {

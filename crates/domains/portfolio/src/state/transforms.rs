@@ -277,7 +277,7 @@ pub(super) fn assemble_snapshot(
     Ok(snapshot)
 }
 
-/// Projects the version-1 canonical portfolio report from a version-2 snapshot.
+/// Projects the canonical portfolio report from the current snapshot.
 pub(super) fn project_report_from_snapshot(
     snapshot: PortfolioSnapshot,
 ) -> StateResult<PortfolioReport> {

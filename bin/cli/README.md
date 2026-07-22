@@ -435,7 +435,7 @@ mfm_cli --output-format json ops list
 ```
 
 JSON output returns plain string ids under `entry_points`. The production surface contains exactly
-one entry point, `mfm.portfolio/snapshot@2`; that exact versioned id is the complete discovery
+one entry point, `mfm.portfolio/snapshot@1`; that exact versioned id is the complete discovery
 surface.
 
 ### `setup import`, `setup list`, and `setup export`
@@ -518,7 +518,7 @@ setup changes target configuration without changing the entry-point registry.
 For example:
 
 ```sh
-mfm_cli run start mfm.portfolio/snapshot@2 acme/primary
+mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
 ```
 
 The target selects only its current `PortfolioConfig`. It cannot select collector policies, child

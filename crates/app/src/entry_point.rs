@@ -12,7 +12,7 @@ use crate::{
     RunLaunchRequest,
 };
 
-const PORTFOLIO_SNAPSHOT_ID: &str = "mfm.portfolio/snapshot@2";
+const PORTFOLIO_SNAPSHOT_ID: &str = "mfm.portfolio/snapshot@1";
 const ENTRY_POINT_IDS: &[&str] = &[PORTFOLIO_SNAPSHOT_ID];
 
 /// Returns the exact compiled entry-point discovery surface.

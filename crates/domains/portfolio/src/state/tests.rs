@@ -121,13 +121,13 @@ fn output_projection_configs_carry_no_version_policy() {
         serde_json::to_value(AssembleSnapshotConfig::new(sample_portfolio()).expect("config"))
             .expect("snapshot config serializes");
     assert!(snapshot_config.get("snapshot_version").is_none());
-    snapshot_config["snapshot_version"] = serde_json::json!(2);
+    snapshot_config["snapshot_version"] = serde_json::json!("unsupported");
     assert!(serde_json::from_value::<AssembleSnapshotConfig>(snapshot_config).is_err());
 
     let mut report_config =
         serde_json::to_value(ProjectReportConfig::default()).expect("report config serializes");
     assert_eq!(report_config, serde_json::json!({}));
-    report_config["report_version"] = serde_json::json!(2);
+    report_config["report_version"] = serde_json::json!("unsupported");
     assert!(serde_json::from_value::<ProjectReportConfig>(report_config).is_err());
 }
 
@@ -181,7 +181,7 @@ fn store_selected_evm_holding_assembles_totals_and_exact_network_pin() {
     assert_eq!(snapshot.network_pins.len(), 1);
     assert_eq!(snapshot.network_pins[0].network_id, "ethereum-mainnet");
     let mut unsupported_snapshot = snapshot.clone();
-    unsupported_snapshot.schema_version = 3;
+    unsupported_snapshot.schema_version = u64::MAX;
     assert!(project_report_from_snapshot(unsupported_snapshot).is_err());
 
     let report = project_report_from_snapshot(snapshot).expect("report");

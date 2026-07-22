@@ -3,18 +3,18 @@
 MFM exposes one portfolio workflow:
 
 ```text
-mfm.portfolio/snapshot@2
+mfm.portfolio/snapshot@1
 ```
 
 Start it with one stable target:
 
 ```sh
-mfm_cli run start mfm.portfolio/snapshot@2 acme/primary
+mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
 ```
 
 Import a `PortfolioConfig` through setup first. Its intrinsic `portfolio_id` becomes the target,
 so `portfolio_id = "acme/primary"` is selected with `acme/primary` on CLI or with
-`{"entry_point":"mfm.portfolio/snapshot@2","target":"acme/primary"}` over REST. Only that exact
+`{"entry_point":"mfm.portfolio/snapshot@1","target":"acme/primary"}` over REST. Only that exact
 versioned snapshot objective is published.
 
 For a runnable token-only setup, import
@@ -78,8 +78,8 @@ portfolio pins reuse the same number/hash value.
 The root returns `PortfolioPublicOutputs` with exactly `snapshot` and `report`. It preserves zero
 holdings, exposes direct quote totals, and does not expose receipt entries, source keys, fact
 identities, artifact references, provider evidence, scan bounds, or runtime routes.
-The snapshot emits `schema_version: 2`; the unchanged report emits `schema_version: 1`. Version
-selection is not a request or certified-state policy.
+The snapshot and report both emit `schema_version: 1`. Version selection is not a request or
+certified-state policy.
 
 After admission current configuration is not run authority. Resume, replay, status, stream
 inspection, and public-output rendering use the certified spec and retained evidence. EVM-adapter

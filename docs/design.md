@@ -190,7 +190,7 @@ persists opaque canonical bytes plus target/schema/digest; target is the primary
 history, revision selector, digest lookup, cursor, or knowledge of setup kinds or domain types.
 
 Run start accepts one exact entry-point id and one target. The sole public entry point is
-`mfm.portfolio/snapshot@2`, whose target is a `PortfolioId` such as `acme/primary`. The target
+`mfm.portfolio/snapshot@1`, whose target is a `PortfolioId` such as `acme/primary`. The target
 contains no collector policy, child config, runtime route, read bound, collect/reuse switch, or
 report-only switch. App assembly loads that target's current row, requires the expected schema,
 verifies canonical bytes and digest, revalidates semantic config, verifies the embedded

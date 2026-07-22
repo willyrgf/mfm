@@ -354,7 +354,7 @@ mod tests {
         )
         .expect("failure");
         let entry_point = mfm_events::v1::EntryPointLaunchEvidence::new(
-            "mfm.portfolio/snapshot@2",
+            "mfm.portfolio/snapshot@1",
             vec![mfm_events::v1::ConfiguredTargetEvidence::new(
                 mfm_ids::StableAuthorKey::new("test/primary").expect("target"),
                 mfm_ids::SchemaId::new(

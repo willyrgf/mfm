@@ -2,7 +2,7 @@
 //! Typed application assembly for certified MFM runs.
 //!
 //! `mfm-app` is the typed boundary used by binaries and process adapters. Its sole published
-//! objective is `mfm.portfolio/snapshot@2`, selected with one target-keyed portfolio config. This
+//! objective is `mfm.portfolio/snapshot@1`, selected with one target-keyed portfolio config. This
 //! crate resolves the current target, plans, certifies, stages launch material, and wires typed
 //! services for start, resume, replay, and public-output rendering. Production assembly registers
 //! EVM balance collection only as a child of the portfolio objective; transaction submission and

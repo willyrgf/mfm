@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "mfm.portfolio";
 const ADAPTER_NAME: &str = "typed-portfolio";
-const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v2";
+const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v1";
 
 /// Returns the typed portfolio adapter kind.
 pub fn portfolio_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {

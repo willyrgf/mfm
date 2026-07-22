@@ -46,9 +46,9 @@ use crate::{HoldingSourceConfig, NetworkConfig, PortfolioConfig, ValidatedPortfo
 
 const OP_NAMESPACE: &str = "mfm.portfolio";
 const OP_KIND_NAME: &str = "snapshot";
-const OP_VERSION: &str = "mfm.portfolio.operation.snapshot.v2";
+const OP_VERSION: &str = "mfm.portfolio.operation.snapshot.v1";
 const REPORT_OP_KIND_NAME: &str = "report";
-const REPORT_OP_VERSION: &str = "mfm.portfolio.operation.report.v2";
+const REPORT_OP_VERSION: &str = "mfm.portfolio.operation.report.v1";
 const ROOT_SCOPE: &str = "portfolio_snapshot";
 const OPERATION_KEY: &str = "portfolio_snapshot";
 const REPORT_OPERATION_KEY: &str = "portfolio_report";
@@ -274,7 +274,7 @@ fn holding_fact_descriptors() -> mfm_program::Result<SelectHoldingsFactDescripto
 /// Builds one complete typed portfolio snapshot program draft.
 ///
 /// The draft binds exactly one [`PortfolioPublicOutputs`] value. Application ingress uses this
-/// exact helper after resolving the sole `mfm.portfolio/snapshot@2` portfolio reference; it does
+/// exact helper after resolving the sole `mfm.portfolio/snapshot@1` portfolio reference; it does
 /// not maintain a parallel app-owned graph builder.
 pub fn portfolio_snapshot_program_draft(
     config: PortfolioConfig,

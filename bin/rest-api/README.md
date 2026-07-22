@@ -218,11 +218,11 @@ delegates current-target resolution, planning, certification, admission, and ver
 app assembly.
 
 The endpoint shape is an `entry_point`, `target`, and optional `invocation_key` JSON object. The
-only accepted entry point is `mfm.portfolio/snapshot@2`:
+only accepted entry point is `mfm.portfolio/snapshot@1`:
 
 ```json
 {
-  "entry_point": "mfm.portfolio/snapshot@2",
+  "entry_point": "mfm.portfolio/snapshot@1",
   "target": "acme/primary"
 }
 ```

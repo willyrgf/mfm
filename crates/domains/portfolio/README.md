@@ -16,7 +16,7 @@ PortfolioSnapshotOperation(normalized PortfolioConfig)
 ```
 
 `portfolio_snapshot_program_draft` and `portfolio_snapshot_program_launch_plan` build the same
-certified graph. App ingress uses that one graph for `mfm.portfolio/snapshot@2` after resolving one
+certified graph. App ingress uses that one graph for `mfm.portfolio/snapshot@1` after resolving one
 target-keyed current `PortfolioConfig`; the app has no parallel graph builder. The two typed family
 receipt vectors flow directly into `SelectHoldingsState`, so collector settlement is the
 selection barrier without a generic fan-in state. Assembly consumes no direct family observation.

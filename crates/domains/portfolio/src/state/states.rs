@@ -25,7 +25,7 @@ impl StateSpec for SelectHoldingsState {
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        StateVersion::new("mfm.portfolio.state.select_holdings.v2")
+        StateVersion::new("mfm.portfolio.state.select_holdings.v1")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
@@ -93,7 +93,7 @@ impl StateSpec for AssembleSnapshotState {
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        StateVersion::new("mfm.portfolio.state.assemble_snapshot.v2")
+        StateVersion::new("mfm.portfolio.state.assemble_snapshot.v1")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
@@ -134,7 +134,7 @@ impl StateSpec for ProjectReportState {
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        StateVersion::new("mfm.portfolio.state.project_report.v2")
+        StateVersion::new("mfm.portfolio.state.project_report.v1")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 

@@ -51,7 +51,7 @@ Typed state programs are the semantic executable surface. Ops plan typed program
 ## Current workflow surface
 
 The compiled application exposes exactly one public run objective:
-`mfm.portfolio/snapshot@2`. Its root composes reusable Bitcoin and EVM collector operations, then
+`mfm.portfolio/snapshot@1`. Its root composes reusable Bitcoin and EVM collector operations, then
 passes their typed receipts to one store-backed portfolio report operation. EVM contract validation
 and transaction submission remain reusable library/test foundations, but production app
 certification, runner, and replay assembly does not register them.

@@ -113,7 +113,7 @@ fn start_args<'a>(
         "json",
         "run",
         "start",
-        "mfm.portfolio/snapshot@2",
+        "mfm.portfolio/snapshot@1",
         target,
         "--invocation-key",
         invocation_key,
@@ -136,7 +136,7 @@ async fn admission_evidence(store: &PostgresStore, run_id: &mfm_ids::RunId) -> A
         .expect("run admission evidence");
     assert_eq!(
         admitted.entry_point.entry_point_id.as_str(),
-        "mfm.portfolio/snapshot@2"
+        "mfm.portfolio/snapshot@1"
     );
     assert_eq!(admitted.entry_point.configured_targets.len(), 1);
     let source = &admitted.entry_point.configured_targets[0];
@@ -168,7 +168,7 @@ async fn admit_configured_target_without_driving(
 ) -> mfm_ids::RunId {
     let request = mfm_app::prepare_entry_point_run_launch(
         store,
-        "mfm.portfolio/snapshot@2",
+        "mfm.portfolio/snapshot@1",
         target,
         &mfm_app::production_certification_registry().expect("production certification registry"),
         store.load_store_scope_id().await.expect("store scope"),
@@ -232,7 +232,7 @@ async fn configured_target_cli_and_rest_enforce_executable_authority_and_nonterm
     let entry_points = entry_points["data"]["entry_points"]
         .as_array()
         .expect("CLI entry-point list");
-    assert_eq!(entry_points, &[json!("mfm.portfolio/snapshot@2")]);
+    assert_eq!(entry_points, &[json!("mfm.portfolio/snapshot@1")]);
 
     let directory = TempDir::new().expect("temporary setup directory");
     let oversized_path = directory.path().join("oversized.toml");
@@ -361,7 +361,7 @@ async fn configured_target_cli_and_rest_enforce_executable_authority_and_nonterm
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "entry_point": "mfm.portfolio/snapshot@2",
+                        "entry_point": "mfm.portfolio/snapshot@1",
                         "target": TARGET,
                         "invocation_key": STABLE_INVOCATION_KEY,
                     })
