@@ -1,4 +1,4 @@
-/// Comprehensive tests for keystore_v3 public API
+/// Comprehensive tests for the current keystore public API.
 ///
 /// These tests validate all public methods and ensure the API works correctly
 /// for external consumers using only public interfaces.

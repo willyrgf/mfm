@@ -31,33 +31,31 @@ fn test_keystore_file_corruption_handling() {
 }
 
 #[test]
-fn test_keystore_version_handling() {
+fn test_v1_writer_and_unsupported_version_fail_closed_without_rewrite() {
     let temp_dir = tempdir().unwrap();
     let keystore_path = temp_dir.path().join("version_test.keystore");
+    let (keystore, _) = unlocked_keystore_with_one_key(&keystore_path, "version-test");
+    assert_eq!(
+        read_keystore_json(&keystore_path)["version"],
+        serde_json::json!(1)
+    );
 
-    // Create keystore file with unsupported version
-    let fake_keystore = r#"{
-        "version": 99,
-        "kdf_params": {
-            "salt": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            "memory_kb": 8192,
-            "iterations": 2,
-            "parallelism": 1
-        },
-        "master_key_verification": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-        "entries": [],
-        "file_integrity_mac": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-    }"#;
+    rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |json| {
+        json["version"] = serde_json::json!(u8::MAX);
+        json["kdf_params"]["memory_kb"] = serde_json::json!(u32::MAX);
+    });
+    let unsupported_bytes = std::fs::read(&keystore_path).unwrap();
+    let error = Keystore::new_with_config(&keystore_path, KeystoreConfig::development())
+        .expect_err("unsupported version must fail before KDF validation");
 
-    std::fs::write(&keystore_path, fake_keystore).unwrap();
-
-    // Try to load keystore with unsupported version
-    let result = Keystore::new(&keystore_path);
-    assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        KeystoreError::InvalidInput(_)
-    ));
+    match error {
+        KeystoreError::InvalidInput(message) => {
+            assert!(message.contains("Unsupported keystore version"));
+            assert!(!message.contains("KDF memory cost"));
+        }
+        other => panic!("expected unsupported version rejection, got: {other:?}"),
+    }
+    assert_eq!(std::fs::read(&keystore_path).unwrap(), unsupported_bytes);
 }
 
 #[test]

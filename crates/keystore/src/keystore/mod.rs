@@ -39,7 +39,7 @@ use alloy_primitives::Address;
 
 pub use self::error::KeystoreError;
 
-const KEYSTORE_FILE_VERSION: u8 = 3;
+const KEYSTORE_FILE_VERSION: u8 = 1;
 const FILE_INTEGRITY_CONTEXT: &[u8] = b"mfm_keystore_file_integrity_v1";
 const DEFAULT_AUTO_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MIN_KDF_MEMORY_KB: u32 = 64;

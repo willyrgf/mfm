@@ -163,7 +163,7 @@ async fn provider_accepts_caller_owned_domain_and_purpose() {
         algorithm(),
         profile(),
         "protocol.other",
-        "operation.authorize.v9",
+        "operation.authorize.alternate",
     );
 
     let result = provider(&keystore, keystore.entry_id)
