@@ -963,13 +963,13 @@ where
         "evidence_schema_id": Evidence::schema_id()
             .map_err(|error| PlanError::Value(error.to_string()))?
             .as_str(),
-        "evidence_semantic_type_id": Evidence::semantic_id()
+        "evidence_semantic_id": Evidence::semantic_id()
             .map_err(|error| PlanError::Value(error.to_string()))?
             .as_str(),
         "plan_schema_id": Plan::schema_id()
             .map_err(|error| PlanError::Value(error.to_string()))?
             .as_str(),
-        "plan_semantic_type_id": Plan::semantic_id()
+        "plan_semantic_id": Plan::semantic_id()
             .map_err(|error| PlanError::Value(error.to_string()))?
             .as_str(),
         "fact_mode": fact_mode,

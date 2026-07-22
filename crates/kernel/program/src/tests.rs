@@ -4,7 +4,7 @@ use mfm_ids::{
     CapabilityKind, CapabilityVersion, ContextResourceKind, ContextStage, DigestBytes, SchemaId,
 };
 use mfm_program_derive::{
-    MfmConfig, MfmValue, OperationOutput as OperationOutputDerive,
+    MfmConfig, MfmFactType, MfmValue, OperationOutput as OperationOutputDerive,
     PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
 };
 use serde::{Deserialize, Serialize};
@@ -173,6 +173,34 @@ struct AlternateReadEvidence {
     label: String,
 }
 
+#[allow(clippy::duplicated_attributes)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmFactType)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "external_read_fact",
+    version = "1",
+    schema = "mfm.program.test.external_read_fact"
+)]
+#[mfm_fact(kind = "mfm.program.test.external_read")]
+#[mfm_fact(field(
+    id = "subject.amount",
+    source = "subject",
+    path = "amount",
+    value_type = "unsigned_integer",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "result.amount",
+    source = "result",
+    path = "amount",
+    value_type = "unsigned_integer",
+    exposure = "returnable"
+))]
+struct ExternalReadFact {
+    subject: LaunchValue,
+    response: ReadEvidenceValue,
+}
+
 #[test]
 fn external_read_contract_digest_binds_plan_evidence_and_fact_mode() {
     let original = external_read_contract_digest::<LaunchValue, ReadEvidenceValue, ()>()
@@ -191,6 +219,65 @@ fn external_read_contract_digest_binds_plan_evidence_and_fact_mode() {
         original,
         external_read_contract_digest::<LaunchValue, AlternateReadEvidence, ()>()
             .expect("changed evidence contract")
+    );
+    assert_eq!(
+        original,
+        canonical_digest(serde_json::json!({
+            "contract_domain": "mfm.external_read",
+            "contract_version": 2,
+            "effect_class": "read_external",
+            "evidence_schema_id": ReadEvidenceValue::schema_id()
+                .expect("evidence schema")
+                .as_str(),
+            "evidence_semantic_id": ReadEvidenceValue::semantic_id()
+                .expect("evidence semantic id")
+                .as_str(),
+            "plan_schema_id": LaunchValue::schema_id()
+                .expect("plan schema")
+                .as_str(),
+            "plan_semantic_id": LaunchValue::semantic_id()
+                .expect("plan semantic id")
+                .as_str(),
+            "fact_mode": { "kind": "none" },
+        }))
+        .expect("exact read contract")
+    );
+
+    let descriptor =
+        <ExternalReadFact as facts::MfmFactType>::descriptor().expect("fact descriptor");
+    let fact_contract = external_read_contract_digest::<
+        LaunchValue,
+        ReadEvidenceValue,
+        NonEmpty<ExternalReadFact>,
+    >()
+    .expect("fact-producing read contract");
+    assert_ne!(original, fact_contract);
+    assert_eq!(
+        fact_contract,
+        canonical_digest(serde_json::json!({
+            "contract_domain": "mfm.external_read",
+            "contract_version": 2,
+            "effect_class": "read_external",
+            "evidence_schema_id": ReadEvidenceValue::schema_id()
+                .expect("evidence schema")
+                .as_str(),
+            "evidence_semantic_id": ReadEvidenceValue::semantic_id()
+                .expect("evidence semantic id")
+                .as_str(),
+            "plan_schema_id": LaunchValue::schema_id()
+                .expect("plan schema")
+                .as_str(),
+            "plan_semantic_id": LaunchValue::semantic_id()
+                .expect("plan semantic id")
+                .as_str(),
+            "fact_mode": {
+                "kind": "non_empty",
+                "fact_descriptor_hash": facts::fact_descriptor_hash(&descriptor)
+                    .expect("fact descriptor hash")
+                    .to_string(),
+            },
+        }))
+        .expect("exact fact-producing read contract")
     );
 }
 
