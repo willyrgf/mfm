@@ -14,9 +14,9 @@ use mfm_evm::{
     EvmCapabilityPhase, EvmNetworkBinding, EvmPreparedTransaction, EvmSenderLane,
     EvmTransactionAction, EvmTransactionCapability, EvmTransactionConfig,
     EvmTransactionConfirmation, EvmTransactionIntent, EvmTransactionOutcome, EvmTransactionReceipt,
-    EvmTransactionRecoveryEvidence, EvmTransactionSession, EvmTransactionSubmission,
-    EvmUnsignedTransaction, SubmitEvmTransactionState, TransientSignedEip1559Envelope,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID, EVM_SENDER_LANE_NAMESPACE,
+    EvmTransactionRecoveryEvidence, EvmTransactionSession, EvmTransactionSessionSet,
+    EvmTransactionSubmission, EvmUnsignedTransaction, SubmitEvmTransactionState,
+    TransientSignedEip1559Envelope, EVM_SENDER_LANE_NAMESPACE,
 };
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_replay::v1 as replay;
@@ -44,52 +44,40 @@ const VERIFY_FACTORY: &str = "read_external";
 const REPLAY_VERIFIER_ID: &str = "mfm.evm.transaction.replay.v1";
 const SIGNED_ENVELOPE_CACHE_CAPACITY: usize = 32;
 
-/// Future returned by the application-owned transaction-session binder.
-pub type EvmTransactionSessionBindFuture = Pin<
-    Box<
-        dyn Future<Output = mfm_evm::EvmCapabilityResult<Arc<dyn EvmTransactionSession>>>
-            + Send
-            + 'static,
-    >,
->;
-
 /// Future returned by application-owned mutation ingress validation.
 pub type EvmMutationValidationFuture =
     Pin<Box<dyn Future<Output = mfm_runtime::Result<()>> + Send + 'static>>;
 
 type ValidateMutation =
     dyn Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> EvmMutationValidationFuture + Send + Sync;
-type BindTransactionSession =
-    dyn Fn(EvmNetworkBinding) -> EvmTransactionSessionBindFuture + Send + Sync;
 /// Process assembly required by the generic EVM transaction runner.
 #[derive(Clone)]
 pub struct EvmTransactionRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
     validate_mutation: Arc<ValidateMutation>,
-    bind_transaction_session: Arc<BindTransactionSession>,
+    transaction_sessions: Arc<dyn EvmTransactionSessionSet>,
 }
 
 impl EvmTransactionRunnerCapabilities {
     /// Creates lazy, exact-bound transaction and signer capabilities.
-    pub fn new<V, T>(
+    pub fn new<V>(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
         validate_mutation: V,
-        bind_transaction_session: T,
+        transaction_sessions: Arc<dyn EvmTransactionSessionSet>,
     ) -> Self
     where
         V: Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> EvmMutationValidationFuture
             + Send
             + Sync
             + 'static,
-        T: Fn(EvmNetworkBinding) -> EvmTransactionSessionBindFuture + Send + Sync + 'static,
     {
         Self {
             artifacts,
             signing_provider_binder,
             validate_mutation: Arc::new(validate_mutation),
-            bind_transaction_session: Arc::new(bind_transaction_session),
+            transaction_sessions,
         }
     }
 
@@ -106,12 +94,14 @@ impl EvmTransactionRunnerCapabilities {
         binding: EvmNetworkBinding,
         phase: EvmCapabilityPhase,
     ) -> mfm_runtime::Result<Arc<dyn EvmTransactionSession>> {
-        let session = (self.bind_transaction_session)(binding.clone())
+        let session = self
+            .transaction_sessions
+            .session(&binding)
             .await
             .map_err(|error| evm_capability_runtime_error(error, phase))?;
         let evidence = session.evidence();
         if !evidence.matches_binding(&binding)
-            || evidence.implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+            || evidence.implementation_id() != self.transaction_sessions.implementation_id()
         {
             return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
                 "bound EVM transaction session violated semantic authority".to_owned(),
@@ -150,7 +140,7 @@ pub fn register_evm_transaction_runner(
     let descriptor = mfm_program::state_descriptor::<SubmitEvmTransactionState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     registry.register_capability_spec::<EvmTransactionCapability>(
-        CapabilityImplementationId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)?,
+        CapabilityImplementationId::new(capabilities.transaction_sessions.implementation_id())?,
     )?;
     registry.register_capability_spec::<mfm_signing::SigningCapability>(
         CapabilityImplementationId::new(

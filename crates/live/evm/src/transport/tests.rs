@@ -107,13 +107,21 @@ fn transport() -> EvmJsonRpcTransport {
     EvmJsonRpcTransport::new().expect("transport")
 }
 
+fn endpoint(value: &str) -> EvmRpcEndpoint {
+    EvmRpcEndpoint::new(value).expect("endpoint")
+}
+
+fn authorization(value: &str) -> EvmRpcAuthorization {
+    EvmRpcAuthorization::new(value).expect("authorization")
+}
+
 async fn session(server: &TestServer) -> EvmJsonRpcSession {
     transport()
         .bind(
             binding(1),
             LocalPublicId::new("primary").expect("source"),
-            server.url.clone(),
-            Some("Bearer top-secret".to_owned()),
+            endpoint(&server.url),
+            Some(authorization("Bearer top-secret")),
         )
         .await
         .expect("bind session")
@@ -427,7 +435,7 @@ async fn sessions_share_the_process_local_source_concurrency_bound() {
         .bind(
             binding(1),
             LocalPublicId::new("primary").expect("source"),
-            server.url.clone(),
+            endpoint(&server.url),
             None,
         )
         .await
@@ -436,7 +444,7 @@ async fn sessions_share_the_process_local_source_concurrency_bound() {
         .bind(
             binding(1),
             LocalPublicId::new("primary").expect("source"),
-            server.url.clone(),
+            endpoint(&server.url),
             None,
         )
         .await
@@ -471,8 +479,8 @@ async fn redirects_are_rejected_without_contacting_or_authorizing_the_target() {
         .bind(
             binding(1),
             LocalPublicId::new("primary").expect("source"),
-            fixture.origin_url.clone(),
-            Some("Bearer top-secret".to_owned()),
+            endpoint(&fixture.origin_url),
+            Some(authorization("Bearer top-secret")),
         )
         .await
         .expect_err("redirect response must fail binding");
@@ -540,8 +548,8 @@ async fn bind_rejects_chain_mismatch_and_redacts_endpoint() {
         .bind(
             binding(1),
             LocalPublicId::new("primary").expect("source"),
-            server.url.clone(),
-            Some("Bearer top-secret".to_owned()),
+            endpoint(&server.url),
+            Some(authorization("Bearer top-secret")),
         )
         .await
         .expect_err("chain mismatch");
@@ -564,7 +572,7 @@ async fn oversized_bind_response_fails_before_body_read() {
         .bind(
             binding(1),
             LocalPublicId::new("primary").expect("source"),
-            server.url,
+            endpoint(&server.url),
             None,
         )
         .await
@@ -580,7 +588,7 @@ async fn chunked_bind_response_without_content_length_obeys_body_bound() {
         .bind(
             binding(1),
             LocalPublicId::new("primary").expect("source"),
-            server.url,
+            endpoint(&server.url),
             None,
         )
         .await
@@ -599,7 +607,7 @@ async fn stalled_bind_response_obeys_request_timeout() {
             .bind(
                 binding(1),
                 LocalPublicId::new("primary").expect("source"),
-                url,
+                endpoint(&url),
                 None,
             )
             .await
@@ -625,7 +633,7 @@ async fn response_version_and_id_are_strict() {
                 .bind(
                     binding(1),
                     LocalPublicId::new("primary").expect("source"),
-                    server.url,
+                    endpoint(&server.url),
                     None,
                 )
                 .await,
@@ -645,8 +653,8 @@ async fn http_and_json_rpc_diagnostics_exclude_bodies() {
             .bind(
                 binding(1),
                 LocalPublicId::new("primary").expect("source"),
-                server.url.clone(),
-                Some("Bearer top-secret".to_owned()),
+                endpoint(&server.url),
+                Some(authorization("Bearer top-secret")),
             )
             .await
             .expect_err("bind failure");

@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use alloy_primitives::{
     address, b256, hex, keccak256, Address, PrimitiveSignature, TxKind, B256, U256,
 };
-use mfm_adapters_evm::{register_evm_transaction_runner, EvmTransactionRunnerCapabilities};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_certify::CertificationRegistry;
@@ -15,9 +14,10 @@ use mfm_evm::{
     evm_sender_lane_resource_claim, EvmBlockAnchor, EvmBlockSelector, EvmFeeInputs,
     EvmNetworkBinding, EvmObservedTransaction, EvmReceipt, EvmReceiptStatus, EvmSessionEvidence,
     EvmSessionFuture, EvmTransactionAction, EvmTransactionConfig, EvmTransactionEstimate,
-    EvmTransactionOutcome, EvmTransactionSession, SubmitEvmTransactionState,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmTransactionOutcome, EvmTransactionSession, EvmTransactionSessionSet,
+    SubmitEvmTransactionState, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
+use mfm_evm_live::{register_evm_transaction_runner, EvmTransactionRunnerCapabilities};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, InputBindingNodeRef, NoContext, PublicOutputKey,
     PureState, RemediationNodeParams, RemediationUnresolved, RootBuilder, ScopeKey, SeedKey,
@@ -350,7 +350,7 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
         .replay_broker_for_test(&run_id)
         .await
         .expect("transaction replay broker");
-    mfm_adapters_evm::verify_evm_transaction_replay(&broker)
+    mfm_evm_live::verify_evm_transaction_replay(&broker)
         .expect("explicit transaction foundation replay verifier");
 }
 
@@ -510,7 +510,6 @@ fn transaction_runners(
     let side_effect_factory = test_factory_binding(&runners, "apply_side_effect");
     let verify_factory = test_factory_binding(&runners, "read_external");
     let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
-    let bind_session = Arc::clone(&session);
     let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
         "mfm.test.deterministic-signer",
         move |_signer_ref| {
@@ -540,15 +539,7 @@ fn transaction_runners(
                     }
                 })
             },
-            move |binding| {
-                let session = Arc::clone(&bind_session);
-                Box::pin(async move {
-                    if !session.evidence.matches_binding(&binding) {
-                        return Err(provider_failure());
-                    }
-                    Ok(session as Arc<dyn EvmTransactionSession>)
-                })
-            },
+            Arc::new(TransactionSessions { session }),
         ),
         &side_effect_factory,
         &verify_factory,
@@ -565,6 +556,28 @@ struct TransactionSession {
     submit_response_unavailable: AtomicBool,
     observation_outage: AtomicU8,
     submitted: Mutex<Vec<Vec<u8>>>,
+}
+
+struct TransactionSessions {
+    session: Arc<TransactionSession>,
+}
+
+impl EvmTransactionSessionSet for TransactionSessions {
+    fn implementation_id(&self) -> &str {
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    }
+
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmTransactionSession>> {
+        Box::pin(async move {
+            if !self.session.evidence.matches_binding(binding) {
+                return Err(provider_failure());
+            }
+            Ok(Arc::clone(&self.session) as Arc<dyn EvmTransactionSession>)
+        })
+    }
 }
 
 impl TransactionSession {

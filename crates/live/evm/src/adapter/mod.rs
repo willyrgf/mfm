@@ -1,9 +1,6 @@
-#![warn(missing_docs)]
 //! Runtime and replay bindings for the four reusable EVM balance, transaction, and validation
 //! states. This adapter owns no operation topology or application entry point.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_capabilities::ProviderDiagnosticCode;
@@ -12,8 +9,8 @@ use mfm_evm::{
     evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, CollectEvmBalancesState,
     EvmCapabilityError, EvmCapabilityFailureDisposition, EvmCapabilityPhase,
     EvmContractValidationEvidence, EvmContractValidationEvidenceBuilder, EvmContractValidationPlan,
-    EvmInvalidRequest, EvmNetworkBinding, EvmReadCapability, EvmReadSession,
-    ValidateEvmContractState, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmInvalidRequest, EvmNetworkBinding, EvmReadCapability, EvmReadSession, EvmReadSessionSet,
+    ValidateEvmContractState,
 };
 use mfm_runtime::{
     CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry, ExternalReadExecution,
@@ -29,49 +26,27 @@ pub use balance_collection::verify_evm_balance_collection_replay;
 pub use transaction::{
     is_evm_transaction_replay_intent, register_evm_transaction_runner,
     verify_evm_transaction_replay, EvmMutationValidationFuture, EvmTransactionRunnerCapabilities,
-    EvmTransactionSessionBindFuture,
 };
 
 pub(crate) const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";
 const READ_FACTORY: &str = "read_external";
 
-/// Future returned by the application-owned EVM read-session binder.
-pub type EvmReadSessionBindFuture = Pin<
-    Box<
-        dyn Future<Output = mfm_evm::EvmCapabilityResult<Arc<dyn EvmReadSession>>> + Send + 'static,
-    >,
->;
-
-/// Future returned by the application-owned EVM read-route validator.
-pub type EvmReadRouteValidationFuture =
-    Pin<Box<dyn Future<Output = mfm_evm::EvmCapabilityResult<()>> + Send + 'static>>;
-
-type ValidateEvmReadRoute = dyn Fn(EvmNetworkBinding) -> EvmReadRouteValidationFuture + Send + Sync;
-type BindEvmReadSession = dyn Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync;
-
 /// Shared process resources required by reusable EVM read states.
 #[derive(Clone)]
 pub struct EvmReadRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    validate_evm_read_route: Arc<ValidateEvmReadRoute>,
-    bind_evm_read_session: Arc<BindEvmReadSession>,
+    sessions: Arc<dyn EvmReadSessionSet>,
 }
 
 impl EvmReadRunnerCapabilities {
-    /// Creates one lazy source-bound capability assembly for all EVM reads.
-    pub fn new<V, B>(
+    /// Creates one source-bound capability assembly for all EVM reads.
+    pub fn new(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-        validate_evm_read_route: V,
-        bind_evm_read_session: B,
-    ) -> Self
-    where
-        V: Fn(EvmNetworkBinding) -> EvmReadRouteValidationFuture + Send + Sync + 'static,
-        B: Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync + 'static,
-    {
+        sessions: Arc<dyn EvmReadSessionSet>,
+    ) -> Self {
         Self {
             artifacts,
-            validate_evm_read_route: Arc::new(validate_evm_read_route),
-            bind_evm_read_session: Arc::new(bind_evm_read_session),
+            sessions,
         }
     }
 
@@ -79,16 +54,16 @@ impl EvmReadRunnerCapabilities {
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm::EvmCapabilityResult<()> {
-        (self.validate_evm_read_route)(binding).await
+        self.sessions.validate_binding(&binding).await
     }
 
     pub(crate) async fn bind(
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_evm::EvmCapabilityResult<Arc<dyn EvmReadSession>> {
-        let session = (self.bind_evm_read_session)(binding.clone()).await?;
+        let session = self.sessions.session(&binding).await?;
         if !session.evidence().matches_binding(&binding)
-            || session.evidence().implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+            || session.evidence().implementation_id() != self.sessions.implementation_id()
         {
             return Err(EvmCapabilityError::InvalidRequest {
                 reason: EvmInvalidRequest::SessionAuthorityMismatch,
@@ -105,7 +80,7 @@ pub fn register_evm_balance_runners(
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
-    register_evm_read_foundation(registry, adapter_factory)?;
+    register_evm_read_foundation(registry, capabilities.sessions.as_ref(), adapter_factory)?;
     require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_state_runner_with_factory::<CollectEvmBalancesState>(
@@ -127,7 +102,7 @@ pub fn register_evm_validation_runner(
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
-    register_evm_read_foundation(registry, adapter_factory)?;
+    register_evm_read_foundation(registry, capabilities.sessions.as_ref(), adapter_factory)?;
     require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_state_runner_with_factory::<ValidateEvmContractState>(
@@ -142,10 +117,11 @@ pub fn register_evm_validation_runner(
 
 fn register_evm_read_foundation(
     registry: &mut ErasedRunnerRegistry,
+    sessions: &dyn EvmReadSessionSet,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
     registry.register_capability_spec::<EvmReadCapability>(CapabilityImplementationId::new(
-        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+        sessions.implementation_id(),
     )?)?;
     require_factory(adapter_factory, ADAPTER_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
@@ -326,6 +302,57 @@ fn evm_state_runtime_error(error: mfm_evm::EvmStateError) -> mfm_runtime::Runtim
 
 pub(crate) fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+#[cfg(test)]
+struct TestReadSessionSet {
+    session: Arc<dyn EvmReadSession>,
+    validation_error: Option<EvmCapabilityError>,
+    validations: Arc<std::sync::atomic::AtomicUsize>,
+    binds: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl EvmReadSessionSet for TestReadSessionSet {
+    fn implementation_id(&self) -> &str {
+        mfm_evm::EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    }
+
+    fn validate_binding<'a>(
+        &'a self,
+        _binding: &'a EvmNetworkBinding,
+    ) -> mfm_evm::EvmSessionFuture<'a, ()> {
+        use std::sync::atomic::Ordering;
+
+        self.validations.fetch_add(1, Ordering::SeqCst);
+        let result = self.validation_error.clone().map_or(Ok(()), Err);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn session<'a>(
+        &'a self,
+        _binding: &'a EvmNetworkBinding,
+    ) -> mfm_evm::EvmSessionFuture<'a, Arc<dyn EvmReadSession>> {
+        use std::sync::atomic::Ordering;
+
+        self.binds.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(Ok(Arc::clone(&self.session))))
+    }
+}
+
+#[cfg(test)]
+fn test_read_session_set(
+    session: Arc<dyn EvmReadSession>,
+    validation_error: Option<EvmCapabilityError>,
+    validations: Arc<std::sync::atomic::AtomicUsize>,
+    binds: Arc<std::sync::atomic::AtomicUsize>,
+) -> Arc<dyn EvmReadSessionSet> {
+    Arc::new(TestReadSessionSet {
+        session,
+        validation_error,
+        validations,
+        binds,
+    })
 }
 
 #[cfg(test)]

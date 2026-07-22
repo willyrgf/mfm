@@ -11,6 +11,7 @@ use mfm_evm::{
     EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmContractCallCheck,
     EvmContractValidationConfig, EvmContractValidationTarget, EvmSessionEvidence, EvmSessionFuture,
     EVM_CODE_MAX_RESPONSE_BYTES, EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_program::{StateSpec, ValidatedConfig};
 
@@ -100,15 +101,13 @@ async fn wrong_session_binding_fails_before_using_validation_authority() {
     )
     .expect("requested binding");
     let session = Arc::new(CountingReadSession::with_chain_id(2));
-    let bound_session = Arc::clone(&session);
-    let capabilities = EvmReadRunnerCapabilities::new(
-        Arc::new(MissingArtifacts),
-        |_| Box::pin(async { Ok(()) }),
-        move |_| {
-            let session = Arc::clone(&bound_session);
-            Box::pin(async move { Ok(session as Arc<dyn EvmReadSession>) })
-        },
+    let sessions = test_read_session_set(
+        Arc::clone(&session) as Arc<dyn EvmReadSession>,
+        None,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
     );
+    let capabilities = EvmReadRunnerCapabilities::new(Arc::new(MissingArtifacts), sessions);
 
     let error = match capabilities.bind(requested).await {
         Ok(_) => panic!("wrong session binding must fail"),
@@ -129,29 +128,15 @@ async fn both_evm_read_families_share_async_route_validation_before_binding_or_r
     let route_validations = Arc::new(AtomicUsize::new(0));
     let session_binds = Arc::new(AtomicUsize::new(0));
     let session = Arc::new(CountingReadSession::with_chain_id(1));
-    let validation_counter = Arc::clone(&route_validations);
-    let bind_counter = Arc::clone(&session_binds);
-    let bound_session = Arc::clone(&session);
-    let capabilities = EvmReadRunnerCapabilities::new(
-        Arc::new(MissingArtifacts),
-        move |_| {
-            let validation_counter = Arc::clone(&validation_counter);
-            Box::pin(async move {
-                validation_counter.fetch_add(1, Ordering::SeqCst);
-                Err(EvmCapabilityError::provider_failure(
-                    mfm_evm::evm_diagnostic(ProviderDiagnosticCode::ProviderConfigurationInvalid),
-                ))
-            })
-        },
-        move |_| {
-            let bind_counter = Arc::clone(&bind_counter);
-            let bound_session = Arc::clone(&bound_session);
-            Box::pin(async move {
-                bind_counter.fetch_add(1, Ordering::SeqCst);
-                Ok(bound_session as Arc<dyn EvmReadSession>)
-            })
-        },
+    let sessions = test_read_session_set(
+        Arc::clone(&session) as Arc<dyn EvmReadSession>,
+        Some(EvmCapabilityError::provider_failure(
+            mfm_evm::evm_diagnostic(ProviderDiagnosticCode::ProviderConfigurationInvalid),
+        )),
+        Arc::clone(&route_validations),
+        Arc::clone(&session_binds),
     );
+    let capabilities = EvmReadRunnerCapabilities::new(Arc::new(MissingArtifacts), sessions);
     let validation_state = <ValidateEvmContractState as StateSpec>::new(
         ValidatedConfig::new(
             EvmContractValidationConfig::new(

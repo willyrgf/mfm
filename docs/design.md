@@ -475,9 +475,9 @@ last-write ordering selects one occurrence without scaling hydration with histor
 content, mixed frontiers, malformed cardinality, tampering, unexpected receipts, or incomplete
 coverage fail closed. The
 report operation assembles only the selected store material, rechecks exact config-derived
-coverage, and projects the structured report. EVM collection replay belongs only to
-`mfm-adapters-evm`; portfolio replay verifies selection, snapshot, and report. Both use retained
-evidence without a live route. Public-facts CLI/REST is not portfolio selection authority.
+coverage, and projects the structured report. EVM collection replay belongs only to the private
+adapter in `mfm-evm-live`; portfolio replay verifies selection, snapshot, and report. Both use
+retained evidence without a live route. Public-facts CLI/REST is not portfolio selection authority.
 
 ## Certified Saga Semantics
 

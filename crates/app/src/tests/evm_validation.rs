@@ -3,14 +3,14 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
-use mfm_adapters_evm::{register_evm_validation_runner, EvmReadRunnerCapabilities};
 use mfm_certify::CertificationRegistry;
 use mfm_evm::{
     evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
     EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
-    EvmNetworkBinding, EvmReadSession, EvmSessionEvidence, EvmSessionFuture,
+    EvmNetworkBinding, EvmReadSession, EvmReadSessionSet, EvmSessionEvidence, EvmSessionFuture,
     ValidateEvmContractState, VerifiedEvmContract, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
+use mfm_evm_live::{register_evm_validation_runner, EvmReadRunnerCapabilities};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, RootBuilder, ScopeKey,
     SeedKey, StateKey, StateRegistryBuilder,
@@ -76,7 +76,7 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
         .replay_broker_for_test(&run_id)
         .await
         .expect("validation replay broker");
-    mfm_adapters_evm::verify_evm_validation_replay(&broker)
+    mfm_evm_live::verify_evm_validation_replay(&broker)
         .expect("explicit validation foundation replay verifier");
     assert_eq!(live_reads.load(Ordering::SeqCst), 3);
 }
@@ -102,8 +102,7 @@ async fn contract_validation_validates_its_async_route_before_admission() {
         &mut runners,
         EvmReadRunnerCapabilities::new(
             Arc::new(store.clone()),
-            |_binding| Box::pin(async move { Err(missing_provider_failure()) }),
-            |_binding| Box::pin(async move { Err(missing_provider_failure()) }),
+            Arc::new(ValidationSessions { live_reads: None }),
         ),
         &read_factory,
         &adapter_factory,
@@ -202,15 +201,9 @@ fn validation_runners(
         &mut runners,
         EvmReadRunnerCapabilities::new(
             Arc::new(store.clone()),
-            |binding| Box::pin(async move { validate_binding(&binding) }),
-            move |binding| {
-                let live_reads = Arc::clone(&live_reads);
-                Box::pin(async move {
-                    validate_binding(&binding)?;
-                    Ok(Arc::new(ValidationSession::new(binding, live_reads))
-                        as Arc<dyn EvmReadSession>)
-                })
-            },
+            Arc::new(ValidationSessions {
+                live_reads: Some(live_reads),
+            }),
         ),
         &read_factory,
         &adapter_factory,
@@ -242,6 +235,42 @@ fn missing_provider_failure() -> EvmCapabilityError {
 struct ValidationSession {
     evidence: EvmSessionEvidence,
     live_reads: Arc<AtomicUsize>,
+}
+
+struct ValidationSessions {
+    live_reads: Option<Arc<AtomicUsize>>,
+}
+
+impl EvmReadSessionSet for ValidationSessions {
+    fn implementation_id(&self) -> &str {
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    }
+
+    fn validate_binding<'a>(&'a self, binding: &'a EvmNetworkBinding) -> EvmSessionFuture<'a, ()> {
+        Box::pin(async move {
+            if self.live_reads.is_none() {
+                return Err(missing_provider_failure());
+            }
+            validate_binding(binding)
+        })
+    }
+
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmReadSession>> {
+        Box::pin(async move {
+            self.validate_binding(binding).await?;
+            let live_reads = self
+                .live_reads
+                .as_ref()
+                .expect("validated live read counter");
+            Ok(Arc::new(ValidationSession::new(
+                binding.clone(),
+                Arc::clone(live_reads),
+            )) as Arc<dyn EvmReadSession>)
+        })
+    }
 }
 
 impl ValidationSession {

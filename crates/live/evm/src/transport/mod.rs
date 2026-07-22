@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Bounded, source-stable EVM JSON-RPC sessions.
 //!
 //! One transport owns the bounded HTTP pool and process-local concurrency
@@ -10,7 +9,7 @@
 //! ```no_run
 //! use mfm_evm::EvmNetworkBinding;
 //! use mfm_ids::LocalPublicId;
-//! use mfm_transports_evm::EvmJsonRpcTransport;
+//! use mfm_evm_live::transport::{EvmJsonRpcTransport, EvmRpcEndpoint};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let binding = EvmNetworkBinding::new(LocalPublicId::new("reth-dev")?, 31337)?;
@@ -18,7 +17,7 @@
 //! let _session = transport.bind(
 //!     binding,
 //!     LocalPublicId::new("local")?,
-//!     "http://127.0.0.1:8545".to_owned(),
+//!     EvmRpcEndpoint::new("http://127.0.0.1:8545")?,
 //!     None,
 //! ).await?;
 //! # Ok(())
@@ -37,9 +36,10 @@ use mfm_capabilities::{
 };
 use mfm_evm::{
     evm_diagnostic, source_mismatch_error, EvmBlockAnchor, EvmBlockSelector, EvmCall,
-    EvmCapabilityError, EvmCode, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
-    EvmReadSession, EvmReceipt, EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence,
-    EvmSessionFuture, EvmTransactionEstimate, EvmTransactionPlacement, EvmTransactionSession,
+    EvmCapabilityError, EvmCode, EvmFeeInputs, EvmInvalidRequest, EvmNetworkBinding,
+    EvmObservedTransaction, EvmReadSession, EvmReadSessionSet, EvmReceipt, EvmReceiptLog,
+    EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture, EvmTransactionEstimate,
+    EvmTransactionPlacement, EvmTransactionSession, EvmTransactionSessionSet,
     EVM_CODE_MAX_RESPONSE_BYTES, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_ids::LocalPublicId;
@@ -82,7 +82,59 @@ impl RpcResponseBodyLimit {
 /// Result type for EVM transport setup and exchange.
 pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
 
+/// Checked resolved endpoint for one EVM JSON-RPC source.
 #[derive(Clone)]
+pub struct EvmRpcEndpoint {
+    url: reqwest::Url,
+}
+
+impl EvmRpcEndpoint {
+    /// Admits one HTTP(S) endpoint without embedded credentials, query, or fragment material.
+    pub fn new(endpoint: impl AsRef<str>) -> TransportResult<Self> {
+        let url = reqwest::Url::parse(endpoint.as_ref())
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(EvmTransportError::InvalidConfiguration);
+        }
+        Ok(Self { url })
+    }
+}
+
+impl fmt::Debug for EvmRpcEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EvmRpcEndpoint(<redacted>)")
+    }
+}
+
+/// Consumed resolved authorization header for one EVM JSON-RPC source.
+pub struct EvmRpcAuthorization {
+    value: HeaderValue,
+}
+
+impl EvmRpcAuthorization {
+    /// Admits one non-empty HTTP authorization header value.
+    pub fn new(value: impl AsRef<str>) -> TransportResult<Self> {
+        if value.as_ref().is_empty() {
+            return Err(EvmTransportError::InvalidConfiguration);
+        }
+        let value = HeaderValue::from_str(value.as_ref())
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        Ok(Self { value })
+    }
+}
+
+impl fmt::Debug for EvmRpcAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EvmRpcAuthorization(<redacted>)")
+    }
+}
+
 struct BoundEndpoint {
     url: reqwest::Url,
     authorization: Option<HeaderValue>,
@@ -130,14 +182,18 @@ impl EvmJsonRpcTransport {
         &self,
         binding: EvmNetworkBinding,
         source_ref: LocalPublicId,
-        rpc_url: String,
-        authorization: Option<String>,
+        endpoint: EvmRpcEndpoint,
+        authorization: Option<EvmRpcAuthorization>,
     ) -> TransportResult<EvmJsonRpcSession> {
         let source_limit = self.source_limit(&source_ref)?;
-        let endpoint = checked_endpoint(rpc_url, authorization, source_limit)?;
+        let endpoint = BoundEndpoint {
+            url: endpoint.url,
+            authorization: authorization.map(|authorization| authorization.value),
+            source_limit,
+        };
         let unbound = EvmJsonRpcSession {
             shared: Arc::clone(&self.shared),
-            endpoint,
+            endpoint: Arc::new(endpoint),
             evidence: EvmSessionEvidence::new(
                 &binding,
                 source_ref.clone(),
@@ -185,7 +241,7 @@ impl EvmJsonRpcTransport {
 #[derive(Clone)]
 pub struct EvmJsonRpcSession {
     shared: Arc<SharedHttpRuntime>,
-    endpoint: BoundEndpoint,
+    endpoint: Arc<BoundEndpoint>,
     evidence: EvmSessionEvidence,
 }
 
@@ -623,6 +679,59 @@ impl EvmTransactionSession for EvmJsonRpcSession {
     }
 }
 
+impl EvmReadSessionSet for EvmJsonRpcSession {
+    fn implementation_id(&self) -> &str {
+        self.evidence.implementation_id()
+    }
+
+    fn validate_binding<'a>(&'a self, binding: &'a EvmNetworkBinding) -> EvmSessionFuture<'a, ()> {
+        Box::pin(async move { self.validate_singleton_binding(binding) })
+    }
+
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmReadSession>> {
+        Box::pin(async move {
+            self.validate_singleton_binding(binding)?;
+            Ok(Arc::new(self.clone()) as Arc<dyn EvmReadSession>)
+        })
+    }
+}
+
+impl EvmTransactionSessionSet for EvmJsonRpcSession {
+    fn implementation_id(&self) -> &str {
+        self.evidence.implementation_id()
+    }
+
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmTransactionSession>> {
+        Box::pin(async move {
+            self.validate_singleton_binding(binding)?;
+            Ok(Arc::new(self.clone()) as Arc<dyn EvmTransactionSession>)
+        })
+    }
+}
+
+impl EvmJsonRpcSession {
+    fn validate_singleton_binding(
+        &self,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm::EvmCapabilityResult<()> {
+        if self.evidence.matches_binding(binding)
+            && self.evidence.implementation_id() == EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+        {
+            Ok(())
+        } else {
+            Err(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::SessionAuthorityMismatch,
+            })
+        }
+    }
+}
+
 impl fmt::Debug for EvmJsonRpcSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EvmJsonRpcSession")
@@ -630,30 +739,6 @@ impl fmt::Debug for EvmJsonRpcSession {
             .field("evidence", &self.evidence)
             .finish()
     }
-}
-
-fn checked_endpoint(
-    rpc_url: String,
-    authorization: Option<String>,
-    source_limit: Arc<Semaphore>,
-) -> TransportResult<BoundEndpoint> {
-    let url = reqwest::Url::parse(&rpc_url).map_err(|_| EvmTransportError::InvalidConfiguration)?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err(EvmTransportError::InvalidConfiguration);
-    }
-    let authorization = authorization
-        .map(|value| {
-            HeaderValue::from_str(&value).map_err(|_| EvmTransportError::InvalidConfiguration)
-        })
-        .transpose()?;
-    Ok(BoundEndpoint {
-        url,
-        authorization,
-        source_limit,
-    })
 }
 
 fn validate_rpc_response(mut body: Value, operation: LocalPublicId) -> TransportResult<Value> {

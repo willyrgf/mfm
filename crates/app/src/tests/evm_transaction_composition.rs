@@ -6,20 +6,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B256, U256};
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
-use mfm_adapters_evm::{
-    register_evm_transaction_runner, register_evm_validation_runner, EvmReadRunnerCapabilities,
-    EvmTransactionRunnerCapabilities,
-};
 use mfm_certify::CertificationRegistry;
 use mfm_events::v1 as events;
 use mfm_evm::{
     evm_diagnostic, evm_sender_lane_resource_claim, EvmBlockAnchor, EvmBlockSelector, EvmCall,
     EvmCapabilityError, EvmCode, EvmContractCallCheck, EvmContractValidationConfig,
     EvmContractValidationTarget, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
-    EvmReadSession, EvmReceipt, EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture,
-    EvmTransactionAction, EvmTransactionConfig, EvmTransactionEstimate, EvmTransactionOutcome,
-    EvmTransactionResult, EvmTransactionSession, EvmTransactionSuccess, SubmitEvmTransactionState,
-    ValidateEvmContractState, VerifiedEvmContract, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    EvmReadSession, EvmReadSessionSet, EvmReceipt, EvmReceiptStatus, EvmSessionEvidence,
+    EvmSessionFuture, EvmTransactionAction, EvmTransactionConfig, EvmTransactionEstimate,
+    EvmTransactionOutcome, EvmTransactionResult, EvmTransactionSession, EvmTransactionSessionSet,
+    EvmTransactionSuccess, SubmitEvmTransactionState, ValidateEvmContractState,
+    VerifiedEvmContract, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
+use mfm_evm_live::{
+    register_evm_transaction_runner, register_evm_validation_runner, EvmReadRunnerCapabilities,
+    EvmTransactionRunnerCapabilities,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, PureState, RootBuilder,
@@ -316,9 +317,9 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
         .replay_broker_for_test(&run_id)
         .await
         .expect("failed composition replay broker");
-    mfm_adapters_evm::verify_evm_transaction_replay(&broker)
+    mfm_evm_live::verify_evm_transaction_replay(&broker)
         .expect("explicit transaction foundation replay verifier");
-    mfm_adapters_evm::verify_evm_validation_replay(&broker)
+    mfm_evm_live::verify_evm_validation_replay(&broker)
         .expect("explicit validation foundation replay verifier");
     verify_composition_pure_states(&broker);
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 0);
@@ -392,9 +393,9 @@ async fn assert_composition_replays(
         .replay_broker_for_test(&run_id)
         .await
         .expect("composition replay broker");
-    mfm_adapters_evm::verify_evm_transaction_replay(&broker)
+    mfm_evm_live::verify_evm_transaction_replay(&broker)
         .expect("explicit transaction foundation replay verifier");
-    mfm_adapters_evm::verify_evm_validation_replay(&broker)
+    mfm_evm_live::verify_evm_validation_replay(&broker)
         .expect("explicit validation foundation replay verifier");
     verify_composition_pure_states(&broker);
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 3);
@@ -684,7 +685,6 @@ fn composition_runners(
 
     let sender = world.sender;
     let transaction_session = Arc::new(CompositionTransactionSession::new(Arc::clone(&world)));
-    let bind_transaction_session = Arc::clone(&transaction_session);
     let signer = Arc::new(CompositionSigner {
         signing_key,
         sender,
@@ -723,13 +723,9 @@ fn composition_runners(
                     }
                 })
             },
-            move |binding| {
-                let transaction_session = Arc::clone(&bind_transaction_session);
-                Box::pin(async move {
-                    validate_composition_binding(&binding)?;
-                    Ok(transaction_session as Arc<dyn EvmTransactionSession>)
-                })
-            },
+            Arc::new(CompositionTransactionSessions {
+                session: transaction_session,
+            }),
         ),
         &side_effect_factory,
         &read_factory,
@@ -741,16 +737,10 @@ fn composition_runners(
         &mut runners,
         EvmReadRunnerCapabilities::new(
             artifacts,
-            |binding| Box::pin(async move { validate_composition_binding(&binding) }),
-            move |binding| {
-                let world = Arc::clone(&world);
-                let reads = Arc::clone(&live_validation_reads);
-                Box::pin(async move {
-                    validate_composition_binding(&binding)?;
-                    Ok(Arc::new(CompositionReadSession::new(binding, world, reads))
-                        as Arc<dyn EvmReadSession>)
-                })
-            },
+            Arc::new(CompositionReadSessions {
+                world,
+                reads: live_validation_reads,
+            }),
         ),
         &read_factory,
         &adapter_factory,
@@ -892,6 +882,26 @@ impl TransactionCompositionWorld {
 struct CompositionTransactionSession {
     evidence: EvmSessionEvidence,
     world: Arc<TransactionCompositionWorld>,
+}
+
+struct CompositionTransactionSessions {
+    session: Arc<CompositionTransactionSession>,
+}
+
+impl EvmTransactionSessionSet for CompositionTransactionSessions {
+    fn implementation_id(&self) -> &str {
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    }
+
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmTransactionSession>> {
+        Box::pin(async move {
+            validate_composition_binding(binding)?;
+            Ok(Arc::clone(&self.session) as Arc<dyn EvmTransactionSession>)
+        })
+    }
 }
 
 impl CompositionTransactionSession {
@@ -1054,6 +1064,35 @@ struct CompositionReadSession {
     evidence: EvmSessionEvidence,
     world: Arc<TransactionCompositionWorld>,
     reads: Arc<AtomicUsize>,
+}
+
+struct CompositionReadSessions {
+    world: Arc<TransactionCompositionWorld>,
+    reads: Arc<AtomicUsize>,
+}
+
+impl EvmReadSessionSet for CompositionReadSessions {
+    fn implementation_id(&self) -> &str {
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    }
+
+    fn validate_binding<'a>(&'a self, binding: &'a EvmNetworkBinding) -> EvmSessionFuture<'a, ()> {
+        Box::pin(async move { validate_composition_binding(binding) })
+    }
+
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmReadSession>> {
+        Box::pin(async move {
+            validate_composition_binding(binding)?;
+            Ok(Arc::new(CompositionReadSession::new(
+                binding.clone(),
+                Arc::clone(&self.world),
+                Arc::clone(&self.reads),
+            )) as Arc<dyn EvmReadSession>)
+        })
+    }
 }
 
 impl CompositionReadSession {

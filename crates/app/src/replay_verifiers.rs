@@ -117,7 +117,7 @@ fn verify_evm_balance_collection(
     broker: &ReplayBroker,
     _registry: &CertificationRegistry,
 ) -> Result<()> {
-    mfm_adapters_evm::verify_evm_balance_collection_replay(broker)
+    mfm_evm_live::verify_evm_balance_collection_replay(broker)
 }
 
 #[cfg(test)]

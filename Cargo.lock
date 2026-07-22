@@ -2324,29 +2324,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-adapters-evm"
-version = "0.1.0"
-dependencies = [
- "alloy-eips",
- "alloy-primitives",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-events",
- "mfm-evm",
- "mfm-ids",
- "mfm-program",
- "mfm-replay",
- "mfm-runtime",
- "mfm-signing",
- "mfm-spec",
- "mfm-store",
- "mfm-values",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "mfm-adapters-portfolio"
 version = "0.1.0"
 dependencies = [
@@ -2363,7 +2340,6 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "k256",
- "mfm-adapters-evm",
  "mfm-adapters-portfolio",
  "mfm-bitcoin",
  "mfm-bitcoin-live",
@@ -2372,6 +2348,7 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-evm",
+ "mfm-evm-live",
  "mfm-facts",
  "mfm-ids",
  "mfm-op-portfolio-snapshot",
@@ -2387,7 +2364,6 @@ dependencies = [
  "mfm-state-portfolio",
  "mfm-storage-postgres",
  "mfm-store",
- "mfm-transports-evm",
  "mfm-values",
  "ring",
  "serde",
@@ -2520,6 +2496,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-evm-live"
+version = "0.1.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "derive_more 1.0.0",
+ "hex",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-evm",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-replay",
+ "mfm-runtime",
+ "mfm-signing",
+ "mfm-spec",
+ "mfm-store",
+ "mfm-values",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mfm-facts"
 version = "0.1.0"
 dependencies = [
@@ -2552,6 +2556,7 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-evm",
+ "mfm-evm-live",
  "mfm-facts",
  "mfm-ids",
  "mfm-op-portfolio-snapshot",
@@ -2562,7 +2567,6 @@ dependencies = [
  "mfm-signing",
  "mfm-storage-postgres",
  "mfm-store",
- "mfm-transports-evm",
  "mfm-values",
  "reqwest",
  "serde_json",
@@ -2833,24 +2837,6 @@ dependencies = [
  "mfm-spec",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "mfm-transports-evm"
-version = "0.1.0"
-dependencies = [
- "alloy-eips",
- "alloy-primitives",
- "derive_more 1.0.0",
- "hex",
- "mfm-capabilities",
- "mfm-evm",
- "mfm-ids",
- "reqwest",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
 ]
 
 [[package]]

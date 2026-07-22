@@ -3,20 +3,17 @@
 #[test]
 fn production_app_links_only_supported_transport_crates() {
     let manifest = include_str!("../Cargo.toml");
-    for required in [
-        "mfm-adapters-portfolio",
-        "mfm-transports-evm",
-        "mfm-bitcoin-live",
-    ] {
+    for required in ["mfm-adapters-portfolio", "mfm-evm-live", "mfm-bitcoin-live"] {
         assert!(
             manifest.contains(required),
             "production app manifest must link {required}"
         );
     }
     for forbidden in [
+        concat!("mfm-adapters-", "evm"),
+        concat!("mfm-transports-", "evm"),
         "mfm-transports-exec",
         "mfm-transports-local-evm",
-        concat!("mfm-transports-evm-", "d", "cv"),
         concat!("mfm-transports-", "portfolio"),
         "mfm-transports-local-fs",
         "mfm-transports-local-keystore",
@@ -54,7 +51,7 @@ fn transport_provider_boundaries_expose_only_checked_bound_sessions() {
     assert!(evm_capabilities.contains("pub trait EvmReadSession"));
     assert!(evm_capabilities.contains("EvmTransactionCapability"));
     assert!(evm_capabilities.contains("pub trait EvmTransactionSession"));
-    let evm_transport = include_str!("../../transports/evm/src/lib.rs");
+    let evm_transport = include_str!("../../live/evm/src/transport/mod.rs");
     assert!(
         evm_transport.contains("pub struct EvmJsonRpcSession")
             && evm_transport.contains("impl EvmReadSession for EvmJsonRpcSession")
@@ -69,7 +66,7 @@ fn transport_provider_boundaries_expose_only_checked_bound_sessions() {
         chain_identity_probes, 1,
         "a session must probe chain identity exactly once while binding"
     );
-    let evm_adapter = include_str!("../../adapters/evm/src/lib.rs");
+    let evm_adapter = include_str!("../../live/evm/src/adapter/mod.rs");
     let app_evm = include_str!("../src/evm_runtime.rs");
     assert!(
         evm_adapter.contains("register_evm_transaction_runner")
@@ -78,13 +75,14 @@ fn transport_provider_boundaries_expose_only_checked_bound_sessions() {
             && evm_adapter.contains("CollectEvmBalancesState")
             && evm_adapter.contains("ValidateEvmContractState")
             && app_evm.contains("register_evm_balance_runners")
-            && app_evm.contains("bind_evm_read_session"),
+            && app_evm.contains("evm_read_sessions()"),
         "adapter foundations must remain explicit while app assembly selects EVM balance reads"
     );
     assert!(
         !app_evm.contains("register_evm_validation_runner")
             && !app_evm.contains("register_evm_transaction_runner")
-            && !app_evm.contains("bind_evm_transaction_session"),
+            && !app_evm.contains("EvmTransactionSession")
+            && !app_evm.contains("Signing"),
         "production app assembly must omit disconnected EVM validation and transaction runners"
     );
 

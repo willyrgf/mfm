@@ -22,6 +22,7 @@
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
@@ -353,6 +354,24 @@ pub trait EvmReadSession: Send + Sync {
     fn call<'a>(&'a self, request: &'a EvmCall) -> EvmSessionFuture<'a, Bytes>;
 }
 
+/// One checked source of endpoint-bound EVM read sessions.
+///
+/// A standalone session implements this as a singleton. App assembly may instead provide a routed
+/// set that resolves and caches one checked session per process-local route key.
+pub trait EvmReadSessionSet: Send + Sync {
+    /// Returns the implementation identity shared by every session in the set.
+    fn implementation_id(&self) -> &str;
+
+    /// Validates that one semantic binding can resolve to a checked session.
+    fn validate_binding<'a>(&'a self, binding: &'a EvmNetworkBinding) -> EvmSessionFuture<'a, ()>;
+
+    /// Returns the checked endpoint-bound session for one semantic binding.
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmReadSession>>;
+}
+
 /// Checked EIP-1559 fee inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvmFeeInputs {
@@ -668,6 +687,21 @@ pub trait EvmTransactionSession: Send + Sync {
         &'a self,
         selector: &'a EvmBlockSelector,
     ) -> EvmSessionFuture<'a, EvmBlockAnchor>;
+}
+
+/// One checked source of endpoint-bound EVM transaction sessions.
+///
+/// Transaction registration receives this authority separately from read-only registration, so a
+/// balance-only process never constructs mutation or signer capabilities.
+pub trait EvmTransactionSessionSet: Send + Sync {
+    /// Returns the implementation identity shared by every session in the set.
+    fn implementation_id(&self) -> &str;
+
+    /// Returns the checked endpoint-bound session for one semantic binding.
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmTransactionSession>>;
 }
 
 /// Closed invalid-request reasons.

@@ -8,6 +8,7 @@ members = [
 	"tests/integration",
 	"crates/app",
 	"crates/live/bitcoin",
+	"crates/live/evm",
 	"crates/core",
 	"crates/kernel/canonical",
 	"crates/kernel/capabilities",
@@ -25,7 +26,6 @@ members = [
 	"crates/kernel/values",
 	"crates/domains/bitcoin",
 	"crates/domains/evm",
-	"crates/adapters/evm",
 	"crates/adapters/portfolio",
 	"crates/signing",
 	"crates/signers/keystore",
@@ -33,7 +33,6 @@ members = [
 	"crates/portfolio/model",
 	"crates/states/portfolio",
 	"crates/storages/postgres",
-	"crates/transports/evm",
 	"crates/ops/portfolio-snapshot-op",
 ]
 

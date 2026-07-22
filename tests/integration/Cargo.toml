@@ -27,8 +27,8 @@ mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 mfm-storage-postgres = { path = "../../crates/storages/postgres" }
 mfm-values = { path = "../../crates/kernel/values" }
 mfm-evm = { path = "../../crates/domains/evm" }
+mfm-evm-live = { path = "../../crates/live/evm" }
 mfm-op-portfolio-snapshot = { path = "../../crates/ops/portfolio-snapshot-op" }
-mfm-transports-evm = { path = "../../crates/transports/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-portfolio-model = { path = "../../crates/portfolio/model" }
 mfm-rest-api = { path = "../../bin/rest-api" }

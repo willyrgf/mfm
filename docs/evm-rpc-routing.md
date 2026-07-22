@@ -103,7 +103,7 @@ The `CollectEvmBalancesState` reducer emits one `evm.balance_snapshot` fact per 
 `EvmBalanceCollectionReceipt`; runtime records them with evidence and completion in one atomic
 external-read settlement. The receipt carries the exact anchor, sorted sources, and verified
 content identities without copying balance response material. The live runner and evidence-only
-replay live in `mfm-adapters-evm`.
+replay live in the private adapter of `mfm-evm-live`.
 `PortfolioReportOperation` receives the typed family receipt vectors and passes the same structured
 binding to selection, which queries receipt-authorized content through the shared Bitcoin/EVM fact
 snapshot, rehydrates response artifacts, and rederives exact content identity before assembly. The
@@ -150,9 +150,10 @@ Contributor ownership:
 
 - `mfm-runtime-config` parses and selectively resolves routes and signers;
 - app assembly selects runtime resources and binds sessions;
-- `mfm-transports-evm` owns bounded JSON-RPC and typed protocol decoding;
-- `mfm-adapters-evm` owns reusable balance collection/publication, transaction, validation, and
-  evidence-only replay bindings;
+- the public `mfm_evm_live::transport` module owns bounded JSON-RPC, checked sessions, and typed
+  protocol decoding;
+- the private adapter in `mfm-evm-live` owns reusable balance collection/publication,
+  transaction, validation, and evidence-only replay bindings;
 - `mfm-adapters-portfolio` owns receipt-pinned fact-index selection and snapshot/report projection
   bindings only;
 - portfolio and reusable EVM states own their deterministic validation/reduction semantics;

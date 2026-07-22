@@ -7,7 +7,7 @@ use alloy_primitives::{
 };
 use mfm_evm::{
     EvmBlockAnchor, EvmFeeInputs, EvmObservedTransaction, EvmSessionEvidence, EvmSessionFuture,
-    EvmTransactionEstimate,
+    EvmTransactionEstimate, EvmTransactionSessionSet, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_ids::LocalPublicId;
 use mfm_signing::{
@@ -223,6 +223,32 @@ impl EvmTransactionSession for MockSession {
     }
 }
 
+struct MockTransactionSessions {
+    session: Arc<MockSession>,
+}
+
+impl EvmTransactionSessionSet for MockTransactionSessions {
+    fn implementation_id(&self) -> &str {
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    }
+
+    fn session<'a>(
+        &'a self,
+        _binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmTransactionSession>> {
+        Box::pin(async move {
+            if self.session.bind_response_invalid.load(Ordering::SeqCst) {
+                return Err(response_invalid_error());
+            }
+            Ok(Arc::clone(&self.session) as Arc<dyn EvmTransactionSession>)
+        })
+    }
+}
+
+fn mock_transaction_sessions(session: Arc<MockSession>) -> Arc<dyn EvmTransactionSessionSet> {
+    Arc::new(MockTransactionSessions { session })
+}
+
 struct FixedProvider {
     calls: AtomicUsize,
 }
@@ -341,7 +367,6 @@ fn response_invalid_error() -> EvmCapabilityError {
 }
 
 fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTransactionAdapter {
-    let bind_session = Arc::clone(&session);
     let bind_signer = Arc::clone(&signer);
     let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
         "mfm.test.deterministic-signer",
@@ -355,15 +380,7 @@ fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTra
         Arc::new(MissingArtifacts),
         signer_binder,
         |_binding, _signer_ref| Box::pin(async { Ok(()) }),
-        move |_binding| {
-            let session = Arc::clone(&bind_session);
-            Box::pin(async move {
-                if session.bind_response_invalid.load(Ordering::SeqCst) {
-                    return Err(response_invalid_error());
-                }
-                Ok(session as Arc<dyn EvmTransactionSession>)
-            })
-        },
+        mock_transaction_sessions(session),
     ))
 }
 
@@ -675,7 +692,6 @@ async fn fresh_envelope_keeps_pre_submission_failure_classification() {
 async fn signer_implementation_mismatch_fails_before_requesting_a_signature() {
     let session = Arc::new(MockSession::new(LookupMode::Missing));
     let signer = Arc::new(FixedProvider::new());
-    let bind_session = Arc::clone(&session);
     let mismatched = Arc::new(MismatchedProvider(Arc::clone(&signer)));
     let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
         "mfm.test.deterministic-signer",
@@ -689,10 +705,7 @@ async fn signer_implementation_mismatch_fails_before_requesting_a_signature() {
         Arc::new(MissingArtifacts),
         signer_binder,
         |_binding, _signer_ref| Box::pin(async { Ok(()) }),
-        move |_binding| {
-            let session = Arc::clone(&bind_session);
-            Box::pin(async move { Ok(session as Arc<dyn EvmTransactionSession>) })
-        },
+        mock_transaction_sessions(session),
     ));
 
     let error = match adapter.prepare_transaction(&intent()).await {

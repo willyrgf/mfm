@@ -13,8 +13,16 @@ use mfm_bitcoin_live::transport::{BitcoinRpcAuthentication, BitcoinRpcSession};
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
-use mfm_evm::{EvmCapabilityError, EvmNetworkBinding};
+use mfm_evm::{
+    EvmCapabilityError, EvmNetworkBinding, EvmReadSession, EvmReadSessionSet, EvmSessionFuture,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
+use mfm_evm_live::transport::{
+    EvmJsonRpcSession, EvmJsonRpcTransport, EvmRpcAuthorization, EvmRpcEndpoint, EvmTransportError,
+    TransportResult,
+};
 use mfm_ids::LocalPublicId;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::MFM_RUNTIME_CONFIG_FILE;
 
@@ -43,9 +51,14 @@ impl RuntimeConfigLoader {
 
 pub(crate) struct LiveTransportRuntime {
     runtime_config: RuntimeConfigLoader,
-    evm_transport:
-        OnceLock<mfm_transports_evm::TransportResult<mfm_transports_evm::EvmJsonRpcTransport>>,
+    evm_sessions: OnceLock<Arc<RoutedEvmReadSessions>>,
     bitcoin_sessions: OnceLock<Arc<RoutedBitcoinSessions>>,
+}
+
+struct RoutedEvmReadSessions {
+    runtime_config: RuntimeConfigLoader,
+    transport: TransportResult<EvmJsonRpcTransport>,
+    sessions: AsyncMutex<BTreeMap<(LocalPublicId, LocalPublicId), Arc<EvmJsonRpcSession>>>,
 }
 
 struct ResolvedBitcoinRoute {
@@ -67,87 +80,20 @@ impl LiveTransportRuntime {
     pub(crate) fn new(runtime_config: RuntimeConfigLoader) -> Self {
         Self {
             runtime_config,
-            evm_transport: OnceLock::new(),
+            evm_sessions: OnceLock::new(),
             bitcoin_sessions: OnceLock::new(),
         }
     }
 
-    pub(crate) async fn validate_evm_read_route(
-        &self,
-        binding: EvmNetworkBinding,
-    ) -> mfm_evm::EvmCapabilityResult<()> {
-        self.load_evm_route_async(binding).await.map(|_| ())
-    }
-
-    pub(crate) async fn bind_evm_read_session(
-        &self,
-        binding: EvmNetworkBinding,
-    ) -> mfm_evm::EvmCapabilityResult<Arc<dyn mfm_evm::EvmReadSession>> {
-        let route = self.load_evm_route_async(binding.clone()).await?;
-        self.evm_transport(&binding)?
-            .bind(
-                binding.clone(),
-                route.source_ref().clone(),
-                route.rpc_url().expose_secret().to_owned(),
-                route
-                    .auth_header()
-                    .map(|value| value.expose_secret().to_owned()),
-            )
-            .await
-            .map(|session| Arc::new(session) as Arc<dyn mfm_evm::EvmReadSession>)
-            .map_err(|error| evm_transport_capability_error(&binding, error))
-    }
-
-    fn load_evm_route(
-        &self,
-        binding: &EvmNetworkBinding,
-    ) -> mfm_evm::EvmCapabilityResult<mfm_runtime_config::EvmRpcRoute> {
-        let Some(path) = self.runtime_config.path.as_ref() else {
-            return Err(evm_provider_failure(
-                binding,
-                ProviderDiagnosticCode::ProviderConfigurationMissing,
-            ));
-        };
-        mfm_runtime_config::RuntimeConfig::load_evm_route(path, binding.network_id()).map_err(
-            |error| {
-                let code = match error.kind() {
-                    mfm_runtime_config::RuntimeConfigErrorKind::MissingFamily
-                    | mfm_runtime_config::RuntimeConfigErrorKind::MissingRoute => {
-                        ProviderDiagnosticCode::ProviderConfigurationMissing
-                    }
-                    _ => ProviderDiagnosticCode::ProviderConfigurationInvalid,
-                };
-                evm_provider_failure(binding, code)
-            },
-        )
-    }
-
-    fn evm_transport(
-        &self,
-        binding: &EvmNetworkBinding,
-    ) -> mfm_evm::EvmCapabilityResult<mfm_transports_evm::EvmJsonRpcTransport> {
-        self.evm_transport
-            .get_or_init(mfm_transports_evm::EvmJsonRpcTransport::new)
-            .clone()
-            .map_err(|error| evm_transport_capability_error(binding, error))
-    }
-
-    async fn load_evm_route_async(
-        &self,
-        binding: EvmNetworkBinding,
-    ) -> mfm_evm::EvmCapabilityResult<mfm_runtime_config::EvmRpcRoute> {
-        let runtime_config = self.runtime_config.clone();
-        let diagnostic_binding = binding.clone();
-        load_runtime_config_on_blocking_worker(move || {
-            Self::new(runtime_config).load_evm_route(&binding)
-        })
-        .await
-        .map_err(|_| {
-            evm_provider_failure(
-                &diagnostic_binding,
-                ProviderDiagnosticCode::ProviderConfigurationInvalid,
-            )
-        })?
+    pub(crate) fn evm_read_sessions(&self) -> Arc<dyn EvmReadSessionSet> {
+        let sessions = self.evm_sessions.get_or_init(|| {
+            Arc::new(RoutedEvmReadSessions {
+                runtime_config: self.runtime_config.clone(),
+                transport: EvmJsonRpcTransport::new(),
+                sessions: AsyncMutex::new(BTreeMap::new()),
+            })
+        });
+        Arc::clone(sessions) as Arc<dyn EvmReadSessionSet>
     }
 
     fn load_bitcoin_routes_optional(
@@ -170,6 +116,134 @@ impl LiveTransportRuntime {
             })
         });
         Arc::clone(session) as Arc<dyn BitcoinBalanceSession>
+    }
+}
+
+impl RoutedEvmReadSessions {
+    fn load_route_blocking(
+        runtime_config: &RuntimeConfigLoader,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm::EvmCapabilityResult<mfm_runtime_config::EvmRpcRoute> {
+        let Some(path) = runtime_config.path.as_ref() else {
+            return Err(evm_provider_failure(
+                binding,
+                ProviderDiagnosticCode::ProviderConfigurationMissing,
+            ));
+        };
+        mfm_runtime_config::RuntimeConfig::load_evm_route(path, binding.network_id()).map_err(
+            |error| {
+                let code = match error.kind() {
+                    mfm_runtime_config::RuntimeConfigErrorKind::MissingFamily
+                    | mfm_runtime_config::RuntimeConfigErrorKind::MissingRoute => {
+                        ProviderDiagnosticCode::ProviderConfigurationMissing
+                    }
+                    _ => ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                };
+                evm_provider_failure(binding, code)
+            },
+        )
+    }
+
+    async fn load_route(
+        &self,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm::EvmCapabilityResult<mfm_runtime_config::EvmRpcRoute> {
+        let runtime_config = self.runtime_config.clone();
+        let binding = binding.clone();
+        let diagnostic_binding = binding.clone();
+        load_runtime_config_on_blocking_worker(move || {
+            Self::load_route_blocking(&runtime_config, &binding)
+        })
+        .await
+        .map_err(|_| {
+            evm_provider_failure(
+                &diagnostic_binding,
+                ProviderDiagnosticCode::ProviderConfigurationInvalid,
+            )
+        })?
+    }
+
+    async fn session_for(
+        &self,
+        binding: &EvmNetworkBinding,
+    ) -> mfm_evm::EvmCapabilityResult<Arc<EvmJsonRpcSession>> {
+        let route = self.load_route(binding).await?;
+        let key = (binding.network_id().clone(), route.source_ref().clone());
+        let mut sessions = self.sessions.lock().await;
+        if let Some(session) = sessions.get(&key) {
+            return validate_evm_session(session, binding, route.source_ref())
+                .map(|()| Arc::clone(session));
+        }
+
+        let transport = self
+            .transport
+            .clone()
+            .map_err(|error| evm_transport_capability_error(binding, error))?;
+        let endpoint = EvmRpcEndpoint::new(route.rpc_url().expose_secret())
+            .map_err(|error| evm_transport_capability_error(binding, error))?;
+        let authorization = route
+            .auth_header()
+            .map(|value| EvmRpcAuthorization::new(value.expose_secret()))
+            .transpose()
+            .map_err(|error| evm_transport_capability_error(binding, error))?;
+        let session = Arc::new(
+            transport
+                .bind(
+                    binding.clone(),
+                    route.source_ref().clone(),
+                    endpoint,
+                    authorization,
+                )
+                .await
+                .map_err(|error| evm_transport_capability_error(binding, error))?,
+        );
+        validate_evm_session(&session, binding, route.source_ref())?;
+        sessions.insert(key, Arc::clone(&session));
+        Ok(session)
+    }
+
+    #[cfg(test)]
+    async fn session_count(&self) -> usize {
+        self.sessions.lock().await.len()
+    }
+}
+
+impl EvmReadSessionSet for RoutedEvmReadSessions {
+    fn implementation_id(&self) -> &str {
+        EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    }
+
+    fn validate_binding<'a>(&'a self, binding: &'a EvmNetworkBinding) -> EvmSessionFuture<'a, ()> {
+        Box::pin(async move { self.session_for(binding).await.map(|_| ()) })
+    }
+
+    fn session<'a>(
+        &'a self,
+        binding: &'a EvmNetworkBinding,
+    ) -> EvmSessionFuture<'a, Arc<dyn EvmReadSession>> {
+        Box::pin(async move {
+            self.session_for(binding)
+                .await
+                .map(|session| session as Arc<dyn EvmReadSession>)
+        })
+    }
+}
+
+fn validate_evm_session(
+    session: &EvmJsonRpcSession,
+    binding: &EvmNetworkBinding,
+    source_ref: &LocalPublicId,
+) -> mfm_evm::EvmCapabilityResult<()> {
+    let evidence = EvmReadSession::evidence(session);
+    if evidence.matches_binding(binding)
+        && evidence.source_ref() == source_ref.as_str()
+        && evidence.implementation_id() == EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+    {
+        Ok(())
+    } else {
+        Err(mfm_evm::EvmCapabilityError::InvalidRequest {
+            reason: mfm_evm::EvmInvalidRequest::SessionAuthorityMismatch,
+        })
     }
 }
 
@@ -335,14 +409,12 @@ fn evm_provider_failure(
 
 fn evm_transport_capability_error(
     binding: &EvmNetworkBinding,
-    error: mfm_transports_evm::EvmTransportError,
+    error: EvmTransportError,
 ) -> EvmCapabilityError {
     match error {
-        mfm_transports_evm::EvmTransportError::SourceMismatch { diagnostic } => {
-            EvmCapabilityError::SourceMismatch {
-                diagnostic: enrich_evm_diagnostic(binding, diagnostic),
-            }
-        }
+        EvmTransportError::SourceMismatch { diagnostic } => EvmCapabilityError::SourceMismatch {
+            diagnostic: enrich_evm_diagnostic(binding, diagnostic),
+        },
         error => EvmCapabilityError::provider_failure(enrich_evm_diagnostic(
             binding,
             error.into_provider_diagnostic(),
@@ -376,6 +448,9 @@ fn bitcoin_provider_failure(
 mod tests {
     use super::*;
     use mfm_bitcoin::{BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceIdentity};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn evm_binding() -> EvmNetworkBinding {
         EvmNetworkBinding::new(LocalPublicId::new("test-evm").expect("network"), 1)
@@ -401,8 +476,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn missing_config_preserves_evm_semantic_binding() {
         let runtime = LiveTransportRuntime::new(RuntimeConfigLoader::from_path_or_env(None));
-        let error = runtime
-            .validate_evm_read_route(evm_binding())
+        let sessions = runtime.evm_read_sessions();
+        let binding = evm_binding();
+        let error = sessions
+            .validate_binding(&binding)
             .await
             .expect_err("missing EVM configuration");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
@@ -469,8 +546,10 @@ rpc_url = "http://127.0.0.1:8545"
         let (dir, runtime) = runtime_with_config(
             "rpc_url = 'https://alice:password@example.invalid/private'\nauth_header = 'Bearer secret-token'\ninvalid = [",
         );
-        let error = runtime
-            .validate_evm_read_route(evm_binding())
+        let sessions = runtime.evm_read_sessions();
+        let binding = evm_binding();
+        let error = sessions
+            .validate_binding(&binding)
             .await
             .expect_err("malformed configuration");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
@@ -558,6 +637,64 @@ scan_timeout_seconds = 30
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn evm_router_stores_one_checked_session_per_network_and_source() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut request = [0_u8; 4096];
+                let read = socket.read(&mut request).await.expect("read request");
+                assert!(read > 0, "JSON-RPC request must not be empty");
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        let config = format!(
+            r#"
+[evm.routes.test-evm]
+source_ref = "primary"
+rpc_url = "http://{address}"
+"#
+        );
+        let (_dir, runtime) = runtime_with_config(&config);
+        let binding = evm_binding();
+        let sessions = runtime.evm_read_sessions();
+
+        assert_eq!(
+            sessions.implementation_id(),
+            EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
+        );
+        sessions
+            .validate_binding(&binding)
+            .await
+            .expect("configured EVM binding");
+        let session = sessions
+            .session(&binding)
+            .await
+            .expect("cached EVM session");
+        assert_eq!(session.evidence().source_ref(), "primary");
+
+        let routed = runtime
+            .evm_sessions
+            .get()
+            .expect("initialized routed EVM session set");
+        assert_eq!(routed.session_count().await, 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn missing_semantic_evm_route_retains_requested_binding() {
         let (_dir, runtime) = runtime_with_config(
             r#"
@@ -566,8 +703,10 @@ source_ref = "primary"
 rpc_url = "http://127.0.0.1:8545"
 "#,
         );
-        let error = runtime
-            .validate_evm_read_route(evm_binding())
+        let sessions = runtime.evm_read_sessions();
+        let binding = evm_binding();
+        let error = sessions
+            .validate_binding(&binding)
             .await
             .expect_err("semantic route is missing");
         let diagnostic = error.redacted_diagnostic().expect("diagnostic");
@@ -595,7 +734,7 @@ rpc_url = "http://127.0.0.1:8545"
         };
         let error = evm_transport_capability_error(
             &binding,
-            mfm_transports_evm::EvmTransportError::SourceMismatch { diagnostic },
+            mfm_evm_live::transport::EvmTransportError::SourceMismatch { diagnostic },
         );
 
         assert!(matches!(error, EvmCapabilityError::SourceMismatch { .. }));

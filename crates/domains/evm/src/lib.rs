@@ -13,11 +13,11 @@ mod state;
 pub use capability::{
     evm_diagnostic, source_mismatch_error, EvmBlockSelector, EvmCall, EvmCapabilityError,
     EvmCapabilityFailureDisposition, EvmCapabilityPhase, EvmCode, EvmFeeInputs, EvmInvalidRequest,
-    EvmNetworkBinding, EvmObservedTransaction, EvmReadCapability, EvmReadSession, EvmReceipt,
-    EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture,
-    EvmTransactionCapability, EvmTransactionEstimate, EvmTransactionPlacement,
-    EvmTransactionSession, Result as EvmCapabilityResult, EVM_CALL_MAX_RESPONSE_BYTES,
-    EVM_CODE_MAX_RESPONSE_BYTES, EVM_EIP1559_TRANSACTION_TYPE,
+    EvmNetworkBinding, EvmObservedTransaction, EvmReadCapability, EvmReadSession,
+    EvmReadSessionSet, EvmReceipt, EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence,
+    EvmSessionFuture, EvmTransactionCapability, EvmTransactionEstimate, EvmTransactionPlacement,
+    EvmTransactionSession, EvmTransactionSessionSet, Result as EvmCapabilityResult,
+    EVM_CALL_MAX_RESPONSE_BYTES, EVM_CODE_MAX_RESPONSE_BYTES, EVM_EIP1559_TRANSACTION_TYPE,
     EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 pub use model::{EvmBlockAnchor, EvmBlockAnchorError};

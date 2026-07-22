@@ -15,7 +15,7 @@ portfolio follows exactly the same path.
 `verify_portfolio_replay` uses only certified configs, the append-only stream, and retained
 artifacts. Bitcoin/EVM selection is recomputed from retained fact-query evidence, and the pure
 snapshot/report outputs are compared byte-for-byte. EVM collection/publication replay lives only
-in `mfm-adapters-evm`.
+in the private adapter of `mfm-evm-live`.
 
 This crate binds portfolio fact-index reads and pure projections. It does not create workflow
 topology, select runtime routes, implement JSON-RPC/ERC-20 codecs, publish family facts, or own

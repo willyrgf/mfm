@@ -16,7 +16,7 @@ use mfm_runtime::{
     RunnerIngressContext,
 };
 
-use crate::{evm_ingress_runtime_error, evm_read_runtime_error, EvmReadRunnerCapabilities};
+use super::{evm_ingress_runtime_error, evm_read_runtime_error, EvmReadRunnerCapabilities};
 
 pub(crate) const EVM_READ_CONCURRENCY_LIMIT: usize = 16;
 pub(crate) const ERC20_DECIMALS_SELECTOR: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];

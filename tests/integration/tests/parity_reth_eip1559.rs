@@ -12,12 +12,12 @@ use mfm_evm::{
     EvmNetworkBinding, EvmTransactionAction, EvmTransactionConfig, EvmTransactionIntent,
     EvmTransactionSession, EvmUnsignedTransaction, EVM_EIP1559_TRANSACTION_TYPE,
 };
+use mfm_evm_live::transport::{EvmJsonRpcTransport, EvmRpcEndpoint};
 use mfm_ids::LocalPublicId;
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SignerRef, SigningFuture,
     SigningProvider, SigningRequest, SigningResult, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
-use mfm_transports_evm::EvmJsonRpcTransport;
 use serde_json::{json, Value};
 
 const RETH_HTTP_URL_ENV: &str = "MFM_RETH_PARITY_HTTP_URL";
@@ -58,7 +58,7 @@ async fn reth_estimates_and_submits_the_same_type_two_description() {
             )
             .expect("network binding"),
             LocalPublicId::new("managed-reth").expect("source ref"),
-            rpc_url,
+            EvmRpcEndpoint::new(&rpc_url).expect("managed Reth endpoint"),
             None,
         )
         .await

@@ -11,11 +11,12 @@ use mfm_evm::{
     evm_diagnostic, reduce_evm_balance_collection, CollectEvmBalancesState, EvmBalanceAsset,
     EvmBalanceCollectionConfig, EvmBalanceCollectionPlan, EvmBalanceSource, EvmBlockAnchor,
     EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence, EvmSessionFuture,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
-use mfm_ids::LocalPublicId;
+use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, LocalPublicId};
 use mfm_program::{ReadState, StateSpec, ValidatedConfig};
 
-use crate::balance_collection::{
+use super::balance_collection::{
     collect_evm_balances, ERC20_BALANCE_OF_SELECTOR, ERC20_DECIMALS_SELECTOR,
     EVM_READ_CONCURRENCY_LIMIT,
 };
@@ -221,34 +222,49 @@ fn capabilities(
 ) -> EvmReadRunnerCapabilities {
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
         Arc::new(store::AsyncInMemoryRunStore::default());
-    EvmReadRunnerCapabilities::new(
-        artifacts,
-        |binding| {
-            Box::pin(async move {
-                if binding.network_id().as_str() == "ethereum-mainnet"
-                    && binding.expected_chain_id() == 1
-                {
-                    Ok(())
-                } else {
-                    Err(provider_failure())
-                }
-            })
-        },
-        move |_binding| {
-            let session = Arc::clone(&session);
-            let binds = Arc::clone(&binds);
-            Box::pin(async move {
-                binds.fetch_add(1, Ordering::SeqCst);
-                Ok(session as Arc<dyn EvmReadSession>)
-            })
-        },
-    )
+    let sessions = test_read_session_set(
+        session as Arc<dyn EvmReadSession>,
+        None,
+        Arc::new(AtomicUsize::new(0)),
+        binds,
+    );
+    EvmReadRunnerCapabilities::new(artifacts, sessions)
+}
+
+fn registry() -> ErasedRunnerRegistry {
+    ErasedRunnerRegistry::new(mfm_runtime::ExecutableIdentityTemplate::new(
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x42; 32]),
+        ),
+    ))
 }
 
 #[test]
 fn balance_runner_registration_keeps_factory_identity_explicit() {
     assert_eq!(READ_FACTORY, "read_external");
     assert_eq!(ADAPTER_FACTORY, "evm_jsonrpc_adapter");
+}
+
+#[test]
+fn adapter_registration_accepts_a_fake_pure_session_set() {
+    let mut registry = registry();
+    let read_factory = registry.factory_binding(
+        events::RunnerFactoryId::new(READ_FACTORY).expect("read factory identity"),
+    );
+    let adapter_factory = registry.factory_binding(
+        events::RunnerFactoryId::new(ADAPTER_FACTORY).expect("adapter factory identity"),
+    );
+    let binding =
+        EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet").expect("network"), 1)
+            .expect("binding");
+    let capabilities = capabilities(
+        Arc::new(RecordingSession::new(&binding, ANCHOR_HASH)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+
+    register_evm_balance_runners(&mut registry, capabilities, &read_factory, &adapter_factory)
+        .expect("fake-session-set registration");
 }
 
 #[tokio::test]
@@ -324,14 +340,13 @@ async fn temporary_provider_outage_blocks_the_balance_collector() {
     let session = Arc::new(UnavailableSession::new(&plan.binding().expect("binding")));
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
         Arc::new(store::AsyncInMemoryRunStore::default());
-    let capabilities = EvmReadRunnerCapabilities::new(
-        artifacts,
-        |_| Box::pin(async { Ok(()) }),
-        move |_| {
-            let session = Arc::clone(&session);
-            Box::pin(async move { Ok(session as Arc<dyn EvmReadSession>) })
-        },
+    let sessions = test_read_session_set(
+        session as Arc<dyn EvmReadSession>,
+        None,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
     );
+    let capabilities = EvmReadRunnerCapabilities::new(artifacts, sessions);
 
     let error = collect_evm_balances(&plan, &capabilities)
         .await

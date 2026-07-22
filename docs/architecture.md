@@ -383,6 +383,17 @@ runtime, replay, store, app, or adapter code. The adapter accepts only that pure
 does not know the concrete transport. The former standalone Bitcoin transport and adapter packages
 are deleted.
 
+`mfm-evm-live` is the one EVM live package. Its independently reusable, checked JSON-RPC API lives
+under `mfm_evm_live::transport`; its sibling adapter module is private and the crate root exposes
+only narrow balance, validation, transaction, and replay bindings. The public transport owns typed
+endpoint and authorization inputs, one shared bounded HTTP runtime, bind-time chain identity
+verification, strict protocol decoding, and redacted errors. It implements the pure EVM read and
+transaction session contracts without importing runtime, replay, store, app, or adapter authority.
+The private adapter accepts only pure session-set traits and cannot name the concrete transport.
+App assembly owns process-local routing and caches one checked read session per `(network_id,
+source_ref)`; production constructs only balance-read authority. The former standalone EVM
+transport and adapter packages are deleted.
+
 ### Signer
 
 Signers provide generic key material and signature capabilities.
