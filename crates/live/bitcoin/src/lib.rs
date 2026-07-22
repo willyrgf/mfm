@@ -5,7 +5,7 @@
 //! registration functions.
 //!
 //! ```compile_fail
-//! use mfm_bitcoin_live::adapter::register_bitcoin_jsonrpc_runners;
+//! use mfm_bitcoin_live::adapter;
 //! ```
 //!
 //! The checked transport does not expose an arbitrary JSON-RPC call surface.
@@ -22,6 +22,3 @@ mod adapter;
 pub mod transport;
 
 pub use adapter::{register_bitcoin_jsonrpc_runners, verify_bitcoin_jsonrpc_replay};
-
-#[cfg(test)]
-mod role_tests;

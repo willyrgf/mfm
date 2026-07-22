@@ -151,6 +151,4 @@ fn portfolio_state_runtime_error(
 }
 
 #[cfg(test)]
-mod role_tests;
-#[cfg(test)]
 mod tests;

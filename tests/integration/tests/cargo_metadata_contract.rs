@@ -181,7 +181,7 @@ fn metadata_shape_is_closed_and_typed() {
     }
 
     for (name, rejected) in [
-        ("old category", json!({"category": "kernel"})),
+        ("missing layer", json!({})),
         ("unknown layer", json!({"layer": "adapter"})),
         (
             "missing kernel facing flag",
@@ -361,11 +361,17 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
             &other_source,
             "source domain -> other source domain",
         ),
+        (&source, &aggregate, "source domain -> aggregate domain"),
         (&source, &source_live, "source domain -> live"),
         (
             &aggregate,
             &other_aggregate,
             "aggregate domain -> other aggregate domain",
+        ),
+        (
+            &aggregate,
+            &kernel_platform,
+            "aggregate domain -> platform-only kernel",
         ),
         (&aggregate, &aggregate_live, "aggregate domain -> live"),
         (&source_live, &aggregate, "source live -> aggregate domain"),
@@ -374,11 +380,21 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
             &other_source_live,
             "source live -> cross-domain live",
         ),
+        (
+            &source_live,
+            &other_source,
+            "source live -> other source domain",
+        ),
         (&source_live, &storage, "source live -> storage"),
         (
             &aggregate_live,
             &source_live,
             "aggregate live -> source live",
+        ),
+        (
+            &aggregate_live,
+            &PackageSemantics::live("reporting"),
+            "aggregate live -> other aggregate live",
         ),
         (&aggregate_live, &storage, "aggregate live -> storage"),
         (
@@ -389,6 +405,11 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
         (&secret, &source, "secret provider -> domain"),
         (&storage, &source, "storage -> domain"),
         (&assembly, &binary, "assembly -> binary"),
+        (
+            &assembly,
+            &PackageSemantics::plain(Layer::Test),
+            "assembly -> test",
+        ),
         (
             &binary,
             &private_assembly,
@@ -431,6 +452,24 @@ fn cargo_target_kinds_constrain_declared_layers() {
     );
     validate_target_coherence(&mixed_binary).expect("a mixed binary package is valid");
 
+    let binary_without_bin = fixture_package(
+        "binary-without-bin",
+        PackageSemantics::plain(Layer::Binary),
+        &[&["lib"]],
+    );
+    let error = validate_target_coherence(&binary_without_bin)
+        .expect_err("a binary layer must carry a binary target");
+    assert!(error.contains("layer=binary") && error.contains("without a bin target"));
+
+    let test_with_bin = fixture_package(
+        "test-with-bin",
+        PackageSemantics::plain(Layer::Test),
+        &[&["bin"]],
+    );
+    let error = validate_target_coherence(&test_with_bin)
+        .expect_err("a binary target cannot hide in the test layer");
+    assert!(error.contains("bin target") && error.contains("layer=test"));
+
     let dedicated_proc_macro = fixture_package(
         "derive",
         PackageSemantics::kernel(true, false),
@@ -465,6 +504,13 @@ fn mixed_binary_library_dependencies_obey_the_binary_row() {
         &roles
     ));
 
+    let facing_kernel = PackageSemantics::kernel(true, true);
+    assert!(dependency_allowed(
+        &mixed_binary.semantics,
+        &facing_kernel,
+        &roles
+    ));
+
     let private_assembly = PackageSemantics::assembly(false);
     assert!(
         !dependency_allowed(&mixed_binary.semantics, &private_assembly, &roles),
@@ -489,66 +535,376 @@ fn durable_source_boundaries_follow_semantic_metadata() {
     let root = repo_root();
     let metadata = workspace_metadata(&root);
     let packages = workspace_packages(&metadata, &root).expect("workspace package metadata");
+    let roles = domain_roles(&packages).expect("domain and live metadata");
 
     for package in packages {
         if package.semantics.layer == Layer::Test {
             continue;
         }
-        let source_root = root.join(&package.manifest_dir_rel);
+        let source_root = root.join(&package.manifest_dir_rel).join("src");
         if !source_root.exists() {
             continue;
         }
-        let mut sources = Vec::new();
-        collect_rust_sources(&source_root, &mut sources);
+        let sources = production_rust_sources(&source_root);
 
-        for path in sources {
-            let source = fs::read_to_string(&path).expect("read Rust source");
-            if package.semantics.layer == Layer::Storage {
-                for forbidden in ["MfmConfig", "ValidatedConfig<"] {
-                    assert!(
-                        !source.contains(forbidden),
-                        "storage source {} imports or names domain configuration {forbidden}",
-                        path.display()
-                    );
-                }
+        match package.semantics.layer {
+            Layer::Domain => validate_pure_source_boundaries(&package, &source_root, &sources),
+            Layer::Live => {
+                validate_live_source_boundaries(&package, &source_root, &sources, &roles)
             }
+            Layer::Storage => assert_sources_exclude(
+                &package,
+                &sources,
+                "domain configuration",
+                &["MfmConfig", "ValidatedConfig<"],
+            ),
+            Layer::Binary => validate_binary_source_boundaries(&package, &sources),
+            Layer::Kernel
+            | Layer::Signing
+            | Layer::SecretProvider
+            | Layer::Assembly
+            | Layer::Test => {}
+        }
 
-            if package.semantics.layer == Layer::Binary {
-                for forbidden in [
-                    "SetupDocument",
-                    "enum SetupConfig",
-                    "toml::from_str",
-                    "ValidatedConfig<",
-                    "MfmConfig",
-                    "mfm_keystore",
-                    "mfm_signing::",
-                    "KeystoreSignerProvider",
-                ] {
-                    assert!(
-                        !source.contains(forbidden),
-                        "binary source {} owns semantic setup/config construction: {forbidden}",
-                        path.display()
-                    );
-                }
-            }
-
-            let owns_configured_values = package.semantics.layer == Layer::Storage
-                || (package.semantics.layer == Layer::Assembly
-                    && package.semantics.binary_facing == Some(true));
-            if !owns_configured_values {
-                for forbidden in [
+        let owns_configured_values = package.semantics.layer == Layer::Storage
+            || (package.semantics.layer == Layer::Assembly
+                && package.semantics.binary_facing == Some(true));
+        if !owns_configured_values {
+            assert_sources_exclude(
+                &package,
+                &sources,
+                "app-owned configured-value authority",
+                &[
                     "publish_configured_values(",
                     ".load_configured_value(",
                     ".list_configured_targets(",
-                ] {
-                    assert!(
-                        !source.contains(forbidden),
-                        "source {} bypasses app-owned configured-value services: {forbidden}",
-                        path.display()
-                    );
-                }
+                ],
+            );
+        }
+    }
+}
+
+fn validate_pure_source_boundaries(
+    package: &WorkspacePackage,
+    source_root: &Path,
+    sources: &[(PathBuf, String)],
+) {
+    const ROLES: [&str; 5] = ["model", "capability", "signing", "state", "operation"];
+    const PLATFORM_IDENTIFIERS: [&str; 14] = [
+        "mfm_runtime",
+        "mfm_replay",
+        "mfm_store",
+        "mfm_app",
+        "mfm_keystore",
+        "mfm_storage_postgres",
+        "std::fs",
+        "std::net",
+        "tokio::fs",
+        "tokio::net",
+        "reqwest",
+        "hyper::",
+        "sqlx::",
+        "url::",
+    ];
+    assert_sources_exclude(
+        package,
+        sources,
+        "platform or ambient IO authority",
+        &PLATFORM_IDENTIFIERS,
+    );
+
+    let root_source = fs::read_to_string(source_root.join("lib.rs")).expect("read domain root");
+    for role in ROLES {
+        if !role_exists(source_root, role) {
+            continue;
+        }
+        assert!(
+            root_source.contains(&format!("mod {role};")),
+            "domain package={} must declare private role module {role}",
+            package.name
+        );
+        assert!(
+            !root_source.contains(&format!("pub mod {role}")),
+            "domain package={} exposes role module {role}",
+            package.name
+        );
+        assert!(
+            !root_source.contains(&format!("pub use {role}::*")),
+            "domain package={} exposes a role glob bridge for {role}",
+            package.name
+        );
+    }
+
+    for (path, source) in sources {
+        let role = source_role(source_root, path);
+        for state_trait in [
+            "StateSpec for ",
+            "ReadState for ",
+            "PureState for ",
+            "SideEffectState for ",
+        ] {
+            assert!(
+                !source.contains(state_trait) || role == Some("state"),
+                "domain package={} source={} implements {state_trait} outside the state role",
+                package.name,
+                path.display()
+            );
+        }
+        assert!(
+            !source.contains("Operation for ") || role == Some("operation"),
+            "domain package={} source={} implements Operation outside the operation role",
+            package.name,
+            path.display()
+        );
+
+        let Some(role) = role else {
+            continue;
+        };
+        let role_index = ROLES
+            .iter()
+            .position(|candidate| *candidate == role)
+            .expect("known role");
+        for higher in &ROLES[role_index + 1..] {
+            for prefix in ["crate::", "super::"] {
+                let forbidden = format!("{prefix}{higher}");
+                assert!(
+                    !source.contains(&forbidden),
+                    "domain package={} lower role {role} source={} imports higher role {higher}",
+                    package.name,
+                    path.display()
+                );
             }
         }
+    }
+}
+
+fn validate_live_source_boundaries(
+    package: &WorkspacePackage,
+    source_root: &Path,
+    sources: &[(PathBuf, String)],
+    roles: &BTreeMap<String, DomainRole>,
+) {
+    let domain = package
+        .semantics
+        .domain
+        .as_deref()
+        .expect("live domain metadata was parsed");
+    match roles
+        .get(domain)
+        .copied()
+        .expect("live owner was validated")
+    {
+        DomainRole::Source => validate_source_live_boundaries(package, source_root, sources),
+        DomainRole::Aggregate => validate_aggregate_live_boundaries(package, source_root, sources),
+    }
+}
+
+fn validate_source_live_boundaries(
+    package: &WorkspacePackage,
+    source_root: &Path,
+    sources: &[(PathBuf, String)],
+) {
+    let root_source = fs::read_to_string(source_root.join("lib.rs")).expect("read live root");
+    assert!(
+        role_exists(source_root, "transport")
+            && root_source.contains("pub mod transport;")
+            && !root_source.contains("mod transport {"),
+        "source-live package={} must expose one public transport role",
+        package.name
+    );
+    assert!(
+        role_exists(source_root, "adapter")
+            && root_source.contains("mod adapter;")
+            && !root_source.contains("pub mod adapter"),
+        "source-live package={} must keep its adapter role private",
+        package.name
+    );
+
+    let transport_sources = sources
+        .iter()
+        .filter(|(path, _)| source_role(source_root, path) == Some("transport"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_sources_exclude(
+        package,
+        &transport_sources,
+        "platform binding authority",
+        &[
+            "mfm_runtime",
+            "mfm_replay",
+            "mfm_store",
+            "mfm_app",
+            "crate::adapter",
+            "super::adapter",
+            "Runner",
+            "ReplayBroker",
+        ],
+    );
+
+    let adapter_sources = sources
+        .iter()
+        .filter(|(path, _)| source_role(source_root, path) == Some("adapter"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_sources_exclude(
+        package,
+        &adapter_sources,
+        "concrete transport dependency",
+        &["crate::transport", "super::transport"],
+    );
+
+    let non_adapter_sources = sources
+        .iter()
+        .filter(|(path, _)| source_role(source_root, path) != Some("adapter"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_sources_exclude(
+        package,
+        &non_adapter_sources,
+        "runner or replay registration outside the adapter",
+        &[
+            "mfm_runtime",
+            "mfm_replay",
+            "ErasedRunnerRegistry",
+            "RunnerRegistrationBuilder",
+            "ReplayBroker",
+        ],
+    );
+}
+
+fn validate_aggregate_live_boundaries(
+    package: &WorkspacePackage,
+    source_root: &Path,
+    sources: &[(PathBuf, String)],
+) {
+    let root_source = fs::read_to_string(source_root.join("lib.rs")).expect("read live root");
+    assert!(
+        !role_exists(source_root, "transport")
+            && !root_source.contains("mod transport")
+            && !root_source.contains("pub mod transport"),
+        "aggregate-live package={} must not own a transport",
+        package.name
+    );
+    assert_sources_exclude(
+        package,
+        sources,
+        "concrete store, provider, or mutation authority",
+        &[
+            "mfm_storage_postgres",
+            "impl store::",
+            "RunEventStore",
+            "ExecutionClaimStore",
+            "PreparedCommit",
+            "put_artifact(",
+            "put_verified_artifact(",
+            "persist_artifact(",
+            "serde_json",
+        ],
+    );
+}
+
+fn validate_binary_source_boundaries(package: &WorkspacePackage, sources: &[(PathBuf, String)]) {
+    assert_sources_exclude(
+        package,
+        sources,
+        "execution or implementation construction",
+        &[
+            "mfm_runtime",
+            "mfm_replay",
+            "mfm_store",
+            "mfm_storage_postgres",
+            "mfm_bitcoin_live",
+            "mfm_evm_live",
+            "mfm_portfolio_live",
+            "mfm_keystore",
+            "mfm_signing",
+            "mfm_program",
+            "PostgresStore",
+            "RunServices",
+            "RunReadServices",
+            "ErasedRunnerRegistry",
+            "ReplayBroker",
+            "RunEventStore",
+            "RunObservationStore",
+            "RetainedArtifactReadProvider",
+            "FactQueryStore",
+            "make_run_services",
+            "make_run_read_services",
+            "production_runner_registry",
+            "production_certification_registry",
+            "connect_production_store",
+            "SetupDocument",
+            "enum SetupConfig",
+            "toml::from_str",
+            "ValidatedConfig<",
+            "MfmConfig",
+            "KeystoreSignerProvider",
+        ],
+    );
+}
+
+fn assert_sources_exclude(
+    package: &WorkspacePackage,
+    sources: &[(PathBuf, String)],
+    boundary: &str,
+    forbidden: &[&str],
+) {
+    for (path, source) in sources {
+        for identifier in forbidden {
+            assert!(
+                !source.contains(identifier),
+                "package={} source={} violates {boundary}: {identifier}",
+                package.name,
+                path.display()
+            );
+        }
+    }
+}
+
+fn production_rust_sources(source_root: &Path) -> Vec<(PathBuf, String)> {
+    let mut paths = Vec::new();
+    collect_rust_sources(source_root, &mut paths);
+    paths
+        .into_iter()
+        .filter(|path| !is_test_source(path))
+        .map(|path| {
+            let source = fs::read_to_string(&path).expect("read Rust source");
+            (path, source)
+        })
+        .collect()
+}
+
+fn is_test_source(path: &Path) -> bool {
+    path.components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .any(|component| component == "tests")
+        || path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == "tests" || stem.ends_with("_tests"))
+}
+
+fn role_exists(source_root: &Path, role: &str) -> bool {
+    source_root.join(format!("{role}.rs")).is_file() || source_root.join(role).is_dir()
+}
+
+fn source_role(source_root: &Path, path: &Path) -> Option<&'static str> {
+    let first = path
+        .strip_prefix(source_root)
+        .ok()?
+        .components()
+        .next()?
+        .as_os_str()
+        .to_str()?;
+    match first {
+        "model" | "model.rs" => Some("model"),
+        "capability" | "capability.rs" => Some("capability"),
+        "signing" | "signing.rs" => Some("signing"),
+        "state" | "state.rs" => Some("state"),
+        "operation" | "operation.rs" => Some("operation"),
+        "adapter" | "adapter.rs" => Some("adapter"),
+        "transport" | "transport.rs" => Some("transport"),
+        _ => None,
     }
 }
 
@@ -780,7 +1136,7 @@ fn validate_target_coherence(package: &WorkspacePackage) -> Result<(), String> {
         .target_kinds
         .iter()
         .any(|kinds| kinds.contains("bin"));
-    if has_bin && !matches!(package.semantics.layer, Layer::Binary | Layer::Test) {
+    if has_bin && package.semantics.layer != Layer::Binary {
         return Err(format!(
             "package={} has a bin target but declares layer={}",
             package.name,
@@ -932,10 +1288,7 @@ fn domain_dependency_allowed(source: &PackageSemantics, dependency: &PackageSema
                 .domain_role
                 .expect("domain role metadata shape was parsed");
             match source_role {
-                // The aggregate edge is removed with the last Bitcoin-to-portfolio state contract.
-                DomainRole::Source => {
-                    dependency_domain == source_domain || dependency_role == DomainRole::Aggregate
-                }
+                DomainRole::Source => dependency_domain == source_domain,
                 DomainRole::Aggregate => {
                     dependency_domain == source_domain || dependency_role == DomainRole::Source
                 }

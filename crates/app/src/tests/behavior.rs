@@ -355,22 +355,6 @@ fn replay_diagnostic_accepts_generic_details_with_network_id() {
 
 #[tokio::test]
 async fn run_read_services_are_evidence_only() {
-    let source = include_str!("../lib.rs");
-    let production_read_constructor = source
-        .split("pub async fn connect_production_run_read_services")
-        .nth(1)
-        .expect("production read constructor is present")
-        .split("/// Builds the production typed runner registry")
-        .next()
-        .expect("production read constructor is bounded");
-    assert!(!production_read_constructor.contains("production_runner_registry"));
-    assert!(!production_read_constructor.contains("std::env"));
-    assert!(production_read_constructor.contains("connect_production_store"));
-
-    let read_services_impl = include_str!("../services_read.rs");
-    assert!(!read_services_impl.contains("production_runner_registry"));
-    assert!(!read_services_impl.contains("std::env"));
-
     let store = store::AsyncInMemoryRunStore::default();
     let services = make_run_read_services(
         Arc::new(store),

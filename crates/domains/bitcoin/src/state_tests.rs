@@ -155,26 +155,3 @@ fn response_decoder_requires_canonical_closed_domain_valid_json() {
         assert!(decode_bitcoin_balance_snapshot_response(invalid.as_bytes()).is_err());
     }
 }
-
-#[test]
-fn pure_bitcoin_manifest_stays_inside_domain_boundaries() {
-    let manifest = include_str!("../Cargo.toml");
-
-    for forbidden in [
-        "mfm-app",
-        "mfm-runtime",
-        "mfm-replay",
-        "mfm-store",
-        "mfm-storage-postgres",
-        "mfm-bitcoin-live",
-        "mfm-keystore",
-        "reqwest",
-        "tokio",
-        "url",
-    ] {
-        assert!(
-            !manifest.contains(forbidden),
-            "pure Bitcoin crate must not depend on forbidden boundary crate {forbidden}"
-        );
-    }
-}

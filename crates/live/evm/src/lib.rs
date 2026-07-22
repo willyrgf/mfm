@@ -5,7 +5,7 @@
 //! registration and replay functions.
 //!
 //! ```compile_fail
-//! use mfm_evm_live::adapter::register_evm_balance_runners;
+//! use mfm_evm_live::adapter;
 //! ```
 //!
 //! The checked transport does not expose an arbitrary JSON-RPC call surface.
@@ -28,6 +28,3 @@ pub use adapter::{
     verify_evm_validation_replay, EvmMutationValidationFuture, EvmReadRunnerCapabilities,
     EvmTransactionRunnerCapabilities,
 };
-
-#[cfg(test)]
-mod role_tests;

@@ -31,6 +31,3 @@ pub use state::{
     BitcoinBalanceCollectionReceipt, BitcoinBalanceSnapshotFact, BitcoinBalanceSnapshotResponse,
     BitcoinBalanceSnapshotSubject, CollectBitcoinBalancesState,
 };
-
-#[cfg(test)]
-mod role_tests;

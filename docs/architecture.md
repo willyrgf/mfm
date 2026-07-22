@@ -123,10 +123,10 @@ assembly packages declare whether binaries may depend on them with `binary-facin
 typed booleans and are required even when false. Other layers cannot carry them. Metadata keys are
 closed: path/category aliases, phase fields, package allowlists, and named exceptions are invalid.
 
-Cargo target kinds constrain metadata. A non-test package with any binary target is layer `binary`,
-and a mixed library/binary package applies the binary dependency row to the whole package. Proc
-macros remain in dedicated non-binary packages. Package renames, moves, additions, and deletions do
-not change this contract and do not require an inventory test update.
+Cargo target kinds constrain metadata. Every package with a binary target is layer `binary`, and a
+mixed library/binary package applies the binary dependency row to the whole package. Proc macros
+remain in dedicated non-binary packages. Package renames, moves, additions, and deletions do not
+change this contract and do not require an inventory test update.
 
 ## Authority Contract
 
@@ -845,6 +845,20 @@ Required metadata checks assert:
 - binary target/layer coherence, including mixed library/binary packages;
 - a dedicated non-binary proc-macro boundary; and
 - positive and negative synthetic fixtures for every dependency row.
+
+The same semantic suite applies targeted source properties without a package inventory:
+
+- pure-domain state and operation implementations remain in their private role modules, lower
+  roles do not import higher roles, and pure source names no platform or ambient-IO authority;
+- source-live packages expose a public transport beside a private adapter, transports name no
+  runner/replay authority, and adapters do not import their concrete transport;
+- aggregate-live packages own no transport, concrete store, provider implementation, or mutation
+  surface; and
+- binaries name no store/runtime/replay/live/keystore implementation construction.
+
+External typed-transport tests, fake-session adapter tests, compile-fail module/privacy examples,
+and production authoring-catalog equality tests complement these scans. They test usable APIs and
+privacy properties without freezing private implementation type names.
 
 ## Companion Docs
 

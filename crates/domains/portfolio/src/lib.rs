@@ -63,6 +63,3 @@ pub use state::{
     SelectHoldingsInputHandles, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
     SelectHoldingsState, SelectedHoldings,
 };
-
-#[cfg(test)]
-mod role_tests;

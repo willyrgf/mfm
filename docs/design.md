@@ -99,8 +99,8 @@ Every pure domain package declares its validated domain and whether that domain 
 aggregate. All packages for a domain agree on that role. A live package declares the same domain
 and is invalid without a pure-domain owner. Kernel packages explicitly declare whether domain code
 may consume them; kernel and assembly packages explicitly declare whether binaries may consume
-them. Cargo target kinds independently require every non-test package with a binary target to use
-layer `binary` and keep proc macros in dedicated non-binary packages.
+them. Cargo target kinds independently require every package with a binary target to use layer
+`binary` and keep proc macros in dedicated non-binary packages.
 
 Model, capability, signing, state, operation, adapter, and transport remain architectural roles,
 not automatic package boundaries. Within one pure domain, the permitted private-module direction
