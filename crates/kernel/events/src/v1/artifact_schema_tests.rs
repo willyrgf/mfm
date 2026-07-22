@@ -487,6 +487,6 @@ pub(super) fn event_schema_descriptor_requirement_sources_golden() {
 
     assert_eq!(
         mfm_canonical::sha256_digest_bytes(rows.as_bytes()).to_string(),
-        "79d09eb956d8bfdf09f38328eb9573a0cdee112e8bba91d53ba84bf2d2964e16"
+        "9ec5cb07f5938944f2bde4052ebc11ab1a40b36a3a6af8ee038893af3e017887"
     );
 }

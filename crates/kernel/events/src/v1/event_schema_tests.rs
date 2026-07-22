@@ -20,7 +20,7 @@ pub(super) fn v1_event_schema_golden() {
         .all(|descriptor| descriptor.schema_version == EVENT_SCHEMA_VERSION));
     assert_eq!(
         mfm_canonical::sha256_digest_bytes(rows.as_bytes()).to_string(),
-        "5ea4ff6078629d8a2174c46df0512d6726a6f5077f3310667b3cfcf3a6eb600d"
+        "1bf1e9bf929a2857e8011a5297f68c866a03afc2c420cd9771974f7622bbc6bb"
     );
 }
 
@@ -30,7 +30,7 @@ pub(super) fn fact_recorded_schema_descriptor_baseline() {
         .canonical_json()
         .expect("canonical fact schema");
 
-    assert!(canonical.as_str().contains("\"schema_version\":\"2\""));
+    assert!(canonical.as_str().contains("\"schema_version\":\"1\""));
     assert!(canonical.as_str().contains("\"name\":\"FactClaim\""));
     for removed in [
         "FactVisibility",
@@ -44,7 +44,7 @@ pub(super) fn fact_recorded_schema_descriptor_baseline() {
     }
     assert_eq!(
         canonical.content_digest().as_str(),
-        "content:sha256-jcs-v1:7e044feab4edfcbfd9080ee89b7105df72bb7404e0efe71ca184818860576381"
+        "content:sha256-jcs-v1:b751e3bab29a05759d39c66cb2990a68ddc596bafe04ac51312537eab0cc9080"
     );
     let schema: serde_json::Value =
         serde_json::from_str(canonical.as_str()).expect("fact schema json");
@@ -199,11 +199,4 @@ pub(super) fn payload_accessors_expose_authority_fields_without_serialization_ch
         SideEffectEventKind::SubmissionObserved
     );
     assert_eq!(side_effect_ref.invocation_epoch, Some(3));
-}
-
-#[test]
-pub(super) fn run_admitted_v1_summary_key_is_canonical() {
-    let keys = ["v1_event_schema_golden", "run_admitted_v1_present"];
-    assert!(keys.contains(&"run_admitted_v1_present"));
-    assert!(!keys.contains(&"run_admitted_v2_present"));
 }

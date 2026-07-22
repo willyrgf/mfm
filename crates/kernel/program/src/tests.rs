@@ -140,9 +140,9 @@ struct LaunchValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.program.test",
-    name = "external_read_plan_v2",
+    name = "external_read_plan_alternate",
     version = "1",
-    schema = "mfm.program.test.external_read_plan_v2"
+    schema = "mfm.program.test.external_read_plan_alternate"
 )]
 struct AlternateReadPlan {
     amount: u64,
@@ -164,9 +164,9 @@ struct ReadEvidenceValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.program.test",
-    name = "external_read_evidence_v2",
+    name = "external_read_evidence_alternate",
     version = "1",
-    schema = "mfm.program.test.external_read_evidence_v2"
+    schema = "mfm.program.test.external_read_evidence_alternate"
 )]
 struct AlternateReadEvidence {
     amount: u64,
@@ -224,7 +224,7 @@ fn external_read_contract_digest_binds_plan_evidence_and_fact_mode() {
         original,
         canonical_digest(serde_json::json!({
             "contract_domain": "mfm.external_read",
-            "contract_version": 2,
+            "contract_version": 1,
             "effect_class": "read_external",
             "evidence_schema_id": ReadEvidenceValue::schema_id()
                 .expect("evidence schema")
@@ -256,7 +256,7 @@ fn external_read_contract_digest_binds_plan_evidence_and_fact_mode() {
         fact_contract,
         canonical_digest(serde_json::json!({
             "contract_domain": "mfm.external_read",
-            "contract_version": 2,
+            "contract_version": 1,
             "effect_class": "read_external",
             "evidence_schema_id": ReadEvidenceValue::schema_id()
                 .expect("evidence schema")

@@ -230,7 +230,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:66ef9b89906af1b355e2ac0dfb1fae2544e8272534cb1cb0352ac4c6398a3289"
+        "content:sha256-jcs-v1:6334096a68af2e287a95d217632d879358bb7d9f328997f4faf509046bdeabe7"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,

@@ -373,10 +373,9 @@ pub(super) fn assert_node_failed_with_code_and_retryable(
         spec::MediaType::new("application/json").expect("media type")
     );
     assert!(
-        diagnostic
-            .schema_id
-            .as_str()
-            .contains("schema:mfm.runtime.redacted_attempt_failure_diagnostic:3:sha256-jcs-v1:"),
+        diagnostic.schema_id.as_str().contains(&format!(
+            "schema:{REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA}:{REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION}:sha256-jcs-v1:"
+        )),
         "diagnostic schema id should identify the runtime redacted failure diagnostic schema"
     );
     let retained = store

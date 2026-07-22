@@ -35,7 +35,7 @@ use self::schema::{
 };
 
 /// Current event schema version string.
-pub const EVENT_SCHEMA_VERSION: &str = "2";
+pub const EVENT_SCHEMA_VERSION: &str = "1";
 
 checked_string_type!(
     /// Runner or adapter factory id.

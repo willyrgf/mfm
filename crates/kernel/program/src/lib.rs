@@ -37,6 +37,7 @@ use mfm_spec::v1::{
     CellContextSpec, InputContextSpec, ManualAuthorizationQuorumSpec,
     ManualResolutionAuthorizationSpec, ManualResolutionEvidenceSpec, NodeContextSpec,
     OperatorAuthoritySnapshotSpec, ResourceClaimSpec, StateContextDescriptorRequirementSpec,
+    LOWERING_VERSION,
 };
 use mfm_values::{
     MfmConfig, MfmValue, NumberPolicy, PersistedSurfacePolicy, SchemaDescriptor, SchemaKind,
@@ -80,8 +81,6 @@ pub use self::saga_policy::*;
 #[path = "context_authority.rs"]
 mod context_authority;
 pub use self::context_authority::*;
-
-const LOWERING_VERSION: &str = "mfm.typed.lowering.v2";
 
 /// Result type for typed program authoring operations.
 pub type Result<T> = std::result::Result<T, PlanError>;
@@ -958,7 +957,7 @@ where
         };
     canonical_digest(serde_json::json!({
         "contract_domain": "mfm.external_read",
-        "contract_version": 2,
+        "contract_version": 1,
         "effect_class": "read_external",
         "evidence_schema_id": Evidence::schema_id()
             .map_err(|error| PlanError::Value(error.to_string()))?

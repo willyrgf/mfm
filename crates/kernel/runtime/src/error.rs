@@ -9,7 +9,7 @@ use serde_json::Value;
 pub const REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA: &str =
     "mfm.runtime.redacted_attempt_failure_diagnostic";
 /// Schema version for retained runtime attempt-failure diagnostics.
-pub const REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION: &str = "3";
+pub const REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION: &str = "1";
 
 /// Validated public metadata supplied by a typed runner failure.
 ///
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn attempt_diagnostic_parser_accepts_only_the_direct_version_three_array() {
+    fn attempt_diagnostic_parser_accepts_only_the_current_closed_envelope() {
         let current = serde_json::json!({
             "attempt_id": "attempt:test",
             "diagnostic_schema": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
@@ -261,19 +261,19 @@ mod tests {
             vec![diagnostic("evm")]
         );
 
-        let legacy = serde_json::json!({
+        let unsupported = serde_json::json!({
             "attempt_id": "attempt:test",
-            "diagnostic": {
-                "details": diagnostic("evm"),
-                "kind": "provider",
-                "version": 1,
-            },
             "diagnostic_schema": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
-            "diagnostic_schema_version": "2",
+            "diagnostic_schema_version": "unsupported",
+            "diagnostics": [diagnostic("evm")],
             "node_id": "node:test",
             "run_id": "run:test",
             "spec_hash": "spec:test",
         });
-        assert!(attempt_failure_diagnostics_from_artifact_json(&legacy).is_err());
+        assert!(attempt_failure_diagnostics_from_artifact_json(&unsupported).is_err());
+
+        let mut unknown_field = current;
+        unknown_field["unexpected"] = serde_json::json!(true);
+        assert!(attempt_failure_diagnostics_from_artifact_json(&unknown_field).is_err());
     }
 }

@@ -53,7 +53,7 @@ pub const SPEC_VERSION: &str = "mfm.typed.execution_spec.v1";
 /// v1 typed execution spec media type.
 pub const MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
 /// v1 lowering-version string.
-pub const LOWERING_VERSION: &str = "mfm.typed.lowering.v2";
+pub const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
 
 pub use super::{
     complete_run_receipt_schema_id, complete_run_receipt_semantic_type_id,

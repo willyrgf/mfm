@@ -143,7 +143,7 @@ fn schema_id_uses_identity_not_audit() {
 
     let mut changed_identity = descriptor.clone();
     changed_identity.identity.schema_name =
-        NameToken::new("mfm.test.example_value_v2").expect("schema name");
+        NameToken::new("mfm.test.example_value_alternate").expect("schema name");
     assert_ne!(
         descriptor.schema_id().expect("descriptor schema id"),
         changed_identity
