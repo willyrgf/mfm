@@ -181,9 +181,7 @@ impl FactPublicRefResolver {
                 .ok_or_else(redacted_fact_not_found)?;
             let fields = public_fields_from_values(
                 descriptor,
-                self.projection
-                    .fact_terms_for_claim(entry.fact_claim_id())
-                    .map(|term| (&term.field_id, &term.value)),
+                entry.terms().map(|term| (term.field_id(), term.value())),
             )?;
             return public_fact_from_parts(&fact_ref, descriptor, fields);
         }

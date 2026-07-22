@@ -11,7 +11,7 @@ pub(crate) async fn hydrate_holding_responses(
     let holding_count = plan.holding_count().map_err(hydration_error)?;
     if responses.len() != holding_count {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "fact-index batch response count does not match receipt demand".to_owned(),
+            "fact-query batch response count does not match receipt demand".to_owned(),
         ));
     }
     let mut hydrated = Vec::with_capacity(responses.len());

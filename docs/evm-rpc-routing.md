@@ -157,7 +157,7 @@ Contributor ownership:
   protocol decoding;
 - the private adapter in `mfm-evm-live` owns reusable balance collection/publication,
   transaction, validation, and evidence-only replay bindings;
-- `mfm-portfolio-live` owns receipt-pinned fact-index selection, canonical response hydration, and
+- `mfm-portfolio-live` owns receipt-pinned fact-query selection, canonical response hydration, and
   snapshot/report projection bindings only;
 - portfolio and reusable EVM states own their deterministic validation/reduction semantics;
   binaries only pass paths and render results.

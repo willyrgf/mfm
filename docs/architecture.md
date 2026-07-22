@@ -715,6 +715,11 @@ Stores own:
 Projection data is derived from the run stream and is never the sole authority for semantic resume,
 replay, retention, public output, or side-effect status.
 
+`FactQueryProjection` is the one backend-facing projection for a recorded fact and owns its
+descriptor-derived query terms. Storage implementations may normalize the parent and terms into
+separate physical tables, but must hydrate, validate, compare, and expose them as one complete
+projection; query terms have no independent public projection authority.
+
 Synthetic store mutation is reserved for explicitly named non-execution test, migration, repair,
 corruption, or low-level storage contract fixtures.
 

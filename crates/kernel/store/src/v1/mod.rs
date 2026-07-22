@@ -921,8 +921,8 @@ mod projection;
 use self::projection::fact_claim_projection_key;
 pub use self::projection::{
     AttemptProjection, AttemptStatus, CellTerminalProjection, FactDescriptorProjection,
-    FactIndexTermProjection, FactQueryProjection, ProjectionSnapshot, ProjectionSnapshotParts,
-    PublicOutputProjection, RetentionManifestProjection, RetentionProjection,
+    FactQueryProjection, ProjectionSnapshot, ProjectionSnapshotParts, PublicOutputProjection,
+    RetentionManifestProjection, RetentionProjection,
 };
 
 use self::resource_lanes::{

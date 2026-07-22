@@ -420,13 +420,12 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     let mut store = started_fixture_store(&scheduler, &fixture).await;
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
     let projections = store.projection_snapshot().clone();
-    let (fact_ref, descriptor_projection, query_projection, term_projections) =
+    let (fact_ref, descriptor_projection, query_projection) =
         test_returned_fact_authority(&fixture, node);
     let projections = projection_snapshot_with_returned_fact_authority(
         &projections,
         descriptor_projection.clone(),
         query_projection.clone(),
-        term_projections,
     );
     let run_stream = store.load_run_stream(&fixture.run_id);
     let committed =

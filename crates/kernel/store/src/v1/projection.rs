@@ -153,6 +153,7 @@ pub struct FactQueryProjection {
     pub(crate) artifact_id: ArtifactId,
     pub(crate) artifact_evidence_hash: ContentDigest,
     pub(crate) response_artifact_evidence: Option<ArtifactEvidenceRef>,
+    pub(crate) terms: BTreeMap<mfm_facts::FactFieldId, mfm_facts::FactQueryTerm>,
 }
 
 impl FactQueryProjection {
@@ -162,6 +163,7 @@ impl FactQueryProjection {
         envelope: &KernelEventEnvelope,
         payload: &mfm_events::v1::FactRecorded,
         response_artifact_evidence: Option<ArtifactEvidenceRef>,
+        terms: Vec<mfm_facts::FactQueryTerm>,
     ) -> Result<Self> {
         let fact_claim_id = mfm_facts::derive_fact_claim_id(
             envelope.run_id().clone(),
@@ -188,6 +190,7 @@ impl FactQueryProjection {
             envelope.commit_key().clone(),
             store_commit_order,
             response_artifact_evidence,
+            terms,
         )
     }
 
@@ -198,7 +201,18 @@ impl FactQueryProjection {
         commit_id: CommitKey,
         store_commit_order: u64,
         response_artifact_evidence: Option<ArtifactEvidenceRef>,
+        terms: Vec<mfm_facts::FactQueryTerm>,
     ) -> Result<Self> {
+        let mut terms_by_field = BTreeMap::new();
+        for term in terms {
+            let field_id = term.field_id().clone();
+            if terms_by_field.insert(field_id.clone(), term).is_some() {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("fact_query_term:{field_id}"),
+                    message: "duplicate fact query term field id".to_owned(),
+                });
+            }
+        }
         let projection = Self {
             fact_claim_id: fact_ref.fact_claim_id().clone(),
             source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
@@ -220,12 +234,13 @@ impl FactQueryProjection {
             artifact_id: fact_ref.artifact_id().clone(),
             artifact_evidence_hash: fact_ref.artifact_evidence_hash().clone(),
             response_artifact_evidence,
+            terms: terms_by_field,
         };
         projection.internal_ref()?;
         Ok(projection)
     }
 
-    /// Builds the durable internal fact reference represented by this index row.
+    /// Builds the durable internal fact reference represented by this query projection.
     pub fn internal_ref(&self) -> Result<mfm_facts::InternalFactRef> {
         let parts = mfm_facts::InternalFactRefParts {
             fact_claim_id: self.fact_claim_id.clone(),
@@ -330,46 +345,15 @@ impl FactQueryProjection {
     pub const fn response_artifact_evidence(&self) -> Option<&ArtifactEvidenceRef> {
         self.response_artifact_evidence.as_ref()
     }
-}
 
-/// Extracted index term projection for one indexed fact claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactIndexTermProjection {
-    /// Store-derived claim id from run-stream coordinates.
-    pub fact_claim_id: mfm_facts::FactClaimId,
-    /// Fact descriptor hash.
-    pub fact_descriptor_hash: ContentDigest,
-    /// Descriptor-owned field id.
-    pub field_id: mfm_facts::FactFieldId,
-    /// Descriptor field source category.
-    pub source: mfm_facts::FactFieldSource,
-    /// Descriptor value type.
-    pub value_type: mfm_facts::FactFieldValueType,
-    /// Extracted canonical scalar.
-    pub value: mfm_facts::FactCanonicalScalar,
-    /// Optional descriptor unit.
-    pub unit: Option<mfm_facts::FactUnit>,
-    /// Optional descriptor scale.
-    pub scale: Option<mfm_facts::FactScale>,
-}
+    /// Returns one descriptor-derived query term by field id.
+    pub fn term(&self, field_id: &mfm_facts::FactFieldId) -> Option<&mfm_facts::FactQueryTerm> {
+        self.terms.get(field_id)
+    }
 
-impl FactIndexTermProjection {
-    /// Builds an index term projection from descriptor-extracted fact term material.
-    pub fn from_extracted_term(
-        fact_claim_id: &mfm_facts::FactClaimId,
-        fact_descriptor_hash: &ContentDigest,
-        term: &mfm_facts::FactIndexTerm,
-    ) -> Self {
-        Self {
-            fact_claim_id: fact_claim_id.clone(),
-            fact_descriptor_hash: fact_descriptor_hash.clone(),
-            field_id: term.field_id().clone(),
-            source: term.source(),
-            value_type: term.value_type(),
-            value: term.value().clone(),
-            unit: term.unit().cloned(),
-            scale: term.scale(),
-        }
+    /// Iterates descriptor-derived query terms in field-id order.
+    pub fn terms(&self) -> impl ExactSizeIterator<Item = &mfm_facts::FactQueryTerm> {
+        self.terms.values()
     }
 }
 
@@ -431,8 +415,6 @@ pub struct ProjectionSnapshot {
     pub(super) cells: BTreeMap<(RunId, CellId), CellTerminalProjection>,
     pub(super) fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
     pub(super) fact_query_entries: BTreeMap<mfm_facts::FactClaimId, FactQueryProjection>,
-    pub(super) fact_term_entries:
-        BTreeMap<(mfm_facts::FactClaimId, mfm_facts::FactFieldId), FactIndexTermProjection>,
     pub(super) side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
     pub(super) resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
     pub(super) public_outputs: BTreeMap<(RunId, SchemaId), PublicOutputProjection>,
@@ -465,9 +447,6 @@ pub struct ProjectionSnapshotParts {
     pub fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
     /// Queryable fact projections.
     pub fact_query_entries: BTreeMap<mfm_facts::FactClaimId, FactQueryProjection>,
-    /// Extracted fact term projections.
-    pub fact_term_entries:
-        BTreeMap<(mfm_facts::FactClaimId, mfm_facts::FactFieldId), FactIndexTermProjection>,
     /// Side-effect pair projections.
     pub side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
     /// Cross-run resource lane projections.
@@ -492,7 +471,6 @@ impl ProjectionSnapshotParts {
             cells: snapshot.cells.clone(),
             fact_descriptors: snapshot.fact_descriptors.clone(),
             fact_query_entries: snapshot.fact_query_entries.clone(),
-            fact_term_entries: snapshot.fact_term_entries.clone(),
             side_effects: snapshot.side_effects.clone(),
             resource_lanes: snapshot.resource_lanes.clone(),
             public_outputs: snapshot.public_outputs.clone(),
@@ -503,7 +481,6 @@ impl ProjectionSnapshotParts {
     fn replace_fact_authority_from(&mut self, authority: &ProjectionSnapshot) {
         self.fact_descriptors = authority.fact_descriptors.clone();
         self.fact_query_entries = authority.fact_query_entries.clone();
-        self.fact_term_entries = authority.fact_term_entries.clone();
     }
 
     fn replace_resource_lanes_from(&mut self, authority: &ProjectionSnapshot) {

@@ -213,14 +213,6 @@ pub(super) async fn load_authoritative_fact_projection_snapshot_tx(
                 .collect(),
             "query",
         )?;
-        merge_fact_projection_family(
-            &mut parts.fact_term_entries,
-            snapshot
-                .fact_term_entries()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            "term",
-        )?;
     }
     Ok(ProjectionSnapshot::from_parts(parts)?)
 }
@@ -266,7 +258,7 @@ fn load_authoritative_fact_query_rows(
     snapshot: &ProjectionSnapshot,
 ) -> Result<Vec<PostgresFactQueryRow>> {
     let mut rows = Vec::new();
-    for (claim_id, projection) in snapshot.fact_query_entries() {
+    for (_claim_id, projection) in snapshot.fact_query_entries() {
         if projection.fact_descriptor_hash() != plan.resolved_descriptor() {
             continue;
         }
@@ -277,9 +269,9 @@ fn load_authoritative_fact_query_rows(
         {
             continue;
         }
-        let terms = snapshot
-            .fact_terms_for_claim(claim_id)
-            .map(|term| (term.field_id.clone(), term.value.clone()))
+        let terms = projection
+            .terms()
+            .map(|term| (term.field_id().clone(), term.value().clone()))
             .collect::<BTreeMap<_, _>>();
         if !shape.predicates().iter().all(|predicate| {
             terms

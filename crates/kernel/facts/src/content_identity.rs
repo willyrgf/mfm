@@ -364,7 +364,7 @@ pub fn verify_fact_claim_content_identity(
     Ok(identity)
 }
 
-/// Recomputes and verifies semantic content identity for an indexed fact reference.
+/// Recomputes and verifies semantic content identity for a queryable fact reference.
 ///
 /// Internal references intentionally retain only compact hashes, so callers must provide the
 /// complete canonical typed subject material and hydrated canonical response bytes that the

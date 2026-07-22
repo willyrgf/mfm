@@ -34,7 +34,7 @@ impl StoreCommitOrder {
 
 /// Semantic read frontier bound into a fact query receipt.
 ///
-/// Bound fields are store authority watermarks only. Rebuildable fact-index
+/// Bound fields are store authority watermarks only. Rebuildable fact-query
 /// projection telemetry is never receipt identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreReadFrontier {

@@ -329,3 +329,20 @@ fn canonical_fact_response_parse_preserves_optional_null_fields() {
         .iter()
         .all(|term| term.field_id().as_str() != "result.observed_at_unix_ms"));
 }
+
+#[test]
+fn durable_query_term_rehydration_rejects_scalar_type_mismatch() {
+    let error = FactQueryTerm::from_parts(
+        FactFieldId::new("subject.chain").expect("field id"),
+        FactFieldSource::Subject,
+        FactFieldValueType::Boolean,
+        FactCanonicalScalar::String("bitcoin".to_owned()),
+        None,
+        None,
+    )
+    .expect_err("mismatched scalar type");
+
+    assert!(error
+        .to_string()
+        .contains("query term scalar does not match its declared value type"));
+}

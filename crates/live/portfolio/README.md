@@ -5,7 +5,7 @@ Live selection, hydration, and runner bindings for certified portfolio states.
 ## Live path
 
 `SelectHoldings` consumes the typed Bitcoin and EVM receipt vectors directly. The adapter submits
-all receipt-derived requests in one fact-index batch, requires one shared snapshot frontier,
+all receipt-derived requests in one fact-query batch, requires one shared snapshot frontier,
 hydrates each returned response artifact, and records the state-produced query evidence. Portfolio
 assembly therefore receives only store-reread and identity-reverified observations; an all-EVM
 portfolio follows exactly the same path.
@@ -23,6 +23,6 @@ contracts, then internally narrows clones of that same value to the least author
 needs. It is therefore impossible for app assembly to combine query results from one store with
 artifact bytes from another.
 
-This crate binds portfolio fact-index reads and pure projections. It implements no generic provider
+This crate binds portfolio fact-query reads and pure projections. It implements no generic provider
 or transport, and it does not create workflow topology, select runtime routes, implement copied
 JSON-RPC/ERC-20 codecs, publish family facts, or own family state semantics.

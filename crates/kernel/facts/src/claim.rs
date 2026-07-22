@@ -284,7 +284,7 @@ pub struct InternalFactRefParts {
     pub response: FactResponseEvidence,
 }
 
-/// Internal trusted reference to an indexed fact projection row.
+/// Internal trusted reference to a queryable fact projection row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalFactRef {
     pub(crate) parts: InternalFactRefParts,

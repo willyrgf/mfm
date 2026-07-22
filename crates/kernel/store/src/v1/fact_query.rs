@@ -7,7 +7,7 @@ pub(crate) fn execute_fact_query_projection(
     let shape = mfm_facts::parse_canonical_fact_query_shape(plan)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     let mut rows = Vec::new();
-    for (claim_id, entry) in projection.fact_query_entries() {
+    for (_claim_id, entry) in projection.fact_query_entries() {
         if entry.fact_descriptor_hash() != plan.resolved_descriptor() {
             continue;
         }
@@ -15,13 +15,13 @@ pub(crate) fn execute_fact_query_projection(
         if shape
             .content_identity()
             .is_some_and(|identity| !identity.matches_internal_ref(&fact_ref))
-            || !entry_matches_predicates(projection, claim_id, &shape)
+            || !entry_matches_predicates(entry, &shape)
         {
             continue;
         }
         rows.push(mfm_facts::FactQueryResultRow::new(
             fact_ref,
-            returned_fields(projection, claim_id, &shape)?,
+            returned_fields(entry, &shape)?,
         ));
     }
     rows.sort_by(|left, right| compare_rows(projection, plan, left, right));
@@ -51,31 +51,29 @@ pub(crate) fn execute_fact_query_projection_result(
 }
 
 fn entry_matches_predicates(
-    projection: &ProjectionSnapshot,
-    claim_id: &mfm_facts::FactClaimId,
+    projection: &FactQueryProjection,
     shape: &mfm_facts::CompiledFactQueryShape,
 ) -> bool {
     shape.predicates().iter().all(|predicate| {
         projection
-            .fact_term(claim_id, predicate.field_id())
-            .is_some_and(|term| predicate.matches_scalar(&term.value))
+            .term(predicate.field_id())
+            .is_some_and(|term| predicate.matches_scalar(term.value()))
     })
 }
 
 fn returned_fields(
-    projection: &ProjectionSnapshot,
-    claim_id: &mfm_facts::FactClaimId,
+    projection: &FactQueryProjection,
     shape: &mfm_facts::CompiledFactQueryShape,
 ) -> Result<Vec<mfm_facts::FactFieldValue>> {
     shape
         .return_fields()
         .iter()
         .filter_map(|field_id| {
-            projection.fact_term(claim_id, field_id).map(|term| {
+            projection.term(field_id).map(|term| {
                 mfm_facts::FactFieldValue::new(
-                    term.field_id.clone(),
-                    term.value_type,
-                    term.value.clone(),
+                    term.field_id().clone(),
+                    term.value_type(),
+                    term.value().clone(),
                 )
                 .map_err(|error| StoreError::Identity(error.to_string()))
             })
@@ -91,11 +89,13 @@ fn compare_rows(
 ) -> std::cmp::Ordering {
     for term in plan.ordering().terms() {
         let left_value = projection
-            .fact_term(left.fact_ref().fact_claim_id(), term.field_id())
-            .map(|term| &term.value);
+            .fact_query_entry(left.fact_ref().fact_claim_id())
+            .and_then(|entry| entry.term(term.field_id()))
+            .map(mfm_facts::FactQueryTerm::value);
         let right_value = projection
-            .fact_term(right.fact_ref().fact_claim_id(), term.field_id())
-            .map(|term| &term.value);
+            .fact_query_entry(right.fact_ref().fact_claim_id())
+            .and_then(|entry| entry.term(term.field_id()))
+            .map(mfm_facts::FactQueryTerm::value);
         let ordering = term
             .compare_values(left_value, right_value)
             .unwrap_or(std::cmp::Ordering::Equal);

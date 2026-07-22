@@ -145,7 +145,7 @@ pub use content_identity::{
 pub use descriptor::{
     FactDescriptor, FactFieldDescriptor, FactFieldPolicy, FactOrderingPolicy, FactOrderingTerm,
 };
-pub use extraction::{FactExtractionMetadata, FactIndexTerm};
+pub use extraction::{FactExtractionMetadata, FactQueryTerm};
 pub use ids::{
     CanonicalValuePath, FactCanonicalizerVersion, FactError, FactFieldId, FactKind,
     FactOrderingName, FactQueryCompilerVersion, FactUnit, Result,

@@ -104,7 +104,7 @@ pub struct FactProjectionFixtureInputForTest {
     pub node_id: NodeId,
     /// Producing attempt id.
     pub attempt_id: AttemptId,
-    /// Commit idempotency key for index rows.
+    /// Commit idempotency key for the query projection.
     pub commit_id: CommitKey,
     /// Store commit ordering coordinate.
     pub store_commit_order: u64,
@@ -146,15 +146,13 @@ pub struct FactRecordFixtureInputForTest {
 pub struct FactProjectionFixtureForTest {
     /// Store-owned query projection.
     pub projection: FactQueryProjection,
-    /// Extracted query term projections.
-    pub terms: Vec<FactIndexTermProjection>,
     /// Verified response artifact evidence.
     pub response_artifact_evidence: ArtifactEvidenceRef,
     /// Canonical response JSON bytes retained as the FactResponse artifact.
     pub response_bytes: Vec<u8>,
 }
 
-/// Builds a fact record, optional index row, and optional term rows for projection fixtures.
+/// Builds one complete fact query projection and its retained response authority for tests.
 pub fn fact_projection_fixture_for_test(
     descriptor: &mfm_facts::FactDescriptor,
     descriptor_hash: ContentDigest,
@@ -188,13 +186,6 @@ pub fn fact_projection_fixture_for_test(
         &claim,
     )
     .map_err(|error| StoreError::Identity(error.to_string()))?;
-    let projection = FactQueryProjection::from_internal_ref(
-        &fact_ref,
-        input.attempt_id,
-        input.commit_id.clone(),
-        input.store_commit_order,
-        Some(response_artifact_evidence.clone()),
-    )?;
     let metadata =
         mfm_facts::FactExtractionMetadata::new(input.recorded_at, input.store_commit_order)
             .map_err(|error| StoreError::Identity(error.to_string()))?;
@@ -204,15 +195,17 @@ pub fn fact_projection_fixture_for_test(
         &input.response,
         &metadata,
     )
-    .map_err(|error| StoreError::Identity(error.to_string()))?
-    .into_iter()
-    .map(|term| {
-        FactIndexTermProjection::from_extracted_term(&fact_claim_id, &descriptor_hash, &term)
-    })
-    .collect();
+    .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let projection = FactQueryProjection::from_internal_ref(
+        &fact_ref,
+        input.attempt_id,
+        input.commit_id.clone(),
+        input.store_commit_order,
+        Some(response_artifact_evidence.clone()),
+        terms,
+    )?;
     Ok(FactProjectionFixtureForTest {
         projection,
-        terms,
         response_artifact_evidence,
         response_bytes,
     })

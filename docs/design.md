@@ -165,15 +165,15 @@ field, optional tagged-enum payload, account, asset, or contract address cannot 
 identity merely because it is not indexed.
 
 Descriptor-declared subject fields validate typed scalar paths and define query-term extraction.
-They are searchable projections, not identity declarations. `fact_index_terms` may omit optional
-terms, but rebuild, signed query evidence, replay, and content-identity verification must rehydrate
-the retained full subject, validate every declared required term, and derive terms again. No
-flattened path list, delimiter-joined asset key, or term cache can substitute for canonical subject
-material.
+They are searchable projections, not identity declarations. A `FactQueryProjection` owns all
+present `fact_query_terms` for its claim; optional terms may be absent, but rebuild, signed query
+evidence, replay, and content-identity verification must rehydrate the retained full subject,
+validate every declared required term, and derive terms again. No flattened path list,
+delimiter-joined asset key, or query-term cache can substitute for canonical subject material.
 
 Canonical fact-query v2 may carry one opaque `FactContentIdentityEvidence` narrowing value. The
 compiler binds its descriptor component to the resolved descriptor, and providers compare all four
-compact components against trusted indexed references before ordering and limiting. This filter is
+compact components against trusted query projections before ordering and limiting. This filter is
 only a bounded candidate-narrowing mechanism: the consumer must still hydrate canonical subject and
 response material and rederive the full content identity before trusting a returned fact.
 

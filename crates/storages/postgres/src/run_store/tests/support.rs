@@ -181,7 +181,13 @@ fn assert_fact_projection_counts(
 ) {
     assert_eq!(projection.fact_descriptors().count(), descriptors);
     assert_eq!(projection.fact_query_entries().count(), query_entries);
-    assert_eq!(projection.fact_term_entries().count(), terms);
+    assert_eq!(
+        projection
+            .fact_query_entries()
+            .map(|(_, projection)| projection.terms().count())
+            .sum::<usize>(),
+        terms
+    );
 }
 
 async fn assert_fact_projection_table_counts(

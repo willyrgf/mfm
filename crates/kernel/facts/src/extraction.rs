@@ -39,25 +39,47 @@ impl FactExtractionMetadata {
     }
 }
 
-/// One extracted index term for an indexed fact claim.
+/// One descriptor-derived term used by canonical fact queries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactIndexTerm {
+pub struct FactQueryTerm {
     pub(crate) field_id: FactFieldId,
     pub(crate) source: FactFieldSource,
-    pub(crate) value_type: FactFieldValueType,
     pub(crate) value: FactCanonicalScalar,
     pub(crate) unit: Option<FactUnit>,
     pub(crate) scale: Option<FactScale>,
 }
 
-impl FactIndexTerm {
+impl FactQueryTerm {
+    /// Rehydrates a validated query term from durable scalar material.
+    pub fn from_parts(
+        field_id: FactFieldId,
+        source: FactFieldSource,
+        value_type: FactFieldValueType,
+        value: FactCanonicalScalar,
+        unit: Option<FactUnit>,
+        scale: Option<FactScale>,
+    ) -> Result<Self> {
+        if value.value_type() != value_type {
+            return Err(FactError::field(
+                field_id,
+                "query term scalar does not match its declared value type",
+            ));
+        }
+        Ok(Self {
+            field_id,
+            source,
+            value,
+            unit,
+            scale,
+        })
+    }
+
     /// Creates a term from a descriptor field and extracted scalar.
     pub fn from_field(field: &FactFieldDescriptor, value: FactCanonicalScalar) -> Result<Self> {
         validate_extracted_scalar(field, &value)?;
         Ok(Self {
             field_id: field.field_id.clone(),
             source: field.extraction.source(),
-            value_type: field.value_type,
             value,
             unit: field.unit.clone(),
             scale: field.scale,
@@ -75,8 +97,8 @@ impl FactIndexTerm {
     }
 
     /// Returns this term's value type.
-    pub const fn value_type(&self) -> FactFieldValueType {
-        self.value_type
+    pub fn value_type(&self) -> FactFieldValueType {
+        self.value.value_type()
     }
 
     /// Returns this term's scalar value.

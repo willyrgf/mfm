@@ -168,11 +168,11 @@ impl SelectHoldingsReadPlan {
         Ok(self.receipt_holdings()?.len())
     }
 
-    /// Builds ordered, exact fact-index requests for every receipt-authorized holding.
+    /// Builds ordered, exact fact-query requests for every receipt-authorized holding.
     pub fn requests(&self) -> Result<Vec<CanonicalFactQueryPlan>, PortfolioHoldingSelectionError> {
         self.receipt_holdings()?
             .iter()
-            .map(|entry| holding_fact_index_request(&self.config(), entry))
+            .map(|entry| holding_fact_query_request(&self.config(), entry))
             .collect()
     }
 
@@ -210,7 +210,7 @@ impl SelectHoldingsReadPlan {
         if responses.len() != entries.len() {
             return Err(selection_error(
                 PortfolioHoldingErrorCode::ReceiptMismatch,
-                "fact-index batch response count did not match receipt demand",
+                "fact-query batch response count did not match receipt demand",
                 None,
             ));
         }
@@ -942,7 +942,7 @@ where
         .is_some())
 }
 
-fn holding_fact_index_request(
+fn holding_fact_query_request(
     config: &SelectHoldingsConfig,
     entry: &ReceiptHolding,
 ) -> Result<CanonicalFactQueryPlan, PortfolioHoldingSelectionError> {

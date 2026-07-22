@@ -132,7 +132,6 @@ pub(super) fn test_returned_fact_authority(
     mfm_facts::InternalFactRef,
     store::FactDescriptorProjection,
     store::FactQueryProjection,
-    Vec<store::FactIndexTermProjection>,
 ) {
     let descriptor = test_fact_descriptor();
     let source_event_id = EventId::from_digest(
@@ -176,7 +175,6 @@ pub(super) fn test_returned_fact_authority(
         fact_ref,
         descriptor_fixture.projection,
         fact_fixture.projection,
-        fact_fixture.terms,
     )
 }
 
@@ -184,7 +182,6 @@ pub(super) fn projection_snapshot_with_returned_fact_authority(
     base: &store::ProjectionSnapshot,
     descriptor: store::FactDescriptorProjection,
     query: store::FactQueryProjection,
-    terms: Vec<store::FactIndexTermProjection>,
 ) -> store::ProjectionSnapshot {
     let mut parts = store::ProjectionSnapshotParts::from_snapshot(base);
     parts
@@ -193,11 +190,6 @@ pub(super) fn projection_snapshot_with_returned_fact_authority(
     parts
         .fact_query_entries
         .insert(query.fact_claim_id().clone(), query);
-    parts.fact_term_entries.extend(
-        terms
-            .into_iter()
-            .map(|term| ((term.fact_claim_id.clone(), term.field_id.clone()), term)),
-    );
     store::ProjectionSnapshot::from_parts(parts)
         .expect("projection snapshot with returned fact authority")
 }

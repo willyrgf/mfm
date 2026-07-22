@@ -73,11 +73,6 @@ impl PublicFactFixtureForTest {
                 descriptor_fixture.projection,
             )]),
             fact_query_entries: BTreeMap::from([(fact_claim_id, fact.projection)]),
-            fact_term_entries: BTreeMap::from_iter(
-                fact.terms
-                    .into_iter()
-                    .map(|term| ((term.fact_claim_id.clone(), term.field_id.clone()), term)),
-            ),
             ..store::ProjectionSnapshotParts::default()
         })
         .expect("projection");

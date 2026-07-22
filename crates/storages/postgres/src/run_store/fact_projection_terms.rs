@@ -1,25 +1,19 @@
 use super::*;
 
-pub(in crate::run_store) fn push_fact_query_projection_term_projection_select_list(
-    builder: &mut QueryBuilder<Postgres>,
-) {
+pub(in crate::run_store) fn push_fact_query_term_select_list(builder: &mut QueryBuilder<Postgres>) {
     let mut has_column = false;
-    for column in FACT_INDEX_TERM_IDENTITY_COLUMNS {
-        push_fact_query_projection_term_select_column(builder, column, &mut has_column);
+    for column in FACT_QUERY_TERM_IDENTITY_COLUMNS {
+        push_fact_query_term_select_column(builder, column, &mut has_column);
     }
     for column in FactTermValueColumn::ALL {
-        push_fact_query_projection_term_select_column(
-            builder,
-            column.storage_column(),
-            &mut has_column,
-        );
+        push_fact_query_term_select_column(builder, column.storage_column(), &mut has_column);
     }
-    for column in FACT_INDEX_TERM_METADATA_COLUMNS {
-        push_fact_query_projection_term_select_column(builder, column, &mut has_column);
+    for column in FACT_QUERY_TERM_METADATA_COLUMNS {
+        push_fact_query_term_select_column(builder, column, &mut has_column);
     }
 }
 
-fn push_fact_query_projection_term_select_column(
+fn push_fact_query_term_select_column(
     builder: &mut QueryBuilder<Postgres>,
     column: &str,
     has_column: &mut bool,

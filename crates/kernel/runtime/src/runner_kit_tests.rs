@@ -99,7 +99,6 @@ struct FactAuthorityFixture {
     fact_ref: mfm_facts::InternalFactRef,
     descriptor: store::FactDescriptorProjection,
     query: store::FactQueryProjection,
-    terms: Vec<store::FactIndexTermProjection>,
 }
 
 fn fact_authority_fixture(subject_height: u64) -> FactAuthorityFixture {
@@ -142,7 +141,6 @@ fn fact_authority_fixture(subject_height: u64) -> FactAuthorityFixture {
         fact_ref,
         descriptor: descriptor_fixture.projection,
         query: fact_fixture.projection,
-        terms: fact_fixture.terms,
     }
 }
 
@@ -156,12 +154,6 @@ fn projections(fixture: &FactAuthorityFixture) -> store::ProjectionSnapshot {
             fixture.query.fact_claim_id().clone(),
             fixture.query.clone(),
         )]),
-        fact_term_entries: fixture
-            .terms
-            .iter()
-            .cloned()
-            .map(|term| ((term.fact_claim_id.clone(), term.field_id.clone()), term))
-            .collect(),
         ..store::ProjectionSnapshotParts::default()
     })
     .expect("projection snapshot")
@@ -282,6 +274,7 @@ fn fact_query_evidence_retention_refs_reject_invalid_returned_fact_authority() {
                     fixture.query.commit_id().clone(),
                     fixture.query.store_commit_order(),
                     None,
+                    fixture.query.terms().cloned().collect(),
                 )
                 .expect("query without hydrated response evidence");
                 parts

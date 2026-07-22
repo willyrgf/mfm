@@ -546,6 +546,12 @@ fn durable_source_boundaries_follow_semantic_metadata() {
             continue;
         }
         let sources = production_rust_sources(&source_root);
+        assert_sources_exclude(
+            &package,
+            &sources,
+            "obsolete fact projection vocabulary",
+            &["FactIndex", "fact_index", "fact-index"],
+        );
 
         match package.semantics.layer {
             Layer::Domain => validate_pure_source_boundaries(&package, &source_root, &sources),

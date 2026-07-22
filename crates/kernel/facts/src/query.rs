@@ -108,7 +108,7 @@ impl FactQueryInput {
         })
     }
 
-    /// Narrows this query to indexed references carrying one verified fact-content identity.
+    /// Narrows this query to projections carrying one verified fact-content identity.
     ///
     /// The compiler binds the evidence to the resolved descriptor. Providers apply the compact
     /// filter before ordering and limiting; consumers must still hydrate and reverify the result.

@@ -136,13 +136,13 @@ impl FactFieldPolicy {
         }
     }
 
-    /// Marks this field as required when extracting indexed facts.
+    /// Marks this field as required when extracting queryable facts.
     pub const fn required(mut self) -> Self {
         self.required = true;
         self
     }
 
-    /// Sets whether this field is required when extracting indexed facts.
+    /// Sets whether this field is required when extracting queryable facts.
     pub const fn with_required(mut self, required: bool) -> Self {
         self.required = required;
         self
@@ -185,7 +185,7 @@ impl FactFieldPolicy {
     }
 }
 
-/// One descriptor-declared field that can produce fact index terms.
+/// One descriptor-declared field that can produce fact query terms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactFieldDescriptor {
     pub(crate) field_id: FactFieldId,
@@ -267,7 +267,7 @@ impl FactFieldDescriptor {
         self.sortable
     }
 
-    /// Returns whether indexed facts must provide this field.
+    /// Returns whether queryable facts must provide this field.
     pub const fn required(&self) -> bool {
         self.required
     }

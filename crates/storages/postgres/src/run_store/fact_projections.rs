@@ -4,8 +4,8 @@ use super::*;
 mod fact_projection_terms;
 pub(super) use self::fact_projection_terms::{
     descriptor_admission_evidence_hash, descriptor_projection_evidence_hash, fact_error,
-    fact_term_value_from_reader, parse_fact_field_source,
-    push_fact_query_projection_term_projection_select_list, TermValueColumns,
+    fact_term_value_from_reader, parse_fact_field_source, push_fact_query_term_select_list,
+    TermValueColumns,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,10 +15,6 @@ pub(super) struct PhysicalFactProjections {
         BTreeMap<(RunId, ContentDigest), FactDescriptorAdmissionProjection>,
     pub(super) fact_query_entries:
         BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactQueryProjection>,
-    pub(super) fact_term_entries: BTreeMap<
-        (mfm_facts::FactClaimId, mfm_facts::FactFieldId),
-        mfm_store::v1::FactIndexTermProjection,
-    >,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,10 +80,6 @@ impl PhysicalFactProjections {
                 .fact_query_entries()
                 .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
                 .collect(),
-            fact_term_entries: snapshot
-                .fact_term_entries()
-                .map(|(key, projection)| (key.clone(), projection.clone()))
-                .collect(),
         })
     }
 }
@@ -124,12 +116,6 @@ pub(super) async fn insert_fact_projection_rows_tx(
             insert_fact_query_projection_tx(tx, projection, commit_id).await?;
         }
     }
-    for (key, projection) in after.fact_term_entries() {
-        let (claim_id, field_id) = key;
-        if before.fact_term(claim_id, field_id).is_none() {
-            insert_fact_term_projection_tx(tx, projection).await?;
-        }
-    }
     Ok(())
 }
 
@@ -144,11 +130,18 @@ async fn load_fact_projection_tables_scoped_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: Option<&RunId>,
 ) -> Result<PhysicalFactProjections> {
+    let mut terms_by_claim = load_fact_query_terms_tx(tx, run_id).await?;
+    let fact_query_entries =
+        load_fact_query_projections_tx(tx, run_id, &mut terms_by_claim).await?;
+    if let Some((claim_id, _)) = terms_by_claim.first_key_value() {
+        return Err(PostgresStoreError::Corruption(format!(
+            "fact query terms for {claim_id:?} have no fact query row"
+        )));
+    }
     let projections = PhysicalFactProjections {
         fact_descriptors: load_fact_descriptor_catalog_tx(tx, run_id).await?,
         fact_descriptor_admissions: load_run_fact_descriptor_admissions_tx(tx, run_id).await?,
-        fact_query_entries: load_fact_query_projections_tx(tx, run_id).await?,
-        fact_term_entries: load_fact_query_terms_tx(tx, run_id).await?,
+        fact_query_entries,
     };
     validate_physical_fact_projections(&projections)?;
     Ok(projections)
@@ -195,23 +188,6 @@ fn validate_physical_fact_projections(projections: &PhysicalFactProjections) -> 
             return Err(PostgresStoreError::Corruption(format!(
                 "fact query row {:?} references a descriptor not admitted by its run",
                 claim_id
-            )));
-        }
-    }
-    for ((claim_id, field_id), term) in &projections.fact_term_entries {
-        let Some(query) = projections.fact_query_entries.get(claim_id) else {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact query term row {:?} has no fact query row",
-                claim_id
-            )));
-        };
-        if &term.fact_descriptor_hash != query.fact_descriptor_hash() {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact query term row {:?}/{} references descriptor {} but parent row references {}",
-                claim_id,
-                field_id,
-                term.fact_descriptor_hash,
-                query.fact_descriptor_hash()
             )));
         }
     }
@@ -370,7 +346,7 @@ async fn delete_fact_projection_rows_tx(
         .bind(run_id.as_str())
         .execute(&mut **tx)
         .await
-        .map_err(|error| database_error("failed to delete fact term projections", error))?;
+        .map_err(|error| database_error("failed to delete fact query terms", error))?;
     sqlx::query("DELETE FROM fact_query_projection WHERE source_run_id = $1")
         .bind(run_id.as_str())
         .execute(&mut **tx)
@@ -416,9 +392,6 @@ async fn insert_rebuilt_fact_projection_rows_tx(
     for (_, projection) in snapshot.fact_query_entries() {
         let commit_id = required_commit_id(commit_ids_by_event, projection.source_event_id())?;
         insert_fact_query_projection_tx(tx, projection, commit_id).await?;
-    }
-    for (_, projection) in snapshot.fact_term_entries() {
-        insert_fact_term_projection_tx(tx, projection).await?;
     }
     Ok(())
 }
@@ -613,14 +586,25 @@ async fn insert_fact_query_projection_tx(
     .execute(&mut **tx)
     .await
     .map_err(|error| database_error("failed to insert fact query projection", error))?;
+    for term in projection.terms() {
+        insert_fact_query_term_tx(
+            tx,
+            projection.fact_claim_id(),
+            projection.fact_descriptor_hash(),
+            term,
+        )
+        .await?;
+    }
     Ok(())
 }
 
-async fn insert_fact_term_projection_tx(
+async fn insert_fact_query_term_tx(
     tx: &mut Transaction<'_, Postgres>,
-    projection: &mfm_store::v1::FactIndexTermProjection,
+    claim_id: &mfm_facts::FactClaimId,
+    descriptor_hash: &ContentDigest,
+    term: &mfm_facts::FactQueryTerm,
 ) -> Result<()> {
-    let value = TermValueColumns::from_scalar(&projection.value);
+    let value = TermValueColumns::from_scalar(term.value());
     sqlx::query(
         "INSERT INTO fact_query_terms \
          (source_run_id, source_seq, source_ordinal, fact_descriptor_hash, field_id, source, \
@@ -628,20 +612,18 @@ async fn insert_fact_term_projection_tx(
           value_timestamp, value_digest, unit, scale) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
     )
-    .bind(projection.fact_claim_id.source_run_id().as_str())
+    .bind(claim_id.source_run_id().as_str())
     .bind(u64_to_i64(
-        projection.fact_claim_id.source_seq(),
+        claim_id.source_seq(),
         "fact_query_terms.source_seq",
     )?)
-    .bind(
-        i32::try_from(projection.fact_claim_id.source_ordinal()).map_err(|_| {
-            PostgresStoreError::Corruption("fact_query_terms.source_ordinal overflow".into())
-        })?,
-    )
-    .bind(projection.fact_descriptor_hash.as_str())
-    .bind(projection.field_id.as_str())
-    .bind(projection.source.path_prefix())
-    .bind(projection.value_type.as_str())
+    .bind(i32::try_from(claim_id.source_ordinal()).map_err(|_| {
+        PostgresStoreError::Corruption("fact_query_terms.source_ordinal overflow".into())
+    })?)
+    .bind(descriptor_hash.as_str())
+    .bind(term.field_id().as_str())
+    .bind(term.source().path_prefix())
+    .bind(term.value_type().as_str())
     .bind(value.value_text.as_deref())
     .bind(value.value_bool)
     .bind(value.value_i64)
@@ -649,11 +631,11 @@ async fn insert_fact_term_projection_tx(
     .bind(value.value_decimal.as_deref())
     .bind(value.value_timestamp.as_deref())
     .bind(value.value_digest.as_deref())
-    .bind(projection.unit.as_ref().map(|unit| unit.as_str()))
-    .bind(projection.scale.map(|scale| i32::from(scale.exponent())))
+    .bind(term.unit().map(mfm_facts::FactUnit::as_str))
+    .bind(term.scale().map(|scale| i32::from(scale.exponent())))
     .execute(&mut **tx)
     .await
-    .map_err(|error| database_error("failed to insert fact term projection", error))?;
+    .map_err(|error| database_error("failed to insert fact query term", error))?;
     Ok(())
 }
 
@@ -807,6 +789,7 @@ async fn load_run_fact_descriptor_admissions_tx(
 async fn load_fact_query_projections_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: Option<&RunId>,
+    terms_by_claim: &mut BTreeMap<mfm_facts::FactClaimId, HydratedFactQueryTerms>,
 ) -> Result<BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactQueryProjection>> {
     let mut builder = QueryBuilder::new("SELECT ");
     push_fact_query_projection_select_list(&mut builder, None);
@@ -826,7 +809,11 @@ async fn load_fact_query_projections_tx(
         .map_err(|error| database_error("failed to load fact query projections", error))?;
     let mut projections = BTreeMap::new();
     for row in rows {
-        let projection = fact_query_projection_from_row(tx, &row).await?;
+        let claim_id =
+            fact_claim_coordinates_from_row(&PgRowReader::new(&row, "fact_query_projection"))?
+                .claim_id;
+        let terms = terms_by_claim.remove(&claim_id);
+        let projection = fact_query_projection_from_row(tx, &row, terms).await?;
         projections.insert(projection.fact_claim_id().clone(), projection);
     }
     Ok(projections)
@@ -887,15 +874,18 @@ fn fact_claim_coordinates_from_row(row: &PgRowReader<'_>) -> Result<FactClaimCoo
     Ok(FactClaimCoordinates { claim_id })
 }
 
-pub(super) async fn fact_query_projection_from_row(
+async fn fact_query_projection_from_row(
     tx: &mut Transaction<'_, Postgres>,
     row: &PgRow,
+    terms: Option<HydratedFactQueryTerms>,
 ) -> Result<mfm_store::v1::FactQueryProjection> {
     let row = PgRowReader::new(row, "fact_query_projection");
     let coordinates = fact_claim_coordinates_from_row(&row)?;
     let response_artifact_id: ArtifactId = row.required_identity("response_artifact_id")?;
     let response_artifact_evidence_hash: ContentDigest =
         row.required_identity("response_artifact_evidence_hash")?;
+    let fact_descriptor_hash = row.required_identity::<ContentDigest>("fact_descriptor_hash")?;
+    let terms = validated_fact_query_terms(&coordinates.claim_id, &fact_descriptor_hash, terms)?;
     let fact_ref = mfm_facts::InternalFactRef::new(mfm_facts::InternalFactRefParts {
         fact_claim_id: coordinates.claim_id,
         source_event_id: row.required_identity("source_event_id")?,
@@ -903,7 +893,7 @@ pub(super) async fn fact_query_projection_from_row(
         producer_node_id: row.required_identity("producer_node_id")?,
         fact_kind: mfm_facts::FactKind::new(row.required_string("fact_kind")?)
             .map_err(fact_error)?,
-        fact_descriptor_hash: row.required_identity("fact_descriptor_hash")?,
+        fact_descriptor_hash,
         subject: mfm_facts::FactSubjectRef::new(
             row.required_identity("fact_subject_namespace_hash")?,
             mfm_facts::FactKey::from_digest(row.required_identity("fact_key")?),
@@ -929,6 +919,7 @@ pub(super) async fn fact_query_projection_from_row(
         commit_key,
         store_commit_order,
         Some(response_artifact.evidence),
+        terms,
     )
     .map_err(Into::into)
 }
@@ -936,14 +927,9 @@ pub(super) async fn fact_query_projection_from_row(
 async fn load_fact_query_terms_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: Option<&RunId>,
-) -> Result<
-    BTreeMap<
-        (mfm_facts::FactClaimId, mfm_facts::FactFieldId),
-        mfm_store::v1::FactIndexTermProjection,
-    >,
-> {
+) -> Result<BTreeMap<mfm_facts::FactClaimId, HydratedFactQueryTerms>> {
     let mut builder = QueryBuilder::new("SELECT ");
-    push_fact_query_projection_term_projection_select_list(&mut builder);
+    push_fact_query_term_select_list(&mut builder);
     builder.push(" FROM fact_query_terms");
     if let Some(run_id) = run_id {
         builder
@@ -957,26 +943,23 @@ async fn load_fact_query_terms_tx(
         .build()
         .fetch_all(&mut **tx)
         .await
-        .map_err(|error| database_error("failed to load fact term projections", error))?;
-    let mut projections = BTreeMap::new();
+        .map_err(|error| database_error("failed to load fact query terms", error))?;
+    let mut terms_by_claim = BTreeMap::new();
     for row in rows {
         let row = PgRowReader::new(&row, "fact_query_terms");
         let coordinates = fact_claim_coordinates_from_row(&row)?;
         let (field_id, value_type, value) = fact_term_value_from_reader(&row)?;
-        let projection = mfm_store::v1::FactIndexTermProjection {
-            fact_claim_id: coordinates.claim_id.clone(),
-            fact_descriptor_hash: row.required_identity("fact_descriptor_hash")?,
-            field_id: field_id.clone(),
-            source: parse_fact_field_source(&row.required_string("source")?)?,
+        let descriptor_hash: ContentDigest = row.required_identity("fact_descriptor_hash")?;
+        let term = mfm_facts::FactQueryTerm::from_parts(
+            field_id,
+            parse_fact_field_source(&row.required_string("source")?)?,
             value_type,
             value,
-            unit: row
-                .optional_string("unit")?
+            row.optional_string("unit")?
                 .map(mfm_facts::FactUnit::new)
                 .transpose()
                 .map_err(fact_error)?,
-            scale: row
-                .optional_i32("scale")?
+            row.optional_i32("scale")?
                 .map(|value| {
                     i16::try_from(value)
                         .map_err(|_| {
@@ -987,13 +970,49 @@ async fn load_fact_query_terms_tx(
                         .and_then(|value| mfm_facts::FactScale::new(value).map_err(fact_error))
                 })
                 .transpose()?,
-        };
-        projections.insert((coordinates.claim_id, field_id), projection);
+        )
+        .map_err(fact_error)?;
+        let entry = terms_by_claim
+            .entry(coordinates.claim_id.clone())
+            .or_insert_with(|| HydratedFactQueryTerms {
+                descriptor_hash: descriptor_hash.clone(),
+                terms: Vec::new(),
+            });
+        if entry.descriptor_hash != descriptor_hash {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact query terms for {:?} reference conflicting descriptors",
+                coordinates.claim_id
+            )));
+        }
+        entry.terms.push(term);
     }
-    Ok(projections)
+    Ok(terms_by_claim)
 }
 
-const FACT_INDEX_TERM_IDENTITY_COLUMNS: &[&str] = &[
+#[derive(Debug)]
+struct HydratedFactQueryTerms {
+    descriptor_hash: ContentDigest,
+    terms: Vec<mfm_facts::FactQueryTerm>,
+}
+
+fn validated_fact_query_terms(
+    claim_id: &mfm_facts::FactClaimId,
+    descriptor_hash: &ContentDigest,
+    hydrated: Option<HydratedFactQueryTerms>,
+) -> Result<Vec<mfm_facts::FactQueryTerm>> {
+    match hydrated {
+        Some(hydrated) if &hydrated.descriptor_hash != descriptor_hash => {
+            Err(PostgresStoreError::Corruption(format!(
+                "fact query terms for {claim_id:?} reference descriptor {} but parent row references {}",
+                hydrated.descriptor_hash, descriptor_hash
+            )))
+        }
+        Some(hydrated) => Ok(hydrated.terms),
+        None => Ok(Vec::new()),
+    }
+}
+
+const FACT_QUERY_TERM_IDENTITY_COLUMNS: &[&str] = &[
     "source_run_id",
     "source_seq",
     "source_ordinal",
@@ -1003,7 +1022,7 @@ const FACT_INDEX_TERM_IDENTITY_COLUMNS: &[&str] = &[
     "value_type",
 ];
 
-const FACT_INDEX_TERM_METADATA_COLUMNS: &[&str] = &["unit", "scale"];
+const FACT_QUERY_TERM_METADATA_COLUMNS: &[&str] = &["unit", "scale"];
 
 #[cfg(test)]
 #[path = "fact_projections_tests.rs"]

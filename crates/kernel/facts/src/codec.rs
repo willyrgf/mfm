@@ -554,18 +554,18 @@ pub fn typed_fact_subject_evidence(
     fact_subject_evidence(descriptor, &subject)
 }
 
-/// Extracts subject, result, and metadata terms for an indexed fact claim.
+/// Extracts subject, result, and metadata terms for a queryable fact claim.
 pub fn extract_terms(
     descriptor: &FactDescriptor,
     subject: &CanonicalValue,
     response: &CanonicalValue,
     metadata: &FactExtractionMetadata,
-) -> Result<Vec<FactIndexTerm>> {
+) -> Result<Vec<FactQueryTerm>> {
     validate_descriptor(descriptor)?;
     let mut terms = Vec::new();
     for field in &descriptor.fields {
         match extract_field_scalar(field, subject, response, Some(metadata))? {
-            Some(scalar) => terms.push(FactIndexTerm::from_field(field, scalar)?),
+            Some(scalar) => terms.push(FactQueryTerm::from_field(field, scalar)?),
             None if field.required => {
                 return Err(FactError::field(
                     field.field_id.clone(),
@@ -592,13 +592,13 @@ pub fn parse_canonical_fact_response_bytes(
     json_to_fact_canonical_value(&value, "", &typed_paths, FactJsonPathContext::Response)
 }
 
-/// Extracts index terms from persisted subject material plus canonical response material.
+/// Extracts query terms from persisted subject material plus canonical response material.
 pub fn extract_terms_from_material(
     descriptor: &FactDescriptor,
     subject_material: &FactSubjectMaterialV2,
     response: &CanonicalValue,
     metadata: &FactExtractionMetadata,
-) -> Result<Vec<FactIndexTerm>> {
+) -> Result<Vec<FactQueryTerm>> {
     let subject = typed_subject_from_material(descriptor, subject_material)?;
     extract_terms(descriptor, &subject, response, metadata)
 }

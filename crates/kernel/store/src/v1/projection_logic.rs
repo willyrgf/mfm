@@ -31,7 +31,6 @@ impl ProjectionSnapshot {
             cells,
             fact_descriptors,
             fact_query_entries,
-            fact_term_entries,
             side_effects,
             resource_lanes,
             public_outputs,
@@ -79,19 +78,6 @@ impl ProjectionSnapshot {
                 });
             }
         }
-        for ((claim_id, field_id), projection) in &fact_term_entries {
-            if claim_id != &projection.fact_claim_id || field_id != &projection.field_id {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!(
-                        "{}:{}",
-                        fact_claim_projection_key("fact_term", claim_id),
-                        field_id
-                    ),
-                    message: "fact term projection key does not match projection identity"
-                        .to_owned(),
-                });
-            }
-        }
         for (ledger_ref, projection) in &side_effects {
             if ledger_ref.run_id != projection.run_id || ledger_ref.pair_id != projection.pair_id {
                 return Err(StoreError::ProjectionConflict {
@@ -112,7 +98,6 @@ impl ProjectionSnapshot {
             cells,
             fact_descriptors,
             fact_query_entries,
-            fact_term_entries,
             side_effects,
             resource_lanes,
             public_outputs,
@@ -199,11 +184,11 @@ impl ProjectionSnapshot {
         Ok(snapshot)
     }
 
-    /// Rebuilds non-fact projections plus fact record identities for stores with physical fact indexes.
+    /// Rebuilds non-fact projections plus fact record identities for external fact query storage.
     ///
-    /// This helper is for stores that maintain descriptor, index, and term projections in separate
-    /// validated tables. It does not rebuild queryable fact indexes from the stream, and it is not a
-    /// replay validation substitute for retained descriptor and response artifact authority.
+    /// This helper is for stores that maintain descriptor and complete fact query projections in
+    /// validated tables. It does not rebuild queryable facts from the stream, and it is not a replay
+    /// validation substitute for retained descriptor and response artifact authority.
     pub fn rebuild_for_external_fact_queries(events: &[KernelEventEnvelope]) -> Result<Self> {
         Self::validate_run_stream(events)?;
         let mut snapshot = Self::default();
@@ -290,27 +275,6 @@ impl ProjectionSnapshot {
         claim_id: &mfm_facts::FactClaimId,
     ) -> Option<&FactQueryProjection> {
         self.fact_query_entries.get(claim_id)
-    }
-
-    /// Returns an extracted fact term for a claim and field id.
-    pub fn fact_term(
-        &self,
-        claim_id: &mfm_facts::FactClaimId,
-        field_id: &mfm_facts::FactFieldId,
-    ) -> Option<&FactIndexTermProjection> {
-        self.fact_term_entries
-            .get(&(claim_id.clone(), field_id.clone()))
-    }
-
-    /// Iterates extracted fact terms for one claim id.
-    pub fn fact_terms_for_claim<'a>(
-        &'a self,
-        claim_id: &'a mfm_facts::FactClaimId,
-    ) -> impl Iterator<Item = &'a FactIndexTermProjection> + 'a {
-        self.fact_term_entries
-            .iter()
-            .filter(move |((term_claim_id, _field_id), _term)| term_claim_id == claim_id)
-            .map(|(_key, term)| term)
     }
 
     /// Returns an attempt lifecycle projection.
@@ -508,18 +472,6 @@ impl ProjectionSnapshot {
         &self,
     ) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &FactQueryProjection)> {
         self.fact_query_entries.iter()
-    }
-
-    /// Iterates extracted fact term projections.
-    pub fn fact_term_entries(
-        &self,
-    ) -> impl Iterator<
-        Item = (
-            &(mfm_facts::FactClaimId, mfm_facts::FactFieldId),
-            &FactIndexTermProjection,
-        ),
-    > {
-        self.fact_term_entries.iter()
     }
 
     /// Iterates side-effect projections.

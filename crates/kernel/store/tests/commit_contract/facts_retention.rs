@@ -264,12 +264,12 @@ fn fact_recorded_projects_reusable_fact_evidence() {
     let snapshot = store.projection_snapshot();
     assert_eq!(snapshot.fact_descriptors().count(), 1);
     assert_eq!(snapshot.fact_query_entries().count(), 1);
-    assert_eq!(snapshot.fact_term_entries().count(), 2);
     let projection = snapshot
         .fact_query_entries()
         .next()
         .map(|(_, projection)| projection)
         .expect("fact query projection");
+    assert_eq!(projection.terms().count(), 2);
     assert_eq!(projection.artifact_id(), &response.artifact_id);
     assert_eq!(projection.response_hash(), &response.digest);
     assert_eq!(projection.fact_key(), &fact_key());
@@ -309,22 +309,28 @@ fn fact_query_projection_constructor_derives_event_coordinates() {
     let KernelEventPayload::FactRecorded(payload) = event.payload() else {
         panic!("fact event payload");
     };
+    let fact_claim_id = mfm_facts::derive_fact_claim_id(
+        event.run_id().clone(),
+        event.seq().as_u64(),
+        event.ordinal().as_u32(),
+    )
+    .expect("claim id");
+    let terms = store
+        .projection_snapshot()
+        .fact_query_entry(&fact_claim_id)
+        .expect("projected query")
+        .terms()
+        .cloned()
+        .collect::<Vec<_>>();
 
     let with_evidence = mfm_store::v1::FactQueryProjection::from_recorded_event(
         event,
         payload,
         Some(response.clone()),
+        terms.clone(),
     )
     .expect("fact query projection");
-    assert_eq!(
-        with_evidence.fact_claim_id(),
-        &mfm_facts::derive_fact_claim_id(
-            event.run_id().clone(),
-            event.seq().as_u64(),
-            event.ordinal().as_u32(),
-        )
-        .expect("claim id")
-    );
+    assert_eq!(with_evidence.fact_claim_id(), &fact_claim_id);
     assert_eq!(with_evidence.source_event_id(), event.event_id());
     assert_eq!(with_evidence.source_run_id(), event.run_id());
     assert_eq!(with_evidence.source_seq(), event.seq().as_u64());
@@ -360,13 +366,31 @@ fn fact_query_projection_constructor_derives_event_coordinates() {
     );
 
     let without_evidence =
-        mfm_store::v1::FactQueryProjection::from_recorded_event(event, payload, None)
+        mfm_store::v1::FactQueryProjection::from_recorded_event(event, payload, None, terms)
             .expect("fact query projection without retained evidence");
     assert_eq!(without_evidence.response_artifact_evidence(), None);
     assert_eq!(
         without_evidence.internal_ref().expect("internal fact ref"),
         fact_ref
     );
+
+    let duplicate_term = mfm_facts::FactQueryTerm::from_parts(
+        mfm_facts::FactFieldId::new("subject.account").expect("field id"),
+        mfm_facts::FactFieldSource::Subject,
+        mfm_facts::FactFieldValueType::String,
+        mfm_facts::FactCanonicalScalar::String("alice".to_owned()),
+        None,
+        None,
+    )
+    .expect("query term");
+    let error = mfm_store::v1::FactQueryProjection::from_recorded_event(
+        event,
+        payload,
+        None,
+        vec![duplicate_term.clone(), duplicate_term],
+    )
+    .expect_err("duplicate query field");
+    assert!(matches!(error, StoreError::ProjectionConflict { .. }));
 }
 
 #[test]

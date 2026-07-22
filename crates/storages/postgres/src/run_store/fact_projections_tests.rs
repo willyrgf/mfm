@@ -1,27 +1,22 @@
 use super::*;
 
 #[test]
-fn physical_fact_projection_validation_rejects_term_descriptor_mismatch() {
-    let mut projections = valid_physical_fact_projections();
-    let other_descriptor_fixture =
-        mfm_store::v1::test_support::fact_descriptor_projection_fixture_for_test(
-            fact_descriptor_with_seed(2),
-        )
-        .expect("other descriptor fixture");
-    let mismatched_descriptor_hash = other_descriptor_fixture.descriptor_hash.clone();
-    projections.fact_descriptors.insert(
-        other_descriptor_fixture.descriptor_hash.clone(),
-        other_descriptor_fixture.projection,
-    );
-    let term = projections
-        .fact_term_entries
-        .values_mut()
-        .next()
-        .expect("index term");
-    term.fact_descriptor_hash = mismatched_descriptor_hash.clone();
+fn query_projection_hydration_rejects_term_descriptor_mismatch() {
+    let projections = valid_physical_fact_projections();
+    let (claim_id, projection) = projections
+        .fact_query_entries
+        .first_key_value()
+        .expect("query projection");
+    let mismatched_descriptor_hash = mfm_facts::fact_descriptor_hash(&fact_descriptor_with_seed(2))
+        .expect("mismatched descriptor hash");
+    let hydrated = HydratedFactQueryTerms {
+        descriptor_hash: mismatched_descriptor_hash.clone(),
+        terms: projection.terms().cloned().collect(),
+    };
 
-    let error = validate_physical_fact_projections(&projections)
-        .expect_err("term descriptor mismatch should reject");
+    let error =
+        validated_fact_query_terms(claim_id, projection.fact_descriptor_hash(), Some(hydrated))
+            .expect_err("term descriptor mismatch should reject");
     assert!(
         error
             .to_string()
@@ -34,13 +29,11 @@ fn physical_fact_projection_validation_rejects_term_descriptor_mismatch() {
 fn physical_fact_projection_validation_rejects_missing_projection_links() {
     #[derive(Clone, Copy)]
     enum MissingLink {
-        QueryForTerm,
         DescriptorForAdmission,
         RunAdmissionForQuery,
     }
 
     for (case, expected) in [
-        (MissingLink::QueryForTerm, "has no fact query row"),
         (
             MissingLink::DescriptorForAdmission,
             "references missing descriptor row",
@@ -52,15 +45,6 @@ fn physical_fact_projection_validation_rejects_missing_projection_links() {
     ] {
         let mut projections = valid_physical_fact_projections();
         match case {
-            MissingLink::QueryForTerm => {
-                let claim_id = projections
-                    .fact_query_entries
-                    .keys()
-                    .next()
-                    .expect("query claim id")
-                    .clone();
-                projections.fact_query_entries.remove(&claim_id);
-            }
             MissingLink::DescriptorForAdmission => projections.fact_descriptors.clear(),
             MissingLink::RunAdmissionForQuery => projections.fact_descriptor_admissions.clear(),
         }
@@ -88,7 +72,7 @@ fn valid_physical_fact_projections() -> PhysicalFactProjections {
             source_event_id: event_id(12),
             node_id: node_id(13),
             attempt_id: attempt_id(14),
-            commit_id: CommitKey::new("fact-term-descriptor-mismatch").expect("commit key"),
+            commit_id: CommitKey::new("fact-query-projection").expect("commit key"),
             store_commit_order: 1,
             recorded_at: "2026-01-02T03:04:05Z".to_owned(),
             subject: mfm_canonical::CanonicalValue::object([(
@@ -108,7 +92,6 @@ fn valid_physical_fact_projections() -> PhysicalFactProjections {
     .expect("fact projection fixture");
     let projection = fact_fixture.projection;
     let claim_id = projection.fact_claim_id().clone();
-    let term = fact_fixture.terms.into_iter().next().expect("index term");
     let descriptor_hash = descriptor_fixture.descriptor_hash.clone();
     let descriptor_admission = FactDescriptorAdmissionProjection {
         run_id: run_id(3),
@@ -129,7 +112,6 @@ fn valid_physical_fact_projections() -> PhysicalFactProjections {
             descriptor_admission,
         )]),
         fact_query_entries: BTreeMap::from([(claim_id.clone(), projection)]),
-        fact_term_entries: BTreeMap::from([((claim_id, term.field_id.clone()), term)]),
     }
 }
 

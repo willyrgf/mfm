@@ -86,7 +86,7 @@ impl_fact_tag!(FactMetadataField, "fact metadata field", pub(crate), "Returns th
     Self::StoreCommitOrder => "store_commit_order",
 });
 
-/// Scalar value type for an indexed fact field.
+/// Scalar value type for a queryable fact field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactFieldValueType {

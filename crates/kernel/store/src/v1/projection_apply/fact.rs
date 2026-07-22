@@ -38,21 +38,6 @@ pub(super) fn apply_fact_recorded(
     validate_fact_response_evidence(response, response_evidence)?;
     let recorded_at = fact_recorded_at(envelope);
     let store_commit_order = envelope.store_commit_order().as_u64();
-    let projection = FactQueryProjection::from_recorded_event(
-        envelope,
-        payload,
-        Some(response_evidence.clone()),
-    )?;
-    if projections
-        .fact_query_entries
-        .insert(claim_id.clone(), projection)
-        .is_some()
-    {
-        return Err(StoreError::ProjectionConflict {
-            key: fact_claim_projection_key("fact_query", &claim_id),
-            message: "fact claim id is already projected".to_owned(),
-        });
-    }
     let metadata = mfm_facts::FactExtractionMetadata::new(recorded_at.clone(), store_commit_order)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     let response_value =
@@ -65,30 +50,21 @@ pub(super) fn apply_fact_recorded(
         &metadata,
     )
     .map_err(|error| StoreError::Identity(error.to_string()))?;
-
-    for term in terms {
-        let key = (claim_id.clone(), term.field_id().clone());
-        if projections
-            .fact_term_entries
-            .insert(
-                key.clone(),
-                FactIndexTermProjection::from_extracted_term(
-                    &claim_id,
-                    claim.fact_descriptor_hash(),
-                    &term,
-                ),
-            )
-            .is_some()
-        {
-            return Err(StoreError::ProjectionConflict {
-                key: format!(
-                    "{}:{}",
-                    fact_claim_projection_key("fact_term", &claim_id),
-                    key.1
-                ),
-                message: "duplicate fact term projection".to_owned(),
-            });
-        }
+    let projection = FactQueryProjection::from_recorded_event(
+        envelope,
+        payload,
+        Some(response_evidence.clone()),
+        terms,
+    )?;
+    if projections
+        .fact_query_entries
+        .insert(claim_id.clone(), projection)
+        .is_some()
+    {
+        return Err(StoreError::ProjectionConflict {
+            key: fact_claim_projection_key("fact_query", &claim_id),
+            message: "fact claim id is already projected".to_owned(),
+        });
     }
     Ok(())
 }
