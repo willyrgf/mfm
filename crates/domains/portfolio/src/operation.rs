@@ -481,6 +481,16 @@ mod tests {
     const TOKEN: &str = "0x0000000000000000000000000000000000000001";
     const BTC_ADDRESS: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
 
+    mfm_certify::define_program_descriptor_registry! {
+        state_registry: undeclared_child_state_registry,
+        operation_registry: undeclared_child_operation_registry,
+        certification: register_undeclared_child_certification_descriptors,
+        authoring_catalog: undeclared_child_authoring_catalog,
+        includes: [],
+        states: [],
+        operations: [PortfolioSnapshotOperation],
+    }
+
     #[test]
     fn compiler_derives_bounded_family_work() {
         let portfolio = portfolio_config(true, true, true);
@@ -659,6 +669,91 @@ mod tests {
                     .len()
         );
         assert_eq!(catalog.side_effect_state_descriptor_ids().len(), 0);
+    }
+
+    #[test]
+    fn operation_authoring_rejects_a_child_absent_from_the_declared_catalog() {
+        let catalog = undeclared_child_authoring_catalog().expect("negative fixture catalog");
+        let child_descriptor =
+            mfm_program::operation_descriptor::<mfm_bitcoin::BitcoinBalanceCollectionOperation>()
+                .expect("Bitcoin child operation descriptor");
+        assert!(catalog
+            .operation_descriptors()
+            .all(|descriptor| descriptor.descriptor_id != *child_descriptor.descriptor_id()));
+
+        let config = ValidatedPortfolioConfig::new(portfolio_config(true, false, false))
+            .expect("Bitcoin-only portfolio")
+            .into_config();
+        let error = build_root_with_registries(
+            ScopeKey::new("undeclared_child_fixture").expect("root key"),
+            undeclared_child_state_registry().expect("negative fixture states"),
+            undeclared_child_operation_registry().expect("negative fixture operations"),
+            |root: &mut RootBuilder<'_, '_>| {
+                let output = root.scope().call::<PortfolioSnapshotOperation, _>(
+                    OperationKey::new("snapshot")?,
+                    PortfolioSnapshotOperation,
+                    config,
+                    (),
+                )?;
+                root.bind_public_outputs(
+                    PublicOutputKey::new("snapshot")?,
+                    &PortfolioPublicOutputs {
+                        snapshot: output.snapshot,
+                        report: output.report,
+                    },
+                )
+            },
+        )
+        .expect_err("undeclared child must reject before a draft is produced");
+        assert!(matches!(
+            error,
+            mfm_program::PlanError::Registry(message) if message.contains("not registered")
+        ));
+
+        let mut certification = mfm_certify::CertificationRegistry::new();
+        register_undeclared_child_certification_descriptors(&mut certification)
+            .expect("negative fixture certification declaration");
+    }
+
+    #[test]
+    fn canonical_branch_lineage_union_equals_the_declared_domain_catalog() {
+        let catalog = portfolio_snapshot_authoring_catalog().expect("snapshot authoring catalog");
+        let declared_states = catalog
+            .state_descriptors()
+            .map(|descriptor| descriptor.descriptor_id.clone())
+            .collect::<BTreeSet<_>>();
+        let declared_operations = catalog
+            .operation_descriptors()
+            .map(|descriptor| descriptor.descriptor_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut observed_states = BTreeSet::new();
+        let mut observed_operations = BTreeSet::new();
+
+        for branch in [
+            portfolio_config(true, false, false),
+            portfolio_config(false, true, true),
+            portfolio_config(true, true, true),
+        ] {
+            let config = ValidatedPortfolioConfig::new(branch)
+                .expect("canonical branch portfolio")
+                .into_config();
+            let draft = portfolio_snapshot_program_draft(config).expect("canonical branch draft");
+            observed_states.extend(
+                draft
+                    .state_nodes()
+                    .iter()
+                    .map(|node| node.state_descriptor_id.clone()),
+            );
+            observed_operations.extend(
+                draft
+                    .operation_lineage()
+                    .iter()
+                    .map(|frame| frame.operation_descriptor_id.clone()),
+            );
+        }
+
+        assert_eq!(observed_states, declared_states);
+        assert_eq!(observed_operations, declared_operations);
     }
 
     #[test]
