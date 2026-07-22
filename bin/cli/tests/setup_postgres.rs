@@ -214,8 +214,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
-async fn configured_target_cli_and_rest_replace_current_config_with_stable_invocation_and_nonterminal_resume(
-) {
+async fn configured_target_cli_and_rest_enforce_executable_authority_and_nonterminal_resume() {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let schema = unique_postgres_schema();
     create_postgres_schema(&database_url, &schema).await;
@@ -370,16 +369,15 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
         )
         .await
         .expect("REST response");
-    assert_eq!(rest_response.status(), StatusCode::OK);
+    assert_eq!(rest_response.status(), StatusCode::BAD_REQUEST);
     let rest_response = response_json(rest_response).await;
-    assert_eq!(rest_response["data"]["outcome"], "attached");
-    let rest_run: mfm_ids::RunId = rest_response["data"]["run"]["run_id"]
-        .as_str()
-        .expect("REST run id")
-        .parse()
-        .expect("typed REST run id");
-    assert_eq!(rest_run, run_b);
-    assert_eq!(admission_evidence(&store, &rest_run).await, cli_evidence_b);
+    assert_eq!(rest_response["status"], "error");
+    assert_eq!(rest_response["error"]["code"], "LaunchRunnerUnavailable");
+    assert_eq!(
+        rest_response["error"]["message"],
+        "A required typed runner is unavailable"
+    );
+    assert_eq!(admission_evidence(&store, &run_b).await, cli_evidence_b);
 
     let duplicate_path = directory.path().join("duplicate-targets.toml");
     std::fs::write(&duplicate_path, format!("{SETUP_FIXTURE}\n{SETUP_FIXTURE}"))
@@ -426,7 +424,7 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
         .await
         .expect("remove mutable current configuration");
     configured_pool.close().await;
-    let resumed_unfinished = json_output(run_cli(
+    let rejected_cli_resume = json_error(run_cli(
         &scoped_url,
         &[
             "--output-format",
@@ -439,10 +437,31 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
         ],
     ));
     assert_eq!(
-        resumed_unfinished["data"]["run_id"],
-        unfinished_run.as_str()
+        rejected_cli_resume["error"]["code"],
+        "LaunchRunnerUnavailable"
     );
-    assert_eq!(resumed_unfinished["data"]["run_mode"], "completed");
+    assert_eq!(
+        store
+            .load_run_stream(&unfinished_run)
+            .await
+            .expect("cross-executable rejection leaves stream unchanged")
+            .len(),
+        1
+    );
+
+    let resume_application =
+        mfm_app::connect_production_application(Some(&scoped_url), Some(&runtime_config_path))
+            .await
+            .expect("connect same-executable resume application");
+    let resumed_unfinished = resume_application
+        .resume_run(&unfinished_run)
+        .await
+        .expect("same executable resumes retained configured run");
+    assert_eq!(resumed_unfinished.run_id, unfinished_run.as_str());
+    assert_eq!(
+        resumed_unfinished.run_mode,
+        mfm_app::RunModeStatus::Completed
+    );
     let resumed_stream = store
         .load_run_stream(&unfinished_run)
         .await
