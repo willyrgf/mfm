@@ -10,6 +10,9 @@ license = "MIT"
 layer = "live"
 domain = "bitcoin"
 
+[features]
+parity-tests = []
+
 [dependencies]
 bitcoin = { workspace = true }
 hex = { workspace = true }
@@ -28,3 +31,8 @@ mfm-store = { path = "../../kernel/store" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+
+[[test]]
+name = "parity_bitcoin_core"
+path = "tests/parity_bitcoin_core.rs"
+required-features = ["parity-tests"]

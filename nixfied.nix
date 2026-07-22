@@ -61,6 +61,113 @@ let
   rethEnv = {
     MFM_RETH_PARITY_HTTP_URL = "http://127.0.0.1:\${port:reth}";
   };
+  bitcoinCore =
+    assert lib.versionAtLeast pkgs.bitcoind.version "28";
+    assert pkgs.bitcoind.version == "31.0";
+    pkgs.bitcoind;
+  bitcoinCoreDisplayVersion = "Bitcoin Core daemon version v31.0.0 bitcoind";
+  bitcoinPrepare = pkgs.writeShellApplication {
+    name = "nixfied-bitcoin-prepare";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.findutils
+    ];
+    text = ''
+      state_dir="''${1:-}"
+      if [[ -z "$state_dir" || "$state_dir" == "/" ]]; then
+        echo "missing or unsafe Bitcoin Core state directory" >&2
+        exit 64
+      fi
+
+      bitcoin_dir="$state_dir/bitcoin"
+      if [[ -e "$bitcoin_dir" ]]; then
+        find "$bitcoin_dir" -depth -delete
+      fi
+      umask 077
+      mkdir -p "$bitcoin_dir"
+    '';
+  };
+  bitcoinNode = pkgs.writeShellApplication {
+    name = "nixfied-bitcoind";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gnused
+      bitcoinCore
+    ];
+    text = ''
+      rpc_port=""
+      state_dir=""
+      host="127.0.0.1"
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --rpc-port)
+            rpc_port="''${2:?missing --rpc-port value}"
+            shift 2
+            ;;
+          --state-dir)
+            state_dir="''${2:?missing --state-dir value}"
+            shift 2
+            ;;
+          *)
+            echo "unknown bitcoind argument" >&2
+            exit 64
+            ;;
+        esac
+      done
+
+      if [[ -z "$rpc_port" || -z "$state_dir" || "$state_dir" == "/" ]]; then
+        echo "missing or unsafe Bitcoin Core service argument" >&2
+        exit 64
+      fi
+
+      bitcoin_dir="$state_dir/bitcoin"
+      umask 077
+      mkdir -p "$bitcoin_dir"
+      export HOME="$bitcoin_dir"
+
+      actual_version="$(bitcoind -version | sed -n '1p')"
+      if [[ "$actual_version" != "${bitcoinCoreDisplayVersion}" ]]; then
+        echo "pinned Bitcoin Core executable version did not match ${bitcoinCoreDisplayVersion}" >&2
+        exit 1
+      fi
+
+      exec bitcoind \
+        -regtest \
+        -datadir="$bitcoin_dir" \
+        -server=1 \
+        -disablewallet=1 \
+        -daemon=0 \
+        -printtoconsole=1 \
+        -listen=0 \
+        -discover=0 \
+        -dnsseed=0 \
+        -fixedseeds=0 \
+        -listenonion=0 \
+        -rest=0 \
+        -rpcbind="$host" \
+        -rpcallowip="$host" \
+        -rpcport="$rpc_port" \
+        -rpccookiefile="$bitcoin_dir/rpc.cookie"
+    '';
+  };
+  bitcoinRpcProbeInvocation = {
+    tools = [ "bitcoin-core-cli" ];
+    run = [
+      "bitcoin-cli"
+      "-regtest"
+      "-rpcconnect=127.0.0.1"
+      "-rpcport=\${port}"
+      "-rpccookiefile=\${stateDir}/bitcoin/rpc.cookie"
+      "getblockchaininfo"
+    ];
+  };
+  bitcoinParityEnv = {
+    MFM_BITCOIN_CORE_VERSION = bitcoinCore.version;
+    MFM_BITCOIN_PARITY_RPC_HOST = "127.0.0.1";
+    MFM_BITCOIN_PARITY_RPC_PORT = "\${port:bitcoin-core}";
+    MFM_BITCOIN_PARITY_COOKIE_FILE = "\${stateDir}/bitcoin/rpc.cookie";
+  };
 
   # A cargo leaf: argv + extra env + service requirements. Reuse is this Nix
   # function; the model carries the fully-applied copies.
@@ -133,8 +240,78 @@ in
     executable = "bin/cc";
     effects = [ "process" ];
   };
+  nixfied.closures.bitcoin-core-node = {
+    package = bitcoinNode;
+    executable = "bin/nixfied-bitcoind";
+    effects = [
+      "process"
+      "network-listener"
+      "file-write"
+    ];
+  };
+  nixfied.closures.bitcoin-core-prepare = {
+    package = bitcoinPrepare;
+    executable = "bin/nixfied-bitcoin-prepare";
+    effects = [
+      "process"
+      "file-write"
+    ];
+  };
+  nixfied.closures.bitcoin-core-cli = {
+    package = bitcoinCore;
+    executable = "bin/bitcoin-cli";
+    effects = [
+      "process"
+      "network-listener"
+    ];
+  };
+
+  nixfied.services.bitcoin-core = {
+    lifecycle = {
+      prepare.task = "bitcoin-core-init";
+      start.invocation = {
+        tools = [ "bitcoin-core-node" ];
+        run = [
+          "nixfied-bitcoind"
+          "--rpc-port"
+          "\${port}"
+          "--state-dir"
+          "\${stateDir}"
+        ];
+      };
+      ready.probe = {
+        kind = "exec";
+        invocation = bitcoinRpcProbeInvocation;
+        timeoutMs = 2000;
+        retryIntervalMs = 250;
+        maxAttempts = 120;
+      };
+      health.probe = {
+        kind = "exec";
+        invocation = bitcoinRpcProbeInvocation;
+        timeoutMs = 2000;
+        retryIntervalMs = 250;
+        maxAttempts = 120;
+      };
+      stop.timeoutMs = 10000;
+    };
+    endpoint.endpointId = "bitcoin-core-rpc";
+    stateRefs = [ "slot" ];
+    logRefs = [ "service.bitcoin-core" ];
+    containment = "process-tree";
+  };
 
   nixfied.tasks = {
+    bitcoin-core-init = {
+      invocation = {
+        tools = [ "bitcoin-core-prepare" ];
+        run = [
+          "nixfied-bitcoin-prepare"
+          "\${stateDir}"
+        ];
+        timeoutMs = 60000;
+      };
+    };
     fmt = cargoLeaf {
       run = [
         "cargo"
@@ -357,6 +534,23 @@ in
       env = rethEnv;
       requires = [ "reth" ];
     };
+    parity-bitcoin-core = cargoLeaf {
+      tools = cargoTools ++ [ "bitcoin-core-cli" ];
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-bitcoin-live"
+        "--features"
+        "parity-tests"
+        "--test"
+        "parity_bitcoin_core"
+        "--"
+        "--nocapture"
+      ];
+      env = bitcoinParityEnv;
+      requires = [ "bitcoin-core" ];
+    };
     closing-source-revision = cargoLeaf {
       run = [
         "git"
@@ -439,9 +633,13 @@ in
           task = "parity-reth-eip1559";
           dependsOn = [ "test-db" ];
         };
+        parity-bitcoin-core = {
+          task = "parity-bitcoin-core";
+          dependsOn = [ "parity-reth-eip1559" ];
+        };
         closing-source-revision = {
           task = "closing-source-revision";
-          dependsOn = [ "parity-reth-eip1559" ];
+          dependsOn = [ "parity-bitcoin-core" ];
         };
       };
     };

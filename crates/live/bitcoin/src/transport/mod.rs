@@ -712,7 +712,7 @@ fn reduce_scan(
 }
 
 fn decode_script(value: &str) -> Result<Vec<u8>, BitcoinRpcError> {
-    if value.len() > MAX_SCRIPT_BYTES * 2 || value.len() % 2 != 0 {
+    if value.len() > MAX_SCRIPT_BYTES * 2 || !value.len().is_multiple_of(2) {
         return Err(BitcoinRpcError::ResponseInvalid);
     }
     hex::decode(value).map_err(|_| BitcoinRpcError::ResponseInvalid)

@@ -78,12 +78,14 @@ directly instead of its enclosing gate:
 ```bash
 nix run .#run -- --task cargo-metadata-contract
 nix run .#run -- --task parity-postgres-rest-api
+nix run .#run -- --task parity-bitcoin-core
 ```
 
 The task invocation starts only its declared service requirements. Task ids
 come from `nixfied.nix`; the examples above run the metadata contract without a
-service and the REST parity target with managed PostgreSQL. Direct task runs use
-the broad verification target and retain Nixfied evidence.
+service, the REST parity target with managed PostgreSQL, and the Bitcoin parity
+target with managed Bitcoin Core. Direct task runs use the broad verification
+target and retain Nixfied evidence.
 
 Leaf task ids are focused internal entry points, not stable public verbs.
 Confirm the current id in `nixfied.nix`. Selecting a leaf runs that leaf and its
@@ -175,10 +177,28 @@ nix develop -c cargo clean --target-dir target/verification
 
 The definitions in `nixfied.nix` are authoritative when individual tests or
 task counts evolve. `.#ci` composes `.#check`, `.#test`, and `.#test-db`, then
-adds keystore/Reth parity coverage and the closing source revision. Do not run
-the three component gates immediately before `.#ci` on the same revision: that
-repeats their work in separate Nixfied runs. Run a component independently when
-it is the smallest sufficient boundary gate or when isolating a failure.
+adds keystore, Reth, and Bitcoin Core parity coverage before the closing source
+revision. Do not run the three component gates immediately before `.#ci` on the
+same revision: that repeats their work in separate Nixfied runs. Run a component
+independently when it is the smallest sufficient boundary gate or when isolating
+a failure.
+
+The `parity-bitcoin-core` leaf starts an isolated loopback-only regtest node from
+the root flake's pinned `pkgs.bitcoind`. The current executable version is
+asserted as Bitcoin Core 31.0, both at Nix evaluation and service startup, and
+must remain at least 28. The task mines a deterministic fixture, then exercises
+the public checked Bitcoin batch transport against the live node for chain/IBD
+validation, one multi-descriptor scan, scan-height hash confirmation,
+zero/nonzero balances, and redacted authentication failure. Its data directory,
+port, process lifetime, and ephemeral cookie credential at one deterministic
+managed path are Nixfied-owned; no credential value enters the compiled model,
+arguments, or logs, and the task never uses a host `bitcoind`. The flake lock is
+the version pin. The transport contract tracks the official
+[JSON-RPC interface](https://github.com/bitcoin/bitcoin/blob/v31.0/doc/JSON-RPC-interface.md),
+[`scantxoutset`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/scantxoutset/),
+[`getblockchaininfo`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/getblockchaininfo/),
+and [`getblockhash`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/getblockhash/)
+contracts.
 
 Nixfied owns deterministic service endpoint placement. Starts from independent
 state roots are coordinated by the upstream endpoint contract; an occupied

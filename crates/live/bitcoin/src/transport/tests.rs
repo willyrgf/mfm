@@ -479,9 +479,7 @@ fn remaining_scan_semantics_fail_closed_before_response_construction() {
 
     let legacy_script = script_hex(LEGACY_MAIN);
     for invalid in [
-        format!(
-            r#"{{"success":true,"height":850000,"bestblock":"invalid","txouts":1,"unspents":[],"total_amount":0}}"#
-        ),
+        r#"{"success":true,"height":850000,"bestblock":"invalid","txouts":1,"unspents":[],"total_amount":0}"#.to_owned(),
         format!(
             r#"{{"success":true,"height":850000,"bestblock":"{ANCHOR_HASH}","txouts":1,"unspents":[{}],"total_amount":0.00000001}}"#,
             unspent("invalid", 0, &legacy_script, "0.00000001", 1)
