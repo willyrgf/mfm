@@ -52,6 +52,8 @@ pub trait FactQueryStore: Send + Sync {
     fn fact_query_implementation_id(&self) -> &'static str;
 
     /// Executes aligned canonical plans under one store snapshot and frontier.
+    // The public contract deliberately spells out its future instead of hiding it behind an alias.
+    #[allow(clippy::type_complexity)]
     fn execute_fact_queries<'a>(
         &'a self,
         plans: &'a [mfm_facts::CanonicalFactQueryPlan],
