@@ -2,7 +2,6 @@ use super::*;
 const DIGEST_A: DigestBytes = DigestBytes::from_array([0x11; 32]);
 const DIGEST_B: DigestBytes = DigestBytes::from_array([0x22; 32]);
 const DIGEST_C: DigestBytes = DigestBytes::from_array([0x33; 32]);
-const DIGEST_D: DigestBytes = DigestBytes::from_array([0x44; 32]);
 
 pub(super) fn digest(byte: u8) -> DigestBytes {
     DigestBytes::from_array([byte; 32])
@@ -294,17 +293,17 @@ pub(super) fn test_spec() -> TypedExecutionSpec {
                 output_semantic_type_id: receipt_semantic_id.clone(),
                 effect_kind: EffectKind::new(
                     "mfm.kernel.effect",
-                    "managed_platform_write",
+                    "pure",
                     DigestAlgorithm::Sha256JcsV1,
-                    DIGEST_D,
+                    DIGEST_B,
                 )
-                .expect("managed effect kind"),
-                effect_class: "managed_platform_write".to_owned(),
-                effect_name: "managed_platform_write".to_owned(),
+                .expect("effect kind"),
+                effect_class: "pure".to_owned(),
+                effect_name: "pure".to_owned(),
                 effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
                 capabilities: no_caps.clone(),
                 emitted_fact_descriptors: Vec::new(),
-                runner: "managed_platform_write".to_owned(),
+                runner: "pure".to_owned(),
                 effect_contract_digest: None,
             })),
             DescriptorIdentity::Operation(Box::new(OperationDescriptorIdentity {
@@ -444,11 +443,11 @@ pub(super) fn test_spec() -> TypedExecutionSpec {
                 output_cell: receipt_cell.clone(),
                 effect_kind: EffectKind::new(
                     "mfm.kernel.effect",
-                    "managed_platform_write",
+                    "pure",
                     DigestAlgorithm::Sha256JcsV1,
-                    DIGEST_D,
+                    DIGEST_B,
                 )
-                .expect("managed effect kind"),
+                .expect("effect kind"),
                 capability_bindings: no_caps.clone(),
                 adapter_bindings: Vec::new(),
                 fact_descriptor_allowlist: Vec::new(),

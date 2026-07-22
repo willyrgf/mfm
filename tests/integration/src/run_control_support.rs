@@ -67,11 +67,6 @@ async fn portfolio_rpc_handler(
         "getblockhash" => {
             serde_json::json!("abababababababababababababababababababababababababababababababab")
         }
-        "getblockheader" => serde_json::json!({
-            "hash": "abababababababababababababababababababababababababababababababab",
-            "height": 850_100u64,
-            "time": 1_720_000_000u64
-        }),
         "scantxoutset" => serde_json::json!({
             "success": true,
             "txouts": 1,

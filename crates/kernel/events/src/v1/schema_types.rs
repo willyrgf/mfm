@@ -439,12 +439,7 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         ),
         "CapabilityRole" => unit_enum_type(
             "CapabilityRole",
-            &[
-                "read_external",
-                "managed_platform_write",
-                "support",
-                "external_mutation_authority",
-            ],
+            &["read_external", "support", "external_mutation_authority"],
         ),
         "SeedCellRef" => struct_type(
             "SeedCellRef",

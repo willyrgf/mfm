@@ -20,7 +20,7 @@ pub(super) fn v1_event_schema_golden() {
         .all(|descriptor| descriptor.schema_version == EVENT_SCHEMA_VERSION));
     assert_eq!(
         mfm_canonical::sha256_digest_bytes(rows.as_bytes()).to_string(),
-        "043ba70f693711a3f252b95e795f5b62083b2cc3cd90da4485bb0d9bf3ab775b"
+        "5ea4ff6078629d8a2174c46df0512d6726a6f5077f3310667b3cfcf3a6eb600d"
     );
 }
 

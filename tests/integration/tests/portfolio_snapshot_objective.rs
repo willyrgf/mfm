@@ -1481,11 +1481,6 @@ async fn snapshot_rpc_handler(
             "initialblockdownload": false,
         }),
         "getblockhash" => json!(BTC_HASH),
-        "getblockheader" => json!({
-            "hash": BTC_HASH,
-            "height": 850_100u64,
-            "time": 1_720_000_000u64,
-        }),
         "scantxoutset" => {
             let amount = serde_json::from_str::<Value>(state.config.btc_amount_json)
                 .expect("valid test Bitcoin amount");
