@@ -58,6 +58,8 @@ pub(super) struct RawBtcConfig {
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct RawBtcJsonRpcConfig {
     #[serde(default)]
+    pub(super) scan_timeout_seconds: Option<u64>,
+    #[serde(default)]
     pub(super) rpc_url: Option<String>,
     #[serde(default)]
     pub(super) rpc_url_env: Option<String>,

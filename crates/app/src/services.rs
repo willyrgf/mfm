@@ -11,39 +11,38 @@ pub(super) use self::services_read::{TrustedRunReader, VerifiedRunReadContext};
 
 /// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
-pub struct RunServices<S, A> {
+pub struct RunServices<S> {
     pub(super) scheduler: SerialTypedScheduler,
-    read: RunReadServices<S, A>,
+    read: RunReadServices<S>,
     pub(super) execution_claim_heartbeat_interval: Duration,
 }
 
-impl<S, A> Deref for RunServices<S, A> {
-    type Target = RunReadServices<S, A>;
+impl<S> Deref for RunServices<S> {
+    type Target = RunReadServices<S>;
 
     fn deref(&self) -> &Self::Target {
         &self.read
     }
 }
 
-impl<S, A> RunServices<S, A>
+impl<S> RunServices<S>
 where
-    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + Send
+        + Sync
+        + 'static,
 {
     /// Creates typed async app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
         scheduler: SerialTypedScheduler,
-        store: S,
-        artifacts: A,
+        store: Arc<S>,
         certification_registry: CertificationRegistry,
     ) -> Self {
         Self {
             scheduler,
-            read: RunReadServices::new_with_certification_registry(
-                store,
-                artifacts,
-                certification_registry,
-            ),
+            read: RunReadServices::new_with_certification_registry(store, certification_registry),
             execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
         }
     }
@@ -66,11 +65,7 @@ where
         )
     }
 
-    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S, A> {
-        TrustedRunReader::new(
-            self.read.store(),
-            self.read.artifacts(),
-            self.read.certification_registry(),
-        )
+    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S> {
+        TrustedRunReader::new(self.read.store(), self.read.certification_registry())
     }
 }

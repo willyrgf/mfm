@@ -276,11 +276,6 @@ fn framework_executable(
     factory_id: events::RunnerFactoryId,
     runner: &'static str,
 ) -> Result<events::ExecutableIdentity> {
-    let package_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "runner": runner,
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
     let binary_digest = content_digest_json(serde_json::json!({
         "crate": "mfm-runtime",
         "factory_id": factory_id.as_str(),
@@ -289,10 +284,7 @@ fn framework_executable(
     }))?;
     Ok(events::ExecutableIdentity {
         factory_id,
-        cargo_package_digest: package_digest,
         binary_digest,
-        nix_derivation_hash: None,
-        nix_output_hash: None,
     })
 }
 

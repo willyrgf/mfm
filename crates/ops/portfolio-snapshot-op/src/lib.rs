@@ -19,10 +19,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use mfm_facts::MfmFactType;
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
-use mfm_op_btc_collectors::{
-    BtcNativeBalancesAtAnchorConfig, BtcNetworkCollectionConfig, BtcNetworkCollectionOperation,
-};
+use mfm_op_btc_collectors::{BitcoinBalanceCollectionConfig, BitcoinBalanceCollectionOperation};
 use mfm_op_evm_collectors::{
     EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceCollectionOperation, EvmBalanceSource,
 };
@@ -30,9 +29,9 @@ use mfm_portfolio_model::domain_key::{HoldingsDomainKey, ReportDomainKey};
 use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig, ValidatedPortfolioConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
-    build_root_with_registries, BridgeKey, BridgePolicy, MfmFactType, NoContext, Operation,
-    OperationExpansion, OperationInputHandles, OperationKey, PublicOutputKey, RootBuilder,
-    ScopeKey, TypedProgramLaunchPlan, ValidatedConfig,
+    build_root_with_registries, BridgeKey, BridgePolicy, NoContext, Operation, OperationExpansion,
+    OperationInputHandles, OperationKey, PublicOutputKey, RootBuilder, ScopeKey,
+    TypedProgramLaunchPlan, ValidatedConfig,
 };
 use mfm_program_derive::OperationOutput;
 use mfm_state_portfolio::{
@@ -41,15 +40,15 @@ use mfm_state_portfolio::{
     SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput,
     SelectHoldingsInputHandles, SelectHoldingsState,
 };
-use mfm_states_btc::BtcAddressBalanceSnapshotFact;
+use mfm_states_btc::BitcoinBalanceSnapshotFact;
 use mfm_states_evm::EvmBalanceSnapshotFact;
 use mfm_values::ConfigError;
 
 const OP_NAMESPACE: &str = "mfm.portfolio";
 const OP_KIND_NAME: &str = "snapshot";
-const OP_VERSION: &str = "mfm.portfolio.operation.snapshot.v1";
+const OP_VERSION: &str = "mfm.portfolio.operation.snapshot.v2";
 const REPORT_OP_KIND_NAME: &str = "report";
-const REPORT_OP_VERSION: &str = "mfm.portfolio.operation.report.v1";
+const REPORT_OP_VERSION: &str = "mfm.portfolio.operation.report.v2";
 const ROOT_SCOPE: &str = "portfolio_snapshot";
 const OPERATION_KEY: &str = "portfolio_snapshot";
 const REPORT_OPERATION_KEY: &str = "portfolio_report";
@@ -131,9 +130,9 @@ impl Operation for PortfolioSnapshotOperation {
             bitcoin_receipts.push(builder.child_scope(
                 ScopeKey::new(format!("bitcoin_collection_{index}"))?,
                 |child| {
-                    let output = child.scope().call::<BtcNetworkCollectionOperation, _>(
-                        OperationKey::new("btc_network_collection")?,
-                        BtcNetworkCollectionOperation,
+                    let output = child.scope().call::<BitcoinBalanceCollectionOperation, _>(
+                        OperationKey::new("bitcoin_balance_collection")?,
+                        BitcoinBalanceCollectionOperation,
                         child_config,
                         (),
                     )?;
@@ -186,7 +185,7 @@ impl Operation for PortfolioSnapshotOperation {
 /// Deterministic receipt-pinned portfolio report operation.
 ///
 /// Its structured operation input is passed unchanged to [`SelectHoldingsState`]. The receipt
-/// edges are therefore the exact managed-write readiness barrier; this operation creates no
+/// edges are therefore the exact collector-settlement readiness barrier; this operation creates no
 /// aggregate receipt value or alternate replay surface.
 pub struct PortfolioReportOperation;
 
@@ -268,7 +267,7 @@ impl Operation for PortfolioReportOperation {
 
 fn holding_fact_descriptors() -> mfm_program::Result<SelectHoldingsFactDescriptors> {
     SelectHoldingsFactDescriptors::new(
-        &BtcAddressBalanceSnapshotFact::descriptor()
+        &BitcoinBalanceSnapshotFact::descriptor()
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
         &EvmBalanceSnapshotFact::descriptor()
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
@@ -279,7 +278,7 @@ fn holding_fact_descriptors() -> mfm_program::Result<SelectHoldingsFactDescripto
 /// Builds one complete typed portfolio snapshot program draft.
 ///
 /// The draft binds exactly one [`PortfolioPublicOutputs`] value. Application ingress uses this
-/// exact helper after resolving the sole `mfm.portfolio/snapshot@1` portfolio reference; it does
+/// exact helper after resolving the sole `mfm.portfolio/snapshot@2` portfolio reference; it does
 /// not maintain a parallel app-owned graph builder.
 pub fn portfolio_snapshot_program_draft(
     config: PortfolioConfig,
@@ -314,7 +313,7 @@ pub fn portfolio_snapshot_program_launch_plan(
 }
 
 struct CompiledCollection {
-    bitcoin_collections: Vec<BtcNetworkCollectionConfig>,
+    bitcoin_collections: Vec<BitcoinBalanceCollectionConfig>,
     evm_collections: Vec<EvmBalanceCollectionConfig>,
 }
 
@@ -414,14 +413,12 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
                         "Bitcoin demand did not match native source shape",
                     ));
                 }
-                bitcoin_collections.push(BtcNetworkCollectionConfig {
-                    native_balances: BtcNativeBalancesAtAnchorConfig {
-                        network: network_id,
-                        bitcoin_network: bitcoin_network.clone(),
-                        semantic_source_identity: source_identity.to_string(),
-                        addresses: network_demand.bitcoin_addresses.into_iter().collect(),
-                    },
-                });
+                bitcoin_collections.push(BitcoinBalanceCollectionConfig::new(
+                    network_id,
+                    bitcoin_network.clone(),
+                    source_identity.to_string(),
+                    network_demand.bitcoin_addresses.into_iter().collect(),
+                )?);
             }
             NetworkConfig::Evm {
                 chain_id,
@@ -454,9 +451,9 @@ mfm_certify::define_program_descriptor_registry! {
     certification: pub register_portfolio_snapshot_certification_descriptors,
     includes: [
         {
-            state_registry: mfm_op_btc_collectors::btc_collectors_state_registry,
-            operation_registry: mfm_op_btc_collectors::btc_collectors_operation_registry,
-            certification: mfm_op_btc_collectors::register_btc_collectors_certification_descriptors,
+            state_registry: mfm_op_btc_collectors::bitcoin_collectors_state_registry,
+            operation_registry: mfm_op_btc_collectors::bitcoin_collectors_operation_registry,
+            certification: mfm_op_btc_collectors::register_bitcoin_collectors_certification_descriptors,
         },
         {
             state_registry: mfm_op_evm_collectors::evm_collectors_state_registry,
@@ -582,21 +579,11 @@ mod tests {
             .any(|operation| operation.operation_name == "mfm.portfolio.snapshot"));
         let collect_kind =
             mfm_states_evm::CollectEvmBalancesState::kind().expect("collect state kind");
-        let publish_kind =
-            mfm_states_evm::RecordEvmBalanceFactsState::kind().expect("publish state kind");
         assert_eq!(
             first
                 .state_nodes()
                 .iter()
                 .filter(|node| node.state_kind == collect_kind)
-                .count(),
-            1
-        );
-        assert_eq!(
-            first
-                .state_nodes()
-                .iter()
-                .filter(|node| node.state_kind == publish_kind)
                 .count(),
             1
         );
@@ -610,20 +597,20 @@ mod tests {
     fn snapshot_registries_compose_child_collector_inventories() {
         let states = portfolio_snapshot_state_registry().expect("snapshot states");
         let btc_states =
-            mfm_op_btc_collectors::btc_collectors_state_registry().expect("Bitcoin states");
+            mfm_op_btc_collectors::bitcoin_collectors_state_registry().expect("Bitcoin states");
         let evm_states =
             mfm_op_evm_collectors::evm_collectors_state_registry().expect("EVM states");
         assert_eq!(states.len(), btc_states.len() + evm_states.len() + 3);
         states
-            .state_descriptor::<mfm_op_btc_collectors::ResolveBtcJointTipState>()
+            .state_descriptor::<mfm_op_btc_collectors::CollectBitcoinBalancesState>()
             .expect("composed Bitcoin state");
         states
             .state_descriptor::<mfm_states_evm::CollectEvmBalancesState>()
             .expect("composed EVM state");
 
         let operations = portfolio_snapshot_operation_registry().expect("snapshot operations");
-        let btc_operations =
-            mfm_op_btc_collectors::btc_collectors_operation_registry().expect("Bitcoin operations");
+        let btc_operations = mfm_op_btc_collectors::bitcoin_collectors_operation_registry()
+            .expect("Bitcoin operations");
         let evm_operations =
             mfm_op_evm_collectors::evm_collectors_operation_registry().expect("EVM operations");
         assert_eq!(
@@ -631,7 +618,7 @@ mod tests {
             btc_operations.len() + evm_operations.len() + 2
         );
         operations
-            .operation_descriptor::<mfm_op_btc_collectors::BtcNetworkCollectionOperation>()
+            .operation_descriptor::<mfm_op_btc_collectors::BitcoinBalanceCollectionOperation>()
             .expect("composed Bitcoin operation");
         operations
             .operation_descriptor::<EvmBalanceCollectionOperation>()
@@ -641,7 +628,7 @@ mod tests {
         register_portfolio_snapshot_certification_descriptors(&mut actual)
             .expect("snapshot certification descriptors");
         let mut expected = mfm_certify::CertificationRegistry::new();
-        mfm_op_btc_collectors::register_btc_collectors_certification_descriptors(&mut expected)
+        mfm_op_btc_collectors::register_bitcoin_collectors_certification_descriptors(&mut expected)
             .expect("Bitcoin certification descriptors");
         mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut expected)
             .expect("EVM certification descriptors");

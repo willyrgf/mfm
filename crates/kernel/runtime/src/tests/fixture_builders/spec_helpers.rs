@@ -88,8 +88,16 @@ pub(in crate::tests::support) fn state_descriptor(
             _ => panic!("test input"),
         },
         effect_kind,
-        effect_class: runner.to_owned(),
-        effect_name: runner.to_owned(),
+        effect_class: if runner == "read" {
+            "read_external".to_owned()
+        } else {
+            runner.to_owned()
+        },
+        effect_name: if runner == "read" {
+            "read_external".to_owned()
+        } else {
+            runner.to_owned()
+        },
         effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
         capabilities,
         runner: runner.to_owned(),

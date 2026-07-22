@@ -30,7 +30,6 @@ mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-evm-signing = { path = "../evm-signing" }
-mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }

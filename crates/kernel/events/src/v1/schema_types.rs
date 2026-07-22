@@ -146,8 +146,6 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         "ResourceNamespace" => resource_namespace_type(),
         "RendererKind" | "StableAuthorKey" => stable_author_key_type(type_name),
         "RunnerFactoryId"
-        | "NixDerivationHash"
-        | "NixOutputHash"
         | "SideEffectLedgerKey"
         | "ResourceKey"
         | "ResourceLaneClaimId"
@@ -185,25 +183,6 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
             ],
         ),
         "FactKind" | "FactKey" => visible_ascii_256_type(type_name),
-        "FactAudience" => unit_enum_type("FactAudience", &["control", "platform"]),
-        "FactVisibilityScope" => unit_enum_type("FactVisibilityScope", &["default"]),
-        "FactVisibility" => enum_type(
-            "FactVisibility",
-            vec![
-                enum_variant("run_private", Vec::new()),
-                enum_variant(
-                    "indexed",
-                    vec![
-                        schema_field("audience", "FactAudience", EventFieldCardinality::Required),
-                        schema_field(
-                            "scope",
-                            "FactVisibilityScope",
-                            EventFieldCardinality::Required,
-                        ),
-                    ],
-                ),
-            ],
-        ),
         "FactSubjectEvidence" => struct_type(
             "FactSubjectEvidence",
             vec![
@@ -223,21 +202,6 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
                     EventFieldCardinality::Required,
                 ),
                 schema_field("fact_key", "FactKey", EventFieldCardinality::Required),
-            ],
-        ),
-        "FactRequestEvidence" => struct_type(
-            "FactRequestEvidence",
-            vec![
-                schema_field(
-                    "request_schema_id",
-                    "SchemaId",
-                    EventFieldCardinality::Required,
-                ),
-                schema_field(
-                    "request_hash",
-                    "ContentDigest",
-                    EventFieldCardinality::Required,
-                ),
             ],
         ),
         "FactResponseEvidence" => struct_type(
@@ -261,39 +225,9 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
                 ),
             ],
         ),
-        "FactProducerProvenance" => struct_type(
-            "FactProducerProvenance",
-            vec![
-                schema_field(
-                    "capability_kind",
-                    "CapabilityKind",
-                    EventFieldCardinality::Required,
-                ),
-                schema_field(
-                    "capability_version",
-                    "CapabilityVersion",
-                    EventFieldCardinality::Required,
-                ),
-                schema_field(
-                    "adapter_kind",
-                    "AdapterKind",
-                    EventFieldCardinality::Required,
-                ),
-                schema_field(
-                    "adapter_version",
-                    "AdapterVersion",
-                    EventFieldCardinality::Required,
-                ),
-            ],
-        ),
         "FactClaim" => struct_type(
             "FactClaim",
             vec![
-                schema_field(
-                    "visibility",
-                    "FactVisibility",
-                    EventFieldCardinality::Required,
-                ),
                 schema_field("fact_kind", "FactKind", EventFieldCardinality::Required),
                 schema_field(
                     "fact_descriptor_hash",
@@ -305,20 +239,9 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
                     "FactSubjectEvidence",
                     EventFieldCardinality::Required,
                 ),
-                schema_field("observed_at", "String", EventFieldCardinality::Optional),
-                schema_field(
-                    "request",
-                    "FactRequestEvidence",
-                    EventFieldCardinality::Optional,
-                ),
                 schema_field(
                     "response",
                     "FactResponseEvidence",
-                    EventFieldCardinality::Required,
-                ),
-                schema_field(
-                    "producer",
-                    "FactProducerProvenance",
                     EventFieldCardinality::Required,
                 ),
             ],
@@ -577,24 +500,9 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
                     EventFieldCardinality::Required,
                 ),
                 schema_field(
-                    "cargo_package_digest",
-                    "ContentDigest",
-                    EventFieldCardinality::Required,
-                ),
-                schema_field(
                     "binary_digest",
                     "ContentDigest",
                     EventFieldCardinality::Required,
-                ),
-                schema_field(
-                    "nix_derivation_hash",
-                    "NixDerivationHash",
-                    EventFieldCardinality::Optional,
-                ),
-                schema_field(
-                    "nix_output_hash",
-                    "NixOutputHash",
-                    EventFieldCardinality::Optional,
                 ),
             ],
         ),

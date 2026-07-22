@@ -113,7 +113,7 @@ fn start_args<'a>(
         "json",
         "run",
         "start",
-        "mfm.portfolio/snapshot@1",
+        "mfm.portfolio/snapshot@2",
         target,
         "--invocation-key",
         invocation_key,
@@ -136,7 +136,7 @@ async fn admission_evidence(store: &PostgresStore, run_id: &mfm_ids::RunId) -> A
         .expect("run admission evidence");
     assert_eq!(
         admitted.entry_point.entry_point_id.as_str(),
-        "mfm.portfolio/snapshot@1"
+        "mfm.portfolio/snapshot@2"
     );
     assert_eq!(admitted.entry_point.configured_targets.len(), 1);
     let source = &admitted.entry_point.configured_targets[0];
@@ -168,7 +168,7 @@ async fn admit_configured_target_without_driving(
 ) -> mfm_ids::RunId {
     let request = mfm_app::prepare_entry_point_run_launch(
         store,
-        "mfm.portfolio/snapshot@1",
+        "mfm.portfolio/snapshot@2",
         target,
         &mfm_app::production_certification_registry().expect("production certification registry"),
         store.load_store_scope_id().await.expect("store scope"),
@@ -177,12 +177,9 @@ async fn admit_configured_target_without_driving(
     .await
     .expect("prepare configured target launch");
     let run_id = request.run_id.clone();
-    let runners = mfm_app::production_runner_registry(
-        Arc::new(store.clone()),
-        mfm_app::production_fact_index_read_provider(store.clone()),
-        Some(runtime_config_path),
-    )
-    .expect("production runners");
+    let runners =
+        mfm_app::production_runner_registry(Arc::new(store.clone()), Some(runtime_config_path))
+            .expect("production runners");
     let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
     let runtime_spec =
         mfm_runtime::CertifiedRuntimeSpec::new(request.certified_spec).expect("runtime spec");
@@ -233,7 +230,7 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
     let entry_points = entry_points["data"]["entry_points"]
         .as_array()
         .expect("CLI entry-point list");
-    assert_eq!(entry_points, &[json!("mfm.portfolio/snapshot@1")]);
+    assert_eq!(entry_points, &[json!("mfm.portfolio/snapshot@2")]);
 
     let directory = TempDir::new().expect("temporary setup directory");
     let oversized_path = directory.path().join("oversized.toml");
@@ -348,7 +345,6 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
 
     let rest = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
-        fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
         configured_store: Some(store.clone()),
         store: store.clone(),
         runtime_config_path: Some(runtime_config_path.clone()),
@@ -361,7 +357,7 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "entry_point": "mfm.portfolio/snapshot@1",
+                        "entry_point": "mfm.portfolio/snapshot@2",
                         "target": TARGET,
                         "invocation_key": STABLE_INVOCATION_KEY,
                     })

@@ -1,7 +1,7 @@
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
-pub use mfm_facts::StoreCommitOrder;
+pub use mfm_facts::{StoreCommitOrder, StoreReadFrontier};
 use mfm_ids::{
     short_stable_id_fragment, AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind,
     CapabilityVersion, CellId, ContentDigest, ContextResourceKind, ContextStage, DescriptorId,
@@ -43,6 +43,27 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 pub type AsyncStoreFuture<'a, T, E> =
     Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>;
 
+/// Store-owned batched fact-query boundary.
+pub trait FactQueryStore: Send + Sync {
+    /// Backend-specific query error.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Returns the stable identity of this concrete fact-query implementation.
+    fn fact_query_implementation_id(&self) -> &'static str;
+
+    /// Executes aligned canonical plans under one store snapshot and frontier.
+    fn execute_fact_queries<'a>(
+        &'a self,
+        plans: &'a [mfm_facts::CanonicalFactQueryPlan],
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Vec<mfm_facts::FactQueryResult>, Self::Error>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
 /// Backend helper APIs for durable store implementations.
 pub mod backend;
 
@@ -69,6 +90,8 @@ pub use admission_lanes::{
 pub mod codec;
 mod event_codec;
 mod event_codec_decode;
+#[cfg(any(test, feature = "test-support"))]
+mod fact_query;
 mod staging;
 mod stream;
 mod validation;
@@ -83,6 +106,7 @@ use self::validation::{
     payload_spec_hash, reject_store_materialized_resource_lane_payloads,
     request_contains_manual_resolution, request_contains_saga_terminal_outcome,
     unique_logical_key_rewrite_allowed, validate_attempt_terminal_commit,
+    validate_fact_response_artifact_admissions, validate_fact_settlement_commit,
     validate_manual_resolution_commit_with_proof, validate_payload_public_diagnostics,
     validate_payload_run_and_spec, validate_required_artifacts_cover_payload_references,
     validate_retention_commit, validate_retention_manifest_pairs, validate_run_start_commit,
@@ -903,9 +927,8 @@ mod projection;
 use self::projection::fact_claim_projection_key;
 pub use self::projection::{
     AttemptProjection, AttemptStatus, CellTerminalProjection, FactDescriptorProjection,
-    FactIndexProjection, FactIndexTermProjection, FactRecordProjection, ProjectionSnapshot,
-    ProjectionSnapshotParts, PublicOutputProjection, RetentionManifestProjection,
-    RetentionProjection,
+    FactIndexTermProjection, FactQueryProjection, ProjectionSnapshot, ProjectionSnapshotParts,
+    PublicOutputProjection, RetentionManifestProjection, RetentionProjection,
 };
 
 use self::resource_lanes::{

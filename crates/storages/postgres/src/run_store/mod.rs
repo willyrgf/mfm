@@ -89,18 +89,12 @@ pub enum PostgresStoreAuthorityError {
     /// PostgreSQL could not be reached or the connection string could not be used.
     #[error("connection validation failed")]
     Connection,
-    /// The applied SQLx migration ledger does not match the compiled migrations.
-    #[error("migration validation failed")]
-    Migrations,
-    /// Required tables, indexes, triggers, functions, constraints, or stale objects were invalid.
-    #[error("catalog validation failed")]
-    Catalog,
-    /// The singleton store metadata row or contract version was invalid.
-    #[error("metadata validation failed")]
-    Metadata,
-    /// The store-owned deployment scope binding was missing or invalid.
-    #[error("store scope validation failed")]
-    StoreScope,
+    /// The connected store does not carry the exact current authority fingerprint and catalog.
+    #[error("store authority mismatch")]
+    StoreAuthorityMismatch,
+    /// The applied SQLx migration checksum differs from the compiled baseline.
+    #[error("migration checksum mismatch")]
+    MigrationChecksumMismatch,
 }
 
 /// Validated Postgres run-store authority loaded during store construction.

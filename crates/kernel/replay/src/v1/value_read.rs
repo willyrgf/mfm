@@ -202,12 +202,14 @@ where
 /// This helper reconstructs config, arbitrary certified input trees, typed context, one primary
 /// evidence artifact, and any auxiliary fact-query evidence before invoking the same state reducer
 /// used by live execution.
+#[allow(private_bounds)]
 pub fn verify_external_read_state<S>(broker: &ReplayBroker) -> Result<()>
 where
     S: mfm_program::ReadState,
     S::Config: DeserializeOwned,
     S::Input: DeserializeOwned,
     S::Evidence: DeserializeOwned,
+    S::Facts: CompareReadFactBatch,
     S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
 {
     let descriptor =
@@ -232,7 +234,7 @@ where
             &frame.produced.attempt_id,
         )?;
         let evidence = mfm_program::ExternalReadEvidenceSet::new(primary, fact_queries);
-        let expected = state
+        let (expected, facts) = state
             .reduce(&input, &evidence, &context)
             .map_err(|error| mismatch(error.to_string()))?;
         let expected_bytes = canonical_value_bytes(&expected)?;
@@ -241,8 +243,40 @@ where
                 "replayed external-read output did not match its retained evidence",
             ));
         }
+        facts.compare(broker, frame)?;
     }
     Ok(())
+}
+
+trait CompareReadFactBatch {
+    fn compare(&self, broker: &ReplayBroker, frame: &ProducedCellReplayFrame) -> Result<()>;
+}
+
+impl CompareReadFactBatch for () {
+    fn compare(&self, broker: &ReplayBroker, frame: &ProducedCellReplayFrame) -> Result<()> {
+        if broker.events().iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::FactRecorded(payload)
+                    if payload.node_id == frame.produced.node_id
+                        && payload.attempt_id == frame.produced.attempt_id
+            )
+        }) {
+            return Err(mismatch(
+                "fact-free read replay found unexpected recorded facts",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<F> CompareReadFactBatch for mfm_values::NonEmpty<F>
+where
+    F: mfm_facts::MfmFactType,
+{
+    fn compare(&self, broker: &ReplayBroker, frame: &ProducedCellReplayFrame) -> Result<()> {
+        verify_recorded_fact_batch_evidence(broker, frame, self.values())
+    }
 }
 
 fn replay_input_node_json(
@@ -454,14 +488,14 @@ where
     )
 }
 
-/// Verifies a homogeneous fact batch atomically recorded by one managed-write attempt.
+/// Verifies a homogeneous fact batch atomically recorded by one external-read settlement.
 pub fn verify_recorded_fact_batch_evidence<F>(
     broker: &ReplayBroker,
     frame: &ProducedCellReplayFrame,
     facts: &[F],
 ) -> Result<()>
 where
-    F: mfm_program::MfmFactType,
+    F: mfm_facts::MfmFactType,
 {
     let output_events = broker
         .events()
@@ -482,7 +516,7 @@ where
         ));
     }
     let output_event = output_events[0];
-    let mut records = broker
+    let records = broker
         .events()
         .iter()
         .filter_map(|event| match event.payload() {
@@ -503,30 +537,22 @@ where
     let descriptor = F::descriptor().map_err(|error| mismatch(error.to_string()))?;
     let descriptor_hash = mfm_facts::fact_descriptor_hash(&descriptor)
         .map_err(|error| mismatch(error.to_string()))?;
-    for fact in facts {
+    for (fact, (record_event, record)) in facts.iter().zip(records.iter()) {
         let subject_json = serde_json::to_value(fact.subject()).map_err(json_error)?;
         let expected_subject = mfm_facts::typed_fact_subject_evidence(&descriptor, &subject_json)
             .map_err(|error| mismatch(error.to_string()))?;
         let expected_response = canonical_value_bytes(fact.response())?;
-        let matches = records
-            .iter()
-            .enumerate()
-            .filter_map(|(index, record)| {
-                let claim = &record.1.claim;
-                (claim.fact_descriptor_hash() == &descriptor_hash
-                    && claim.fact_kind() == descriptor.fact_kind()
-                    && claim.subject() == &expected_subject
-                    && claim.response().response_schema_id() == descriptor.response_schema_id()
-                    && claim.response().response_hash() == &expected_response.content_digest())
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
+        let claim = &record.claim;
+        if claim.fact_descriptor_hash() != &descriptor_hash
+            || claim.fact_kind() != descriptor.fact_kind()
+            || claim.subject() != &expected_subject
+            || claim.response().response_schema_id() != descriptor.response_schema_id()
+            || claim.response().response_hash() != &expected_response.content_digest()
+        {
             return Err(mismatch(
-                "replay fact batch contained missing or duplicate fact authority",
+                "replay fact batch order or identity differed from reducer output",
             ));
         }
-        let (record_event, record) = records.remove(matches[0]);
         if record_event.commit_key() != output_event.commit_key()
             || record_event.store_commit_order() != output_event.store_commit_order()
         {
@@ -542,11 +568,6 @@ where
             fact.subject(),
             fact.response(),
         )?;
-    }
-    if !records.is_empty() {
-        return Err(mismatch(
-            "replay fact batch contained unexpected fact authority",
-        ));
     }
     Ok(())
 }

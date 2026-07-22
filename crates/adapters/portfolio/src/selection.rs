@@ -1,5 +1,5 @@
 use mfm_facts::FactQueryResult;
-use mfm_state_portfolio::{PortfolioHoldingFactResponse, SelectHoldingsReadPlan};
+use mfm_state_portfolio::{PortfolioHoldingFactEvidence, SelectHoldingsReadPlan};
 use mfm_store::v1 as store;
 
 /// Hydrates every retained fact response in query-row order without applying selection policy.
@@ -7,7 +7,7 @@ pub(crate) async fn hydrate_holding_responses(
     plan: &SelectHoldingsReadPlan,
     responses: &[FactQueryResult],
     artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> mfm_runtime::Result<Vec<Vec<PortfolioHoldingFactResponse>>> {
+) -> mfm_runtime::Result<Vec<Vec<PortfolioHoldingFactEvidence>>> {
     let holding_count = plan.holding_count().map_err(hydration_error)?;
     if responses.len() != holding_count {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
@@ -24,8 +24,11 @@ pub(crate) async fn hydrate_holding_responses(
                 .read_retained_artifact(&requirement)
                 .await
                 .map_err(runtime_artifact_read_error)?;
-            let material = PortfolioHoldingFactResponse::from_canonical_bytes(artifact.bytes())
-                .map_err(hydration_error)?;
+            let material = PortfolioHoldingFactEvidence::from_canonical_bytes(
+                fact_ref.fact_kind(),
+                artifact.bytes(),
+            )
+            .map_err(hydration_error)?;
             query_material.push(material);
         }
         hydrated.push(query_material);

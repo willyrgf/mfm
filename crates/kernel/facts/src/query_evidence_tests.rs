@@ -1,6 +1,6 @@
 use super::*;
 
-fn internal_ref_parts(visibility: FactVisibility) -> InternalFactRefParts {
+fn internal_ref_parts() -> InternalFactRefParts {
     InternalFactRefParts {
         fact_claim_id: FactClaimId::new(run_id(10), 1, 0).expect("claim id"),
         source_event_id: event_id(11),
@@ -9,23 +9,14 @@ fn internal_ref_parts(visibility: FactVisibility) -> InternalFactRefParts {
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([19; 32]),
         ),
-        observed_at: None,
-        visibility,
         fact_kind: FactKind::new("chain.head").expect("kind"),
         fact_descriptor_hash: digest(12),
         subject: FactSubjectRef::new(digest(13), FactKey::from_digest(digest(14)), digest(15)),
-        request: None,
         response: FactResponseEvidence::new(
             schema_id("mfm.test.response"),
             digest(16),
             artifact_id(17),
             digest(18),
-        ),
-        producer: FactProducerProvenance::new(
-            capability_kind(),
-            CapabilityVersion::new("mfm.capability.test.v1").expect("capability version"),
-            adapter_kind(),
-            AdapterVersion::new("mfm.adapter.test.v1").expect("adapter version"),
         ),
     }
 }
@@ -42,27 +33,20 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
             .expect("query value"),
     );
     let plan = CanonicalFactQueryPlan::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        FactQueryCompilerVersion::new("mfm.facts.query.v2").expect("compiler"),
+        FactQueryCompilerVersion::new("mfm.facts.query.v3").expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
-        ScopeDecisionEvidence::new(digest(2)),
         canonical_query,
         ordering,
         Some(10),
     )
     .expect("plan");
     let frontier = StoreReadFrontier::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        DescriptorCatalogWatermark::new(3),
+        mfm_ids::StoreScopeId::new("mfm.store_scope.v1:01010101010101010101010101010101")
+            .expect("store scope"),
         StoreCommitOrder::new(100),
     );
-    let returned_ref = InternalFactRef::new(internal_ref_parts(FactVisibility::indexed_default(
-        FactAudience::Platform,
-    )))
-    .expect("returned ref");
+    let returned_ref = InternalFactRef::new(internal_ref_parts()).expect("returned ref");
     let rows = [FactQueryResultRow::new(
         returned_ref,
         vec![FactFieldValue::new(
@@ -72,9 +56,7 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
         )
         .expect("summary")],
     )];
-    let receipt =
-        FactQueryReceipt::from_rows(frontier, StoreReadFrontierType::Snapshot, &rows, true, None)
-            .expect("receipt");
+    let receipt = FactQueryReceipt::from_rows(frontier, &rows, true, None).expect("receipt");
     let selected_summaries_digest = selected_returned_field_summaries_digest(
         receipt.returned_field_summaries().expect("summaries"),
         &[0],
@@ -113,14 +95,9 @@ fn fact_query_receipt_from_rows_derives_receipt_shape() {
     let row = query_result_row_from_receipt(&receipt);
     let rows = [row.clone()];
 
-    let limited = FactQueryReceipt::from_rows(
-        receipt.read_frontier().clone(),
-        receipt.frontier_type(),
-        &rows,
-        true,
-        Some(1),
-    )
-    .expect("limited receipt material");
+    let limited =
+        FactQueryReceipt::from_rows(receipt.read_frontier().clone(), &rows, true, Some(1))
+            .expect("limited receipt material");
     assert_eq!(limited.returned_refs(), receipt.returned_refs());
     assert_eq!(
         limited.returned_field_summaries(),
@@ -131,24 +108,13 @@ fn fact_query_receipt_from_rows_derives_receipt_shape() {
         QueryResultCardinality::AtLeast(1)
     );
 
-    let without_summaries = FactQueryReceipt::from_rows(
-        receipt.read_frontier().clone(),
-        receipt.frontier_type(),
-        &rows,
-        false,
-        None,
-    )
-    .expect("receipt material without summaries");
+    let without_summaries =
+        FactQueryReceipt::from_rows(receipt.read_frontier().clone(), &rows, false, None)
+            .expect("receipt material without summaries");
     assert_eq!(without_summaries.returned_field_summaries(), None);
 
-    let exact = FactQueryReceipt::from_rows(
-        receipt.read_frontier().clone(),
-        receipt.frontier_type(),
-        &rows,
-        true,
-        Some(2),
-    )
-    .expect("exact receipt material");
+    let exact = FactQueryReceipt::from_rows(receipt.read_frontier().clone(), &rows, true, Some(2))
+        .expect("exact receipt material");
     assert_eq!(
         exact.result_cardinality,
         QueryResultCardinality::Exact(rows.len() as u64)
@@ -169,8 +135,7 @@ fn fact_query_result_rejects_misaligned_or_unpinned_rows() {
         let (_, mut receipt, _) = query_evidence_fixture();
         let row = match case {
             Case::RowRefMismatch => {
-                let mut parts =
-                    internal_ref_parts(FactVisibility::indexed_default(FactAudience::Platform));
+                let mut parts = internal_ref_parts();
                 parts.fact_claim_id = FactClaimId::new(run_id(10), 1, 1).expect("claim id");
                 let wrong_ref = InternalFactRef::new(parts).expect("wrong ref");
                 let fields = receipt
@@ -194,14 +159,11 @@ fn fact_query_result_rejects_misaligned_or_unpinned_rows() {
 }
 
 #[test]
-fn internal_fact_ref_requires_indexed_visibility() {
-    assert!(
-        InternalFactRef::new(internal_ref_parts(FactVisibility::indexed_default(
-            FactAudience::Platform,
-        )))
-        .is_ok()
-    );
-    assert!(InternalFactRef::new(internal_ref_parts(FactVisibility::RunPrivate)).is_err());
+fn internal_fact_ref_requires_store_recording_time() {
+    assert!(InternalFactRef::new(internal_ref_parts()).is_ok());
+    let mut parts = internal_ref_parts();
+    parts.recorded_at.clear();
+    assert!(InternalFactRef::new(parts).is_err());
 }
 
 #[test]
@@ -249,13 +211,13 @@ fn canonical_goldens_match_expected_values() {
         canonical_fact_descriptor_bytes(&descriptor)
             .expect("descriptor bytes")
             .as_str(),
-        r#"{"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v1"}"#
+        r#"{"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v2"}"#
     );
     assert_eq!(
         fact_descriptor_hash(&descriptor)
             .expect("descriptor hash")
             .as_str(),
-        "content:sha256-jcs-v1:178704387523ebb4cb05d04b97d008de627acc90b8e80497fdacb2d27b2e038c"
+        "content:sha256-jcs-v1:4ffdd6344d5e39f31d80cc9a649130d2c6cab858adf6b4480f2a4af4a4f6a45a"
     );
     assert_eq!(
         namespace_hash.as_str(),
@@ -285,23 +247,23 @@ fn canonical_goldens_match_expected_values() {
         canonical_fact_query_plan_bytes(&plan)
             .expect("plan bytes")
             .as_str(),
-        r#"{"canonical_query":"{\"kind\":\"chain.head\"}","canonical_query_hash":"content:sha256-jcs-v1:63dccff9320cdcc68affe1e82a03834050ecbef8210854d4ed865721b8f03020","canonicalizer_version":"mfm.canonical.v1","limit":10,"ordering":{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]},"query_compiler_version":"mfm.facts.query.v2","query_scope":{"audience":"platform","scope":"default"},"resolved_descriptor":"content:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","scope_decision_evidence":{"decision_hash":"content:sha256-jcs-v1:0202020202020202020202020202020202020202020202020202020202020202"},"store_scope":"default","version":"mfm.fact-query-plan.v1"}"#
+        r#"{"canonical_query":"{\"kind\":\"chain.head\"}","canonical_query_hash":"content:sha256-jcs-v1:63dccff9320cdcc68affe1e82a03834050ecbef8210854d4ed865721b8f03020","canonicalizer_version":"mfm.canonical.v1","limit":10,"ordering":{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]},"query_compiler_version":"mfm.facts.query.v3","resolved_descriptor":"content:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.fact-query-plan.v2"}"#
     );
     assert_eq!(
         plan_hash.as_str(),
-        "content:sha256-jcs-v1:2895b3220cb3e98e2ad55ecac2667f96cad79875a80e2bfc5b791f2077ca2f59"
+        "content:sha256-jcs-v1:49f418c9b88b3e6a37bc7009ce4ef225b2edc36b31a4c65bd6a7c990030def6b"
     );
     let evidence_bytes = canonical_fact_query_evidence_bytes(&evidence)
         .expect("evidence bytes")
         .to_vec();
     let evidence_text = String::from_utf8_lossy(&evidence_bytes);
-    assert!(evidence_text.contains("mfm.fact-query-receipt.v2"));
+    assert!(evidence_text.contains("mfm.fact-query-receipt.v3"));
     assert!(!evidence_text.contains("store_receipt"));
     assert_eq!(
         fact_query_evidence_hash(&evidence)
             .expect("evidence hash")
             .as_str(),
-        "content:sha256-jcs-v1:e0ea64fc5f0321935bcc76f14bc178b10635d6fdec9db059c2a531af97039943"
+        "content:sha256-jcs-v1:9a8eb4c267e370d6afd0d8626c9d0ea800ce0ea3bddaf6b91bfee929b656fae0"
     );
 }
 

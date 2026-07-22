@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn app_read_services_reconstruct_fact_bearing_status_from_committed_stream() {
     let (run_id, store, registry) = launch_app_fact_run().await;
-    let read_services = make_run_read_services(store.clone(), store, registry);
+    let read_services = make_run_read_services(Arc::new(store.clone()), registry);
 
     let status = read_services
         .run_status(&run_id)
@@ -29,8 +29,7 @@ async fn app_read_services_fail_closed_for_missing_or_tampered_fact_artifacts() 
         CommittedStreamArtifactMode::TamperFactResponse,
     ] {
         let overridden = OverriddenCommittedStreamStore::new(store.clone(), mode);
-        let read_services =
-            make_run_read_services(overridden.clone(), overridden, registry.clone());
+        let read_services = make_run_read_services(Arc::new(overridden), registry.clone());
 
         let status_error = read_services
             .run_status(&run_id)
@@ -47,7 +46,7 @@ async fn app_read_services_fail_closed_for_missing_or_tampered_fact_artifacts() 
 }
 
 #[tokio::test]
-async fn public_fact_catalog_discovers_only_platform_descriptors() {
+async fn public_fact_catalog_discovers_projected_descriptors() {
     let (_run_id, store, _registry) = launch_app_fact_run().await;
     let descriptor = AppLaunchFact::descriptor().expect("fact descriptor");
     let projection = store.projection_snapshot().expect("projection snapshot");
@@ -63,70 +62,32 @@ async fn public_fact_catalog_discovers_only_platform_descriptors() {
         }]
     );
 
-    let (_claim_id, platform_entry) = projection
-        .fact_index_entries()
+    let (_claim_id, entry) = projection
+        .fact_query_entries()
         .next()
-        .expect("platform fact index entry");
-    let mut control_entry = platform_entry.clone();
-    control_entry.audience = mfm_facts::FactAudience::Control;
-    let control_projection =
+        .expect("queryable fact projection");
+    let projection_without_facts =
         store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-            fact_index_entries: BTreeMap::from([(
-                control_entry.fact_claim_id.clone(),
-                control_entry,
+            fact_descriptors: BTreeMap::from([(
+                entry.fact_descriptor_hash().clone(),
+                projection
+                    .fact_descriptor(entry.fact_descriptor_hash())
+                    .expect("descriptor projection")
+                    .clone(),
             )]),
             ..store::ProjectionSnapshotParts::default()
         })
-        .expect("control projection");
-    let control_catalog =
-        FactCatalogService::from_public_projection(vec![descriptor], &control_projection)
-            .expect("control catalog");
-
-    assert!(control_catalog.list_kinds().is_empty());
-    let error = control_catalog
-        .describe_kind("mfm.app.test.launch")
-        .expect_err("control-only descriptors are not publicly discoverable");
-    assert_eq!(error.class, ErrorClass::NotFound);
-    assert_eq!(error.code, "FactNotFound");
-
-    let (_record_claim_id, platform_record) = projection
-        .fact_records()
-        .next()
-        .expect("recorded fact projection");
-    let run_private_claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: mfm_facts::FactVisibility::RunPrivate,
-        fact_kind: platform_record.claim.fact_kind().clone(),
-        fact_descriptor_hash: platform_record.claim.fact_descriptor_hash().clone(),
-        subject: platform_record.claim.subject().clone(),
-        observed_at: platform_record.claim.observed_at().map(str::to_owned),
-        request: platform_record.claim.request().cloned(),
-        response: platform_record.claim.response().clone(),
-        producer: platform_record.claim.producer().clone(),
-    })
-    .expect("run-private claim");
-    let mut run_private_record = platform_record.clone();
-    run_private_record.claim = run_private_claim;
-    let run_private_projection =
-        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-            fact_records: BTreeMap::from([(
-                run_private_record.fact_claim_id.clone(),
-                run_private_record,
-            )]),
-            ..store::ProjectionSnapshotParts::default()
-        })
-        .expect("run-private projection");
-    let run_private_catalog = FactCatalogService::from_public_projection(
-        vec![AppLaunchFact::descriptor().expect("fact descriptor")],
-        &run_private_projection,
-    )
-    .expect("run-private catalog");
-    assert!(run_private_catalog.list_kinds().is_empty());
+        .expect("descriptor-only projection");
+    let empty_catalog =
+        FactCatalogService::from_public_projection(vec![descriptor], &projection_without_facts)
+            .expect("descriptor-only catalog");
+    assert!(empty_catalog.list_kinds().is_empty());
 }
 
 #[tokio::test]
 async fn run_read_services_load_public_fact_catalog_from_retained_projection_authority() {
     let (_run_id, store, registry) = launch_app_fact_run().await;
-    let services = make_run_read_services(store.clone(), store.clone(), registry);
+    let services = make_run_read_services(Arc::new(store.clone()), registry);
 
     assert_eq!(
         services.fact_kinds().await.expect("fact kinds"),
@@ -149,12 +110,11 @@ async fn run_read_services_load_public_fact_catalog_from_retained_projection_aut
 
     let projection = store.projection_snapshot().expect("projection snapshot");
     let (_claim_id, entry) = projection
-        .fact_index_entries()
+        .fact_query_entries()
         .next()
-        .expect("platform fact index entry");
+        .expect("queryable fact projection");
     let public_ref =
-        public_ref_id(&internal_fact_ref_for_entry(entry).expect("platform internal ref"))
-            .expect("public ref id");
+        public_ref_id(&entry.internal_ref().expect("internal ref")).expect("public ref id");
     let resolved = services
         .resolve_public_fact_ref(&public_ref)
         .await
@@ -169,31 +129,24 @@ async fn run_read_services_load_public_fact_catalog_from_retained_projection_aut
 #[tokio::test]
 async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
     let store = store::AsyncInMemoryRunStore::default();
-    let (first_run_id, store, _registry) = launch_app_fact_run_in_store_with_visibility(
+    let (first_run_id, store, _registry) = launch_app_fact_run_in_store(
         store,
-        mfm_program::facts::FactVisibility::indexed_default(
-            mfm_program::facts::FactAudience::Platform,
-        ),
         Some(content_digest_for_bytes(
             b"mfm.app.test.first-public-fact-run",
         )),
     )
     .await;
-    let (second_run_id, store, registry) =
-        launch_app_fact_run_in_store_with_visibility_and_state_key(
-            store,
-            mfm_program::facts::FactVisibility::indexed_default(
-                mfm_program::facts::FactAudience::Platform,
-            ),
-            Some(content_digest_for_bytes(
-                b"mfm.app.test.second-public-fact-run",
-            )),
-            "fact-state-second",
-            false,
-        )
-        .await;
+    let (second_run_id, store, registry) = launch_app_fact_run_in_store_with_state_key(
+        store,
+        Some(content_digest_for_bytes(
+            b"mfm.app.test.second-public-fact-run",
+        )),
+        "fact-state-second",
+        false,
+    )
+    .await;
     assert_ne!(first_run_id, second_run_id);
-    let services = make_run_read_services(store.clone(), store.clone(), registry);
+    let services = make_run_read_services(Arc::new(store.clone()), registry);
 
     assert_eq!(
         services.fact_kinds().await.expect("fact kinds"),
@@ -226,122 +179,18 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
 }
 
 #[tokio::test]
-async fn run_read_services_do_not_disclose_non_public_facts() {
-    for (case, visibility, has_index_entry) in [
-        (
-            "control",
-            mfm_program::facts::FactVisibility::indexed_default(
-                mfm_program::facts::FactAudience::Control,
-            ),
-            true,
-        ),
-        (
-            "run-private",
-            mfm_program::facts::FactVisibility::RunPrivate,
-            false,
-        ),
-    ] {
-        let (_run_id, store, registry) = launch_app_fact_run_with_visibility(visibility).await;
-        let services = make_run_read_services(store.clone(), store.clone(), registry);
-
-        assert!(
-            services
-                .fact_kinds()
-                .await
-                .expect("non-public fact kinds")
-                .is_empty(),
-            "{case} facts should not be listed"
-        );
-        let error = services
-            .describe_fact_kind("mfm.app.test.launch")
-            .await
-            .expect_err("non-public descriptors are not public");
-        assert_eq!(error.class, ErrorClass::NotFound, "{case}");
-        assert_eq!(error.code, "FactNotFound", "{case}");
-        let error = services
-            .explain_fact_kind("mfm.app.test.launch")
-            .await
-            .expect_err("non-public descriptors are not explainable");
-        assert_eq!(error.class, ErrorClass::NotFound, "{case}");
-        assert_eq!(error.code, "FactNotFound", "{case}");
-
-        let projection = store.projection_snapshot().expect("projection snapshot");
-        if has_index_entry {
-            let (_claim_id, entry) = projection
-                .fact_index_entries()
-                .next()
-                .expect("control fact index entry");
-            let public_ref =
-                public_ref_id(&internal_fact_ref_for_entry(entry).expect("control internal ref"))
-                    .expect("control public ref-shaped id");
-            let error = services
-                .resolve_public_fact_ref(&public_ref)
-                .await
-                .expect_err("non-public refs resolve as not found");
-            assert_eq!(error.class, ErrorClass::NotFound, "{case}");
-            assert_eq!(error.code, "FactNotFound", "{case}");
-        } else {
-            assert!(
-                projection.fact_records().next().is_some(),
-                "{case} fact should still be retained internally"
-            );
-            assert!(
-                projection.fact_index_entries().next().is_none(),
-                "{case} fact should not be publicly indexed"
-            );
-        }
-    }
-}
-
-#[derive(Clone)]
-struct FakeFactQueryExecutor {
-    rows: Vec<AppFactQueryRow>,
-}
-
-impl PublicFactQueryExecutor for FakeFactQueryExecutor {
-    fn execute_public_fact_query_plan<'a>(
-        &'a self,
-        _plan: &'a mfm_facts::CanonicalFactQueryPlan,
-    ) -> PublicFactQueryFuture<'a> {
-        let rows = self.rows.clone();
-        Box::pin(async move { Ok(rows) })
-    }
-}
-
-#[tokio::test]
-async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields() {
-    let (_run_id, store, _registry) = launch_app_fact_run().await;
-    let descriptor = AppLaunchFact::descriptor().expect("fact descriptor");
+async fn public_fact_query_redacts_internal_projection_fields() {
+    let (_run_id, store, registry) = launch_app_fact_run().await;
     let projection = store.projection_snapshot().expect("projection snapshot");
-    let catalog = FactCatalogService::from_public_projection(vec![descriptor], &projection)
-        .expect("public catalog");
-    let (_claim_id, platform_entry) = projection
-        .fact_index_entries()
+    let (_claim_id, entry) = projection
+        .fact_query_entries()
         .next()
-        .expect("platform fact index entry");
-    let platform_ref = internal_fact_ref_for_entry(platform_entry).expect("platform internal ref");
-    let platform_fields = returned_fields_for_entry(&projection, platform_entry);
-    let mut control_entry = platform_entry.clone();
-    control_entry.audience = mfm_facts::FactAudience::Control;
-    let control_ref = internal_fact_ref_for_entry(&control_entry).expect("control ref");
-    let executor = FakeFactQueryExecutor {
-        rows: vec![
-            AppFactQueryRow::new(platform_ref, platform_fields.clone()),
-            AppFactQueryRow::new(control_ref, platform_fields),
-        ],
-    };
-
-    let page = query_public_facts(
-        &catalog,
-        &executor,
-        &mfm_facts::StoreScopeRef::new("mfm.store.default").expect("store scope"),
-        &mfm_facts::ScopeDecisionEvidence::new(content_digest_for_bytes(
-            b"mfm.public-facts.default-scope.v1",
-        )),
-        app_launch_fact_query_request(),
-    )
-    .await
-    .expect("public fact query");
+        .expect("queryable fact projection");
+    let services = make_run_read_services(Arc::new(store.clone()), registry);
+    let page = services
+        .query_public_facts(app_launch_fact_query_request())
+        .await
+        .expect("public fact query");
 
     assert_eq!(page.facts.len(), 1);
     assert_eq!(page.facts[0].fact_kind, "mfm.app.test.launch");
@@ -356,44 +205,17 @@ async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields()
     assert_public_fact_json_redacts_private_tokens_for_test(
         &rendered,
         [
-            platform_entry.artifact_id.as_str(),
-            platform_entry.artifact_evidence_hash.as_str(),
-            platform_entry.fact_descriptor_hash.as_str(),
-            platform_entry.subject_material_hash.as_str(),
+            entry.artifact_id().as_str(),
+            entry.artifact_evidence_hash().as_str(),
+            entry.fact_descriptor_hash().as_str(),
+            entry.subject_material_hash().as_str(),
         ],
     );
 }
 
-fn returned_fields_for_entry(
-    projection: &store::ProjectionSnapshot,
-    entry: &store::FactIndexProjection,
-) -> Vec<mfm_facts::FactFieldValue> {
-    projection
-        .fact_term_entries()
-        .filter(|((claim_id, _field_id), _term)| claim_id == &entry.fact_claim_id)
-        .filter(|((_claim_id, field_id), _term)| {
-            ["subject.amount", "result.amount"].contains(&field_id.as_str())
-        })
-        .map(|((_claim_id, _field_id), term)| {
-            mfm_facts::FactFieldValue::new(
-                term.field_id.clone(),
-                term.value_type,
-                term.value.clone(),
-            )
-            .expect("returned field")
-        })
-        .collect()
-}
-
-fn internal_fact_ref_for_entry(
-    entry: &store::FactIndexProjection,
-) -> Result<mfm_facts::InternalFactRef, PublicError> {
-    entry.internal_ref().map_err(PublicError::from)
-}
-
 #[test]
 fn certified_launch_stages_fact_descriptor_artifacts() {
-    let request = prepare_app_fact_launch(true).expect("prepared launch");
+    let request = prepare_app_fact_launch().expect("prepared launch");
     let descriptor = AppLaunchFact::descriptor().expect("fact descriptor");
     let canonical =
         mfm_program::facts::canonical_fact_descriptor_bytes(&descriptor).expect("canonical");
@@ -425,15 +247,6 @@ fn certified_launch_stages_fact_descriptor_artifacts() {
     assert!(artifact.evidence.semantic_type_id.is_none());
     assert!(artifact.evidence.producer_node_id.is_none());
     assert!(artifact.evidence.producer_seed_id.is_none());
-}
-
-#[test]
-fn certified_launch_rejects_missing_fact_descriptor_artifacts() {
-    let error =
-        prepare_app_fact_launch(false).expect_err("hash-only fact descriptor refs must not launch");
-
-    assert_eq!(error.class, ErrorClass::Internal);
-    assert_eq!(error.code, "FactDescriptorArtifactMissing");
 }
 
 #[test]
@@ -560,8 +373,7 @@ async fn run_read_services_are_evidence_only() {
 
     let store = store::AsyncInMemoryRunStore::default();
     let services = make_run_read_services(
-        store.clone(),
-        store,
+        Arc::new(store),
         production_certification_registry().expect("cert registry"),
     );
     let run_id = RunId::parse(
@@ -585,20 +397,14 @@ async fn run_read_services_are_evidence_only() {
 #[tokio::test]
 async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
     let store = store::AsyncInMemoryRunStore::default();
-    let request = prepare_app_fact_launch(true).expect("prepared launch");
+    let request = prepare_app_fact_launch().expect("prepared launch");
     let runtime_spec =
         CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
-    let runners = app_fact_runner_registry(
-        &runtime_spec,
-        mfm_program::facts::FactVisibility::indexed_default(
-            mfm_program::facts::FactAudience::Platform,
-        ),
-    );
+    let runners = app_fact_runner_registry(&runtime_spec, Arc::new(store.clone()));
     let services = make_run_services(
         runners,
-        store.clone(),
-        store.clone(),
-        app_fact_certification_registry(true),
+        Arc::new(store.clone()),
+        app_fact_certification_registry(),
     );
     let execution_scope =
         store::ExecutionClaimScope::from_run_identity_material(&request.identity_material);
@@ -649,8 +455,8 @@ async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
         Err(error) => error,
     };
 
-    assert_eq!(error.code, "RunStoreAuthorityInvalid");
-    assert_eq!(error.message, "Run store authority could not be validated");
+    assert_eq!(error.code, "RunStoreUnavailable");
+    assert_eq!(error.message, "Run store is unavailable");
     let rendered = format!("{error:?}\n{error}");
     for forbidden in [
         database_url,

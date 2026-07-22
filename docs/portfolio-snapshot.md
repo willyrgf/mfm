@@ -3,18 +3,18 @@
 MFM exposes one portfolio workflow:
 
 ```text
-mfm.portfolio/snapshot@1
+mfm.portfolio/snapshot@2
 ```
 
 Start it with one stable target:
 
 ```sh
-mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
+mfm_cli run start mfm.portfolio/snapshot@2 acme/primary
 ```
 
 Import a `PortfolioConfig` through setup first. Its intrinsic `portfolio_id` becomes the target,
 so `portfolio_id = "acme/primary"` is selected with `acme/primary` on CLI or with
-`{"entry_point":"mfm.portfolio/snapshot@1","target":"acme/primary"}` over REST. Only that exact
+`{"entry_point":"mfm.portfolio/snapshot@2","target":"acme/primary"}` over REST. Only that exact
 versioned snapshot objective is published.
 
 For a runnable token-only setup, import
@@ -30,16 +30,16 @@ snapshot operation. That operation constructs only collector child calls and one
 call; it constructs no state directly. Admission also enforces the configured network, wallet,
 symbol, wallet-to-symbol, and per-EVM-network source limits before graph expansion.
 
-The operation derives only explicit wallet-to-symbol demand. Bitcoin collection resolves one
-shared anchor per demanded network and emits checked network receipts. Each EVM network becomes one
-child call to `EvmBalanceCollectionOperation`; that reusable operation contains one external-read
-state and one atomic publication state. One checked session resolves latest once, reads
+The operation derives only explicit wallet-to-symbol demand. Bitcoin collection performs one
+bounded multi-descriptor scan per demanded semantic source and emits checked receipts at one shared
+anchor. Each EVM network becomes one child call to `EvmBalanceCollectionOperation`; that reusable
+operation contains one fact-producing external-read state. One checked session resolves latest once, reads
 deduplicated token metadata and every native/ERC-20 balance at the exact hash, and rechecks that
 hash by block number. The bounded concurrent scheduler issues each chunk in certified plan order
 and preserves that order independently of response completion order.
 
-The publication attempt records the complete `evm.balance_snapshot` fact batch and a checked
-`EvmBalanceCollectionReceipt` together. That receipt contains the network/chain, exact anchor,
+The external-read settlement records the complete ordered `evm.balance_snapshot` fact batch and a
+checked `EvmBalanceCollectionReceipt` together. That receipt contains the network/chain, exact anchor,
 sorted sources, and verified fact content identities, but no duplicate balance response material.
 Collector batches commit independently. If one sibling collector fails, no report is produced;
 already committed sibling facts remain valid append-only observations, and resume advances the
@@ -47,8 +47,8 @@ unfinished graph. MFM does not wrap independent networks in a cross-family datab
 delete successful observations as compensation.
 
 The typed Bitcoin and EVM receipt vectors flow into one `PortfolioReportOperation`. Its structured
-operation input is passed unchanged into `SelectHoldingsState`; those input edges are the
-managed-write completion barrier. The report operation then owns snapshot assembly and report
+operation input is passed unchanged into `SelectHoldingsState`; those receipt input edges are the
+collector completion barrier. The report operation then owns snapshot assembly and report
 projection. Selection issues all family queries over one store snapshot, rehydrates every
 candidate response, rederives fact identity, and admits only the exact receipt-authorized content.
 Byte-identical append occurrences are equivalent; same-subject facts with different response
@@ -78,8 +78,8 @@ portfolio pins reuse the same number/hash value.
 The root returns `PortfolioPublicOutputs` with exactly `snapshot` and `report`. It preserves zero
 holdings, exposes direct quote totals, and does not expose receipt entries, source keys, fact
 identities, artifact references, provider evidence, scan bounds, or runtime routes.
-Both public values emit `schema_version: 1`; snapshot and report version selection is not a
-request or certified-state policy.
+The snapshot emits `schema_version: 2`; the unchanged report emits `schema_version: 1`. Version
+selection is not a request or certified-state policy.
 
 After admission current configuration is not run authority. Resume, replay, status, stream
 inspection, and public-output rendering use the certified spec and retained evidence. EVM-adapter

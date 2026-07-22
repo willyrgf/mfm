@@ -146,6 +146,12 @@ impl CertificationRegistry {
     {
         let descriptor = program::state_descriptor::<S>()?;
         self.insert_state(state_descriptor_identity_from_descriptor(&descriptor)?)?;
+        for fact_descriptor in
+            <S::Effect as program::EffectRunner<S>>::emitted_fact_descriptor_artifacts()
+                .map_err(|error| problem(ProblemClass::InvalidDataShape, error.to_string()))?
+        {
+            self.insert_fact_descriptor(&fact_descriptor)?;
+        }
         self.insert_config_validator(config_validator_for::<S::Config>()?)?;
         if let Some(validator) = context_validator_for::<S::Context>()? {
             self.insert_context_validator(validator)?;
@@ -163,18 +169,7 @@ impl CertificationRegistry {
         self.insert_config_validator(config_validator_for::<O::Config>()?)
     }
 
-    /// Adds canonical descriptor bytes for a typed fact authoring contract.
-    pub fn register_fact_type<F>(&mut self) -> Result<()>
-    where
-        F: program::MfmFactType,
-    {
-        let descriptor = F::descriptor()
-            .map_err(|error| problem(ProblemClass::InvalidDataShape, error.to_string()))?;
-        self.register_fact_descriptor(&descriptor)
-    }
-
-    /// Adds canonical descriptor bytes for fact descriptor artifact staging.
-    pub fn register_fact_descriptor(
+    fn insert_fact_descriptor(
         &mut self,
         descriptor: &program::facts::FactDescriptor,
     ) -> Result<()> {

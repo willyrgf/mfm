@@ -1,7 +1,7 @@
 //! Typed family receipt input for receipt-pinned portfolio fact selection.
 
 use mfm_program_derive::{MfmValue, StateInput};
-use mfm_states_btc::BtcNetworkCollectionReceipt;
+use mfm_states_btc::BitcoinBalanceCollectionReceipt;
 use mfm_states_evm::EvmBalanceCollectionReceipt;
 use serde::{Deserialize, Serialize};
 
@@ -33,14 +33,14 @@ impl HoldingRequirementKey {
 
 /// Typed family receipts consumed directly by receipt-pinned holding selection.
 ///
-/// These vectors are both selection authority and the managed-write completion barrier. No
+/// These vectors are both selection authority and the collector-settlement completion barrier. No
 /// portfolio-owned fan-in receipt is constructed between collection and selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, StateInput)]
 #[serde(deny_unknown_fields)]
 #[mfm(schema = "mfm.portfolio.input.select_holdings")]
 pub struct SelectHoldingsInput {
     /// Exact Bitcoin network collection receipts produced by the same graph.
-    pub bitcoin_receipts: Vec<BtcNetworkCollectionReceipt>,
+    pub bitcoin_receipts: Vec<BitcoinBalanceCollectionReceipt>,
     /// Exact EVM balance collection receipts produced by the same graph.
     pub evm_receipts: Vec<EvmBalanceCollectionReceipt>,
 }

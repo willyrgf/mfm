@@ -359,23 +359,14 @@ fn open_started_attempt_for_node(
 }
 
 fn attempt_has_committed_progress(view: &RuntimeRunView, attempt_id: &AttemptId) -> bool {
-    view.projections
-        .fact_records()
-        .any(|(_, fact)| &fact.attempt_id == attempt_id)
-        || view
-            .artifact_refs
-            .values()
-            .any(|reference| reference.attempt_id.as_ref() == Some(attempt_id))
+    view.artifact_refs
+        .values()
+        .any(|reference| reference.attempt_id.as_ref() == Some(attempt_id))
 }
 
 fn node_requires_same_attempt_recovery(node: &spec::NodeSpec) -> bool {
     node.capability_bindings
         .capabilities
         .iter()
-        .any(|capability| {
-            matches!(
-                capability.role,
-                CapabilityRole::ManagedPlatformWrite | CapabilityRole::ExternalMutationAuthority
-            )
-        })
+        .any(|capability| capability.role == CapabilityRole::ExternalMutationAuthority)
 }

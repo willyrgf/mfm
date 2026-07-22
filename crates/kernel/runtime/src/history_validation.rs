@@ -219,17 +219,16 @@ pub(super) fn validate_historical_run_stream(
                         payload.node_id
                     )));
                 }
-                let caps = CertifiedRuntimeCapabilities::for_node(node);
-                let producer = payload.claim.producer();
-                require_capability(
-                    &caps,
-                    producer.capability_kind(),
-                    producer.capability_version(),
-                    &node.node_id,
-                )
-                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-                require_adapter(node, producer.adapter_kind(), producer.adapter_version())
-                    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                let state_descriptor = runtime_spec.state_descriptor_for_node(node)?;
+                if state_descriptor.effect_class != "read_external"
+                    || state_descriptor.emitted_fact_descriptors.len() != 1
+                    || node.fact_descriptor_allowlist.len() != 1
+                {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "fact for node {} was not produced by one certified fact-emitting external read",
+                        node.node_id
+                    )));
+                }
                 require_projected_attempt(
                     projections,
                     &payload.node_id,
@@ -251,50 +250,32 @@ pub(super) fn validate_historical_run_stream(
                 )
                 .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
                 let fact_key = payload.claim.subject().fact_key();
-                let record = projections.fact_record(&claim_id).ok_or_else(|| {
+                let projection = projections.fact_query_entry(&claim_id).ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
                         "fact {} for node {} attempt {} is not projected",
                         fact_key, payload.node_id, payload.attempt_id
                     ))
                 })?;
-                if record.source_event_id != *event.event_id()
-                    || record.node_id != payload.node_id
-                    || record.attempt_id != payload.attempt_id
-                    || record.claim != payload.claim
+                let projected_ref = projection
+                    .internal_ref()
+                    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                let event_ref = mfm_facts::InternalFactRef::from_claim(
+                    claim_id,
+                    event.event_id().clone(),
+                    projection.recorded_at().to_owned(),
+                    payload.node_id.clone(),
+                    &payload.claim,
+                )
+                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                if projection.source_event_id() != event.event_id()
+                    || projection.producer_node_id() != &payload.node_id
+                    || projection.attempt_id() != &payload.attempt_id
+                    || projected_ref != event_ref
                 {
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "fact {} projection does not match authoritative event",
                         fact_key
                     )));
-                }
-                match payload.claim.visibility() {
-                    mfm_facts::FactVisibility::Indexed { .. } => {
-                        let index = projections.fact_index_entry(&claim_id).ok_or_else(|| {
-                            RuntimeError::InvalidRunStream(format!(
-                                "indexed fact {} for node {} attempt {} is not projected",
-                                fact_key, payload.node_id, payload.attempt_id
-                            ))
-                        })?;
-                        if index.source_event_id != *event.event_id()
-                            || index.fact_key != *fact_key
-                            || index.fact_descriptor_hash != *payload.claim.fact_descriptor_hash()
-                            || index.response_hash != *payload.claim.response().response_hash()
-                            || index.artifact_id != *payload.claim.response().artifact_id()
-                        {
-                            return Err(RuntimeError::InvalidRunStream(format!(
-                                "indexed fact {} projection does not match authoritative event",
-                                fact_key
-                            )));
-                        }
-                    }
-                    mfm_facts::FactVisibility::RunPrivate => {
-                        if projections.fact_index_entry(&claim_id).is_some() {
-                            return Err(RuntimeError::InvalidRunStream(format!(
-                                "private fact {} has an index projection",
-                                fact_key
-                            )));
-                        }
-                    }
                 }
             }
             events::KernelEventPayload::ArtifactReferenced(payload) => {

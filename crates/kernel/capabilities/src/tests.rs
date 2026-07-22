@@ -3,7 +3,6 @@ use mfm_ids::{DigestAlgorithm, DigestBytes};
 
 struct ReadRpc;
 struct SupportKeystore;
-struct PlatformArtifactWriter;
 struct MutationSubmitter;
 
 impl CapabilitySpec for ReadRpc {
@@ -35,22 +34,6 @@ impl CapabilitySpec for SupportKeystore {
 
     fn name() -> &'static str {
         "support_keystore"
-    }
-}
-
-impl CapabilitySpec for PlatformArtifactWriter {
-    type Role = ManagedPlatformWriteRole;
-
-    fn kind() -> Result<CapabilityKind> {
-        capability_kind("platform_artifact_writer", 0x33)
-    }
-
-    fn version() -> Result<CapabilityVersion> {
-        capability_version()
-    }
-
-    fn name() -> &'static str {
-        "platform_artifact_writer"
     }
 }
 
@@ -97,7 +80,6 @@ fn valid_effect_capability_sets_compile_and_describe() {
     assert_capability_set_for::<Pure, NoCaps>();
     assert_capability_set_for::<ReadExternal, (ReadRpc,)>();
     assert_capability_set_for::<ReadExternal, (ReadRpc, SupportKeystore)>();
-    assert_capability_set_for::<ManagedPlatformWrite, (PlatformArtifactWriter,)>();
     assert_capability_set_for::<ApplySideEffect, (MutationSubmitter,)>();
     assert_capability_set_for::<ApplySideEffect, (ReadRpc, MutationSubmitter, SupportKeystore)>();
 
@@ -142,13 +124,6 @@ fn descriptor_role_validation_matches_v1_effect_rules() {
         .validate_for_effect::<ReadExternal>()
         .is_err());
 
-    let managed_with_read =
-        CapabilitySetDescriptor::new(vec![ReadRpc::descriptor().expect("read cap")])
-            .expect("descriptor builds");
-    assert!(managed_with_read
-        .validate_for_effect::<ManagedPlatformWrite>()
-        .is_err());
-
     let two_mutation_authorities = CapabilitySetDescriptor::new(vec![
         MutationSubmitter::descriptor().expect("mutation cap"),
         CapabilityDescriptor::new(
@@ -176,10 +151,6 @@ fn duplicate_capability_descriptors_reject() {
 #[test]
 fn capability_role_strings_are_stable() {
     assert_eq!(CapabilityRole::ReadExternal.as_str(), "read_external");
-    assert_eq!(
-        CapabilityRole::ManagedPlatformWrite.as_str(),
-        "managed_platform_write"
-    );
     assert_eq!(CapabilityRole::Support.as_str(), "support");
     assert_eq!(
         CapabilityRole::ExternalMutationAuthority.as_str(),

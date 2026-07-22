@@ -1,13 +1,16 @@
 use super::*;
-use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole, NoCaps};
+use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole, NoCaps, ReadExternalRole};
+use mfm_effects::ReadExternal;
+use mfm_facts::MfmFactType as _;
 use mfm_ids::{
     AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, ContextRef,
     ContextResourceKind, ContextStage, OperationKind, OperationVersion,
 };
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, MfmContext, MfmFactType as _, NoContext, Operation,
-    OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim, RootBuilder,
-    ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    build_root_with_registries, CanonicalSeed, CertifiedContext, ExternalReadEvidenceSet,
+    MfmContext, NoContext, Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey,
+    PureState, ReadState, ResourceClaim, RootBuilder, ScopeKey, SideEffectState, StateKey,
+    StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs};
 use serde::{Deserialize, Serialize};
@@ -347,13 +350,38 @@ struct FactEmittingState {
     config: TestConfig,
 }
 
+struct FactReadCap;
+
+impl CapabilitySpec for FactReadCap {
+    type Role = ReadExternalRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new(
+            "mfm.certify.test",
+            "fact-read",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0xa3),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.certify.test.fact_read.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.certify.test.fact_read"
+    }
+}
+
 impl StateSpec for FactEmittingState {
     type Config = TestConfig;
     type Context = NoContext;
     type Input = TestValue;
     type Output = TestValue;
-    type Effect = Pure;
-    type Caps = NoCaps;
+    type Effect = ReadExternal;
+    type Caps = (FactReadCap,);
 
     fn kind() -> program::Result<StateKind> {
         StateKind::new(
@@ -374,10 +402,6 @@ impl StateSpec for FactEmittingState {
         "mfm.certify.test.fact_emitting"
     }
 
-    fn emitted_fact_descriptors() -> program::Result<Vec<program::FactDescriptorRef>> {
-        Ok(vec![mfm_program::fact_descriptor_ref::<ChainHeadFact>()?])
-    }
-
     fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
         Ok(Self {
             config: config.into_inner(),
@@ -385,7 +409,41 @@ impl StateSpec for FactEmittingState {
     }
 }
 
-impl_multiplying_pure_state!(FactEmittingState);
+impl ReadState for FactEmittingState {
+    type Plan = TestValue;
+    type Evidence = TestValue;
+    type Facts = mfm_values::NonEmpty<ChainHeadFact>;
+
+    fn plan(
+        &self,
+        input: &Self::Input,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        Ok(input.clone())
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<(Self::Output, Self::Facts)> {
+        let output = TestValue {
+            amount: input.amount * self.config.multiplier,
+        };
+        let fact = ChainHeadFact {
+            subject: ChainHeadSubject {
+                chain: "test".to_owned(),
+            },
+            response: ChainHeadResponse {
+                height: evidence.primary_evidence().amount,
+            },
+        };
+        let facts = mfm_values::NonEmpty::try_from_vec(vec![fact])
+            .map_err(|error| program::StateError::Message(error.to_string()))?;
+        Ok((output, facts))
+    }
+}
 
 struct MutationCap;
 

@@ -137,40 +137,7 @@ pub(super) fn cell_replay_authority(
 }
 
 pub(super) fn hashed_cell_replay_spec() -> HashedSpecEnvelope {
-    let mut envelope = fact_replay_spec();
-    let node = envelope
-        .spec
-        .nodes
-        .iter()
-        .find(|node| node.node_id == fact_node_id())
-        .expect("cell node")
-        .clone();
-    let lineage = spec::ValueLineageRef {
-        lineage_digest: content_digest(0xe0),
-    };
-    envelope.spec.cells.push(spec::CellSpec {
-        cell_id: node.output_cell.clone(),
-        producer: spec::CellProducer::Node(node.node_id.clone()),
-        scope_id: node.scope_id.clone(),
-        semantic_type_id: semantic_type_id(0xd6),
-        schema_id: schema_id("mfm.replay.test.output", 0xd5),
-        value_lineage: lineage.clone(),
-        terminal_policy: spec::CellTerminalPolicy::MaybeSkipped,
-        storage_policy: spec::StoragePolicy::ContentAddressed,
-        redaction_policy: spec::RedactionPolicy::Public,
-        context: spec::CellContextSpec::no_context(),
-    });
-    envelope.spec.value_lineages.push(spec::ValueLineage {
-        lineage_ref: lineage,
-        scope_id: node.scope_id.clone(),
-        producer: spec::CellProducer::Node(node.node_id.clone()),
-        input_cells: Vec::new(),
-        config_ref_digest: None,
-        planning_lineage: node.planning_lineage,
-        domain_keys: Vec::new(),
-        transform_policy: spec::LineageTransformPolicy::StateOutput,
-    });
-    HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("hashed cell replay spec")
+    hashed_fact_replay_spec()
 }
 
 pub(super) fn state_output_artifact_ref(

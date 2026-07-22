@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::U256;
 use mfm_evm_capabilities::EvmBlockAnchor;
+use mfm_facts::MfmFactType;
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioReport,
@@ -15,8 +16,7 @@ use mfm_portfolio_model::symbol::{
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
 };
-use mfm_program::MfmFactType;
-use mfm_states_btc::BtcAddressBalanceSnapshotFact;
+use mfm_states_btc::BitcoinBalanceSnapshotFact;
 use mfm_states_evm::EvmBalanceSnapshotFact;
 
 const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -105,7 +105,6 @@ fn selected_native(raw_units: &str) -> SelectedHoldings {
                     ),
                 },
             },
-            coverage: "complete_at_anchor".to_owned(),
             metadata: PublicMetadata::default(),
         }],
     }
@@ -154,7 +153,7 @@ fn selection_config_carries_both_family_descriptors() {
     let config = SelectHoldingsConfig::new(
         sample_portfolio(),
         SelectHoldingsFactDescriptors::new(
-            &BtcAddressBalanceSnapshotFact::descriptor().expect("Bitcoin descriptor"),
+            &BitcoinBalanceSnapshotFact::descriptor().expect("Bitcoin descriptor"),
             &EvmBalanceSnapshotFact::descriptor().expect("EVM descriptor"),
         )
         .expect("holding descriptors"),
@@ -184,13 +183,8 @@ fn store_selected_evm_holding_assembles_totals_and_exact_network_pin() {
     assert_eq!(snapshot.schema_version, PortfolioSnapshot::SCHEMA_VERSION);
     assert_eq!(snapshot.network_pins.len(), 1);
     assert_eq!(snapshot.network_pins[0].network_id, "ethereum-mainnet");
-    assert_eq!(
-        snapshot.wallets[0].observations[0].coverage,
-        "complete_at_anchor"
-    );
-
     let mut unsupported_snapshot = snapshot.clone();
-    unsupported_snapshot.schema_version = 2;
+    unsupported_snapshot.schema_version = 3;
     assert!(project_report_from_snapshot(unsupported_snapshot).is_err());
 
     let report = project_report_from_snapshot(snapshot).expect("report");

@@ -46,26 +46,6 @@ fn schema_id() -> SchemaId {
     .expect("schema")
 }
 
-fn capability_kind() -> CapabilityKind {
-    CapabilityKind::new(
-        "mfm.test.capability",
-        "read",
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_ids::DigestBytes::from_array([2; 32]),
-    )
-    .expect("capability")
-}
-
-fn adapter_kind() -> AdapterKind {
-    AdapterKind::new(
-        "mfm.test.adapter",
-        "read",
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_ids::DigestBytes::from_array([3; 32]),
-    )
-    .expect("adapter")
-}
-
 fn descriptor() -> mfm_facts::FactDescriptor {
     mfm_facts::FactDescriptor::new(
         mfm_facts::FactKind::new("chain.head").expect("kind"),
@@ -115,33 +95,29 @@ fn descriptor() -> mfm_facts::FactDescriptor {
     .expect("descriptor")
 }
 
-fn fact_producer_node_id() -> mfm_ids::NodeId {
-    mfm_ids::NodeId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_ids::DigestBytes::from_array([0x19; 32]),
-    )
+struct FactAuthorityFixture {
+    fact_ref: mfm_facts::InternalFactRef,
+    descriptor: store::FactDescriptorProjection,
+    query: store::FactQueryProjection,
+    terms: Vec<store::FactIndexTermProjection>,
 }
 
-fn fact_projection_fixture(
-    subject_height: u64,
-) -> (
-    mfm_facts::InternalFactRef,
-    store::FactDescriptorProjection,
-    store::FactRecordProjection,
-    store::FactIndexProjection,
-) {
+fn fact_authority_fixture(subject_height: u64) -> FactAuthorityFixture {
     let descriptor = descriptor();
     let descriptor_fixture = fact_descriptor_projection_fixture_for_test(descriptor.clone())
         .expect("descriptor fixture");
     let fact_fixture = fact_projection_fixture_for_test(
         &descriptor,
-        descriptor_fixture.descriptor_hash.clone(),
+        descriptor_fixture.descriptor_hash,
         FactProjectionFixtureInputForTest {
             run_id: run_id(0x10),
             source_seq: 1,
             source_ordinal: 0,
             source_event_id: event_id(0x11),
-            node_id: fact_producer_node_id(),
+            node_id: mfm_ids::NodeId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                mfm_ids::DigestBytes::from_array([0x19; 32]),
+            ),
             attempt_id: mfm_ids::AttemptId::from_digest(
                 DigestAlgorithm::Sha256JcsV1,
                 mfm_ids::DigestBytes::from_array([0x42; 32]),
@@ -149,90 +125,46 @@ fn fact_projection_fixture(
             commit_id: store::CommitKey::new("fact-query-authority").expect("commit key"),
             store_commit_order: 1,
             recorded_at: "2026-07-01T00:00:00Z".to_owned(),
-            observed_at: None,
-            visibility: mfm_facts::FactVisibility::indexed_default(
-                mfm_facts::FactAudience::Platform,
-            ),
             subject: CanonicalValue::object([("height", CanonicalValue::Unsigned(subject_height))])
                 .expect("subject"),
             response: CanonicalValue::object([("height", CanonicalValue::Unsigned(800000))])
                 .expect("response"),
-            request: None,
             response_schema_id: schema_id(),
             response_artifact_id: None,
-            producer: mfm_facts::FactProducerProvenance::new(
-                capability_kind(),
-                CapabilityVersion::new("mfm.test.capability.v1").expect("capability version"),
-                adapter_kind(),
-                AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
-            ),
         },
     )
     .expect("fact fixture");
-    let index = fact_fixture.index.expect("indexed fact fixture");
-    let fact_ref = index.internal_ref().expect("internal fact ref");
-    (
+    let fact_ref = fact_fixture
+        .projection
+        .internal_ref()
+        .expect("internal fact ref");
+    FactAuthorityFixture {
         fact_ref,
-        descriptor_fixture.projection,
-        fact_fixture.record,
-        index,
-    )
+        descriptor: descriptor_fixture.projection,
+        query: fact_fixture.projection,
+        terms: fact_fixture.terms,
+    }
 }
 
-fn fact_authority_fixture(
-    subject_height: u64,
-) -> (mfm_facts::InternalFactRef, store::ProjectionSnapshot) {
-    let (fact_ref, descriptor_projection, record_projection, index_projection) =
-        fact_projection_fixture(subject_height);
-    let projections = store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+fn projections(fixture: &FactAuthorityFixture) -> store::ProjectionSnapshot {
+    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
         fact_descriptors: BTreeMap::from([(
-            descriptor_projection.descriptor_hash.clone(),
-            descriptor_projection,
+            fixture.descriptor.descriptor_hash.clone(),
+            fixture.descriptor.clone(),
         )]),
-        fact_records: BTreeMap::from([(
-            record_projection.fact_claim_id.clone(),
-            record_projection,
+        fact_query_entries: BTreeMap::from([(
+            fixture.query.fact_claim_id().clone(),
+            fixture.query.clone(),
         )]),
-        fact_index_entries: BTreeMap::from([(
-            index_projection.fact_claim_id.clone(),
-            index_projection,
-        )]),
+        fact_term_entries: fixture
+            .terms
+            .iter()
+            .cloned()
+            .map(|term| ((term.fact_claim_id.clone(), term.field_id.clone()), term))
+            .collect(),
         ..store::ProjectionSnapshotParts::default()
     })
-    .expect("projection snapshot");
-    (fact_ref, projections)
-}
-
-fn fact_authority_projections_without(
-    full: &store::ProjectionSnapshot,
-    descriptor: bool,
-    record: bool,
-    index: bool,
-) -> store::ProjectionSnapshot {
-    let mut parts = store::ProjectionSnapshotParts::from_snapshot(full);
-    if !descriptor {
-        parts.fact_descriptors.clear();
-    }
-    if !record {
-        parts.fact_records.clear();
-    }
-    if !index {
-        parts.fact_index_entries.clear();
-    }
-    store::ProjectionSnapshot::from_parts(parts).expect("filtered fact authority projection")
-}
-
-fn fact_authority_projections_with_tampered_subject(
-    full: &store::ProjectionSnapshot,
-    fact_ref: &mfm_facts::InternalFactRef,
-) -> store::ProjectionSnapshot {
-    let mut parts = store::ProjectionSnapshotParts::from_snapshot(full);
-    parts
-        .fact_records
-        .get_mut(fact_ref.fact_claim_id())
-        .expect("fact record")
-        .claim = fact_projection_fixture(18).2.claim;
-    store::ProjectionSnapshot::from_parts(parts).expect("tampered fact authority projection")
+    .expect("projection snapshot")
 }
 
 fn query_evidence_artifact() -> RunnerJsonArtifact {
@@ -253,15 +185,7 @@ fn query_evidence_artifact() -> RunnerJsonArtifact {
 }
 
 fn query_evidence(fact_ref: mfm_facts::InternalFactRef) -> mfm_facts::FactQueryEvidence {
-    let query_scope = mfm_facts::FactQueryScope::new(
-        mfm_facts::FactAudience::Platform,
-        mfm_facts::FactVisibilityScope::Default,
-    );
-    let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
     let input = mfm_facts::FactQueryInput::new(
-        store_scope.clone(),
-        query_scope.clone(),
-        mfm_facts::ScopeDecisionEvidence::new(digest(0x19)),
         vec![mfm_facts::FactQueryPredicate::new(
             mfm_facts::FactFieldId::new("subject.height").expect("field"),
             mfm_facts::FactQueryOperator::Equal,
@@ -274,9 +198,8 @@ fn query_evidence(fact_ref: mfm_facts::InternalFactRef) -> mfm_facts::FactQueryE
     .expect("query input");
     let plan = mfm_facts::compile_fact_query_plan(&descriptor(), input).expect("plan");
     let frontier = mfm_facts::StoreReadFrontier::new(
-        store_scope,
-        query_scope,
-        mfm_facts::DescriptorCatalogWatermark::new(1),
+        mfm_ids::StoreScopeId::new("mfm.store_scope.v1:10101010101010101010101010101010")
+            .expect("store scope"),
         mfm_facts::StoreCommitOrder::new(1),
     );
     let rows = [mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new())];
@@ -295,93 +218,83 @@ fn query_evidence(fact_ref: mfm_facts::InternalFactRef) -> mfm_facts::FactQueryE
 
 #[test]
 fn fact_query_evidence_retention_refs_include_returned_fact_authority_artifacts() {
-    let (fact_ref, projections) = fact_authority_fixture(17);
+    let fixture = fact_authority_fixture(17);
+    let projections = projections(&fixture);
     let evidence_artifact = query_evidence_artifact();
-    let descriptor_projection = projections
-        .fact_descriptor(fact_ref.fact_descriptor_hash())
-        .expect("descriptor projection");
-    let evidence = query_evidence(fact_ref.clone());
+    let evidence = query_evidence(fixture.fact_ref.clone());
 
     let refs = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
         .expect("fact query retention refs");
 
-    assert!(refs.contains(&events::RetentionRef {
-        artifact_id: evidence_artifact.evidence.artifact_id.clone(),
-        role: events::ArtifactRole::FactQueryEvidence,
-        evidence_hash: evidence_artifact
-            .evidence
-            .evidence_hash()
-            .expect("query evidence hash"),
-        content_digest: evidence_artifact.evidence.digest.clone(),
-    }));
-    assert!(refs.contains(&events::RetentionRef {
-        artifact_id: descriptor_projection.descriptor_artifact_id.clone(),
-        role: events::ArtifactRole::FactDescriptor,
-        evidence_hash: descriptor_projection
+    assert!(refs.contains(
+        &evidence_artifact
+            .retention_ref()
+            .expect("query evidence ref")
+    ));
+    assert!(refs.contains(
+        &fixture
+            .descriptor
             .descriptor_artifact_evidence
-            .evidence_hash()
-            .expect("descriptor evidence hash"),
-        content_digest: fact_ref.fact_descriptor_hash().clone(),
-    }));
-    assert!(refs.contains(&events::RetentionRef {
-        artifact_id: fact_ref.artifact_id().clone(),
-        role: events::ArtifactRole::FactResponse,
-        evidence_hash: fact_ref.artifact_evidence_hash().clone(),
-        content_digest: fact_ref.response_hash().clone(),
-    }));
+            .retention_ref()
+            .expect("descriptor ref")
+    ));
+    assert!(refs.contains(
+        &fixture
+            .query
+            .response_artifact_evidence()
+            .expect("response evidence")
+            .retention_ref()
+            .expect("response ref")
+    ));
 }
 
 #[test]
 fn fact_query_evidence_retention_refs_reject_invalid_returned_fact_authority() {
-    for (name, descriptor, record, index, tampered, expected) in [
+    for (name, mutation, expected) in [
+        ("missing descriptor", 0_u8, "missing descriptor authority"),
+        ("missing query", 1, "missing fact query authority"),
         (
-            "missing descriptor",
-            false,
-            true,
-            true,
-            false,
-            "missing descriptor authority",
+            "tampered query",
+            2,
+            "fact query authority does not match returned ref",
         ),
         (
-            "missing source fact",
-            true,
-            false,
-            true,
-            false,
-            "missing source fact authority",
-        ),
-        (
-            "missing indexed fact",
-            true,
-            true,
-            false,
-            false,
-            "missing indexed fact authority",
-        ),
-        (
-            "tampered subject",
-            true,
-            true,
-            true,
-            true,
-            "source fact authority does not match",
+            "missing response evidence",
+            3,
+            "missing response artifact authority",
         ),
     ] {
-        let (fact_ref, full) = fact_authority_fixture(17);
-        let evidence_artifact = query_evidence_artifact();
-        let projections = if tampered {
-            fact_authority_projections_with_tampered_subject(&full, &fact_ref)
-        } else {
-            fact_authority_projections_without(&full, descriptor, record, index)
-        };
-        let evidence = query_evidence(fact_ref);
-
+        let fixture = fact_authority_fixture(17);
+        let mut parts = store::ProjectionSnapshotParts::from_snapshot(&projections(&fixture));
+        match mutation {
+            0 => parts.fact_descriptors.clear(),
+            1 => parts.fact_query_entries.clear(),
+            2 => {
+                let tampered = fact_authority_fixture(18).query;
+                parts
+                    .fact_query_entries
+                    .insert(tampered.fact_claim_id().clone(), tampered);
+            }
+            3 => {
+                let query = store::FactQueryProjection::from_internal_ref(
+                    &fixture.fact_ref,
+                    fixture.query.attempt_id().clone(),
+                    fixture.query.commit_id().clone(),
+                    fixture.query.store_commit_order(),
+                    None,
+                )
+                .expect("query without hydrated response evidence");
+                parts
+                    .fact_query_entries
+                    .insert(query.fact_claim_id().clone(), query);
+            }
+            _ => unreachable!(),
+        }
+        let projections = store::ProjectionSnapshot::from_parts(parts).expect("mutated snapshot");
+        let evidence = query_evidence(fixture.fact_ref);
         let error =
-            match fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections) {
-                Ok(_) => panic!("{name} authority should reject"),
-                Err(error) => error,
-            };
-
+            fact_query_evidence_retention_refs(&query_evidence_artifact(), &evidence, &projections)
+                .expect_err("invalid returned authority rejects");
         assert!(
             matches!(&error, RuntimeError::InvalidRunnerOutput(message) if message.contains(expected)),
             "{name} returned {error:?}"

@@ -1,523 +1,524 @@
 #![warn(missing_docs)]
-//! Bitcoin Core JSON-RPC over HTTP client.
-//!
-//! Minimal typed client for the Bitcoin Core RPCs needed by the mfm semantic runtime:
-//! - `getblockchaininfo` — current chain height and best block hash (anchor)
-//! - `getblockhash` and `getblockheader` — selected chain-head metadata
-//! - `scantxoutset` — UTXO balance for a given address (observation)
-//!
-//! The client speaks plain JSON-RPC 2.0 over HTTP with optional Basic auth, using `reqwest`.
-//! Debug output and errors redact RPC URL credentials, query strings, passwords, and raw response
-//! bodies.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use mfm_transports_btc_jsonrpc_http::BtcJsonRpcConfig;
-//!
-//! let config = BtcJsonRpcConfig {
-//!     rpc_url: "http://127.0.0.1:8332".to_string(),
-//!     rpc_user: Some("user".to_string()),
-//!     rpc_password: Some("pass".to_string()),
-//! };
-//! ```
+//! Strict bounded Bitcoin Core 28+ JSON-RPC session for aggregate balance collection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
-use bitcoin::{Amount, Denomination};
+use bitcoin::{Amount, BlockHash, Txid};
 use mfm_btc_capabilities::{
-    btc_diagnostic, BitcoinBlockHash, BitcoinSourceBinding, BitcoinSourceIdentity,
-    BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcCapabilityError,
-    BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse,
-    BtcFinality, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BitcoinAddressBalance, BitcoinBalanceCollectionRequest, BitcoinBalanceCollectionResponse,
+    BitcoinBalanceSession, BitcoinCapabilityError, BitcoinSessionFuture, BitcoinSourceBinding,
+    BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
 };
-use mfm_capabilities::{
-    ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
-};
-use mfm_ids::LocalPublicId;
+use mfm_capabilities::ProviderDiagnosticCode;
 use reqwest::header::CONTENT_TYPE;
-use serde::{de, Deserialize, Deserializer, Serialize};
-use tracing::debug;
+use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-const MAX_DIAGNOSTIC_MESSAGE_LEN: usize = 240;
-const REDACTED_SECRET: &str = "<redacted>";
-const REDACTED_DIAGNOSTIC: &str = "<redacted diagnostic message>";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const ORDINARY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const MIN_SCAN_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_SCAN_TIMEOUT: Duration = Duration::from_secs(86_400);
+const MAX_JSON_RPC_ERROR_MESSAGE_BYTES: usize = 1_024;
+const MAX_DESCRIPTOR_BYTES: usize = 4_096;
+const MAX_SCRIPT_BYTES: usize = 10_000;
+const MAX_BITCOIN_JSON_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-/// Configuration for a Bitcoin Core JSON-RPC connection.
+/// Resolved Basic authentication for one Bitcoin RPC endpoint.
 #[derive(Clone)]
-pub struct BtcJsonRpcConfig {
-    /// Bitcoin Core RPC URL (e.g. `http://127.0.0.1:8332`).
-    pub rpc_url: String,
-    /// Optional RPC username for Basic auth.
-    pub rpc_user: Option<String>,
-    /// Optional RPC password for Basic auth.
-    pub rpc_password: Option<String>,
+pub struct BitcoinRpcAuthentication {
+    username: String,
+    password: String,
 }
 
-impl fmt::Debug for BtcJsonRpcConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BtcJsonRpcConfig")
-            .field("rpc_url", &redacted_rpc_url(&self.rpc_url))
-            .field("rpc_user", &redacted_optional_secret(&self.rpc_user))
-            .field(
-                "rpc_password",
-                &redacted_optional_secret(&self.rpc_password),
-            )
+impl BitcoinRpcAuthentication {
+    /// Creates resolved Basic authentication. Empty components are rejected.
+    pub fn new(
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Result<Self, BitcoinRpcError> {
+        let authentication = Self {
+            username: username.into(),
+            password: password.into(),
+        };
+        if authentication.username.is_empty() || authentication.password.is_empty() {
+            return Err(BitcoinRpcError::InvalidConfiguration);
+        }
+        Ok(authentication)
+    }
+}
+
+impl fmt::Debug for BitcoinRpcAuthentication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BitcoinRpcAuthentication")
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
             .finish()
     }
 }
 
-/// Bitcoin Core JSON-RPC client.
-pub struct BtcJsonRpcClient {
-    config: BtcJsonRpcConfig,
-    http: reqwest::Client,
-    next_id: AtomicU64,
-}
-
-type BtcTransportFuture<'a, T> =
-    Pin<Box<dyn Future<Output = std::result::Result<T, BtcRpcError>> + Send + 'a>>;
-
-trait BtcJsonRpcChainHeadTransport: Send + Sync {
-    fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo>;
-
-    fn get_block_hash<'a>(
-        &'a self,
-        verified: &'a VerifiedBtcCall,
-        height: u64,
-    ) -> BtcTransportFuture<'a, String>;
-
-    fn get_block_header<'a>(
-        &'a self,
-        verified: &'a VerifiedBtcCall,
-        block_hash: &'a str,
-    ) -> BtcTransportFuture<'a, BlockHeaderInfo>;
-
-    fn scan_tx_out_set<'a>(
-        &'a self,
-        verified: &'a VerifiedBtcCall,
-        address: &'a str,
-    ) -> BtcTransportFuture<'a, ScanTxOutSetResult>;
-}
-
-impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
-    fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo> {
-        Box::pin(async move { BtcJsonRpcClient::get_blockchain_info(self).await })
-    }
-
-    fn get_block_hash<'a>(
-        &'a self,
-        verified: &'a VerifiedBtcCall,
-        height: u64,
-    ) -> BtcTransportFuture<'a, String> {
-        Box::pin(async move { BtcJsonRpcClient::get_block_hash(self, verified, height).await })
-    }
-
-    fn get_block_header<'a>(
-        &'a self,
-        verified: &'a VerifiedBtcCall,
-        block_hash: &'a str,
-    ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
-        Box::pin(
-            async move { BtcJsonRpcClient::get_block_header(self, verified, block_hash).await },
-        )
-    }
-
-    fn scan_tx_out_set<'a>(
-        &'a self,
-        verified: &'a VerifiedBtcCall,
-        address: &'a str,
-    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
-        Box::pin(async move { BtcJsonRpcClient::scan_tx_out_set(self, verified, address).await })
-    }
-}
-
-/// Bitcoin JSON-RPC router over semantic source identities.
-///
-/// Owns runtime route/source descriptors and low-level protocol mechanics. It exposes no-IO binding
-/// validation and bind constructors only; it does not implement live capability provider traits.
-#[derive(Clone)]
-pub struct BtcJsonRpcRouter {
-    routes: BTreeMap<BitcoinSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
-}
-
-impl BtcJsonRpcRouter {
-    /// Creates a router over JSON-RPC transports keyed by semantic source identity.
-    pub fn new(routes: BTreeMap<BitcoinSourceIdentity, Arc<BtcJsonRpcClient>>) -> Self {
-        Self {
-            routes: routes
-                .into_iter()
-                .map(|(source, client)| (source, client as Arc<dyn BtcJsonRpcChainHeadTransport>))
-                .collect(),
-        }
-    }
-
-    #[cfg(test)]
-    fn new_for_transport(
-        routes: BTreeMap<BitcoinSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
-    ) -> Self {
-        Self { routes }
-    }
-
-    /// Validates that a source binding can resolve to a configured route without network IO.
-    pub fn validate_source_binding(
-        &self,
-        binding: &BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<()> {
-        self.transport_for_source_identity(binding.source_identity())
-            .map(|_| ())
-    }
-
-    /// Binds a checked semantic source binding to a live capability provider.
-    pub fn bind_source(
-        &self,
-        binding: BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<BtcJsonRpcSourceProvider> {
-        self.validate_source_binding(&binding)?;
-        Ok(BtcJsonRpcSourceProvider {
-            router: self.clone(),
-            binding,
-        })
-    }
-
-    fn transport_for_source_identity(
-        &self,
-        source_identity: &BitcoinSourceIdentity,
-    ) -> mfm_btc_capabilities::Result<Arc<dyn BtcJsonRpcChainHeadTransport>> {
-        self.routes
-            .get(source_identity)
-            .cloned()
-            .ok_or_else(|| btc_provider_failure(missing_route_diagnostic(source_identity)))
-    }
-}
-
-/// Bitcoin capability provider bound to a checked semantic source binding.
-///
-/// Owns a private sealed pipeline that mints [`VerifiedBtcCall`] before raw operation IO.
-#[derive(Clone)]
-pub struct BtcJsonRpcSourceProvider {
-    router: BtcJsonRpcRouter,
+/// One checked endpoint-bound Bitcoin Core session.
+pub struct BitcoinRpcSession {
+    endpoint: reqwest::Url,
+    authentication: Option<BitcoinRpcAuthentication>,
     binding: BitcoinSourceBinding,
+    scan_timeout: Duration,
+    client: reqwest::Client,
+    next_request_id: AtomicU64,
 }
 
-/// Private verified-call token minted by the sealed call-prepare stage.
-///
-/// Raw operation helpers require this token so capability IO cannot skip provider binding checks.
-struct VerifiedBtcCall {
-    transport: Arc<dyn BtcJsonRpcChainHeadTransport>,
-    info: BlockchainInfo,
-    evidence: RedactedBtcSourceEvidence,
-}
-
-impl BtcJsonRpcSourceProvider {
-    async fn prepare_call(&self) -> mfm_btc_capabilities::Result<VerifiedBtcCall> {
-        let transport = self
-            .router
-            .transport_for_source_identity(self.binding.source_identity())?;
-        let info = transport
-            .get_blockchain_info()
-            .await
-            .map_err(|error| btc_rpc_provider_error("getblockchaininfo", error))?;
-        let status = source_status(&info);
-        let evidence =
-            RedactedBtcSourceEvidence::from_binding(&self.binding, info.chain.as_str(), status)?;
-        Ok(VerifiedBtcCall {
-            transport,
-            info,
-            evidence,
-        })
-    }
-
-    async fn read_chain_head_checked(
-        &self,
-        verified: &VerifiedBtcCall,
-        request: &BtcChainHeadRequest,
-    ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
-        let (height, hash) = selected_head(verified, request).await?;
-        let canonical_hash = hash.to_string();
-        let header = verified
-            .transport
-            .get_block_header(verified, &canonical_hash)
-            .await
-            .map_err(|error| btc_rpc_provider_error("getblockheader", error))?;
-        verify_header(&header, height, &hash)?;
-        let provider_time_unix_ms = header.time.checked_mul(1000);
-        Ok(BtcChainHeadResponse {
-            evidence: verified.evidence.clone(),
-            head_kind: request.selection().head_kind(),
-            finality: request.selection().finality(),
-            block_height: height,
-            block_hash: hash,
-            provider_time_unix_ms,
-        })
-    }
-
-    async fn read_balance_checked(
-        &self,
-        verified: &VerifiedBtcCall,
-        request: &BtcBalanceReadRequest,
-    ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
-        request
-            .address()
-            .require_network(self.binding.bitcoin_network())?;
-        verify_current_tip_matches_balance_request(verified, request)?;
-        let scan = verified
-            .transport
-            .scan_tx_out_set(verified, request.address().as_str())
-            .await
-            .map_err(|error| btc_rpc_provider_error("scantxoutset", error))?;
-        verify_scan_matches_balance_request(&scan, request)?;
-        Ok(BtcBalanceReadResponse {
-            evidence: verified.evidence.clone(),
-            address: request.address().clone(),
-            balance_sats: scan.total_amount.to_sat(),
-            block_height: request.block_height(),
-            block_hash: request.block_hash().clone(),
-        })
-    }
-}
-
-impl BtcChainHeadReadProvider for BtcJsonRpcSourceProvider {
-    fn read_chain_head<'a>(
-        &'a self,
-        request: &'a BtcChainHeadRequest,
-    ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
-        Box::pin(async move {
-            let verified = self.prepare_call().await?;
-            self.read_chain_head_checked(&verified, request).await
-        })
-    }
-}
-
-impl BtcBalanceReadProvider for BtcJsonRpcSourceProvider {
-    fn read_balance<'a>(
-        &'a self,
-        request: &'a BtcBalanceReadRequest,
-    ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
-        Box::pin(async move {
-            let verified = self.prepare_call().await?;
-            self.read_balance_checked(&verified, request).await
-        })
-    }
-}
-
-/// Error returned by the Bitcoin JSON-RPC client.
-#[derive(Debug, thiserror::Error)]
-pub enum BtcRpcError {
-    /// HTTP transport failure.
-    #[error("btc rpc http error: {0}")]
-    Http(String),
-    /// Non-2xx HTTP status.
-    #[error("btc rpc http status {status}{status_details}", status_details = btc_status_details(*body_len, content_type.as_deref()))]
-    HttpStatus {
-        /// HTTP status code returned by the RPC endpoint.
-        status: u16,
-        /// Length in bytes of the omitted response body, when it could be read.
-        body_len: Option<usize>,
-        /// Sanitized `content-type` header value, when present.
-        content_type: Option<String>,
-    },
-    /// Response body could not be read.
-    #[error("btc rpc body read error: {0}")]
-    BodyRead(String),
-    /// Response was not valid JSON.
-    #[error("btc rpc invalid json: {0}")]
-    InvalidJson(String),
-    /// JSON-RPC error object returned by Bitcoin Core.
-    #[error("btc rpc error {code}: {message}")]
-    JsonRpcError {
-        /// Error code from Bitcoin Core.
-        code: i64,
-        /// Error message from Bitcoin Core.
-        message: String,
-    },
-    /// JSON-RPC response missing `result` field.
-    #[error("btc rpc response missing result")]
-    MissingResult,
-}
-
-fn btc_status_details(body_len: Option<usize>, content_type: Option<&str>) -> String {
-    match (body_len, content_type) {
-        (Some(body_len), Some(content_type)) => {
-            format!(" (body_len={body_len}, content_type={content_type})")
+impl BitcoinRpcSession {
+    /// Creates a session from resolved endpoint, authentication, binding, and scan deadline.
+    pub fn new(
+        endpoint: impl AsRef<str>,
+        authentication: Option<BitcoinRpcAuthentication>,
+        binding: BitcoinSourceBinding,
+        scan_timeout: Duration,
+    ) -> Result<Self, BitcoinRpcError> {
+        if !(MIN_SCAN_TIMEOUT..=MAX_SCAN_TIMEOUT).contains(&scan_timeout) {
+            return Err(BitcoinRpcError::InvalidConfiguration);
         }
-        (Some(body_len), None) => format!(" (body_len={body_len})"),
-        (None, Some(content_type)) => format!(" (content_type={content_type})"),
-        (None, None) => String::new(),
+        let endpoint = reqwest::Url::parse(endpoint.as_ref())
+            .map_err(|_| BitcoinRpcError::InvalidConfiguration)?;
+        if !matches!(endpoint.scheme(), "http" | "https")
+            || endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(BitcoinRpcError::InvalidConfiguration);
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|_| BitcoinRpcError::InvalidConfiguration)?;
+        Ok(Self {
+            endpoint,
+            authentication,
+            binding,
+            scan_timeout,
+            client,
+            next_request_id: AtomicU64::new(1),
+        })
     }
-}
 
-fn redacted_optional_secret(value: &Option<String>) -> &'static str {
-    if value.is_some() {
-        REDACTED_SECRET
-    } else {
-        "<unset>"
+    /// Returns the exact checked semantic binding of this endpoint.
+    pub const fn binding(&self) -> &BitcoinSourceBinding {
+        &self.binding
     }
-}
 
-fn redacted_rpc_url(raw: &str) -> String {
-    let Ok(parsed) = reqwest::Url::parse(raw) else {
-        return "<invalid-url>".to_string();
-    };
-    let Some(host_raw) = parsed.host_str() else {
-        return "<invalid-url>".to_string();
-    };
-    let host = if host_raw.contains(':') && !host_raw.starts_with('[') {
-        format!("[{host_raw}]")
-    } else {
-        host_raw.to_string()
-    };
+    async fn execute_collection(
+        &self,
+        request: &BitcoinBalanceCollectionRequest,
+    ) -> Result<BitcoinBalanceCollectionResponse, BitcoinRpcError> {
+        if request.binding() != &self.binding {
+            return Err(BitcoinRpcError::SourceMismatch);
+        }
 
-    match parsed.port() {
-        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
-        None => format!("{}://{}", parsed.scheme(), host),
-    }
-}
-
-fn diagnostic_message(raw: &str) -> String {
-    if contains_secret_marker(raw) || contains_secret_bearing_url(raw) {
-        return REDACTED_DIAGNOSTIC.to_string();
-    }
-    truncate_diagnostic(raw)
-}
-
-fn contains_secret_bearing_url(raw: &str) -> bool {
-    raw.split_ascii_whitespace().any(|part| {
-        match reqwest::Url::parse(part.trim_matches(|c: char| {
-            matches!(
-                c,
-                '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+        let info: BlockchainInfo = self
+            .rpc(
+                "getblockchaininfo",
+                serde_json::json!([]),
+                ORDINARY_REQUEST_TIMEOUT,
             )
-        })) {
-            Ok(url) => {
-                !url.username().is_empty() || url.password().is_some() || url.query().is_some()
-            }
-            Err(_) => false,
+            .await?;
+        if info.chain != self.binding.bitcoin_network().as_str() || info.initial_block_download {
+            return Err(BitcoinRpcError::SourceMismatch);
         }
-    })
-}
 
-fn contains_secret_marker(raw: &str) -> bool {
-    let lowered = raw.to_ascii_lowercase();
-    [
-        "authorization",
-        "api_key",
-        "apikey",
-        "access_token",
-        "token",
-        "password",
-        "passwd",
-        "secret",
-        "bearer ",
-        "basic ",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
-}
+        let descriptors = request
+            .addresses()
+            .iter()
+            .map(|address| address.scan_descriptor())
+            .collect::<Vec<_>>();
+        let scan: ScanTxOutSetResult = self
+            .rpc(
+                "scantxoutset",
+                serde_json::json!(["start", descriptors]),
+                self.scan_timeout,
+            )
+            .await?;
+        let reduced = reduce_scan(request, scan)?;
 
-fn truncate_diagnostic(raw: &str) -> String {
-    if raw.len() <= MAX_DIAGNOSTIC_MESSAGE_LEN {
-        raw.to_string()
-    } else {
-        raw.chars().take(MAX_DIAGNOSTIC_MESSAGE_LEN).collect()
+        let final_hash: String = self
+            .rpc(
+                "getblockhash",
+                serde_json::json!([reduced.height]),
+                ORDINARY_REQUEST_TIMEOUT,
+            )
+            .await?;
+        let final_hash =
+            BlockHash::from_str(&final_hash).map_err(|_| BitcoinRpcError::ResponseInvalid)?;
+        if final_hash != reduced.anchor_hash {
+            return Err(BitcoinRpcError::Reorganization);
+        }
+
+        Ok(BitcoinBalanceCollectionResponse::new(
+            self.binding.clone(),
+            BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
+            reduced.height,
+            reduced.anchor_hash,
+            reduced.balances,
+            final_hash,
+        ))
+    }
+
+    async fn rpc<T>(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<T, BitcoinRpcError>
+    where
+        T: DeserializeOwned,
+    {
+        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let body = RpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method,
+            params,
+        };
+        let mut builder = self
+            .client
+            .post(self.endpoint.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .timeout(timeout)
+            .json(&body);
+        if let Some(authentication) = &self.authentication {
+            builder = builder.basic_auth(&authentication.username, Some(&authentication.password));
+        }
+        let mut response = builder.send().await.map_err(classify_reqwest_error)?;
+        let status = response.status();
+        if let Some(length) = response.content_length() {
+            if length > MAX_BITCOIN_JSON_RPC_BODY_BYTES as u64 {
+                return Err(BitcoinRpcError::BodyTooLarge);
+            }
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or(0)
+                .min(MAX_BITCOIN_JSON_RPC_BODY_BYTES as u64) as usize,
+        );
+        while let Some(chunk) = response.chunk().await.map_err(classify_reqwest_error)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_BITCOIN_JSON_RPC_BODY_BYTES {
+                return Err(BitcoinRpcError::BodyTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(BitcoinRpcError::HttpStatus(status.as_u16()));
+        }
+
+        let envelope: RpcEnvelope = decode_unique(&bytes)?;
+        if envelope.jsonrpc.as_deref() != Some("2.0") || envelope.id != Some(id) {
+            return Err(BitcoinRpcError::ProtocolViolation);
+        }
+        match (envelope.result, envelope.error) {
+            (Some(result), None) => decode_unique(result.get().as_bytes()),
+            (None, Some(error)) => {
+                let scan_busy = method == "scantxoutset"
+                    && error.code == -8
+                    && error.message.starts_with("Scan already in progress");
+                Err(BitcoinRpcError::Rpc {
+                    code: error.code,
+                    scan_busy,
+                })
+            }
+            _ => Err(BitcoinRpcError::ProtocolViolation),
+        }
     }
 }
 
-fn sanitized_content_type(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let raw = headers.get(CONTENT_TYPE)?.to_str().ok()?.trim();
-    if raw.is_empty() {
-        return None;
+impl fmt::Debug for BitcoinRpcSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BitcoinRpcSession")
+            .field("endpoint", &"<redacted>")
+            .field(
+                "authentication",
+                &self.authentication.as_ref().map(|_| "<redacted>"),
+            )
+            .field("binding", &self.binding)
+            .field("scan_timeout", &self.scan_timeout)
+            .finish_non_exhaustive()
     }
-    if contains_secret_marker(raw) || contains_secret_bearing_url(raw) {
-        return Some(REDACTED_SECRET.to_string());
-    }
-    Some(
-        raw.chars()
-            .filter(|ch| {
-                ch.is_ascii_alphanumeric()
-                    || matches!(
-                        ch,
-                        '!' | '#'
-                            | '$'
-                            | '%'
-                            | '&'
-                            | '\''
-                            | '*'
-                            | '+'
-                            | '-'
-                            | '.'
-                            | '^'
-                            | '_'
-                            | '`'
-                            | '|'
-                            | '~'
-                            | '/'
-                            | ';'
-                            | '='
-                            | ' '
-                    )
-            })
-            .take(120)
-            .collect(),
-    )
 }
 
-/// Error returned when a Bitcoin BTC-denominated JSON amount cannot be represented exactly.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-enum BtcAmountParseError {
-    #[error("bitcoin amount was empty")]
-    Empty,
-    #[error("bitcoin amount must not be negative")]
-    Negative,
-    #[error("bitcoin amount must be a base-10 integer or decimal")]
-    Invalid,
-    #[error("bitcoin amount must not have more than 8 decimal places")]
-    TooPrecise,
-    #[error("bitcoin amount overflowed satoshi range")]
-    Overflow,
-    #[error("bitcoin amount exceeded MAX_MONEY")]
-    ExceedsMaxMoney,
+impl BitcoinBalanceSession for BitcoinRpcSession {
+    fn implementation_id(&self) -> &'static str {
+        BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
+    }
+
+    fn validate_binding(&self, binding: &BitcoinSourceBinding) -> mfm_btc_capabilities::Result<()> {
+        if binding == &self.binding {
+            Ok(())
+        } else {
+            Err(BitcoinCapabilityError::SourceMismatch)
+        }
+    }
+
+    fn collect_balances<'a>(
+        &'a self,
+        request: &'a BitcoinBalanceCollectionRequest,
+    ) -> BitcoinSessionFuture<'a, BitcoinBalanceCollectionResponse> {
+        Box::pin(async move {
+            self.execute_collection(request)
+                .await
+                .map_err(capability_error)
+        })
+    }
 }
 
-/// Response from `getblockchaininfo`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Serialize)]
+struct RpcRequest<'a> {
+    jsonrpc: &'static str,
+    id: u64,
+    method: &'a str,
+    params: serde_json::Value,
+}
+
+struct RpcEnvelope {
+    jsonrpc: Option<String>,
+    id: Option<u64>,
+    result: Option<Box<serde_json::value::RawValue>>,
+    error: Option<RpcErrorObject>,
+}
+
+impl<'de> Deserialize<'de> for RpcEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EnvelopeVisitor;
+        impl<'de> Visitor<'de> for EnvelopeVisitor {
+            type Value = RpcEnvelope;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a unique-member JSON-RPC 2.0 envelope")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                let mut jsonrpc = None;
+                let mut id = None;
+                let mut result = None;
+                let mut error = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    require_unique::<A::Error>(&mut seen, &key)?;
+                    match key.as_str() {
+                        "jsonrpc" => jsonrpc = Some(map.next_value()?),
+                        "id" => id = Some(map.next_value()?),
+                        "result" => result = Some(map.next_value()?),
+                        "error" => error = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<DuplicateRejectingIgnored>()?;
+                        }
+                    }
+                }
+                Ok(RpcEnvelope {
+                    jsonrpc,
+                    id,
+                    result,
+                    error,
+                })
+            }
+        }
+        deserializer.deserialize_map(EnvelopeVisitor)
+    }
+}
+
+struct RpcErrorObject {
+    code: i64,
+    message: String,
+}
+
+impl<'de> Deserialize<'de> for RpcErrorObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ErrorVisitor;
+        impl<'de> Visitor<'de> for ErrorVisitor {
+            type Value = RpcErrorObject;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON-RPC error object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                let mut code = None;
+                let mut message: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    require_unique::<A::Error>(&mut seen, &key)?;
+                    match key.as_str() {
+                        "code" => code = Some(map.next_value()?),
+                        "message" => message = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<DuplicateRejectingIgnored>()?;
+                        }
+                    }
+                }
+                let code = code.ok_or_else(|| serde::de::Error::missing_field("code"))?;
+                let message = message.ok_or_else(|| serde::de::Error::missing_field("message"))?;
+                if message.len() > MAX_JSON_RPC_ERROR_MESSAGE_BYTES {
+                    return Err(serde::de::Error::custom(
+                        "JSON-RPC error message was oversized",
+                    ));
+                }
+                Ok(RpcErrorObject { code, message })
+            }
+        }
+        deserializer.deserialize_map(ErrorVisitor)
+    }
+}
+
+struct DuplicateRejectingIgnored;
+
+impl<'de> Deserialize<'de> for DuplicateRejectingIgnored {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IgnoreVisitor;
+        impl<'de> Visitor<'de> for IgnoreVisitor {
+            type Value = DuplicateRejectingIgnored;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("any JSON value with unique object members")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    require_unique::<A::Error>(&mut seen, &key)?;
+                    map.next_value::<DuplicateRejectingIgnored>()?;
+                }
+                Ok(DuplicateRejectingIgnored)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence
+                    .next_element::<DuplicateRejectingIgnored>()?
+                    .is_some()
+                {}
+                Ok(DuplicateRejectingIgnored)
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(DuplicateRejectingIgnored)
+            }
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Deserialize::deserialize(deserializer)
+            }
+            fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Deserialize::deserialize(deserializer)
+            }
+        }
+        deserializer.deserialize_any(IgnoreVisitor)
+    }
+}
+
 struct BlockchainInfo {
-    blocks: u64,
-    bestblockhash: String,
     chain: String,
-    #[serde(default)]
-    initialblockdownload: Option<bool>,
+    initial_block_download: bool,
 }
 
-/// Response from `getblockheader` with verbose output.
-#[derive(Clone, Debug, Deserialize)]
-struct BlockHeaderInfo {
-    hash: String,
-    height: u64,
-    time: u64,
+impl<'de> Deserialize<'de> for BlockchainInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct InfoVisitor;
+        impl<'de> Visitor<'de> for InfoVisitor {
+            type Value = BlockchainInfo;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Bitcoin Core blockchain-info result")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                let mut chain = None;
+                let mut initial_block_download = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    require_unique::<A::Error>(&mut seen, &key)?;
+                    match key.as_str() {
+                        "chain" => chain = Some(map.next_value()?),
+                        "initialblockdownload" => initial_block_download = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<DuplicateRejectingIgnored>()?;
+                        }
+                    }
+                }
+                Ok(BlockchainInfo {
+                    chain: chain.ok_or_else(|| serde::de::Error::missing_field("chain"))?,
+                    initial_block_download: initial_block_download
+                        .ok_or_else(|| serde::de::Error::missing_field("initialblockdownload"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(InfoVisitor)
+    }
 }
 
-/// Response from `scantxoutset` with only the fields used by the bound provider.
-#[derive(Clone, Debug)]
 struct ScanTxOutSetResult {
     success: bool,
     height: u64,
-    bestblock: String,
-    total_amount: Amount,
-}
-
-#[derive(Deserialize)]
-struct ScanTxOutSetResultWire {
-    success: bool,
-    #[serde(default)]
-    height: u64,
-    #[serde(default)]
-    bestblock: String,
+    best_block: String,
+    txouts: u64,
+    unspents: Vec<ScanUnspent>,
     total_amount: Box<serde_json::value::RawValue>,
 }
 
@@ -526,434 +527,349 @@ impl<'de> Deserialize<'de> for ScanTxOutSetResult {
     where
         D: Deserializer<'de>,
     {
-        let wire = ScanTxOutSetResultWire::deserialize(deserializer)?;
-        let total_amount =
-            btc_amount_json_to_amount(wire.total_amount.get()).map_err(de::Error::custom)?;
-        Ok(Self {
-            success: wire.success,
-            height: wire.height,
-            bestblock: wire.bestblock,
-            total_amount,
-        })
-    }
-}
+        struct ScanVisitor;
+        impl<'de> Visitor<'de> for ScanVisitor {
+            type Value = ScanTxOutSetResult;
 
-/// JSON-RPC 2.0 request envelope.
-#[derive(Serialize)]
-struct JsonRpcRequest<'a> {
-    jsonrpc: &'static str,
-    id: u64,
-    method: &'a str,
-    params: serde_json::Value,
-}
-
-/// JSON-RPC 2.0 response envelope.
-#[derive(Deserialize)]
-struct JsonRpcResponse {
-    result: Option<serde_json::Value>,
-    error: Option<JsonRpcErrorObj>,
-}
-
-/// JSON-RPC 2.0 error object.
-#[derive(Deserialize)]
-struct JsonRpcErrorObj {
-    code: i64,
-    message: String,
-}
-
-/// Parses a Bitcoin BTC-denominated JSON amount into a bounded rust-bitcoin amount.
-///
-/// The input must be the raw JSON token for an integer, decimal number, or string containing
-/// a plain decimal amount. Exponents, negative values, and fractional precision above eight
-/// places are rejected.
-fn btc_amount_json_to_amount(raw_json: &str) -> Result<Amount, BtcAmountParseError> {
-    let raw = raw_json.trim();
-    if raw.is_empty() {
-        return Err(BtcAmountParseError::Empty);
-    }
-
-    let amount = if raw.starts_with('"') {
-        serde_json::from_str::<String>(raw).map_err(|_| BtcAmountParseError::Invalid)?
-    } else {
-        raw.to_string()
-    };
-    parse_btc_decimal_to_amount(amount.trim())
-}
-
-fn parse_btc_decimal_to_amount(amount: &str) -> Result<Amount, BtcAmountParseError> {
-    if amount.is_empty() {
-        return Err(BtcAmountParseError::Empty);
-    }
-    if amount.starts_with('-') {
-        return Err(BtcAmountParseError::Negative);
-    }
-    if amount.starts_with('+') {
-        return Err(BtcAmountParseError::Invalid);
-    }
-
-    let mut parts = amount.split('.');
-    let whole = parts.next().ok_or(BtcAmountParseError::Invalid)?;
-    let fractional = parts.next();
-    if parts.next().is_some() || whole.is_empty() {
-        return Err(BtcAmountParseError::Invalid);
-    }
-    if !whole.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(BtcAmountParseError::Invalid);
-    }
-
-    match fractional {
-        None => {}
-        Some("") => return Err(BtcAmountParseError::Invalid),
-        Some(frac) if frac.len() > 8 => return Err(BtcAmountParseError::TooPrecise),
-        Some(frac) if !frac.bytes().all(|byte| byte.is_ascii_digit()) => {
-            return Err(BtcAmountParseError::Invalid);
-        }
-        Some(_) => {}
-    }
-
-    let amount = Amount::from_str_in(amount, Denomination::Bitcoin)
-        .map_err(|_| BtcAmountParseError::Overflow)?;
-    if amount <= Amount::MAX_MONEY {
-        Ok(amount)
-    } else {
-        Err(BtcAmountParseError::ExceedsMaxMoney)
-    }
-}
-
-impl BtcJsonRpcClient {
-    /// Creates a new client with the given configuration.
-    pub fn new(config: BtcJsonRpcConfig) -> Result<Self, BtcRpcError> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|err| {
-                BtcRpcError::Http(format!(
-                    "failed to build bitcoin rpc client: {}",
-                    diagnostic_message(&err.to_string())
-                ))
-            })?;
-        Ok(Self {
-            config,
-            http,
-            next_id: AtomicU64::new(1),
-        })
-    }
-
-    /// Low-level JSON-RPC call returning the raw `result` value.
-    async fn rpc_call(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, BtcRpcError> {
-        let text = self.rpc_call_text(method, params).await?;
-        let rpc_resp: JsonRpcResponse =
-            serde_json::from_str(&text).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))?;
-
-        if let Some(err) = rpc_resp.error {
-            return Err(BtcRpcError::JsonRpcError {
-                code: err.code,
-                message: diagnostic_message(&err.message),
-            });
-        }
-
-        rpc_resp.result.ok_or(BtcRpcError::MissingResult)
-    }
-
-    async fn rpc_call_typed<T>(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<T, BtcRpcError>
-    where
-        T: de::DeserializeOwned,
-    {
-        let result = self.rpc_call(method, params).await?;
-        serde_json::from_value(result).map_err(|error| BtcRpcError::InvalidJson(error.to_string()))
-    }
-
-    async fn rpc_call_text(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<String, BtcRpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method,
-            params,
-        };
-
-        debug!(method, id, "btc rpc request");
-
-        let mut req = self.http.post(&self.config.rpc_url).json(&body);
-        if let (Some(user), Some(pass)) = (&self.config.rpc_user, &self.config.rpc_password) {
-            req = req.basic_auth(user, Some(pass));
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| BtcRpcError::Http(diagnostic_message(&e.to_string())))?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            let content_type = sanitized_content_type(resp.headers());
-            let body_len = resp.bytes().await.ok().map(|bytes| bytes.len());
-            return Err(BtcRpcError::HttpStatus {
-                status,
-                body_len,
-                content_type,
-            });
-        }
-
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| BtcRpcError::BodyRead(diagnostic_message(&e.to_string())))?;
-        Ok(text)
-    }
-
-    async fn get_blockchain_info(&self) -> Result<BlockchainInfo, BtcRpcError> {
-        self.rpc_call_typed("getblockchaininfo", serde_json::json!([]))
-            .await
-    }
-
-    async fn get_block_hash(
-        &self,
-        _verified: &VerifiedBtcCall,
-        height: u64,
-    ) -> Result<String, BtcRpcError> {
-        self.rpc_call_typed("getblockhash", serde_json::json!([height]))
-            .await
-    }
-
-    async fn get_block_header(
-        &self,
-        _verified: &VerifiedBtcCall,
-        block_hash: &str,
-    ) -> Result<BlockHeaderInfo, BtcRpcError> {
-        self.rpc_call_typed("getblockheader", serde_json::json!([block_hash, true]))
-            .await
-    }
-
-    async fn scan_tx_out_set(
-        &self,
-        _verified: &VerifiedBtcCall,
-        address: &str,
-    ) -> Result<ScanTxOutSetResult, BtcRpcError> {
-        self.rpc_call_typed(
-            "scantxoutset",
-            serde_json::json!(["start", [{"desc": format!("addr({address})")}]]),
-        )
-        .await
-    }
-}
-
-async fn selected_head(
-    verified: &VerifiedBtcCall,
-    request: &BtcChainHeadRequest,
-) -> mfm_btc_capabilities::Result<(u64, BitcoinBlockHash)> {
-    match request.selection().finality() {
-        BtcFinality::BestAvailable => {
-            let hash = provider_block_hash("getblockchaininfo", &verified.info.bestblockhash)?;
-            Ok((verified.info.blocks, hash))
-        }
-        BtcFinality::Confirmations(confirmations) => {
-            let confirmations = confirmations.get();
-            let available_confirmations = verified.info.blocks.saturating_add(1);
-            if available_confirmations < confirmations {
-                return Err(btc_provider_failure(
-                    btc_operation_diagnostic(
-                        ProviderDiagnosticCode::OperationIncomplete,
-                        "getblockhash",
-                    )
-                    .with_field(
-                        diagnostic_id("source_height"),
-                        ProviderDiagnosticValue::U64(verified.info.blocks),
-                    )
-                    .with_field(
-                        diagnostic_id("confirmations"),
-                        ProviderDiagnosticValue::U64(confirmations),
-                    ),
-                ));
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Bitcoin Core scantxoutset result")
             }
-            let height = verified.info.blocks + 1 - confirmations;
-            let hash = verified
-                .transport
-                .get_block_hash(verified, height)
-                .await
-                .map_err(|error| btc_rpc_provider_error("getblockhash", error))?;
-            Ok((height, provider_block_hash("getblockhash", &hash)?))
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                let mut success = None;
+                let mut height = None;
+                let mut best_block = None;
+                let mut txouts = None;
+                let mut unspents = None;
+                let mut total_amount = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    require_unique::<A::Error>(&mut seen, &key)?;
+                    match key.as_str() {
+                        "success" => success = Some(map.next_value()?),
+                        "height" => height = Some(map.next_value()?),
+                        "bestblock" => best_block = Some(map.next_value()?),
+                        "txouts" => txouts = Some(map.next_value()?),
+                        "unspents" => unspents = Some(map.next_value()?),
+                        "total_amount" => total_amount = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<DuplicateRejectingIgnored>()?;
+                        }
+                    }
+                }
+                Ok(ScanTxOutSetResult {
+                    success: success.ok_or_else(|| serde::de::Error::missing_field("success"))?,
+                    height: height.ok_or_else(|| serde::de::Error::missing_field("height"))?,
+                    best_block: best_block
+                        .ok_or_else(|| serde::de::Error::missing_field("bestblock"))?,
+                    txouts: txouts.ok_or_else(|| serde::de::Error::missing_field("txouts"))?,
+                    unspents: unspents
+                        .ok_or_else(|| serde::de::Error::missing_field("unspents"))?,
+                    total_amount: total_amount
+                        .ok_or_else(|| serde::de::Error::missing_field("total_amount"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(ScanVisitor)
+    }
+}
+
+struct ScanUnspent {
+    txid: String,
+    vout: u64,
+    script_pub_key: String,
+    descriptor: String,
+    amount: Box<serde_json::value::RawValue>,
+    height: u64,
+}
+
+impl<'de> Deserialize<'de> for ScanUnspent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct UnspentVisitor;
+        impl<'de> Visitor<'de> for UnspentVisitor {
+            type Value = ScanUnspent;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Bitcoin Core scan unspent")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                let mut txid = None;
+                let mut vout = None;
+                let mut script_pub_key = None;
+                let mut descriptor = None;
+                let mut amount = None;
+                let mut height = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    require_unique::<A::Error>(&mut seen, &key)?;
+                    match key.as_str() {
+                        "txid" => txid = Some(map.next_value()?),
+                        "vout" => vout = Some(map.next_value()?),
+                        "scriptPubKey" => script_pub_key = Some(map.next_value()?),
+                        "desc" => descriptor = Some(map.next_value()?),
+                        "amount" => amount = Some(map.next_value()?),
+                        "height" => height = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<DuplicateRejectingIgnored>()?;
+                        }
+                    }
+                }
+                Ok(ScanUnspent {
+                    txid: txid.ok_or_else(|| serde::de::Error::missing_field("txid"))?,
+                    vout: vout.ok_or_else(|| serde::de::Error::missing_field("vout"))?,
+                    script_pub_key: script_pub_key
+                        .ok_or_else(|| serde::de::Error::missing_field("scriptPubKey"))?,
+                    descriptor: descriptor
+                        .ok_or_else(|| serde::de::Error::missing_field("desc"))?,
+                    amount: amount.ok_or_else(|| serde::de::Error::missing_field("amount"))?,
+                    height: height.ok_or_else(|| serde::de::Error::missing_field("height"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(UnspentVisitor)
+    }
+}
+
+struct ReducedScan {
+    height: u64,
+    anchor_hash: BlockHash,
+    balances: Vec<BitcoinAddressBalance>,
+}
+
+fn reduce_scan(
+    request: &BitcoinBalanceCollectionRequest,
+    scan: ScanTxOutSetResult,
+) -> Result<ReducedScan, BitcoinRpcError> {
+    if !scan.success {
+        return Err(BitcoinRpcError::OperationIncomplete);
+    }
+    let _validated_txouts = scan.txouts;
+    let anchor_hash =
+        BlockHash::from_str(&scan.best_block).map_err(|_| BitcoinRpcError::ResponseInvalid)?;
+    let mut script_to_index = BTreeMap::new();
+    for (index, address) in request.addresses().iter().enumerate() {
+        if script_to_index
+            .insert(address.script_pubkey().as_bytes().to_vec(), index)
+            .is_some()
+        {
+            return Err(BitcoinRpcError::ResponseInvalid);
         }
     }
-}
-
-fn source_status(info: &BlockchainInfo) -> BtcSourceStatus {
-    match info.initialblockdownload {
-        Some(true) => BtcSourceStatus::InitialBlockDownload,
-        Some(false) => BtcSourceStatus::Synced,
-        None => BtcSourceStatus::Unknown,
+    let mut balances = vec![0_u64; request.addresses().len()];
+    let mut outpoints = BTreeSet::new();
+    let mut observed_total = 0_u64;
+    for unspent in scan.unspents {
+        let txid = Txid::from_str(&unspent.txid).map_err(|_| BitcoinRpcError::ResponseInvalid)?;
+        let vout = u32::try_from(unspent.vout).map_err(|_| BitcoinRpcError::ResponseInvalid)?;
+        if !outpoints.insert((txid, vout)) || unspent.height > scan.height {
+            return Err(BitcoinRpcError::ResponseInvalid);
+        }
+        if unspent.descriptor.len() > MAX_DESCRIPTOR_BYTES {
+            return Err(BitcoinRpcError::ResponseInvalid);
+        }
+        let script = decode_script(&unspent.script_pub_key)?;
+        let index = script_to_index
+            .get(&script)
+            .copied()
+            .ok_or(BitcoinRpcError::ResponseInvalid)?;
+        let amount = parse_btc_amount(unspent.amount.get())?;
+        balances[index] = balances[index]
+            .checked_add(amount)
+            .filter(|subtotal| *subtotal <= Amount::MAX_MONEY.to_sat())
+            .ok_or(BitcoinRpcError::ResponseInvalid)?;
+        observed_total = observed_total
+            .checked_add(amount)
+            .filter(|total| *total <= Amount::MAX_MONEY.to_sat())
+            .ok_or(BitcoinRpcError::ResponseInvalid)?;
     }
-}
-
-fn verify_header(
-    header: &BlockHeaderInfo,
-    height: u64,
-    hash: &BitcoinBlockHash,
-) -> mfm_btc_capabilities::Result<()> {
-    let observed_hash = provider_block_hash("getblockheader", &header.hash)?;
-    if header.height == height && &observed_hash == hash {
-        Ok(())
-    } else {
-        Err(btc_provider_failure(btc_operation_diagnostic(
-            ProviderDiagnosticCode::ResponseInvalid,
-            "getblockheader",
-        )))
+    if observed_total != parse_btc_amount(scan.total_amount.get())? {
+        return Err(BitcoinRpcError::ResponseInvalid);
     }
-}
-
-fn verify_current_tip_matches_balance_request(
-    verified: &VerifiedBtcCall,
-    request: &BtcBalanceReadRequest,
-) -> mfm_btc_capabilities::Result<()> {
-    let best_hash = provider_block_hash("getblockchaininfo", &verified.info.bestblockhash)?;
-    verify_balance_anchor(
-        "getblockchaininfo",
-        verified.info.blocks,
-        &best_hash,
-        request,
-    )
-}
-
-fn verify_scan_matches_balance_request(
-    scan: &ScanTxOutSetResult,
-    request: &BtcBalanceReadRequest,
-) -> mfm_btc_capabilities::Result<()> {
-    if !scan.success {
-        return Err(btc_provider_failure(
-            btc_operation_diagnostic(ProviderDiagnosticCode::OperationIncomplete, "scantxoutset")
-                .with_field(
-                    diagnostic_id("scan_success"),
-                    ProviderDiagnosticValue::Bool(false),
-                ),
-        ));
-    }
-    let scan_hash = provider_block_hash("scantxoutset", &scan.bestblock)?;
-    verify_balance_anchor("scantxoutset", scan.height, &scan_hash, request)
-}
-
-fn verify_balance_anchor(
-    operation: &'static str,
-    observed_height: u64,
-    observed_hash: &BitcoinBlockHash,
-    request: &BtcBalanceReadRequest,
-) -> mfm_btc_capabilities::Result<()> {
-    if observed_height == request.block_height() && observed_hash == request.block_hash() {
-        Ok(())
-    } else {
-        Err(balance_anchor_unavailable_diagnostic(
-            operation,
-            request,
-            observed_height,
-            &observed_hash.to_string(),
-        ))
-    }
-}
-
-fn balance_anchor_unavailable_diagnostic(
-    operation: &'static str,
-    request: &BtcBalanceReadRequest,
-    observed_height: u64,
-    observed_hash: &str,
-) -> BtcCapabilityError {
-    btc_provider_failure(
-        btc_operation_diagnostic(ProviderDiagnosticCode::OperationIncomplete, operation)
-            .with_field(
-                diagnostic_id("requested_height"),
-                ProviderDiagnosticValue::U64(request.block_height()),
-            )
-            .with_field(
-                diagnostic_id("observed_height"),
-                ProviderDiagnosticValue::U64(observed_height),
-            )
-            .with_field(
-                diagnostic_id("requested_block_hash"),
-                ProviderDiagnosticValue::Id(diagnostic_id(&request.block_hash().to_string())),
-            )
-            .with_field(
-                diagnostic_id("observed_block_hash"),
-                ProviderDiagnosticValue::Id(diagnostic_id(observed_hash)),
-            ),
-    )
-}
-
-fn provider_block_hash(
-    operation: &'static str,
-    hash: &str,
-) -> mfm_btc_capabilities::Result<BitcoinBlockHash> {
-    BitcoinBlockHash::new(hash).map_err(|_| {
-        btc_provider_failure(btc_operation_diagnostic(
-            ProviderDiagnosticCode::ResponseInvalid,
-            operation,
-        ))
+    let balances = request
+        .addresses()
+        .iter()
+        .zip(balances)
+        .map(|(address, sats)| BitcoinAddressBalance::new(address.as_str().to_owned(), sats))
+        .collect();
+    Ok(ReducedScan {
+        height: scan.height,
+        anchor_hash,
+        balances,
     })
 }
 
-fn missing_route_diagnostic(source_identity: &BitcoinSourceIdentity) -> RedactedProviderDiagnostic {
-    btc_operation_diagnostic(ProviderDiagnosticCode::RouteUnavailable, "route_lookup").with_field(
-        diagnostic_id("source_identity"),
-        ProviderDiagnosticValue::Id(diagnostic_id(source_identity.as_str())),
-    )
+fn decode_script(value: &str) -> Result<Vec<u8>, BitcoinRpcError> {
+    if value.len() > MAX_SCRIPT_BYTES * 2 || value.len() % 2 != 0 {
+        return Err(BitcoinRpcError::ResponseInvalid);
+    }
+    hex::decode(value).map_err(|_| BitcoinRpcError::ResponseInvalid)
 }
 
-fn btc_rpc_provider_error(operation: &'static str, error: BtcRpcError) -> BtcCapabilityError {
-    let diagnostic = match error {
-        BtcRpcError::Http(_) | BtcRpcError::BodyRead(_) => {
-            btc_operation_diagnostic(ProviderDiagnosticCode::TransportFailed, operation)
-        }
-        BtcRpcError::HttpStatus { status, .. } => {
-            btc_operation_diagnostic(ProviderDiagnosticCode::RpcHttpStatus, operation).with_field(
-                diagnostic_id("http_status"),
-                ProviderDiagnosticValue::U64(u64::from(status)),
-            )
-        }
-        BtcRpcError::InvalidJson(_) => {
-            btc_operation_diagnostic(ProviderDiagnosticCode::ResponseInvalid, operation)
-        }
-        BtcRpcError::JsonRpcError { code, .. } => {
-            btc_operation_diagnostic(ProviderDiagnosticCode::RpcJsonError, operation).with_field(
-                diagnostic_id("rpc_code"),
-                ProviderDiagnosticValue::I64(code),
-            )
-        }
-        BtcRpcError::MissingResult => {
-            btc_operation_diagnostic(ProviderDiagnosticCode::ResponseMissingResult, operation)
-        }
+fn parse_btc_amount(raw: &str) -> Result<u64, BitcoinRpcError> {
+    if raw.is_empty()
+        || raw.starts_with(['-', '+'])
+        || raw.contains(['e', 'E'])
+        || raw.matches('.').count() > 1
+    {
+        return Err(BitcoinRpcError::ResponseInvalid);
+    }
+    let (whole, fraction) = raw.split_once('.').unwrap_or((raw, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 8
+    {
+        return Err(BitcoinRpcError::ResponseInvalid);
+    }
+    let whole = whole
+        .parse::<u64>()
+        .map_err(|_| BitcoinRpcError::ResponseInvalid)?;
+    let mut fractional = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u64>()
+            .map_err(|_| BitcoinRpcError::ResponseInvalid)?
     };
-    btc_provider_failure(diagnostic)
+    for _ in fraction.len()..8 {
+        fractional = fractional
+            .checked_mul(10)
+            .ok_or(BitcoinRpcError::ResponseInvalid)?;
+    }
+    let sats = whole
+        .checked_mul(100_000_000)
+        .and_then(|value| value.checked_add(fractional))
+        .filter(|value| *value <= Amount::MAX_MONEY.to_sat())
+        .ok_or(BitcoinRpcError::ResponseInvalid)?;
+    Ok(sats)
 }
 
-fn btc_operation_diagnostic(
-    code: ProviderDiagnosticCode,
-    operation: &'static str,
-) -> RedactedProviderDiagnostic {
-    btc_diagnostic(code).with_operation(diagnostic_id(operation))
+fn decode_unique<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, BitcoinRpcError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = T::deserialize(&mut deserializer).map_err(|_| BitcoinRpcError::ResponseInvalid)?;
+    deserializer
+        .end()
+        .map_err(|_| BitcoinRpcError::ResponseInvalid)?;
+    Ok(value)
 }
 
-fn btc_provider_failure(diagnostic: RedactedProviderDiagnostic) -> BtcCapabilityError {
-    debug!(
-        provider_family = %diagnostic.provider_family(),
-        diagnostic_code = diagnostic.code().as_str(),
-        diagnostic = %diagnostic,
-        "btc provider failure"
-    );
-    BtcCapabilityError::provider_failure(diagnostic)
+fn require_unique<E>(seen: &mut BTreeSet<String>, key: &str) -> Result<(), E>
+where
+    E: serde::de::Error,
+{
+    if seen.insert(key.to_owned()) {
+        Ok(())
+    } else {
+        Err(E::custom("duplicate JSON object member"))
+    }
 }
 
-fn diagnostic_id(value: &str) -> LocalPublicId {
-    LocalPublicId::new(value).expect("BTC diagnostic label must be checked public text")
+fn classify_reqwest_error(error: reqwest::Error) -> BitcoinRpcError {
+    if error.is_timeout() {
+        BitcoinRpcError::Timeout
+    } else {
+        BitcoinRpcError::Transport
+    }
+}
+
+fn capability_error(error: BitcoinRpcError) -> BitcoinCapabilityError {
+    match error {
+        BitcoinRpcError::SourceMismatch => BitcoinCapabilityError::SourceMismatch,
+        BitcoinRpcError::Timeout | BitcoinRpcError::Transport => BitcoinCapabilityError::provider(
+            ProviderDiagnosticCode::TransportFailed,
+            "aggregate_read",
+            true,
+        ),
+        BitcoinRpcError::HttpStatus(status) => BitcoinCapabilityError::provider(
+            ProviderDiagnosticCode::RpcHttpStatus,
+            "aggregate_read",
+            status >= 500,
+        ),
+        BitcoinRpcError::Rpc {
+            scan_busy: true, ..
+        } => BitcoinCapabilityError::provider(
+            ProviderDiagnosticCode::RpcJsonError,
+            "scantxoutset",
+            true,
+        ),
+        BitcoinRpcError::Rpc { .. } => BitcoinCapabilityError::provider(
+            ProviderDiagnosticCode::RpcJsonError,
+            "aggregate_read",
+            false,
+        ),
+        BitcoinRpcError::OperationIncomplete => BitcoinCapabilityError::provider(
+            ProviderDiagnosticCode::OperationIncomplete,
+            "scantxoutset",
+            false,
+        ),
+        BitcoinRpcError::InvalidConfiguration => BitcoinCapabilityError::provider(
+            ProviderDiagnosticCode::ProviderConfigurationInvalid,
+            "session",
+            false,
+        ),
+        BitcoinRpcError::BodyTooLarge
+        | BitcoinRpcError::ProtocolViolation
+        | BitcoinRpcError::ResponseInvalid
+        | BitcoinRpcError::Reorganization => BitcoinCapabilityError::provider(
+            ProviderDiagnosticCode::ResponseInvalid,
+            "aggregate_read",
+            false,
+        ),
+    }
+}
+
+/// Redacted transport failure. No variant stores URLs, credentials, bodies, or provider messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BitcoinRpcError {
+    /// Resolved endpoint/authentication/timeout input was invalid.
+    #[error("Bitcoin RPC configuration was invalid")]
+    InvalidConfiguration,
+    /// Selected session binding did not match the request.
+    #[error("Bitcoin RPC source binding did not match")]
+    SourceMismatch,
+    /// HTTP request failed before a response was available.
+    #[error("Bitcoin RPC transport failed")]
+    Transport,
+    /// Request exceeded its explicit overall deadline.
+    #[error("Bitcoin RPC request timed out")]
+    Timeout,
+    /// Provider returned a non-200 response.
+    #[error("Bitcoin RPC returned HTTP status {0}")]
+    HttpStatus(u16),
+    /// Response exceeded the supported body ceiling.
+    #[error("Bitcoin RPC response exceeded the supported size")]
+    BodyTooLarge,
+    /// JSON-RPC 2.0 envelope contract was violated.
+    #[error("Bitcoin RPC envelope was invalid")]
+    ProtocolViolation,
+    /// JSON-RPC error was returned; provider text is deliberately discarded.
+    #[error("Bitcoin RPC returned error code {code}")]
+    Rpc {
+        /// Numeric public protocol code.
+        code: i64,
+        /// Whether this was the exact scan-busy classification.
+        scan_busy: bool,
+    },
+    /// Typed result failed strict semantic validation.
+    #[error("Bitcoin RPC response was invalid")]
+    ResponseInvalid,
+    /// Scan did not report successful completion.
+    #[error("Bitcoin RPC scan did not complete")]
+    OperationIncomplete,
+    /// Scan anchor was no longer canonical.
+    #[error("Bitcoin RPC scan anchor reorganized")]
+    Reorganization,
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;

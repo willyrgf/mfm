@@ -486,37 +486,7 @@ pub(super) fn event_schema_descriptor_requirement_sources_golden() {
         .join("\n");
 
     assert_eq!(
-        rows,
-        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:cda48aaa4d423db38f798386851a3d91992801b524768ab69bc3c41cf3fd0850 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
-mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []
-mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734 [FactResponse]
-mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:b60ebe4bc262799c154a596362ae57672801f54e1b18d703572848626ccef3f0 [ArtifactReferenced]
-mfm.events.v1.cell_produced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:a4bac036db54afd368d6e9c53b566daadba6ef6ea72bdf9839dd08213284737e [StateOutput]
-mfm.events.v1.cell_skipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e430038e78e1a83bf2465de6bdc23703395781dc4395e0340eb3856298225b84 []
-mfm.events.v1.side_effect.intent_persisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:1301896f1bd678773c0f145114b0c29cf7b06138686a99b75716a7d41fc181ed [SideEffectIntent]
-mfm.events.v1.side_effect.claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:793b4e2c8a58d2acef7cd4500fe7b20a1cf6dfd57386ccb8ef47cf64b3feb862 []
-mfm.events.v1.side_effect.claim_taken_over schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:abdc3cb22d1022954df00d0fa18ea5ddf0f71f576b9a9c7e0dca08de2a0f5acf []
-mfm.events.v1.resource_lane.claimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:c9b27a3f52464ad34d1cb80fc41947bbfa71bfcba8ab4d78cc09e4b1a9286e4c []
-mfm.events.v1.resource_lane.claim_intent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:14ec3899b92dc1182f8b5865e2c5597b053ae648290b9b900eb161014dd7b4ed []
-mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:727f477650e620a3526593d80d0a9afbc75359009b19003722bde42c1325c309 [PreparedInvocation]
-mfm.events.v1.side_effect.invocation_started schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:7d4cf3ffbd5109af4251e207927b0b4819e3ec058a948b1d106d022eeddfa3fc []
-mfm.events.v1.side_effect.not_submitted_proven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:c1ccc7c56931f0f14fa86e233899beb7b744b5cff47f68ec74e53e7f8cf6af12 [NotSubmittedProof]
-mfm.events.v1.side_effect.submission_observed schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:612411db371d86f8cc7033745692bcd88018b632ded4b156b0c96935bc4532cb [Submission]
-mfm.events.v1.side_effect.submission_unknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:56c8fb7e5f12f11c178c671edd68fff8d22a8acd27eb97a7cc364b71a93f5637 [SubmissionUnknownEvidence]
-mfm.events.v1.side_effect.receipt_observed schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:f24eae04a3a4dcf471c5c4fc362deeb25e8915958565bc61236684ef5e8fd549 [Receipt,ResourceTouchedSet]
-mfm.events.v1.side_effect.confirmation_observed schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:c5f0bee3807376b77bdb4386ea18c92ed17f2e8381a249c50eddb35b75690143 [Confirmation,ResourceTouchedSet]
-mfm.events.v1.side_effect.ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:2e436cd594c93cdd1e8a548804b90719c13cd3e62933a90e0ae810e3ae04686a [AmbiguityEvidence]
-mfm.events.v1.side_effect.failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:0f9166fa332675d82be749016fc2b5836dfebe6ea6aa1c25b7b59a7144c0fb4d [SideEffectFailureDiagnostic]
-mfm.events.v1.resource_lane.released schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:5c4b4506528fbc8d849d79012d62c87ab72b7df12b26129d84ecacfcdd07be89 []
-mfm.events.v1.resource_lane.release_intent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:8053fc9f4e470aaed7bd05872717ea78d07999cefa0b17e0bf78e0925b4acb1a []
-mfm.events.v1.public_output_produced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:0f6b8361913bd2993f79a02c15f87d93cfaaadfbdcd055176419ca9758eba098 [PublicOutputCell,PublicOutputRendered]
-mfm.events.v1.public_output_render_failed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:c25355e4bddc82bd7626afbc7128a9c3f94d86f5951faa103eaeb8948bf8a8cc [PublicOutputRenderFailureDiagnostic]
-mfm.events.v1.state_attempt_completed schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80 []
-mfm.events.v1.state_attempt_interrupted schema:mfm.events.v1.state_attempt_interrupted:1:sha256-jcs-v1:a01ea4960dfa7c42cd9da4a572a2748513cae4107b99ac1f04afc37b7a4e9e14 []
-mfm.events.v1.state_attempt_failed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:6b5970a1e5da5adc00fc141f0bfaeb9114196e1f87291c2ad9121e7fe41644d6 [StateAttemptFailureDiagnostic]
-mfm.events.v1.manual_resolution_recorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:045108e1d80601559ce9d7a408a24e2052dfee309ae2b255b3f83b4508b4d352 [ManualResolutionEvidence,ManualResolutionAuthorization]
-mfm.events.v1.run_completed schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479 []
-mfm.events.v1.retention_refs_appended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:354dd1baedf12dab84a3885079b19bbd205004bbc4ef5dc6dfb2dfd4ed197476 [RetentionRef]
-mfm.events.v1.retention_manifest_projected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:0dc12ccdc64f00e214e6fdb17e7be8b7bfe0900f64b99daa59c4d437a14784cf [RetentionManifest]"#
+        mfm_canonical::sha256_digest_bytes(rows.as_bytes()).to_string(),
+        "cdcd6c7a4e1a89d33de459fed6c41e8d4ad36c52b795ef3d23454e9c9155ed18"
     );
 }

@@ -193,7 +193,7 @@ persists opaque canonical bytes plus target/schema/digest; target is the primary
 history, revision selector, digest lookup, cursor, or knowledge of setup kinds or domain types.
 
 Run start accepts one exact entry-point id and one target. The sole public entry point is
-`mfm.portfolio/snapshot@1`, whose target is a `PortfolioId` such as `acme/primary`. The target
+`mfm.portfolio/snapshot@2`, whose target is a `PortfolioId` such as `acme/primary`. The target
 contains no collector policy, child config, runtime route, read bound, collect/reuse switch, or
 report-only switch. App assembly loads that target's current row, requires the expected schema,
 verifies canonical bytes and digest, revalidates semantic config, verifies the embedded
@@ -219,7 +219,7 @@ fallback or compatibility surface.
 Portfolio selection consumes family completion authority without a generic fan-in value. The
 snapshot operation passes typed Bitcoin and EVM receipt vectors into one report operation. That
 operation's structured input binding is passed unchanged into `SelectHoldingsState`; the
-managed-write input edges are the readiness barrier. The snapshot operation constructs only child
+collector receipt input edges are the readiness barrier. The snapshot operation constructs only child
 operations, while the report operation constructs only selection, snapshot assembly, and report
 projection. The state validates exact portfolio demand, receipt family/chain/source coverage, and
 receipt uniqueness before it authors any query. There is no portfolio manifest identity, generic
@@ -269,7 +269,6 @@ Effect classes are framework-owned:
 
 - pure: no external capabilities
 - read: read/support capabilities only
-- managed platform write: platform persistence/output capabilities only
 - apply side effect: exactly one external mutation authority plus allowed support capabilities
 
 The runtime injects only capabilities certified for the current node. State code must not create its
@@ -430,18 +429,18 @@ the semantic network. Admission rejects excessive networks, wallets, symbols, wa
 relations, or distinct sources for one EVM network before graph expansion or provider work.
 
 Each demanded EVM network is one child call to `EvmBalanceCollectionOperation`. The reusable
-operation expands to exactly `CollectEvmBalancesState` followed by `RecordEvmBalanceFactsState` and
-exports only an `EvmBalanceCollectionReceipt`. The read state owns the sorted native/ERC-20 source
+operation expands to exactly one fact-producing `CollectEvmBalancesState` and exports only an
+`EvmBalanceCollectionReceipt`. The read state owns the sorted native/ERC-20 source
 plan and deterministic reducer. One checked source-bound session resolves latest once, reads
 deduplicated token metadata and every balance at the exact EIP-1898 hash with canonicality
 required, and finishes with one number-to-hash recheck. Reads use bounded concurrency. The
-managed-write state publishes one `evm.balance_snapshot` fact per source and the checked receipt in
-the same atomic attempt.
+reducer emits one `evm.balance_snapshot` fact per source and the checked receipt; runtime settles
+the ordered fact batch, receipt, evidence, and completion in one atomic append.
 
 The generic source contract is `EvmBalanceSource { account, asset }`, where `EvmBalanceAsset` is
 `Native` or `Erc20` with a non-zero contract address. Typed constructors accept checked EVM
 addresses and persisted values retain their canonical lowercase representation. The fact subject,
-collection plan, evidence, observation batch, and receipt use this one EVM-domain algebra; they
+collection plan, evidence, fact batch, and receipt use this one EVM-domain algebra; they
 contain no portfolio, wallet, symbol, route, endpoint, schedule, or invocation identity. Their
 shared EVM block anchor persists the full U256 number as canonical decimal plus canonical hash. The
 receipt retains only network/chain, anchor, sorted sources, and verified content identities; it
@@ -450,14 +449,16 @@ does not duplicate response material.
 `PortfolioSnapshotOperation` constructs collector operation calls and one
 `PortfolioReportOperation` call; it constructs no state directly. The report operation receives
 the typed Bitcoin and EVM receipt vectors and passes the same structured binding to selection,
-which compiles one exact query per demanded holding. The fact-index provider evaluates the complete
-batch over one store snapshot and applies receipt content identity before the one-row limit. The
+which compiles one exact query per demanded holding. The same store that owns retained artifacts
+evaluates the complete batch over one snapshot and applies receipt content identity before the
+one-row limit. The
 production Postgres provider reconstructs append-only fact authority once for that batch, not once
 per holding. Selection rehydrates the returned response and rederives full
 descriptor/subject/response identity and fact refs before accepting it. Content identity
 intentionally treats any number of byte-identical append occurrences as equivalent; deterministic
 last-write ordering selects one occurrence without scaling hydration with history. Missing receipt
-content, mixed frontiers, malformed cardinality, tampering, unexpected receipts, or incomplete coverage fail closed. The
+content, mixed frontiers, malformed cardinality, tampering, unexpected receipts, or incomplete
+coverage fail closed. The
 report operation assembles only the selected store material, rechecks exact config-derived
 coverage, and projects the structured report. EVM collection replay belongs only to
 `mfm-adapters-evm`; portfolio replay verifies selection, snapshot, and report. Both use retained

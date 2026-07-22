@@ -42,8 +42,7 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
     let certification = validation_certification_registry();
     let launch_services = make_run_services(
         validation_runners(&store, Arc::clone(&live_reads)),
-        store.clone(),
-        store.clone(),
+        Arc::new(store.clone()),
         certification.clone(),
     );
     let (draft, seed_material) = validation_launch_material();
@@ -70,8 +69,7 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
     drop(launch_services);
 
     // Read services have no runner registry, session binder, transport, or runtime config.
-    let replay_services =
-        make_run_read_services(store.clone(), store.clone(), certification.clone());
+    let replay_services = make_run_read_services(Arc::new(store.clone()), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
@@ -110,7 +108,7 @@ async fn contract_validation_validates_its_async_route_before_admission() {
         ),
     )
     .expect("explicit validation runner");
-    let services = make_run_services(runners, store.clone(), store.clone(), certification);
+    let services = make_run_services(runners, Arc::new(store.clone()), certification);
 
     let error = services
         .launch_run(request)

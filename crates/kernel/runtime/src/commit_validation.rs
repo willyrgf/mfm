@@ -1,14 +1,21 @@
 use super::*;
+use std::collections::BTreeSet;
 
 pub(crate) fn runner_payloads_with_derived_lifecycle(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
+    read_facts: Vec<events::FactRecorded>,
     runner_payloads: Vec<RunnerEventPayload>,
 ) -> Result<Vec<events::KernelEventPayload>> {
-    let mut payloads = runner_payloads
+    let mut payloads = read_facts
         .into_iter()
-        .map(events::KernelEventPayload::from)
+        .map(events::KernelEventPayload::FactRecorded)
+        .chain(
+            runner_payloads
+                .into_iter()
+                .map(events::KernelEventPayload::from),
+        )
         .collect::<Vec<_>>();
     let mut terminal_cell = false;
     let mut failure: Option<(bool, events::MfmErrorInfo)> = None;
@@ -98,7 +105,6 @@ pub(super) struct RunnerOutputValidation<'a> {
     pub(super) node: &'a spec::NodeSpec,
     pub(super) attempt_id: &'a AttemptId,
     pub(super) caps: &'a CertifiedRuntimeCapabilities,
-    pub(super) recorded_facts: &'a RecordedFacts,
     pub(super) projections: &'a store::ProjectionSnapshot,
     pub(super) payloads: &'a [events::KernelEventPayload],
 }
@@ -110,7 +116,6 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
         node,
         attempt_id,
         caps,
-        recorded_facts,
         projections,
         payloads,
     } = input;
@@ -129,6 +134,9 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
     let mut side_effect_terminal_failure = false;
     let mut attempt_failure_retryable = None;
     let mut side_effect_terminal_failure_retryable = None;
+    let mut fact_keys = BTreeSet::new();
+    let mut fact_count = 0usize;
+    let mut fact_phase_closed = false;
     for payload in payloads {
         if payload_spec_hash(payload) != *runtime_spec.spec_hash() {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -138,6 +146,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
         }
         match payload {
             events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                fact_phase_closed = true;
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
                 if payload.output_cell_id != node.output_cell {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -148,6 +157,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
                 completed = true;
             }
             events::KernelEventPayload::StateAttemptFailed(payload) => {
+                fact_phase_closed = true;
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
                 if failed {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -165,6 +175,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
                 )));
             }
             events::KernelEventPayload::CellProduced(payload) => {
+                fact_phase_closed = true;
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
                 let cell = runtime_spec.cell(&payload.cell_id).ok_or_else(|| {
                     RuntimeError::InvalidRunnerOutput(format!(
@@ -188,6 +199,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
                 terminal_cell = true;
             }
             events::KernelEventPayload::CellSkipped(payload) => {
+                fact_phase_closed = true;
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
                 let cell = runtime_spec.cell(&payload.cell_id).ok_or_else(|| {
                     RuntimeError::InvalidRunnerOutput(format!(
@@ -214,20 +226,28 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
             events::KernelEventPayload::FactRecorded(payload) => {
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
                 let fact_key = payload.claim.subject().fact_key();
-                if !recorded_facts.is_empty() {
+                if fact_phase_closed {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(
-                        "node {} attempted to record fact {} after committed facts existed for the same attempt",
+                        "node {} returned fact {} after its settlement cell or terminal payload",
                         node.node_id, fact_key
                     )));
                 }
-                let producer = payload.claim.producer();
-                require_capability(
-                    caps,
-                    producer.capability_kind(),
-                    producer.capability_version(),
-                    &node.node_id,
-                )?;
-                require_adapter(node, producer.adapter_kind(), producer.adapter_version())?;
+                if node.fact_descriptor_allowlist.len() != 1
+                    || node.fact_descriptor_allowlist[0].descriptor_hash
+                        != *payload.claim.fact_descriptor_hash()
+                {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "node {} returned fact {} outside its one certified descriptor",
+                        node.node_id, fact_key
+                    )));
+                }
+                if !fact_keys.insert(fact_key.clone()) {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "node {} returned duplicate fact key {}",
+                        node.node_id, fact_key
+                    )));
+                }
+                fact_count += 1;
             }
             events::KernelEventPayload::ArtifactReferenced(payload) => {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -300,6 +320,26 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
                 }
             }
         }
+    }
+
+    let descriptor = runtime_spec.state_descriptor_for_node(node)?;
+    if fact_count > 0
+        && (descriptor.effect_class != "read_external"
+            || descriptor.emitted_fact_descriptors.len() != 1)
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} emitted facts without one certified fact-producing external-read contract",
+            node.node_id
+        )));
+    }
+    if descriptor.effect_class == "read_external"
+        && !descriptor.emitted_fact_descriptors.is_empty()
+        && fact_count == 0
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "fact-producing external-read node {} returned an empty fact batch",
+            node.node_id
+        )));
     }
     if side_effect_verify_spec(node).is_some() {
         return validate_side_effect_verify_runner_output(SideEffectVerifyRunnerOutputValidation {

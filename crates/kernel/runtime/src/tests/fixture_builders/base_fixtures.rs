@@ -130,7 +130,7 @@ pub(in crate::tests::support) fn fixture() -> Fixture {
             .expect("render input digest"),
         root: render_input_root,
     };
-    let managed_effect = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let framework_effect = mfm_effects::Pure::descriptor().expect("framework effect");
     let render_state_kind = StateKind::new(
         "mfm.framework.state",
         "render_public_outputs",
@@ -197,7 +197,7 @@ pub(in crate::tests::support) fn fixture() -> Fixture {
         config_ref: render_config_ref.clone(),
         input_bindings: render_input_binding,
         output_cell: render_cell.clone(),
-        effect_kind: managed_effect.kind.clone(),
+        effect_kind: framework_effect.kind.clone(),
         capability_bindings: no_caps.clone(),
         adapter_bindings: Vec::new(),
         side_effect: None,
@@ -268,12 +268,12 @@ pub(in crate::tests::support) fn fixture() -> Fixture {
                 input_schema_id: public_schema.clone(),
                 output_schema_id: receipt_schema.clone(),
                 output_semantic_type_id: receipt_semantic.clone(),
-                effect_kind: managed_effect.kind,
-                effect_class: managed_effect.class.as_str().to_owned(),
-                effect_name: managed_effect.name.to_owned(),
-                effect_version: managed_effect.version,
+                effect_kind: framework_effect.kind,
+                effect_class: framework_effect.class.as_str().to_owned(),
+                effect_name: framework_effect.name.to_owned(),
+                effect_version: framework_effect.version,
                 capabilities: no_caps,
-                runner: "managed_platform_write".to_owned(),
+                runner: "pure".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
                 effect_contract_digest: None,
             })),

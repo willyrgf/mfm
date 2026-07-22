@@ -264,9 +264,10 @@ fn route_shape_and_urls_fail_closed() {
 }
 
 #[test]
-fn bitcoin_runtime_and_auth_contract_are_unchanged() {
+fn bitcoin_runtime_requires_bounded_scan_timeout_and_complete_auth() {
     let config = r#"
         [btc.routes.public-bitcoin-core]
+        scan_timeout_seconds = 30
         rpc_url = "http://127.0.0.1:8332"
         rpc_user = "rpc-user"
         rpc_password = "rpc-pass"
@@ -283,11 +284,21 @@ fn bitcoin_runtime_and_auth_contract_are_unchanged() {
         "http://127.0.0.1:8332",
         RuntimeValueSourceKind::Direct,
     );
+    assert_eq!(route.scan_timeout_seconds(), 30);
 
-    let incomplete = "[btc.routes.node]\nrpc_url='http://127.0.0.1:8332'\nrpc_user='user'";
+    let incomplete = "[btc.routes.node]\nscan_timeout_seconds=30\nrpc_url='http://127.0.0.1:8332'\nrpc_user='user'";
     let error = RuntimeConfig::from_str(incomplete, RuntimeConfigFormat::Toml)
         .expect_err("incomplete auth");
     assert_eq!(error.kind(), &RuntimeConfigErrorKind::IncompleteBasicAuth);
+
+    for timeout in [0, 86_401] {
+        let invalid = format!(
+            "[btc.routes.node]\nscan_timeout_seconds={timeout}\nrpc_url='http://127.0.0.1:8332'"
+        );
+        let error = RuntimeConfig::from_str(&invalid, RuntimeConfigFormat::Toml)
+            .expect_err("invalid scan timeout");
+        assert_eq!(error.kind(), &RuntimeConfigErrorKind::InvalidBoundedInteger);
+    }
 }
 
 #[test]

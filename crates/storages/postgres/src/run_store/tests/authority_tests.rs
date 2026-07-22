@@ -61,35 +61,35 @@ async fn store_authority_rejects_schema_drift_cases() {
     for (case, expected) in [
         (
             Case::MissingMigrationRecord,
-            PostgresStoreAuthorityError::Migrations,
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
         ),
         (
             Case::MigrationChecksumMismatch,
-            PostgresStoreAuthorityError::Migrations,
+            PostgresStoreAuthorityError::MigrationChecksumMismatch,
         ),
         (
             Case::StaleSchemaObject,
-            PostgresStoreAuthorityError::Catalog,
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
         ),
         (
             Case::MissingFactProjectionTable,
-            PostgresStoreAuthorityError::Catalog,
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
         ),
         (
             Case::RetiredFactProjectionObject,
-            PostgresStoreAuthorityError::Catalog,
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
         ),
         (
             Case::InvalidStoreMetadata,
-            PostgresStoreAuthorityError::Metadata,
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
         ),
         (
             Case::InvalidStoreScopeBinding,
-            PostgresStoreAuthorityError::StoreScope,
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
         ),
         (
             Case::MissingMutationGuardTrigger,
-            PostgresStoreAuthorityError::Catalog,
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
         ),
     ] {
         let (store, schema) = test_store().await;
@@ -116,7 +116,7 @@ async fn store_authority_rejects_schema_drift_cases() {
                     .expect("create stale retired table");
             }
             Case::MissingFactProjectionTable => {
-                sqlx::query("DROP TABLE fact_index_terms")
+                sqlx::query("DROP TABLE fact_query_terms")
                     .execute(&store.pool)
                     .await
                     .expect("drop fact term table");

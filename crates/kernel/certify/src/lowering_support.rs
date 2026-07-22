@@ -425,7 +425,6 @@ pub(super) fn runner_kind_name(runner: program::RunnerKind) -> &'static str {
     match runner {
         program::RunnerKind::Pure => "pure",
         program::RunnerKind::ReadExternal => "read_external",
-        program::RunnerKind::ManagedPlatformWrite => "managed_platform_write",
         program::RunnerKind::ApplySideEffect => "apply_side_effect",
     }
 }

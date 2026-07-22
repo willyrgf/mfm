@@ -229,6 +229,7 @@ impl<Purpose: CommitPurpose> PreparedCommit<Purpose> {
         validate_required_artifacts_cover_payload_references(Purpose::NAME, &request)?;
         reject_store_materialized_resource_lane_payloads(Purpose::NAME, &request)?;
         validate(&request)?;
+        validate_fact_response_artifact_admissions(&request, &artifacts.admitted_artifacts)?;
         let inner = PreparedCommitInner::new_with_authority(
             request,
             artifacts.admitted_artifacts,

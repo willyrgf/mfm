@@ -5,11 +5,12 @@ use std::sync::Arc;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilitySetFor, CapabilitySpec};
 use mfm_events::v1::{self as events, side_effect};
+use mfm_facts::MfmFactType;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
     DescriptorId, DigestAlgorithm, SchemaId,
 };
-use mfm_program::{EffectRunner, MfmFactType, ReadState, SideEffectState, StateSpec};
+use mfm_program::{EffectRunner, ReadState, SideEffectState, StateSpec};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_values::{ContextBoundOutput, MfmConfig, MfmValue, NonEmpty, StateInput, ValidatedConfig};
@@ -19,8 +20,8 @@ use crate::{
     artifacts::fact_query_returned_ref_retention_refs, AdapterExecutableBinding,
     ContextOutputExtractor, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
-    MaterializedInputNode, MaterializedInputs, Result, RunnerEventPayload, RunnerFactRecorded,
-    RunnerIngressContext, RuntimeError, SideEffectAdapter, StagedArtifact, StagedRetentionRefs,
+    MaterializedInputNode, MaterializedInputs, Result, RunnerEventPayload, RunnerIngressContext,
+    RuntimeError, SideEffectAdapter, StagedArtifact, StagedRetentionRefs,
 };
 
 #[path = "runner_kit/registration.rs"]

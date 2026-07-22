@@ -165,23 +165,6 @@ impl<'row> PgRowReader<'row> {
         Ok(parse_identity(&self.required_string(column)?)?)
     }
 
-    pub(super) fn optional_identity<T>(&self, column: &str) -> Result<Option<T>>
-    where
-        T: FromStr<Err = IdentityError>,
-    {
-        parse_optional_identity(self.optional_string(column)?)
-    }
-
-    pub(super) fn required_parsed<T>(&self, column: &str) -> Result<T>
-    where
-        T: FromStr,
-        T::Err: std::fmt::Display,
-    {
-        self.required_string(column)?
-            .parse()
-            .map_err(|error| PostgresStoreError::Corruption(format!("{error}")))
-    }
-
     pub(super) fn required_positive_u64(&self, column: &str) -> Result<u64> {
         i64_to_positive_u64(self.required_i64(column)?, &self.field(column))
     }

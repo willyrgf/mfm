@@ -96,7 +96,7 @@ pub struct PortfolioSnapshot {
 
 impl PortfolioSnapshot {
     /// The only supported public snapshot schema version.
-    pub const SCHEMA_VERSION: u64 = 1;
+    pub const SCHEMA_VERSION: u64 = 2;
 
     /// Sorts nested collections into the canonical order used for persistence.
     pub fn normalize(&mut self) {

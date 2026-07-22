@@ -220,7 +220,9 @@ pub(super) fn is_attempt_terminal_commit_payload(payload: &KernelEventPayload) -
     payload.is_attempt_terminal()
         || matches!(
             payload,
-            KernelEventPayload::ResourceLaneReleased(_)
+            KernelEventPayload::FactRecorded(_)
+                | KernelEventPayload::ArtifactReferenced(_)
+                | KernelEventPayload::ResourceLaneReleased(_)
                 | KernelEventPayload::ResourceLaneReleaseIntent(_)
         )
         || is_retention_ref_payload(payload)
@@ -229,6 +231,7 @@ pub(super) fn is_attempt_terminal_commit_payload(payload: &KernelEventPayload) -
 pub(super) fn is_side_effect_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
     is_side_effect_payload(payload)
         || payload.is_attempt_terminal()
+        || matches!(payload, KernelEventPayload::ArtifactReferenced(_))
         || is_retention_ref_payload(payload)
 }
 
@@ -290,11 +293,13 @@ pub(super) fn is_retention_commit_payload(payload: &KernelEventPayload) -> bool 
     is_retention_payload(payload)
         || is_non_run_completed_attempt_terminal_payload(payload)
         || is_completed_run_payload(payload)
+        || matches!(payload, KernelEventPayload::ArtifactReferenced(_))
 }
 
 pub(super) fn is_saga_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
     is_run_completed_payload(payload)
         || is_non_run_completed_attempt_terminal_payload(payload)
+        || matches!(payload, KernelEventPayload::ArtifactReferenced(_))
         || is_retention_ref_payload(payload)
 }
 

@@ -94,8 +94,17 @@ async fn portfolio_rpc_handler(
         }),
         "scantxoutset" => serde_json::json!({
             "success": true,
+            "txouts": 1,
             "height": 850_100u64,
             "bestblock": "abababababababababababababababababababababababababababababababab",
+            "unspents": [{
+                "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+                "vout": 0,
+                "scriptPubKey": "00149c0a9f112688c85fcb4417b05c8dec775e4cab36",
+                "desc": "addr(bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw)",
+                "amount": 0.001,
+                "height": 850_100u64
+            }],
             "total_amount": 0.001
         }),
         other => {
@@ -163,6 +172,7 @@ rpc_url = {rpc_url}
 
 [btc.routes.public-bitcoin-core]
 rpc_url = {rpc_url}
+scan_timeout_seconds = 30
 "#,
         rpc_url = toml_string(rpc_url),
     );

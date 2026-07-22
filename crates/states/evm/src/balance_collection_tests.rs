@@ -4,8 +4,9 @@ use alloy_primitives::{Address, U256};
 use mfm_evm_capabilities::{
     EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
+use mfm_facts::MfmFactType;
 use mfm_ids::LocalPublicId;
-use mfm_program::{MfmFactType, ReadState, StateSpec, ValidatedConfig};
+use mfm_program::{ReadState, StateSpec, ValidatedConfig};
 
 const ANCHOR_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const REORG_HASH: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
@@ -84,6 +85,22 @@ fn address_hash(value: &str) -> alloy_primitives::B256 {
 }
 
 #[test]
+fn collection_state_uses_the_replacement_semantic_identities() {
+    assert_eq!(
+        CollectEvmBalancesState::version()
+            .expect("state version")
+            .as_str(),
+        "mfm.evm.state.collect_balances.v2"
+    );
+    assert_eq!(
+        crate::evm_jsonrpc_adapter_version()
+            .expect("adapter version")
+            .as_str(),
+        "mfm.evm.jsonrpc.adapter.v2"
+    );
+}
+
+#[test]
 fn collection_config_is_sorted_unique_and_bounded() {
     let token = token_source(ACCOUNT);
     let native = native_source(ACCOUNT);
@@ -144,7 +161,7 @@ fn balance_asset_deserialization_preserves_the_closed_fact_shape() {
 }
 
 #[test]
-fn reducer_deduplicates_metadata_and_records_one_unified_fact_per_source() {
+fn reducer_deduplicates_metadata_and_emits_one_unified_fact_per_source() {
     let config = collection_config(vec![
         token_source(SECOND_ACCOUNT),
         native_source(ACCOUNT),
@@ -154,22 +171,21 @@ fn reducer_deduplicates_metadata_and_records_one_unified_fact_per_source() {
     assert_eq!(plan.token_contracts(), vec![TOKEN.to_owned()]);
 
     let evidence = evidence_for(&config, &[10, 20, 30]);
-    let batch = reduce_evm_balance_collection(&plan, &evidence).expect("reduced collection");
-    assert_eq!(batch.anchor().number(), "10");
-    assert_eq!(batch.balances().len(), 3);
+    let (receipt, facts) =
+        reduce_evm_balance_collection(&plan, &evidence).expect("reduced collection");
+    assert_eq!(receipt.block_anchor().number(), "10");
+    assert_eq!(facts.values().len(), 3);
     assert_eq!(
-        batch
-            .balances()
+        facts
+            .values()
             .iter()
-            .filter(|balance| matches!(balance.source().asset(), EvmBalanceAsset::Erc20 { .. }))
-            .map(EvmBalanceObservation::decimals)
+            .filter(|fact| matches!(fact.subject().asset(), EvmBalanceAsset::Erc20 { .. }))
+            .map(|fact| fact.response().decimals())
             .collect::<Vec<_>>(),
         vec![6, 6]
     );
 
-    let (receipt, facts) =
-        record_evm_balance_facts(&config, batch).expect("recorded fact material");
-    assert_eq!(facts.len(), 3);
+    assert_eq!(facts.values().len(), 3);
     assert_eq!(receipt.sources().len(), 3);
     assert_eq!(receipt.fact_content_identities().len(), 3);
     assert_eq!(receipt.block_anchor().hash(), ANCHOR_HASH);
@@ -182,7 +198,7 @@ fn reducer_deduplicates_metadata_and_records_one_unified_fact_per_source() {
     assert!(descriptor.fields().iter().any(|field| {
         field.field_id().as_str() == "subject.asset.contract_address" && !field.required()
     }));
-    let fact_json = serde_json::to_value(&facts).expect("fact JSON");
+    let fact_json = serde_json::to_value(facts.values()).expect("fact JSON");
     assert_eq!(
         fact_json[0]["response"]["block_anchor"]["hash"],
         ANCHOR_HASH

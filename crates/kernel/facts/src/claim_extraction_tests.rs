@@ -195,8 +195,7 @@ fn extraction_derives_subject_material_and_terms() {
         .expect("subject");
     let response =
         CanonicalValue::object([("height", CanonicalValue::Unsigned(850_000))]).expect("response");
-    let metadata =
-        FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42).expect("metadata");
+    let metadata = FactExtractionMetadata::new("2026-07-01T00:00:00Z", 42).expect("metadata");
 
     let material = extract_subject_material(&descriptor, &subject).expect("subject material");
     assert_eq!(material.subject(), &subject);
@@ -223,8 +222,7 @@ fn extraction_optional_missing_field_yields_no_term() {
         .expect("subject");
     let response =
         CanonicalValue::object([("height", CanonicalValue::Unsigned(850_000))]).expect("response");
-    let metadata =
-        FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42).expect("metadata");
+    let metadata = FactExtractionMetadata::new("2026-07-01T00:00:00Z", 42).expect("metadata");
 
     let terms = extract_terms(&descriptor, &subject, &response, &metadata).expect("terms");
 
@@ -265,8 +263,7 @@ fn extraction_rejects_invalid_material_shapes() {
                     CanonicalValue::object([("height", CanonicalValue::String("850000".into()))])
                         .expect("response");
                 let metadata =
-                    FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42)
-                        .expect("metadata");
+                    FactExtractionMetadata::new("2026-07-01T00:00:00Z", 42).expect("metadata");
                 extract_terms(&descriptor, &subject, &response, &metadata)
                     .expect_err("type mismatch")
             }
@@ -291,8 +288,7 @@ fn extraction_validates_decimal_scale() {
             .expect("descriptor");
     let subject = CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
         .expect("subject");
-    let metadata =
-        FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42).expect("metadata");
+    let metadata = FactExtractionMetadata::new("2026-07-01T00:00:00Z", 42).expect("metadata");
     let valid_response = CanonicalValue::object([(
         "price",
         CanonicalValue::Decimal(DecimalString::new_variable("12.34").expect("decimal")),
@@ -326,8 +322,7 @@ fn canonical_fact_response_parse_preserves_optional_null_fields() {
             .expect("response");
     let subject = CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
         .expect("subject");
-    let metadata =
-        FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42).expect("metadata");
+    let metadata = FactExtractionMetadata::new("2026-07-01T00:00:00Z", 42).expect("metadata");
 
     let terms = extract_terms(&descriptor, &subject, &response, &metadata).expect("terms");
     assert!(terms

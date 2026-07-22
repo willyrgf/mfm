@@ -34,23 +34,13 @@ use self::schema::{
     STATE_ATTEMPT_FAILED_SCHEMA, STATE_ATTEMPT_INTERRUPTED_SCHEMA, STATE_ATTEMPT_STARTED_SCHEMA,
 };
 
-/// v1 event schema version string.
-pub const EVENT_SCHEMA_VERSION: &str = "1";
+/// Current event schema version string.
+pub const EVENT_SCHEMA_VERSION: &str = "2";
 
 checked_string_type!(
     /// Runner or adapter factory id.
     RunnerFactoryId,
     "runner factory id"
-);
-checked_string_type!(
-    /// Nix derivation hash or equivalent build input hash.
-    NixDerivationHash,
-    "nix derivation hash"
-);
-checked_string_type!(
-    /// Nix output hash or equivalent build output hash.
-    NixOutputHash,
-    "nix output hash"
 );
 checked_string_type!(
     /// Side-effect ledger key.
@@ -884,14 +874,8 @@ pub struct RetentionManifestProjected {
 pub struct ExecutableIdentity {
     /// Logical runner or adapter factory id.
     pub factory_id: RunnerFactoryId,
-    /// Cargo package digest.
-    pub cargo_package_digest: ContentDigest,
     /// Binary digest.
     pub binary_digest: ContentDigest,
-    /// Optional Nix derivation hash.
-    pub nix_derivation_hash: Option<NixDerivationHash>,
-    /// Optional Nix output hash.
-    pub nix_output_hash: Option<NixOutputHash>,
 }
 
 /// Side-effect event payloads.

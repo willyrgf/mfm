@@ -1,53 +1,5 @@
 use super::*;
 
-pub(in crate::tests::support) fn fixture_with_first_managed_write_state() -> Fixture {
-    let mut fixture = fixture();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    let managed_effect = EffectKind::new(
-        "mfm.test",
-        "managed-write",
-        DigestAlgorithm::Sha256JcsV1,
-        D8,
-    )
-    .expect("managed effect");
-    let managed_cap = CapabilityDescriptor::new(
-        CapabilityKind::new(
-            "mfm.test",
-            "managed-store",
-            DigestAlgorithm::Sha256JcsV1,
-            D9,
-        )
-        .expect("managed cap kind"),
-        CapabilityVersion::new("mfm.cap.managed_store.v1").expect("managed cap version"),
-        CapabilityRole::ManagedPlatformWrite,
-        "managed-store",
-    )
-    .expect("managed cap");
-    let managed_caps = CapabilitySetDescriptor::new(vec![managed_cap]).expect("managed caps");
-    for node in &mut envelope.spec.nodes {
-        if node.descriptor_id == fixture.descriptor_a {
-            node.effect_kind = managed_effect.clone();
-            node.capability_bindings = managed_caps.clone();
-        }
-    }
-    for descriptor in &mut envelope.spec.descriptor_identities {
-        if let spec::DescriptorIdentity::State(identity) = descriptor {
-            if identity.descriptor_id == fixture.descriptor_a {
-                identity.effect_kind = managed_effect.clone();
-                identity.effect_class = "managed-write".to_owned();
-                identity.effect_name = "managed-write".to_owned();
-                identity.capabilities = managed_caps.clone();
-                identity.runner = "managed-write".to_owned();
-            }
-        }
-    }
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    refresh_fixture_run_id(&mut fixture);
-    fixture
-}
-
 pub(in crate::tests::support) fn fixture_with_first_side_effect_state() -> Fixture {
     runtime_side_effect_fixture(
         RuntimeSideEffectFixtureShape::Chained,

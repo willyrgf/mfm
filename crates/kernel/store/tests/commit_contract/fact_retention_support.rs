@@ -42,7 +42,16 @@ pub(super) fn fact_descriptor() -> mfm_facts::FactDescriptor {
             )
             .expect("response field"),
         ],
-        Vec::new(),
+        vec![mfm_facts::FactOrderingPolicy::new(
+            mfm_facts::FactOrderingName::new("result.height.desc").expect("ordering"),
+            vec![mfm_facts::FactOrderingTerm::new(
+                mfm_facts::FactFieldId::new("result.height").expect("field id"),
+                mfm_facts::SortDirection::Descending,
+                mfm_facts::NullOrdering::Last,
+                false,
+            )],
+        )
+        .expect("height ordering")],
     )
     .expect("fact descriptor")
 }
@@ -62,6 +71,31 @@ pub(super) fn fact_descriptor_artifact_ref() -> ArtifactEvidenceRef {
 pub(super) fn fact_descriptor_fixture(
 ) -> mfm_store::v1::test_support::FactDescriptorProjectionFixtureForTest {
     fact_descriptor_projection_fixture_for_test(fact_descriptor()).expect("fact descriptor fixture")
+}
+
+pub(super) fn fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
+    let input = mfm_facts::FactQueryInput::new(
+        vec![
+            mfm_facts::FactQueryPredicate::new(
+                mfm_facts::FactFieldId::new("subject.chain").expect("field"),
+                mfm_facts::FactQueryOperator::Equal,
+                mfm_facts::FactCanonicalScalar::string("store_test_chain"),
+            ),
+            mfm_facts::FactQueryPredicate::new(
+                mfm_facts::FactFieldId::new("result.height").expect("field"),
+                mfm_facts::FactQueryOperator::GreaterThanOrEqual,
+                mfm_facts::FactCanonicalScalar::UnsignedInteger(800_000),
+            ),
+        ],
+        vec![
+            mfm_facts::FactFieldId::new("subject.chain").expect("field"),
+            mfm_facts::FactFieldId::new("result.height").expect("field"),
+        ],
+        mfm_facts::FactOrderingName::new("result.height.desc").expect("ordering"),
+        None,
+    )
+    .expect("fact query input");
+    mfm_facts::compile_fact_query_plan(&fact_descriptor(), input).expect("fact query plan")
 }
 
 pub(super) fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
@@ -113,48 +147,101 @@ pub(super) fn fact_artifact_ref() -> ArtifactEvidenceRef {
 
 pub(super) fn fact_claim(response: &ArtifactEvidenceRef) -> mfm_facts::FactClaim {
     mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
         fact_kind: mfm_facts::FactKind::new("mfm.test.fact").expect("fact kind"),
         fact_descriptor_hash: fact_descriptor_hash(),
         subject: fact_subject_evidence(),
-        observed_at: Some("2026-01-02T03:04:05Z".to_owned()),
-        request: Some(mfm_facts::FactRequestEvidence::new(
-            schema_id("mfm.test.fact_request", 94),
-            content_digest(95),
-        )),
         response: mfm_facts::FactResponseEvidence::new(
             schema_id("mfm.test.fact_response", 96),
             response.digest.clone(),
             response.artifact_id.clone(),
             response.evidence_hash().expect("response evidence hash"),
         ),
-        producer: mfm_facts::FactProducerProvenance::new(
-            capability_kind(92),
-            CapabilityVersion::new("mfm.test.fact.v1").expect("capability version"),
-            adapter_kind(93),
-            AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
-        ),
     })
     .expect("fact claim")
 }
 
 pub(super) fn fact_recorded(response: &ArtifactEvidenceRef) -> KernelEventPayload {
+    fact_recorded_for_attempt(response, attempt_id(91))
+}
+
+pub(super) fn fact_recorded_for_attempt(
+    response: &ArtifactEvidenceRef,
+    attempt_id: AttemptId,
+) -> KernelEventPayload {
     KernelEventPayload::FactRecorded(events::FactRecorded {
         spec_hash: spec_hash(1),
         node_id: node_id(90),
-        attempt_id: attempt_id(91),
+        attempt_id,
         claim: fact_claim(response),
     })
 }
 
 pub(super) fn fact_attempt_started() -> KernelEventPayload {
+    fact_attempt_started_for(attempt_id(91))
+}
+
+pub(super) fn fact_attempt_started_for(attempt_id: AttemptId) -> KernelEventPayload {
     KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
         spec_hash: spec_hash(1),
         node_id: node_id(90),
-        attempt_id: attempt_id(91),
+        attempt_id,
         attempt_no: 1,
         state_kind: state_kind(90),
         state_version: StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
+    })
+}
+
+pub(super) fn fact_output_artifact_ref_for_height(height: u64) -> ArtifactEvidenceRef {
+    let bytes = fact_response_bytes_for_height(height);
+    let digest = PlainCanonicalJsonBytes::from_canonical_json_slice(&bytes)
+        .expect("canonical output bytes")
+        .content_digest();
+    ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: bytes.len() as u64,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id("mfm.test.side_effect_output", 97)),
+        semantic_type_id: Some(semantic_id("side_effect_output", 98)),
+        producer_node_id: Some(node_id(90)),
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::StateOutput,
+    }
+}
+
+pub(super) fn fact_cell_produced_for_height(
+    height: u64,
+    attempt_id: AttemptId,
+) -> KernelEventPayload {
+    let evidence = fact_output_artifact_ref_for_height(height);
+    KernelEventPayload::CellProduced(events::CellProduced {
+        spec_hash: spec_hash(1),
+        node_id: node_id(90),
+        cell_id: cell_id(90),
+        scope_id: scope_id(90),
+        attempt_id,
+        semantic_type_id: semantic_id("side_effect_output", 98),
+        schema_id: schema_id("mfm.test.side_effect_output", 97),
+        value_lineage: ValueLineageRef {
+            lineage_digest: content_digest(99),
+        },
+        context: spec::CellContextSpec::no_context(),
+        artifact_id: evidence.artifact_id.clone(),
+        content_digest: evidence.digest.clone(),
+        evidence_hash: evidence.evidence_hash().expect("output evidence hash"),
+        producer_state_kind: Some(state_kind(90)),
+        producer_state_version: Some(
+            StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
+        ),
+    })
+}
+
+pub(super) fn fact_attempt_completed(attempt_id: AttemptId) -> KernelEventPayload {
+    KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+        spec_hash: spec_hash(1),
+        node_id: node_id(90),
+        attempt_id,
+        output_cell_id: cell_id(90),
     })
 }
 
@@ -163,8 +250,17 @@ pub(super) fn retention_refs_appended(
     digest: ContentDigest,
     role: ArtifactRole,
 ) -> KernelEventPayload {
+    retention_refs_appended_for_run(&run_id(120), artifact_id, digest, role)
+}
+
+pub(super) fn retention_refs_appended_for_run(
+    run_id: &RunId,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    role: ArtifactRole,
+) -> KernelEventPayload {
     KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-        run_id: run_id(120),
+        run_id: run_id.clone(),
         spec_hash: spec_hash(1),
         refs: vec![events::RetentionRef {
             artifact_id: artifact_id.clone(),
@@ -266,12 +362,12 @@ pub(super) fn projection_snapshot_summary(
         committed.next_seq().as_u64()
     ));
 
-    rows.extend(snapshot.fact_index_entries().map(|(_claim_id, fact)| {
+    rows.extend(snapshot.fact_query_entries().map(|(_claim_id, fact)| {
         format!(
             "fact key={} schema={} artifact={}",
-            fact.fact_key.as_str(),
-            fact.response_schema_id.as_str(),
-            fact.artifact_id.as_str()
+            fact.fact_key().as_str(),
+            fact.response_schema_id().as_str(),
+            fact.artifact_id().as_str()
         )
     }));
 

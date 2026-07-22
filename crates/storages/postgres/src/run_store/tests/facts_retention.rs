@@ -1,5 +1,138 @@
 use super::*;
 
+async fn fixed_postgres_fact_snapshot_query(
+    store: PostgresStore,
+    plan: mfm_facts::CanonicalFactQueryPlan,
+    snapshot_fixed: std::sync::Arc<tokio::sync::Barrier>,
+    release_snapshot: std::sync::Arc<tokio::sync::Barrier>,
+) -> (u64, mfm_facts::FactQueryResult) {
+    let mut tx = store.pool.begin().await.expect("begin fact query");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .expect("set repeatable-read snapshot");
+    let fixed_order: i64 =
+        sqlx::query_scalar("SELECT current_order FROM store_commit_order WHERE singleton")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("establish fact query snapshot");
+    snapshot_fixed.wait().await;
+    release_snapshot.wait().await;
+    let mut results =
+        super::super::fact_queries::execute_fact_queries_tx(&mut tx, std::slice::from_ref(&plan))
+            .await
+            .expect("execute fixed-snapshot query");
+    tx.commit().await.expect("commit fact query");
+    (
+        u64::try_from(fixed_order).expect("nonnegative store order"),
+        results.pop().expect("one aligned fact query result"),
+    )
+}
+
+#[tokio::test]
+async fn fact_queries_are_snapshot_aligned_across_descriptor_and_fact_appends() {
+    let (store, schema) = test_store().await;
+    let plan = fact_query_plan_with_limit(None);
+    let run = fact_run_id(9);
+
+    let snapshot_fixed = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let release_snapshot = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let query = tokio::spawn(fixed_postgres_fact_snapshot_query(
+        store.clone(),
+        plan.clone(),
+        std::sync::Arc::clone(&snapshot_fixed),
+        std::sync::Arc::clone(&release_snapshot),
+    ));
+    snapshot_fixed.wait().await;
+    append_fact_run_start(&store, run.clone())
+        .await
+        .expect("descriptor-only admission");
+    release_snapshot.wait().await;
+    let (fixed_order, before_descriptor) = query.await.expect("descriptor query task");
+    assert_eq!(fixed_order, 0);
+    assert!(before_descriptor.rows().is_empty());
+    assert_eq!(
+        before_descriptor
+            .receipt()
+            .read_frontier()
+            .store_commit_order()
+            .as_u64(),
+        fixed_order
+    );
+
+    let after_descriptor = store
+        .execute_fact_query(&plan)
+        .await
+        .expect("post-descriptor query");
+    assert!(after_descriptor.rows().is_empty());
+    assert_eq!(
+        after_descriptor
+            .receipt()
+            .read_frontier()
+            .store_commit_order()
+            .as_u64(),
+        1
+    );
+    assert_eq!(
+        store
+            .fact_projection_snapshot()
+            .await
+            .expect("descriptor projection")
+            .fact_descriptors()
+            .count(),
+        1
+    );
+
+    append_fact_attempt_start(&store, run.clone(), "snapshot-fact-attempt-start")
+        .await
+        .expect("fact attempt start");
+    let snapshot_fixed = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let release_snapshot = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let query = tokio::spawn(fixed_postgres_fact_snapshot_query(
+        store.clone(),
+        plan.clone(),
+        std::sync::Arc::clone(&snapshot_fixed),
+        std::sync::Arc::clone(&release_snapshot),
+    ));
+    snapshot_fixed.wait().await;
+    let response = fact_artifact_ref();
+    append_fact_commit(
+        &store,
+        fact_commit_request(run.clone(), 3, "snapshot-fact", &response),
+        &response,
+    )
+    .await
+    .expect("fact-producing append");
+    release_snapshot.wait().await;
+    let (fixed_order, before_fact) = query.await.expect("fact query task");
+    assert_eq!(fixed_order, 2);
+    assert!(before_fact.rows().is_empty());
+    assert_eq!(
+        before_fact
+            .receipt()
+            .read_frontier()
+            .store_commit_order()
+            .as_u64(),
+        fixed_order
+    );
+
+    let after_fact = store
+        .execute_fact_query(&plan)
+        .await
+        .expect("post-fact query");
+    assert_eq!(after_fact.rows().len(), 1);
+    assert_eq!(
+        after_fact
+            .receipt()
+            .read_frontier()
+            .store_commit_order()
+            .as_u64(),
+        3
+    );
+
+    drop_schema(&store, &schema).await;
+}
+
 #[tokio::test]
 async fn required_artifacts_and_fact_projection_are_atomic() {
     let (store, schema) = test_store().await;
@@ -39,15 +172,12 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         .status_projection_snapshot(&run)
         .await
         .expect("projection");
-    assert_fact_projection_counts(&projection, 1, 1, 1, 2);
-    assert!(projection.fact_records().any(|(_, fact)| {
-        fact.node_id == node_id(30)
-            && fact.attempt_id == attempt_id(31)
-            && fact.claim.subject().fact_key() == &fact_key()
-    }));
+    assert_fact_projection_counts(&projection, 1, 1, 2);
     assert!(projection
-        .fact_index_entries()
-        .any(|(_, fact)| fact.fact_key == fact_key()));
+        .fact_query_entries()
+        .any(|(_, fact)| fact.producer_node_id() == &node_id(30)
+            && fact.attempt_id() == &attempt_id(31)
+            && fact.fact_key() == &fact_key()));
     assert_fact_projection_table_counts(&store, &run, 1, 1, 2).await;
     let exact_plan = fact_query_plan_with_limit(Some(10));
     let exact_query_result = assert_single_public_fact_query(&store, &exact_plan).await;
@@ -68,15 +198,12 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     );
     assert_eq!(receipt.returned_refs().len(), 1);
     assert_eq!(
-        receipt
-            .read_frontier()
-            .descriptor_catalog_watermark()
-            .as_u64(),
-        1
+        receipt.read_frontier().store_scope_id(),
+        store.store_authority().store_scope_id()
     );
-    assert!(receipt.read_frontier().store_commit_order().as_u64() >= 1);
+    assert_eq!(receipt.read_frontier().store_commit_order().as_u64(), 3);
     sqlx::query(
-        "UPDATE fact_index_terms SET value_u64 = '1' \
+        "UPDATE fact_query_terms SET value_u64 = '1' \
          WHERE source_run_id = $1 AND field_id = 'result.height'",
     )
     .bind(run.as_str())
@@ -89,12 +216,12 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         query_result.rows(),
         "fact projection terms must not be semantic query authority"
     );
-    sqlx::query("DELETE FROM fact_index_terms WHERE source_run_id = $1")
+    sqlx::query("DELETE FROM fact_query_terms WHERE source_run_id = $1")
         .bind(run.as_str())
         .execute(&store.pool)
         .await
         .expect("delete fact terms");
-    sqlx::query("DELETE FROM fact_index WHERE source_run_id = $1")
+    sqlx::query("DELETE FROM fact_query_projection WHERE source_run_id = $1")
         .bind(run.as_str())
         .execute(&store.pool)
         .await
@@ -119,7 +246,7 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         .fact_projection_snapshot()
         .await
         .expect("authoritative fact projection snapshot after cache deletion");
-    assert_fact_projection_counts(&fact_projection_after_delete, 1, 1, 1, 2);
+    assert_fact_projection_counts(&fact_projection_after_delete, 1, 1, 2);
     let err = store
         .status_projection_snapshot(&run)
         .await
@@ -129,12 +256,12 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     let rebuilt = rebuild_fact_projection_tables_client(&store.pool, &run)
         .await
         .expect("fact projection rebuild");
-    assert_fact_projection_counts(&rebuilt, 1, 1, 1, 2);
+    assert_fact_projection_counts(&rebuilt, 1, 1, 2);
     let projection = store
         .status_projection_snapshot(&run)
         .await
         .expect("projection after fact rebuild");
-    assert_fact_projection_counts(&projection, 1, 1, 1, 2);
+    assert_fact_projection_counts(&projection, 1, 1, 2);
 
     let retry = append_fact_commit(&store, fact_request, &response_ref)
         .await
@@ -217,55 +344,17 @@ async fn fact_descriptor_catalog_and_response_artifacts_deduplicate_across_runs(
         mfm_facts::QueryResultCardinality::Exact(2),
     );
     assert_eq!(
+        query_result.receipt().read_frontier().store_scope_id(),
+        store.store_authority().store_scope_id()
+    );
+    assert_eq!(
         query_result
             .receipt()
             .read_frontier()
-            .descriptor_catalog_watermark()
+            .store_commit_order()
             .as_u64(),
-        1
+        6
     );
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn run_private_fact_records_load_without_index_rows() {
-    let (store, schema) = test_store().await;
-    let run = fact_run_id(11);
-    append_fact_run_start(&store, run.clone())
-        .await
-        .expect("run start");
-    append_fact_attempt_start(&store, run.clone(), "private-fact-attempt-start")
-        .await
-        .expect("fact attempt start");
-
-    let response_ref = fact_artifact_ref();
-    let fact_request = fact_commit_request_with_visibility(
-        run.clone(),
-        3,
-        "private-fact",
-        &response_ref,
-        mfm_facts::FactVisibility::RunPrivate,
-    );
-    append_fact_commit(&store, fact_request, &response_ref)
-        .await
-        .expect("private fact commit");
-
-    let projection = store
-        .status_projection_snapshot(&run)
-        .await
-        .expect("projection");
-    assert_fact_projection_counts(&projection, 1, 1, 0, 0);
-    assert!(projection.fact_records().any(|(_, fact)| {
-        matches!(
-            fact.claim.visibility(),
-            mfm_facts::FactVisibility::RunPrivate
-        )
-    }));
-    assert_fact_projection_table_counts(&store, &run, 1, 0, 0).await;
-
-    let private_plan = fact_query_plan_with_limit(Some(10));
-    assert_empty_fact_query(&store, &private_plan).await;
 
     drop_schema(&store, &schema).await;
 }

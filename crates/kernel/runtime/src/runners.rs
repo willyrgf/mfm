@@ -138,27 +138,6 @@ pub trait ErasedNodeRunner: Send + Sync {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a>;
 }
 
-/// Runner-owned typed fact payload emitted by the runtime fact recorder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerFactRecorded {
-    payload: events::FactRecorded,
-}
-
-impl RunnerFactRecorded {
-    pub(crate) fn new(payload: events::FactRecorded) -> Self {
-        Self { payload }
-    }
-
-    /// Returns the typed fact payload.
-    pub fn payload(&self) -> &events::FactRecorded {
-        &self.payload
-    }
-
-    fn into_payload(self) -> events::FactRecorded {
-        self.payload
-    }
-}
-
 /// Runner-owned payloads that may be proposed by domain execution.
 ///
 /// Scheduler, framework lifecycle, artifact reference, retention, and run lifecycle events are
@@ -170,8 +149,6 @@ impl RunnerFactRecorded {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerEventPayload {
-    /// Recorded read fact event emitted by the typed runtime fact recorder.
-    FactRecorded(RunnerFactRecorded),
     /// Cell produced terminal event.
     CellProduced(events::CellProduced),
     /// Cell skipped terminal event.
@@ -213,7 +190,6 @@ pub enum RunnerEventPayload {
 impl From<RunnerEventPayload> for events::KernelEventPayload {
     fn from(payload: RunnerEventPayload) -> Self {
         match payload {
-            RunnerEventPayload::FactRecorded(payload) => Self::FactRecorded(payload.into_payload()),
             RunnerEventPayload::CellProduced(payload) => Self::CellProduced(payload),
             RunnerEventPayload::CellSkipped(payload) => Self::CellSkipped(payload),
             RunnerEventPayload::SideEffectIntentPersisted(payload) => {
@@ -301,6 +277,8 @@ pub struct ErasedRunnerOutput {
     staged_artifacts: Vec<StagedArtifact>,
     /// Retention refs staged by the runner for scheduler-owned event binding.
     staged_retention_refs: Vec<StagedRetentionRefs>,
+    /// Runtime-owned facts staged by a read reducer.
+    read_facts: Vec<events::FactRecorded>,
     /// Runner-owned typed payloads to validate before runtime lifecycle derivation.
     payloads: Vec<RunnerEventPayload>,
     /// Process-local authority settled only after a successful durable append.
@@ -313,6 +291,7 @@ impl std::fmt::Debug for ErasedRunnerOutput {
             .debug_struct("ErasedRunnerOutput")
             .field("staged_artifacts", &self.staged_artifacts)
             .field("staged_retention_refs", &self.staged_retention_refs)
+            .field("read_facts", &self.read_facts)
             .field("payloads", &self.payloads)
             .field("settlement", &self.settlement)
             .finish()
@@ -325,9 +304,24 @@ impl ErasedRunnerOutput {
         staged_retention_refs: Vec<StagedRetentionRefs>,
         payloads: Vec<RunnerEventPayload>,
     ) -> Self {
+        Self::from_parts_with_read_facts(
+            staged_artifacts,
+            staged_retention_refs,
+            Vec::new(),
+            payloads,
+        )
+    }
+
+    pub(crate) fn from_parts_with_read_facts(
+        staged_artifacts: Vec<StagedArtifact>,
+        staged_retention_refs: Vec<StagedRetentionRefs>,
+        read_facts: Vec<events::FactRecorded>,
+        payloads: Vec<RunnerEventPayload>,
+    ) -> Self {
         Self {
             staged_artifacts,
             staged_retention_refs,
+            read_facts,
             payloads,
             settlement: None,
         }
@@ -368,12 +362,14 @@ impl ErasedRunnerOutput {
     ) -> (
         Vec<StagedArtifact>,
         Vec<StagedRetentionRefs>,
+        Vec<events::FactRecorded>,
         Vec<RunnerEventPayload>,
         Option<RunnerOutputSettlement>,
     ) {
         (
             self.staged_artifacts,
             self.staged_retention_refs,
+            self.read_facts,
             self.payloads,
             self.settlement,
         )

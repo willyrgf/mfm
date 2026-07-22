@@ -194,10 +194,20 @@ impl From<store::StoreError> for PublicError {
 impl From<mfm_storage_postgres::PostgresStoreError> for PublicError {
     fn from(error: mfm_storage_postgres::PostgresStoreError) -> Self {
         match error {
-            mfm_storage_postgres::PostgresStoreError::Authority(_) => Self::backend(
+            mfm_storage_postgres::PostgresStoreError::Authority(
+                mfm_storage_postgres::PostgresStoreAuthorityError::StoreAuthorityMismatch
+                | mfm_storage_postgres::PostgresStoreAuthorityError::MigrationChecksumMismatch,
+            ) => Self::backend(
                 ErrorClass::Internal,
-                "RunStoreAuthorityInvalid",
-                "Run store authority could not be validated",
+                "IncompatibleStoreSchema",
+                "Run store schema is incompatible with this MFM build",
+            ),
+            mfm_storage_postgres::PostgresStoreError::Authority(
+                mfm_storage_postgres::PostgresStoreAuthorityError::Connection,
+            ) => Self::backend(
+                ErrorClass::Internal,
+                "RunStoreUnavailable",
+                "Run store is unavailable",
             ),
             mfm_storage_postgres::PostgresStoreError::Store(_) => Self::backend(
                 ErrorClass::Conflict,
@@ -308,6 +318,27 @@ mod tests {
     }
 
     #[test]
+    fn postgres_authority_failures_share_one_redacted_public_contract() {
+        use mfm_storage_postgres::{PostgresStoreAuthorityError, PostgresStoreError};
+
+        for internal in [
+            PostgresStoreAuthorityError::StoreAuthorityMismatch,
+            PostgresStoreAuthorityError::MigrationChecksumMismatch,
+        ] {
+            let error = PublicError::from(PostgresStoreError::Authority(internal));
+            assert_eq!(error.code, "IncompatibleStoreSchema");
+            assert_eq!(
+                error.message,
+                "Run store schema is incompatible with this MFM build"
+            );
+            let rendered = format!("{error:?}\n{error}");
+            assert!(!rendered.contains("authority"));
+            assert!(!rendered.contains("migration"));
+            assert!(!rendered.contains("checksum"));
+        }
+    }
+
+    #[test]
     fn launch_context_summarizes_mixed_families_in_presentation_order() {
         let diagnostic = |family| {
             RedactedProviderDiagnostic::new(
@@ -323,7 +354,7 @@ mod tests {
         )
         .expect("failure");
         let entry_point = mfm_events::v1::EntryPointLaunchEvidence::new(
-            "mfm.portfolio/snapshot@1",
+            "mfm.portfolio/snapshot@2",
             vec![mfm_events::v1::ConfiguredTargetEvidence::new(
                 mfm_ids::StableAuthorKey::new("test/primary").expect("target"),
                 mfm_ids::SchemaId::new(

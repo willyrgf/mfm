@@ -321,12 +321,9 @@ pub fn compile_fact_query_plan(
     )
     .canonical_bytes()?;
     CanonicalFactQueryPlan::new(
-        input.store_scope,
-        input.query_scope,
         FactQueryCompilerVersion::new(FACT_QUERY_COMPILER_VERSION)?,
         FactCanonicalizerVersion::new(FACT_QUERY_CANONICALIZER_VERSION)?,
         descriptor_hash,
-        input.scope_decision_evidence,
         canonical_query,
         ordering,
         input.limit,
@@ -397,17 +394,6 @@ pub fn fact_query_evidence_hash(evidence: &FactQueryEvidence) -> Result<ContentD
 /// retained authority bindings provide its integrity.
 pub fn validate_fact_query_evidence(evidence: &FactQueryEvidence) -> Result<()> {
     let receipt = evidence.receipt();
-
-    if receipt.read_frontier().store_scope() != evidence.plan().store_scope() {
-        return Err(FactError::descriptor(
-            "fact query receipt frontier store scope does not match plan",
-        ));
-    }
-    if receipt.read_frontier().query_scope() != evidence.plan().query_scope() {
-        return Err(FactError::descriptor(
-            "fact query receipt frontier query scope does not match plan",
-        ));
-    }
 
     let expected_result_set_digest =
         fact_query_result_set_digest(receipt.returned_refs(), receipt.returned_field_summaries())?;

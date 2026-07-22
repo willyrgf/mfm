@@ -1,22 +1,6 @@
-use mfm_ids::ContentDigest;
+use mfm_ids::{ContentDigest, StoreScopeId};
 
 use crate::*;
-
-/// Descriptor catalog watermark bound into query receipts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DescriptorCatalogWatermark(u64);
-
-impl DescriptorCatalogWatermark {
-    /// Creates a descriptor catalog watermark.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the watermark value.
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-}
 
 /// Store-wide commit coordinate bound into query receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -48,61 +32,28 @@ impl StoreCommitOrder {
     }
 }
 
-/// Store read frontier type for fact query receipts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum StoreReadFrontierType {
-    /// Receipt was evaluated over a complete authorized snapshot.
-    Snapshot,
-    /// Receipt was evaluated over an authorized prefix frontier.
-    Prefix,
-}
-
-impl_fact_tag!(StoreReadFrontierType, "store read frontier type", pub(crate), "Returns the canonical store read frontier type tag.", {
-    Self::Snapshot => "snapshot",
-    Self::Prefix => "prefix",
-});
-
 /// Semantic read frontier bound into a fact query receipt.
 ///
 /// Bound fields are store authority watermarks only. Rebuildable fact-index
 /// projection telemetry is never receipt identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreReadFrontier {
-    pub(crate) store_scope: StoreScopeRef,
-    pub(crate) query_scope: FactQueryScope,
-    pub(crate) descriptor_catalog_watermark: DescriptorCatalogWatermark,
+    pub(crate) store_scope_id: StoreScopeId,
     pub(crate) store_commit_order: StoreCommitOrder,
 }
 
 impl StoreReadFrontier {
     /// Creates a store read frontier.
-    pub fn new(
-        store_scope: StoreScopeRef,
-        query_scope: FactQueryScope,
-        descriptor_catalog_watermark: DescriptorCatalogWatermark,
-        store_commit_order: StoreCommitOrder,
-    ) -> Self {
+    pub fn new(store_scope_id: StoreScopeId, store_commit_order: StoreCommitOrder) -> Self {
         Self {
-            store_scope,
-            query_scope,
-            descriptor_catalog_watermark,
+            store_scope_id,
             store_commit_order,
         }
     }
 
-    /// Returns the store scope.
-    pub const fn store_scope(&self) -> &StoreScopeRef {
-        &self.store_scope
-    }
-
-    /// Returns the query scope.
-    pub const fn query_scope(&self) -> &FactQueryScope {
-        &self.query_scope
-    }
-
-    /// Returns the descriptor catalog watermark.
-    pub const fn descriptor_catalog_watermark(&self) -> DescriptorCatalogWatermark {
-        self.descriptor_catalog_watermark
+    /// Returns the store authority scope identifier.
+    pub const fn store_scope_id(&self) -> &StoreScopeId {
+        &self.store_scope_id
     }
 
     /// Returns the maximum committed store coordinate included by the query.
@@ -169,7 +120,6 @@ pub enum QueryResultCardinality {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryReceipt {
     pub(crate) read_frontier: StoreReadFrontier,
-    pub(crate) frontier_type: StoreReadFrontierType,
     pub(crate) returned_refs: Vec<InternalFactRef>,
     pub(crate) returned_field_summaries: Option<ReturnedFieldSummaries>,
     pub(crate) result_set_digest: ContentDigest,
@@ -180,7 +130,6 @@ impl FactQueryReceipt {
     /// Builds deterministic query evidence from returned rows.
     pub fn from_rows(
         read_frontier: StoreReadFrontier,
-        frontier_type: StoreReadFrontierType,
         rows: &[FactQueryResultRow],
         include_returned_field_summaries: bool,
         limit: Option<u64>,
@@ -193,7 +142,6 @@ impl FactQueryReceipt {
         let result_cardinality = cardinality_for_rows(rows.len(), limit)?;
         Ok(Self {
             read_frontier,
-            frontier_type,
             returned_refs,
             returned_field_summaries,
             result_set_digest,
@@ -203,7 +151,6 @@ impl FactQueryReceipt {
 
     pub(crate) fn from_parts(
         read_frontier: StoreReadFrontier,
-        frontier_type: StoreReadFrontierType,
         returned_refs: Vec<InternalFactRef>,
         returned_field_summaries: Option<ReturnedFieldSummaries>,
         result_set_digest: ContentDigest,
@@ -211,7 +158,6 @@ impl FactQueryReceipt {
     ) -> Self {
         Self {
             read_frontier,
-            frontier_type,
             returned_refs,
             returned_field_summaries,
             result_set_digest,
@@ -222,11 +168,6 @@ impl FactQueryReceipt {
     /// Returns the read frontier.
     pub const fn read_frontier(&self) -> &StoreReadFrontier {
         &self.read_frontier
-    }
-
-    /// Returns the frontier type.
-    pub const fn frontier_type(&self) -> StoreReadFrontierType {
-        self.frontier_type
     }
 
     /// Returns refs in receipt order.

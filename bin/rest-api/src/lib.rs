@@ -135,7 +135,7 @@ pub const MFM_REST_ROLE: &str = "MFM_REST_ROLE";
 pub enum RestProcessRole {
     /// Evidence-only status, stream, list, replay, and public-output routes.
     Read,
-    /// Live start/resume plus public fact-query execution.
+    /// Live start/resume and manual-resolution execution.
     Live,
 }
 
@@ -176,16 +176,14 @@ pub struct AppState<S = PostgresStore> {
     pub configured_store: Option<PostgresStore>,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
-    /// Platform/Control fact-index used by portfolio snapshot and collector runners.
-    pub fact_index: Arc<dyn mfm_app::FactIndexReadProvider>,
 }
 
 #[derive(Clone)]
 struct RouterState<S> {
     app: AppState<S>,
     configured_store: Option<PostgresStore>,
-    live_services: Arc<OnceLock<Result<RunServices<S, S>, ApiError>>>,
-    read_services: Arc<OnceLock<Result<RunReadServices<S, S>, ApiError>>>,
+    live_services: Arc<OnceLock<Result<RunServices<S>, ApiError>>>,
+    read_services: Arc<OnceLock<Result<RunReadServices<S>, ApiError>>>,
 }
 
 trait RunCommandStore:
@@ -193,6 +191,7 @@ trait RunCommandStore:
     + store::StoreScopeStore
     + store::ExecutionClaimStore
     + store::RetainedArtifactReadProvider
+    + store::FactQueryStore
     + Clone
     + Send
     + Sync
@@ -205,6 +204,7 @@ impl<S> RunCommandStore for S where
         + store::StoreScopeStore
         + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
+        + store::FactQueryStore
         + Clone
         + Send
         + Sync
@@ -237,33 +237,31 @@ where
         Ok(())
     }
 
-    fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
+    fn live_services(&self) -> Result<RunServices<S>, ApiError> {
         self.require_live_role()?;
         self.live_services
             .get_or_init(|| {
+                let store = Arc::new(self.app.store.clone());
                 let runners = mfm_app::production_runner_registry(
-                    Arc::new(self.app.store.clone()),
-                    Arc::clone(&self.app.fact_index),
+                    store.clone(),
                     self.app.runtime_config_path.as_deref(),
                 )?;
                 let certification_registry = mfm_app::production_certification_registry()?;
                 Ok(mfm_app::make_run_services(
                     runners,
-                    self.app.store.clone(),
-                    self.app.store.clone(),
+                    store,
                     certification_registry,
                 ))
             })
             .clone()
     }
 
-    fn read_services(&self) -> Result<RunReadServices<S, S>, ApiError> {
+    fn read_services(&self) -> Result<RunReadServices<S>, ApiError> {
         self.read_services
             .get_or_init(|| {
                 let certification_registry = mfm_app::production_certification_registry()?;
                 Ok(mfm_app::make_run_read_services(
-                    self.app.store.clone(),
-                    self.app.store.clone(),
+                    Arc::new(self.app.store.clone()),
                     certification_registry,
                 ))
             })
@@ -274,13 +272,11 @@ where
 /// Builds production REST API state for an explicit process role.
 pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultAppState, ApiError> {
     let store = mfm_app::connect_production_store(None).await?;
-    let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     Ok(AppState {
         role,
         configured_store: Some(store.clone()),
         store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
-        fact_index,
     })
 }
 
@@ -297,7 +293,7 @@ where
         + store::ExecutionClaimStore
         + RunObservationStore<Error = <S as RunEventStore>::Error>
         + store::RetainedArtifactReadProvider
-        + mfm_app::PublicFactQueryExecutor
+        + store::FactQueryStore
         + Clone
         + Send
         + Sync
@@ -540,7 +536,7 @@ async fn facts_query<S>(
     query: RawQuery,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+    S: RunCommandStore,
 {
     facts_query_response(&state, kind, query, None).await
 }
@@ -552,7 +548,7 @@ async fn facts_latest<S>(
     query: RawQuery,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+    S: RunCommandStore,
 {
     facts_query_response(&state, kind, query, Some(1)).await
 }
@@ -564,7 +560,7 @@ async fn facts_query_response<S>(
     forced_limit: Option<u64>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+    S: RunCommandStore,
 {
     let request = public_fact_query_request(kind, query, forced_limit)?;
     json_ok(state.read_services()?.query_public_facts(request).await?)

@@ -1,12 +1,3 @@
-fn fact_record_input_fields<T>(input: mfm_runtime::FactRecordInput<T>)
-where
-    T: mfm_program::MfmFactType,
-{
-    let _ = input.fact;
-    let _ = input.visibility;
-    let _ = input.observed_at;
-}
-
 fn erased_runner_output_fields() {
     let output = mfm_runtime::ErasedRunnerOutput::new(Vec::new());
     let _ = output.staged_artifacts;
@@ -47,6 +38,7 @@ fn side_effect_callback_dto_fields() {
 }
 
 fn removed_public_types() {
+    let _ = core::mem::size_of::<mfm_runtime::FactRecordInput<()>>();
     let _ = core::mem::size_of::<mfm_runtime::StagedFactRecord>();
     let _ = mfm_runtime::SideEffectLanePreclaimBuilder::new;
     let _ = core::mem::size_of::<mfm_runtime::SideEffectPreparedInvocationPlan<()>>();

@@ -427,11 +427,8 @@ fn write_descriptor(
 fn write_fact(f: &mut fmt::Formatter<'_>, fact: &PublicFactRef) -> fmt::Result {
     writeln!(
         f,
-        "{} {} recorded_at={} observed_at={}",
-        fact.public_ref,
-        fact.fact_kind,
-        fact.recorded_at,
-        fact.observed_at.as_deref().unwrap_or("none")
+        "{} {} recorded_at={}",
+        fact.public_ref, fact.fact_kind, fact.recorded_at
     )?;
     for field in &fact.fields {
         writeln!(f, "  {}={}", field.field_id, field.value)?;

@@ -34,11 +34,7 @@ impl SelectHoldingsFactDescriptors {
     pub(crate) fn bitcoin_native(
         &self,
     ) -> Result<mfm_facts::FactDescriptor, PortfolioHoldingSelectionError> {
-        self.descriptor(
-            &self.bitcoin_native,
-            "bitcoin.address_balance_snapshot",
-            "Bitcoin",
-        )
+        self.descriptor(&self.bitcoin_native, "bitcoin.balance_snapshot", "Bitcoin")
     }
 
     pub(crate) fn evm_balance(
@@ -99,8 +95,6 @@ fn canonical_descriptor_json(
 pub struct SelectHoldingsConfig {
     /// Portfolio requirements used for subject projection.
     pub(super) portfolio: PortfolioConfig,
-    /// Store scope for Platform fact-index reads.
-    pub(super) store_scope: String,
     /// Fixed certified selection policy id.
     pub(super) selection_policy_id: String,
     /// Registered fact descriptors that define query and hydration authority.
@@ -115,7 +109,6 @@ impl SelectHoldingsConfig {
     ) -> Result<Self, ConfigError> {
         let config = Self {
             portfolio,
-            store_scope: PORTFOLIO_STORE_SCOPE.to_owned(),
             selection_policy_id: PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID.to_owned(),
             fact_descriptors,
         };
@@ -126,11 +119,6 @@ impl SelectHoldingsConfig {
     /// Returns the portfolio requirements.
     pub const fn portfolio(&self) -> &PortfolioConfig {
         &self.portfolio
-    }
-
-    /// Returns the store scope.
-    pub fn store_scope(&self) -> &str {
-        &self.store_scope
     }
 
     /// Returns the certified selection policy id.
@@ -178,10 +166,6 @@ pub struct ProjectReportConfig {}
 
 fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), String> {
     validate_normalized_portfolio(&config.portfolio)?;
-    StoreScopeRef::new(&config.store_scope).map_err(|error| error.to_string())?;
-    if config.store_scope != PORTFOLIO_STORE_SCOPE {
-        return Err("portfolio store scope did not match the closed version-1 policy".to_owned());
-    }
     if config.selection_policy_id != PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID {
         return Err(format!(
             "unsupported selection policy id `{}`",

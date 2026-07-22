@@ -29,10 +29,9 @@ use crate::side_effects::{
     HistoricalSideEffectLedger,
 };
 use crate::{
-    config_ref_key, require_adapter, require_capability, validate_public_output,
-    validate_public_output_render_node, CertifiedRuntimeCapabilities, CertifiedRuntimeSpec,
-    MaterializedCell, MaterializedCellTerminal, MaterializedInputNode, MaterializedInputs,
-    NamedMaterializedInput, RecordedFact, RecordedFacts, Result, RuntimeError,
+    config_ref_key, validate_public_output, validate_public_output_render_node,
+    CertifiedRuntimeSpec, MaterializedCell, MaterializedCellTerminal, MaterializedInputNode,
+    MaterializedInputs, NamedMaterializedInput, Result, RuntimeError,
 };
 
 #[path = "history_artifacts.rs"]
@@ -52,9 +51,7 @@ pub(crate) use self::history_artifacts::{
 };
 #[cfg(test)]
 use self::history_inputs::raw_stream_requires_artifact_byte_authority;
-pub(crate) use self::history_inputs::{
-    materialize_inputs, recorded_facts_for_attempt, validate_seed_cells,
-};
+pub(crate) use self::history_inputs::{materialize_inputs, validate_seed_cells};
 pub(crate) use self::history_validation::{
     validate_certificate_artifact, validate_config_artifacts, validate_spec_artifact,
 };

@@ -16,7 +16,7 @@ EVM receipt vector ─────┴→ SelectHoldings → AssembleSnapshot →
 ```
 
 `SelectHoldingsState` validates both typed receipt vectors against exact portfolio demand, issues
-all BTC/EVM queries as one bounded batch, rehydrates every candidate response, rederives its full
+all Bitcoin/EVM queries as one bounded batch, rehydrates every candidate response, rederives its full
 fact identity, filters to the receipt-authorized content, and then applies deterministic ordering.
 `AssembleSnapshotState` consumes only those selected store-backed observations and validates exact
 wallet/symbol/source coverage before deriving totals and network pins. All-EVM portfolios use this

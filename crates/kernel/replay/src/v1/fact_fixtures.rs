@@ -121,15 +121,40 @@ pub(super) fn fact_replay_spec() -> HashedSpecEnvelope {
         output_schema_id: schema_id("mfm.replay.test.output", 0xd5),
         output_semantic_type_id: semantic_type_id(0xd6),
         effect_kind: node.effect_kind.clone(),
-        effect_class: "read".to_owned(),
-        effect_name: "read".to_owned(),
+        effect_class: "read_external".to_owned(),
+        effect_name: "read_external".to_owned(),
         effect_version: mfm_ids::EffectVersion::new("mfm.replay.test.effect.v1")
             .expect("effect version"),
         capabilities: node.capability_bindings.clone(),
         emitted_fact_descriptors: vec![descriptor_ref],
-        runner: "mfm.replay.test.runner".to_owned(),
+        runner: "read_external".to_owned(),
         effect_contract_digest: None,
     }));
+    let output_lineage = spec::ValueLineageRef {
+        lineage_digest: content_digest(0xe0),
+    };
+    let output_cell = spec::CellSpec {
+        cell_id: node.output_cell.clone(),
+        producer: spec::CellProducer::Node(node.node_id.clone()),
+        scope_id: node.scope_id.clone(),
+        semantic_type_id: semantic_type_id(0xd6),
+        schema_id: schema_id("mfm.replay.test.output", 0xd5),
+        value_lineage: output_lineage.clone(),
+        terminal_policy: spec::CellTerminalPolicy::MaybeSkipped,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+        context: spec::CellContextSpec::no_context(),
+    };
+    let value_lineage = spec::ValueLineage {
+        lineage_ref: output_lineage,
+        scope_id: node.scope_id.clone(),
+        producer: spec::CellProducer::Node(node.node_id.clone()),
+        input_cells: Vec::new(),
+        config_ref_digest: None,
+        planning_lineage: node.planning_lineage.clone(),
+        domain_keys: Vec::new(),
+        transform_policy: spec::LineageTransformPolicy::StateOutput,
+    };
     let spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
         authoring: spec::AuthoringProvenance::StateComposition {
             descriptor: spec::CompositionDescriptor {
@@ -147,8 +172,8 @@ pub(super) fn fact_replay_spec() -> HashedSpecEnvelope {
         config_refs: vec![config_ref],
         nodes: vec![node],
         remediations: BTreeMap::new(),
-        cells: Vec::new(),
-        value_lineages: Vec::new(),
+        cells: vec![output_cell],
+        value_lineages: vec![value_lineage],
         planning_lineage: Vec::new(),
         public_outputs: spec::PublicOutputSpec {
             public_schema_id,
@@ -234,55 +259,6 @@ pub(super) fn run_artifact_ref(
         byte_len: 2,
         media_type: store.media_type,
     }
-}
-
-pub(super) fn fact_recorded(artifact: &StoredArtifactEvidenceRef) -> events::FactRecorded {
-    events::FactRecorded {
-        spec_hash: spec_hash(0xc0),
-        node_id: fact_node_id(),
-        attempt_id: fact_attempt_id(),
-        claim: fact_claim(artifact),
-    }
-}
-
-pub(super) fn fact_claim(artifact: &StoredArtifactEvidenceRef) -> mfm_facts::FactClaim {
-    mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
-        fact_kind: mfm_facts::FactKind::new("mfm.replay.test.fact").expect("fact kind"),
-        fact_descriptor_hash: content_digest(0xcc),
-        subject: fact_subject_evidence(),
-        observed_at: None,
-        request: Some(mfm_facts::FactRequestEvidence::new(
-            fact_request_schema_id(),
-            fact_request_hash(),
-        )),
-        response: mfm_facts::FactResponseEvidence::new(
-            fact_response_schema_id(),
-            artifact.digest.clone(),
-            artifact.artifact_id.clone(),
-            artifact.evidence_hash().expect("artifact evidence hash"),
-        ),
-        producer: mfm_facts::FactProducerProvenance::new(
-            fact_capability_kind(),
-            fact_capability_version(),
-            fact_adapter_kind(),
-            fact_adapter_version(),
-        ),
-    })
-    .expect("fact claim")
-}
-
-pub(super) fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV2::new(
-        mfm_canonical::CanonicalValue::object([(
-            "account",
-            mfm_canonical::CanonicalValue::String("same-subject".into()),
-        )])
-        .expect("subject"),
-    )
-    .expect("subject material");
-    mfm_facts::FactSubjectEvidence::from_material(content_digest(0xcd), &material)
-        .expect("subject evidence")
 }
 
 #[derive(Clone)]

@@ -276,8 +276,7 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     let certification = transaction_certification_registry();
     let launch_services = make_run_services(
         transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
-        store.clone(),
-        store.clone(),
+        Arc::new(store.clone()),
         certification.clone(),
     );
     let (draft, seed_material) = transaction_launch_material();
@@ -327,8 +326,7 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     session.make_transaction_visible();
     let resume_services = make_run_services(
         transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
-        store.clone(),
-        store.clone(),
+        Arc::new(store.clone()),
         certification.clone(),
     );
     let resumed = resume_services
@@ -344,8 +342,7 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     drop(resume_services);
 
     // Read-only replay has no runner registry, transaction session, or signer binder.
-    let replay_services =
-        make_run_read_services(store.clone(), store.clone(), certification.clone());
+    let replay_services = make_run_read_services(Arc::new(store.clone()), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
@@ -386,8 +383,7 @@ async fn assert_post_submission_outage_resumes(outage: ObservationOutage) {
     let certification = transaction_certification_registry();
     let launch_services = make_run_services(
         transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
-        store.clone(),
-        store.clone(),
+        Arc::new(store.clone()),
         certification.clone(),
     );
     let (draft, seed_material) = transaction_launch_material();
@@ -433,8 +429,7 @@ async fn assert_post_submission_outage_resumes(outage: ObservationOutage) {
 
     let resume_services = make_run_services(
         transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
-        store.clone(),
-        store,
+        Arc::new(store.clone()),
         certification,
     );
     let resumed = resume_services

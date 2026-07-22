@@ -413,17 +413,6 @@ pub(super) fn assert_failure_code_count(store: &TestTypedRunStore, code: &str, e
     assert_eq!(count, expected, "failure code count for {code}");
 }
 
-pub(super) fn fact_recorded_count(
-    store: &TestTypedRunStore,
-    expected: &mfm_facts::FactKey,
-) -> usize {
-    store
-        .projection_snapshot()
-        .fact_records()
-        .filter(|(_, fact)| fact.claim.subject().fact_key() == expected)
-        .count()
-}
-
 #[test]
 pub(super) fn runtime_order_is_deterministic_for_reordered_spec_nodes() {
     let fixture = fixture();
@@ -590,10 +579,7 @@ pub(super) fn register_side_effect_verify_runner_with<R: ErasedNodeRunner + 'sta
             factory_id.clone(),
             events::ExecutableIdentity {
                 factory_id,
-                cargo_package_digest: content(0xe1),
                 binary_digest: content(0xe2),
-                nix_derivation_hash: None,
-                nix_output_hash: None,
             },
             Arc::new(runner),
         )
@@ -627,10 +613,7 @@ pub(super) fn binding<R: ErasedNodeRunner + 'static>(
         factory_id.clone(),
         events::ExecutableIdentity {
             factory_id,
-            cargo_package_digest: content(0xe1),
             binary_digest: content(0xe2),
-            nix_derivation_hash: None,
-            nix_output_hash: None,
         },
         Arc::new(runner),
     )

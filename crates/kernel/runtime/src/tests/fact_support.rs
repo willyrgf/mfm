@@ -1,20 +1,7 @@
 use super::*;
 
 pub(super) fn test_fact_descriptor() -> mfm_facts::FactDescriptor {
-    <RuntimeTestFact as mfm_program::MfmFactType>::descriptor().expect("fact descriptor")
-}
-
-pub(super) fn test_fact_descriptor_with_kind(kind: &str) -> mfm_facts::FactDescriptor {
-    let descriptor = test_fact_descriptor();
-    mfm_facts::FactDescriptor::new(
-        mfm_facts::FactKind::new(kind).expect("fact kind"),
-        descriptor.descriptor_schema_id().clone(),
-        descriptor.subject_schema_id().clone(),
-        descriptor.response_schema_id().clone(),
-        descriptor.fields().to_vec(),
-        descriptor.orderings().to_vec(),
-    )
-    .expect("fact descriptor")
+    <RuntimeTestFact as mfm_facts::MfmFactType>::descriptor().expect("fact descriptor")
 }
 
 pub(super) fn test_fact_key(subject_amount: u64) -> mfm_facts::FactKey {
@@ -30,15 +17,7 @@ pub(super) fn test_fact_query_evidence() -> mfm_facts::FactQueryEvidence {
 pub(super) fn test_fact_query_evidence_with_returned_refs(
     returned_refs: Vec<mfm_facts::InternalFactRef>,
 ) -> mfm_facts::FactQueryEvidence {
-    let query_scope = mfm_facts::FactQueryScope::new(
-        mfm_facts::FactAudience::Platform,
-        mfm_facts::FactVisibilityScope::Default,
-    );
-    let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
     let input = mfm_facts::FactQueryInput::new(
-        store_scope.clone(),
-        query_scope.clone(),
-        mfm_facts::ScopeDecisionEvidence::new(content(0x42)),
         vec![mfm_facts::FactQueryPredicate::new(
             mfm_facts::FactFieldId::new("subject.amount").expect("field id"),
             mfm_facts::FactQueryOperator::Equal,
@@ -52,9 +31,7 @@ pub(super) fn test_fact_query_evidence_with_returned_refs(
     let plan =
         mfm_facts::compile_fact_query_plan(&test_fact_descriptor(), input).expect("query plan");
     let frontier = mfm_facts::StoreReadFrontier::new(
-        store_scope,
-        query_scope,
-        mfm_facts::DescriptorCatalogWatermark::new(1),
+        fixture_store_scope_id(),
         mfm_facts::StoreCommitOrder::new(10),
     );
     let rows = returned_refs
@@ -72,52 +49,22 @@ pub(super) fn test_fact_query_evidence_with_returned_refs(
     mfm_facts::FactQueryEvidence::new(plan, receipt, selection)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn test_fact_claim(
     subject_amount: u64,
-    request_schema_id: SchemaId,
-    request_hash: ContentDigest,
     response_evidence: &store::ArtifactEvidenceRef,
-    capability_kind: CapabilityKind,
-    capability_version: CapabilityVersion,
-    adapter_kind: AdapterKind,
-    adapter_version: AdapterVersion,
 ) -> mfm_facts::FactClaim {
-    test_fact_claim_for_descriptor(
-        &test_fact_descriptor(),
-        subject_amount,
-        request_schema_id,
-        request_hash,
-        response_evidence,
-        capability_kind,
-        capability_version,
-        adapter_kind,
-        adapter_version,
-    )
+    test_fact_claim_for_descriptor(&test_fact_descriptor(), subject_amount, response_evidence)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn test_fact_claim_for_descriptor(
     descriptor: &mfm_facts::FactDescriptor,
     subject_amount: u64,
-    request_schema_id: SchemaId,
-    request_hash: ContentDigest,
     response_evidence: &store::ArtifactEvidenceRef,
-    capability_kind: CapabilityKind,
-    capability_version: CapabilityVersion,
-    adapter_kind: AdapterKind,
-    adapter_version: AdapterVersion,
 ) -> mfm_facts::FactClaim {
     mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
         fact_kind: descriptor.fact_kind().clone(),
         fact_descriptor_hash: mfm_facts::fact_descriptor_hash(descriptor).expect("descriptor hash"),
         subject: test_fact_subject_evidence_for_descriptor(descriptor, subject_amount),
-        observed_at: Some("2026-01-02T03:04:05Z".to_owned()),
-        request: Some(mfm_facts::FactRequestEvidence::new(
-            request_schema_id,
-            request_hash,
-        )),
         response: mfm_facts::FactResponseEvidence::new(
             response_evidence
                 .schema_id
@@ -128,12 +75,6 @@ pub(super) fn test_fact_claim_for_descriptor(
             response_evidence
                 .evidence_hash()
                 .expect("fact response evidence hash"),
-        ),
-        producer: mfm_facts::FactProducerProvenance::new(
-            capability_kind,
-            capability_version,
-            adapter_kind,
-            adapter_version,
         ),
     })
     .expect("fact claim")
@@ -190,8 +131,7 @@ pub(super) fn test_returned_fact_authority(
 ) -> (
     mfm_facts::InternalFactRef,
     store::FactDescriptorProjection,
-    store::FactRecordProjection,
-    store::FactIndexProjection,
+    store::FactQueryProjection,
     Vec<store::FactIndexTermProjection>,
 ) {
     let descriptor = test_fact_descriptor();
@@ -218,34 +158,24 @@ pub(super) fn test_returned_fact_authority(
             commit_id: store::CommitKey::new("test-returned-fact").expect("commit key"),
             store_commit_order: 2,
             recorded_at: "2026-07-01T00:00:00Z".to_owned(),
-            observed_at: Some("2026-07-01T00:01:00Z".to_owned()),
-            visibility: mfm_facts::FactVisibility::indexed_default(
-                mfm_facts::FactAudience::Platform,
-            ),
             subject: CanonicalValue::object([("amount", CanonicalValue::Unsigned(17))])
                 .expect("fact subject"),
             response: CanonicalValue::object([("amount", CanonicalValue::Unsigned(23))])
                 .expect("fact response"),
-            request: None,
             response_schema_id: <CertifierValue as mfm_values::MfmValue>::schema_id()
                 .expect("fact response schema"),
             response_artifact_id: None,
-            producer: mfm_facts::FactProducerProvenance::new(
-                fixture.cap_kind.clone(),
-                fixture.cap_version.clone(),
-                fixture.adapter_kind.clone(),
-                fixture.adapter_version.clone(),
-            ),
         },
     )
     .expect("fact projection fixture");
-    let index_projection = fact_fixture.index.expect("indexed fact projection");
-    let fact_ref = index_projection.internal_ref().expect("internal fact ref");
+    let fact_ref = fact_fixture
+        .projection
+        .internal_ref()
+        .expect("internal fact ref");
     (
         fact_ref,
         descriptor_fixture.projection,
-        fact_fixture.record,
-        index_projection,
+        fact_fixture.projection,
         fact_fixture.terms,
     )
 }
@@ -253,8 +183,7 @@ pub(super) fn test_returned_fact_authority(
 pub(super) fn projection_snapshot_with_returned_fact_authority(
     base: &store::ProjectionSnapshot,
     descriptor: store::FactDescriptorProjection,
-    record: store::FactRecordProjection,
-    index: store::FactIndexProjection,
+    query: store::FactQueryProjection,
     terms: Vec<store::FactIndexTermProjection>,
 ) -> store::ProjectionSnapshot {
     let mut parts = store::ProjectionSnapshotParts::from_snapshot(base);
@@ -262,11 +191,8 @@ pub(super) fn projection_snapshot_with_returned_fact_authority(
         .fact_descriptors
         .insert(descriptor.descriptor_hash.clone(), descriptor);
     parts
-        .fact_records
-        .insert(record.fact_claim_id.clone(), record);
-    parts
-        .fact_index_entries
-        .insert(index.fact_claim_id.clone(), index);
+        .fact_query_entries
+        .insert(query.fact_claim_id().clone(), query);
     parts.fact_term_entries.extend(
         terms
             .into_iter()

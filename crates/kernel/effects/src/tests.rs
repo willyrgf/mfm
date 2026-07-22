@@ -28,11 +28,6 @@ fn framework_effect_markers_have_stable_descriptors() {
         "read_external",
         "effect:mfm.kernel.effect:read_external:sha256-jcs-v1:57b1f6b604d4d724bdf593d53f397f88661f07c17cd2ed036e454f66192a6502",
     );
-    assert_effect::<ManagedPlatformWrite>(
-        EffectClass::ManagedPlatformWrite,
-        "managed_platform_write",
-        "effect:mfm.kernel.effect:managed_platform_write:sha256-jcs-v1:40d491129f1350c3b54cf50db658bd6a9bb0cadaeb8098252c7e4bcc4897192f",
-    );
     assert_effect::<ApplySideEffect>(
         EffectClass::ApplySideEffect,
         "apply_side_effect",
@@ -44,9 +39,5 @@ fn framework_effect_markers_have_stable_descriptors() {
 fn effect_class_strings_are_stable() {
     assert_eq!(EffectClass::Pure.as_str(), "pure");
     assert_eq!(EffectClass::ReadExternal.as_str(), "read_external");
-    assert_eq!(
-        EffectClass::ManagedPlatformWrite.as_str(),
-        "managed_platform_write"
-    );
     assert_eq!(EffectClass::ApplySideEffect.as_str(), "apply_side_effect");
 }

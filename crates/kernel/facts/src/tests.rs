@@ -1,7 +1,6 @@
 use mfm_canonical::{CanonicalJsonBytes, CanonicalValue, DecimalString};
 use mfm_ids::{
-    AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId,
+    ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId,
 };
 
 use super::*;
@@ -44,26 +43,6 @@ fn artifact_id(byte: u8) -> ArtifactId {
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([byte; 32]),
     )
-}
-
-fn capability_kind() -> CapabilityKind {
-    CapabilityKind::new(
-        "mfm.test.capability",
-        "read",
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([31; 32]),
-    )
-    .expect("capability kind")
-}
-
-fn adapter_kind() -> AdapterKind {
-    AdapterKind::new(
-        "mfm.test.adapter",
-        "read",
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([32; 32]),
-    )
-    .expect("adapter kind")
 }
 
 fn run_id(byte: u8) -> RunId {
@@ -207,9 +186,6 @@ fn default_query_input(
     limit: Option<u64>,
 ) -> FactQueryInput {
     FactQueryInput::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(digest(2)),
         predicates,
         return_fields
             .iter()

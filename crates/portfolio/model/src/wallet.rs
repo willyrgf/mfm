@@ -123,7 +123,8 @@ impl BitcoinAddress {
     /// Creates a checked Bitcoin address.
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let raw = value.into();
-        CheckedBitcoinAddress::new(&raw).map_err(|_| "Bitcoin address was invalid".to_owned())?;
+        CheckedBitcoinAddress::parse_any(&raw)
+            .map_err(|_| "Bitcoin address was invalid".to_owned())?;
         Ok(Self { raw })
     }
 

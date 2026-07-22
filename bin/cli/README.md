@@ -118,14 +118,13 @@ Public fact discovery and read-only queries are available under the `facts` subc
 Facts commands use only evidence-backed app read services over the certified PostgreSQL run store
 and retained fact descriptor artifacts. They do not construct live transports, signer providers,
 keystores, runtime source config, or workflow runners. Public queries always use the app service's
-Platform audience and default public scope; the CLI does not expose flags for `Control` or
-`RunPrivate` facts.
+committed store-wide fact projection; facts have no caller-authored visibility or audience.
 
 All fact query commands require `DATABASE_URL` or `--database-url`.
 
 ### `facts kinds`
 
-Lists public fact kinds that have Platform/default indexed facts.
+Lists fact kinds present in the committed store-wide projection.
 
 ```sh
 mfm_cli facts kinds [--database-url <URL>]
@@ -206,7 +205,7 @@ mfm_cli facts latest wallet.balance \
 
 mfm_cli facts history weather.observation \
   --shape mfm.weather.observation.v1 \
-  --order metadata.observed_at.desc \
+  --order metadata.recorded_at.desc \
   --subject country=IE \
   --result temperature_celsius_milli.lt=0 \
   --field result.temperature_celsius_milli \
@@ -236,8 +235,8 @@ Unknown refs and refs for non-public facts return the same redacted `FactNotFoun
 ### Facts Output And Privacy Contract
 
 Facts JSON uses the standard CLI success/error envelope. Query and show results contain only app
-public DTOs: `public_ref`, `fact_kind`, a public descriptor reference, `recorded_at`,
-`observed_at`, and descriptor-approved returned fields.
+public DTOs: `public_ref`, `fact_kind`, a public descriptor reference, `recorded_at`, and
+descriptor-approved returned fields.
 
 Text output is concise and follows the same privacy boundary. Facts commands must not print or
 serialize internal refs, artifact ids, artifact evidence hashes, descriptor hashes, subject
@@ -413,7 +412,7 @@ mfm_cli --output-format json ops list
 ```
 
 JSON output returns plain string ids under `entry_points`. The production surface contains exactly
-one entry point, `mfm.portfolio/snapshot@1`; that exact versioned id is the complete discovery
+one entry point, `mfm.portfolio/snapshot@2`; that exact versioned id is the complete discovery
 surface.
 
 ### `setup import`, `setup list`, and `setup export`
@@ -504,7 +503,7 @@ setup changes target configuration without changing the entry-point registry.
 For example:
 
 ```sh
-mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
+mfm_cli run start mfm.portfolio/snapshot@2 acme/primary
 ```
 
 The target selects only its current `PortfolioConfig`. It cannot select collector policies, child

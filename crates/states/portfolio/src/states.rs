@@ -1,6 +1,6 @@
 use super::*;
 
-/// State that selects required holdings from Platform facts (adapter-bound).
+/// State that selects required holdings from committed facts (adapter-bound).
 pub struct SelectHoldingsState {
     config: SelectHoldingsConfig,
 }
@@ -18,14 +18,15 @@ impl StateSpec for SelectHoldingsState {
     type Input = SelectHoldingsInput;
     type Output = SelectedHoldings;
     type Effect = ReadExternal;
-    type Caps = (FactIndexReadCapability,);
+    type Caps = (FactQueryReadCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("select_holdings")
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        state_version("select_holdings")
+        StateVersion::new("mfm.portfolio.state.select_holdings.v2")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
     fn name() -> &'static str {
@@ -46,6 +47,7 @@ impl StateSpec for SelectHoldingsState {
 impl ReadState for SelectHoldingsState {
     type Plan = SelectHoldingsReadPlan;
     type Evidence = SelectHoldingsReadEvidence;
+    type Facts = ();
 
     fn plan(
         &self,
@@ -61,13 +63,14 @@ impl ReadState for SelectHoldingsState {
         input: &Self::Input,
         evidence: &ExternalReadEvidenceSet<Self::Evidence>,
         context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
+    ) -> StateResult<(Self::Output, Self::Facts)> {
         let plan = self.plan(input, context)?;
         holding_read::reduce_select_holdings(
             &plan,
             evidence.primary_evidence(),
             evidence.fact_query_evidence(),
         )
+        .map(|output| (output, ()))
         .map_err(|error| StateError::Message(error.to_string()))
     }
 }
@@ -90,7 +93,8 @@ impl StateSpec for AssembleSnapshotState {
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        state_version("assemble_snapshot")
+        StateVersion::new("mfm.portfolio.state.assemble_snapshot.v2")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
     fn name() -> &'static str {
@@ -130,7 +134,8 @@ impl StateSpec for ProjectReportState {
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        state_version("project_report")
+        StateVersion::new("mfm.portfolio.state.project_report.v2")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
     fn name() -> &'static str {

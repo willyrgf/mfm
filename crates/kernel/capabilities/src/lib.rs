@@ -9,9 +9,7 @@
 
 use std::collections::BTreeSet;
 
-pub use mfm_effects::{
-    ApplySideEffect, EffectClass, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
-};
+pub use mfm_effects::{ApplySideEffect, EffectClass, EffectSpec, Pure, ReadExternal};
 use mfm_ids::NameToken;
 pub use mfm_ids::{CapabilityKind, CapabilityVersion};
 pub use provider_diagnostic::{
@@ -62,9 +60,6 @@ pub trait CapabilityRoleSpec: private::RoleSealed + Send + Sync + 'static {
 /// External read capability role.
 pub enum ReadExternalRole {}
 
-/// MFM-managed platform persistence/output capability role.
-pub enum ManagedPlatformWriteRole {}
-
 /// Support capability role that cannot mutate external systems.
 pub enum SupportRole {}
 
@@ -82,10 +77,6 @@ macro_rules! impl_role_spec {
 }
 
 impl_role_spec!(ReadExternalRole, CapabilityRole::ReadExternal);
-impl_role_spec!(
-    ManagedPlatformWriteRole,
-    CapabilityRole::ManagedPlatformWrite
-);
 impl_role_spec!(SupportRole, CapabilityRole::Support);
 impl_role_spec!(
     ExternalMutationAuthorityRole,
@@ -97,8 +88,6 @@ impl_role_spec!(
 pub enum CapabilityRole {
     /// Read-only access to an external system.
     ReadExternal,
-    /// MFM-managed platform persistence/output authority.
-    ManagedPlatformWrite,
     /// Non-mutating support authority.
     Support,
     /// Authority to mutate one external domain system.
@@ -110,7 +99,6 @@ impl CapabilityRole {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ReadExternal => "read_external",
-            Self::ManagedPlatformWrite => "managed_platform_write",
             Self::Support => "support",
             Self::ExternalMutationAuthority => "external_mutation_authority",
         }
@@ -272,20 +260,6 @@ impl CapabilitySetDescriptor {
                     ))
                 }
             }
-            EffectClass::ManagedPlatformWrite => {
-                if self
-                    .capabilities
-                    .iter()
-                    .all(|capability| capability.role == CapabilityRole::ManagedPlatformWrite)
-                {
-                    Ok(())
-                } else {
-                    Err(invalid_set(
-                        effect_name,
-                        "managed platform write effects may declare only managed platform capabilities",
-                    ))
-                }
-            }
             EffectClass::ApplySideEffect => {
                 let mutation_authorities = self
                     .capabilities
@@ -362,11 +336,6 @@ macro_rules! impl_capability_tuple_family {
     ($($name:ident),+) => {
         impl_capability_tuple!($($name),+);
         impl_all_roles_for_effect!(ReadExternal, private::ReadEffectRole, $($name),+);
-        impl_all_roles_for_effect!(
-            ManagedPlatformWrite,
-            private::ManagedPlatformWriteEffectRole,
-            $($name),+
-        );
         impl<$($name),+> private::CapabilitySetForSealed<ApplySideEffect> for ($($name,)+)
         where
             $(
@@ -396,9 +365,7 @@ fn invalid_set(effect: &'static str, message: &'static str) -> CapabilityError {
 }
 
 mod private {
-    use super::{
-        ExternalMutationAuthorityRole, ManagedPlatformWriteRole, ReadExternalRole, SupportRole,
-    };
+    use super::{ExternalMutationAuthorityRole, ReadExternalRole, SupportRole};
     use mfm_effects::EffectSpec;
 
     pub trait RoleSealed {}
@@ -412,10 +379,6 @@ mod private {
     impl ReadEffectRole for ReadExternalRole {}
 
     impl ReadEffectRole for SupportRole {}
-
-    pub trait ManagedPlatformWriteEffectRole {}
-
-    impl ManagedPlatformWriteEffectRole for ManagedPlatformWriteRole {}
 
     pub enum ZeroMutationAuthorities {}
 
@@ -487,10 +450,6 @@ mod private {
 
     impl RoleMutationAuthorityCount for ExternalMutationAuthorityRole {
         type Count = OneMutationAuthority;
-    }
-
-    impl RoleMutationAuthorityCount for ManagedPlatformWriteRole {
-        type Count = InvalidMutationAuthorities;
     }
 
     pub trait ExactlyOneMutationAuthorityCount {}

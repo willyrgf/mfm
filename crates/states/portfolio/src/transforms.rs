@@ -36,7 +36,6 @@ pub fn observations_from_selected_holdings(
                 holding: item.material.holding.clone(),
                 anchor: item.material.observation_anchor.clone(),
             },
-            coverage: item.material.coverage.clone(),
             metadata: symbol.metadata.clone(),
         };
         observation.normalize();
@@ -279,7 +278,7 @@ pub fn assemble_snapshot(
     Ok(snapshot)
 }
 
-/// Projects the version-1 canonical portfolio report from a version-1 snapshot.
+/// Projects the version-1 canonical portfolio report from a version-2 snapshot.
 pub fn project_report_from_snapshot(snapshot: PortfolioSnapshot) -> StateResult<PortfolioReport> {
     if snapshot.schema_version != PortfolioSnapshot::SCHEMA_VERSION {
         return Err(StateError::Message(

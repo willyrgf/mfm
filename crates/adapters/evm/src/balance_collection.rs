@@ -6,22 +6,15 @@ use std::task::Poll;
 
 use alloy_primitives::{Address, Bytes, U256};
 use mfm_evm_capabilities::{EvmBlockSelector, EvmCall, EvmReadSession};
-use mfm_fact_capabilities::FactRecordCapability;
-use mfm_program::StateSpec;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    load_materialized_struct_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerFuture, ExternalReadExecution, ExternalReadExecutionFuture,
-    ExternalReadPlanExecutor, FactRecordInput, RunnerCapabilityBinding, RunnerIngressContext,
-    RunnerOutputBuilder,
+    ErasedRunCtx, ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
+    RunnerIngressContext,
 };
 use mfm_states_evm::{
-    evm_balance_fact_visibility, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
-    record_evm_balance_facts, CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig,
-    EvmBalanceCollectionEvidence, EvmBalanceCollectionPlan, EvmBalanceReadEvidence,
-    EvmTokenDecimalsEvidence, RecordEvmBalanceFactsInput, RecordEvmBalanceFactsState,
+    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionEvidence,
+    EvmBalanceCollectionPlan, EvmBalanceReadEvidence, EvmTokenDecimalsEvidence,
 };
-use mfm_store::v1 as store;
 
 use crate::{evm_ingress_runtime_error, evm_read_runtime_error, EvmReadRunnerCapabilities};
 
@@ -274,80 +267,13 @@ where
     .await
 }
 
-pub(crate) struct RecordEvmBalanceFactsRunner {
-    pub(crate) artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for RecordEvmBalanceFactsRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config = load_runner_config_for_node::<EvmBalanceCollectionConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let input = load_materialized_struct_input::<RecordEvmBalanceFactsInput>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let (receipt, facts) = record_evm_balance_facts(config.as_ref(), input.batch)
-                .map_err(balance_state_runtime_error)?;
-            let mut output = RunnerOutputBuilder::new(&ctx);
-            let producer = evm_fact_record_binding()?;
-            for fact in facts {
-                output.record_fact(
-                    FactRecordInput::new(fact, evm_balance_fact_visibility()),
-                    producer.clone(),
-                )?;
-            }
-            output.state_output(&receipt)?;
-            Ok(output.finish())
-        })
-    }
-}
-
-fn evm_fact_record_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    RunnerCapabilityBinding::for_capability::<FactRecordCapability>(
-        evm_jsonrpc_adapter_kind()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
-        evm_jsonrpc_adapter_version()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
-    )
-}
-
 /// Verifies EVM balance collection and atomic fact publication from retained material only.
 pub fn verify_evm_balance_collection_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
-    replay::verify_external_read_state::<CollectEvmBalancesState>(broker)?;
-    let kind = RecordEvmBalanceFactsState::kind().map_err(replay_adapter_error)?;
-    let version = RecordEvmBalanceFactsState::version().map_err(replay_adapter_error)?;
-    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
-        Ok(node.state_kind == kind && node.state_version == version)
-    })?;
-    for frame in frames {
-        let config: EvmBalanceCollectionConfig = replay::load_node_config(broker, &frame.node)?;
-        let input = replay::load_node_input::<RecordEvmBalanceFactsInput>(broker, &frame.node)?;
-        let (receipt, facts) =
-            record_evm_balance_facts(&config, input.batch).map_err(replay_adapter_error)?;
-        if replay::canonical_value_bytes(&receipt)?.as_bytes() != frame.artifact_bytes {
-            return Err(replay_adapter_error(
-                "recorded EVM balance receipt did not match recomputed value",
-            ));
-        }
-        replay::verify_recorded_fact_batch_evidence(broker, &frame, &facts)?;
-    }
-    Ok(())
+    replay::verify_external_read_state::<CollectEvmBalancesState>(broker)
 }
 
 fn balance_state_runtime_error(
     error: mfm_states_evm::EvmBalanceCollectionError,
 ) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-}
-
-fn replay_adapter_error(error: impl std::fmt::Display) -> replay::ReplayError {
-    replay::ReplayError::new(
-        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
-        error.to_string(),
-    )
 }

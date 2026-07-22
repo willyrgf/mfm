@@ -72,7 +72,7 @@ pub fn derive_public_outputs(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_derive(MfmFactType, attributes(mfm_fact, mfm, serde))]
-/// Derives `mfm_program::MfmFactType` for a fact wrapper struct.
+/// Derives `mfm_facts::MfmFactType` for a fact wrapper struct.
 pub fn derive_mfm_fact_type(input: TokenStream) -> TokenStream {
     fact::derive(input)
 }

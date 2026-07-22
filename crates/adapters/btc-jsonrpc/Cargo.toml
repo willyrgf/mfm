@@ -11,17 +11,10 @@ layer = "live"
 domain = "bitcoin"
 
 [dependencies]
-serde = { workspace = true }
-thiserror = { workspace = true }
-
 mfm-btc-capabilities = { path = "../../btc-capabilities" }
 mfm-events = { path = "../../kernel/events" }
-mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-program = { path = "../../kernel/program" }
 mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
-mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store" }
 mfm-states-btc = { path = "../../states/btc" }
-mfm-values = { path = "../../kernel/values" }

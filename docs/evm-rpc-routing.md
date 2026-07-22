@@ -99,16 +99,17 @@ limit of 16. Its single aggregate evidence value retains the checked session, re
 and final canonicality observation. The state-owned reducer enforces exact order and coverage for
 both live execution and replay.
 
-`RecordEvmBalanceFactsState` then records one `evm.balance_snapshot` fact per source and a checked
-`EvmBalanceCollectionReceipt` in one atomic managed-write attempt. The receipt carries the exact
-anchor, sorted sources, and verified content identities without copying balance response material.
-The live runner, atomic publication, and evidence-only replay live in `mfm-adapters-evm`.
+The `CollectEvmBalancesState` reducer emits one `evm.balance_snapshot` fact per source and a checked
+`EvmBalanceCollectionReceipt`; runtime records them with evidence and completion in one atomic
+external-read settlement. The receipt carries the exact anchor, sorted sources, and verified
+content identities without copying balance response material. The live runner and evidence-only
+replay live in `mfm-adapters-evm`.
 `PortfolioReportOperation` receives the typed family receipt vectors and passes the same structured
-binding to selection, which queries receipt-authorized content through the shared BTC/EVM fact-index
+binding to selection, which queries receipt-authorized content through the shared Bitcoin/EVM fact
 snapshot, rehydrates response artifacts, and rederives exact content identity before assembly. The
 receipts come from the same run, while any byte-identical append occurrence with the authorized
 content identity is interchangeable. All-EVM portfolios use this same store path. EVM replay
-reconstructs collection and publication in the EVM adapter; portfolio replay reconstructs only
+reruns collection reduction in the EVM adapter; portfolio replay reconstructs only
 receipt-pinned selection and report projection. Neither requires runtime config or network access.
 
 ## Signing

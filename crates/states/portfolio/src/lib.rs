@@ -26,13 +26,12 @@ pub use collection_receipt::{
     HoldingRequirementKey, SelectHoldingsInput, SelectHoldingsInputHandles,
 };
 pub use holding_read::{
-    PortfolioHoldingFactResponse, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
+    PortfolioHoldingFactEvidence, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
 };
 pub use selection::{
-    portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
-    project_network_pins_from_observations, HoldingCandidate, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, SelectedHolding, SelectedHoldingMaterial,
-    PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
+    portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
+    HoldingCandidate, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, SelectedHolding,
+    SelectedHoldingMaterial, PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,8 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_effects::{Pure, ReadExternal};
-use mfm_fact_capabilities::FactIndexReadCapability;
-use mfm_facts::StoreScopeRef;
+use mfm_facts::FactQueryReadCapability;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
 use mfm_portfolio_model::portfolio::{
     PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
@@ -61,8 +59,7 @@ use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "mfm.portfolio";
 const ADAPTER_NAME: &str = "typed-portfolio";
-const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v1";
-const PORTFOLIO_STORE_SCOPE: &str = "mfm.store.default";
+const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v2";
 
 #[path = "config.rs"]
 mod config;
@@ -108,11 +105,6 @@ fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
         sha256_digest_bytes(format!("mfm.portfolio.state:{name}").as_bytes()),
     )
     .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-}
-
-fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
-    StateVersion::new(format!("mfm.portfolio.state.{name}.v1"))
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
 /// Selected receipt-authorized holdings emitted by fact selection (without valuation join).

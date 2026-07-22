@@ -1,4 +1,5 @@
-use mfm_program::{fact_descriptor_ref, facts, MfmFactType as _};
+use mfm_facts::MfmFactType as _;
+use mfm_program::{fact_descriptor_ref, facts};
 use mfm_program_derive::{
     MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs, StateInput,
 };
@@ -190,16 +191,6 @@ struct ChainHeadResponse {
     value_type = "string",
     exposure = "returnable"
 ))]
-#[mfm_fact(field(
-    id = "metadata.observed_at",
-    source = "metadata",
-    metadata = "observed_at",
-    value_type = "timestamp",
-    operators(equal, less_than_or_equal),
-    exposure = "query_only",
-    optional,
-    sortable
-))]
 #[mfm_fact(ordering(
     name = "result.height.desc",
     term(field = "result.height", direction = "descending", nulls = "last")
@@ -372,7 +363,7 @@ fn generated_fact_descriptor_is_canonical_descriptor_authority() {
     );
 
     let fields = descriptor.fields();
-    assert_eq!(fields.len(), 4);
+    assert_eq!(fields.len(), 3);
     assert_eq!(fields[0].field_id().as_str(), "subject.chain");
     assert_eq!(
         fields[0].extraction(),
@@ -397,15 +388,6 @@ fn generated_fact_descriptor_is_canonical_descriptor_authority() {
     );
     assert_eq!(fields[1].exposure(), facts::FactFieldExposure::Returnable);
     assert!(fields[1].sortable());
-
-    assert_eq!(fields[3].field_id().as_str(), "metadata.observed_at");
-    assert_eq!(
-        fields[3].extraction(),
-        &facts::FactFieldExtraction::Metadata(facts::FactMetadataField::ObservedAt)
-    );
-    assert_eq!(fields[3].exposure(), facts::FactFieldExposure::QueryOnly);
-    assert!(!fields[3].required());
-    assert!(fields[3].sortable());
 
     let ordering = descriptor.orderings().first().expect("ordering");
     assert_eq!(ordering.name().as_str(), "result.height.desc");

@@ -23,7 +23,7 @@ INSERT INTO store_metadata (store_epoch, store_scope_id, schema_contract_version
 VALUES (
   'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'),
   'mfm.store_scope.v1:' || encode(public.gen_random_bytes(16), 'hex'),
-  'mfm.postgres.store.v3'
+  'mfm.postgres.store.v4'
 );
 
 CREATE TABLE store_commit_order (
@@ -146,7 +146,7 @@ CREATE TABLE run_artifact_admissions (
   CONSTRAINT run_artifact_admissions_seq_positive CHECK (first_seq >= 1)
 );
 
-CREATE TABLE fact_descriptor_index (
+CREATE TABLE fact_descriptor_catalog (
   descriptor_hash TEXT PRIMARY KEY,
   descriptor_artifact_id TEXT NOT NULL,
   descriptor_artifact_evidence_hash TEXT NOT NULL,
@@ -156,9 +156,9 @@ CREATE TABLE fact_descriptor_index (
   response_schema_id TEXT NOT NULL,
   fact_subject_namespace_hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT fact_descriptor_index_artifact_fk FOREIGN KEY (descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES artifact_admissions(artifact_id, evidence_hash) ON DELETE RESTRICT,
-  CONSTRAINT fact_descriptor_index_artifact_unique UNIQUE (descriptor_artifact_id, descriptor_artifact_evidence_hash),
-  CONSTRAINT fact_descriptor_index_descriptor_artifact_unique UNIQUE (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash)
+  CONSTRAINT fact_descriptor_catalog_artifact_fk FOREIGN KEY (descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES artifact_admissions(artifact_id, evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_descriptor_catalog_artifact_unique UNIQUE (descriptor_artifact_id, descriptor_artifact_evidence_hash),
+  CONSTRAINT fact_descriptor_catalog_descriptor_artifact_unique UNIQUE (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash)
 );
 
 CREATE TABLE run_fact_descriptor_admissions (
@@ -171,7 +171,7 @@ CREATE TABLE run_fact_descriptor_admissions (
   source_event_id TEXT NOT NULL,
   commit_id TEXT NOT NULL,
   PRIMARY KEY (run_id, descriptor_hash),
-  CONSTRAINT run_fact_descriptor_admissions_descriptor_artifact_fk FOREIGN KEY (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES fact_descriptor_index(descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_descriptor_artifact_fk FOREIGN KEY (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES fact_descriptor_catalog(descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) ON DELETE RESTRICT,
   CONSTRAINT run_fact_descriptor_admissions_event_fk FOREIGN KEY (run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
   CONSTRAINT run_fact_descriptor_admissions_event_id_fk FOREIGN KEY (run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,
   CONSTRAINT run_fact_descriptor_admissions_commit_fk FOREIGN KEY (commit_id) REFERENCES commits(commit_id) ON DELETE RESTRICT,
@@ -180,49 +180,38 @@ CREATE TABLE run_fact_descriptor_admissions (
   CONSTRAINT run_fact_descriptor_admissions_ordinal_nonnegative CHECK (source_ordinal >= 0)
 );
 
-CREATE TABLE fact_index (
+CREATE TABLE fact_query_projection (
   source_run_id TEXT NOT NULL,
   source_seq BIGINT NOT NULL,
   source_ordinal INTEGER NOT NULL,
   source_event_id TEXT NOT NULL,
   producer_node_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
   commit_id TEXT NOT NULL,
   commit_key TEXT NOT NULL,
   store_commit_order BIGINT NOT NULL,
   recorded_at TEXT NOT NULL,
-  observed_at TEXT NULL,
-  audience TEXT NOT NULL,
-  visibility_scope TEXT NOT NULL,
   fact_kind TEXT NOT NULL,
   fact_descriptor_hash TEXT NOT NULL,
   fact_subject_namespace_hash TEXT NOT NULL,
   fact_key TEXT NOT NULL,
   subject_material_hash TEXT NOT NULL,
-  request_schema_id TEXT NULL,
-  request_hash TEXT NULL,
   response_schema_id TEXT NOT NULL,
   response_hash TEXT NOT NULL,
   response_artifact_id TEXT NOT NULL,
   response_artifact_evidence_hash TEXT NOT NULL,
-  capability_kind TEXT NOT NULL,
-  capability_version TEXT NOT NULL,
-  adapter_kind TEXT NOT NULL,
-  adapter_version TEXT NOT NULL,
   PRIMARY KEY (source_run_id, source_seq, source_ordinal),
-  CONSTRAINT fact_index_event_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
-  CONSTRAINT fact_index_event_id_fk FOREIGN KEY (source_run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,
-  CONSTRAINT fact_index_commit_fk FOREIGN KEY (commit_id) REFERENCES commits(commit_id) ON DELETE RESTRICT,
-  CONSTRAINT fact_index_descriptor_fk FOREIGN KEY (fact_descriptor_hash) REFERENCES fact_descriptor_index(descriptor_hash) ON DELETE RESTRICT,
-  CONSTRAINT fact_index_response_artifact_fk FOREIGN KEY (response_artifact_id, response_artifact_evidence_hash) REFERENCES artifact_admissions(artifact_id, evidence_hash) ON DELETE RESTRICT,
-  CONSTRAINT fact_index_seq_positive CHECK (source_seq >= 1),
-  CONSTRAINT fact_index_ordinal_nonnegative CHECK (source_ordinal >= 0),
-  CONSTRAINT fact_index_store_commit_order_positive CHECK (store_commit_order >= 1),
-  CONSTRAINT fact_index_audience_v1 CHECK (audience IN ('control', 'platform')),
-  CONSTRAINT fact_index_visibility_scope_v1 CHECK (visibility_scope = 'default'),
-  CONSTRAINT fact_index_request_pair CHECK ((request_schema_id IS NULL) = (request_hash IS NULL))
+  CONSTRAINT fact_query_projection_event_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
+  CONSTRAINT fact_query_projection_event_id_fk FOREIGN KEY (source_run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,
+  CONSTRAINT fact_query_projection_commit_fk FOREIGN KEY (commit_id) REFERENCES commits(commit_id) ON DELETE RESTRICT,
+  CONSTRAINT fact_query_projection_descriptor_fk FOREIGN KEY (fact_descriptor_hash) REFERENCES fact_descriptor_catalog(descriptor_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_query_projection_response_artifact_fk FOREIGN KEY (response_artifact_id, response_artifact_evidence_hash) REFERENCES artifact_admissions(artifact_id, evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_query_projection_seq_positive CHECK (source_seq >= 1),
+  CONSTRAINT fact_query_projection_ordinal_nonnegative CHECK (source_ordinal >= 0),
+  CONSTRAINT fact_query_projection_store_commit_order_positive CHECK (store_commit_order >= 1)
 );
 
-CREATE TABLE fact_index_terms (
+CREATE TABLE fact_query_terms (
   source_run_id TEXT NOT NULL,
   source_seq BIGINT NOT NULL,
   source_ordinal INTEGER NOT NULL,
@@ -240,15 +229,15 @@ CREATE TABLE fact_index_terms (
   unit TEXT NULL,
   scale INTEGER NULL,
   PRIMARY KEY (source_run_id, source_seq, source_ordinal, field_id),
-  CONSTRAINT fact_index_terms_claim_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES fact_index(source_run_id, source_seq, source_ordinal) ON DELETE CASCADE,
-  CONSTRAINT fact_index_terms_descriptor_fk FOREIGN KEY (fact_descriptor_hash) REFERENCES fact_descriptor_index(descriptor_hash) ON DELETE RESTRICT,
-  CONSTRAINT fact_index_terms_seq_positive CHECK (source_seq >= 1),
-  CONSTRAINT fact_index_terms_ordinal_nonnegative CHECK (source_ordinal >= 0),
-  CONSTRAINT fact_index_terms_source_v1 CHECK (source IN ('subject', 'result', 'metadata')),
-  CONSTRAINT fact_index_terms_value_type_v1 CHECK (
+  CONSTRAINT fact_query_terms_claim_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES fact_query_projection(source_run_id, source_seq, source_ordinal) ON DELETE CASCADE,
+  CONSTRAINT fact_query_terms_descriptor_fk FOREIGN KEY (fact_descriptor_hash) REFERENCES fact_descriptor_catalog(descriptor_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_query_terms_seq_positive CHECK (source_seq >= 1),
+  CONSTRAINT fact_query_terms_ordinal_nonnegative CHECK (source_ordinal >= 0),
+  CONSTRAINT fact_query_terms_source_v1 CHECK (source IN ('subject', 'result', 'metadata')),
+  CONSTRAINT fact_query_terms_value_type_v1 CHECK (
     value_type IN ('string', 'boolean', 'signed_integer', 'unsigned_integer', 'timestamp', 'decimal_string', 'digest')
   ),
-  CONSTRAINT fact_index_terms_u64_range CHECK (
+  CONSTRAINT fact_query_terms_u64_range CHECK (
     value_u64 IS NULL
     OR (
       value_u64 ~ '^[0-9]+$'
@@ -258,7 +247,7 @@ CREATE TABLE fact_index_terms (
       )
     )
   ),
-  CONSTRAINT fact_index_terms_value_shape CHECK (
+  CONSTRAINT fact_query_terms_value_shape CHECK (
     (value_type = 'string' AND value_text IS NOT NULL AND value_bool IS NULL AND value_i64 IS NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NULL)
     OR (value_type = 'boolean' AND value_text IS NULL AND value_bool IS NOT NULL AND value_i64 IS NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NULL)
     OR (value_type = 'signed_integer' AND value_text IS NULL AND value_bool IS NULL AND value_i64 IS NOT NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NULL)
@@ -269,53 +258,53 @@ CREATE TABLE fact_index_terms (
   )
 );
 
-CREATE TABLE fact_projection_metadata (
+CREATE TABLE fact_query_metadata (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   projection_generation BIGINT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT fact_projection_metadata_generation_positive CHECK (projection_generation >= 1)
+  CONSTRAINT fact_query_metadata_generation_positive CHECK (projection_generation >= 1)
 );
 
-INSERT INTO fact_projection_metadata (projection_generation) VALUES (1);
+INSERT INTO fact_query_metadata (projection_generation) VALUES (1);
 
-CREATE INDEX fact_descriptor_index_kind_idx
-ON fact_descriptor_index (fact_kind, descriptor_hash);
+CREATE INDEX fact_descriptor_catalog_kind_idx
+ON fact_descriptor_catalog (fact_kind, descriptor_hash);
 
-CREATE INDEX fact_index_descriptor_scope_idx
-ON fact_index (fact_descriptor_hash, audience, visibility_scope, store_commit_order DESC, source_run_id, source_seq, source_ordinal);
+CREATE INDEX fact_query_projection_descriptor_order_idx
+ON fact_query_projection (fact_descriptor_hash, store_commit_order DESC, source_run_id, source_seq, source_ordinal);
 
-CREATE INDEX fact_index_fact_key_idx
-ON fact_index (fact_descriptor_hash, fact_key);
+CREATE INDEX fact_query_projection_fact_key_idx
+ON fact_query_projection (fact_descriptor_hash, fact_key);
 
-CREATE INDEX fact_index_response_artifact_idx
-ON fact_index (response_artifact_id, response_artifact_evidence_hash);
+CREATE INDEX fact_query_projection_response_artifact_idx
+ON fact_query_projection (response_artifact_id, response_artifact_evidence_hash);
 
-CREATE INDEX fact_index_terms_text_idx
-ON fact_index_terms (fact_descriptor_hash, field_id, value_text, source_run_id, source_seq, source_ordinal)
+CREATE INDEX fact_query_terms_text_idx
+ON fact_query_terms (fact_descriptor_hash, field_id, value_text, source_run_id, source_seq, source_ordinal)
 WHERE value_type = 'string';
 
-CREATE INDEX fact_index_terms_bool_idx
-ON fact_index_terms (fact_descriptor_hash, field_id, value_bool, source_run_id, source_seq, source_ordinal)
+CREATE INDEX fact_query_terms_bool_idx
+ON fact_query_terms (fact_descriptor_hash, field_id, value_bool, source_run_id, source_seq, source_ordinal)
 WHERE value_type = 'boolean';
 
-CREATE INDEX fact_index_terms_i64_idx
-ON fact_index_terms (fact_descriptor_hash, field_id, value_i64, source_run_id, source_seq, source_ordinal)
+CREATE INDEX fact_query_terms_i64_idx
+ON fact_query_terms (fact_descriptor_hash, field_id, value_i64, source_run_id, source_seq, source_ordinal)
 WHERE value_type = 'signed_integer';
 
-CREATE INDEX fact_index_terms_u64_idx
-ON fact_index_terms (fact_descriptor_hash, field_id, value_u64, source_run_id, source_seq, source_ordinal)
+CREATE INDEX fact_query_terms_u64_idx
+ON fact_query_terms (fact_descriptor_hash, field_id, value_u64, source_run_id, source_seq, source_ordinal)
 WHERE value_type = 'unsigned_integer';
 
-CREATE INDEX fact_index_terms_decimal_idx
-ON fact_index_terms (fact_descriptor_hash, field_id, value_decimal, source_run_id, source_seq, source_ordinal)
+CREATE INDEX fact_query_terms_decimal_idx
+ON fact_query_terms (fact_descriptor_hash, field_id, value_decimal, source_run_id, source_seq, source_ordinal)
 WHERE value_type = 'decimal_string';
 
-CREATE INDEX fact_index_terms_timestamp_idx
-ON fact_index_terms (fact_descriptor_hash, field_id, value_timestamp, source_run_id, source_seq, source_ordinal)
+CREATE INDEX fact_query_terms_timestamp_idx
+ON fact_query_terms (fact_descriptor_hash, field_id, value_timestamp, source_run_id, source_seq, source_ordinal)
 WHERE value_type = 'timestamp';
 
-CREATE INDEX fact_index_terms_digest_idx
-ON fact_index_terms (fact_descriptor_hash, field_id, value_digest, source_run_id, source_seq, source_ordinal)
+CREATE INDEX fact_query_terms_digest_idx
+ON fact_query_terms (fact_descriptor_hash, field_id, value_digest, source_run_id, source_seq, source_ordinal)
 WHERE value_type = 'digest';
 
 CREATE TABLE admission_lane (

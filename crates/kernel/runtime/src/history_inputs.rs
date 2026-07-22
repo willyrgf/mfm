@@ -17,55 +17,6 @@ pub(super) fn raw_stream_requires_artifact_byte_authority(
     })
 }
 
-pub(crate) fn recorded_facts_for_attempt(
-    projections: &store::ProjectionSnapshot,
-    node_id: &NodeId,
-    attempt_id: &AttemptId,
-) -> Result<RecordedFacts> {
-    let mut facts = BTreeMap::new();
-    for (fact_claim_id, projection) in projections.fact_records() {
-        if projection.node_id != *node_id || projection.attempt_id != *attempt_id {
-            continue;
-        }
-        if projection.fact_claim_id != *fact_claim_id {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "fact record {:?} for node {} attempt {} is internally inconsistent",
-                fact_claim_id, node_id, attempt_id
-            )));
-        }
-        let claim = &projection.claim;
-        let fact_key = claim.subject().fact_key();
-        let request = claim.request();
-        let response = claim.response();
-        let producer = claim.producer();
-        if facts
-            .insert(
-                fact_claim_id.clone(),
-                RecordedFact {
-                    fact_claim_id: fact_claim_id.clone(),
-                    fact_key: fact_key.clone(),
-                    request_schema_id: request.map(|evidence| evidence.request_schema_id().clone()),
-                    request_hash: request.map(|evidence| evidence.request_hash().clone()),
-                    response_schema_id: response.response_schema_id().clone(),
-                    response_hash: response.response_hash().clone(),
-                    artifact_id: response.artifact_id().clone(),
-                    capability_kind: producer.capability_kind().clone(),
-                    capability_version: producer.capability_version().clone(),
-                    adapter_kind: producer.adapter_kind().clone(),
-                    adapter_version: producer.adapter_version().clone(),
-                },
-            )
-            .is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "node {} attempt {} has multiple recorded facts for claim {:?}",
-                node_id, attempt_id, fact_claim_id
-            )));
-        }
-    }
-    Ok(RecordedFacts { facts })
-}
-
 pub(crate) fn materialize_inputs(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,

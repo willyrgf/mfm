@@ -1,6 +1,14 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 
 pub(super) fn replay_fact_stream_fixture() -> ReplayFactStreamFixture {
+    replay_fact_stream_fixture_with_values(&[("same-subject", 42)])
+}
+
+pub(super) fn replay_fact_stream_fixture_with_values(
+    values: &[(&str, u64)],
+) -> ReplayFactStreamFixture {
+    assert!(!values.is_empty(), "fact stream fixture requires facts");
     let descriptor = replay_stream_fact_descriptor();
     let descriptor_bytes =
         mfm_facts::canonical_fact_descriptor_bytes(&descriptor).expect("descriptor bytes");
@@ -16,9 +24,6 @@ pub(super) fn replay_fact_stream_fixture() -> ReplayFactStreamFixture {
         replay_artifact_authority_key(&descriptor_artifact).expect("descriptor artifact key");
     let descriptor_run_ref = run_artifact_ref_from_store_artifact_for_test(&descriptor_artifact);
 
-    let (response_artifact, response_bytes) = replay_stream_fact_response_artifact(&descriptor, 42);
-    let response_artifact_key =
-        replay_artifact_authority_key(&response_artifact).expect("response artifact key");
     let certified_spec = hashed_fact_replay_spec();
     let run_admitted = fact_run_admitted_for_stream(&certified_spec, descriptor_run_ref);
     let run_id = run_admitted.run_id.clone();
@@ -37,41 +42,182 @@ pub(super) fn replay_fact_stream_fixture() -> ReplayFactStreamFixture {
         state_kind: node.state_kind.clone(),
         state_version: node.state_version.clone(),
     };
-    let fact = events::FactRecorded {
+    let mut response_artifacts = Vec::with_capacity(values.len());
+    let mut response_artifact_bytes = Vec::with_capacity(values.len());
+    let mut settlement_payloads = Vec::with_capacity(values.len() + 2);
+    for (account, amount) in values {
+        let (response_artifact, response_bytes) =
+            replay_stream_fact_response_artifact(&descriptor, *amount);
+        response_artifact_bytes.push((
+            replay_artifact_authority_key(&response_artifact).expect("response artifact key"),
+            response_bytes,
+        ));
+        settlement_payloads.push(KernelEventPayload::FactRecorded(events::FactRecorded {
+            spec_hash: certified_spec.spec_hash.clone(),
+            node_id: fact_node_id(),
+            attempt_id: attempt_id.clone(),
+            claim: replay_stream_fact_claim(&descriptor, account, &response_artifact),
+        }));
+        response_artifacts.push(response_artifact);
+    }
+    let (output_artifact, output_bytes, cell_produced) =
+        replay_stream_state_output(&certified_spec, node, &attempt_id);
+    let output_artifact_key =
+        replay_artifact_authority_key(&output_artifact).expect("state output artifact key");
+    let completed = events::StateAttemptCompleted {
         spec_hash: certified_spec.spec_hash.clone(),
-        node_id: fact_node_id(),
+        node_id: node.node_id.clone(),
         attempt_id,
-        claim: replay_stream_fact_claim(&descriptor, &response_artifact),
+        output_cell_id: node.output_cell.clone(),
     };
-    let stream = vec![
+    let mut stream = vec![
         persisted_envelope(
             &run_id,
             1,
             KernelEventPayload::RunAdmitted(Box::new(run_admitted)),
         ),
         persisted_envelope(&run_id, 2, KernelEventPayload::StateAttemptStarted(started)),
-        persisted_envelope(&run_id, 3, KernelEventPayload::FactRecorded(fact)),
     ];
+    settlement_payloads.push(KernelEventPayload::CellProduced(cell_produced));
+    settlement_payloads.push(KernelEventPayload::StateAttemptCompleted(completed));
+    stream.extend(persisted_commit(&run_id, 3, settlement_payloads));
     let claim_id = mfm_facts::derive_fact_claim_id(run_id, 3, 0).expect("fact claim id");
-    let response_artifact_id = response_artifact.artifact_id.clone();
+    let response_artifact_id = response_artifacts[0].artifact_id.clone();
     let config_artifact = replay_stream_config_artifact(&certified_spec);
+    let mut artifact_evidence = vec![
+        stored_artifact_from_run_ref(&stream_run_admitted_spec_artifact()),
+        stored_artifact_from_run_ref(&stream_run_admitted_certificate_artifact()),
+        config_artifact,
+        descriptor_artifact,
+    ];
+    artifact_evidence.extend(response_artifacts);
+    artifact_evidence.push(output_artifact);
+    let mut artifact_bytes = BTreeMap::from([(descriptor_artifact_key, descriptor_bytes.to_vec())]);
+    artifact_bytes.extend(response_artifact_bytes);
+    artifact_bytes.insert(output_artifact_key, output_bytes);
     ReplayFactStreamFixture {
         certified_spec,
         stream,
-        artifact_evidence: vec![
-            stored_artifact_from_run_ref(&stream_run_admitted_spec_artifact()),
-            stored_artifact_from_run_ref(&stream_run_admitted_certificate_artifact()),
-            config_artifact,
-            descriptor_artifact,
-            response_artifact,
-        ],
-        artifact_bytes: BTreeMap::from([
-            (descriptor_artifact_key, descriptor_bytes.to_vec()),
-            (response_artifact_key, response_bytes),
-        ]),
+        artifact_evidence,
+        artifact_bytes,
         run_id: claim_id.source_run_id().clone(),
         claim_id,
         response_artifact_id,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplayStreamFactSubject {
+    account: String,
+}
+
+impl mfm_values::MfmValue for ReplayStreamFactSubject {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        mfm_values::framework_value_descriptor(
+            Self::semantic_id()?,
+            "mfm.replay.test.fact_subject_value",
+            mfm_values::SchemaShape::named_struct(vec![mfm_values::FieldDescriptor::required(
+                "account",
+                mfm_values::SchemaShape::String,
+            )])?,
+            "mfm_replay::tests::ReplayStreamFactSubject",
+        )
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        Ok(semantic_type_id(0xe4))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplayStreamFactResponse {
+    amount: u64,
+}
+
+impl mfm_values::MfmValue for ReplayStreamFactResponse {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        mfm_values::framework_value_descriptor(
+            Self::semantic_id()?,
+            "mfm.replay.test.fact_response_value",
+            mfm_values::SchemaShape::named_struct(vec![mfm_values::FieldDescriptor::required(
+                "amount",
+                mfm_values::SchemaShape::UnsignedInteger { bits: 64 },
+            )])?,
+            "mfm_replay::tests::ReplayStreamFactResponse",
+        )
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        Ok(semantic_type_id(0xe5))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplayStreamFact {
+    subject: ReplayStreamFactSubject,
+    response: ReplayStreamFactResponse,
+}
+
+impl ReplayStreamFact {
+    pub(super) fn new(account: &str, amount: u64) -> Self {
+        Self {
+            subject: ReplayStreamFactSubject {
+                account: account.to_owned(),
+            },
+            response: ReplayStreamFactResponse { amount },
+        }
+    }
+}
+
+impl mfm_values::MfmValue for ReplayStreamFact {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        mfm_values::framework_value_descriptor(
+            Self::semantic_id()?,
+            "mfm.replay.test.fact_value",
+            mfm_values::SchemaShape::named_struct(vec![
+                mfm_values::FieldDescriptor::required(
+                    "response",
+                    mfm_values::SchemaShape::ValueRef {
+                        schema_id: <ReplayStreamFactResponse as mfm_values::MfmValue>::schema_id()?,
+                        semantic_type_id:
+                            <ReplayStreamFactResponse as mfm_values::MfmValue>::semantic_id()?,
+                    },
+                ),
+                mfm_values::FieldDescriptor::required(
+                    "subject",
+                    mfm_values::SchemaShape::ValueRef {
+                        schema_id: <ReplayStreamFactSubject as mfm_values::MfmValue>::schema_id()?,
+                        semantic_type_id:
+                            <ReplayStreamFactSubject as mfm_values::MfmValue>::semantic_id()?,
+                    },
+                ),
+            ])?,
+            "mfm_replay::tests::ReplayStreamFact",
+        )
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        Ok(semantic_type_id(0xe6))
+    }
+}
+
+impl mfm_facts::MfmFactType for ReplayStreamFact {
+    type Subject = ReplayStreamFactSubject;
+    type Response = ReplayStreamFactResponse;
+
+    fn descriptor() -> mfm_facts::Result<mfm_facts::FactDescriptor> {
+        Ok(replay_stream_fact_descriptor())
+    }
+
+    fn subject(&self) -> &Self::Subject {
+        &self.subject
+    }
+
+    fn response(&self) -> &Self::Response {
+        &self.response
     }
 }
 
@@ -97,22 +243,12 @@ pub(super) fn fact_query_evidence_artifact(
         .expect("field summary")],
     )];
     let frontier = mfm_facts::StoreReadFrontier::new(
-        mfm_facts::StoreScopeRef::new("default").expect("store scope"),
-        mfm_facts::FactQueryScope::new(
-            mfm_facts::FactAudience::Platform,
-            mfm_facts::FactVisibilityScope::Default,
-        ),
-        mfm_facts::DescriptorCatalogWatermark::new(1),
+        mfm_ids::StoreScopeId::new("mfm.store_scope.v1:000000000000000000000000000000c1")
+            .expect("store scope"),
         mfm_facts::StoreCommitOrder::new(3),
     );
-    let receipt = mfm_facts::FactQueryReceipt::from_rows(
-        frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
-        &rows,
-        true,
-        None,
-    )
-    .expect("receipt");
+    let receipt =
+        mfm_facts::FactQueryReceipt::from_rows(frontier, &rows, true, None).expect("receipt");
     let selected_summaries_digest = mfm_facts::selected_returned_field_summaries_digest(
         receipt.returned_field_summaries().expect("summaries"),
         &[0],
@@ -176,12 +312,6 @@ pub(super) fn append_fact_query_evidence(
 
 pub(super) fn replay_fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
     let input = mfm_facts::FactQueryInput::new(
-        mfm_facts::StoreScopeRef::new("default").expect("store scope"),
-        mfm_facts::FactQueryScope::new(
-            mfm_facts::FactAudience::Platform,
-            mfm_facts::FactVisibilityScope::Default,
-        ),
-        mfm_facts::ScopeDecisionEvidence::new(content_digest(0x46)),
         vec![mfm_facts::FactQueryPredicate::new(
             mfm_facts::FactFieldId::new("subject.account").expect("field"),
             mfm_facts::FactQueryOperator::Equal,
@@ -210,7 +340,6 @@ pub(super) fn internal_fact_ref_for_fixture(
         &fact.claim,
     )
     .expect("internal fact ref")
-    .expect("indexed fact ref")
 }
 
 pub(super) fn internal_fact_ref_parts_from_ref(
@@ -221,8 +350,6 @@ pub(super) fn internal_fact_ref_parts_from_ref(
         source_event_id: fact_ref.source_event_id().clone(),
         recorded_at: fact_ref.recorded_at().to_owned(),
         producer_node_id: fact_ref.producer_node_id().clone(),
-        observed_at: fact_ref.observed_at().map(ToOwned::to_owned),
-        visibility: fact_ref.visibility().clone(),
         fact_kind: fact_ref.fact_kind().clone(),
         fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
         subject: mfm_facts::FactSubjectRef::new(
@@ -230,25 +357,11 @@ pub(super) fn internal_fact_ref_parts_from_ref(
             fact_ref.fact_key().clone(),
             fact_ref.subject_material_hash().clone(),
         ),
-        request: match (fact_ref.request_schema_id(), fact_ref.request_hash()) {
-            (Some(schema_id), Some(hash)) => Some(mfm_facts::FactRequestEvidence::new(
-                schema_id.clone(),
-                hash.clone(),
-            )),
-            (None, None) => None,
-            _ => unreachable!("internal fact refs cannot carry partial request evidence"),
-        },
         response: mfm_facts::FactResponseEvidence::new(
             fact_ref.response_schema_id().clone(),
             fact_ref.response_hash().clone(),
             fact_ref.artifact_id().clone(),
             fact_ref.artifact_evidence_hash().clone(),
-        ),
-        producer: mfm_facts::FactProducerProvenance::new(
-            fact_ref.capability_kind().clone(),
-            fact_ref.capability_version().clone(),
-            fact_ref.adapter_kind().clone(),
-            fact_ref.adapter_version().clone(),
         ),
     }
 }
@@ -317,11 +430,12 @@ pub(super) fn replay_stream_other_fact_descriptor() -> mfm_facts::FactDescriptor
 
 pub(super) fn replay_stream_fact_subject_evidence(
     descriptor: &mfm_facts::FactDescriptor,
+    account: &str,
 ) -> mfm_facts::FactSubjectEvidence {
     let material = mfm_facts::FactSubjectMaterialV2::new(
         mfm_canonical::CanonicalValue::object([(
             "account",
-            mfm_canonical::CanonicalValue::String("same-subject".into()),
+            mfm_canonical::CanonicalValue::String(account.to_owned()),
         )])
         .expect("subject"),
     )
@@ -358,20 +472,50 @@ pub(super) fn replay_stream_fact_response_artifact(
     )
 }
 
+pub(super) fn replay_stream_state_output(
+    certified_spec: &HashedSpecEnvelope,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> (StoredArtifactEvidenceRef, Vec<u8>, events::CellProduced) {
+    let cell = certified_spec
+        .spec
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == node.output_cell)
+        .expect("fact output cell");
+    let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str("{}")
+        .expect("canonical state output");
+    let artifact = state_output_artifact_ref(cell, &bytes.content_digest());
+    let event = events::CellProduced {
+        spec_hash: certified_spec.spec_hash.clone(),
+        node_id: node.node_id.clone(),
+        cell_id: cell.cell_id.clone(),
+        scope_id: cell.scope_id.clone(),
+        attempt_id: attempt_id.clone(),
+        semantic_type_id: cell.semantic_type_id.clone(),
+        schema_id: cell.schema_id.clone(),
+        value_lineage: cell.value_lineage.clone(),
+        context: cell.context.clone(),
+        artifact_id: artifact.artifact_id.clone(),
+        content_digest: artifact.digest.clone(),
+        evidence_hash: artifact
+            .evidence_hash()
+            .expect("state output evidence hash"),
+        producer_state_kind: Some(node.state_kind.clone()),
+        producer_state_version: Some(node.state_version.clone()),
+    };
+    (artifact, bytes.to_vec(), event)
+}
+
 pub(super) fn replay_stream_fact_claim(
     descriptor: &mfm_facts::FactDescriptor,
+    account: &str,
     response_artifact: &StoredArtifactEvidenceRef,
 ) -> mfm_facts::FactClaim {
     mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
         fact_kind: descriptor.fact_kind().clone(),
         fact_descriptor_hash: mfm_facts::fact_descriptor_hash(descriptor).expect("descriptor hash"),
-        subject: replay_stream_fact_subject_evidence(descriptor),
-        observed_at: None,
-        request: Some(mfm_facts::FactRequestEvidence::new(
-            fact_request_schema_id(),
-            fact_request_hash(),
-        )),
+        subject: replay_stream_fact_subject_evidence(descriptor, account),
         response: mfm_facts::FactResponseEvidence::new(
             descriptor.response_schema_id().clone(),
             response_artifact.digest.clone(),
@@ -379,12 +523,6 @@ pub(super) fn replay_stream_fact_claim(
             response_artifact
                 .evidence_hash()
                 .expect("response evidence hash"),
-        ),
-        producer: mfm_facts::FactProducerProvenance::new(
-            fact_capability_kind(),
-            fact_capability_version(),
-            fact_adapter_kind(),
-            fact_adapter_version(),
         ),
     })
     .expect("fact claim")

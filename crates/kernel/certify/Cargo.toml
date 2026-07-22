@@ -29,6 +29,7 @@ mfm-values = { path = "../values" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+mfm-facts = { path = "../facts" }
 mfm-program-derive = { path = "../program-derive" }
 serde = { workspace = true }
 trybuild = "1.0"

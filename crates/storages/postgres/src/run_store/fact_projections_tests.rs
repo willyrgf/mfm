@@ -34,35 +34,35 @@ fn physical_fact_projection_validation_rejects_term_descriptor_mismatch() {
 fn physical_fact_projection_validation_rejects_missing_projection_links() {
     #[derive(Clone, Copy)]
     enum MissingLink {
-        RecordForIndex,
+        QueryForTerm,
         DescriptorForAdmission,
-        RunAdmissionForRecord,
+        RunAdmissionForQuery,
     }
 
     for (case, expected) in [
-        (MissingLink::RecordForIndex, "has no FactRecorded payload"),
+        (MissingLink::QueryForTerm, "has no fact query row"),
         (
             MissingLink::DescriptorForAdmission,
             "references missing descriptor row",
         ),
         (
-            MissingLink::RunAdmissionForRecord,
-            "references descriptor not admitted by run",
+            MissingLink::RunAdmissionForQuery,
+            "references a descriptor not admitted by its run",
         ),
     ] {
         let mut projections = valid_physical_fact_projections();
         match case {
-            MissingLink::RecordForIndex => {
+            MissingLink::QueryForTerm => {
                 let claim_id = projections
-                    .fact_index_entries
+                    .fact_query_entries
                     .keys()
                     .next()
-                    .expect("index claim id")
+                    .expect("query claim id")
                     .clone();
-                projections.fact_records.remove(&claim_id);
+                projections.fact_query_entries.remove(&claim_id);
             }
             MissingLink::DescriptorForAdmission => projections.fact_descriptors.clear(),
-            MissingLink::RunAdmissionForRecord => projections.fact_descriptor_admissions.clear(),
+            MissingLink::RunAdmissionForQuery => projections.fact_descriptor_admissions.clear(),
         }
 
         let error =
@@ -91,10 +91,6 @@ fn valid_physical_fact_projections() -> PhysicalFactProjections {
             commit_id: CommitKey::new("fact-term-descriptor-mismatch").expect("commit key"),
             store_commit_order: 1,
             recorded_at: "2026-01-02T03:04:05Z".to_owned(),
-            observed_at: None,
-            visibility: mfm_facts::FactVisibility::indexed_default(
-                mfm_facts::FactAudience::Platform,
-            ),
             subject: mfm_canonical::CanonicalValue::object([(
                 "account",
                 mfm_canonical::CanonicalValue::String("alice".to_owned()),
@@ -105,15 +101,13 @@ fn valid_physical_fact_projections() -> PhysicalFactProjections {
                 mfm_canonical::CanonicalValue::Bool(true),
             )])
             .expect("response"),
-            request: None,
             response_schema_id: schema_id("response", 5),
             response_artifact_id: None,
-            producer: producer(),
         },
     )
     .expect("fact projection fixture");
-    let index = fact_fixture.index.expect("indexed fact projection");
-    let claim_id = index.fact_claim_id.clone();
+    let projection = fact_fixture.projection;
+    let claim_id = projection.fact_claim_id().clone();
     let term = fact_fixture.terms.into_iter().next().expect("index term");
     let descriptor_hash = descriptor_fixture.descriptor_hash.clone();
     let descriptor_admission = FactDescriptorAdmissionProjection {
@@ -134,8 +128,7 @@ fn valid_physical_fact_projections() -> PhysicalFactProjections {
             (run_id(3), descriptor_hash),
             descriptor_admission,
         )]),
-        fact_records: BTreeMap::from([(claim_id.clone(), fact_fixture.record)]),
-        fact_index_entries: BTreeMap::from([(claim_id.clone(), index)]),
+        fact_query_entries: BTreeMap::from([(claim_id.clone(), projection)]),
         fact_term_entries: BTreeMap::from([((claim_id, term.field_id.clone()), term)]),
     }
 }
@@ -168,15 +161,6 @@ fn fact_descriptor_with_seed(seed: u8) -> mfm_facts::FactDescriptor {
     .expect("fact descriptor")
 }
 
-fn producer() -> mfm_facts::FactProducerProvenance {
-    mfm_facts::FactProducerProvenance::new(
-        capability_kind(31),
-        mfm_ids::CapabilityVersion::new("mfm.pg.test.capability.v1").expect("capability version"),
-        adapter_kind(32),
-        mfm_ids::AdapterVersion::new("mfm.pg.test.adapter.v1").expect("adapter version"),
-    )
-}
-
 fn fact_kind() -> mfm_facts::FactKind {
     mfm_facts::FactKind::new("mfm.pg.test.fact").expect("fact kind")
 }
@@ -190,26 +174,6 @@ fn schema_id(name: &str, seed: u8) -> SchemaId {
         digest_bytes(seed),
     )
     .expect("schema id")
-}
-
-fn capability_kind(seed: u8) -> mfm_ids::CapabilityKind {
-    mfm_ids::CapabilityKind::new(
-        "mfm.pg.test",
-        "capability",
-        mfm_ids::DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(seed),
-    )
-    .expect("capability kind")
-}
-
-fn adapter_kind(seed: u8) -> mfm_ids::AdapterKind {
-    mfm_ids::AdapterKind::new(
-        "mfm.pg.test",
-        "adapter",
-        mfm_ids::DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(seed),
-    )
-    .expect("adapter kind")
 }
 
 fn run_id(seed: u8) -> RunId {

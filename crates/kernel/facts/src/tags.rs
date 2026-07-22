@@ -67,8 +67,6 @@ impl FactFieldExtraction {
 pub enum FactMetadataField {
     /// Store-assigned time when the claim was recorded.
     RecordedAt,
-    /// Optional source or domain observation time carried by the claim.
-    ObservedAt,
     /// Store-owned append ordering coordinate.
     StoreCommitOrder,
 }
@@ -77,7 +75,7 @@ impl FactMetadataField {
     /// Returns the expected value type for this metadata field.
     pub const fn value_type(self) -> FactFieldValueType {
         match self {
-            Self::RecordedAt | Self::ObservedAt => FactFieldValueType::Timestamp,
+            Self::RecordedAt => FactFieldValueType::Timestamp,
             Self::StoreCommitOrder => FactFieldValueType::UnsignedInteger,
         }
     }
@@ -85,7 +83,6 @@ impl FactMetadataField {
 
 impl_fact_tag!(FactMetadataField, "fact metadata field", pub(crate), "Returns the canonical metadata field tag used in descriptors.", {
     Self::RecordedAt => "recorded_at",
-    Self::ObservedAt => "observed_at",
     Self::StoreCommitOrder => "store_commit_order",
 });
 
@@ -214,58 +211,6 @@ impl FactScale {
         self.exponent
     }
 }
-
-/// Fact visibility selected by the producer for a recorded claim.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactVisibility {
-    /// Fact remains private run evidence and is not inserted into fact indexes.
-    RunPrivate,
-    /// Fact is indexed for the selected audience and scope.
-    Indexed {
-        /// Audience allowed to discover the indexed fact.
-        audience: FactAudience,
-        /// Visibility scope recorded with the indexed fact.
-        scope: FactVisibilityScope,
-    },
-}
-
-impl FactVisibility {
-    /// Creates indexed visibility for the selected audience in the default scope.
-    pub const fn indexed_default(audience: FactAudience) -> Self {
-        Self::Indexed {
-            audience,
-            scope: FactVisibilityScope::Default,
-        }
-    }
-}
-
-/// Audience for an indexed fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactAudience {
-    /// Internal operational audience for cross-run control facts.
-    Control,
-    /// Public platform fact audience, still subject to scope and exposure policy.
-    Platform,
-}
-
-impl_fact_tag!(FactAudience, "fact audience", pub, "Returns the canonical snake-case tag used in query scopes and receipts.", {
-    Self::Control => "control",
-    Self::Platform => "platform",
-});
-
-/// Visibility scope for an indexed fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactVisibilityScope {
-    /// V1 default scope.
-    Default,
-}
-
-impl_fact_tag!(FactVisibilityScope, "fact visibility scope", pub, "Returns the canonical snake-case tag used in query scopes and receipts.", {
-    Self::Default => "default",
-});
 
 /// Sort direction for a fact ordering term.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

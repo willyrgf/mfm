@@ -145,44 +145,18 @@ impl ReplayBroker {
                 "returned fact ref does not match the query descriptor",
             ));
         }
-        let mfm_facts::FactVisibility::Indexed { audience, scope } = fact_ref.visibility() else {
-            return Err(ReplayError::new(
-                ReplayErrorKind::FactMismatch,
-                "returned fact ref is not indexed for query visibility",
-            ));
-        };
-        if *audience != plan.query_scope().audience() || *scope != plan.query_scope().scope() {
-            return Err(ReplayError::new(
-                ReplayErrorKind::FactMismatch,
-                "returned fact ref does not match the query visibility scope",
-            ));
-        }
         let (envelope, fact) = self.fact_event_for_claim(fact_ref.fact_claim_id())?;
         let claim = &fact.claim;
-        let request = claim.request();
         let response = claim.response();
-        let producer = claim.producer();
-        if envelope.event_id() != fact_ref.source_event_id()
-            || fact_ref.producer_node_id() != &fact.node_id
-            || claim.visibility() != fact_ref.visibility()
-            || claim.fact_kind() != fact_ref.fact_kind()
-            || claim.fact_descriptor_hash() != fact_ref.fact_descriptor_hash()
-            || claim.subject().fact_subject_namespace_hash()
-                != fact_ref.fact_subject_namespace_hash()
-            || claim.subject().fact_key() != fact_ref.fact_key()
-            || claim.subject().subject_material_hash() != fact_ref.subject_material_hash()
-            || claim.observed_at() != fact_ref.observed_at()
-            || request.map(|request| request.request_schema_id()) != fact_ref.request_schema_id()
-            || request.map(|request| request.request_hash()) != fact_ref.request_hash()
-            || response.response_schema_id() != fact_ref.response_schema_id()
-            || response.response_hash() != fact_ref.response_hash()
-            || response.artifact_id() != fact_ref.artifact_id()
-            || response.artifact_evidence_hash() != fact_ref.artifact_evidence_hash()
-            || producer.capability_kind() != fact_ref.capability_kind()
-            || producer.capability_version() != fact_ref.capability_version()
-            || producer.adapter_kind() != fact_ref.adapter_kind()
-            || producer.adapter_version() != fact_ref.adapter_version()
-        {
+        let source_ref = mfm_facts::InternalFactRef::from_claim(
+            fact_ref.fact_claim_id().clone(),
+            envelope.event_id().clone(),
+            fact_ref.recorded_at().to_owned(),
+            fact.node_id.clone(),
+            claim,
+        )
+        .map_err(|error| ReplayError::new(ReplayErrorKind::FactMismatch, error.to_string()))?;
+        if &source_ref != fact_ref {
             return Err(ReplayError::new(
                 ReplayErrorKind::FactMismatch,
                 format!(

@@ -1,14 +1,14 @@
 # mfm-adapters-evm
 
-Runtime and replay bindings for exactly four reusable EVM state kinds:
-`CollectEvmBalancesState`, `RecordEvmBalanceFactsState`, `SubmitEvmTransactionState`, and
-`ValidateEvmContractState`.
+Runtime and replay bindings for exactly three reusable EVM state kinds:
+`CollectEvmBalancesState`, `SubmitEvmTransactionState`, and `ValidateEvmContractState`.
 
 `EvmReadRunnerCapabilities` is the single source-bound read assembly used by balance collection and
 exact-anchor validation. Both families await its one asynchronous route validator before admission;
 failed validation cannot bind a session or issue an RPC. The balance executor resolves one anchor,
-performs bounded ordered native and ERC-20 reads, and retains complete reducer evidence. The record
-runner atomically publishes the complete `evm.balance_snapshot` batch with its checked receipt.
+performs bounded ordered native and ERC-20 reads, and retains complete reducer evidence. The read
+reducer returns the complete `evm.balance_snapshot` batch with its checked receipt for atomic
+runtime settlement.
 
 Registration is deliberately split: `register_evm_balance_runners`,
 `register_evm_validation_runner`, and `register_evm_transaction_runner` let each consumer install

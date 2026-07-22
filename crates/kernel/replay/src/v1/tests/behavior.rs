@@ -1,48 +1,6 @@
 use super::*;
 
 #[test]
-fn recorded_fact_replay_uses_claim_id_not_fact_key() {
-    let run_id = run_id(0xa0);
-    let first_claim_id = mfm_facts::FactClaimId::new(run_id.clone(), 2, 0).expect("claim id");
-    let second_claim_id = mfm_facts::FactClaimId::new(run_id, 3, 0).expect("claim id");
-    let first_artifact = fact_response_artifact(0xa1);
-    let second_artifact = fact_response_artifact(0xa2);
-    let first_fact = fact_recorded(&first_artifact);
-    let second_fact = fact_recorded(&second_artifact);
-    assert_eq!(
-        first_fact.claim.subject().fact_key(),
-        second_fact.claim.subject().fact_key()
-    );
-
-    let broker = replay_broker_with_facts(vec![
-        (first_claim_id.clone(), first_fact, first_artifact),
-        (
-            second_claim_id.clone(),
-            second_fact.clone(),
-            second_artifact.clone(),
-        ),
-    ]);
-    let replay = broker
-        .recorded_fact(&FactReplayRequest {
-            node_id: fact_node_id(),
-            attempt_id: fact_attempt_id(),
-            fact_claim_id: second_claim_id.clone(),
-            capability_kind: fact_capability_kind(),
-            capability_version: fact_capability_version(),
-            adapter_kind: fact_adapter_kind(),
-            adapter_version: fact_adapter_version(),
-            request_schema_id: fact_request_schema_id(),
-            request_hash: fact_request_hash(),
-            response_schema_id: fact_response_schema_id(),
-        })
-        .expect("replay second claim");
-
-    assert_eq!(replay.fact_claim_id, second_claim_id);
-    assert_eq!(replay.fact, second_fact);
-    assert_eq!(replay.artifact.artifact_id, second_artifact.artifact_id);
-}
-
-#[test]
 fn replay_retained_artifact_lookup_uses_exact_evidence_identity() {
     let first = fact_response_artifact(0xa1);
     let mut second = first.clone();
@@ -143,7 +101,7 @@ fn replay_broker_rebuilds_fact_projection_with_retained_artifact_bytes() {
     assert!(
         broker
             .projection_snapshot()
-            .fact_record(&fixture.claim_id)
+            .fact_query_entry(&fixture.claim_id)
             .is_some(),
         "fact claim should be projected from retained descriptor and response bytes"
     );
@@ -178,6 +136,69 @@ fn replay_broker_rebuilds_fact_projection_with_retained_artifact_bytes() {
     let error = ReplayBroker::from_read_authority(mismatched_bytes)
         .expect_err("mismatched retained fact response bytes must fail closed");
     assert_eq!(error.kind, ReplayErrorKind::ArtifactMismatch);
+}
+
+#[test]
+fn replay_fact_batch_comparison_rejects_missing_extra_reordered_and_wrong_facts() {
+    let fixture = replay_fact_stream_fixture_with_values(&[("account-a", 41), ("account-b", 42)]);
+    let broker = ReplayBroker::from_read_authority(fixture.authority())
+        .expect("two-fact replay authority rebuilds");
+    let mut frames = broker
+        .produced_cell_frames_matching(|node, _, _| Ok(node.node_id == fact_node_id()))
+        .expect("fact output frame");
+    assert_eq!(frames.len(), 1);
+    let frame = frames.pop().expect("one fact output frame");
+    let exact = vec![
+        ReplayStreamFact::new("account-a", 41),
+        ReplayStreamFact::new("account-b", 42),
+    ];
+    verify_recorded_fact_batch_evidence(&broker, &frame, &exact)
+        .expect("exact reducer fact batch verifies");
+
+    for (name, facts) in [
+        ("missing", vec![ReplayStreamFact::new("account-a", 41)]),
+        (
+            "extra",
+            vec![
+                ReplayStreamFact::new("account-a", 41),
+                ReplayStreamFact::new("account-b", 42),
+                ReplayStreamFact::new("account-c", 43),
+            ],
+        ),
+        (
+            "reordered",
+            vec![
+                ReplayStreamFact::new("account-b", 42),
+                ReplayStreamFact::new("account-a", 41),
+            ],
+        ),
+        (
+            "wrong",
+            vec![
+                ReplayStreamFact::new("account-a", 99),
+                ReplayStreamFact::new("account-b", 42),
+            ],
+        ),
+    ] {
+        let error = verify_recorded_fact_batch_evidence(&broker, &frame, &facts)
+            .expect_err("non-exact fact batch must reject");
+        assert_eq!(
+            error.kind,
+            ReplayErrorKind::CertifiedEvidenceMismatch,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn replay_rejects_duplicate_fact_keys_in_one_settlement() {
+    let fixture =
+        replay_fact_stream_fixture_with_values(&[("same-account", 41), ("same-account", 42)]);
+
+    let error = ReplayBroker::from_read_authority(fixture.authority())
+        .expect_err("duplicate fact keys must reject");
+    assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
+    assert!(error.message.contains("fact keys must be unique"));
 }
 
 #[test]
@@ -238,6 +259,19 @@ fn replay_verifies_fact_query_evidence_with_retained_cross_run_source_fact() {
         .expect("retained source fact event");
     let mut authority = fixture.authority();
     authority.stream = fixture.stream[..2].to_vec();
+    let unreferenced_output_keys = authority
+        .artifact_evidence
+        .iter()
+        .filter(|artifact| artifact.artifact_role == ArtifactRole::StateOutput)
+        .map(replay_artifact_authority_key)
+        .collect::<Result<Vec<_>>>()
+        .expect("state output artifact keys");
+    authority
+        .artifact_evidence
+        .retain(|artifact| artifact.artifact_role != ArtifactRole::StateOutput);
+    authority
+        .artifact_bytes
+        .retain(|key, _| !unreferenced_output_keys.contains(key));
     append_fact_query_evidence(&mut authority, &fixture.run_id, 3, &query);
     authority.source_fact_events.push(source_event);
 
@@ -266,17 +300,17 @@ fn replay_rejects_fact_query_evidence_with_mismatched_returned_refs() {
     enum ReturnedRefMismatch {
         DescriptorHash,
         ResponseDigest,
-        ObservedAt,
+        FactKind,
         ProducerNodeId,
-        Visibility,
+        SubjectMaterial,
     }
 
     for (name, mismatch) in [
         ("descriptor hash", ReturnedRefMismatch::DescriptorHash),
         ("response digest", ReturnedRefMismatch::ResponseDigest),
-        ("observed_at", ReturnedRefMismatch::ObservedAt),
+        ("fact kind", ReturnedRefMismatch::FactKind),
         ("producer node id", ReturnedRefMismatch::ProducerNodeId),
-        ("visibility", ReturnedRefMismatch::Visibility),
+        ("subject material", ReturnedRefMismatch::SubjectMaterial),
     ] {
         let fixture = replay_fact_stream_fixture();
         let query = match mismatch {
@@ -301,10 +335,11 @@ fn replay_rejects_fact_query_evidence_with_mismatched_returned_refs() {
                     mfm_facts::InternalFactRef::new(parts).expect("mismatched returned ref")
                 })
             }
-            ReturnedRefMismatch::ObservedAt => fact_query_evidence_artifact(&fixture, |fact_ref| {
+            ReturnedRefMismatch::FactKind => fact_query_evidence_artifact(&fixture, |fact_ref| {
                 let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
-                parts.observed_at = Some("2026-07-02T00:00:00Z".to_owned());
-                mfm_facts::InternalFactRef::new(parts).expect("mismatched observed_at ref")
+                parts.fact_kind =
+                    mfm_facts::FactKind::new("mfm.replay.test.other_fact").expect("fact kind");
+                mfm_facts::InternalFactRef::new(parts).expect("mismatched fact kind ref")
             }),
             ReturnedRefMismatch::ProducerNodeId => {
                 fact_query_evidence_artifact(&fixture, |fact_ref| {
@@ -313,12 +348,17 @@ fn replay_rejects_fact_query_evidence_with_mismatched_returned_refs() {
                     mfm_facts::InternalFactRef::new(parts).expect("mismatched producer_node_id ref")
                 })
             }
-            ReturnedRefMismatch::Visibility => fact_query_evidence_artifact(&fixture, |fact_ref| {
-                let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
-                parts.visibility =
-                    mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Control);
-                mfm_facts::InternalFactRef::new(parts).expect("mismatched visibility ref")
-            }),
+            ReturnedRefMismatch::SubjectMaterial => {
+                fact_query_evidence_artifact(&fixture, |fact_ref| {
+                    let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
+                    parts.subject = mfm_facts::FactSubjectRef::new(
+                        parts.subject.fact_subject_namespace_hash().clone(),
+                        parts.subject.fact_key().clone(),
+                        content_digest(0x45),
+                    );
+                    mfm_facts::InternalFactRef::new(parts).expect("mismatched subject material ref")
+                })
+            }
         };
         let mut authority = fixture.authority();
         append_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);
@@ -389,20 +429,39 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
     let fact = events::FactRecorded {
         spec_hash: certified_spec.spec_hash.clone(),
         node_id: fact_node_id(),
-        attempt_id,
-        claim: replay_stream_fact_claim(&other_descriptor, &response_artifact),
+        attempt_id: attempt_id.clone(),
+        claim: replay_stream_fact_claim(&other_descriptor, "same-subject", &response_artifact),
     };
+    let (output_artifact, output_bytes, cell_produced) =
+        replay_stream_state_output(&certified_spec, node, &attempt_id);
+    let output_artifact_key =
+        replay_artifact_authority_key(&output_artifact).expect("state output artifact key");
+    let completed = events::StateAttemptCompleted {
+        spec_hash: certified_spec.spec_hash.clone(),
+        node_id: node.node_id.clone(),
+        attempt_id,
+        output_cell_id: node.output_cell.clone(),
+    };
+    let mut stream = vec![
+        persisted_envelope(
+            &run_id,
+            1,
+            KernelEventPayload::RunAdmitted(Box::new(run_admitted)),
+        ),
+        persisted_envelope(&run_id, 2, KernelEventPayload::StateAttemptStarted(started)),
+    ];
+    stream.extend(persisted_commit(
+        &run_id,
+        3,
+        vec![
+            KernelEventPayload::FactRecorded(fact),
+            KernelEventPayload::CellProduced(cell_produced),
+            KernelEventPayload::StateAttemptCompleted(completed),
+        ],
+    ));
     let authority = ReplayReadAuthority {
         certified_spec: certified_spec.clone(),
-        stream: vec![
-            persisted_envelope(
-                &run_id,
-                1,
-                KernelEventPayload::RunAdmitted(Box::new(run_admitted)),
-            ),
-            persisted_envelope(&run_id, 2, KernelEventPayload::StateAttemptStarted(started)),
-            persisted_envelope(&run_id, 3, KernelEventPayload::FactRecorded(fact)),
-        ],
+        stream,
         canonicalizer_identity: certified_spec
             .spec
             .public_outputs
@@ -421,6 +480,7 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
             descriptor_artifact,
             other_descriptor_artifact,
             response_artifact.clone(),
+            output_artifact,
         ],
         artifact_bytes: BTreeMap::from([
             (descriptor_artifact_key, descriptor_bytes.to_vec()),
@@ -429,6 +489,7 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
                 other_descriptor_bytes.to_vec(),
             ),
             (response_artifact_key, response_bytes),
+            (output_artifact_key, output_bytes),
         ]),
         additional_artifact_evidence: Vec::new(),
         source_fact_events: Vec::new(),
@@ -437,7 +498,9 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
     let error = ReplayBroker::from_read_authority(authority)
         .expect_err("wrong-node descriptor must reject");
     assert_eq!(error.kind, ReplayErrorKind::CertifiedEvidenceMismatch);
-    assert!(error.message.contains("not certified for producing node"));
+    assert!(error
+        .message
+        .contains("not the exact read_external fact contract"));
 }
 
 #[test]

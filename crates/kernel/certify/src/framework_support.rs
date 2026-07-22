@@ -115,10 +115,10 @@ pub(super) fn framework_render_descriptor(
         output_schema_id,
         output_semantic_type_id,
         context,
-        effect_kind: ManagedPlatformWrite::descriptor()
+        effect_kind: Pure::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
-        runner: "managed_platform_write",
+        runner: "pure",
         capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
     })
 }
@@ -194,10 +194,10 @@ fn framework_lifecycle_descriptor(
         output_schema_id,
         output_semantic_type_id,
         context: spec::StateContextDescriptorSpec::no_context(),
-        effect_kind: ManagedPlatformWrite::descriptor()
+        effect_kind: Pure::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
-        runner: "managed_platform_write",
+        runner: "pure",
         capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
     })
 }
@@ -244,9 +244,7 @@ fn framework_state_descriptor(
             "output_schema_id": output_schema_id.as_str(),
             "output_semantic_type_id": output_semantic_type_id.as_str(),
         }))?),
-        EffectClass::Pure | EffectClass::ManagedPlatformWrite | EffectClass::ApplySideEffect => {
-            None
-        }
+        EffectClass::Pure | EffectClass::ApplySideEffect => None,
     };
     let descriptor_id = descriptor_id_json(serde_json::json!({
         "capabilities": capabilities.capabilities.iter().map(|capability| {
@@ -556,10 +554,6 @@ pub(super) fn effect_descriptor_for_kind(
     let pure = Pure::descriptor().map_err(|error| lower(error.to_string()))?;
     if effect_kind == &pure.kind {
         return Ok(pure);
-    }
-    let managed = ManagedPlatformWrite::descriptor().map_err(|error| lower(error.to_string()))?;
-    if effect_kind == &managed.kind {
-        return Ok(managed);
     }
     let side_effect = ApplySideEffect::descriptor().map_err(|error| lower(error.to_string()))?;
     if effect_kind == &side_effect.kind {

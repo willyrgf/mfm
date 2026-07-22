@@ -1,13 +1,11 @@
 #![warn(missing_docs)]
 //! Shared helpers for MFM integration tests.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Request;
 use mfm_events::v1::{ArtifactRole, KernelEventPayload};
-use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadProvider, FactRecordCapability};
 use mfm_store::v1 as store;
 use mfm_store::v1::RetainedArtifactReadProvider;
 use sqlx::{AssertSqlSafe, PgPool};
@@ -29,9 +27,6 @@ pub use store::test_support::{
 
 /// In-memory REST app state used by integration tests.
 pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunStore>;
-
-/// Store-backed projection fact-index (shared with app process assembly tests).
-pub use mfm_app::ProjectionFactIndexProvider;
 
 /// Creates a unique schema name for an isolated Postgres parity test.
 pub fn unique_postgres_schema(prefix: &str) -> String {
@@ -101,29 +96,14 @@ pub async fn connect_postgres_with_retry(
     );
 }
 
-/// Binds the shared fact capabilities owned by an integration-test process.
-pub fn register_process_fact_capabilities(
-    registry: &mut mfm_runtime::ErasedRunnerRegistry,
-    fact_index: &dyn FactIndexReadProvider,
-) -> mfm_runtime::Result<()> {
-    registry.register_capability_spec::<FactIndexReadCapability>(
-        mfm_runtime::CapabilityImplementationId::new(fact_index.implementation_id())?,
-    )?;
-    registry.register_capability_spec::<FactRecordCapability>(
-        mfm_runtime::CapabilityImplementationId::new("mfm.integration.managed-fact-record.v1")?,
-    )
-}
-
 /// Builds in-memory REST app state.
 pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     let store = store::AsyncInMemoryRunStore::default();
-    let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
     mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         store,
         configured_store: None,
         runtime_config_path: None,
-        fact_index,
     }
 }
 

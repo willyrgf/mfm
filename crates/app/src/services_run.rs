@@ -1,10 +1,15 @@
 use super::*;
 use crate::errors::runtime_error_with_launch_context;
 
-impl<S, A> RunServices<S, A>
+impl<S> RunServices<S>
 where
-    S: store::RunEventStore + store::StoreScopeStore + store::ExecutionClaimStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::ExecutionClaimStore
+        + store::RetainedArtifactReadProvider
+        + Send
+        + Sync
+        + 'static,
 {
     /// Resumes a certified typed run from its stored spec artifact.
     pub async fn resume_stored_run(&self, run_id: &RunId) -> Result<RunResponse, PublicError> {

@@ -297,7 +297,7 @@ async fn materialize_observation_row(
     candidate: ObservationCandidate,
 ) -> Result<ObservationRow> {
     let events = load_run_prefix(pool, &candidate.run_id, candidate.head_seq).await?;
-    let projections = ProjectionSnapshot::rebuild_for_external_fact_indexes(&events)?;
+    let projections = ProjectionSnapshot::rebuild_for_external_fact_queries(&events)?;
     let observed_status = observed_status_from_run_state(projections.run_state(&candidate.run_id))?;
     let completed_at =
         (observed_status == ObservedRunStatus::Completed).then_some(candidate.updated_at.clone());

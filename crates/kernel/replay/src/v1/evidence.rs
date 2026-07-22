@@ -48,42 +48,6 @@ impl RetainedSourceFactReplayEvent {
     }
 }
 
-/// Request for replaying a previously recorded read fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactReplayRequest {
-    /// Expected producing node id.
-    pub node_id: NodeId,
-    /// Expected producing attempt id.
-    pub attempt_id: AttemptId,
-    /// Store-derived claim id for the recorded fact.
-    pub fact_claim_id: mfm_facts::FactClaimId,
-    /// Capability kind expected by the replaying state.
-    pub capability_kind: CapabilityKind,
-    /// Capability version expected by the replaying state.
-    pub capability_version: CapabilityVersion,
-    /// Adapter kind expected by the replaying state.
-    pub adapter_kind: AdapterKind,
-    /// Adapter version expected by the replaying state.
-    pub adapter_version: AdapterVersion,
-    /// Request schema id expected by replay.
-    pub request_schema_id: SchemaId,
-    /// Canonical request hash expected by replay.
-    pub request_hash: ContentDigest,
-    /// Response schema id expected by replay.
-    pub response_schema_id: SchemaId,
-}
-
-/// Replay evidence returned for a recorded read fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordedFactReplay {
-    /// Store-derived claim id for the recorded fact.
-    pub fact_claim_id: mfm_facts::FactClaimId,
-    /// Recorded fact event payload.
-    pub fact: events::FactRecorded,
-    /// Retained artifact evidence for the fact response.
-    pub artifact: StoredArtifactEvidenceRef,
-}
-
 /// Request for replaying recorded side-effect evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SideEffectEvidenceReplayRequest {

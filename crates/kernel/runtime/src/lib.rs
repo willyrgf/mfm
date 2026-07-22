@@ -53,7 +53,7 @@ pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHisto
 pub use invocation::{
     CertifiedInvocationContext, CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell,
     MaterializedCellTerminal, MaterializedInputNode, MaterializedInputs, NamedMaterializedInput,
-    PreInvocationRunCtx, PreparedRunnerInvocation, RecordedFact, RecordedFacts,
+    PreInvocationRunCtx, PreparedRunnerInvocation,
 };
 pub use manual_resolution::{
     manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
@@ -64,16 +64,16 @@ pub use runner_kit::{
     load_materialized_struct_field_value, load_materialized_struct_input,
     load_non_empty_materialized_input, load_runner_config_for_node, load_side_effect_artifact,
     materialized_input_node_json, ExternalReadExecution, ExternalReadExecutionFuture,
-    ExternalReadPlanExecutor, ExternalReadRunner, FactRecordInput, RunnerArtifactBuilder,
-    RunnerCapabilityBinding, RunnerExecutableIdentityTemplate, RunnerFactoryBinding,
-    RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
+    ExternalReadPlanExecutor, ExternalReadRunner, RunnerArtifactBuilder, RunnerCapabilityBinding,
+    RunnerExecutableIdentityTemplate, RunnerFactoryBinding, RunnerJsonArtifact,
+    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
     TypedContextOutputExtractor,
 };
 pub use runners::{
     AdapterExecutableBinding, CapabilityImplementationBinding, CapabilityImplementationId,
     ContextOutputExtractor, ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload,
-    RunnerFactRecorded, RunnerIngressContext, RunnerIngressFuture, RunnerOutputSettlement,
+    RunnerIngressContext, RunnerIngressFuture, RunnerOutputSettlement,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
@@ -256,10 +256,7 @@ fn content_digest_json(value: serde_json::Value) -> Result<ContentDigest> {
 fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
     serde_json::json!({
         "binary_digest": identity.binary_digest.as_str(),
-        "cargo_package_digest": identity.cargo_package_digest.as_str(),
         "factory_id": identity.factory_id.as_str(),
-        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(events::NixDerivationHash::as_str),
-        "nix_output_hash": identity.nix_output_hash.as_ref().map(events::NixOutputHash::as_str),
     })
 }
 

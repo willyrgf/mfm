@@ -102,6 +102,7 @@ where
     S: ReadState,
     S::Config: DeserializeOwned,
     S::Input: DeserializeOwned,
+    S::Facts: StageReadFactBatch,
     E: ExternalReadPlanExecutor<S> + 'static,
 {
     fn validate_ingress<'a>(
@@ -138,7 +139,7 @@ where
                 .execute(&plan, &ctx)
                 .await?
                 .into_evidence_set();
-            let output_value = state
+            let (output_value, facts) = state
                 .reduce(&input, &evidence, &context)
                 .map_err(state_execution_error)?;
 
@@ -147,9 +148,32 @@ where
             for query in evidence.fact_query_evidence() {
                 output.record_fact_query_evidence(query.clone())?;
             }
+            facts.stage(&mut output)?;
             output.state_output(&output_value)?;
             Ok(output.finish())
         })
+    }
+}
+
+trait StageReadFactBatch {
+    fn stage(self, output: &mut RunnerOutputBuilder<'_, '_>) -> Result<()>;
+}
+
+impl StageReadFactBatch for () {
+    fn stage(self, _output: &mut RunnerOutputBuilder<'_, '_>) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl<F> StageReadFactBatch for mfm_values::NonEmpty<F>
+where
+    F: mfm_facts::MfmFactType,
+{
+    fn stage(self, output: &mut RunnerOutputBuilder<'_, '_>) -> Result<()> {
+        for fact in self.values() {
+            output.record_read_fact(fact)?;
+        }
+        Ok(())
     }
 }
 

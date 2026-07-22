@@ -112,13 +112,12 @@ async fn unknown_entry_points_do_not_bypass_configuration_authority() {
 
 #[tokio::test]
 async fn read_role_refuses_live_start() {
-    let fixture = mfm_app::PublicFactVisibilityFixtureForTest::new();
+    let fixture = mfm_app::PublicFactFixtureForTest::new();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Read,
         store: fixture.store.clone(),
         configured_store: None,
         runtime_config_path: None,
-        fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
     let response = app
         .oneshot(json_post(

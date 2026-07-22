@@ -268,16 +268,3 @@ fn checked_strings_reject_invalid_fact_kind() {
 
     assert!(error.to_string().contains("lowercase ascii"));
 }
-
-#[test]
-fn visibility_indexed_default_records_audience_and_scope() {
-    let visibility = FactVisibility::indexed_default(FactAudience::Control);
-
-    assert_eq!(
-        visibility,
-        FactVisibility::Indexed {
-            audience: FactAudience::Control,
-            scope: FactVisibilityScope::Default,
-        }
-    );
-}

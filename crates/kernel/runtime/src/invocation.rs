@@ -1,18 +1,14 @@
-use std::collections::BTreeMap;
-
 use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor};
 use mfm_events::v1 as events;
 use mfm_ids::{
-    AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, NodeId, RunId, SchemaId, SpecHash,
+    ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId, ContentDigest, NodeId, RunId,
+    SchemaId, SpecHash,
 };
 use mfm_program::{CertifiedContext, StateContext};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::history::{
-    committed_config_artifact, materialize_inputs, recorded_facts_for_attempt, RuntimeRunView,
-};
+use crate::history::{committed_config_artifact, materialize_inputs, RuntimeRunView};
 use crate::{CertifiedRuntimeSpec, Result};
 
 /// Certified transition context authority for one runner invocation.
@@ -71,7 +67,6 @@ pub struct PreparedRunnerInvocation<'a> {
     pub(crate) config_artifact: store::ArtifactEvidenceRef,
     pub(crate) inputs: MaterializedInputs,
     pub(crate) caps: CertifiedRuntimeCapabilities,
-    pub(crate) recorded_facts: RecordedFacts,
     pub(crate) projections: &'a store::ProjectionSnapshot,
     pub(crate) run_stream: &'a [store::KernelEventEnvelope],
     pub(crate) view: &'a RuntimeRunView,
@@ -133,11 +128,6 @@ impl<'a> PreparedRunnerInvocation<'a> {
         &self.caps
     }
 
-    /// Facts already committed for this attempt and therefore reusable after recovery.
-    pub fn recorded_facts(&self) -> &RecordedFacts {
-        &self.recorded_facts
-    }
-
     /// Store-owned projection snapshot observed before the runner invocation.
     pub fn projections(&self) -> &store::ProjectionSnapshot {
         self.projections
@@ -192,7 +182,6 @@ struct InvocationMaterial {
     config_artifact: store::ArtifactEvidenceRef,
     inputs: MaterializedInputs,
     caps: CertifiedRuntimeCapabilities,
-    recorded_facts: RecordedFacts,
     context: CertifiedInvocationContext,
 }
 
@@ -225,17 +214,11 @@ impl<'a> InvocationBuilder<'a> {
         let config_artifact = committed_config_artifact(self.node, self.view)?;
         let inputs = materialize_inputs(self.runtime_spec, self.node, self.view)?;
         let caps = CertifiedRuntimeCapabilities::for_node(self.node);
-        let recorded_facts = recorded_facts_for_attempt(
-            &self.view.projections,
-            &self.node.node_id,
-            self.attempt_id,
-        )?;
         let context = self.runtime_spec.invocation_context_for_node(self.node)?;
         Ok(InvocationMaterial {
             config_artifact,
             inputs,
             caps,
-            recorded_facts,
             context,
         })
     }
@@ -256,7 +239,6 @@ impl<'a> InvocationBuilder<'a> {
             config_artifact: material.config_artifact,
             inputs: material.inputs,
             caps: material.caps,
-            recorded_facts: material.recorded_facts,
             projections: &self.view.projections,
             run_stream: &self.view.stream,
             view: self.view,
@@ -279,7 +261,6 @@ impl<'a> InvocationBuilder<'a> {
             config_artifact: material.config_artifact,
             inputs: material.inputs,
             caps: material.caps,
-            recorded_facts: material.recorded_facts,
             projections: &self.view.projections,
         })
     }
@@ -303,7 +284,6 @@ pub struct PreInvocationRunCtx<'a> {
     pub(crate) config_artifact: store::ArtifactEvidenceRef,
     pub(crate) inputs: MaterializedInputs,
     pub(crate) caps: CertifiedRuntimeCapabilities,
-    pub(crate) recorded_facts: RecordedFacts,
     pub(crate) projections: &'a store::ProjectionSnapshot,
 }
 
@@ -361,11 +341,6 @@ impl<'a> PreInvocationRunCtx<'a> {
     /// Runtime capabilities minted only from the certified node capability set.
     pub fn caps(&self) -> &CertifiedRuntimeCapabilities {
         &self.caps
-    }
-
-    /// Facts already committed for this attempt and therefore reusable after recovery.
-    pub fn recorded_facts(&self) -> &RecordedFacts {
-        &self.recorded_facts
     }
 
     /// Store-owned projection snapshot observed before invocation construction.
@@ -471,11 +446,6 @@ impl<'a> ErasedRunCtx<'a> {
         self.invocation.caps()
     }
 
-    /// Facts already committed for this attempt and therefore reusable after recovery.
-    pub fn recorded_facts(&self) -> &RecordedFacts {
-        self.invocation.recorded_facts()
-    }
-
     /// Store-owned projection snapshot observed before the runner invocation.
     pub fn projections(&self) -> &store::ProjectionSnapshot {
         self.invocation.projections()
@@ -497,66 +467,6 @@ impl<'a> ErasedRunCtx<'a> {
     pub(crate) fn artifact_byte_authority(&self) -> &'a store::ArtifactByteAuthorityMap {
         self.invocation.artifact_byte_authority()
     }
-}
-
-/// Facts committed for one node attempt before recovery resumed execution.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RecordedFacts {
-    pub(crate) facts: BTreeMap<mfm_facts::FactClaimId, RecordedFact>,
-}
-
-impl RecordedFacts {
-    /// Returns true when no facts have been recorded for the attempt.
-    pub fn is_empty(&self) -> bool {
-        self.facts.is_empty()
-    }
-
-    /// Returns a recorded fact by stable claim id.
-    pub fn get(&self, claim_id: &mfm_facts::FactClaimId) -> Option<&RecordedFact> {
-        self.facts.get(claim_id)
-    }
-
-    /// Iterates recorded facts in deterministic claim-id order.
-    pub fn iter(&self) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &RecordedFact)> {
-        self.facts.iter()
-    }
-
-    /// Iterates recorded facts for a subject key in deterministic claim-id order.
-    pub fn by_fact_key<'a>(
-        &'a self,
-        fact_key: &'a mfm_facts::FactKey,
-    ) -> impl Iterator<Item = (&'a mfm_facts::FactClaimId, &'a RecordedFact)> + 'a {
-        self.facts
-            .iter()
-            .filter(move |(_, fact)| &fact.fact_key == fact_key)
-    }
-}
-
-/// Store-projected read fact available for same-attempt recovery.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordedFact {
-    /// Store-derived identity for the recorded claim.
-    pub fact_claim_id: mfm_facts::FactClaimId,
-    /// Subject grouping key; not a unique claim identity.
-    pub fact_key: mfm_facts::FactKey,
-    /// Request schema id, when request evidence is present.
-    pub request_schema_id: Option<SchemaId>,
-    /// Canonical request hash, when request evidence is present.
-    pub request_hash: Option<ContentDigest>,
-    /// Response schema id.
-    pub response_schema_id: SchemaId,
-    /// Canonical response hash.
-    pub response_hash: ContentDigest,
-    /// Response artifact id.
-    pub artifact_id: ArtifactId,
-    /// Capability kind used for the original read.
-    pub capability_kind: CapabilityKind,
-    /// Capability version used for the original read.
-    pub capability_version: CapabilityVersion,
-    /// Adapter kind used for the original read.
-    pub adapter_kind: AdapterKind,
-    /// Adapter version used for the original read.
-    pub adapter_version: AdapterVersion,
 }
 
 /// Runtime capabilities minted for a node attempt.

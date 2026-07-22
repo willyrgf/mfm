@@ -47,7 +47,7 @@ outside the typed run store are not read or migrated by the REST API.
 Only live start/resume requires `MFM_REST_ROLE=live`. Public fact queries are deterministic evidence
 reads and are available from either role.
 
-Public fact queries return descriptor-filtered Platform facts with deterministic evidence metadata;
+Public fact queries return descriptor-filtered committed facts with deterministic evidence metadata;
 they do not depend on process-local signing material.
 
 REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
@@ -89,7 +89,7 @@ Probe semantics:
 
 ## Public Facts
 
-The `/v1/facts/...` routes expose descriptor-scoped public Platform facts only. REST decodes path
+The `/v1/facts/...` routes expose descriptor-scoped committed facts. REST decodes path
 and query parameters into `mfm-app` public fact DTOs; descriptor resolution, field validation,
 query compilation, public ref resolution, and non-public filtering are owned by the app/facts
 services.
@@ -127,7 +127,7 @@ curl -s "http://127.0.0.1:3001/v1/facts/kinds/wallet.balance"
 
 curl -s "http://127.0.0.1:3001/v1/facts/wallet.balance/latest?shape=mfm.wallet.balance.v1&order=result:block_number:desc&field=result.amount_sat&subject=chain%3Dbitcoin&subject=asset_ref%3Dbtc"
 
-curl -s "http://127.0.0.1:3001/v1/facts/weather.observation?shape=mfm.weather.observation.v1&order=metadata:observed_at:desc&field=result.temperature_celsius_milli&subject=country%3DIE&result=temperature_celsius_milli.lt%3D0&limit=20"
+curl -s "http://127.0.0.1:3001/v1/facts/weather.observation?shape=mfm.weather.observation.v1&order=metadata:recorded_at:desc&field=result.temperature_celsius_milli&subject=country%3DIE&result=temperature_celsius_milli.lt%3D0&limit=20"
 
 curl -s "http://127.0.0.1:3001/v1/facts/ref/pfr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ```
@@ -146,7 +146,6 @@ Query response shape:
         "response_schema_id": "schema:mfm.wallet.balance.response.v1:..."
       },
       "recorded_at": "2026-07-02T00:00:00.000000Z",
-      "observed_at": "2026-07-02T00:00:00.000000Z",
       "fields": [
         {
           "field_id": "result.amount_sat",
@@ -166,9 +165,8 @@ Query response shape:
 
 Privacy and error contract:
 
-- Public REST routes query only `audience = Platform` with the default public scope.
-- `Control` and `RunPrivate` facts are absent from kind discovery, descriptor descriptions,
-  queries, and exact-ref lookup.
+- Facts have no caller-authored visibility, audience, or scope branch; discovery, query, and
+  exact-ref lookup use the one committed store-wide projection.
 - Public outputs never include internal fact refs, descriptor hashes, fact keys, subject material,
   subject hashes, response artifacts, request/response hashes, artifact ids, artifact evidence
   hashes, raw run ids, event ids, source sequences, event ordinals, adapter routing, or capability
@@ -216,11 +214,11 @@ delegates current-target resolution, planning, certification, admission, and ver
 app assembly.
 
 The endpoint shape is an `entry_point`, `target`, and optional `invocation_key` JSON object. The
-only accepted entry point is `mfm.portfolio/snapshot@1`:
+only accepted entry point is `mfm.portfolio/snapshot@2`:
 
 ```json
 {
-  "entry_point": "mfm.portfolio/snapshot@1",
+  "entry_point": "mfm.portfolio/snapshot@2",
   "target": "acme/primary"
 }
 ```

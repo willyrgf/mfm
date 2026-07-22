@@ -1,33 +1,34 @@
 //! State-owned fact-query plan, evidence, and reducer for portfolio holding selection.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
-use std::str::FromStr;
-
-use alloy_primitives::U256;
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_fact_capabilities::FactIndexReadRequest;
 use mfm_facts::{
     compile_fact_query_plan, fact_query_evidence_hash, fact_query_result_rows_from_receipt,
-    FactAudience, FactCanonicalScalar, FactContentIdentityEvidence, FactFieldId, FactOrderingName,
-    FactQueryEvidence, FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryResult,
-    FactQueryScope, FactSelectionEvidence, FactVisibilityScope, QueryResultCardinality,
-    ScopeDecisionEvidence, StoreReadFrontier, StoreReadFrontierType, StoreScopeRef,
+    CanonicalFactQueryPlan, FactCanonicalScalar, FactContentIdentityEvidence, FactFieldId,
+    FactKind, FactOrderingName, FactQueryEvidence, FactQueryInput, FactQueryOperator,
+    FactQueryPredicate, FactQueryResult, FactSelectionEvidence, QueryResultCardinality,
+    StoreReadFrontier,
 };
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program_derive::MfmValue;
-use mfm_states_btc::BtcNetworkCollectionReceipt;
-use mfm_states_evm::{EvmBalanceAsset, EvmBalanceCollectionReceipt, EvmBalanceSource};
+use mfm_states_btc::{
+    decode_bitcoin_balance_snapshot_response, BitcoinBalanceCollectionReceipt,
+    BitcoinBalanceSnapshotResponse,
+};
+use mfm_states_evm::{
+    decode_evm_balance_snapshot_response, EvmBalanceAsset, EvmBalanceCollectionReceipt,
+    EvmBalanceSnapshotResponse, EvmBalanceSource,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 
 use crate::selection::{holding_candidate_from_bitcoin, BitcoinHoldingCandidateFields};
 use crate::{
-    observations_from_selected_holdings, portfolio_holding_select_scope_decision_hash,
-    portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
-    symbols_by_id_map, HoldingCandidate, HoldingRequirementKey, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, SelectHoldingsConfig, SelectHoldingsFactDescriptors,
-    SelectHoldingsInput, SelectedHolding, SelectedHoldingMaterial, SelectedHoldings,
+    observations_from_selected_holdings, portfolio_holding_selection_policy_digest,
+    project_network_pins_from_observations, symbols_by_id_map, HoldingCandidate,
+    HoldingRequirementKey, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
+    SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput, SelectedHolding,
+    SelectedHoldingMaterial, SelectedHoldings,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,8 +45,6 @@ enum ReceiptSource {
         key: BitcoinSourceKey,
         anchor_height: u64,
         anchor_hash: String,
-        coverage: String,
-        source_status: String,
         fact_content_identity: FactContentIdentityEvidence,
     },
     Evm {
@@ -141,10 +140,9 @@ impl ReceiptHolding {
 )]
 pub struct SelectHoldingsReadPlan {
     portfolio: PortfolioConfig,
-    store_scope: String,
     selection_policy_id: String,
     fact_descriptors: SelectHoldingsFactDescriptors,
-    bitcoin_receipts: Vec<BtcNetworkCollectionReceipt>,
+    bitcoin_receipts: Vec<BitcoinBalanceCollectionReceipt>,
     evm_receipts: Vec<EvmBalanceCollectionReceipt>,
 }
 
@@ -156,7 +154,6 @@ impl SelectHoldingsReadPlan {
     ) -> Result<Self, PortfolioHoldingSelectionError> {
         let plan = Self {
             portfolio: config.portfolio().clone(),
-            store_scope: config.store_scope().to_owned(),
             selection_policy_id: config.selection_policy_id().to_owned(),
             fact_descriptors: config.fact_descriptors().clone(),
             bitcoin_receipts: input.bitcoin_receipts.clone(),
@@ -173,7 +170,7 @@ impl SelectHoldingsReadPlan {
     }
 
     /// Builds ordered, exact fact-index requests for every receipt-authorized holding.
-    pub fn requests(&self) -> Result<Vec<FactIndexReadRequest>, PortfolioHoldingSelectionError> {
+    pub fn requests(&self) -> Result<Vec<CanonicalFactQueryPlan>, PortfolioHoldingSelectionError> {
         self.receipt_holdings()?
             .iter()
             .map(|entry| holding_fact_index_request(&self.config(), entry))
@@ -184,7 +181,7 @@ impl SelectHoldingsReadPlan {
     pub fn query_evidence(
         &self,
         responses: &[FactQueryResult],
-        hydrated: &[Vec<PortfolioHoldingFactResponse>],
+        hydrated: &[Vec<PortfolioHoldingFactEvidence>],
     ) -> Result<Vec<FactQueryEvidence>, PortfolioHoldingSelectionError> {
         let entries = self.receipt_holdings()?;
         let requests = self.requests()?;
@@ -197,7 +194,7 @@ impl SelectHoldingsReadPlan {
             .map(|(((request, response), material), entry)| {
                 let (_, selected_index) = select_entry(entry, &self.config(), response, material)?;
                 Ok(FactQueryEvidence::new(
-                    request.plan().clone(),
+                    request.clone(),
                     response.receipt().clone(),
                     selection_evidence_for_index(selected_index)?,
                 ))
@@ -222,9 +219,6 @@ impl SelectHoldingsReadPlan {
             responses
                 .iter()
                 .map(|response| response.receipt().read_frontier()),
-            responses
-                .iter()
-                .map(|response| response.receipt().frontier_type()),
         )?;
         for (entry, response) in entries.iter().zip(responses) {
             require_identity_pinned_cardinality(response, entry)?;
@@ -282,7 +276,7 @@ impl SelectHoldingsReadPlan {
             .zip(&evidence.hydrated_responses)
             .zip(&entries)
         {
-            if query.plan() != request.plan() {
+            if query.plan() != request {
                 return Err(receipt_selection_error(
                     entry,
                     "fact-query evidence did not match its ordered state-authored request",
@@ -316,7 +310,7 @@ impl SelectHoldingsReadPlan {
         &self,
         entries: &[ReceiptHolding],
         responses: &[FactQueryResult],
-        hydrated: &[Vec<PortfolioHoldingFactResponse>],
+        hydrated: &[Vec<PortfolioHoldingFactEvidence>],
     ) -> Result<(), PortfolioHoldingSelectionError> {
         self.validate_query_results(responses)?;
         if hydrated.len() != responses.len() {
@@ -344,7 +338,6 @@ impl SelectHoldingsReadPlan {
     fn config(&self) -> SelectHoldingsConfig {
         SelectHoldingsConfig {
             portfolio: self.portfolio.clone(),
-            store_scope: self.store_scope.clone(),
             selection_policy_id: self.selection_policy_id.clone(),
             fact_descriptors: self.fact_descriptors.clone(),
         }
@@ -353,27 +346,34 @@ impl SelectHoldingsReadPlan {
 
 fn receipt_holdings(
     portfolio: &PortfolioConfig,
-    bitcoin_receipts: &[BtcNetworkCollectionReceipt],
+    bitcoin_receipts: &[BitcoinBalanceCollectionReceipt],
     evm_receipts: &[EvmBalanceCollectionReceipt],
 ) -> Result<Vec<ReceiptHolding>, PortfolioHoldingSelectionError> {
     let mut bitcoin = BTreeMap::new();
     for receipt in bitcoin_receipts {
-        for entry in receipt.entries() {
+        if receipt.addresses().len() != receipt.fact_content_identities().len() {
+            return Err(selection_error(
+                PortfolioHoldingErrorCode::ReceiptMismatch,
+                "Bitcoin receipt address and fact identity counts differed",
+                None,
+            ));
+        }
+        for (address, identity) in receipt
+            .addresses()
+            .iter()
+            .zip(receipt.fact_content_identities())
+        {
             let key = BitcoinSourceKey {
-                network_id: receipt.network().to_owned(),
+                network_id: receipt.network_id().to_owned(),
                 bitcoin_network: receipt.bitcoin_network().to_owned(),
                 semantic_source_identity: receipt.semantic_source_identity().to_owned(),
-                address: entry.source_key().address().to_owned(),
+                address: address.clone(),
             };
             let source = ReceiptSource::Bitcoin {
                 key: key.clone(),
-                anchor_height: entry.anchor_height(),
-                anchor_hash: entry.anchor_hash().to_owned(),
-                coverage: entry.coverage().to_owned(),
-                source_status: entry.source_status().to_owned(),
-                fact_content_identity: FactContentIdentityEvidence::from_verified(
-                    entry.fact_content_identity(),
-                ),
+                anchor_height: receipt.anchor_height(),
+                anchor_hash: receipt.anchor_hash().to_owned(),
+                fact_content_identity: identity.clone(),
             };
             if bitcoin.insert(key, source).is_some() {
                 return Err(selection_error(
@@ -573,7 +573,7 @@ fn receipt_network_pins(
 }
 
 fn order_query_evidence(
-    requests: &[FactIndexReadRequest],
+    requests: &[CanonicalFactQueryPlan],
     queries: &[FactQueryEvidence],
     entries: &[ReceiptHolding],
 ) -> Result<Vec<FactQueryEvidence>, PortfolioHoldingSelectionError> {
@@ -590,7 +590,7 @@ fn order_query_evidence(
         let matches = remaining
             .iter()
             .enumerate()
-            .filter_map(|(index, query)| (query.plan() == request.plan()).then_some(index))
+            .filter_map(|(index, query)| (query.plan() == request).then_some(index))
             .collect::<Vec<_>>();
         let [index] = matches.as_slice() else {
             return Err(receipt_selection_error(
@@ -610,45 +610,52 @@ fn order_query_evidence(
     Ok(ordered)
 }
 
-/// Canonical hydrated response material for one portfolio holding fact row.
+/// Closed typed evidence hydrated from one retained source-domain fact response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[serde(deny_unknown_fields)]
+#[serde(tag = "family", content = "response", rename_all = "snake_case")]
 #[mfm(
     namespace = "mfm.portfolio",
-    name = "holding_fact_response",
-    schema = "mfm.portfolio.external_read.holding_fact_response"
+    name = "holding_fact_evidence",
+    schema = "mfm.portfolio.external_read.holding_fact_evidence"
 )]
-pub struct PortfolioHoldingFactResponse {
-    canonical_json: String,
+pub enum PortfolioHoldingFactEvidence {
+    /// Checked aggregate Bitcoin balance response.
+    Bitcoin(BitcoinBalanceSnapshotResponse),
+    /// Checked EVM balance response.
+    Evm(EvmBalanceSnapshotResponse),
 }
 
-impl PortfolioHoldingFactResponse {
-    /// Admits one canonical retained fact response without interpreting its family schema.
-    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, PortfolioHoldingSelectionError> {
-        let canonical =
-            PlainCanonicalJsonBytes::from_canonical_json_slice(bytes).map_err(|error| {
-                selection_error(
-                    PortfolioHoldingErrorCode::ReceiptMismatch,
-                    error.to_string(),
-                    None,
-                )
-            })?;
-        let canonical_json = String::from_utf8(canonical.as_bytes().to_vec()).map_err(|error| {
-            selection_error(
+impl PortfolioHoldingFactEvidence {
+    /// Decodes canonical bytes through the source-domain decoder selected by the recorded kind.
+    pub fn from_canonical_bytes(
+        fact_kind: &FactKind,
+        bytes: &[u8],
+    ) -> Result<Self, PortfolioHoldingSelectionError> {
+        match fact_kind.as_str() {
+            "bitcoin.balance_snapshot" => decode_bitcoin_balance_snapshot_response(bytes)
+                .map(Self::Bitcoin)
+                .map_err(|_| {
+                    selection_error(
+                        PortfolioHoldingErrorCode::ReceiptMismatch,
+                        "retained Bitcoin balance response was invalid",
+                        None,
+                    )
+                }),
+            "evm.balance_snapshot" => decode_evm_balance_snapshot_response(bytes)
+                .map(Self::Evm)
+                .map_err(|_| {
+                    selection_error(
+                        PortfolioHoldingErrorCode::ReceiptMismatch,
+                        "retained EVM balance response was invalid",
+                        None,
+                    )
+                }),
+            _ => Err(selection_error(
                 PortfolioHoldingErrorCode::ReceiptMismatch,
-                error.to_string(),
+                "retained holding fact kind was unsupported",
                 None,
-            )
-        })?;
-        Ok(Self { canonical_json })
-    }
-
-    fn value(
-        &self,
-        entry: &ReceiptHolding,
-    ) -> Result<serde_json::Value, PortfolioHoldingSelectionError> {
-        serde_json::from_str(&self.canonical_json)
-            .map_err(|error| receipt_selection_error(entry, error.to_string()))
+            )),
+        }
     }
 }
 
@@ -661,14 +668,14 @@ impl PortfolioHoldingFactResponse {
 )]
 pub struct SelectHoldingsReadEvidence {
     fact_query_evidence_hashes: Vec<String>,
-    hydrated_responses: Vec<Vec<PortfolioHoldingFactResponse>>,
+    hydrated_responses: Vec<Vec<PortfolioHoldingFactEvidence>>,
 }
 
 impl SelectHoldingsReadEvidence {
     /// Creates primary evidence bound to ordered auxiliary query evidence.
     pub fn new(
         queries: &[FactQueryEvidence],
-        hydrated_responses: Vec<Vec<PortfolioHoldingFactResponse>>,
+        hydrated_responses: Vec<Vec<PortfolioHoldingFactEvidence>>,
     ) -> Result<Self, PortfolioHoldingSelectionError> {
         if queries.len() != hydrated_responses.len() {
             return Err(selection_error(
@@ -721,7 +728,7 @@ fn select_entry(
     entry: &ReceiptHolding,
     config: &SelectHoldingsConfig,
     response: &FactQueryResult,
-    hydrated: &[PortfolioHoldingFactResponse],
+    hydrated: &[PortfolioHoldingFactEvidence],
 ) -> Result<(SelectedHolding, usize), PortfolioHoldingSelectionError> {
     let mut matching = Vec::new();
     for (row_index, (row, material)) in response.rows().iter().zip(hydrated).enumerate() {
@@ -767,7 +774,7 @@ fn candidate_from_response(
     entry: &ReceiptHolding,
     config: &SelectHoldingsConfig,
     fact_ref: &mfm_facts::InternalFactRef,
-    material: &PortfolioHoldingFactResponse,
+    material: &PortfolioHoldingFactEvidence,
     store_commit_order: u64,
 ) -> Result<Option<HoldingCandidate>, PortfolioHoldingSelectionError> {
     let descriptor = match &entry.source {
@@ -775,15 +782,26 @@ fn candidate_from_response(
         ReceiptSource::Evm { .. } => config.fact_descriptors().evm_balance()?,
     };
     let subject = holding_subject_value(entry)?;
-    let response = material.value(entry)?;
-    if !identity_matches(entry, fact_ref, &descriptor, &subject, &response)? {
+    let identity_matches = match material {
+        PortfolioHoldingFactEvidence::Bitcoin(response) => {
+            matches!(&entry.source, ReceiptSource::Bitcoin { .. })
+                && identity_matches(entry, fact_ref, &descriptor, &subject, response)?
+        }
+        PortfolioHoldingFactEvidence::Evm(response) => {
+            matches!(&entry.source, ReceiptSource::Evm { .. })
+                && identity_matches(entry, fact_ref, &descriptor, &subject, response)?
+        }
+    };
+    if !identity_matches {
         return Ok(None);
     }
-    let candidate = match &entry.source {
-        ReceiptSource::Bitcoin { .. } => {
-            btc_candidate(entry, fact_ref, &response, store_commit_order)?
+    let candidate = match material {
+        PortfolioHoldingFactEvidence::Bitcoin(response) => {
+            btc_candidate(entry, fact_ref, response, store_commit_order)?
         }
-        ReceiptSource::Evm { .. } => evm_candidate(entry, fact_ref, &response, store_commit_order)?,
+        PortfolioHoldingFactEvidence::Evm(response) => {
+            evm_candidate(entry, fact_ref, response, store_commit_order)?
+        }
     };
     Ok(Some(candidate))
 }
@@ -791,32 +809,24 @@ fn candidate_from_response(
 fn btc_candidate(
     entry: &ReceiptHolding,
     fact_ref: &mfm_facts::InternalFactRef,
-    response: &serde_json::Value,
+    response: &BitcoinBalanceSnapshotResponse,
     store_commit_order: u64,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
-    let anchor_height = response_u64(entry, response, "anchor_height")?;
-    let anchor_hash = response_string(entry, response, "anchor_hash")?;
-    let balance_sats = response_u64(entry, response, "balance_sats")?;
-    let coverage = response_string(entry, response, "coverage")?;
-    let source_status = response_string(entry, response, "source_status")?;
+    let anchor_height = response.anchor_height();
+    let anchor_hash = response.anchor_hash();
+    let balance_sats = response.balance_sats();
     let ReceiptSource::Bitcoin {
         anchor_height: expected_height,
         anchor_hash: expected_hash,
-        coverage: expected_coverage,
-        source_status: expected_status,
         ..
     } = &entry.source
     else {
         unreachable!("Bitcoin candidate requires Bitcoin receipt authority")
     };
-    if anchor_height != *expected_height
-        || anchor_hash != expected_hash
-        || coverage != expected_coverage
-        || source_status != expected_status
-    {
+    if anchor_height != *expected_height || anchor_hash != expected_hash {
         return Err(receipt_selection_error(
             entry,
-            "hydrated Bitcoin response did not match receipt anchor/status",
+            "hydrated Bitcoin response did not match the receipt anchor",
         ));
     }
     holding_candidate_from_bitcoin(
@@ -829,8 +839,6 @@ fn btc_candidate(
             decimals: 8,
             height: anchor_height,
             block_hash: anchor_hash.to_owned(),
-            coverage: coverage.to_owned(),
-            source_status: source_status.to_owned(),
         },
     )
 }
@@ -838,7 +846,7 @@ fn btc_candidate(
 fn evm_candidate(
     entry: &ReceiptHolding,
     fact_ref: &mfm_facts::InternalFactRef,
-    response: &serde_json::Value,
+    response: &EvmBalanceSnapshotResponse,
     store_commit_order: u64,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
     let ReceiptSource::Evm {
@@ -849,28 +857,14 @@ fn evm_candidate(
     else {
         unreachable!("EVM candidate requires EVM receipt authority")
     };
-    let response_anchor = response
-        .get("block_anchor")
-        .ok_or_else(|| receipt_selection_error(entry, "EVM response omitted block_anchor"))?;
-    let number = response_string(entry, response_anchor, "number")?;
-    let hash = response_string(entry, response_anchor, "hash")?;
-    if number != block_anchor.number() || hash != block_anchor.hash() {
+    if response.block_anchor() != block_anchor {
         return Err(receipt_selection_error(
             entry,
             "hydrated EVM response did not match receipt block anchor",
         ));
     }
-    let raw_units = response_string(entry, response, "raw_units")?;
-    let raw_quantity = U256::from_str(raw_units)
-        .map_err(|_| receipt_selection_error(entry, "EVM response raw_units exceeded U256"))?;
-    if raw_quantity.to_string() != raw_units {
-        return Err(receipt_selection_error(
-            entry,
-            "EVM response raw_units was not canonical decimal",
-        ));
-    }
-    let decimals = u8::try_from(response_u64(entry, response, "decimals")?)
-        .map_err(|_| receipt_selection_error(entry, "EVM response decimals exceeded u8"))?;
+    let raw_units = response.raw_units();
+    let decimals = response.decimals();
     let anchor = ExecutionAnchor::Evm {
         chain_id: NonZeroU64::new(*chain_id)
             .ok_or_else(|| receipt_selection_error(entry, "EVM receipt chain id was zero"))?,
@@ -889,8 +883,6 @@ fn evm_candidate(
             raw_dec: raw_units.to_owned(),
             decimals,
             observation_anchor: anchor,
-            coverage: "complete_at_anchor".to_owned(),
-            source_status: "ok".to_owned(),
         },
     })
 }
@@ -902,7 +894,7 @@ fn holding_subject_value(
         ReceiptSource::Bitcoin { key, .. } => Ok(serde_json::json!({
             "address": key.address,
             "bitcoin_network": key.bitcoin_network,
-            "network": key.network_id,
+            "network_id": key.network_id,
             "semantic_source_identity": key.semantic_source_identity,
         })),
         ReceiptSource::Evm {
@@ -954,21 +946,17 @@ where
 fn holding_fact_index_request(
     config: &SelectHoldingsConfig,
     entry: &ReceiptHolding,
-) -> Result<FactIndexReadRequest, PortfolioHoldingSelectionError> {
-    let store_scope = StoreScopeRef::new(config.store_scope())
-        .map_err(|error| receipt_selection_error(entry, error.to_string()))?;
+) -> Result<CanonicalFactQueryPlan, PortfolioHoldingSelectionError> {
     let (descriptor, predicates, return_fields) = match &entry.source {
         ReceiptSource::Bitcoin {
             key,
             anchor_height,
             anchor_hash,
-            coverage,
-            source_status,
             ..
         } => (
             config.fact_descriptors().bitcoin_native()?,
             vec![
-                query_eq_string(entry, "subject.network", &key.network_id)?,
+                query_eq_string(entry, "subject.network_id", &key.network_id)?,
                 query_eq_string(entry, "subject.bitcoin_network", &key.bitcoin_network)?,
                 query_eq_string(
                     entry,
@@ -978,8 +966,6 @@ fn holding_fact_index_request(
                 query_eq_string(entry, "subject.address", &key.address)?,
                 query_eq_u64(entry, "result.anchor_height", *anchor_height)?,
                 query_eq_string(entry, "result.anchor_hash", anchor_hash)?,
-                query_eq_string(entry, "result.coverage", coverage)?,
-                query_eq_string(entry, "result.source_status", source_status)?,
             ],
             query_fields(
                 entry,
@@ -987,8 +973,6 @@ fn holding_fact_index_request(
                     "result.anchor_height",
                     "result.anchor_hash",
                     "result.balance_sats",
-                    "result.coverage",
-                    "result.source_status",
                     "metadata.store_commit_order",
                 ],
             )?,
@@ -1039,9 +1023,6 @@ fn holding_fact_index_request(
         }
     };
     let input = FactQueryInput::new(
-        store_scope,
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(portfolio_holding_select_scope_decision_hash()),
         predicates,
         return_fields,
         FactOrderingName::new("metadata.store_commit_order.desc")
@@ -1052,34 +1033,7 @@ fn holding_fact_index_request(
     .with_content_identity(entry.source.fact_content_identity().clone());
     let plan = compile_fact_query_plan(&descriptor, input)
         .map_err(|error| receipt_selection_error(entry, error.to_string()))?;
-    FactIndexReadRequest::new(plan)
-        .map_err(|error| receipt_selection_error(entry, error.to_string()))
-}
-
-fn response_u64(
-    entry: &ReceiptHolding,
-    response: &serde_json::Value,
-    field: &str,
-) -> Result<u64, PortfolioHoldingSelectionError> {
-    response
-        .get(field)
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            receipt_selection_error(entry, format!("response field {field} was not u64"))
-        })
-}
-
-fn response_string<'a>(
-    entry: &ReceiptHolding,
-    response: &'a serde_json::Value,
-    field: &str,
-) -> Result<&'a str, PortfolioHoldingSelectionError> {
-    response
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            receipt_selection_error(entry, format!("response field {field} was not a string"))
-        })
+    Ok(plan)
 }
 
 fn query_field(
@@ -1148,17 +1102,9 @@ fn require_identity_pinned_cardinality(
 
 fn require_shared_snapshot_read_frontier<'a>(
     frontiers: impl IntoIterator<Item = &'a StoreReadFrontier>,
-    frontier_types: impl IntoIterator<Item = StoreReadFrontierType>,
 ) -> Result<(), PortfolioHoldingSelectionError> {
     let mut expected: Option<&StoreReadFrontier> = None;
-    for (frontier, frontier_type) in frontiers.into_iter().zip(frontier_types) {
-        if frontier_type != StoreReadFrontierType::Snapshot {
-            return Err(selection_error(
-                PortfolioHoldingErrorCode::ReceiptMismatch,
-                "portfolio selection queries must use snapshot read frontiers",
-                None,
-            ));
-        }
+    for frontier in frontiers {
         match expected {
             None => expected = Some(frontier),
             Some(shared) if shared != frontier => {

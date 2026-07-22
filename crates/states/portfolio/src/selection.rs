@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
-use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkPin};
 use mfm_portfolio_model::symbol::{AnchoredHoldingSource, HoldingSourceConfig, Observation};
 
@@ -23,14 +22,6 @@ pub fn portfolio_holding_selection_policy_digest() -> ContentDigest {
     ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         sha256_digest_bytes(PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID.as_bytes()),
-    )
-}
-
-/// Scope decision digest for Platform holding candidate fact-index queries.
-pub fn portfolio_holding_select_scope_decision_hash() -> ContentDigest {
-    ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"mfm.portfolio.holding.select.scope.v1"),
     )
 }
 
@@ -131,10 +122,6 @@ pub struct SelectedHoldingMaterial {
     pub decimals: u8,
     /// Family-specific execution anchor for observation source.
     pub observation_anchor: ExecutionAnchor,
-    /// Coverage tag retained for honesty surfaces after selection.
-    pub coverage: String,
-    /// Source status tag.
-    pub source_status: String,
 }
 
 pub(crate) struct BitcoinHoldingCandidateFields {
@@ -143,8 +130,6 @@ pub(crate) struct BitcoinHoldingCandidateFields {
     pub(crate) decimals: u8,
     pub(crate) height: u64,
     pub(crate) block_hash: String,
-    pub(crate) coverage: String,
-    pub(crate) source_status: String,
 }
 
 pub(crate) fn holding_candidate_from_bitcoin(
@@ -153,33 +138,6 @@ pub(crate) fn holding_candidate_from_bitcoin(
     fact_claim_id: FactClaimId,
     fields: BitcoinHoldingCandidateFields,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
-    let parsed_coverage = fields.coverage.parse::<CoverageStatus>().map_err(|_| {
-        PortfolioHoldingSelectionError::new(
-            PortfolioHoldingErrorCode::MissingFact,
-            "holding fact has unknown coverage status",
-            Some(key.as_key_str()),
-            Some(key.network_id.clone()),
-        )
-    })?;
-    let parsed_source_status = fields
-        .source_status
-        .parse::<HoldingSourceStatus>()
-        .map_err(|_| {
-            PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::MissingFact,
-                "holding fact has unknown source status",
-                Some(key.as_key_str()),
-                Some(key.network_id.clone()),
-            )
-        })?;
-    if !portfolio_selection_accepts_status(parsed_coverage, parsed_source_status) {
-        return Err(PortfolioHoldingSelectionError::new(
-            PortfolioHoldingErrorCode::MissingFact,
-            "holding fact is not acceptable for portfolio selection",
-            Some(key.as_key_str()),
-            Some(key.network_id.clone()),
-        ));
-    }
     let anchor = ExecutionAnchor::Bitcoin {
         height: fields.height,
         block_hash: fields.block_hash.clone(),
@@ -200,23 +158,8 @@ pub(crate) fn holding_candidate_from_bitcoin(
                 height: fields.height,
                 block_hash: fields.block_hash,
             },
-            coverage: fields.coverage,
-            source_status: fields.source_status,
         },
     })
-}
-
-fn portfolio_selection_accepts_status(
-    coverage: CoverageStatus,
-    source_status: HoldingSourceStatus,
-) -> bool {
-    matches!(
-        (coverage, source_status),
-        (
-            CoverageStatus::CompleteAtAnchor | CoverageStatus::ConfiguredOnly,
-            HoldingSourceStatus::Ok,
-        )
-    )
 }
 
 /// One selected holding after receipt-pinned identity filtering and ordering.

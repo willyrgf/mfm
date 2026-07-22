@@ -42,7 +42,7 @@ pub(super) fn parse_canonical_fact_query_plan(
     value: &serde_json::Value,
 ) -> Result<CanonicalFactQueryPlan> {
     let object = json_object(value, "fact query plan")?;
-    require_version(object, "mfm.fact-query-plan.v1", "fact query plan")?;
+    require_version(object, "mfm.fact-query-plan.v2", "fact query plan")?;
     let canonical_query =
         canonical_json_bytes_from_canonical_json_str(json_str(object, "canonical_query")?)?;
     let expected_query_hash: ContentDigest = parse_json_str(object, "canonical_query_hash")?;
@@ -53,12 +53,9 @@ pub(super) fn parse_canonical_fact_query_plan(
         ));
     }
     let plan = CanonicalFactQueryPlan::new(
-        StoreScopeRef::new(json_str(object, "store_scope")?)?,
-        QueryScopeWire::parse(json_required(object, "query_scope")?)?,
         FactQueryCompilerVersion::new(json_str(object, "query_compiler_version")?)?,
         FactCanonicalizerVersion::new(json_str(object, "canonicalizer_version")?)?,
         parse_json_str(object, "resolved_descriptor")?,
-        ScopeDecisionEvidenceWire::parse(json_required(object, "scope_decision_evidence")?)?,
         canonical_query,
         OrderingWire::parse(json_required(object, "ordering")?)?,
         json_optional_u64(object, "limit")?,
@@ -71,7 +68,7 @@ pub(super) fn parse_fact_query_receipt(
     expected_plan_hash: &ContentDigest,
 ) -> Result<FactQueryReceipt> {
     let object = json_object(value, "fact query receipt")?;
-    require_version(object, "mfm.fact-query-receipt.v2", "fact query receipt")?;
+    require_version(object, "mfm.fact-query-receipt.v3", "fact query receipt")?;
     let plan_hash: ContentDigest = parse_json_str(object, "plan_hash")?;
     if &plan_hash != expected_plan_hash {
         return Err(FactError::descriptor(
@@ -79,10 +76,6 @@ pub(super) fn parse_fact_query_receipt(
         ));
     }
     let read_frontier = parse_store_read_frontier(json_required(object, "read_frontier")?)?;
-    let frontier_type = parse_tag(
-        json_str(object, "frontier_type")?,
-        "store read frontier type",
-    )?;
     let returned_refs = json_array(object, "returned_refs")?
         .iter()
         .map(parse_internal_fact_ref)
@@ -96,7 +89,6 @@ pub(super) fn parse_fact_query_receipt(
         parse_query_result_cardinality(json_required(object, "result_cardinality")?)?;
     Ok(FactQueryReceipt::from_parts(
         read_frontier,
-        frontier_type,
         returned_refs,
         returned_field_summaries,
         result_set_digest,
@@ -126,35 +118,19 @@ pub(super) fn parse_fact_selection_evidence(
 fn parse_store_read_frontier(value: &serde_json::Value) -> Result<StoreReadFrontier> {
     let object = json_object(value, "store read frontier")?;
     Ok(StoreReadFrontier::new(
-        StoreScopeRef::new(json_str(object, "store_scope")?)?,
-        QueryScopeWire::parse(json_required(object, "query_scope")?)?,
-        DescriptorCatalogWatermark::new(json_u64(object, "descriptor_catalog_watermark")?),
+        mfm_ids::StoreScopeId::new(json_str(object, "store_scope_id")?)
+            .map_err(|error| FactError::descriptor(error.to_string()))?,
         StoreCommitOrder::new(json_u64(object, "store_commit_order")?),
     ))
 }
 
 fn parse_internal_fact_ref(value: &serde_json::Value) -> Result<InternalFactRef> {
     let object = json_object(value, "internal fact ref")?;
-    let request_schema_id = parse_optional_identity(json_required(object, "request_schema_id")?)?;
-    let request_hash = parse_optional_digest(json_required(object, "request_hash")?)?;
-    let request = match (request_schema_id, request_hash) {
-        (Some(request_schema_id), Some(request_hash)) => {
-            Some(FactRequestEvidence::new(request_schema_id, request_hash))
-        }
-        (None, None) => None,
-        _ => {
-            return Err(FactError::descriptor(
-                "request schema and hash must be present or absent together",
-            ));
-        }
-    };
     InternalFactRef::new(InternalFactRefParts {
         fact_claim_id: parse_fact_claim_id(json_required(object, "fact_claim_id")?)?,
         source_event_id: parse_json_str(object, "source_event_id")?,
         recorded_at: json_str(object, "recorded_at")?.to_owned(),
         producer_node_id: parse_json_str(object, "producer_node_id")?,
-        observed_at: parse_optional_string(json_required(object, "observed_at")?)?,
-        visibility: parse_fact_visibility(json_required(object, "visibility")?)?,
         fact_kind: FactKind::new(json_str(object, "fact_kind")?)?,
         fact_descriptor_hash: parse_json_str(object, "fact_descriptor_hash")?,
         subject: FactSubjectRef::new(
@@ -162,18 +138,11 @@ fn parse_internal_fact_ref(value: &serde_json::Value) -> Result<InternalFactRef>
             FactKey::from_digest(parse_json_str(object, "fact_key")?),
             parse_json_str(object, "subject_material_hash")?,
         ),
-        request,
         response: FactResponseEvidence::new(
             parse_json_str(object, "response_schema_id")?,
             parse_json_str(object, "response_hash")?,
             parse_json_str(object, "artifact_id")?,
             parse_json_str(object, "artifact_evidence_hash")?,
-        ),
-        producer: FactProducerProvenance::new(
-            parse_json_str(object, "capability_kind")?,
-            parse_json_str(object, "capability_version")?,
-            parse_json_str(object, "adapter_kind")?,
-            parse_json_str(object, "adapter_version")?,
         ),
     })
 }
@@ -186,20 +155,6 @@ fn parse_fact_claim_id(value: &serde_json::Value) -> Result<FactClaimId> {
         json_u64(object, "source_seq")?,
         json_u32(object, "source_ordinal")?,
     )
-}
-
-fn parse_fact_visibility(value: &serde_json::Value) -> Result<FactVisibility> {
-    let object = json_object(value, "fact visibility")?;
-    match json_str(object, "kind")? {
-        "run_private" => Ok(FactVisibility::RunPrivate),
-        "indexed" => Ok(FactVisibility::Indexed {
-            audience: parse_tag(json_str(object, "audience")?, "fact audience")?,
-            scope: parse_tag(json_str(object, "scope")?, "fact visibility scope")?,
-        }),
-        value => Err(FactError::descriptor(format!(
-            "unknown fact visibility kind {value:?}"
-        ))),
-    }
 }
 
 fn parse_optional_returned_field_summaries(
@@ -416,16 +371,6 @@ fn parse_optional_digest(value: &serde_json::Value) -> Result<Option<ContentDige
     parse_optional_identity(value)
 }
 
-fn parse_optional_string(value: &serde_json::Value) -> Result<Option<String>> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    value
-        .as_str()
-        .map(|value| Some(value.to_owned()))
-        .ok_or_else(|| FactError::descriptor("optional string must be null or string"))
-}
-
 pub(super) fn descriptor_fields_by_id(
     descriptor: &FactDescriptor,
 ) -> Result<BTreeMap<FactFieldId, &FactFieldDescriptor>> {
@@ -475,7 +420,7 @@ pub(super) struct CompiledQueryWire {
 }
 
 impl CompiledQueryWire {
-    const VERSION: &'static str = "mfm.fact-query.v2";
+    const VERSION: &'static str = "mfm.fact-query.v3";
 
     pub(super) fn from_parts(
         descriptor: &FactDescriptor,
@@ -635,50 +580,6 @@ fn parse_query_return_field(value: &serde_json::Value) -> Result<FactFieldId> {
         .as_str()
         .ok_or_else(|| FactError::descriptor("query return field must be a string"))?;
     FactFieldId::new(value)
-}
-
-pub(crate) struct QueryScopeWire;
-
-impl QueryScopeWire {
-    fn parse(value: &serde_json::Value) -> Result<FactQueryScope> {
-        let object = json_object(value, "fact query scope")?;
-        Ok(FactQueryScope::new(
-            parse_tag(json_str(object, "audience")?, "fact audience")?,
-            parse_tag(json_str(object, "scope")?, "fact visibility scope")?,
-        ))
-    }
-
-    pub(crate) fn canonical_value(scope: &FactQueryScope) -> Result<CanonicalValue> {
-        canonical_object([
-            (
-                "audience",
-                CanonicalValue::String(scope.audience().as_str().to_owned()),
-            ),
-            (
-                "scope",
-                CanonicalValue::String(scope.scope().as_str().to_owned()),
-            ),
-        ])
-    }
-}
-
-pub(crate) struct ScopeDecisionEvidenceWire;
-
-impl ScopeDecisionEvidenceWire {
-    fn parse(value: &serde_json::Value) -> Result<ScopeDecisionEvidence> {
-        let object = json_object(value, "scope decision evidence")?;
-        Ok(ScopeDecisionEvidence::new(parse_json_str(
-            object,
-            "decision_hash",
-        )?))
-    }
-
-    pub(crate) fn canonical_value(evidence: &ScopeDecisionEvidence) -> Result<CanonicalValue> {
-        canonical_object([(
-            "decision_hash",
-            CanonicalValue::String(evidence.decision_hash().as_str().to_owned()),
-        )])
-    }
 }
 
 pub(crate) struct OrderingWire;

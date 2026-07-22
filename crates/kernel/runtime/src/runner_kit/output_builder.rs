@@ -3,9 +3,7 @@ use super::builder_helpers::{
     insert_retention_ref, runtime_fact_error,
 };
 use super::runner_artifact_builder::RunnerArtifactBuilder;
-use super::runner_payload_builder::{
-    RunnerCapabilityBinding, RunnerPayloadBuilder, RunnerSideEffectBinding,
-};
+use super::runner_payload_builder::{RunnerPayloadBuilder, RunnerSideEffectBinding};
 use super::*;
 
 /// Builder for assembling an erased runner output batch.
@@ -13,6 +11,7 @@ pub struct RunnerOutputBuilder<'a, 'ctx> {
     artifacts: RunnerArtifactBuilder<'a, 'ctx>,
     staged_artifacts: Vec<StagedArtifact>,
     staged_retention_refs: Vec<StagedRetentionRefs>,
+    read_facts: Vec<events::FactRecorded>,
     payloads: Vec<RunnerEventPayload>,
 }
 
@@ -23,6 +22,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             artifacts: RunnerArtifactBuilder::new(ctx),
             staged_artifacts: Vec::new(),
             staged_retention_refs: Vec::new(),
+            read_facts: Vec::new(),
             payloads: Vec::new(),
         }
     }
@@ -95,22 +95,6 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         Ok(artifact)
     }
 
-    /// Stages a state-output artifact for a fact value and appends the matching fact record.
-    pub fn state_output_and_record_fact<T>(
-        &mut self,
-        input: FactRecordInput<T>,
-        producer: RunnerCapabilityBinding,
-    ) -> Result<()>
-    where
-        T: MfmFactType + MfmValue,
-    {
-        let payloads = RunnerPayloadBuilder::new(self.artifacts.ctx);
-        let state_artifact = self.stage_state_output_artifact(&input.fact)?;
-        self.record_fact(input, producer)?;
-        self.payload(payloads.cell_produced(&state_artifact)?);
-        Ok(())
-    }
-
     /// Stages a state-output artifact and private fact-query replay evidence.
     pub fn state_output_and_record_fact_query_evidence<T>(
         &mut self,
@@ -124,12 +108,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         self.record_fact_query_evidence(evidence)
     }
 
-    /// Stages a typed fact response artifact and appends the matching `FactRecorded` payload.
-    pub fn record_fact<T>(
-        &mut self,
-        input: FactRecordInput<T>,
-        producer: RunnerCapabilityBinding,
-    ) -> Result<()>
+    pub(in crate::runner_kit) fn record_read_fact<T>(&mut self, fact: &T) -> Result<()>
     where
         T: MfmFactType,
     {
@@ -139,11 +118,11 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             mfm_facts::fact_descriptor_hash(&descriptor).map_err(runtime_fact_error)?;
         ensure_node_allows_fact_descriptor(self.artifacts.ctx.node(), &descriptor_hash)?;
 
-        let subject_json = serde_json::to_value(input.fact.subject())
+        let subject_json = serde_json::to_value(fact.subject())
             .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
         let subject = mfm_facts::typed_fact_subject_evidence(&descriptor, &subject_json)
             .map_err(runtime_fact_error)?;
-        let response = self.artifacts.fact_response(input.fact.response())?;
+        let response = self.artifacts.fact_response(fact.response())?;
         let response_schema_id = artifact_schema_id(&response)?;
         if descriptor.response_schema_id() != &response_schema_id {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -154,36 +133,25 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         }
         let response_evidence = response.evidence().clone();
         let claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-            visibility: input.visibility,
             fact_kind: descriptor.fact_kind().clone(),
             fact_descriptor_hash: descriptor_hash,
             subject,
-            observed_at: input.observed_at,
-            request: None,
             response: mfm_facts::FactResponseEvidence::new(
                 response_schema_id,
                 response_evidence.digest.clone(),
                 response_evidence.artifact_id.clone(),
                 response_evidence.evidence_hash()?,
             ),
-            producer: mfm_facts::FactProducerProvenance::new(
-                producer.capability_kind,
-                producer.capability_version,
-                producer.adapter_kind,
-                producer.adapter_version,
-            ),
         })
         .map_err(runtime_fact_error)?;
 
         self.stage_attempt_artifact(&response)?;
-        self.payload(RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
-            events::FactRecorded {
-                spec_hash: self.artifacts.ctx.spec_hash().clone(),
-                node_id: self.artifacts.ctx.node().node_id.clone(),
-                attempt_id: self.artifacts.ctx.attempt_id().clone(),
-                claim,
-            },
-        )));
+        self.read_facts.push(events::FactRecorded {
+            spec_hash: self.artifacts.ctx.spec_hash().clone(),
+            node_id: self.artifacts.ctx.node().node_id.clone(),
+            attempt_id: self.artifacts.ctx.attempt_id().clone(),
+            claim,
+        });
 
         Ok(())
     }
@@ -233,9 +201,10 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
 
     /// Finishes the builder into an erased runner output batch.
     pub fn finish(self) -> ErasedRunnerOutput {
-        ErasedRunnerOutput::from_parts(
+        ErasedRunnerOutput::from_parts_with_read_facts(
             self.staged_artifacts,
             self.staged_retention_refs,
+            self.read_facts,
             self.payloads,
         )
     }

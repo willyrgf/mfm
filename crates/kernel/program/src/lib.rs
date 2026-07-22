@@ -9,15 +9,12 @@
 extern crate self as mfm_program;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, NoCaps};
-use mfm_effects::{
-    ApplySideEffect, EffectDescriptor, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
-};
+use mfm_effects::{ApplySideEffect, EffectDescriptor, EffectSpec, Pure, ReadExternal};
 pub use mfm_facts as facts;
 use mfm_ids::{
     AdapterKind, AdapterVersion, CellId, ContentDigest, ContextDescriptorId, ContextRef,
@@ -87,29 +84,8 @@ const LOWERING_VERSION: &str = "mfm.typed.lowering.v2";
 /// Result type for typed program authoring operations.
 pub type Result<T> = std::result::Result<T, PlanError>;
 
-/// Authoring helper for typed fact publication.
-///
-/// This trait is not fact publication authority. Production recording must still validate
-/// descriptor bytes, certified node allow-lists, response artifacts, and store append rules.
-pub trait MfmFactType: MfmValue {
-    /// Typed subject value used to derive fact identity.
-    type Subject: MfmValue;
-
-    /// Typed response value retained as fact response evidence.
-    type Response: MfmValue;
-
-    /// Returns the fact descriptor emitted by the derive-owned authoring path.
-    fn descriptor() -> facts::Result<facts::FactDescriptor>;
-
-    /// Returns this fact's subject value.
-    fn subject(&self) -> &Self::Subject;
-
-    /// Returns this fact's response value.
-    fn response(&self) -> &Self::Response;
-}
-
 /// Builds the certified descriptor reference for a typed fact authoring contract.
-pub fn fact_descriptor_ref<F: MfmFactType>() -> Result<FactDescriptorRef> {
+pub fn fact_descriptor_ref<F: facts::MfmFactType>() -> Result<FactDescriptorRef> {
     let descriptor = F::descriptor().map_err(|error| PlanError::Registry(error.to_string()))?;
     fact_descriptor_ref_for_descriptor(&descriptor)
 }
@@ -426,11 +402,6 @@ pub trait StateSpec: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// Returns fact descriptor hashes this state type may emit.
-    fn emitted_fact_descriptors() -> Result<Vec<FactDescriptorRef>> {
-        Ok(Vec::new())
-    }
-
     /// Returns the context-bound input resource contract for this state.
     fn input_context_contract() -> Result<StateInputContextContractSpec> {
         Ok(StateInputContextContractSpec::no_context())
@@ -566,8 +537,6 @@ pub enum RunnerKind {
     Pure,
     /// External read runner.
     ReadExternal,
-    /// MFM-managed platform write runner.
-    ManagedPlatformWrite,
     /// External side-effect runner.
     ApplySideEffect,
 }
@@ -577,7 +546,6 @@ impl RunnerKind {
         match self {
             Self::Pure => "pure",
             Self::ReadExternal => "read_external",
-            Self::ManagedPlatformWrite => "managed_platform_write",
             Self::ApplySideEffect => "apply_side_effect",
         }
     }
@@ -628,8 +596,9 @@ impl StateDescriptorIdentity {
             .map_err(|error| PlanError::Registry(error.to_string()))?;
         let runner = <S::Effect as EffectRunner<S>>::runner_kind();
         let effect_contract_digest = <S::Effect as EffectRunner<S>>::effect_contract_digest()?;
-        let emitted_fact_descriptors =
-            canonical_fact_descriptor_refs(S::emitted_fact_descriptors()?)?;
+        let emitted_fact_descriptors = canonical_fact_descriptor_refs(
+            <S::Effect as EffectRunner<S>>::emitted_fact_descriptors()?,
+        )?;
         let context = S::Context::descriptor()?;
         let input_context = S::input_context_contract()?;
         let output_context = S::output_context_contract()?;
@@ -847,6 +816,49 @@ pub trait EffectRunner<S: StateSpec>: private::EffectRunnerSealed<S> {
     fn effect_contract_digest() -> Result<Option<ContentDigest>> {
         Ok(None)
     }
+
+    /// Returns fact descriptors derived from this effect/state pair.
+    fn emitted_fact_descriptors() -> Result<Vec<FactDescriptorRef>> {
+        Ok(Vec::new())
+    }
+
+    /// Returns canonical fact descriptors for framework-owned registration.
+    #[doc(hidden)]
+    fn emitted_fact_descriptor_artifacts() -> facts::Result<Vec<facts::FactDescriptor>> {
+        Ok(Vec::new())
+    }
+}
+
+mod read_fact_batch_private {
+    use mfm_facts::MfmFactType;
+    use mfm_values::NonEmpty;
+
+    pub trait Sealed {}
+
+    impl Sealed for () {}
+
+    impl<F: MfmFactType> Sealed for NonEmpty<F> {}
+}
+
+/// Closed fact-batch shape returned by an external-read reducer.
+///
+/// Framework reads either emit no facts (`()`) or one homogeneous non-empty batch
+/// (`NonEmpty<F>`). The sealed contract intentionally has no visitor or extension surface.
+pub trait ReadFactBatch: read_fact_batch_private::Sealed {
+    /// Returns the one emitted fact descriptor, or `None` for a no-fact read.
+    fn fact_descriptor() -> facts::Result<Option<facts::FactDescriptor>>;
+}
+
+impl ReadFactBatch for () {
+    fn fact_descriptor() -> facts::Result<Option<facts::FactDescriptor>> {
+        Ok(None)
+    }
+}
+
+impl<F: facts::MfmFactType> ReadFactBatch for NonEmpty<F> {
+    fn fact_descriptor() -> facts::Result<Option<facts::FactDescriptor>> {
+        F::descriptor().map(Some)
+    }
 }
 
 /// Pure deterministic state runner.
@@ -865,6 +877,8 @@ pub trait ReadState: StateSpec<Effect = ReadExternal> {
     type Plan: MfmValue;
     /// Canonical primary evidence returned by the adapter and consumed by the reducer.
     type Evidence: MfmValue;
+    /// Homogeneous fact batch emitted by the reducer, or `()` when it emits no facts.
+    type Facts: ReadFactBatch;
 
     /// Builds the complete deterministic external-read plan.
     fn plan(
@@ -879,7 +893,7 @@ pub trait ReadState: StateSpec<Effect = ReadExternal> {
         input: &Self::Input,
         evidence: &ExternalReadEvidenceSet<Self::Evidence>,
         context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output>;
+    ) -> StateResult<(Self::Output, Self::Facts)>;
 }
 
 /// Complete retained evidence supplied to an external-read state reducer.
@@ -923,15 +937,26 @@ impl<E> ExternalReadEvidenceSet<E> {
     }
 }
 
-/// Derives a hash-defining contract for one external-read plan/evidence pair.
-pub fn external_read_contract_digest<Plan, Evidence>() -> Result<ContentDigest>
+/// Derives a hash-defining contract for one external-read plan/evidence/fact-mode tuple.
+fn external_read_contract_digest<Plan, Evidence, Facts>() -> Result<ContentDigest>
 where
     Plan: MfmValue,
     Evidence: MfmValue,
+    Facts: ReadFactBatch,
 {
+    let fact_mode =
+        match Facts::fact_descriptor().map_err(|error| PlanError::Registry(error.to_string()))? {
+            None => serde_json::json!({"kind": "none"}),
+            Some(descriptor) => serde_json::json!({
+                "kind": "non_empty",
+                "fact_descriptor_hash": facts::fact_descriptor_hash(&descriptor)
+                    .map_err(|error| PlanError::Registry(error.to_string()))?
+                    .to_string(),
+            }),
+        };
     canonical_digest(serde_json::json!({
         "contract_domain": "mfm.external_read",
-        "contract_version": 1,
+        "contract_version": 2,
         "effect_class": "read_external",
         "evidence_schema_id": Evidence::schema_id()
             .map_err(|error| PlanError::Value(error.to_string()))?
@@ -945,6 +970,7 @@ where
         "plan_semantic_type_id": Plan::semantic_id()
             .map_err(|error| PlanError::Value(error.to_string()))?
             .as_str(),
+        "fact_mode": fact_mode,
     }))
 }
 
@@ -1014,22 +1040,6 @@ where
             .map_err(|error| PlanError::Value(error.to_string()))?
             .as_str(),
     }))
-}
-
-/// MFM-managed platform write state runner.
-pub trait ManagedWriteState: StateSpec<Effect = ManagedPlatformWrite> {
-    /// Future returned by [`ManagedWriteState::run`].
-    type RunFuture<'a>: Future<Output = StateResult<Self::Output>> + Send + 'a
-    where
-        Self: 'a;
-
-    /// Executes this managed write through declared capabilities.
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        caps: &'a Self::Caps,
-        context: &'a CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a>;
 }
 
 /// Deterministic state-authored mutation intent and idempotency material.
@@ -1127,16 +1137,22 @@ where
     }
 
     fn effect_contract_digest() -> Result<Option<ContentDigest>> {
-        external_read_contract_digest::<S::Plan, S::Evidence>().map(Some)
+        external_read_contract_digest::<S::Plan, S::Evidence, S::Facts>().map(Some)
     }
-}
 
-impl<S> EffectRunner<S> for ManagedPlatformWrite
-where
-    S: ManagedWriteState,
-{
-    fn runner_kind() -> RunnerKind {
-        RunnerKind::ManagedPlatformWrite
+    fn emitted_fact_descriptors() -> Result<Vec<FactDescriptorRef>> {
+        S::Facts::fact_descriptor()
+            .map_err(|error| PlanError::Registry(error.to_string()))?
+            .map(|descriptor| {
+                fact_descriptor_ref_for_descriptor(&descriptor).map(|item| vec![item])
+            })
+            .unwrap_or_else(|| Ok(Vec::new()))
+    }
+
+    fn emitted_fact_descriptor_artifacts() -> facts::Result<Vec<facts::FactDescriptor>> {
+        S::Facts::fact_descriptor()
+            .map(Option::into_iter)
+            .map(Iterator::collect)
     }
 }
 
@@ -1164,9 +1180,9 @@ where
 
 mod private {
     use super::{
-        ApplySideEffect, DeclaredContext, ForwardSideEffectHandle, Handle, ManagedPlatformWrite,
-        MfmContext, MfmValue, NoContext, NonEmptyHandles, OperationInputHandles, Pure,
-        ReadExternal, SideEffectState, StateContext, StateInput, StateSpec,
+        ApplySideEffect, DeclaredContext, ForwardSideEffectHandle, Handle, MfmContext, MfmValue,
+        NoContext, NonEmptyHandles, OperationInputHandles, Pure, ReadExternal, SideEffectState,
+        StateContext, StateInput, StateSpec,
     };
 
     pub trait EffectRunnerSealed<S: StateSpec> {}
@@ -1177,8 +1193,6 @@ mod private {
     impl<S> EffectRunnerSealed<S> for Pure where S: super::PureState {}
 
     impl<S> EffectRunnerSealed<S> for ReadExternal where S: super::ReadState {}
-
-    impl<S> EffectRunnerSealed<S> for ManagedPlatformWrite where S: super::ManagedWriteState {}
 
     impl<S> EffectRunnerSealed<S> for ApplySideEffect where S: SideEffectState {}
 

@@ -54,27 +54,23 @@ async fn validate_migrations(pool: &PgPool) -> Result<()> {
         sqlx::query!("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(pool)
             .await
-            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Migrations))?;
+            .map_err(|_| authority_mismatch())?;
 
     if rows.len() != MIGRATOR.iter().count() {
-        return Err(store_authority_error(
-            PostgresStoreAuthorityError::Migrations,
-        ));
+        return Err(authority_mismatch());
     }
 
     for migration in MIGRATOR.iter() {
         let row = rows
             .iter()
             .find(|row| row.version == migration.version)
-            .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Migrations))?;
+            .ok_or_else(authority_mismatch)?;
         if !row.success {
-            return Err(store_authority_error(
-                PostgresStoreAuthorityError::Migrations,
-            ));
+            return Err(authority_mismatch());
         }
         if row.checksum.as_slice() != migration.checksum.as_ref() {
             return Err(store_authority_error(
-                PostgresStoreAuthorityError::Migrations,
+                PostgresStoreAuthorityError::MigrationChecksumMismatch,
             ));
         }
     }
@@ -90,7 +86,7 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
     let tables = table_rows
         .into_iter()
         .map(|row| row.table_name)
@@ -98,12 +94,12 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
 
     for table in REQUIRED_TABLES {
         if !tables.contains(*table) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
     for table in FORBIDDEN_TABLES {
         if tables.contains(*table) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
 
@@ -114,15 +110,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
     let views = view_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("table_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     for view in REQUIRED_VIEWS {
         if !views.contains(*view) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
 
@@ -133,15 +129,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
     let indexes = index_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("indexname"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     for index in REQUIRED_INDEXES {
         if !indexes.contains(*index) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
 
@@ -152,15 +148,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
     let triggers = trigger_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("trigger_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     for trigger in REQUIRED_TRIGGERS {
         if !triggers.contains(*trigger) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
     validate_trigger_contracts(pool).await?;
@@ -173,15 +169,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
     let functions = function_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("proname"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     for function in REQUIRED_FUNCTIONS {
         if !functions.contains(*function) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
     validate_function_contracts(pool).await?;
@@ -193,15 +189,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
     let constraints = constraint_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("constraint_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     for constraint in REQUIRED_CONSTRAINTS {
         if !constraints.contains(*constraint) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
 
@@ -213,15 +209,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
     let cursor_columns = cursor_column_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("column_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     for column in REQUIRED_CURSOR_COLUMNS {
         if !cursor_columns.contains(*column) {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
     }
 
@@ -238,28 +234,26 @@ async fn validate_function_contracts(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
 
     for contract in REQUIRED_FUNCTION_CONTRACTS {
         let row = rows
             .iter()
             .find(|row| row.try_get::<String, _>("proname").ok().as_deref() == Some(contract.name))
-            .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+            .ok_or_else(|| authority_mismatch())?;
         let result_type: String = row
             .try_get("result_type")
-            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
-        let arguments: String = row
-            .try_get("arguments")
-            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+            .map_err(|_| authority_mismatch())?;
+        let arguments: String = row.try_get("arguments").map_err(|_| authority_mismatch())?;
         let definition: String = row
             .try_get("definition")
-            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+            .map_err(|_| authority_mismatch())?;
         if result_type != "trigger" || !arguments.is_empty() {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+            return Err(authority_mismatch());
         }
         for snippet in contract.required_definition_snippets {
             if !definition.contains(snippet) {
-                return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+                return Err(authority_mismatch());
             }
         }
     }
@@ -279,7 +273,7 @@ async fn validate_trigger_contracts(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+    .map_err(|_| authority_mismatch())?;
 
     for contract in REQUIRED_TRIGGER_CONTRACTS {
         validate_trigger_contract_row(&rows, contract)?;
@@ -313,19 +307,19 @@ fn validate_trigger_contract_row(
     let row = rows
         .iter()
         .find(|row| row.try_get::<String, _>("tgname").ok().as_deref() == Some(contract.name))
-        .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .ok_or_else(|| authority_mismatch())?;
     let table_name: String = row
         .try_get("table_name")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     let function_name: String = row
         .try_get("function_name")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     let trigger_type: i32 = row
         .try_get("trigger_type")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
     let trigger_enabled: String = row
         .try_get("trigger_enabled")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        .map_err(|_| authority_mismatch())?;
 
     if table_name != contract.table
         || function_name != contract.function
@@ -337,7 +331,7 @@ fn validate_trigger_contract_row(
         || trigger_type_has(trigger_type, TRIGGER_TYPE_DELETE) != contract.delete
         || trigger_type_has(trigger_type, TRIGGER_TYPE_TRUNCATE) != contract.truncate
     {
-        return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
+        return Err(authority_mismatch());
     }
 
     Ok(())
@@ -357,31 +351,26 @@ async fn validate_store_metadata(pool: &PgPool) -> Result<PostgresStoreAuthority
     )
     .fetch_one(pool)
     .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
-    let row_count: i64 = row
-        .try_get("row_count")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
+    .map_err(|_| authority_mismatch())?;
+    let row_count: i64 = row.try_get("row_count").map_err(|_| authority_mismatch())?;
     let store_epoch: Option<String> = row
         .try_get("store_epoch")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
+        .map_err(|_| authority_mismatch())?;
     let schema_contract_version: Option<String> = row
         .try_get("schema_contract_version")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
+        .map_err(|_| authority_mismatch())?;
     let store_scope_id: Option<String> = row
         .try_get("store_scope_id")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
+        .map_err(|_| authority_mismatch())?;
     if row_count != 1
-        || schema_contract_version.as_deref() != Some("mfm.postgres.store.v3")
+        || schema_contract_version.as_deref() != Some("mfm.postgres.store.v4")
         || !valid_store_epoch(store_epoch.as_deref())
     {
-        return Err(store_authority_error(PostgresStoreAuthorityError::Metadata));
+        return Err(authority_mismatch());
     }
     let store_scope_id = store_scope_id
-        .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::StoreScope))
-        .and_then(|value| {
-            StoreScopeId::new(value)
-                .map_err(|_| store_authority_error(PostgresStoreAuthorityError::StoreScope))
-        })?;
+        .ok_or_else(|| authority_mismatch())
+        .and_then(|value| StoreScopeId::new(value).map_err(|_| authority_mismatch()))?;
     Ok(PostgresStoreAuthority::new(store_scope_id))
 }
 
@@ -400,6 +389,10 @@ fn store_authority_error(kind: PostgresStoreAuthorityError) -> PostgresStoreErro
     PostgresStoreError::Authority(kind)
 }
 
+fn authority_mismatch() -> PostgresStoreError {
+    store_authority_error(PostgresStoreAuthorityError::StoreAuthorityMismatch)
+}
+
 const REQUIRED_TABLES: &[&str] = &[
     "_sqlx_migrations",
     "store_metadata",
@@ -410,11 +403,11 @@ const REQUIRED_TABLES: &[&str] = &[
     "artifact_admissions",
     "commit_artifact_evidence",
     "run_artifact_admissions",
-    "fact_descriptor_index",
+    "fact_descriptor_catalog",
     "run_fact_descriptor_admissions",
-    "fact_index",
-    "fact_index_terms",
-    "fact_projection_metadata",
+    "fact_query_projection",
+    "fact_query_terms",
+    "fact_query_metadata",
     "admission_lane",
     "admission_waiter",
     "run_observation_cursors",
@@ -427,17 +420,17 @@ const REQUIRED_INDEXES: &[&str] = &[
     "admission_lane_expired_execution_claim_idx",
     "admission_waiter_live_fifo_idx",
     "admission_waiter_waiting_expiry_idx",
-    "fact_descriptor_index_kind_idx",
-    "fact_index_descriptor_scope_idx",
-    "fact_index_fact_key_idx",
-    "fact_index_response_artifact_idx",
-    "fact_index_terms_text_idx",
-    "fact_index_terms_bool_idx",
-    "fact_index_terms_i64_idx",
-    "fact_index_terms_u64_idx",
-    "fact_index_terms_decimal_idx",
-    "fact_index_terms_timestamp_idx",
-    "fact_index_terms_digest_idx",
+    "fact_descriptor_catalog_kind_idx",
+    "fact_query_projection_descriptor_order_idx",
+    "fact_query_projection_fact_key_idx",
+    "fact_query_projection_response_artifact_idx",
+    "fact_query_terms_text_idx",
+    "fact_query_terms_bool_idx",
+    "fact_query_terms_i64_idx",
+    "fact_query_terms_u64_idx",
+    "fact_query_terms_decimal_idx",
+    "fact_query_terms_timestamp_idx",
+    "fact_query_terms_digest_idx",
 ];
 
 const REQUIRED_FUNCTIONS: &[&str] = &["mfm_reject_authority_mutation"];
@@ -474,9 +467,9 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "admission_waiter_id_nonempty",
     "admission_waiter_token_nonempty",
     "admission_waiter_status_v1",
-    "fact_descriptor_index_artifact_fk",
-    "fact_descriptor_index_artifact_unique",
-    "fact_descriptor_index_descriptor_artifact_unique",
+    "fact_descriptor_catalog_artifact_fk",
+    "fact_descriptor_catalog_artifact_unique",
+    "fact_descriptor_catalog_descriptor_artifact_unique",
     "run_fact_descriptor_admissions_descriptor_artifact_fk",
     "run_fact_descriptor_admissions_event_fk",
     "run_fact_descriptor_admissions_event_id_fk",
@@ -484,26 +477,23 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "run_fact_descriptor_admissions_run_artifact_fk",
     "run_fact_descriptor_admissions_seq_positive",
     "run_fact_descriptor_admissions_ordinal_nonnegative",
-    "fact_index_event_fk",
-    "fact_index_event_id_fk",
-    "fact_index_commit_fk",
-    "fact_index_descriptor_fk",
-    "fact_index_response_artifact_fk",
-    "fact_index_seq_positive",
-    "fact_index_ordinal_nonnegative",
-    "fact_index_store_commit_order_positive",
-    "fact_index_audience_v1",
-    "fact_index_visibility_scope_v1",
-    "fact_index_request_pair",
-    "fact_index_terms_claim_fk",
-    "fact_index_terms_descriptor_fk",
-    "fact_index_terms_seq_positive",
-    "fact_index_terms_ordinal_nonnegative",
-    "fact_index_terms_source_v1",
-    "fact_index_terms_value_type_v1",
-    "fact_index_terms_u64_range",
-    "fact_index_terms_value_shape",
-    "fact_projection_metadata_generation_positive",
+    "fact_query_projection_event_fk",
+    "fact_query_projection_event_id_fk",
+    "fact_query_projection_commit_fk",
+    "fact_query_projection_descriptor_fk",
+    "fact_query_projection_response_artifact_fk",
+    "fact_query_projection_seq_positive",
+    "fact_query_projection_ordinal_nonnegative",
+    "fact_query_projection_store_commit_order_positive",
+    "fact_query_terms_claim_fk",
+    "fact_query_terms_descriptor_fk",
+    "fact_query_terms_seq_positive",
+    "fact_query_terms_ordinal_nonnegative",
+    "fact_query_terms_source_v1",
+    "fact_query_terms_value_type_v1",
+    "fact_query_terms_u64_range",
+    "fact_query_terms_value_shape",
+    "fact_query_metadata_generation_positive",
     "run_observation_cursors_version_v3",
     "run_observation_cursors_store_commit_order_nonnegative",
     "configured_values_target_bounds",
@@ -585,6 +575,10 @@ const FORBIDDEN_TABLES: &[&str] = &[
     "fact_projections",
     "fact_records",
     "fact_terms",
+    "fact_descriptor_index",
+    "fact_index",
+    "fact_index_terms",
+    "fact_projection_metadata",
     "typed_side_effect_projection",
     "typed_resource_lane_projection",
     "public_output_projection",

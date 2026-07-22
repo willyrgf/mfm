@@ -159,7 +159,7 @@ async fn run_start_admitted_uses_committed_fact_descriptor_artifacts() {
 }
 
 #[tokio::test]
-async fn fact_bearing_runtime_prefix_rebuild_uses_retained_artifact_bytes() {
+async fn fact_bearing_runtime_settlement_rebuild_uses_retained_artifact_bytes() {
     let (fixture, descriptor, _) = fixture_with_read_node_fact_descriptor();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
     let mut store = TestTypedRunStore::new();
@@ -191,7 +191,7 @@ async fn fact_bearing_runtime_prefix_rebuild_uses_retained_artifact_bytes() {
     );
     let node = node_by_output(&fixture, &fixture.cell_b).clone();
     let attempt_id = append_attempt_start(&mut store, &fixture, &node, 1);
-    append_fact(&mut store, &fixture, &node, &attempt_id, 17, 23);
+    append_fact_settlement(&mut store, &fixture, &node, &attempt_id, 17, 23);
 
     let stream = store.load_run_stream(&fixture.run_id);
     let raw_error = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)

@@ -208,7 +208,120 @@ pub(super) fn validate_attempt_terminal_commit(request: &CommitRequest) -> Resul
         "missing attempt-terminal payload",
     )?;
     validate_attempt_terminal_resource_lane_release_batch(request)?;
-    validate_terminal_attempt_cell_pairs(&request.payloads)
+    validate_terminal_attempt_cell_pairs(&request.payloads)?;
+    validate_fact_settlement_commit(&request.payloads)
+}
+
+pub(super) fn validate_fact_settlement_commit(payloads: &[KernelEventPayload]) -> Result<()> {
+    let facts = payloads
+        .iter()
+        .enumerate()
+        .filter_map(|(index, payload)| match payload {
+            KernelEventPayload::FactRecorded(fact) => Some((index, fact)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if facts.is_empty() {
+        return Ok(());
+    }
+
+    let (node_id, attempt_id) = (&facts[0].1.node_id, &facts[0].1.attempt_id);
+    let mut keys = BTreeSet::new();
+    for (_, fact) in &facts {
+        if &fact.node_id != node_id || &fact.attempt_id != attempt_id {
+            return Err(StoreError::ProjectionConflict {
+                key: "fact:settlement".to_owned(),
+                message: "one fact settlement must bind one node attempt".to_owned(),
+            });
+        }
+        if !keys.insert(fact.claim.subject().fact_key().clone()) {
+            return Err(StoreError::ProjectionConflict {
+                key: "fact:settlement".to_owned(),
+                message: "fact keys must be unique within one settlement".to_owned(),
+            });
+        }
+    }
+
+    let matching_cells = payloads
+        .iter()
+        .enumerate()
+        .filter_map(|(index, payload)| match payload {
+            KernelEventPayload::CellProduced(cell)
+                if &cell.node_id == node_id && &cell.attempt_id == attempt_id =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let matching_completions = payloads
+        .iter()
+        .enumerate()
+        .filter_map(|(index, payload)| match payload {
+            KernelEventPayload::StateAttemptCompleted(completion)
+                if &completion.node_id == node_id && &completion.attempt_id == attempt_id =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if matching_cells.len() != 1 || matching_completions.len() != 1 {
+        return Err(StoreError::ProjectionConflict {
+            key: "fact:settlement".to_owned(),
+            message: "facts require exactly one matching produced cell and completed attempt"
+                .to_owned(),
+        });
+    }
+    if facts
+        .last()
+        .is_some_and(|(index, _)| *index >= matching_cells[0])
+        || matching_cells[0] >= matching_completions[0]
+    {
+        return Err(StoreError::ProjectionConflict {
+            key: "fact:settlement".to_owned(),
+            message: "fact settlement order must be facts, produced cell, then completion"
+                .to_owned(),
+        });
+    }
+    if payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            KernelEventPayload::CellSkipped(_)
+                | KernelEventPayload::StateAttemptFailed(_)
+                | KernelEventPayload::StateAttemptInterrupted(_)
+        ) || payload.is_side_effect_terminal()
+    }) {
+        return Err(StoreError::ProjectionConflict {
+            key: "fact:settlement".to_owned(),
+            message: "facts cannot be committed with failed, interrupted, skipped, or side-effect evidence"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_fact_response_artifact_admissions(
+    request: &CommitRequest,
+    admitted_artifacts: &[ArtifactEvidenceRef],
+) -> Result<()> {
+    for payload in &request.payloads {
+        let KernelEventPayload::FactRecorded(fact) = payload else {
+            continue;
+        };
+        let response = fact.claim.response();
+        let admitted = admitted_artifacts.iter().any(|evidence| {
+            evidence.artifact_id == *response.artifact_id()
+                && evidence.evidence_hash().ok().as_ref() == Some(response.artifact_evidence_hash())
+        });
+        if !admitted {
+            return Err(StoreError::ProjectionConflict {
+                key: "fact:settlement:response".to_owned(),
+                message: "each fact response must be admitted in its settlement bundle".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_side_effect_terminal_commit(request: &CommitRequest) -> Result<()> {

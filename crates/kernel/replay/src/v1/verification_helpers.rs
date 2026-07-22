@@ -733,10 +733,7 @@ fn capability_implementation_identity_json(
 pub(super) fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
     serde_json::json!({
         "binary_digest": identity.binary_digest.as_str(),
-        "cargo_package_digest": identity.cargo_package_digest.as_str(),
         "factory_id": identity.factory_id.as_str(),
-        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
-        "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
     })
 }
 

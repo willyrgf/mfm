@@ -1,4 +1,4 @@
-use super::parse::{OrderingTermWire, OrderingWire, QueryScopeWire, ScopeDecisionEvidenceWire};
+use super::parse::{OrderingTermWire, OrderingWire};
 use super::*;
 
 pub(super) fn canonical_descriptor_value(descriptor: &FactDescriptor) -> Result<CanonicalValue> {
@@ -162,15 +162,7 @@ pub(super) fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Resul
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-plan.v1".to_owned()),
-        ),
-        (
-            "store_scope",
-            CanonicalValue::String(plan.store_scope.as_str().to_owned()),
-        ),
-        (
-            "query_scope",
-            QueryScopeWire::canonical_value(&plan.query_scope)?,
+            CanonicalValue::String("mfm.fact-query-plan.v2".to_owned()),
         ),
         (
             "query_compiler_version",
@@ -183,10 +175,6 @@ pub(super) fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Resul
         (
             "resolved_descriptor",
             CanonicalValue::String(plan.resolved_descriptor.as_str().to_owned()),
-        ),
-        (
-            "scope_decision_evidence",
-            ScopeDecisionEvidenceWire::canonical_value(&plan.scope_decision_evidence)?,
         ),
         (
             "canonical_query",
@@ -218,7 +206,7 @@ fn canonical_query_receipt_value(
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-receipt.v2".to_owned()),
+            CanonicalValue::String("mfm.fact-query-receipt.v3".to_owned()),
         ),
         (
             "plan_hash",
@@ -227,10 +215,6 @@ fn canonical_query_receipt_value(
         (
             "read_frontier",
             canonical_store_read_frontier_value(&receipt.read_frontier)?,
-        ),
-        (
-            "frontier_type",
-            CanonicalValue::String(receipt.frontier_type.as_str().to_owned()),
         ),
         ("returned_refs", CanonicalValue::Array(returned_refs)),
         (
@@ -259,7 +243,7 @@ pub(super) fn canonical_fact_query_result_set_value(
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-result-set.v1".to_owned()),
+            CanonicalValue::String("mfm.fact-query-result-set.v2".to_owned()),
         ),
         ("returned_refs", CanonicalValue::Array(returned_refs)),
         (
@@ -293,16 +277,8 @@ pub(super) fn canonical_query_evidence_value(
 fn canonical_store_read_frontier_value(frontier: &StoreReadFrontier) -> Result<CanonicalValue> {
     canonical_object([
         (
-            "store_scope",
-            CanonicalValue::String(frontier.store_scope.as_str().to_owned()),
-        ),
-        (
-            "query_scope",
-            QueryScopeWire::canonical_value(&frontier.query_scope)?,
-        ),
-        (
-            "descriptor_catalog_watermark",
-            CanonicalValue::Unsigned(frontier.descriptor_catalog_watermark.as_u64()),
+            "store_scope_id",
+            CanonicalValue::String(frontier.store_scope_id.as_str().to_owned()),
         ),
         (
             "store_commit_order",
@@ -331,14 +307,6 @@ fn canonical_internal_fact_ref_value(reference: &InternalFactRef) -> Result<Cano
             CanonicalValue::String(parts.producer_node_id.as_str().to_owned()),
         ),
         (
-            "observed_at",
-            optional_string_value(parts.observed_at.as_deref()),
-        ),
-        (
-            "visibility",
-            canonical_fact_visibility_value(&parts.visibility)?,
-        ),
-        (
             "fact_kind",
             CanonicalValue::String(parts.fact_kind.as_str().to_owned()),
         ),
@@ -365,24 +333,6 @@ fn canonical_internal_fact_ref_value(reference: &InternalFactRef) -> Result<Cano
             CanonicalValue::String(parts.subject.subject_material_hash().as_str().to_owned()),
         ),
         (
-            "request_schema_id",
-            optional_display_value(
-                parts
-                    .request
-                    .as_ref()
-                    .map(FactRequestEvidence::request_schema_id),
-            ),
-        ),
-        (
-            "request_hash",
-            optional_display_value(
-                parts
-                    .request
-                    .as_ref()
-                    .map(FactRequestEvidence::request_hash),
-            ),
-        ),
-        (
             "response_schema_id",
             CanonicalValue::String(parts.response.response_schema_id().as_str().to_owned()),
         ),
@@ -397,22 +347,6 @@ fn canonical_internal_fact_ref_value(reference: &InternalFactRef) -> Result<Cano
         (
             "artifact_evidence_hash",
             CanonicalValue::String(parts.response.artifact_evidence_hash().as_str().to_owned()),
-        ),
-        (
-            "capability_kind",
-            CanonicalValue::String(parts.producer.capability_kind().as_str().to_owned()),
-        ),
-        (
-            "capability_version",
-            CanonicalValue::String(parts.producer.capability_version().as_str().to_owned()),
-        ),
-        (
-            "adapter_kind",
-            CanonicalValue::String(parts.producer.adapter_kind().as_str().to_owned()),
-        ),
-        (
-            "adapter_version",
-            CanonicalValue::String(parts.producer.adapter_version().as_str().to_owned()),
         ),
     ])
 }
@@ -433,22 +367,6 @@ pub(super) fn canonical_fact_claim_id_value(claim_id: &FactClaimId) -> Result<Ca
             CanonicalValue::Unsigned(u64::from(claim_id.source_ordinal)),
         ),
     ])
-}
-
-fn canonical_fact_visibility_value(visibility: &FactVisibility) -> Result<CanonicalValue> {
-    match visibility {
-        FactVisibility::RunPrivate => {
-            canonical_object([("kind", CanonicalValue::String("run_private".to_owned()))])
-        }
-        FactVisibility::Indexed { audience, scope } => canonical_object([
-            ("kind", CanonicalValue::String("indexed".to_owned())),
-            (
-                "audience",
-                CanonicalValue::String(audience.as_str().to_owned()),
-            ),
-            ("scope", CanonicalValue::String(scope.as_str().to_owned())),
-        ]),
-    }
 }
 
 fn optional_returned_field_summaries_value(
@@ -526,12 +444,6 @@ fn canonical_fact_selection_evidence_value(
             optional_display_value(selection.selected_summaries_digest.as_ref()),
         ),
     ])
-}
-
-fn optional_string_value(value: Option<&str>) -> CanonicalValue {
-    value
-        .map(|value| CanonicalValue::String(value.to_owned()))
-        .unwrap_or(CanonicalValue::Null)
 }
 
 fn optional_display_value<T>(value: Option<&T>) -> CanonicalValue

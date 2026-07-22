@@ -128,6 +128,8 @@ pub enum RuntimeConfigErrorKind {
     },
     /// Required field was not present.
     MissingRequiredField,
+    /// Bounded unsigned integer was missing or outside its supported range.
+    InvalidBoundedInteger,
     /// Required value source did not provide exactly one source.
     ExactlyOneValueSource,
     /// Optional value source provided more than one source.
@@ -181,6 +183,7 @@ impl fmt::Display for RuntimeConfigErrorKind {
             Self::ForbiddenSecretMaterial => f.write_str("forbidden secret material field"),
             Self::InvalidIdentifier { kind } => write!(f, "invalid {kind}"),
             Self::MissingRequiredField => f.write_str("required field is missing"),
+            Self::InvalidBoundedInteger => f.write_str("bounded integer is invalid"),
             Self::ExactlyOneValueSource => {
                 f.write_str("exactly one value source must be configured")
             }

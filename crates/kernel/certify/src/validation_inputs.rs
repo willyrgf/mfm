@@ -452,7 +452,6 @@ fn validate_state_descriptor_identity(descriptor: &spec::StateDescriptorIdentity
     let expected_runner = match effect.class {
         EffectClass::Pure => "pure",
         EffectClass::ReadExternal => "read_external",
-        EffectClass::ManagedPlatformWrite => "managed_platform_write",
         EffectClass::ApplySideEffect => "apply_side_effect",
     };
     if descriptor.runner != expected_runner {
@@ -479,8 +478,8 @@ fn validate_state_descriptor_identity(descriptor: &spec::StateDescriptorIdentity
                 ),
             ));
         }
-        (EffectClass::Pure | EffectClass::ManagedPlatformWrite, None) => {}
-        (EffectClass::Pure | EffectClass::ManagedPlatformWrite, Some(_)) => {
+        (EffectClass::Pure, None) => {}
+        (EffectClass::Pure, Some(_)) => {
             return Err(problem(
                 ProblemClass::InvalidSemanticTransition,
                 format!(

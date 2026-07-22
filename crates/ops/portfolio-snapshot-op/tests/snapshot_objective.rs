@@ -46,8 +46,8 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
         .collect::<Vec<_>>();
     for required in [
         "mfm.portfolio.select_holdings",
+        "mfm.bitcoin.collect_balances",
         "mfm.evm.collect_balances",
-        "mfm.evm.record_balance_facts",
         "mfm.portfolio.assemble_snapshot",
         "mfm.portfolio.project_report",
     ] {
@@ -63,7 +63,7 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
         .collect::<Vec<_>>();
     assert!(operations.contains(&"mfm.portfolio.snapshot"));
     assert!(operations.contains(&"mfm.portfolio.report"));
-    assert!(operations.contains(&"mfm.bitcoin.btc_network_collection"));
+    assert!(operations.contains(&"mfm.bitcoin.balance_collection"));
     assert!(operations.contains(&"mfm.evm.balance_collection"));
 
     mfm_certify::certify_program_draft(&draft).expect("complete snapshot draft certifies");
@@ -99,7 +99,7 @@ fn snapshot_operation_contains_only_child_operation_composition() {
     assert_eq!(
         direct_children,
         [
-            "mfm.bitcoin.btc_network_collection",
+            "mfm.bitcoin.balance_collection",
             "mfm.evm.balance_collection",
             "mfm.portfolio.report",
         ]
@@ -188,10 +188,7 @@ fn report_selection_receives_only_stored_family_receipts() {
     receipt_producers.sort_unstable();
     assert_eq!(
         receipt_producers,
-        [
-            "mfm.bitcoin.address_balance.assemble_network_receipt",
-            "mfm.evm.record_balance_facts",
-        ]
+        ["mfm.bitcoin.collect_balances", "mfm.evm.collect_balances",]
     );
 }
 
@@ -202,56 +199,52 @@ fn aggregate_snapshot_topology_matches_demand_without_inert_collection_nodes() {
     let bitcoin_only =
         deterministic_snapshot_draft(topology_config(true, false, false, false, false));
     assert_eq!(
-        operation_count(&bitcoin_only, "mfm.bitcoin.btc_network_collection"),
+        operation_count(&bitcoin_only, "mfm.bitcoin.balance_collection"),
         1
     );
-    assert_two_state_evm_slice(&bitcoin_only, 0);
+    assert_one_state_evm_slice(&bitcoin_only, 0);
     assert_no_state_prefix(&bitcoin_only, "mfm.evm.");
 
     let evm_native_only =
         deterministic_snapshot_draft(topology_config(false, true, false, false, false));
     assert_eq!(
-        operation_count(&evm_native_only, "mfm.bitcoin.btc_network_collection"),
+        operation_count(&evm_native_only, "mfm.bitcoin.balance_collection"),
         0
     );
-    assert_two_state_evm_slice(&evm_native_only, 1);
+    assert_one_state_evm_slice(&evm_native_only, 1);
     assert_eq!(evm_collection_config(&evm_native_only).sources().len(), 1);
     assert_no_state_prefix(&evm_native_only, "mfm.bitcoin.");
 
     let evm_token_only =
         deterministic_snapshot_draft(topology_config(false, false, true, false, false));
     assert_eq!(
-        operation_count(&evm_token_only, "mfm.bitcoin.btc_network_collection"),
+        operation_count(&evm_token_only, "mfm.bitcoin.balance_collection"),
         0
     );
-    assert_two_state_evm_slice(&evm_token_only, 1);
+    assert_one_state_evm_slice(&evm_token_only, 1);
     assert_eq!(evm_collection_config(&evm_token_only).sources().len(), 1);
 
     let mixed = deterministic_snapshot_draft(topology_config(false, true, true, false, false));
-    assert_two_state_evm_slice(&mixed, 1);
+    assert_one_state_evm_slice(&mixed, 1);
     assert_eq!(evm_collection_config(&mixed).sources().len(), 2);
 
     let repeated_token =
         deterministic_snapshot_draft(topology_config(false, false, true, false, true));
-    assert_two_state_evm_slice(&repeated_token, 1);
+    assert_one_state_evm_slice(&repeated_token, 1);
     assert_eq!(evm_collection_config(&repeated_token).sources().len(), 2);
 
     let unreferenced_token =
         deterministic_snapshot_draft(topology_config(false, true, false, true, false));
-    assert_two_state_evm_slice(&unreferenced_token, 1);
+    assert_one_state_evm_slice(&unreferenced_token, 1);
     assert_eq!(
         evm_collection_config(&unreferenced_token).sources().len(),
         1
     );
 }
 
-fn assert_two_state_evm_slice(draft: &TypedProgramDraft, network_count: usize) {
+fn assert_one_state_evm_slice(draft: &TypedProgramDraft, network_count: usize) {
     assert_eq!(
         state_count(draft, "mfm.evm.collect_balances"),
-        network_count
-    );
-    assert_eq!(
-        state_count(draft, "mfm.evm.record_balance_facts"),
         network_count
     );
     assert_eq!(

@@ -1,11 +1,10 @@
 use mfm_capabilities::{
     CapabilityKind, CapabilitySetFor, CapabilitySpec, CapabilityVersion,
-    ExternalMutationAuthorityRole, ManagedPlatformWriteRole, ReadExternalRole, Result, SupportRole,
+    ExternalMutationAuthorityRole, ReadExternalRole, Result, SupportRole,
 };
 
 pub struct ReadCap;
 pub struct SupportCap;
-pub struct ManagedWriteCap;
 pub struct MutationCap;
 
 impl CapabilitySpec for ReadCap {
@@ -37,22 +36,6 @@ impl CapabilitySpec for SupportCap {
 
     fn name() -> &'static str {
         "support_cap"
-    }
-}
-
-impl CapabilitySpec for ManagedWriteCap {
-    type Role = ManagedPlatformWriteRole;
-
-    fn kind() -> Result<CapabilityKind> {
-        unimplemented!()
-    }
-
-    fn version() -> Result<CapabilityVersion> {
-        unimplemented!()
-    }
-
-    fn name() -> &'static str {
-        "managed_write_cap"
     }
 }
 

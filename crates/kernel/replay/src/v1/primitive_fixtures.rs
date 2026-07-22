@@ -27,6 +27,28 @@ pub(super) fn persisted_envelope_with_ordinal(
     )
 }
 
+pub(super) fn persisted_commit(
+    run_id: &RunId,
+    seq: u64,
+    payloads: Vec<KernelEventPayload>,
+) -> Vec<KernelEventEnvelope> {
+    let commit_key =
+        store::CommitKey::new(format!("replay-test:{seq}")).expect("replay test commit key");
+    payloads
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, payload)| {
+            persisted_envelope_with_ordinal(
+                run_id,
+                seq,
+                u32::try_from(ordinal).expect("replay test event ordinal"),
+                commit_key.clone(),
+                payload,
+            )
+        })
+        .collect()
+}
+
 pub(super) fn fact_response_artifact(byte: u8) -> StoredArtifactEvidenceRef {
     StoredArtifactEvidenceRef {
         artifact_id: artifact_id(byte),
@@ -75,14 +97,6 @@ pub(super) fn fact_adapter_kind() -> AdapterKind {
 
 pub(super) fn fact_adapter_version() -> AdapterVersion {
     AdapterVersion::new("mfm.replay.test.fact_adapter.v1").expect("adapter version")
-}
-
-pub(super) fn fact_request_schema_id() -> SchemaId {
-    schema_id("mfm.replay.test.fact_request", 0xd2)
-}
-
-pub(super) fn fact_request_hash() -> ContentDigest {
-    content_digest(0xd3)
 }
 
 pub(super) fn fact_response_schema_id() -> SchemaId {

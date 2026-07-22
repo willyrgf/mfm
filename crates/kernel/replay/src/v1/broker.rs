@@ -632,31 +632,39 @@ impl ReplayBroker {
 
     fn verify_fact_against_spec(&self, payload: &events::FactRecorded) -> Result<()> {
         let node = self.node(&payload.node_id)?;
-        if !node
-            .fact_descriptor_allowlist
+        let state = self
+            .certified_spec
+            .spec
+            .descriptor_identities
             .iter()
-            .any(|reference| &reference.descriptor_hash == payload.claim.fact_descriptor_hash())
+            .find_map(|descriptor| match descriptor {
+                spec::DescriptorIdentity::State(state)
+                    if state.descriptor_id == node.descriptor_id =>
+                {
+                    Some(state.as_ref())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                certified_evidence_mismatch(
+                    "fact-producing node is missing its certified state descriptor",
+                )
+            })?;
+        let descriptor_hash = payload.claim.fact_descriptor_hash();
+        if state.effect_class != "read_external"
+            || state.emitted_fact_descriptors.len() != 1
+            || node.fact_descriptor_allowlist.len() != 1
+            || state.emitted_fact_descriptors[0].descriptor_hash != *descriptor_hash
+            || node.fact_descriptor_allowlist[0].descriptor_hash != *descriptor_hash
         {
             return Err(ReplayError::new(
                 ReplayErrorKind::CertifiedEvidenceMismatch,
                 format!(
-                    "fact descriptor {} is not certified for producing node {}",
-                    payload.claim.fact_descriptor_hash(),
-                    payload.node_id
+                    "fact descriptor {descriptor_hash} is not the exact read_external fact contract for producing node {}",
+                    payload.node_id,
                 ),
             ));
         }
-        let producer = payload.claim.producer();
-        self.verify_node_capability(
-            &payload.node_id,
-            producer.capability_kind(),
-            producer.capability_version(),
-        )?;
-        self.verify_node_adapter(
-            &payload.node_id,
-            producer.adapter_kind(),
-            producer.adapter_version(),
-        )?;
         Ok(())
     }
 

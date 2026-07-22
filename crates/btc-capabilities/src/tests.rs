@@ -1,58 +1,39 @@
 use super::*;
-use std::collections::BTreeSet;
 
-use bitcoin::{OutPoint, Txid};
+use mfm_capabilities::CapabilitySpec;
+
+const LEGACY_MAIN: &str = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
+const SEGWIT_MAIN: &str = "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw";
+const SHARED_TEST_ADDRESS: &str = "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn";
 
 fn binding() -> BitcoinSourceBinding {
     BitcoinSourceBinding::new(
         BitcoinNetworkId::new("bitcoin-mainnet").expect("network"),
-        BitcoinSourceIdentity::new("public-bitcoin-core").expect("source"),
         BitcoinNetworkTag::Main,
+        BitcoinSourceIdentity::new("public-bitcoin-core").expect("source"),
     )
 }
 
-fn request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
-    BtcChainHeadRequest::new(selection)
-}
-
 #[test]
-fn confirmation_depth_rejects_zero() {
-    let error = BtcHeadSelection::confirmed(0).expect_err("zero confirmations");
-
+fn aggregate_capability_identity_is_stable() {
     assert_eq!(
-        error,
-        BtcCapabilityError::InvalidRequest {
-            reason: BtcInvalidRequest::ZeroConfirmations,
-        }
+        BitcoinBalanceCollectionReadCapability::name(),
+        "mfm.bitcoin.balance_collection.read"
     );
-}
-
-#[test]
-fn block_hash_validation_rejects_non_hash_values() {
-    let error = BitcoinBlockHash::new("not-a-block-hash").expect_err("invalid hash");
-
     assert_eq!(
-        error,
-        BtcCapabilityError::InvalidRequest {
-            reason: BtcInvalidRequest::InvalidBlockHash,
-        }
+        BitcoinBalanceCollectionReadCapability::version()
+            .expect("version")
+            .as_str(),
+        "mfm.bitcoin.balance_collection.read.v1"
     );
+    assert!(BitcoinBalanceCollectionReadCapability::kind()
+        .expect("kind")
+        .to_string()
+        .starts_with("capability:mfm.bitcoin:balance_collection.read:"));
 }
 
 #[test]
-fn block_hash_validation_normalizes_to_lowercase() {
-    let hash =
-        BitcoinBlockHash::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-            .expect("hash");
-
-    assert_eq!(
-        hash.to_string(),
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
-}
-
-#[test]
-fn network_tags_cover_every_supported_bitcoin_core_chain() {
+fn network_tags_cover_supported_bitcoin_core_chains() {
     for (tag, expected, network) in [
         ("main", BitcoinNetworkTag::Main, Network::Bitcoin),
         ("test", BitcoinNetworkTag::Test, Network::Testnet),
@@ -65,190 +46,150 @@ fn network_tags_cover_every_supported_bitcoin_core_chain() {
         assert_eq!(parsed.as_str(), tag);
         assert_eq!(parsed.network(), network);
     }
-
     assert_eq!(
         BitcoinNetworkTag::new("testnet3").expect_err("unsupported alias"),
-        BtcCapabilityError::InvalidRequest {
-            reason: BtcInvalidRequest::InvalidBitcoinNetwork,
+        BitcoinCapabilityError::InvalidRequest {
+            reason: BitcoinInvalidRequest::InvalidBitcoinNetwork,
         }
     );
 }
 
 #[test]
-fn addresses_require_canonical_rust_bitcoin_rendering() {
-    let canonical = BitcoinAddress::new("bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw")
-        .expect("canonical address");
-    assert_eq!(
-        canonical.as_str(),
-        "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw"
-    );
+fn addresses_use_canonical_rust_bitcoin_identity_and_network_checks() {
+    let legacy = BitcoinAddress::parse(LEGACY_MAIN, BitcoinNetworkTag::Main).expect("legacy");
+    let segwit = BitcoinAddress::parse(SEGWIT_MAIN, BitcoinNetworkTag::Main).expect("segwit");
+    assert_eq!(legacy.as_str(), LEGACY_MAIN);
+    assert_eq!(segwit.as_str(), SEGWIT_MAIN);
+    assert_eq!(segwit.scan_descriptor(), format!("addr({SEGWIT_MAIN})"));
+    assert_ne!(legacy.script_pubkey(), segwit.script_pubkey());
 
-    for (case, value, reason) in [
+    for (value, reason) in [
         (
-            "uppercase",
             "BC1QVZVKJN4Q3NSZQXRV3NRAGA2R822XJTY3YKVKUW",
-            BtcInvalidRequest::NonCanonicalAddress,
+            BitcoinInvalidRequest::NonCanonicalAddress,
         ),
-        (
-            "checksum",
-            "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuq",
-            BtcInvalidRequest::InvalidAddress,
-        ),
-        (
-            "whitespace",
-            " bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw",
-            BtcInvalidRequest::InvalidAddress,
-        ),
+        ("not-an-address", BitcoinInvalidRequest::InvalidAddress),
     ] {
-        let error = BitcoinAddress::new(value).unwrap_err();
         assert_eq!(
-            error,
-            BtcCapabilityError::InvalidRequest { reason },
-            "{case}"
+            BitcoinAddress::parse_any(value).expect_err("invalid address"),
+            BitcoinCapabilityError::InvalidRequest { reason }
         );
-        let rendered = format!("{error:?} {error}");
-        assert!(!rendered.contains(value), "{case}");
     }
+    assert_eq!(
+        BitcoinAddress::parse(SEGWIT_MAIN, BitcoinNetworkTag::Test).expect_err("wrong network"),
+        BitcoinCapabilityError::InvalidRequest {
+            reason: BitcoinInvalidRequest::AddressNetworkMismatch,
+        }
+    );
 }
 
 #[test]
-fn address_network_checks_preserve_shared_test_family_encodings() {
-    let main =
-        BitcoinAddress::new("bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw").expect("main address");
-    let shared =
-        BitcoinAddress::new("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7")
-            .expect("shared test address");
-    let regtest = BitcoinAddress::new("bcrt1q2nfxmhd4n3c8834pj72xagvyr9gl57n5r94fsl")
-        .expect("regtest address");
-
-    main.require_network(BitcoinNetworkTag::Main).expect("main");
+fn shared_test_family_address_encoding_is_bound_by_the_selected_rpc_chain() {
     for network in [
         BitcoinNetworkTag::Test,
         BitcoinNetworkTag::Testnet4,
         BitcoinNetworkTag::Signet,
-    ] {
-        shared.require_network(network).expect("shared test family");
-    }
-    regtest
-        .require_network(BitcoinNetworkTag::Regtest)
-        .expect("regtest");
-
-    for (address, network) in [
-        (&main, BitcoinNetworkTag::Testnet4),
-        (&shared, BitcoinNetworkTag::Main),
-        (&regtest, BitcoinNetworkTag::Signet),
+        BitcoinNetworkTag::Regtest,
     ] {
         assert_eq!(
-            address.require_network(network).unwrap_err(),
-            BtcCapabilityError::InvalidRequest {
-                reason: BtcInvalidRequest::AddressNetworkMismatch,
-            }
+            BitcoinAddress::parse(SHARED_TEST_ADDRESS, network)
+                .expect("shared test-family address")
+                .as_str(),
+            SHARED_TEST_ADDRESS
+        );
+    }
+    assert_eq!(
+        BitcoinAddress::parse(SHARED_TEST_ADDRESS, BitcoinNetworkTag::Main)
+            .expect_err("mainnet mismatch"),
+        BitcoinCapabilityError::InvalidRequest {
+            reason: BitcoinInvalidRequest::AddressNetworkMismatch,
+        }
+    );
+}
+
+#[test]
+fn aggregate_request_requires_a_bounded_sorted_unique_address_set() {
+    let request = BitcoinBalanceCollectionRequest::new(
+        binding(),
+        vec![LEGACY_MAIN.to_owned(), SEGWIT_MAIN.to_owned()],
+    )
+    .expect("sorted request");
+    assert_eq!(request.binding(), &binding());
+    assert_eq!(
+        request
+            .addresses()
+            .iter()
+            .map(BitcoinAddress::as_str)
+            .collect::<Vec<_>>(),
+        vec![LEGACY_MAIN, SEGWIT_MAIN]
+    );
+
+    for (addresses, reason) in [
+        (Vec::new(), BitcoinInvalidRequest::AddressCount),
+        (
+            vec![SEGWIT_MAIN.to_owned(), LEGACY_MAIN.to_owned()],
+            BitcoinInvalidRequest::AddressOrder,
+        ),
+        (
+            vec![LEGACY_MAIN.to_owned(), LEGACY_MAIN.to_owned()],
+            BitcoinInvalidRequest::AddressOrder,
+        ),
+        (
+            vec![LEGACY_MAIN.to_owned(); BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT + 1],
+            BitcoinInvalidRequest::AddressCount,
+        ),
+    ] {
+        assert_eq!(
+            BitcoinBalanceCollectionRequest::new(binding(), addresses)
+                .expect_err("invalid request"),
+            BitcoinCapabilityError::InvalidRequest { reason }
         );
     }
 }
 
 #[test]
-fn address_scripts_and_outpoints_use_rust_bitcoin_primitives() {
-    let address =
-        BitcoinAddress::new("1BoatSLRHtKNngkdXEeobR76b53LETtpyT").expect("legacy main address");
-    let duplicate = BitcoinAddress::new(address.as_str()).expect("duplicate address");
-    let mut scripts = BTreeSet::new();
-    assert!(scripts.insert(address.script_pubkey()));
-    assert!(!scripts.insert(duplicate.script_pubkey()));
-
-    let txid = "4d3f4f6f0b669a9a00909506f9bd30770f5ac37c1f91c3669e5d9f4f85b8f2f2"
-        .parse::<Txid>()
-        .expect("transaction id");
-    let outpoint = OutPoint::new(txid, 7);
-    assert_eq!(outpoint.txid, txid);
-    assert_eq!(outpoint.vout, 7);
-    assert!("not-a-txid".parse::<Txid>().is_err());
-}
-
-#[test]
-fn address_order_is_canonical_rendered_utf8_order() {
-    let mut addresses = [
-        "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
-        "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw",
-        "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
-    ]
-    .map(|address| BitcoinAddress::new(address).expect("canonical address"));
-    addresses.sort();
-
-    assert_eq!(
-        addresses.map(String::from),
-        [
-            "1BoatSLRHtKNngkdXEeobR76b53LETtpyT".to_owned(),
-            "bc1qvzvkjn4q3nszqxrv3nraga2r822xjty3ykvkuw".to_owned(),
-            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7".to_owned(),
-        ]
+fn aggregate_response_preserves_binding_anchor_and_request_order() {
+    let anchor = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc"
+        .parse::<BlockHash>()
+        .expect("block hash");
+    let response = BitcoinBalanceCollectionResponse::new(
+        binding(),
+        BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
+        850_000,
+        anchor,
+        vec![
+            BitcoinAddressBalance::new(LEGACY_MAIN.to_owned(), 1),
+            BitcoinAddressBalance::new(SEGWIT_MAIN.to_owned(), 2),
+        ],
+        anchor,
     );
-}
-
-#[test]
-fn chain_head_request_is_operation_only() {
-    let request = request(BtcHeadSelection::best());
-
-    assert_eq!(request.selection(), BtcHeadSelection::best());
-}
-
-#[test]
-fn response_evidence_is_built_from_provider_binding() {
-    let binding = binding();
-    let evidence =
-        RedactedBtcSourceEvidence::from_binding(&binding, "main", BtcSourceStatus::Synced)
-            .expect("evidence");
-
-    assert_eq!(evidence.network_id, binding.network_id().clone());
-    assert_eq!(evidence.source_identity, binding.source_identity().clone());
-    assert_eq!(evidence.bitcoin_network, binding.bitcoin_network().as_str());
+    assert_eq!(response.binding(), &binding());
+    assert_eq!(response.anchor_height(), 850_000);
+    assert_eq!(response.anchor_hash(), anchor);
+    assert_eq!(response.final_canonical_hash(), anchor);
     assert_eq!(
-        evidence.observed_bitcoin_network,
-        binding.bitcoin_network().as_str()
+        response.implementation_id(),
+        BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
     );
-    assert_eq!(evidence.source_status, BtcSourceStatus::Synced);
+    assert_eq!(response.balances()[0].address(), LEGACY_MAIN);
+    assert_eq!(response.balances()[1].balance_sats(), 2);
 }
 
 #[test]
-fn source_mismatch_diagnostic_stays_redacted() {
-    let binding = binding();
-    let mismatched = RedactedBtcSourceEvidence {
-        source_identity: BitcoinSourceIdentity::new("different-semantic-source").expect("source"),
-        ..RedactedBtcSourceEvidence::from_binding(&binding, "main", BtcSourceStatus::Unknown)
-            .expect("evidence")
-    };
-
-    let diagnostic = mismatched.source_mismatch_diagnostic();
-    let rendered = format!("{diagnostic:?} {diagnostic}");
-
-    assert!(rendered.contains("different-semantic-source"));
+fn provider_failures_expose_only_closed_diagnostics_and_retryability() {
+    let retryable = BitcoinCapabilityError::provider(
+        ProviderDiagnosticCode::TransportFailed,
+        "aggregate_read",
+        true,
+    );
+    assert!(retryable.is_retryable());
+    let permanent = BitcoinCapabilityError::provider(
+        ProviderDiagnosticCode::ResponseInvalid,
+        "aggregate_read",
+        false,
+    );
+    assert!(!permanent.is_retryable());
+    let rendered = format!("{permanent:?} {permanent}");
     assert!(!rendered.contains("http://"));
-    assert!(!rendered.contains(concat!("Bear", "er")));
-    assert!(!rendered.contains("secret"));
-}
-
-#[test]
-fn response_evidence_rejects_observed_bitcoin_network_mismatch() {
-    let error =
-        RedactedBtcSourceEvidence::from_binding(&binding(), "test", BtcSourceStatus::Synced)
-            .expect_err("observed network mismatch");
-
-    assert!(matches!(error, BtcCapabilityError::SourceMismatch { .. }));
-}
-
-#[test]
-fn provider_failure_carries_only_closed_diagnostics() {
-    let diagnostic = btc_diagnostic(ProviderDiagnosticCode::RpcHttpStatus)
-        .with_operation(btc_public_id("scantxoutset"))
-        .with_field(
-            btc_public_id("http_status"),
-            ProviderDiagnosticValue::U64(403),
-        );
-    let error = BtcCapabilityError::provider_failure(diagnostic.clone());
-    let rendered = format!("{error:?} {error}");
-
-    assert_eq!(error, BtcCapabilityError::Provider { diagnostic });
-    assert!(!rendered.contains("node.invalid"));
-    assert!(!rendered.contains(concat!("Author", "ization")));
     assert!(!rendered.contains("secret"));
 }

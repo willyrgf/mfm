@@ -311,15 +311,52 @@ impl RunMemoryCore {
 ///
 /// This helper is compiled only for tests or the `test-support` feature. It must not be used as a
 /// production persistence store.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AsyncInMemoryRunStore {
     inner: Arc<Mutex<RunMemoryCore>>,
+    fact_query_snapshot_hook: FactQuerySnapshotHook,
+}
+
+#[derive(Clone, Default)]
+struct FactQuerySnapshotHook {
+    callback: Arc<Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>>,
+}
+
+impl std::fmt::Debug for FactQuerySnapshotHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FactQuerySnapshotHook")
+    }
+}
+
+impl std::fmt::Debug for AsyncInMemoryRunStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AsyncInMemoryRunStore")
+            .finish_non_exhaustive()
+    }
 }
 
 impl AsyncInMemoryRunStore {
     /// Creates an empty async in-memory typed run store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Installs a one-shot synchronization hook after the next fact-query snapshot is fixed.
+    ///
+    /// This test-only seam executes while the store lock is held, allowing concurrency tests to
+    /// prove that an overlapping append cannot partially enter the returned snapshot.
+    #[doc(hidden)]
+    pub fn set_fact_query_snapshot_hook_for_test(
+        &self,
+        callback: impl FnOnce() + Send + 'static,
+    ) -> Result<()> {
+        let mut hook =
+            self.fact_query_snapshot_hook.callback.lock().map_err(|_| {
+                StoreError::Event("fact-query snapshot hook lock poisoned".to_owned())
+            })?;
+        *hook = Some(Box::new(callback));
+        Ok(())
     }
 
     /// Returns the current in-memory projection snapshot.
@@ -419,6 +456,19 @@ impl AsyncInMemoryRunStore {
             .lock()
             .map_err(|_| StoreError::Event("async in-memory run store lock poisoned".to_owned()))
     }
+
+    fn run_fact_query_snapshot_hook(&self) -> Result<()> {
+        let callback = self
+            .fact_query_snapshot_hook
+            .callback
+            .lock()
+            .map_err(|_| StoreError::Event("fact-query snapshot hook lock poisoned".to_owned()))?
+            .take();
+        if let Some(callback) = callback {
+            callback();
+        }
+        Ok(())
+    }
 }
 
 impl RunEventStore for AsyncInMemoryRunStore {
@@ -502,6 +552,47 @@ impl StoreScopeStore for AsyncInMemoryRunStore {
     fn load_store_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, StoreScopeId, Self::Error> {
         let result = self.lock_inner().map(|store| store.store_scope_id.clone());
         Box::pin(std::future::ready(result))
+    }
+}
+
+impl FactQueryStore for AsyncInMemoryRunStore {
+    type Error = StoreError;
+
+    fn fact_query_implementation_id(&self) -> &'static str {
+        "mfm.store.memory.fact-query.v1"
+    }
+
+    fn execute_fact_queries<'a>(
+        &'a self,
+        plans: &'a [mfm_facts::CanonicalFactQueryPlan],
+    ) -> Pin<
+        Box<
+            dyn Future<Output = std::result::Result<Vec<mfm_facts::FactQueryResult>, Self::Error>>
+                + Send
+                + 'a,
+        >,
+    > {
+        if plans.is_empty() {
+            return Box::pin(std::future::ready(Ok(Vec::new())));
+        }
+        Box::pin(async move {
+            let store = self.lock_inner()?;
+            let frontier = mfm_facts::StoreReadFrontier::new(
+                store.store_scope_id.clone(),
+                StoreCommitOrder::new(store.next_store_commit_order.as_u64().saturating_sub(1)),
+            );
+            self.run_fact_query_snapshot_hook()?;
+            plans
+                .iter()
+                .map(|plan| {
+                    super::fact_query::execute_fact_query_projection_result(
+                        &store.projections,
+                        frontier.clone(),
+                        plan,
+                    )
+                })
+                .collect()
+        })
     }
 }
 

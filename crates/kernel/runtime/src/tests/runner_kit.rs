@@ -188,22 +188,12 @@ fn runner_kit_rejects_skipped_materialized_input_cell() {
 #[test]
 fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     let fixture = fixture();
-    let fact_descriptor_ref =
-        mfm_program::fact_descriptor_ref::<RuntimeTestFact>().expect("fact descriptor ref");
-    let mut node = node_by_output(&fixture, &fixture.cell_a).clone();
-    node.fact_descriptor_allowlist = vec![fact_descriptor_ref.clone()];
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
 
     with_runner_erased_ctx_for_node(&fixture, &node, |ctx| {
         let artifacts = RunnerArtifactBuilder::new(&ctx);
         let payloads = RunnerPayloadBuilder::new(&ctx);
         let value = CertifierValue { amount: 42 };
-        let binding = RunnerCapabilityBinding {
-            capability_kind: fixture.cap_kind.clone(),
-            capability_version: fixture.cap_version.clone(),
-            adapter_kind: fixture.adapter_kind.clone(),
-            adapter_version: fixture.adapter_version.clone(),
-        };
-
         let state = artifacts.state_output(&value).expect("state output");
         assert_eq!(
             state.evidence().artifact_role,
@@ -241,135 +231,6 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
             response.evidence().producer_node_id.as_ref(),
             Some(&ctx.node().node_id)
         );
-
-        let fact = RuntimeTestFact {
-            subject: CertifierValue { amount: 7 },
-            response: CertifierValue { amount: 9 },
-        };
-        let expected_descriptor =
-            <RuntimeTestFact as mfm_program::MfmFactType>::descriptor().expect("fact descriptor");
-        let expected_descriptor_hash =
-            mfm_facts::fact_descriptor_hash(&expected_descriptor).expect("descriptor hash");
-        let expected_subject = test_fact_subject_evidence(7);
-        assert_eq!(
-            fact_descriptor_ref.descriptor_hash,
-            expected_descriptor_hash
-        );
-
-        let mut fact_output = RunnerOutputBuilder::new(&ctx);
-        fact_output
-            .record_fact(
-                FactRecordInput::new(
-                    fact,
-                    mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
-                )
-                .observed_at("2026-01-02T03:04:05Z"),
-                binding.clone(),
-            )
-            .expect("record typed fact");
-        let fact_output = fact_output.finish();
-        assert_eq!(fact_output.staged_artifacts().len(), 1);
-        assert_eq!(fact_output.staged_retention_refs().len(), 0);
-        assert_eq!(fact_output.payloads().len(), 1);
-        let fact_artifact = &fact_output.staged_artifacts()[0];
-        assert_eq!(
-            fact_artifact.evidence().artifact_role,
-            events::ArtifactRole::FactResponse
-        );
-        match &fact_output.payloads()[0] {
-            RunnerEventPayload::FactRecorded(recorded) => {
-                let payload = recorded.payload();
-                assert_eq!(payload.spec_hash, *ctx.spec_hash());
-                assert_eq!(payload.node_id, ctx.node().node_id);
-                assert_eq!(payload.attempt_id, *ctx.attempt_id());
-                assert_eq!(
-                    payload.claim.fact_descriptor_hash(),
-                    &expected_descriptor_hash
-                );
-                assert_eq!(
-                    payload.claim.subject().fact_key(),
-                    expected_subject.fact_key()
-                );
-                assert_eq!(payload.claim.observed_at(), Some("2026-01-02T03:04:05Z"));
-                assert!(payload.claim.request().is_none());
-                assert_eq!(
-                    payload.claim.response().response_schema_id(),
-                    &<CertifierValue as mfm_values::MfmValue>::schema_id()
-                        .expect("response schema")
-                );
-                assert_eq!(
-                    payload.claim.response().response_hash(),
-                    &fact_artifact.evidence().digest
-                );
-                assert_eq!(
-                    payload.claim.response().artifact_id(),
-                    &fact_artifact.evidence().artifact_id
-                );
-                assert_eq!(
-                    payload.claim.response().artifact_evidence_hash(),
-                    &fact_artifact
-                        .evidence()
-                        .evidence_hash()
-                        .expect("artifact evidence hash")
-                );
-                assert_eq!(
-                    payload.claim.producer().capability_kind(),
-                    &fixture.cap_kind
-                );
-                assert_eq!(
-                    payload.claim.producer().capability_version(),
-                    &fixture.cap_version
-                );
-                assert_eq!(
-                    payload.claim.producer().adapter_kind(),
-                    &fixture.adapter_kind
-                );
-                assert_eq!(
-                    payload.claim.producer().adapter_version(),
-                    &fixture.adapter_version
-                );
-            }
-            _ => panic!("expected fact recorded payload"),
-        }
-
-        let composed_fact = RuntimeTestFact {
-            subject: CertifierValue { amount: 8 },
-            response: CertifierValue { amount: 10 },
-        };
-        let mut composed_output = RunnerOutputBuilder::new(&ctx);
-        composed_output
-            .state_output_and_record_fact(
-                FactRecordInput::new(
-                    composed_fact,
-                    mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
-                ),
-                binding.clone(),
-            )
-            .expect("state output and fact record");
-        let composed_output = composed_output.finish();
-        assert_eq!(composed_output.staged_artifacts().len(), 2);
-        assert_eq!(composed_output.staged_retention_refs().len(), 1);
-        assert_eq!(composed_output.payloads().len(), 2);
-        assert_eq!(
-            composed_output.staged_artifacts()[0]
-                .evidence()
-                .artifact_role,
-            events::ArtifactRole::StateOutput
-        );
-        assert_eq!(
-            composed_output.staged_artifacts()[1]
-                .evidence()
-                .artifact_role,
-            events::ArtifactRole::FactResponse
-        );
-        assert!(matches!(
-            composed_output.payloads()[0],
-            RunnerEventPayload::FactRecorded(_)
-        ));
-        assert!(matches!(
-            composed_output.payloads()[1],
-            RunnerEventPayload::CellProduced(_)
-        ));
 
         let query_evidence = test_fact_query_evidence();
         let expected_query_evidence_hash =
@@ -508,13 +369,12 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     let mut store = started_fixture_store(&scheduler, &fixture).await;
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
     let projections = store.projection_snapshot().clone();
-    let (fact_ref, descriptor_projection, record_projection, index_projection, term_projections) =
+    let (fact_ref, descriptor_projection, query_projection, term_projections) =
         test_returned_fact_authority(&fixture, node);
     let projections = projection_snapshot_with_returned_fact_authority(
         &projections,
         descriptor_projection.clone(),
-        record_projection,
-        index_projection.clone(),
+        query_projection.clone(),
         term_projections,
     );
     let run_stream = store.load_run_stream(&fixture.run_id);
@@ -537,7 +397,6 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
         .expect("output cell");
     let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
     let caps = CertifiedRuntimeCapabilities::for_node(node);
-    let recorded_facts = RecordedFacts::default();
     let invocation = PreparedRunnerInvocation {
         runtime_spec: &fixture.runtime_spec,
         run_id: &fixture.run_id,
@@ -557,7 +416,6 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
             root: MaterializedInputNode::Unit,
         },
         caps,
-        recorded_facts,
         projections: &projections,
         run_stream: &run_stream,
         view: &view,
@@ -683,10 +541,10 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
         content_digest: descriptor_projection.descriptor_hash.clone(),
     }));
     assert!(retained_refs.contains(&events::RetentionRef {
-        artifact_id: index_projection.artifact_id.clone(),
+        artifact_id: query_projection.artifact_id().clone(),
         role: events::ArtifactRole::FactResponse,
-        evidence_hash: index_projection.artifact_evidence_hash.clone(),
-        content_digest: index_projection.response_hash.clone(),
+        evidence_hash: query_projection.artifact_evidence_hash().clone(),
+        content_digest: query_projection.response_hash().clone(),
     }));
     assert_eq!(retained_refs.len(), 3);
     assert!(!prepared

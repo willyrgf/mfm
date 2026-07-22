@@ -1,4 +1,4 @@
-use mfm_program::MfmFactType as _;
+use mfm_facts::MfmFactType as _;
 use mfm_program_derive::{
     MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs, StateInput,
 };

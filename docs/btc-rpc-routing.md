@@ -2,8 +2,9 @@
 
 Status: typed transport runbook for Bitcoin-backed portfolio workflows.
 
-Bitcoin RPC endpoints are live runtime inputs. They are not semantic run authority and must not be
-persisted in manifests, events, artifacts, public outputs, fixtures, or replay inputs.
+Bitcoin RPC endpoints, Basic-auth values, and scan deadlines are process-local live inputs. They
+are not semantic run authority and must not be persisted in specs, events, artifacts, public
+outputs, fixtures, or replay inputs.
 
 Normative architecture references:
 
@@ -13,84 +14,77 @@ Normative architecture references:
 
 ## Runtime Config File
 
-Live CLI start accepts `--runtime-config <PATH>`. A resume needs it only when verified history still
-has a pending Bitcoin live-source node. CLI and REST also read `MFM_RUNTIME_CONFIG_FILE` when no
+Live CLI start accepts `--runtime-config <PATH>`. A resume needs it only while verified history has
+a pending Bitcoin live-source node. CLI and REST also read `MFM_RUNTIME_CONFIG_FILE` when no
 explicit path is provided. Read-only commands and REST startup do not load this file.
 
 Example TOML:
 
 ```toml
 [btc.routes.public-bitcoin-core]
+scan_timeout_seconds = 30
 rpc_url_env = "MFM_BITCOIN_RPC_URL"
 rpc_user_env = "MFM_BITCOIN_RPC_USER"
 rpc_password_env = "MFM_BITCOIN_RPC_PASSWORD"
 ```
 
-JSON with the same shape is also accepted by `mfm-runtime-config`.
+The route key is the semantic `BitcoinSourceIdentity`, not an endpoint name, URL, credential id, or
+routing policy. `scan_timeout_seconds` is required and must be in `1..=86_400`. Basic-auth user and
+password are either both absent or both present.
 
-The Bitcoin runtime shape is `btc.routes.<source_identity>`. Route keys are semantic
-`BitcoinSourceIdentity` values, not endpoint names, URLs, credential ids, or routing policies.
+## Source-Bound Aggregate Reads
 
-## Provider-Bound Reads
+App assembly creates one private routed session set. It selects an endpoint-bound
+`BitcoinRpcSession` by the certified semantic source identity, validates its exact
+`BitcoinSourceBinding` without network IO, and registers that routed set once for
+`BitcoinBalanceCollectionReadCapability`.
 
-App assembly creates one process-local live transport runtime from runtime config and caches the
-derived `BtcJsonRpcRouter`. Runners and adapters derive a `BitcoinSourceBinding` from certified
-workflow semantics, validate that binding without network IO, and bind it to a
-`BtcJsonRpcSourceProvider` before any live call.
+`rust-bitcoin` is the primitive authority for canonical address parsing, network compatibility,
+script derivation, block/transaction hashes, outpoints, and amounts. Supported Bitcoin Core chain
+tags are `main`, `test`, `testnet4`, `signet`, and `regtest`. Test-family address encodings may be
+shared; the checked `getblockchaininfo.chain` value establishes the actual chain.
 
-`rust-bitcoin` is the primitive authority for address parsing and canonical rendering, address
-network compatibility, script derivation, hashes, outpoints, and amounts. Supported Bitcoin Core
-chain tags are `main`, `test`, `testnet4`, `signet`, and `regtest`. Test-family address encodings
-may be shared; the checked `getblockchaininfo.chain` value establishes the actual chain.
+Each `BitcoinBalanceCollectionRequest` carries one exact semantic binding and between 1 and 1,024
+canonical addresses in strict UTF-8 order. A successful attempt performs exactly:
 
-BTC capability requests are operation-only. Chain-head requests carry only the requested head
-selection. Portfolio balance requests carry only the address, `block_height`, and `block_hash`
-obtained from the pinned execution anchor. They do not carry `network_id`, `source_identity`,
-expected network tags, endpoints, or credentials.
+1. `getblockchaininfo`, requiring the configured chain and `initialblockdownload == false`;
+2. one `scantxoutset start` containing every `addr(address)` descriptor; and
+3. `getblockhash(scan.height)`, requiring the hash to equal the scan anchor.
 
-The bound Bitcoin provider resolves `source_identity` through runtime config, probes
-`getblockchaininfo`, and returns redacted evidence containing both expected and observed Bitcoin
-network tags. If the observed tag differs from the provider binding, the provider returns a
-source-mismatch diagnostic. `validate_source_binding` only checks that the route exists; it does not
-perform network IO.
+Tip advancement is valid. A changed hash at the scan height is a reorganization and fails the
+attempt. MFM never calls `getblockheader`, `scantxoutset status`, or `scantxoutset abort`; it has no
+process-local scan coordinator and no hidden transport retry.
 
-Provider diagnostics may carry reviewed operation ids and public fields such as network tags,
-heights, hashes, and numeric status codes. They must never carry RPC URLs, credentials, file paths,
-provider messages, request bodies, or response bodies.
+The selected deadline is the overall `scantxoutset start` timeout. Timeout or cancellation drops
+MFM's HTTP request but does not abort Bitcoin Core's global scan. A later full-attempt retry may
+receive the exact retriable scan-busy error until Core finishes.
 
-Ingress distinguishes absence from invalid input. No runtime file, no `btc` family, or no selected
-semantic route yields `RuntimeConfigRequired` with a `provider_configuration_missing` or
-`route_unavailable` diagnostic. The diagnostic retains only the certified `network_id`,
-`source_identity`, and `bitcoin_network`. An unreadable, malformed, or semantically invalid supplied
+## Strict Reduction
+
+The transport accepts the forward-additive Bitcoin Core 28 response shape but strictly validates
+every consumed field. It requires JSON-RPC 2.0, exact request ids, exactly one result/error arm,
+bounded bodies, unique object members at every nesting level, mandatory scan fields, checked hashes
+and outpoints, bounded scripts/descriptors, known scriptPubKeys, and UTXO heights no greater than
+the scan height.
+
+Raw JSON amount tokens are converted directly to satoshis with at most eight fractional digits and
+no sign, exponent, float intermediary, overflow, or value above Bitcoin `MAX_MONEY`. Address
+balances and the total are checked sums; `total_amount` must equal the observed sum. Addresses with
+no UTXO remain explicit zero balances. Provider bodies/messages, endpoints, and credentials are
+discarded at the transport boundary.
+
+`CollectBitcoinBalancesState` reduces that one source-bound observation to an ordered non-empty
+`bitcoin.balance_snapshot` fact batch and a minimal `BitcoinBalanceCollectionReceipt`. Runtime
+settles the facts, receipt, retained evidence, and attempt completion in one atomic append.
+
+## Ingress And Replay
+
+No runtime file, no Bitcoin family, or no selected semantic route yields `RuntimeConfigRequired`
+with a closed missing/route diagnostic. An unreadable, malformed, or semantically invalid supplied
 file yields `RuntimeConfigInvalid`; it is never presented as a missing route. Admission aggregates
-and deduplicates all missing BTC and EVM routes before any `RunAdmitted` event is appended. Resume
-performs the same check only for nonterminal live-source nodes.
+and deduplicates missing Bitcoin and EVM routes before `RunAdmitted`. Resume repeats that check only
+for nonterminal live-source nodes.
 
-## Strict Portfolio Snapshots
-
-Portfolio Bitcoin balance reads are exact-anchor requests. The response must verify the same
-address, provider source evidence, height, and hash. The live Bitcoin Core provider supports this
-only when the requested anchor is the node's current best tip:
-
-1. `getblockchaininfo` must report the requested `block_height` and `block_hash`.
-2. `scantxoutset` scans `addr(<address>)`.
-3. The scan result `height` and `bestblock` must still match the requested anchor.
-
-If the requested anchor is stale, the node advances during the scan, or the scan does not complete,
-the provider returns `operation_incomplete` as a fatal capability failure. The system does not add a
-current-only Bitcoin portfolio mode because that would introduce a second snapshot semantics.
-
-## Replay
-
-Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
-must not open live RPC connections or consult runtime config. Replay providers rebuild the certified
-provider binding and verify recorded Bitcoin evidence against that binding and operation request.
-
-## Contributor Guidance
-
-- Keep runtime config parsing in `mfm-runtime-config`.
-- Keep live Bitcoin route resolution in `mfm-transports-btc-jsonrpc-http`.
-- Bind live providers from certified semantic source intent before issuing operation-only requests.
-- Keep workflow-specific operation construction in adapters.
-- Keep binaries limited to parsing and passing runtime config paths.
-- Keep one route-based source model and one exact-anchor balance semantic.
+Replay uses the certified spec, append-only run stream, and retained typed artifacts. It reruns the
+same reducer and verifies the exact ordered fact batch and receipt. It must not open an RPC
+connection, consult runtime config, or repeat live IO.

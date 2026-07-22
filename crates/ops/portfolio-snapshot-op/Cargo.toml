@@ -15,6 +15,7 @@ domain-role = "aggregate"
 mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
 mfm-certify = { path = "../../kernel/certify", version = "0.1.0" }
 mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
+mfm-facts = { path = "../../kernel/facts", version = "0.1.0" }
 mfm-op-btc-collectors = { path = "../btc-collectors-op", version = "0.1.0" }
 mfm-op-evm-collectors = { path = "../evm-collectors-op", version = "0.1.0" }
 mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }

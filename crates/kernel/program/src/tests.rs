@@ -174,22 +174,22 @@ struct AlternateReadEvidence {
 }
 
 #[test]
-fn external_read_contract_digest_binds_plan_and_evidence_identities() {
-    let original =
-        external_read_contract_digest::<LaunchValue, ReadEvidenceValue>().expect("read contract");
+fn external_read_contract_digest_binds_plan_evidence_and_fact_mode() {
+    let original = external_read_contract_digest::<LaunchValue, ReadEvidenceValue, ()>()
+        .expect("read contract");
     assert_eq!(
         original,
-        external_read_contract_digest::<LaunchValue, ReadEvidenceValue>()
+        external_read_contract_digest::<LaunchValue, ReadEvidenceValue, ()>()
             .expect("stable read contract")
     );
     assert_ne!(
         original,
-        external_read_contract_digest::<AlternateReadPlan, ReadEvidenceValue>()
+        external_read_contract_digest::<AlternateReadPlan, ReadEvidenceValue, ()>()
             .expect("changed plan contract")
     );
     assert_ne!(
         original,
-        external_read_contract_digest::<LaunchValue, AlternateReadEvidence>()
+        external_read_contract_digest::<LaunchValue, AlternateReadEvidence, ()>()
             .expect("changed evidence contract")
     );
 }

@@ -46,7 +46,7 @@ pub(super) fn append_runtime_retention_lifecycle_node(
         &input_cell,
     )
     .expect("input binding");
-    let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let pure = mfm_effects::Pure::descriptor().expect("pure effect");
     let receipt_schema =
         spec::retention_manifest_receipt_schema_id().expect("retention receipt schema");
     let receipt_semantic =
@@ -76,12 +76,12 @@ pub(super) fn append_runtime_retention_lifecycle_node(
                 input_schema_id: input_binding.input_schema_id.clone(),
                 output_schema_id: receipt_schema.clone(),
                 output_semantic_type_id: receipt_semantic.clone(),
-                effect_kind: managed.kind.clone(),
-                effect_class: managed.class.as_str().to_owned(),
-                effect_name: managed.name.to_owned(),
-                effect_version: managed.version,
+                effect_kind: pure.kind.clone(),
+                effect_class: pure.class.as_str().to_owned(),
+                effect_name: pure.name.to_owned(),
+                effect_version: pure.version,
                 capabilities: no_caps.clone(),
-                runner: "managed_platform_write".to_owned(),
+                runner: "pure".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
                 effect_contract_digest: None,
             },
@@ -122,7 +122,7 @@ pub(super) fn append_runtime_retention_lifecycle_node(
         config_ref,
         input_bindings: input_binding,
         output_cell,
-        effect_kind: managed.kind,
+        effect_kind: pure.kind,
         capability_bindings: no_caps,
         adapter_bindings: Vec::new(),
         side_effect: None,
@@ -170,7 +170,7 @@ pub(super) fn append_runtime_complete_lifecycle_node(
         &input_cell,
     )
     .expect("input binding");
-    let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let pure = mfm_effects::Pure::descriptor().expect("pure effect");
     let receipt_schema = spec::complete_run_receipt_schema_id().expect("complete receipt schema");
     let receipt_semantic =
         spec::complete_run_receipt_semantic_type_id().expect("complete receipt semantic");
@@ -199,12 +199,12 @@ pub(super) fn append_runtime_complete_lifecycle_node(
                 input_schema_id: input_binding.input_schema_id.clone(),
                 output_schema_id: receipt_schema.clone(),
                 output_semantic_type_id: receipt_semantic.clone(),
-                effect_kind: managed.kind.clone(),
-                effect_class: managed.class.as_str().to_owned(),
-                effect_name: managed.name.to_owned(),
-                effect_version: managed.version,
+                effect_kind: pure.kind.clone(),
+                effect_class: pure.class.as_str().to_owned(),
+                effect_name: pure.name.to_owned(),
+                effect_version: pure.version,
                 capabilities: no_caps.clone(),
-                runner: "managed_platform_write".to_owned(),
+                runner: "pure".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
                 effect_contract_digest: None,
             },
@@ -250,7 +250,7 @@ pub(super) fn append_runtime_complete_lifecycle_node(
         config_ref,
         input_bindings: input_binding,
         output_cell,
-        effect_kind: managed.kind,
+        effect_kind: pure.kind,
         capability_bindings: no_caps,
         adapter_bindings: Vec::new(),
         side_effect: None,
@@ -286,7 +286,7 @@ pub(super) fn append_runtime_resolve_saga_terminal_lifecycle_node(
         spec::framework_config_ref("resolve_saga_terminal", &node_id).expect("resolve config ref");
     let input_binding = spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
         .expect("input binding");
-    let managed = ManagedPlatformWrite::descriptor().expect("managed effect");
+    let pure = mfm_effects::Pure::descriptor().expect("pure effect");
     let receipt_schema =
         spec::resolve_saga_terminal_receipt_schema_id().expect("resolve receipt schema");
     let receipt_semantic =
@@ -316,12 +316,12 @@ pub(super) fn append_runtime_resolve_saga_terminal_lifecycle_node(
                 input_schema_id: input_binding.input_schema_id.clone(),
                 output_schema_id: receipt_schema.clone(),
                 output_semantic_type_id: receipt_semantic.clone(),
-                effect_kind: managed.kind.clone(),
-                effect_class: managed.class.as_str().to_owned(),
-                effect_name: managed.name.to_owned(),
-                effect_version: managed.version,
+                effect_kind: pure.kind.clone(),
+                effect_class: pure.class.as_str().to_owned(),
+                effect_name: pure.name.to_owned(),
+                effect_version: pure.version,
                 capabilities: no_caps.clone(),
-                runner: "managed_platform_write".to_owned(),
+                runner: "pure".to_owned(),
                 emitted_fact_descriptors: Vec::new(),
                 effect_contract_digest: None,
             },
@@ -354,7 +354,7 @@ pub(super) fn append_runtime_resolve_saga_terminal_lifecycle_node(
         config_ref,
         input_bindings: input_binding,
         output_cell,
-        effect_kind: managed.kind,
+        effect_kind: pure.kind,
         capability_bindings: no_caps,
         adapter_bindings: Vec::new(),
         side_effect: None,

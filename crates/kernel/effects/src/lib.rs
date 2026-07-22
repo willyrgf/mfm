@@ -40,10 +40,6 @@ pub enum Pure {}
 /// capabilities and replayable facts.
 pub enum ReadExternal {}
 
-/// Managed MFM platform write effect for artifacts, public output rendering,
-/// retention, and redacted diagnostics.
-pub enum ManagedPlatformWrite {}
-
 /// External mutation effect governed by the side-effect ledger protocol.
 pub enum ApplySideEffect {}
 
@@ -94,8 +90,6 @@ pub enum EffectClass {
     Pure,
     /// External read through declared read/support capabilities.
     ReadExternal,
-    /// MFM-managed platform persistence/output writes.
-    ManagedPlatformWrite,
     /// External mutation with side-effect ledger authority.
     ApplySideEffect,
 }
@@ -106,7 +100,6 @@ impl EffectClass {
         match self {
             Self::Pure => "pure",
             Self::ReadExternal => "read_external",
-            Self::ManagedPlatformWrite => "managed_platform_write",
             Self::ApplySideEffect => "apply_side_effect",
         }
     }
@@ -134,11 +127,6 @@ macro_rules! impl_effect_spec {
 
 impl_effect_spec!(Pure, EffectClass::Pure, "pure");
 impl_effect_spec!(ReadExternal, EffectClass::ReadExternal, "read_external");
-impl_effect_spec!(
-    ManagedPlatformWrite,
-    EffectClass::ManagedPlatformWrite,
-    "managed_platform_write"
-);
 impl_effect_spec!(
     ApplySideEffect,
     EffectClass::ApplySideEffect,

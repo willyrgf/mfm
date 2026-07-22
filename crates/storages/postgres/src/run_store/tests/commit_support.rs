@@ -121,18 +121,22 @@ pub(super) fn test_prepared_commit_bundle_with_artifact_bytes(
     PreparedCommitBundle::new(plan, artifact_bytes, Vec::new())
 }
 
-pub(super) fn test_prepared_commit_bundle_with_existing_artifact(
+pub(super) fn test_prepared_commit_bundle_with_existing_artifacts(
     plan: PreparedCommitPlan,
-    evidence: &ArtifactEvidenceRef,
+    evidence: &[ArtifactEvidenceRef],
 ) -> mfm_store::v1::Result<PreparedCommitBundle> {
-    let evidence_hash = evidence.evidence_hash()?;
     PreparedCommitBundle::new(
         plan,
         Vec::new(),
-        vec![ExistingArtifactAdmission::new(
-            evidence.artifact_id.clone(),
-            evidence_hash,
-        )],
+        evidence
+            .iter()
+            .map(|evidence| {
+                Ok(ExistingArtifactAdmission::new(
+                    evidence.artifact_id.clone(),
+                    evidence.evidence_hash()?,
+                ))
+            })
+            .collect::<mfm_store::v1::Result<Vec<_>>>()?,
     )
 }
 
@@ -179,33 +183,22 @@ pub(super) fn fact_commit_request(
     key: &str,
     response: &ArtifactEvidenceRef,
 ) -> mfm_store::v1::CommitRequest {
-    fact_commit_request_with_visibility(
-        run_id,
-        seq,
-        key,
-        response,
-        mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
-    )
-}
-
-pub(super) fn fact_commit_request_with_visibility(
-    run_id: RunId,
-    seq: u64,
-    key: &str,
-    response: &ArtifactEvidenceRef,
-    visibility: mfm_facts::FactVisibility,
-) -> mfm_store::v1::CommitRequest {
+    let output = fact_output_artifact_ref(response);
     let request = certified_fact_request(
         run_id,
         seq,
         key,
-        vec![fact_recorded_with_visibility(response, visibility)],
+        vec![
+            fact_recorded(response),
+            fact_cell_produced(response),
+            fact_attempt_completed(),
+        ],
     );
     let mut preconditions = request.preconditions().clone();
     preconditions.required_run_state = RequiredRunState::Started;
     request
         .with_preconditions(preconditions)
-        .with_required_artifacts(vec![response.clone()])
+        .with_required_artifacts(vec![response.clone(), output])
 }
 
 pub(super) async fn append_fact_commit(
@@ -223,11 +216,13 @@ pub(super) async fn append_fact_commit_with_response_bytes(
     response_bytes: Vec<u8>,
 ) -> Result<CommitOutcome> {
     let response_bytes = PreparedArtifactBytes::new(response_bytes, response.clone())?;
-    let plan = test_prepared_commit_plan(request, vec![response.clone()])?;
+    let output = fact_output_artifact_ref(response);
+    let output_bytes = PreparedArtifactBytes::new(response_bytes.bytes().to_vec(), output.clone())?;
+    let plan = test_prepared_commit_plan(request, vec![response.clone(), output])?;
     store
         .append_prepared_commit_bundle(test_prepared_commit_bundle_with_artifact_bytes(
             plan,
-            vec![response_bytes],
+            vec![response_bytes, output_bytes],
         )?)
         .await
 }
@@ -285,10 +280,12 @@ pub(super) async fn append_fact_commit_with_missing_existing_artifact(
     request: mfm_store::v1::CommitRequest,
     response: &ArtifactEvidenceRef,
 ) -> Result<CommitOutcome> {
-    let plan = test_prepared_commit_plan(request, vec![response.clone()])?;
+    let output = fact_output_artifact_ref(response);
+    let plan = test_prepared_commit_plan(request, vec![response.clone(), output.clone()])?;
     store
-        .append_prepared_commit_bundle(test_prepared_commit_bundle_with_existing_artifact(
-            plan, response,
+        .append_prepared_commit_bundle(test_prepared_commit_bundle_with_existing_artifacts(
+            plan,
+            &[response.clone(), output],
         )?)
         .await
 }

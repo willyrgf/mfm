@@ -285,8 +285,6 @@ pub struct Observation {
     pub values: Vec<ObservationValue>,
     /// Direct holding source information pinned to a concrete anchor.
     pub source: AnchoredHoldingSource,
-    /// Selected holding coverage honesty tag (`configured_only` or `complete_at_anchor`).
-    pub coverage: String,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: PublicMetadata,

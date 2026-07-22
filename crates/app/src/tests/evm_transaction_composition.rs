@@ -264,8 +264,7 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
             Arc::clone(&signing_key),
             Arc::clone(&live_validation_reads),
         ),
-        store.clone(),
-        store.clone(),
+        Arc::new(store.clone()),
         certification.clone(),
     );
     let (draft, seed_material) = composition_launch_material(sender, created);
@@ -316,8 +315,7 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
     drop(launch_services);
     drop(signing_key);
 
-    let replay_services =
-        make_run_read_services(store.clone(), store.clone(), certification.clone());
+    let replay_services = make_run_read_services(Arc::new(store.clone()), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await
@@ -357,8 +355,7 @@ async fn assert_composition_replays(
             Arc::clone(&signing_key),
             Arc::clone(&live_validation_reads),
         ),
-        store.clone(),
-        store.clone(),
+        Arc::new(store.clone()),
         certification.clone(),
     );
     let (draft, seed_material) = build(sender, created);
@@ -393,8 +390,7 @@ async fn assert_composition_replays(
     drop(launch_services);
     drop(signing_key);
 
-    let replay_services =
-        make_run_read_services(store.clone(), store.clone(), certification.clone());
+    let replay_services = make_run_read_services(Arc::new(store.clone()), certification.clone());
     let replay = replay_services
         .verify_replay_for_run(&run_id)
         .await

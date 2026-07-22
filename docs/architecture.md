@@ -49,12 +49,14 @@ runtime or replay authority.
 
 The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
 normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
-Bitcoin collection resolves one shared tip per required network and emits checked receipts. Each
-EVM network becomes one child call to the reusable `EvmBalanceCollectionOperation`, whose read and
-atomic-record states return a checked receipt after recording `evm.balance_snapshot` facts. The
-typed BTC/EVM receipt vectors flow directly into one store-backed selection state; assembly
+Bitcoin collection performs one bounded multi-descriptor scan per semantic source, verifies one
+shared height/hash anchor, and emits ordered balance facts plus a checked receipt from one read
+state. Each EVM network becomes one child call to the reusable `EvmBalanceCollectionOperation`,
+whose single fact-producing read state returns a checked receipt with its ordered
+`evm.balance_snapshot` facts in one settlement. The typed Bitcoin/EVM receipt vectors flow directly
+into one store-backed selection state; assembly
 receives only rehydrated and identity-reverified facts. The complete snapshot graph is the sole
-public objective, `mfm.portfolio/snapshot@1`.
+public objective, `mfm.portfolio/snapshot@2`.
 
 `mfm-op-portfolio-snapshot` owns that complete internal graph through two operations.
 `PortfolioSnapshotOperation` projects normalized `PortfolioConfig` into child Bitcoin/EVM
@@ -65,7 +67,7 @@ snapshot assembly, and report projection. Its one production draft helper binds 
 wallet-to-symbol relations, and distinct EVM sources per network before graph expansion. The app
 registers the needed runners and certification descriptors, strictly resolves one target-keyed
 `PortfolioConfig` at admission, and exposes that exact graph only through
-`mfm.portfolio/snapshot@1`.
+`mfm.portfolio/snapshot@2`.
 
 The snapshot operation registry composes the Bitcoin and EVM child registry functions, then adds
 only the report operation's own states and operations. Parent registries must never repeat a child
@@ -193,9 +195,9 @@ entry-point id plus target/schema/digest so a run can be verified without consul
 current configuration. Resume, status, stream, public-output, and replay paths use retained
 certified artifacts and the append-only run stream only.
 
-Two v1 decisions are deliberate:
+Two current decisions are deliberate:
 
-- Family managed-write outputs are the completion authority for portfolio selection.
+- Family collector receipts are the completion authority for portfolio selection.
   `PortfolioSnapshotOperation` passes typed Bitcoin and EVM receipt vectors into one
   `PortfolioReportOperation`, whose structured input is passed unchanged to
   `SelectHoldingsState`; neither operation has a generic receipt entry, logical-manifest wrapper,

@@ -1066,7 +1066,6 @@ fn parse_capability_descriptor(value: &serde_json::Value) -> Result<CapabilityDe
 fn parse_capability_role(value: &str) -> Result<CapabilityRole> {
     match value {
         "read_external" => Ok(CapabilityRole::ReadExternal),
-        "managed_platform_write" => Ok(CapabilityRole::ManagedPlatformWrite),
         "support" => Ok(CapabilityRole::Support),
         "external_mutation_authority" => Ok(CapabilityRole::ExternalMutationAuthority),
         role => Err(json_error(format!("unsupported capability role {role:?}"))),

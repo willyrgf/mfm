@@ -597,6 +597,7 @@ fn side_effect_terminal_payloads_derive_attempt_failure_payload() {
             &fixture.runtime_spec,
             node,
             &attempt_id,
+            Vec::new(),
             vec![runner_payload],
         )
         .expect("derive lifecycle");

@@ -506,6 +506,7 @@ macro_rules! impl_runtime_read_state {
         impl ReadState for $state {
             type Plan = FixtureOutputValue;
             type Evidence = FixtureOutputValue;
+            type Facts = ();
 
             fn plan(
                 &self,
@@ -524,7 +525,7 @@ macro_rules! impl_runtime_read_state {
                 input: &Self::Input,
                 evidence: &mfm_program::ExternalReadEvidenceSet<Self::Evidence>,
                 context: &mfm_program::CertifiedContext<Self::Context>,
-            ) -> StateResult<Self::Output> {
+            ) -> StateResult<(Self::Output, Self::Facts)> {
                 if !evidence.fact_query_evidence().is_empty()
                     || evidence.primary_evidence() != &self.plan(input, context)?
                 {
@@ -532,7 +533,7 @@ macro_rules! impl_runtime_read_state {
                         "runtime fixture read evidence did not match its plan".to_owned(),
                     ));
                 }
-                Ok(evidence.primary_evidence().clone())
+                Ok((evidence.primary_evidence().clone(), ()))
             }
         }
     };

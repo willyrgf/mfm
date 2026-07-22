@@ -2,38 +2,39 @@ use super::*;
 
 /// Evidence-only application facade for certified typed run reads.
 #[derive(Clone)]
-pub struct RunReadServices<S, A> {
-    store: S,
-    artifacts: A,
+pub struct RunReadServices<S> {
+    store: Arc<S>,
     certification_registry: CertificationRegistry,
 }
 
-impl<S, A> RunReadServices<S, A>
+impl<S> RunReadServices<S>
 where
-    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + Send
+        + Sync
+        + 'static,
 {
     /// Creates evidence-only app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
-        store: S,
-        artifacts: A,
+        store: Arc<S>,
         certification_registry: CertificationRegistry,
     ) -> Self {
         Self {
             store,
-            artifacts,
             certification_registry,
         }
     }
 
     /// Returns the typed artifact store.
-    pub fn artifacts(&self) -> &A {
-        &self.artifacts
+    pub fn artifacts(&self) -> &S {
+        self.store.as_ref()
     }
 
     /// Returns the async typed run store.
     pub fn store(&self) -> &S {
-        &self.store
+        self.store.as_ref()
     }
 
     /// Returns the trusted certification registry used for stored spec verification.
@@ -84,8 +85,8 @@ where
     ) -> Result<ReplayBroker, PublicError> {
         let context = self.trusted_run_reader().load_run_context(run_id).await?;
         let authority = replay_read_authority_for_run_with_retained_source_facts(
-            &self.store,
-            &self.artifacts,
+            self.store.as_ref(),
+            self.store.as_ref(),
             context.runtime_spec(),
             context.view(),
         )
@@ -125,23 +126,23 @@ where
         self.public_fact_catalog().await?.explain_kind(fact_kind)
     }
 
-    /// Resolves an opaque public fact reference against store-scoped Platform facts.
+    /// Resolves an opaque public fact reference against store-scoped committed facts.
     ///
-    /// Unknown, `Control`, and `RunPrivate` facts all return the same redacted not-found class.
+    /// Unknown facts return the same redacted not-found class.
     pub async fn resolve_public_fact_ref(
         &self,
         public_ref: &PublicFactRefId,
     ) -> Result<PublicFactRef, PublicError> {
         let projection = self.public_fact_projection().await?;
         let catalog =
-            FactCatalogService::from_retained_public_projection(&self.artifacts, &projection)
+            FactCatalogService::from_retained_public_projection(self.store.as_ref(), &projection)
                 .await?;
         FactPublicRefResolver::new(catalog, projection).resolve(public_ref)
     }
 
     async fn public_fact_catalog(&self) -> Result<FactCatalogService, PublicError> {
         let projection = self.public_fact_projection().await?;
-        FactCatalogService::from_retained_public_projection(&self.artifacts, &projection).await
+        FactCatalogService::from_retained_public_projection(self.store.as_ref(), &projection).await
     }
 
     async fn public_fact_projection(&self) -> Result<store::ProjectionSnapshot, PublicError> {
@@ -151,15 +152,20 @@ where
             .map_err(async_app_store_error)
     }
 
-    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S, A> {
-        TrustedRunReader::new(&self.store, &self.artifacts, &self.certification_registry)
+    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S> {
+        TrustedRunReader::new(self.store.as_ref(), &self.certification_registry)
     }
 }
 
-impl<S, A> RunReadServices<S, A>
+impl<S> RunReadServices<S>
 where
-    S: store::RunEventStore + store::StoreScopeStore + PublicFactQueryExecutor + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + store::FactQueryStore
+        + Send
+        + Sync
+        + 'static,
 {
     /// Builds a production public fact query service from retained descriptor and store-scoped projection authority.
     pub async fn public_fact_query_service(
@@ -228,26 +234,24 @@ impl VerifiedStatusReadContext {
     }
 }
 
-pub(crate) struct TrustedRunReader<'a, S, A: ?Sized> {
+pub(crate) struct TrustedRunReader<'a, S> {
     store: &'a S,
-    artifacts: &'a A,
     registry: &'a CertificationRegistry,
 }
 
-impl<'a, S, A: ?Sized> TrustedRunReader<'a, S, A> {
-    pub(super) fn new(store: &'a S, artifacts: &'a A, registry: &'a CertificationRegistry) -> Self {
-        Self {
-            store,
-            artifacts,
-            registry,
-        }
+impl<'a, S> TrustedRunReader<'a, S> {
+    pub(super) fn new(store: &'a S, registry: &'a CertificationRegistry) -> Self {
+        Self { store, registry }
     }
 }
 
-impl<S, A> TrustedRunReader<'_, S, A>
+impl<S> TrustedRunReader<'_, S>
 where
-    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + ?Sized,
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + Send
+        + Sync,
 {
     pub(super) async fn load_store_scope_id(&self) -> Result<StoreScopeId, PublicError> {
         self.store
@@ -272,8 +276,7 @@ where
         run_id: &RunId,
     ) -> Result<VerifiedRunReadContext, PublicError> {
         let context =
-            load_async_verified_run_read_context(self.store, self.artifacts, self.registry, run_id)
-                .await?;
+            load_async_verified_run_read_context(self.store, self.registry, run_id).await?;
         self.validate_identity_material_store_scope(
             &context.view().run_admitted().identity_material,
         )
@@ -285,13 +288,8 @@ where
         &self,
         run_id: &RunId,
     ) -> Result<VerifiedStatusReadContext, PublicError> {
-        let context = load_async_verified_status_read_context(
-            self.store,
-            self.artifacts,
-            self.registry,
-            run_id,
-        )
-        .await?;
+        let context =
+            load_async_verified_status_read_context(self.store, self.registry, run_id).await?;
         self.validate_identity_material_store_scope(
             &context.read.view().run_admitted().identity_material,
         )
@@ -337,11 +335,11 @@ where
         run_id: &RunId,
     ) -> Result<ReplayResponse, PublicError> {
         let context = self.load_run_context(run_id).await?;
-        verify_replay_diagnostics_from_recorded_artifacts(self.artifacts, run_id, context.events())
+        verify_replay_diagnostics_from_recorded_artifacts(self.store, run_id, context.events())
             .await?;
         let authority = replay_read_authority_for_run_with_retained_source_facts(
             self.store,
-            self.artifacts,
+            self.store,
             context.runtime_spec(),
             context.view(),
         )
@@ -379,42 +377,38 @@ where
     ) -> Result<PublicOutputResponse, PublicError> {
         let context = self.load_run_context(run_id).await?;
         let authority = public_output_read_authority_for_run(
-            self.artifacts,
+            self.store,
             context.runtime_spec(),
             context.view(),
             public_schema_id,
         )
         .await?;
-        render_public_output(self.artifacts, &authority).await
+        render_public_output(self.store, &authority).await
     }
 }
 
-async fn load_async_verified_run_read_context<S, A>(
+async fn load_async_verified_run_read_context<S>(
     store: &S,
-    artifacts: &A,
     registry: &CertificationRegistry,
     run_id: &RunId,
 ) -> Result<VerifiedRunReadContext, PublicError>
 where
-    S: store::RunEventStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + ?Sized,
+    S: store::RunEventStore + store::RetainedArtifactReadProvider + Send + Sync,
 {
     let committed = store
         .load_committed_run_stream(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_run_read_context_from_committed_stream(artifacts, registry, committed).await
+    verified_run_read_context_from_committed_stream(store, registry, committed).await
 }
 
-async fn load_async_verified_status_read_context<S, A>(
+async fn load_async_verified_status_read_context<S>(
     store: &S,
-    artifacts: &A,
     registry: &CertificationRegistry,
     run_id: &RunId,
 ) -> Result<VerifiedStatusReadContext, PublicError>
 where
-    S: store::RunEventStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + ?Sized,
+    S: store::RunEventStore + store::RetainedArtifactReadProvider + Send + Sync,
 {
     let committed = store
         .load_committed_run_stream(run_id)
@@ -424,7 +418,7 @@ where
         .status_projection_snapshot(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_status_read_context_from_committed_stream(artifacts, registry, committed, &projection)
+    verified_status_read_context_from_committed_stream(store, registry, committed, &projection)
         .await
 }
 

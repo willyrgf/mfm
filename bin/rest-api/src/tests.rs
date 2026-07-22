@@ -98,7 +98,7 @@ async fn run_start_recognizes_the_snapshot_entry_point_before_target_resolution(
         .oneshot(json_post(
             "/v1/runs/start",
             json!({
-                "entry_point": "mfm.portfolio/snapshot@1",
+                "entry_point": "mfm.portfolio/snapshot@2",
                 "target": "acme/primary"
             }),
         ))
@@ -112,13 +112,12 @@ async fn run_start_recognizes_the_snapshot_entry_point_before_target_resolution(
 
 #[tokio::test]
 async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
-    let fixture = mfm_app::PublicFactVisibilityFixtureForTest::new();
+    let fixture = mfm_app::PublicFactFixtureForTest::new();
     let app = make_app(AppState {
         role: RestProcessRole::Read,
         store: fixture.store.clone(),
         configured_store: None,
         runtime_config_path: None,
-        fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
     let start = app
@@ -165,7 +164,6 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
         store: store::AsyncInMemoryRunStore::default(),
         configured_store: None,
         runtime_config_path: Some(config_path.clone()),
-        fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
     assert_start_requires_configured_store(&app).await;
@@ -292,14 +290,13 @@ async fn fact_query_routes_reject_malformed_query_shapes() {
 }
 
 #[tokio::test]
-async fn facts_routes_expose_only_public_platform_projection_data() {
-    let fixture = mfm_app::PublicFactVisibilityFixtureForTest::new();
+async fn facts_routes_expose_public_projection_data() {
+    let fixture = mfm_app::PublicFactFixtureForTest::new();
     let app = make_app(AppState {
         role: RestProcessRole::Live,
         store: fixture.store.clone(),
         configured_store: None,
         runtime_config_path: None,
-        fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
     let value = get_json(&app, "/v1/facts/kinds", StatusCode::OK).await;
@@ -319,7 +316,7 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
     let value = get_json(&app, &query_uri, StatusCode::OK).await;
     let facts = value["data"]["facts"].as_array().expect("facts array");
     assert_eq!(facts.len(), 1);
-    assert_eq!(facts[0]["public_ref"], fixture.platform_public_ref);
+    assert_eq!(facts[0]["public_ref"], fixture.public_ref);
     assert_eq!(facts[0]["fields"].as_array().unwrap().len(), 2);
     fixture.assert_json_redacts_private_tokens(&value);
 
@@ -331,19 +328,15 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
     assert_eq!(value["data"]["facts"].as_array().unwrap().len(), 1);
     fixture.assert_json_redacts_private_tokens(&value);
 
-    let platform_ref_uri = format!("/v1/facts/ref/{}", fixture.platform_public_ref);
-    let value = get_json(&app, &platform_ref_uri, StatusCode::OK).await;
-    assert_eq!(value["data"]["public_ref"], fixture.platform_public_ref);
+    let public_ref_uri = format!("/v1/facts/ref/{}", fixture.public_ref);
+    let value = get_json(&app, &public_ref_uri, StatusCode::OK).await;
+    assert_eq!(value["data"]["public_ref"], fixture.public_ref);
     fixture.assert_json_redacts_private_tokens(&value);
-
-    let control_ref_uri = format!("/v1/facts/ref/{}", fixture.control_public_ref);
-    let control_error = get_json(&app, &control_ref_uri, StatusCode::NOT_FOUND).await;
-    assert_eq!(control_error["error"]["code"], "FactNotFound");
-    fixture.assert_json_redacts_private_tokens(&control_error);
 
     let unknown_ref_uri = format!("/v1/facts/ref/{}", unknown_public_ref());
     let unknown_error = get_json(&app, &unknown_ref_uri, StatusCode::NOT_FOUND).await;
-    assert_eq!(unknown_error["error"], control_error["error"]);
+    assert_eq!(unknown_error["error"]["code"], "FactNotFound");
+    fixture.assert_json_redacts_private_tokens(&unknown_error);
 }
 
 async fn assert_start_requires_configured_store(app: &axum::Router) {
@@ -440,7 +433,6 @@ fn test_app() -> axum::Router {
         store: store::AsyncInMemoryRunStore::default(),
         configured_store: None,
         runtime_config_path: None,
-        fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     })
 }
 

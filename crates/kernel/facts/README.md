@@ -1,7 +1,7 @@
 # mfm-facts
 
 Typed kernel crate for fact descriptors, checked semantic fact-content identity, field extraction
-contracts, visibility, and query evidence.
+contracts, content identity, and query evidence.
 
 `FactContentIdentity` identifies verified descriptor, subject-material, response-schema, and
 response-content bytes without inheriting any claim, artifact, run, or store-occurrence identity.

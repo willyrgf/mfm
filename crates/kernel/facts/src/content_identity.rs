@@ -532,10 +532,7 @@ fn validate_response(descriptor: &FactDescriptor, response: &CanonicalValue) -> 
 #[cfg(test)]
 mod tests {
     use mfm_canonical::CanonicalValue;
-    use mfm_ids::{
-        AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion,
-        DigestAlgorithm, DigestBytes, EventId, NodeId, RunId,
-    };
+    use mfm_ids::{ArtifactId, DigestAlgorithm, DigestBytes, EventId, NodeId, RunId};
     use mfm_values::{MfmValue, NumberPolicy, SecretPolicy};
 
     use super::*;
@@ -604,27 +601,6 @@ mod tests {
         .expect("subject material")
     }
 
-    fn producer() -> FactProducerProvenance {
-        FactProducerProvenance::new(
-            CapabilityKind::new(
-                "mfm.test",
-                "fact-read",
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([11; 32]),
-            )
-            .expect("capability kind"),
-            CapabilityVersion::new("mfm.test.capability.v1").expect("capability version"),
-            AdapterKind::new(
-                "mfm.test",
-                "fact-adapter",
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([12; 32]),
-            )
-            .expect("adapter kind"),
-            AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
-        )
-    }
-
     fn claim(
         descriptor: &FactDescriptor,
         material: &FactSubjectMaterialV2,
@@ -632,13 +608,10 @@ mod tests {
         response_hash: ContentDigest,
     ) -> FactClaim {
         FactClaim::new(FactClaimParts {
-            visibility: FactVisibility::indexed_default(FactAudience::Platform),
             fact_kind: descriptor.fact_kind().clone(),
             fact_descriptor_hash: descriptor_hash,
             subject: fact_subject_evidence_from_material(descriptor, material)
                 .expect("subject evidence"),
-            observed_at: None,
-            request: None,
             response: FactResponseEvidence::new(
                 descriptor.response_schema_id().clone(),
                 response_hash,
@@ -648,7 +621,6 @@ mod tests {
                 ),
                 digest(14),
             ),
-            producer: producer(),
         })
         .expect("claim")
     }
@@ -675,7 +647,6 @@ mod tests {
             ),
             claim,
         )
-        .expect("indexed ref")
         .expect("platform ref")
     }
 

@@ -1,22 +1,21 @@
 //! Reusable EVM balance collection state contracts.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future;
 use std::str::FromStr;
 
 use alloy_primitives::{Address, U256};
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_evm_capabilities::{
     EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
     EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
-use mfm_fact_capabilities::FactRecordCapability;
-use mfm_facts::{FactAudience, FactContentIdentityEvidence, FactVisibility};
+use mfm_facts::{FactContentIdentityEvidence, MfmFactType};
 use mfm_ids::LocalPublicId;
 use mfm_program::{
-    fact_descriptor_ref, ExternalReadEvidenceSet, FactDescriptorRef, ManagedWriteState,
-    MfmFactType, NoContext, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    ExternalReadEvidenceSet, NoContext, NonEmpty, ReadState, StateError, StateResult, StateSpec,
+    ValidatedConfig,
 };
-use mfm_program_derive::{MfmConfig, MfmFactType as DeriveMfmFactType, MfmValue, StateInput};
+use mfm_program_derive::{MfmConfig, MfmFactType as DeriveMfmFactType, MfmValue};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -467,126 +466,6 @@ impl EvmBalanceCollectionEvidence {
     }
 }
 
-/// One normalized balance in a reduced collection batch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "balance_observation",
-    schema = "mfm.evm.balance_observation"
-)]
-pub struct EvmBalanceObservation {
-    source: EvmBalanceSource,
-    raw_units: String,
-    decimals: u8,
-}
-
-impl EvmBalanceObservation {
-    /// Returns the exact source.
-    pub const fn source(&self) -> &EvmBalanceSource {
-        &self.source
-    }
-
-    /// Returns the canonical raw balance.
-    pub fn raw_units(&self) -> &str {
-        &self.raw_units
-    }
-
-    /// Returns the exact asset decimal scale.
-    pub const fn decimals(&self) -> u8 {
-        self.decimals
-    }
-}
-
-/// Reduced, canonical observation batch produced by the external-read state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "balance_observation_batch",
-    schema = "mfm.evm.balance_observation_batch"
-)]
-pub struct EvmBalanceObservationBatch {
-    network_id: String,
-    chain_id: u64,
-    anchor: EvmBlockAnchor,
-    balances: Vec<EvmBalanceObservation>,
-}
-
-impl EvmBalanceObservationBatch {
-    /// Returns the semantic network id.
-    pub fn network_id(&self) -> &str {
-        &self.network_id
-    }
-
-    /// Returns the checked chain id.
-    pub const fn chain_id(&self) -> u64 {
-        self.chain_id
-    }
-
-    /// Returns the common exact canonical anchor.
-    pub const fn anchor(&self) -> &EvmBlockAnchor {
-        &self.anchor
-    }
-
-    /// Returns every collected balance in source order.
-    pub fn balances(&self) -> &[EvmBalanceObservation] {
-        &self.balances
-    }
-
-    fn validate_against(
-        &self,
-        config: &EvmBalanceCollectionConfig,
-    ) -> Result<(), EvmBalanceCollectionError> {
-        validate_evm_balance_collection_config(config).map_err(invalid)?;
-        validate_anchor(&self.anchor)?;
-        if self.network_id != config.network_id
-            || self.chain_id != config.chain_id
-            || self.balances.len() != config.sources.len()
-        {
-            return Err(invalid(
-                "EVM collection batch did not match certified collection demand",
-            ));
-        }
-        let token_decimals = self
-            .balances
-            .iter()
-            .filter_map(|balance| {
-                balance
-                    .source
-                    .asset
-                    .contract_address()
-                    .map(|contract| (contract.to_owned(), balance.decimals))
-            })
-            .collect::<BTreeMap<_, _>>();
-        for (expected, balance) in config.sources.iter().zip(&self.balances) {
-            balance.source.validate()?;
-            parse_quantity(&balance.raw_units)?;
-            if &balance.source != expected {
-                return Err(invalid(
-                    "EVM collection batch source coverage was not exact",
-                ));
-            }
-            match balance.source.asset() {
-                EvmBalanceAsset::Native if balance.decimals != config.native_decimals => {
-                    return Err(invalid(
-                        "native balance decimals did not match network config",
-                    ));
-                }
-                EvmBalanceAsset::Erc20 { contract_address }
-                    if token_decimals.get(contract_address) != Some(&balance.decimals) =>
-                {
-                    return Err(invalid(
-                        "ERC-20 balances disagreed on one contract decimal scale",
-                    ));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-}
-
 /// State that collects every configured EVM holding at one exact canonical anchor.
 pub struct CollectEvmBalancesState {
     config: EvmBalanceCollectionConfig,
@@ -603,7 +482,7 @@ impl StateSpec for CollectEvmBalancesState {
     type Config = EvmBalanceCollectionConfig;
     type Context = NoContext;
     type Input = ();
-    type Output = EvmBalanceObservationBatch;
+    type Output = EvmBalanceCollectionReceipt;
     type Effect = mfm_effects::ReadExternal;
     type Caps = (EvmReadCapability,);
 
@@ -633,6 +512,7 @@ impl StateSpec for CollectEvmBalancesState {
 impl ReadState for CollectEvmBalancesState {
     type Plan = EvmBalanceCollectionPlan;
     type Evidence = EvmBalanceCollectionEvidence;
+    type Facts = NonEmpty<EvmBalanceSnapshotFact>;
 
     fn plan(
         &self,
@@ -653,7 +533,7 @@ impl ReadState for CollectEvmBalancesState {
         input: &Self::Input,
         evidence: &ExternalReadEvidenceSet<Self::Evidence>,
         context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
+    ) -> StateResult<(Self::Output, Self::Facts)> {
         if !evidence.fact_query_evidence().is_empty() {
             return Err(StateError::Message(
                 "EVM network collection carried unexpected fact-query evidence".to_owned(),
@@ -668,7 +548,13 @@ impl ReadState for CollectEvmBalancesState {
 pub fn reduce_evm_balance_collection(
     plan: &EvmBalanceCollectionPlan,
     evidence: &EvmBalanceCollectionEvidence,
-) -> Result<EvmBalanceObservationBatch, EvmBalanceCollectionError> {
+) -> Result<
+    (
+        EvmBalanceCollectionReceipt,
+        NonEmpty<EvmBalanceSnapshotFact>,
+    ),
+    EvmBalanceCollectionError,
+> {
     validate_evm_balance_collection_config(&plan.config()).map_err(invalid)?;
     validate_session(&evidence.session, plan)?;
     if evidence.anchor != evidence.final_canonical_block {
@@ -698,7 +584,7 @@ pub fn reduce_evm_balance_collection(
     if evidence.balances.len() != plan.sources.len() {
         return Err(invalid("EVM balance evidence coverage was not exact"));
     }
-    let mut balances = Vec::with_capacity(plan.sources.len());
+    let mut facts = Vec::with_capacity(plan.sources.len());
     for (expected, observed) in plan.sources.iter().zip(&evidence.balances) {
         if &observed.source != expected {
             return Err(invalid(
@@ -712,30 +598,25 @@ pub fn reduce_evm_balance_collection(
                 .get(contract_address)
                 .ok_or_else(|| invalid("ERC-20 balance lacked token metadata"))?,
         };
-        balances.push(EvmBalanceObservation {
-            source: observed.source.clone(),
-            raw_units: observed.raw_units.clone(),
-            decimals,
-        });
+        facts.push(EvmBalanceSnapshotFact::new(
+            EvmBalanceSnapshotSubject::from_source(
+                &plan.network_id,
+                plan.chain_id,
+                &observed.source,
+            ),
+            EvmBalanceSnapshotResponse {
+                block_anchor: evidence.anchor.clone(),
+                raw_units: observed.raw_units.clone(),
+                decimals,
+            },
+        ));
     }
 
-    let batch = EvmBalanceObservationBatch {
-        network_id: plan.network_id.clone(),
-        chain_id: plan.chain_id,
-        anchor: evidence.anchor.clone(),
-        balances,
-    };
-    batch.validate_against(&plan.config())?;
-    Ok(batch)
-}
-
-/// Input for the atomic EVM fact-publication state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
-#[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.evm.input.record_balance_facts")]
-pub struct RecordEvmBalanceFactsInput {
-    /// Complete reduced collection batch.
-    pub batch: EvmBalanceObservationBatch,
+    let facts = NonEmpty::try_from_vec(facts)
+        .map_err(|error| invalid(format!("EVM fact batch was empty: {error}")))?;
+    let receipt =
+        EvmBalanceCollectionReceipt::from_verified_facts(plan, &evidence.anchor, facts.values())?;
+    Ok((receipt, facts))
 }
 
 /// Checked receipt for one atomic EVM balance-fact publication.
@@ -758,45 +639,47 @@ pub struct EvmBalanceCollectionReceipt {
 }
 
 impl EvmBalanceCollectionReceipt {
-    fn from_verified_publication(
-        batch: &EvmBalanceObservationBatch,
+    fn from_verified_facts(
+        plan: &EvmBalanceCollectionPlan,
+        anchor: &EvmBlockAnchor,
         facts: &[EvmBalanceSnapshotFact],
     ) -> Result<Self, EvmBalanceCollectionError> {
-        if facts.len() != batch.balances.len() {
+        validate_evm_balance_collection_config(&plan.config()).map_err(invalid)?;
+        validate_anchor(anchor)?;
+        if facts.len() != plan.sources.len() {
             return Err(invalid(
-                "EVM balance publication fact coverage did not match the reduced batch",
+                "EVM balance fact coverage did not match collection demand",
             ));
         }
         let descriptor =
             EvmBalanceSnapshotFact::descriptor().map_err(|error| invalid(error.to_string()))?;
         let mut sources = Vec::with_capacity(facts.len());
         let mut fact_content_identities = Vec::with_capacity(facts.len());
-        for (balance, fact) in batch.balances.iter().zip(facts) {
-            if fact.subject.network_id != batch.network_id
-                || fact.subject.chain_id != batch.chain_id
-                || fact.subject.account != balance.source.account
-                || fact.subject.asset != balance.source.asset
-                || fact.response.block_anchor != batch.anchor
-                || fact.response.raw_units != balance.raw_units
-                || fact.response.decimals != balance.decimals
+        for (source, fact) in plan.sources.iter().zip(facts) {
+            if fact.subject.network_id != plan.network_id
+                || fact.subject.chain_id != plan.chain_id
+                || fact.subject.account != source.account
+                || fact.subject.asset != source.asset
+                || &fact.response.block_anchor != anchor
             {
                 return Err(invalid(
-                    "EVM balance publication fact did not match the reduced batch",
+                    "EVM balance fact did not match reduced collection evidence",
                 ));
             }
+            parse_quantity(&fact.response.raw_units)?;
             let identity = mfm_facts::derive_fact_content_identity_from_typed_values(
                 &descriptor,
                 fact.subject(),
                 fact.response(),
             )
             .map_err(|error| invalid(error.to_string()))?;
-            sources.push(balance.source.clone());
+            sources.push(source.clone());
             fact_content_identities.push(FactContentIdentityEvidence::from_verified(&identity));
         }
         Self::from_evidence(
-            batch.network_id.clone(),
-            batch.chain_id,
-            batch.anchor.clone(),
+            plan.network_id.clone(),
+            plan.chain_id,
+            anchor.clone(),
             sources,
             fact_content_identities,
         )
@@ -897,90 +780,6 @@ impl<'de> Deserialize<'de> for EvmBalanceCollectionReceipt {
     }
 }
 
-/// State that atomically records a complete EVM fact batch and returns its checked receipt.
-pub struct RecordEvmBalanceFactsState {
-    config: EvmBalanceCollectionConfig,
-}
-
-impl StateSpec for RecordEvmBalanceFactsState {
-    type Config = EvmBalanceCollectionConfig;
-    type Context = NoContext;
-    type Input = RecordEvmBalanceFactsInput;
-    type Output = EvmBalanceCollectionReceipt;
-    type Effect = mfm_effects::ManagedPlatformWrite;
-    type Caps = (FactRecordCapability,);
-
-    fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
-        state_kind("record_balance_facts")
-    }
-
-    fn version() -> mfm_program::Result<mfm_ids::StateVersion> {
-        state_version("record_balance_facts")
-    }
-
-    fn name() -> &'static str {
-        "mfm.evm.record_balance_facts"
-    }
-
-    fn adapter_bindings() -> mfm_program::Result<Vec<mfm_program::AdapterBindingSpec>> {
-        adapter_binding()
-    }
-
-    fn emitted_fact_descriptors() -> mfm_program::Result<Vec<FactDescriptorRef>> {
-        Ok(vec![fact_descriptor_ref::<EvmBalanceSnapshotFact>()?])
-    }
-
-    fn new(config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
-    }
-}
-
-impl ManagedWriteState for RecordEvmBalanceFactsState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
-
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        let result = record_evm_balance_facts(&self.config, input.batch)
-            .map(|(receipt, _facts)| receipt)
-            .map_err(StateError::from);
-        future::ready(result)
-    }
-}
-
-/// Validates a complete batch and prepares its checked receipt and exact fact records.
-pub fn record_evm_balance_facts(
-    config: &EvmBalanceCollectionConfig,
-    batch: EvmBalanceObservationBatch,
-) -> Result<(EvmBalanceCollectionReceipt, Vec<EvmBalanceSnapshotFact>), EvmBalanceCollectionError> {
-    batch.validate_against(config)?;
-    let facts = batch
-        .balances
-        .iter()
-        .map(|balance| {
-            EvmBalanceSnapshotFact::new(
-                EvmBalanceSnapshotSubject::from_source(
-                    &batch.network_id,
-                    batch.chain_id,
-                    &balance.source,
-                ),
-                EvmBalanceSnapshotResponse {
-                    block_anchor: batch.anchor.clone(),
-                    raw_units: balance.raw_units.clone(),
-                    decimals: balance.decimals,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    let receipt = EvmBalanceCollectionReceipt::from_verified_publication(&batch, &facts)?;
-    Ok((receipt, facts))
-}
-
 /// Subject identity for the reusable EVM balance fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -1056,6 +855,19 @@ impl EvmBalanceSnapshotResponse {
     pub const fn decimals(&self) -> u8 {
         self.decimals
     }
+}
+
+/// Decodes one canonical, closed EVM fact response and revalidates its domain invariants.
+pub fn decode_evm_balance_snapshot_response(
+    bytes: &[u8],
+) -> Result<EvmBalanceSnapshotResponse, EvmBalanceCollectionError> {
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+        .map_err(|_| invalid("EVM fact response was not canonical JSON"))?;
+    let response: EvmBalanceSnapshotResponse = serde_json::from_slice(canonical.as_bytes())
+        .map_err(|_| invalid("EVM fact response did not match the closed schema"))?;
+    validate_anchor(&response.block_anchor)?;
+    parse_quantity(&response.raw_units)?;
+    Ok(response)
 }
 
 /// Unified native/ERC-20 EVM balance fact recorded by reusable collectors.
@@ -1177,11 +989,6 @@ impl EvmBalanceSnapshotFact {
     pub const fn response(&self) -> &EvmBalanceSnapshotResponse {
         &self.response
     }
-}
-
-/// Returns Platform visibility for unified EVM balance facts.
-pub fn evm_balance_fact_visibility() -> FactVisibility {
-    FactVisibility::indexed_default(FactAudience::Platform)
 }
 
 fn network_binding(

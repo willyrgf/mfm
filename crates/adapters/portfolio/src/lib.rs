@@ -1,19 +1,19 @@
 #![warn(missing_docs)]
 //! Portfolio adapter runners for certified portfolio snapshots.
 //!
-//! The Platform fact-index binding rereads and verifies Bitcoin and generic EVM facts before
+//! The store-owned fact-query binding rereads and verifies Bitcoin and generic EVM facts before
 //! portfolio assembly. Family collection execution belongs to the family adapters.
 
 use std::sync::Arc;
 
 use mfm_events::v1 as events;
-use mfm_fact_capabilities::FactIndexReadProvider;
+use mfm_facts::FactQueryReadCapability;
 use mfm_program::StateSpec;
 use mfm_runtime::{
-    load_materialized_struct_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, ExternalReadExecution,
-    ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
-    RunnerExecutableIdentityTemplate, RunnerRegistrationBuilder,
+    load_materialized_struct_input, load_runner_config_for_node, CapabilityImplementationId,
+    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
+    ExternalReadRunner, RunnerExecutableIdentityTemplate, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
     assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
@@ -34,41 +34,18 @@ const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
 const ADAPTER_FACTORY: &str = "portfolio_adapter";
 
-/// Runtime capabilities used by portfolio adapter runners.
-#[derive(Clone)]
-pub struct PortfolioRunnerCapabilities {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    fact_index: Arc<dyn FactIndexReadProvider>,
-}
-
-impl PortfolioRunnerCapabilities {
-    /// Creates portfolio runner capabilities from artifact and Platform fact-index providers.
-    pub fn new(
-        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-        fact_index: Arc<dyn FactIndexReadProvider>,
-    ) -> Self {
-        Self {
-            artifacts,
-            fact_index,
-        }
-    }
-
-    fn artifacts(&self) -> Arc<dyn store::RetainedArtifactReadProvider> {
-        Arc::clone(&self.artifacts)
-    }
-
-    fn fact_index(&self) -> Arc<dyn FactIndexReadProvider> {
-        Arc::clone(&self.fact_index)
-    }
-}
-
 /// Registers receipt-pinned selection and snapshot projection runners.
-pub fn register_portfolio_runners(
+pub fn register_portfolio_runners<S>(
     registry: &mut ErasedRunnerRegistry,
-    capabilities: PortfolioRunnerCapabilities,
-) -> mfm_runtime::Result<()> {
-    let artifacts = capabilities.artifacts();
-    let fact_index = capabilities.fact_index();
+    store: Arc<S>,
+) -> mfm_runtime::Result<()>
+where
+    S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
+{
+    registry.register_capability_spec::<FactQueryReadCapability>(
+        CapabilityImplementationId::new(store.fact_query_implementation_id())?,
+    )?;
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-portfolio",
@@ -92,7 +69,7 @@ pub fn register_portfolio_runners(
             artifacts.clone(),
             SelectHoldingsExecutor {
                 artifacts: artifacts.clone(),
-                fact_index,
+                store,
             },
         )),
     )?;
@@ -109,12 +86,15 @@ pub fn register_portfolio_runners(
     Ok(())
 }
 
-struct SelectHoldingsExecutor {
+struct SelectHoldingsExecutor<S> {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    fact_index: Arc<dyn FactIndexReadProvider>,
+    store: Arc<S>,
 }
 
-impl ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor {
+impl<S> ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor<S>
+where
+    S: store::FactQueryStore + Send + Sync + 'static,
+{
     fn validate_ingress<'a>(
         &'a self,
         _ctx: mfm_runtime::RunnerIngressContext<'a>,
@@ -130,14 +110,11 @@ impl ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor {
     ) -> ExternalReadExecutionFuture<'a, SelectHoldingsReadEvidence> {
         Box::pin(async move {
             let requests = plan.requests().map_err(portfolio_state_runtime_error)?;
-            let responses = if requests.is_empty() {
-                Vec::new()
-            } else {
-                self.fact_index
-                    .read_fact_index_batch(&requests)
-                    .await
-                    .map_err(fact_index_runtime_error)?
-            };
+            let responses = self
+                .store
+                .execute_fact_queries(&requests)
+                .await
+                .map_err(fact_query_runtime_error)?;
             plan.validate_query_results(&responses)
                 .map_err(portfolio_state_runtime_error)?;
             let hydrated =
@@ -211,17 +188,8 @@ where
     ErasedRunnerOutput::state_output(&ctx, value)
 }
 
-fn fact_index_runtime_error(
-    error: mfm_fact_capabilities::FactIndexReadError,
-) -> mfm_runtime::RuntimeError {
-    match error {
-        mfm_fact_capabilities::FactIndexReadError::Provider { .. } => {
-            mfm_runtime::RuntimeError::Blocked("fact-index provider is unavailable".to_owned())
-        }
-        mfm_fact_capabilities::FactIndexReadError::InvalidRequest { .. } => {
-            mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-        }
-    }
+fn fact_query_runtime_error<E>(_error: E) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::Blocked("fact-query store is unavailable".to_owned())
 }
 
 fn portfolio_state_runtime_error(
@@ -243,21 +211,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fact_index_provider_failures_block_without_terminalizing_the_attempt() {
-        let provider = mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-            "private backend detail",
-        );
+    fn fact_query_store_failures_block_without_exposing_backend_detail() {
         assert_eq!(
-            fact_index_runtime_error(provider),
-            mfm_runtime::RuntimeError::Blocked("fact-index provider is unavailable".to_owned())
+            fact_query_runtime_error("private backend detail"),
+            mfm_runtime::RuntimeError::Blocked("fact-query store is unavailable".to_owned())
         );
-
-        let invalid = mfm_fact_capabilities::FactIndexReadError::InvalidRequest {
-            reason: mfm_fact_capabilities::FactIndexInvalidRequest::UnsupportedAudience,
-        };
-        assert!(matches!(
-            fact_index_runtime_error(invalid),
-            mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
-        ));
     }
 }

@@ -267,8 +267,10 @@ async fn one_session_uses_latest_then_exact_hash_reads_then_number_recheck() {
     let evidence = collect_evm_balances(&plan, &capabilities)
         .await
         .expect("collection evidence");
-    let batch = reduce_evm_balance_collection(&plan, &evidence).expect("reduced evidence");
-    assert_eq!(batch.balances().len(), 2);
+    let (receipt, facts) =
+        reduce_evm_balance_collection(&plan, &evidence).expect("reduced evidence");
+    assert_eq!(receipt.sources().len(), 2);
+    assert_eq!(facts.values().len(), 2);
     assert_eq!(binds.load(Ordering::SeqCst), 1);
 
     let records = session.records();

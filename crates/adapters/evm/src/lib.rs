@@ -20,7 +20,7 @@ use mfm_runtime::{
 use mfm_states_evm::{
     evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, CollectEvmBalancesState,
     EvmContractValidationEvidence, EvmContractValidationEvidenceBuilder, EvmContractValidationPlan,
-    RecordEvmBalanceFactsState, ValidateEvmContractState,
+    ValidateEvmContractState,
 };
 use mfm_store::v1 as store;
 
@@ -100,7 +100,7 @@ impl EvmReadRunnerCapabilities {
     }
 }
 
-/// Registers the reusable EVM balance collection and atomic publication bindings.
+/// Registers the reusable fact-producing EVM balance collection binding.
 pub fn register_evm_balance_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: EvmReadRunnerCapabilities,
@@ -117,13 +117,6 @@ pub fn register_evm_balance_runners(
                 capabilities: capabilities.clone(),
             },
         )),
-    )?;
-    registrations.register_state_runner_with_factory::<RecordEvmBalanceFactsState>(
-        &executable_identities
-            .factory_binding(events::RunnerFactoryId::new("managed_platform_write")?),
-        Arc::new(balance_collection::RecordEvmBalanceFactsRunner {
-            artifacts: Arc::clone(&capabilities.artifacts),
-        }),
     )?;
     Ok(())
 }

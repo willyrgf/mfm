@@ -197,53 +197,6 @@ pub(super) fn rewrite_envelope(
     .expect("rewritten envelope")
 }
 
-pub(super) fn rewrite_envelope_payload(
-    event: &store::KernelEventEnvelope,
-    payload: events::KernelEventPayload,
-) -> store::KernelEventEnvelope {
-    let payload_hash = store::payload_canonical_json(&payload)
-        .expect("payload canonical")
-        .content_digest();
-    let event_schema_id = payload.event_schema_id().expect("event schema");
-    store::KernelEventEnvelope::from_persisted_record(store::PersistedKernelEventRecord {
-        event_id: test_event_id_for_envelope_inputs(
-            event.run_id(),
-            event.seq(),
-            event.ordinal(),
-            &event_schema_id,
-            &payload_hash,
-        ),
-        event_schema_id,
-        run_id: event.run_id().clone(),
-        seq: event.seq(),
-        store_commit_order: event.store_commit_order(),
-        ordinal: event.ordinal(),
-        spec_hash: payload.spec_hash().clone(),
-        commit_key: event.commit_key().clone(),
-        logical_key: event.logical_key().clone(),
-        payload_hash,
-        payload,
-    })
-    .expect("rewritten envelope payload")
-}
-
-pub(super) fn rewrite_stream_payloads<F>(
-    stream: &[store::KernelEventEnvelope],
-    mut rewrite: F,
-) -> Vec<store::KernelEventEnvelope>
-where
-    F: FnMut(&events::KernelEventPayload) -> Option<events::KernelEventPayload>,
-{
-    stream
-        .iter()
-        .map(|event| {
-            rewrite(event.payload())
-                .map(|payload| rewrite_envelope_payload(event, payload))
-                .unwrap_or_else(|| event.clone())
-        })
-        .collect()
-}
-
 pub(super) fn rewrite_stream_without_payloads<F>(
     stream: &[store::KernelEventEnvelope],
     mut should_remove: F,

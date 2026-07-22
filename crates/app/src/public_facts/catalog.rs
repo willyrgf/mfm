@@ -37,7 +37,7 @@ impl FactCatalogService {
 
     /// Loads a public catalog from retained descriptor artifacts and store projection authority.
     ///
-    /// Only descriptors with indexed `Platform` facts in the default visibility scope are included.
+    /// Only descriptors with queryable platform facts are included.
     pub async fn from_retained_public_projection<A>(
         artifacts: &A,
         projection: &store::ProjectionSnapshot,
@@ -57,7 +57,7 @@ impl FactCatalogService {
         Ok(Self { descriptors })
     }
 
-    /// Creates a catalog filtered to descriptors with Platform facts in the projection snapshot.
+    /// Creates a catalog filtered to descriptors with facts in the projection snapshot.
     pub fn from_public_projection<I>(
         descriptors: I,
         projection: &store::ProjectionSnapshot,
@@ -170,22 +170,19 @@ impl FactPublicRefResolver {
 
     /// Resolves a public fact ref, returning the same not-found class for unknown and non-public refs.
     pub fn resolve(&self, public_ref: &PublicFactRefId) -> Result<PublicFactRef, PublicError> {
-        for (_claim_id, entry) in self.projection.fact_index_entries() {
-            if !is_public_default_fact_index_entry(entry) {
-                continue;
-            }
+        for (_claim_id, entry) in self.projection.fact_query_entries() {
             let fact_ref = entry.internal_ref()?;
             if public_ref_id(&fact_ref)? != *public_ref {
                 continue;
             }
             let descriptor = self
                 .catalog
-                .descriptor_by_hash(&entry.fact_descriptor_hash)
+                .descriptor_by_hash(entry.fact_descriptor_hash())
                 .ok_or_else(redacted_fact_not_found)?;
             let fields = public_fields_from_values(
                 descriptor,
                 self.projection
-                    .fact_terms_for_claim(&entry.fact_claim_id)
+                    .fact_terms_for_claim(entry.fact_claim_id())
                     .map(|term| (&term.field_id, &term.value)),
             )?;
             return public_fact_from_parts(&fact_ref, descriptor, fields);
@@ -194,39 +191,12 @@ impl FactPublicRefResolver {
     }
 }
 
-pub(super) fn public_fact_query_scope() -> mfm_facts::FactQueryScope {
-    mfm_facts::FactQueryScope::new(
-        mfm_facts::FactAudience::Platform,
-        mfm_facts::FactVisibilityScope::Default,
-    )
-}
-
-pub(super) fn is_public_default_fact_visibility(
-    audience: mfm_facts::FactAudience,
-    scope: mfm_facts::FactVisibilityScope,
-) -> bool {
-    audience == mfm_facts::FactAudience::Platform
-        && scope == mfm_facts::FactVisibilityScope::Default
-}
-
-fn is_public_default_fact_index_entry(entry: &store::FactIndexProjection) -> bool {
-    is_public_default_fact_visibility(entry.audience, entry.visibility_scope)
-}
-
-fn is_public_default_internal_fact_ref(fact_ref: &mfm_facts::InternalFactRef) -> bool {
-    let mfm_facts::FactVisibility::Indexed { audience, scope } = fact_ref.visibility() else {
-        return false;
-    };
-    is_public_default_fact_visibility(*audience, *scope)
-}
-
 fn public_fact_descriptor_hashes(
     projection: &store::ProjectionSnapshot,
 ) -> BTreeSet<ContentDigest> {
     projection
-        .fact_index_entries()
-        .filter(|(_claim_id, entry)| is_public_default_fact_index_entry(entry))
-        .map(|(_claim_id, entry)| entry.fact_descriptor_hash.clone())
+        .fact_query_entries()
+        .map(|(_claim_id, entry)| entry.fact_descriptor_hash().clone())
         .collect()
 }
 
@@ -371,8 +341,6 @@ fn descriptor_fields_by_id(
 
 pub(super) fn public_query_input(
     request: &PublicFactQueryRequest,
-    store_scope: mfm_facts::StoreScopeRef,
-    scope_decision_evidence: mfm_facts::ScopeDecisionEvidence,
 ) -> Result<mfm_facts::FactQueryInput, PublicError> {
     let predicates = request.predicates.clone();
     let return_fields = request
@@ -382,9 +350,6 @@ pub(super) fn public_query_input(
         .map(mfm_facts::FactFieldId::new)
         .collect::<mfm_facts::Result<Vec<_>>>()?;
     Ok(mfm_facts::FactQueryInput::new(
-        store_scope,
-        public_fact_query_scope(),
-        scope_decision_evidence,
         predicates,
         return_fields,
         request.ordering.clone(),
@@ -396,9 +361,6 @@ pub(super) fn public_fact_from_query_row(
     catalog: &FactCatalogService,
     row: &AppFactQueryRow,
 ) -> Result<Option<PublicFactRef>, PublicError> {
-    if !is_public_default_internal_fact_ref(row.fact_ref()) {
-        return Ok(None);
-    }
     let Some(descriptor) = catalog.descriptor_by_hash(row.fact_ref().fact_descriptor_hash()) else {
         return Ok(None);
     };
@@ -416,7 +378,6 @@ fn public_fact_from_parts(
         fact_kind: fact_ref.fact_kind().as_str().to_owned(),
         descriptor: public_descriptor_ref(descriptor),
         recorded_at: fact_ref.recorded_at().to_owned(),
-        observed_at: fact_ref.observed_at().map(str::to_owned),
         fields,
     })
 }

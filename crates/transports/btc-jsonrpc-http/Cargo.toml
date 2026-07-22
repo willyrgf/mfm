@@ -12,15 +12,14 @@ domain = "bitcoin"
 
 [dependencies]
 bitcoin = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tracing = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 thiserror = { workspace = true }
 
 mfm-btc-capabilities = { path = "../../btc-capabilities" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-ids = { path = "../../kernel/ids" }
 
 [dev-dependencies]
 tokio = { workspace = true }

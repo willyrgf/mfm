@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mfm_canonical::{sha256_digest_bytes, CanonicalValue};
+use mfm_canonical::CanonicalValue;
 use mfm_ids::{ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId};
 use mfm_store::v1 as store;
 
@@ -18,105 +18,64 @@ const PUBLIC_FACT_PRIVATE_JSON_TOKENS_FOR_TEST: &[&str] = &[
     "source_ordinal",
 ];
 
-/// Public fact fixture containing Platform, Control, and RunPrivate facts for visibility tests.
+/// Public fact fixture backed by one store-owned query projection.
 #[derive(Clone)]
-pub struct PublicFactVisibilityFixtureForTest {
+pub struct PublicFactFixtureForTest {
     /// Store serving the fixture projection and retained descriptor artifact.
     pub store: store::AsyncInMemoryRunStore,
     /// Fact kind exposed by the fixture descriptor.
     pub fact_kind: String,
     /// Descriptor schema id usable as a public shape selector.
     pub shape: String,
-    /// Public ref for the Platform fact.
-    pub platform_public_ref: String,
-    /// Public ref for the Control fact, which public routes must not resolve.
-    pub control_public_ref: String,
+    /// Public ref for the projected fact.
+    pub public_ref: String,
     /// Internal tokens that public DTOs and errors must not expose.
     pub private_tokens: Vec<String>,
 }
 
-impl PublicFactVisibilityFixtureForTest {
-    /// Builds a standard public fact visibility fixture.
+impl PublicFactFixtureForTest {
+    /// Builds a standard public fact fixture.
     pub fn new() -> Self {
         let descriptor_fixture = store::test_support::fact_descriptor_projection_fixture_for_test(
-            public_visibility_fact_descriptor(),
+            public_fact_descriptor(),
         )
         .expect("descriptor projection fixture");
-        let platform = fact_projection_fixture(
+        let fact = fact_projection_fixture(
             1,
             &descriptor_fixture.descriptor,
             descriptor_fixture.descriptor_hash.clone(),
-            mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
-        );
-        let control = fact_projection_fixture(
-            2,
-            &descriptor_fixture.descriptor,
-            descriptor_fixture.descriptor_hash.clone(),
-            mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Control),
-        );
-        let run_private = fact_projection_fixture(
-            3,
-            &descriptor_fixture.descriptor,
-            descriptor_fixture.descriptor_hash.clone(),
-            mfm_facts::FactVisibility::RunPrivate,
         );
 
-        let platform_index = platform.index.clone().expect("platform index");
-        let control_index = control.index.clone().expect("control index");
-        let platform_public_ref = public_ref_id(
-            &platform_index
+        let public_ref = public_ref_id(
+            &fact
+                .projection
                 .internal_ref()
-                .expect("platform internal ref"),
+                .expect("projected internal ref"),
         )
-        .expect("platform public ref")
+        .expect("public ref")
         .as_str()
         .to_owned();
-        let control_public_ref =
-            public_ref_id(&control_index.internal_ref().expect("control internal ref"))
-                .expect("control public ref")
-                .as_str()
-                .to_owned();
         let private_tokens = vec![
-            platform_index.source_run_id.as_str().to_owned(),
-            platform_index.source_event_id.as_str().to_owned(),
-            platform_index.artifact_id.as_str().to_owned(),
-            platform_index.artifact_evidence_hash.as_str().to_owned(),
-            platform_index.fact_descriptor_hash.as_str().to_owned(),
-            platform_index.fact_key.as_str().to_owned(),
-            platform_index.subject_material_hash.as_str().to_owned(),
-            platform_index.response_hash.as_str().to_owned(),
-            control_index.source_run_id.as_str().to_owned(),
-            control_index.artifact_id.as_str().to_owned(),
-            run_private
-                .record
-                .claim
-                .subject()
-                .subject_material_hash()
-                .as_str()
-                .to_owned(),
-            "control".to_owned(),
-            "run_private".to_owned(),
+            fact.projection.source_run_id().as_str().to_owned(),
+            fact.projection.source_event_id().as_str().to_owned(),
+            fact.projection.artifact_id().as_str().to_owned(),
+            fact.projection.artifact_evidence_hash().as_str().to_owned(),
+            fact.projection.fact_descriptor_hash().as_str().to_owned(),
+            fact.projection.fact_key().as_str().to_owned(),
+            fact.projection.subject_material_hash().as_str().to_owned(),
+            fact.projection.response_hash().as_str().to_owned(),
         ];
+        let fact_claim_id = fact.projection.fact_claim_id().clone();
 
         let projection = store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
             fact_descriptors: BTreeMap::from([(
                 descriptor_fixture.descriptor_hash.clone(),
                 descriptor_fixture.projection,
             )]),
-            fact_records: BTreeMap::from([
-                (platform.record.fact_claim_id.clone(), platform.record),
-                (control.record.fact_claim_id.clone(), control.record),
-                (run_private.record.fact_claim_id.clone(), run_private.record),
-            ]),
-            fact_index_entries: BTreeMap::from([
-                (platform_index.fact_claim_id.clone(), platform_index),
-                (control_index.fact_claim_id.clone(), control_index),
-            ]),
+            fact_query_entries: BTreeMap::from([(fact_claim_id, fact.projection)]),
             fact_term_entries: BTreeMap::from_iter(
-                platform
-                    .terms
+                fact.terms
                     .into_iter()
-                    .chain(control.terms)
                     .map(|term| ((term.fact_claim_id.clone(), term.field_id.clone()), term)),
             ),
             ..store::ProjectionSnapshotParts::default()
@@ -140,8 +99,7 @@ impl PublicFactVisibilityFixtureForTest {
                 .descriptor_schema_id()
                 .as_str()
                 .to_owned(),
-            platform_public_ref,
-            control_public_ref,
+            public_ref,
             private_tokens,
         }
     }
@@ -161,7 +119,7 @@ impl PublicFactVisibilityFixtureForTest {
     }
 }
 
-impl Default for PublicFactVisibilityFixtureForTest {
+impl Default for PublicFactFixtureForTest {
     fn default() -> Self {
         Self::new()
     }
@@ -184,12 +142,12 @@ pub fn assert_public_fact_json_redacts_private_tokens_for_test<'a>(
     }
 }
 
-fn public_visibility_fact_descriptor() -> mfm_facts::FactDescriptor {
+fn public_fact_descriptor() -> mfm_facts::FactDescriptor {
     mfm_facts::FactDescriptor::new(
-        mfm_facts::FactKind::new("mfm.app.test.public_fact_visibility").expect("kind"),
-        schema_id("mfm.app.test.public_fact_visibility.descriptor", 1),
-        schema_id("mfm.app.test.public_fact_visibility.subject", 2),
-        schema_id("mfm.app.test.public_fact_visibility.response", 3),
+        mfm_facts::FactKind::new("mfm.app.test.public_fact").expect("kind"),
+        schema_id("mfm.app.test.public_fact.descriptor", 1),
+        schema_id("mfm.app.test.public_fact.subject", 2),
+        schema_id("mfm.app.test.public_fact.response", 3),
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.account").expect("field"),
@@ -240,7 +198,6 @@ fn fact_projection_fixture(
     n: u8,
     descriptor: &mfm_facts::FactDescriptor,
     descriptor_hash: ContentDigest,
-    visibility: mfm_facts::FactVisibility,
 ) -> store::test_support::FactProjectionFixtureForTest {
     store::test_support::fact_projection_fixture_for_test(
         descriptor,
@@ -255,20 +212,16 @@ fn fact_projection_fixture(
             commit_id: store::CommitKey::new(format!("commit-{n}")).expect("commit"),
             store_commit_order: n as u64,
             recorded_at: "2026-07-02T00:00:00Z".to_owned(),
-            observed_at: Some("2026-07-02T00:00:00Z".to_owned()),
-            visibility,
-            subject: public_visibility_fact_subject(),
-            response: public_visibility_fact_response(),
-            request: None,
-            response_schema_id: schema_id("mfm.app.test.public_fact_visibility.response", 3),
+            subject: public_fact_subject(),
+            response: public_fact_response(),
+            response_schema_id: schema_id("mfm.app.test.public_fact.response", 3),
             response_artifact_id: None,
-            producer: producer(),
         },
     )
     .expect("fact projection fixture")
 }
 
-fn public_visibility_fact_subject() -> CanonicalValue {
+fn public_fact_subject() -> CanonicalValue {
     CanonicalValue::object([(
         "account",
         CanonicalValue::String("public-account".to_owned()),
@@ -276,29 +229,8 @@ fn public_visibility_fact_subject() -> CanonicalValue {
     .expect("subject")
 }
 
-fn public_visibility_fact_response() -> CanonicalValue {
+fn public_fact_response() -> CanonicalValue {
     CanonicalValue::object([("amount", CanonicalValue::Unsigned(15))]).expect("response")
-}
-
-fn producer() -> mfm_facts::FactProducerProvenance {
-    mfm_facts::FactProducerProvenance::new(
-        mfm_ids::CapabilityKind::new(
-            "mfm.app.test",
-            "fact-read",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"capability"),
-        )
-        .expect("capability kind"),
-        mfm_ids::CapabilityVersion::new("mfm.app.test.fact_read.v1").expect("capability version"),
-        mfm_ids::AdapterKind::new(
-            "mfm.app.test",
-            "fact-adapter",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"adapter"),
-        )
-        .expect("adapter kind"),
-        mfm_ids::AdapterVersion::new("mfm.app.test.fact_adapter.v1").expect("adapter version"),
-    )
 }
 
 fn schema_id(name: &str, n: u8) -> SchemaId {

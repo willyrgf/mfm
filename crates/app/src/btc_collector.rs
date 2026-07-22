@@ -9,8 +9,8 @@ pub(crate) fn register_btc_collector_runners(
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: Arc<LiveTransportRuntime>,
 ) -> Result<(), PublicError> {
-    let btc: Arc<dyn mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory> = runtime_config;
-    let capabilities = mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(artifacts, btc);
-    mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(registry, capabilities)?;
+    runtime_config.initialize_bitcoin_routes();
+    let session: Arc<dyn mfm_btc_capabilities::BitcoinBalanceSession> = runtime_config;
+    mfm_adapters_btc_jsonrpc::register_bitcoin_jsonrpc_runners(registry, artifacts, session)?;
     Ok(())
 }

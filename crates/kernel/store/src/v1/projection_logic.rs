@@ -3,7 +3,7 @@ use super::*;
 #[path = "projection_apply.rs"]
 mod projection_apply;
 pub(crate) use self::projection_apply::{
-    apply_projection, apply_projection_for_external_fact_indexes, fact_claim_projection_key,
+    apply_projection, apply_projection_for_external_fact_queries, fact_claim_projection_key,
 };
 
 impl ProjectionSnapshot {
@@ -30,8 +30,7 @@ impl ProjectionSnapshot {
             attempts,
             cells,
             fact_descriptors,
-            fact_records,
-            fact_index_entries,
+            fact_query_entries,
             fact_term_entries,
             side_effects,
             resource_lanes,
@@ -72,19 +71,11 @@ impl ProjectionSnapshot {
                 });
             }
         }
-        for (claim_id, projection) in &fact_records {
+        for (claim_id, projection) in &fact_query_entries {
             if claim_id != &projection.fact_claim_id {
                 return Err(StoreError::ProjectionConflict {
-                    key: fact_claim_projection_key("fact_record", claim_id),
-                    message: "fact record projection key does not match claim id".to_owned(),
-                });
-            }
-        }
-        for (claim_id, projection) in &fact_index_entries {
-            if claim_id != &projection.fact_claim_id {
-                return Err(StoreError::ProjectionConflict {
-                    key: fact_claim_projection_key("fact_index", claim_id),
-                    message: "fact index projection key does not match claim id".to_owned(),
+                    key: fact_claim_projection_key("fact_query", claim_id),
+                    message: "fact query projection key does not match claim id".to_owned(),
                 });
             }
         }
@@ -120,8 +111,7 @@ impl ProjectionSnapshot {
             attempts,
             cells,
             fact_descriptors,
-            fact_records,
-            fact_index_entries,
+            fact_query_entries,
             fact_term_entries,
             side_effects,
             resource_lanes,
@@ -169,6 +159,7 @@ impl ProjectionSnapshot {
                 .map(|event| event.payload().clone())
                 .collect::<Vec<_>>();
             validate_terminal_attempt_cell_pairs(&payloads)?;
+            validate_fact_settlement_commit(&payloads)?;
             validate_terminal_side_effect_evidence_pairs(&payloads)?;
             validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
             validate_retention_manifest_pairs(&payloads)?;
@@ -197,6 +188,7 @@ impl ProjectionSnapshot {
                 .map(|event| event.payload().clone())
                 .collect::<Vec<_>>();
             validate_terminal_attempt_cell_pairs(&payloads)?;
+            validate_fact_settlement_commit(&payloads)?;
             validate_terminal_side_effect_evidence_pairs(&payloads)?;
             validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
             validate_retention_manifest_pairs(&payloads)?;
@@ -212,7 +204,7 @@ impl ProjectionSnapshot {
     /// This helper is for stores that maintain descriptor, index, and term projections in separate
     /// validated tables. It does not rebuild queryable fact indexes from the stream, and it is not a
     /// replay validation substitute for retained descriptor and response artifact authority.
-    pub fn rebuild_for_external_fact_indexes(events: &[KernelEventEnvelope]) -> Result<Self> {
+    pub fn rebuild_for_external_fact_queries(events: &[KernelEventEnvelope]) -> Result<Self> {
         Self::validate_run_stream(events)?;
         let mut snapshot = Self::default();
         for commit in committed_run_stream_commits(events) {
@@ -222,11 +214,12 @@ impl ProjectionSnapshot {
                 .map(|event| event.payload().clone())
                 .collect::<Vec<_>>();
             validate_terminal_attempt_cell_pairs(&payloads)?;
+            validate_fact_settlement_commit(&payloads)?;
             validate_terminal_side_effect_evidence_pairs(&payloads)?;
             validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
             validate_retention_manifest_pairs(&payloads)?;
             for event in commit.events {
-                projection::apply_projection_for_external_fact_indexes(&mut snapshot, &event)?;
+                projection::apply_projection_for_external_fact_queries(&mut snapshot, &event)?;
             }
         }
         Ok(snapshot)
@@ -291,17 +284,12 @@ impl ProjectionSnapshot {
         self.fact_descriptors.get(descriptor_hash)
     }
 
-    /// Returns a recorded fact projection.
-    pub fn fact_record(&self, claim_id: &mfm_facts::FactClaimId) -> Option<&FactRecordProjection> {
-        self.fact_records.get(claim_id)
-    }
-
-    /// Returns an indexed fact projection.
-    pub fn fact_index_entry(
+    /// Returns a queryable fact projection.
+    pub fn fact_query_entry(
         &self,
         claim_id: &mfm_facts::FactClaimId,
-    ) -> Option<&FactIndexProjection> {
-        self.fact_index_entries.get(claim_id)
+    ) -> Option<&FactQueryProjection> {
+        self.fact_query_entries.get(claim_id)
     }
 
     /// Returns an extracted fact term for a claim and field id.
@@ -515,18 +503,11 @@ impl ProjectionSnapshot {
         self.fact_descriptors.iter()
     }
 
-    /// Iterates recorded fact projections.
-    pub fn fact_records(
+    /// Iterates queryable fact projections.
+    pub fn fact_query_entries(
         &self,
-    ) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &FactRecordProjection)> {
-        self.fact_records.iter()
-    }
-
-    /// Iterates indexed fact projections.
-    pub fn fact_index_entries(
-        &self,
-    ) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &FactIndexProjection)> {
-        self.fact_index_entries.iter()
+    ) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &FactQueryProjection)> {
+        self.fact_query_entries.iter()
     }
 
     /// Iterates extracted fact term projections.

@@ -11,10 +11,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
     let factory_id = events::RunnerFactoryId::new("read").expect("factory");
     let executable = events::ExecutableIdentity {
         factory_id: factory_id.clone(),
-        cargo_package_digest: content(0xe1),
         binary_digest: content(0xe2),
-        nix_derivation_hash: None,
-        nix_output_hash: None,
     };
     let implementation_id = CapabilityImplementationId::new("mfm.test.runner-kit-registration")
         .expect("implementation id");
@@ -63,10 +60,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
     let typed_factory = events::RunnerFactoryId::new("read_external").expect("typed factory");
     let typed_executable = events::ExecutableIdentity {
         factory_id: typed_factory.clone(),
-        cargo_package_digest: content(0xe3),
         binary_digest: content(0xe4),
-        nix_derivation_hash: None,
-        nix_output_hash: None,
     };
     let typed_implementation_id =
         CapabilityImplementationId::new("mfm.test.runner-kit-typed-registration")

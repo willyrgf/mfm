@@ -407,8 +407,29 @@ pub(super) fn append_fact_recorded_commit_for_height(
     commit_key: &str,
     height: u64,
 ) -> std::result::Result<CommitOutcome, StoreError> {
+    append_fact_recorded_commit_for_height_and_attempt(
+        store,
+        run_id,
+        commit_key,
+        height,
+        attempt_id(91),
+    )
+}
+
+pub(super) fn append_fact_recorded_commit_for_height_and_attempt(
+    store: &mut StoreContractRunStore,
+    run_id: &RunId,
+    commit_key: &str,
+    height: u64,
+    attempt_id: AttemptId,
+) -> std::result::Result<CommitOutcome, StoreError> {
     let response = fact_artifact_ref_for_height(height);
-    let mut payloads = vec![fact_recorded(&response)];
+    let output = fact_output_artifact_ref_for_height(height);
+    let mut payloads = vec![
+        fact_recorded_for_attempt(&response, attempt_id.clone()),
+        fact_cell_produced_for_height(height, attempt_id.clone()),
+        fact_attempt_completed(attempt_id),
+    ];
     store.certify_payloads_for_run(run_id, &mut payloads);
     let mut preconditions = store.certified_preconditions(run_id);
     preconditions.required_run_state = RequiredRunState::Started;
@@ -417,15 +438,17 @@ pub(super) fn append_fact_recorded_commit_for_height(
         expected_next_seq: store.expected_next_seq(run_id),
         commit_key: CommitKey::new(commit_key).expect("commit key"),
         payloads: payloads,
-        required_artifacts: vec![response.clone()],
+        required_artifacts: vec![response.clone(), output.clone()],
         preconditions: preconditions,
     };
-    let plan = test_prepared_commit_plan(request, vec![response.clone()])?;
+    let plan = test_prepared_commit_plan(request, vec![response.clone(), output.clone()])?;
     let bundle = PreparedCommitBundle::new(
         plan,
         vec![
             PreparedArtifactBytes::new(fact_response_bytes_for_height(height), response)
                 .expect("fact response bytes"),
+            PreparedArtifactBytes::new(fact_response_bytes_for_height(height), output)
+                .expect("fact output bytes"),
         ],
         Vec::new(),
     )?;

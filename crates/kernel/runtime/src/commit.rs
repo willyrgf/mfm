@@ -33,9 +33,9 @@ use crate::side_effect_lifecycle::{
 };
 use crate::side_effects::validate_runner_side_effect_payload;
 use crate::{
-    content_digest_json, require_adapter, require_attempt, require_capability,
-    validate_public_output, validate_public_output_render_node, CertifiedRuntimeCapabilities,
-    CertifiedRuntimeSpec, RecordedFacts, Result, RuntimeError,
+    content_digest_json, require_attempt, validate_public_output,
+    validate_public_output_render_node, CertifiedRuntimeCapabilities, CertifiedRuntimeSpec, Result,
+    RuntimeError,
 };
 
 #[path = "commit_validation.rs"]
@@ -122,7 +122,6 @@ pub(crate) struct RunnerOutputCommitInput<'a> {
     pub(crate) node: &'a spec::NodeSpec,
     pub(crate) attempt_id: &'a AttemptId,
     pub(crate) caps: &'a CertifiedRuntimeCapabilities,
-    pub(crate) recorded_facts: &'a RecordedFacts,
     pub(crate) view: &'a RuntimeRunView,
     pub(crate) context_output_extractor: Option<&'a dyn ContextOutputExtractor>,
     pub(crate) saga_terminal_proof: Option<store::SagaTerminalProof>,
@@ -434,12 +433,13 @@ impl CommitPlanner {
     pub(crate) fn prepare_runner_output(
         input: RunnerOutputCommitInput<'_>,
     ) -> Result<PreparedRunnerOutput> {
-        let (staged_artifacts, staged_retention_refs, runner_payloads, settlement) =
+        let (staged_artifacts, staged_retention_refs, read_facts, runner_payloads, settlement) =
             input.output.into_parts();
         let runner_payloads = runner_payloads_with_derived_lifecycle(
             input.runtime_spec,
             input.node,
             input.attempt_id,
+            read_facts,
             runner_payloads,
         )?;
         validate_runner_output(RunnerOutputValidation {
@@ -448,7 +448,6 @@ impl CommitPlanner {
             node: input.node,
             attempt_id: input.attempt_id,
             caps: input.caps,
-            recorded_facts: input.recorded_facts,
             projections: &input.view.projections,
             payloads: &runner_payloads,
         })?;

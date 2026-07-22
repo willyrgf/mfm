@@ -10,32 +10,20 @@ use crate::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactExtractionMetadata {
     pub(crate) recorded_at: String,
-    pub(crate) observed_at: Option<String>,
     pub(crate) store_commit_order: u64,
 }
 
 impl FactExtractionMetadata {
     /// Creates extraction metadata for fact term derivation.
-    pub fn new(
-        recorded_at: impl Into<String>,
-        observed_at: Option<impl Into<String>>,
-        store_commit_order: u64,
-    ) -> Result<Self> {
+    pub fn new(recorded_at: impl Into<String>, store_commit_order: u64) -> Result<Self> {
         let recorded_at = recorded_at.into();
         if recorded_at.is_empty() {
             return Err(FactError::descriptor(
                 "recorded_at metadata must not be empty",
             ));
         }
-        let observed_at = observed_at.map(Into::into);
-        if observed_at.as_ref().is_some_and(|value| value.is_empty()) {
-            return Err(FactError::descriptor(
-                "observed_at metadata must not be empty when present",
-            ));
-        }
         Ok(Self {
             recorded_at,
-            observed_at,
             store_commit_order,
         })
     }
@@ -43,11 +31,6 @@ impl FactExtractionMetadata {
     /// Returns the store-assigned recorded time.
     pub fn recorded_at(&self) -> &str {
         &self.recorded_at
-    }
-
-    /// Returns the optional source observation time.
-    pub fn observed_at(&self) -> Option<&str> {
-        self.observed_at.as_deref()
     }
 
     /// Returns the store-owned commit ordering coordinate.
@@ -192,10 +175,6 @@ fn metadata_scalar(
         FactMetadataField::RecordedAt => {
             Some(FactCanonicalScalar::Timestamp(metadata.recorded_at.clone()))
         }
-        FactMetadataField::ObservedAt => metadata
-            .observed_at
-            .as_ref()
-            .map(|value| FactCanonicalScalar::Timestamp(value.clone())),
         FactMetadataField::StoreCommitOrder => Some(FactCanonicalScalar::UnsignedInteger(
             metadata.store_commit_order,
         )),

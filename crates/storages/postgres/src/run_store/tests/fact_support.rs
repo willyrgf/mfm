@@ -122,18 +122,26 @@ pub(super) fn fact_artifact_ref_for_response_bytes(bytes: &[u8]) -> ArtifactEvid
     }
 }
 
+pub(super) fn fact_output_artifact_ref(response: &ArtifactEvidenceRef) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id: response.artifact_id.clone(),
+        digest: response.digest.clone(),
+        byte_len: response.byte_len,
+        media_type: response.media_type.clone(),
+        schema_id: Some(schema_id("mfm.test.fact_output", 142)),
+        semantic_type_id: Some(semantic_id("fact_output", 143)),
+        producer_node_id: Some(node_id(30)),
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::StateOutput,
+    }
+}
+
 pub(super) fn fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
     fact_query_plan_with_limit(Some(1))
 }
 
 pub(super) fn fact_query_plan_with_limit(limit: Option<u64>) -> mfm_facts::CanonicalFactQueryPlan {
     let input = mfm_facts::FactQueryInput::new(
-        mfm_facts::StoreScopeRef::new("default").expect("store scope"),
-        mfm_facts::FactQueryScope::new(
-            mfm_facts::FactAudience::Platform,
-            mfm_facts::FactVisibilityScope::Default,
-        ),
-        mfm_facts::ScopeDecisionEvidence::new(content_digest(180)),
         vec![
             mfm_facts::FactQueryPredicate::new(
                 mfm_facts::FactFieldId::new("subject.chain").expect("field"),
@@ -157,57 +165,60 @@ pub(super) fn fact_query_plan_with_limit(limit: Option<u64>) -> mfm_facts::Canon
     mfm_facts::compile_fact_query_plan(&fact_descriptor(), input).expect("fact query plan")
 }
 
-pub(super) fn fact_claim_with_visibility(
-    response: &ArtifactEvidenceRef,
-    visibility: mfm_facts::FactVisibility,
-) -> mfm_facts::FactClaim {
+pub(super) fn fact_claim(response: &ArtifactEvidenceRef) -> mfm_facts::FactClaim {
     mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility,
         fact_kind: mfm_facts::FactKind::new("mfm.test.fact").expect("fact kind"),
         fact_descriptor_hash: fact_descriptor_hash(),
         subject: fact_subject_evidence(),
-        observed_at: Some("2026-01-02T03:04:05Z".to_owned()),
-        request: Some(mfm_facts::FactRequestEvidence::new(
-            schema_id("mfm.test.fact_request", 34),
-            content_digest(35),
-        )),
         response: mfm_facts::FactResponseEvidence::new(
             schema_id("mfm.test.fact_response", 36),
             response.digest.clone(),
             response.artifact_id.clone(),
             response.evidence_hash().expect("response evidence hash"),
         ),
-        producer: mfm_facts::FactProducerProvenance::new(
-            CapabilityKind::new(
-                "mfm.test",
-                "fact",
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(32),
-            )
-            .expect("capability kind"),
-            CapabilityVersion::new("mfm.test.fact.v1").expect("capability version"),
-            AdapterKind::new(
-                "mfm.test",
-                "adapter",
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(33),
-            )
-            .expect("adapter kind"),
-            AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
-        ),
     })
     .expect("fact claim")
 }
 
-pub(super) fn fact_recorded_with_visibility(
-    response: &ArtifactEvidenceRef,
-    visibility: mfm_facts::FactVisibility,
-) -> KernelEventPayload {
+pub(super) fn fact_recorded(response: &ArtifactEvidenceRef) -> KernelEventPayload {
     KernelEventPayload::FactRecorded(events::FactRecorded {
         spec_hash: spec_hash(1),
         node_id: node_id(30),
         attempt_id: attempt_id(31),
-        claim: fact_claim_with_visibility(response, visibility),
+        claim: fact_claim(response),
+    })
+}
+
+pub(super) fn fact_cell_produced(response: &ArtifactEvidenceRef) -> KernelEventPayload {
+    let output = fact_output_artifact_ref(response);
+    KernelEventPayload::CellProduced(events::CellProduced {
+        spec_hash: spec_hash(1),
+        node_id: node_id(30),
+        cell_id: cell_id(145),
+        scope_id: scope_id(144),
+        attempt_id: attempt_id(31),
+        semantic_type_id: semantic_id("fact_output", 143),
+        schema_id: schema_id("mfm.test.fact_output", 142),
+        value_lineage: ValueLineageRef {
+            lineage_digest: content_digest(181),
+        },
+        context: spec::CellContextSpec::no_context(),
+        artifact_id: output.artifact_id.clone(),
+        content_digest: output.digest.clone(),
+        evidence_hash: output.evidence_hash().expect("output evidence hash"),
+        producer_state_kind: Some(state_kind(30)),
+        producer_state_version: Some(
+            StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
+        ),
+    })
+}
+
+pub(super) fn fact_attempt_completed() -> KernelEventPayload {
+    KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+        spec_hash: spec_hash(1),
+        node_id: node_id(30),
+        attempt_id: attempt_id(31),
+        output_cell_id: cell_id(145),
     })
 }
 

@@ -40,7 +40,6 @@ fn sample_public_fact() -> PublicFactRef {
             response_schema_id: "mfm.wallet.balance.response.v1".to_owned(),
         },
         recorded_at: "2026-07-02T00:00:00Z".to_owned(),
-        observed_at: Some("2026-07-02T00:00:00Z".to_owned()),
         fields: vec![PublicFactFieldValue {
             field_id: "result.amount_sat".to_owned(),
             path: "result.amount_sat".to_owned(),

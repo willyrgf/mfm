@@ -163,8 +163,6 @@ pub struct PublicFactRef {
     pub descriptor: PublicFactDescriptorRef,
     /// Store-assigned recorded timestamp.
     pub recorded_at: String,
-    /// Optional source observation timestamp.
-    pub observed_at: Option<String>,
     /// Descriptor-approved returnable fields.
     pub fields: Vec<PublicFactFieldValue>,
 }

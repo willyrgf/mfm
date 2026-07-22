@@ -175,8 +175,6 @@ impl KernelEventPayload {
                 | Self::StateAttemptFailed(_)
                 | Self::CellProduced(_)
                 | Self::CellSkipped(_)
-                | Self::FactRecorded(_)
-                | Self::ArtifactReferenced(_)
                 | Self::PublicOutputProduced(_)
                 | Self::PublicOutputRenderFailed(_)
                 | Self::RunCompleted(_)

@@ -37,13 +37,12 @@ mod broker;
 mod evidence;
 pub use self::evidence::{
     AmbiguityReplayEvidence, ArtifactReplayEvidence, ArtifactReplayRequest,
-    CertifiedSideEffectContext, ConfirmationReplayEvidence, FactReplayRequest,
-    NotSubmittedReplayEvidence, PreparedInvocationReplayEvidence, ProducedCellReplayFrame,
-    ReceiptReplayEvidence, RecordedFactReplay, RetainedSourceFactReplayEvent,
-    SideEffectConfirmationReplayInput, SideEffectEvidenceReplayRequest,
-    SideEffectIntentReplayEvidence, SideEffectReceiptReplayInput, SideEffectReplayFrame,
-    SideEffectReplayVerifier, SideEffectSubmissionReplayInput, SubmissionReplayEvidence,
-    SubmissionUnknownReplayEvidence,
+    CertifiedSideEffectContext, ConfirmationReplayEvidence, NotSubmittedReplayEvidence,
+    PreparedInvocationReplayEvidence, ProducedCellReplayFrame, ReceiptReplayEvidence,
+    RetainedSourceFactReplayEvent, SideEffectConfirmationReplayInput,
+    SideEffectEvidenceReplayRequest, SideEffectIntentReplayEvidence, SideEffectReceiptReplayInput,
+    SideEffectReplayFrame, SideEffectReplayVerifier, SideEffectSubmissionReplayInput,
+    SubmissionReplayEvidence, SubmissionUnknownReplayEvidence,
 };
 
 /// Result type for replay broker operations.

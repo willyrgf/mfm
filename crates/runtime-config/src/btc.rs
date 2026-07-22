@@ -64,12 +64,18 @@ impl fmt::Debug for BtcRuntimeConfig {
 /// Runtime Bitcoin Core JSON-RPC endpoint descriptor.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BtcJsonRpcRuntimeConfig {
+    scan_timeout_seconds: u64,
     rpc_url: RuntimeSecretValue,
     rpc_user: Option<RuntimeSecretValue>,
     rpc_password: Option<RuntimeSecretValue>,
 }
 
 impl BtcJsonRpcRuntimeConfig {
+    /// Returns the overall deadline for one `scantxoutset start` call.
+    pub const fn scan_timeout_seconds(&self) -> u64 {
+        self.scan_timeout_seconds
+    }
+
     /// Returns the resolved Bitcoin Core RPC URL.
     pub const fn rpc_url(&self) -> &RuntimeSecretValue {
         &self.rpc_url
@@ -87,6 +93,15 @@ impl BtcJsonRpcRuntimeConfig {
 
     fn from_raw(raw: RawBtcJsonRpcConfig, location: RuntimeConfigLocation) -> Result<Self> {
         reject_extra_fields(&raw.extra, location.clone())?;
+        let scan_timeout_seconds = raw
+            .scan_timeout_seconds
+            .filter(|value| (1..=86_400).contains(value))
+            .ok_or_else(|| {
+                RuntimeConfigError::new(
+                    location.clone().with_field("scan_timeout_seconds"),
+                    RuntimeConfigErrorKind::InvalidBoundedInteger,
+                )
+            })?;
         let rpc_url = resolve_rpc_url(
             location.clone(),
             &raw.rpc_url,
@@ -117,6 +132,7 @@ impl BtcJsonRpcRuntimeConfig {
             ));
         }
         Ok(Self {
+            scan_timeout_seconds,
             rpc_url,
             rpc_user,
             rpc_password,
@@ -127,6 +143,7 @@ impl BtcJsonRpcRuntimeConfig {
 impl fmt::Debug for BtcJsonRpcRuntimeConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BtcJsonRpcRuntimeConfig")
+            .field("scan_timeout_seconds", &self.scan_timeout_seconds)
             .field("rpc_url", &self.rpc_url)
             .field("rpc_user", &self.rpc_user)
             .field("rpc_password", &self.rpc_password)

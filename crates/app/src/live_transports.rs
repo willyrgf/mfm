@@ -2,9 +2,12 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use mfm_btc_capabilities::{
-    BitcoinSourceBinding, BtcBalanceReadProvider, BtcChainHeadReadProvider,
+    BitcoinBalanceCollectionRequest, BitcoinBalanceCollectionResponse, BitcoinBalanceSession,
+    BitcoinCapabilityError, BitcoinSessionFuture, BitcoinSourceBinding, BitcoinSourceIdentity,
+    BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
 };
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
@@ -41,12 +44,20 @@ pub(crate) struct LiveTransportRuntime {
     runtime_config: RuntimeConfigLoader,
     evm_transport:
         OnceLock<mfm_transports_evm::TransportResult<mfm_transports_evm::EvmJsonRpcTransport>>,
-    btc_router: OnceLock<
+    bitcoin_routes: OnceLock<
         Result<
-            Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>,
+            Option<BTreeMap<BitcoinSourceIdentity, ResolvedBitcoinRoute>>,
             ProviderDiagnosticCode,
         >,
     >,
+}
+
+#[derive(Clone)]
+struct ResolvedBitcoinRoute {
+    rpc_url: String,
+    rpc_user: Option<String>,
+    rpc_password: Option<String>,
+    scan_timeout: Duration,
 }
 
 impl LiveTransportRuntime {
@@ -54,7 +65,7 @@ impl LiveTransportRuntime {
         Self {
             runtime_config,
             evm_transport: OnceLock::new(),
-            btc_router: OnceLock::new(),
+            bitcoin_routes: OnceLock::new(),
         }
     }
 
@@ -136,81 +147,50 @@ impl LiveTransportRuntime {
         })?
     }
 
-    fn load_btc_router_optional(
+    fn load_bitcoin_routes_optional(
         &self,
-    ) -> Result<
-        Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>,
-        ProviderDiagnosticCode,
-    > {
+    ) -> Result<Option<BTreeMap<BitcoinSourceIdentity, ResolvedBitcoinRoute>>, ProviderDiagnosticCode>
+    {
         self.runtime_config
             .load_optional_blocking()
             .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)?
             .and_then(|config| config.btc().cloned())
-            .map(btc_json_rpc_router)
+            .map(resolved_bitcoin_routes)
             .transpose()
-            .map(|router| router.map(Arc::new))
     }
 
-    fn cached_btc_router(
+    pub(crate) fn initialize_bitcoin_routes(&self) {
+        let loaded = self.load_bitcoin_routes_optional();
+        let _ = self.bitcoin_routes.set(loaded);
+    }
+
+    fn bitcoin_route(
         &self,
         binding: &BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>> {
-        self.btc_router
+    ) -> mfm_btc_capabilities::Result<ResolvedBitcoinRoute> {
+        let routes = self
+            .bitcoin_routes
             .get()
             .ok_or_else(|| {
-                btc_provider_failure(
-                    binding,
+                bitcoin_provider_failure(
                     ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                    false,
                 )
             })?
             .clone()
-            .map_err(|code| btc_provider_failure(binding, code))?
+            .map_err(|code| bitcoin_provider_failure(code, false))?
             .ok_or_else(|| {
-                btc_provider_failure(
-                    binding,
+                bitcoin_provider_failure(
                     ProviderDiagnosticCode::ProviderConfigurationMissing,
+                    false,
                 )
+            })?;
+        routes
+            .get(binding.semantic_source_identity())
+            .cloned()
+            .ok_or_else(|| {
+                bitcoin_provider_failure(ProviderDiagnosticCode::RouteUnavailable, false)
             })
-    }
-
-    async fn validate_btc_source_binding(
-        &self,
-        binding: BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<()> {
-        self.btc_router_async(&binding)
-            .await?
-            .validate_source_binding(&binding)
-            .map_err(|error| enrich_btc_capability_error(&binding, error))
-    }
-
-    async fn btc_router_async(
-        &self,
-        binding: &BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>> {
-        if let Some(cached) = self.btc_router.get() {
-            return cached
-                .clone()
-                .map_err(|code| btc_provider_failure(binding, code))?
-                .ok_or_else(|| {
-                    btc_provider_failure(
-                        binding,
-                        ProviderDiagnosticCode::ProviderConfigurationMissing,
-                    )
-                });
-        }
-        let runtime_config = self.runtime_config.clone();
-        let loaded = load_runtime_config_on_blocking_worker(move || {
-            Self::new(runtime_config).load_btc_router_optional()
-        })
-        .await
-        .map_err(|_| {
-            btc_provider_failure(
-                binding,
-                ProviderDiagnosticCode::ProviderConfigurationInvalid,
-            )
-        })?;
-        let _ = self.btc_router.set(loaded);
-        self.cached_btc_router(binding)
     }
 }
 
@@ -222,64 +202,78 @@ where
     tokio::task::spawn_blocking(load).await
 }
 
-impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRuntime {
-    fn validate_source_binding<'a>(
+impl BitcoinBalanceSession for LiveTransportRuntime {
+    fn implementation_id(&self) -> &'static str {
+        BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
+    }
+
+    fn validate_binding(&self, binding: &BitcoinSourceBinding) -> mfm_btc_capabilities::Result<()> {
+        self.bitcoin_route(binding).map(|_| ())
+    }
+
+    fn collect_balances<'a>(
         &'a self,
-        binding: BitcoinSourceBinding,
-    ) -> mfm_adapters_btc_jsonrpc::BtcSourceBindingValidationFuture<'a> {
-        Box::pin(async move { self.validate_btc_source_binding(binding).await })
-    }
-
-    fn bind_source(
-        &self,
-        binding: BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<Arc<dyn BtcChainHeadReadProvider>> {
-        let router = self.cached_btc_router(&binding)?;
-        router
-            .bind_source(binding.clone())
-            .map(|provider| Arc::new(provider) as Arc<dyn BtcChainHeadReadProvider>)
-            .map_err(|error| enrich_btc_capability_error(&binding, error))
-    }
-
-    fn bind_balance_source(
-        &self,
-        binding: BitcoinSourceBinding,
-    ) -> mfm_btc_capabilities::Result<Arc<dyn BtcBalanceReadProvider>> {
-        let router = self.cached_btc_router(&binding)?;
-        router
-            .bind_source(binding.clone())
-            .map(|provider| Arc::new(provider) as Arc<dyn BtcBalanceReadProvider>)
-            .map_err(|error| enrich_btc_capability_error(&binding, error))
+        request: &'a BitcoinBalanceCollectionRequest,
+    ) -> BitcoinSessionFuture<'a, BitcoinBalanceCollectionResponse> {
+        Box::pin(async move {
+            let route = self.bitcoin_route(request.binding())?;
+            let authentication = match (route.rpc_user, route.rpc_password) {
+                (Some(username), Some(password)) => Some(
+                    mfm_transports_btc_jsonrpc_http::BitcoinRpcAuthentication::new(
+                        username, password,
+                    )
+                    .map_err(|_| {
+                        bitcoin_provider_failure(
+                            ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                            false,
+                        )
+                    })?,
+                ),
+                (None, None) => None,
+                _ => {
+                    return Err(bitcoin_provider_failure(
+                        ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                        false,
+                    ))
+                }
+            };
+            let session = mfm_transports_btc_jsonrpc_http::BitcoinRpcSession::new(
+                route.rpc_url,
+                authentication,
+                request.binding().clone(),
+                route.scan_timeout,
+            )
+            .map_err(|_| {
+                bitcoin_provider_failure(
+                    ProviderDiagnosticCode::ProviderConfigurationInvalid,
+                    false,
+                )
+            })?;
+            session.collect_balances(request).await
+        })
     }
 }
 
-fn btc_json_rpc_router(
+fn resolved_bitcoin_routes(
     btc: mfm_runtime_config::BtcRuntimeConfig,
-) -> Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter, ProviderDiagnosticCode> {
+) -> Result<BTreeMap<BitcoinSourceIdentity, ResolvedBitcoinRoute>, ProviderDiagnosticCode> {
     let mut routes = BTreeMap::new();
     for (source_identity, route) in btc.routes() {
-        let client = btc_json_rpc_client(route)?;
-        routes.insert(source_identity.clone(), Arc::new(client));
+        routes.insert(
+            source_identity.clone(),
+            ResolvedBitcoinRoute {
+                rpc_url: route.rpc_url().expose_secret().to_owned(),
+                rpc_user: route
+                    .rpc_user()
+                    .map(|value| value.expose_secret().to_owned()),
+                rpc_password: route
+                    .rpc_password()
+                    .map(|value| value.expose_secret().to_owned()),
+                scan_timeout: Duration::from_secs(route.scan_timeout_seconds()),
+            },
+        );
     }
-    Ok(mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter::new(
-        routes,
-    ))
-}
-
-fn btc_json_rpc_client(
-    json_rpc: &mfm_runtime_config::BtcJsonRpcRuntimeConfig,
-) -> Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcClient, ProviderDiagnosticCode> {
-    let config = mfm_transports_btc_jsonrpc_http::BtcJsonRpcConfig {
-        rpc_url: json_rpc.rpc_url().expose_secret().to_owned(),
-        rpc_user: json_rpc
-            .rpc_user()
-            .map(|value| value.expose_secret().to_owned()),
-        rpc_password: json_rpc
-            .rpc_password()
-            .map(|value| value.expose_secret().to_owned()),
-    };
-    mfm_transports_btc_jsonrpc_http::BtcJsonRpcClient::new(config)
-        .map_err(|_| ProviderDiagnosticCode::ProviderConfigurationInvalid)
+    Ok(routes)
 }
 
 fn diagnostic_id(value: &str) -> LocalPublicId {
@@ -328,47 +322,11 @@ fn enrich_evm_diagnostic(
         )
 }
 
-fn btc_provider_failure(
-    binding: &BitcoinSourceBinding,
+fn bitcoin_provider_failure(
     code: ProviderDiagnosticCode,
-) -> mfm_btc_capabilities::BtcCapabilityError {
-    mfm_btc_capabilities::BtcCapabilityError::provider_failure(enrich_btc_diagnostic(
-        binding,
-        mfm_btc_capabilities::btc_diagnostic(code),
-    ))
-}
-
-fn enrich_btc_capability_error(
-    binding: &BitcoinSourceBinding,
-    error: mfm_btc_capabilities::BtcCapabilityError,
-) -> mfm_btc_capabilities::BtcCapabilityError {
-    match error {
-        mfm_btc_capabilities::BtcCapabilityError::Provider { diagnostic } => {
-            mfm_btc_capabilities::BtcCapabilityError::provider_failure(enrich_btc_diagnostic(
-                binding, diagnostic,
-            ))
-        }
-        error => error,
-    }
-}
-
-fn enrich_btc_diagnostic(
-    binding: &BitcoinSourceBinding,
-    diagnostic: RedactedProviderDiagnostic,
-) -> RedactedProviderDiagnostic {
-    diagnostic
-        .with_field(
-            diagnostic_id("network_id"),
-            ProviderDiagnosticValue::Id(diagnostic_id(binding.network_id().as_str())),
-        )
-        .with_field(
-            diagnostic_id("source_identity"),
-            ProviderDiagnosticValue::Id(diagnostic_id(binding.source_identity().as_str())),
-        )
-        .with_field(
-            diagnostic_id("bitcoin_network"),
-            ProviderDiagnosticValue::Id(diagnostic_id(binding.bitcoin_network().as_str())),
-        )
+    retryable: bool,
+) -> BitcoinCapabilityError {
+    BitcoinCapabilityError::provider(code, "route_selection", retryable)
 }
 
 #[cfg(test)]
@@ -384,8 +342,8 @@ mod tests {
     fn btc_binding() -> BitcoinSourceBinding {
         BitcoinSourceBinding::new(
             BitcoinNetworkId::new("test-btc").expect("network"),
-            BitcoinSourceIdentity::new("primary").expect("source"),
             BitcoinNetworkTag::Test,
+            BitcoinSourceIdentity::new("primary").expect("source"),
         )
     }
 
@@ -445,29 +403,22 @@ rpc_url = "http://127.0.0.1:8545"
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn missing_config_preserves_bitcoin_semantic_binding() {
+    async fn missing_config_reports_bitcoin_route_failure() {
         let runtime = LiveTransportRuntime::new(RuntimeConfigLoader::from_path_or_env(None));
         let binding = btc_binding();
-        let error = mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory::validate_source_binding(
-            &runtime, binding,
-        )
-        .await
-        .expect_err("missing Bitcoin configuration");
-        let diagnostic = error.redacted_diagnostic().expect("diagnostic");
+        runtime.initialize_bitcoin_routes();
+        let error = runtime
+            .validate_binding(&binding)
+            .expect_err("missing Bitcoin configuration");
+        let BitcoinCapabilityError::Provider { diagnostic, .. } = error else {
+            panic!("missing configuration must be a provider failure")
+        };
 
         assert_eq!(
             diagnostic.code(),
             ProviderDiagnosticCode::ProviderConfigurationMissing
         );
-        assert_eq!(diagnostic.provider_family().as_str(), "bitcoin");
-        assert_eq!(
-            serde_json::to_value(diagnostic).expect("diagnostic JSON")["fields"],
-            serde_json::json!({
-                "bitcoin_network": "test",
-                "network_id": "test-btc",
-                "source_identity": "primary"
-            })
-        );
+        assert_eq!(diagnostic.provider_family().as_str(), "bitcoin_core");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -513,14 +464,15 @@ rpc_url = "http://127.0.0.1:8545"
 "#,
         );
         let binding = btc_binding();
-        let error = mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory::validate_source_binding(
-            &runtime, binding,
-        )
-        .await
-        .expect_err("Bitcoin family is missing");
-        let diagnostic = error.redacted_diagnostic().expect("diagnostic");
+        runtime.initialize_bitcoin_routes();
+        let error = runtime
+            .validate_binding(&binding)
+            .expect_err("Bitcoin family is missing");
+        let BitcoinCapabilityError::Provider { diagnostic, .. } = error else {
+            panic!("missing family must be a provider failure")
+        };
 
-        assert_eq!(diagnostic.provider_family().as_str(), "bitcoin");
+        assert_eq!(diagnostic.provider_family().as_str(), "bitcoin_core");
         assert_eq!(
             diagnostic.code(),
             ProviderDiagnosticCode::ProviderConfigurationMissing

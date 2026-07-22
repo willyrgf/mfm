@@ -462,8 +462,7 @@ fn store_owned_requirement_constructors_preserve_exact_bindings() {
         fact_recorded.node_id.clone(),
         &fact_recorded.claim,
     )
-    .expect("internal fact ref")
-    .expect("indexed fact ref");
+    .expect("internal fact ref");
     assert_eq!(
         fact_response_artifact_requirement(&fact_ref),
         event_artifact_requirements(&fact_payload)[0]
@@ -528,42 +527,22 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
         .expect("append fact recorded");
     let stream = store.load_run_stream(&run_id);
     assert!(ProjectionSnapshot::rebuild_from_run_stream(&stream).is_err());
-    let record = store
-        .projection_snapshot()
-        .fact_records()
-        .next()
-        .map(|(_, projection)| projection)
-        .expect("fact record projection");
-    assert_eq!(record.node_id, node_id(90));
-    assert_eq!(record.attempt_id, attempt_id(91));
     let projection = store
         .projection_snapshot()
-        .fact_index_entries()
+        .fact_query_entries()
         .next()
         .map(|(_, projection)| projection)
-        .expect("fact index projection");
-    assert_eq!(projection.fact_key, fact_key());
+        .expect("fact query projection");
+    assert_eq!(projection.producer_node_id(), &node_id(90));
+    assert_eq!(projection.attempt_id(), &attempt_id(91));
+    assert_eq!(projection.fact_key(), &fact_key());
     assert_eq!(
-        projection.request_schema_id,
-        Some(schema_id("mfm.test.fact_request", 94))
+        projection.response_schema_id(),
+        &schema_id("mfm.test.fact_response", 96)
     );
-    assert_eq!(projection.request_hash, Some(content_digest(95)));
-    assert_eq!(
-        projection.response_schema_id,
-        schema_id("mfm.test.fact_response", 96)
-    );
-    assert_eq!(projection.response_hash, response.digest);
-    assert_eq!(projection.artifact_id, response.artifact_id);
-    assert_eq!(projection.capability_kind, capability_kind(92));
-    assert_eq!(
-        projection.capability_version,
-        CapabilityVersion::new("mfm.test.fact.v1").expect("capability version")
-    );
-    assert_eq!(projection.adapter_kind, adapter_kind(93));
-    assert_eq!(
-        projection.adapter_version,
-        AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version")
-    );
+    assert_eq!(projection.response_hash(), &response.digest);
+    assert_eq!(projection.artifact_id(), &response.artifact_id);
+    assert_eq!(projection.response_artifact_evidence(), Some(&response));
 }
 
 #[test]

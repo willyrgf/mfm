@@ -786,14 +786,7 @@ fn parse_capability(json: &serde_json::Value) -> Result<CapabilityDescriptor> {
 fn parse_executable(json: &serde_json::Value) -> Result<events::ExecutableIdentity> {
     Ok(events::ExecutableIdentity {
         factory_id: events::RunnerFactoryId::new(required_str(json, "factory_id")?)?,
-        cargo_package_digest: parse_identity(required_str(json, "cargo_package_digest")?)?,
         binary_digest: parse_identity(required_str(json, "binary_digest")?)?,
-        nix_derivation_hash: optional_str(json, "nix_derivation_hash")?
-            .map(events::NixDerivationHash::new)
-            .transpose()?,
-        nix_output_hash: optional_str(json, "nix_output_hash")?
-            .map(events::NixOutputHash::new)
-            .transpose()?,
     })
 }
 
@@ -875,44 +868,13 @@ pub fn parse_event_artifact(json: &serde_json::Value) -> CodecResult<events::Art
 
 fn parse_fact_claim(json: &serde_json::Value) -> Result<mfm_facts::FactClaim> {
     mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: parse_fact_visibility(required_obj(json, "visibility")?)?,
         fact_kind: mfm_facts::FactKind::new(required_str(json, "fact_kind")?)
             .map_err(|error| StoreError::Identity(error.to_string()))?,
         fact_descriptor_hash: parse_identity(required_str(json, "fact_descriptor_hash")?)?,
         subject: parse_fact_subject_evidence(required_obj(json, "subject")?)?,
-        observed_at: optional_str(json, "observed_at")?.map(str::to_owned),
-        request: optional_obj(json, "request")?
-            .map(parse_fact_request_evidence)
-            .transpose()?,
         response: parse_fact_response_evidence(required_obj(json, "response")?)?,
-        producer: parse_fact_producer_provenance(required_obj(json, "producer")?)?,
     })
     .map_err(|error| StoreError::Identity(error.to_string()))
-}
-
-fn parse_fact_visibility(json: &serde_json::Value) -> Result<mfm_facts::FactVisibility> {
-    match required_str(json, "kind")? {
-        "run_private" => Ok(mfm_facts::FactVisibility::RunPrivate),
-        "indexed" => Ok(mfm_facts::FactVisibility::Indexed {
-            audience: parse_fact_audience(required_str(json, "audience")?)?,
-            scope: parse_fact_visibility_scope(required_str(json, "scope")?)?,
-        }),
-        other => Err(StoreError::Identity(format!(
-            "unknown fact visibility {other}"
-        ))),
-    }
-}
-
-fn parse_fact_audience(value: &str) -> Result<mfm_facts::FactAudience> {
-    value
-        .parse::<mfm_facts::FactAudience>()
-        .map_err(|_| StoreError::Identity(format!("unknown fact audience {value}")))
-}
-
-fn parse_fact_visibility_scope(value: &str) -> Result<mfm_facts::FactVisibilityScope> {
-    value
-        .parse::<mfm_facts::FactVisibilityScope>()
-        .map_err(|_| StoreError::Identity(format!("unknown fact visibility scope {value}")))
 }
 
 fn parse_fact_subject_evidence(json: &serde_json::Value) -> Result<mfm_facts::FactSubjectEvidence> {
@@ -928,13 +890,6 @@ fn parse_fact_subject_evidence(json: &serde_json::Value) -> Result<mfm_facts::Fa
     .map_err(|error| StoreError::Identity(error.to_string()))
 }
 
-fn parse_fact_request_evidence(json: &serde_json::Value) -> Result<mfm_facts::FactRequestEvidence> {
-    Ok(mfm_facts::FactRequestEvidence::new(
-        parse_identity(required_str(json, "request_schema_id")?)?,
-        parse_identity(required_str(json, "request_hash")?)?,
-    ))
-}
-
 fn parse_fact_response_evidence(
     json: &serde_json::Value,
 ) -> Result<mfm_facts::FactResponseEvidence> {
@@ -943,17 +898,6 @@ fn parse_fact_response_evidence(
         parse_identity(required_str(json, "response_hash")?)?,
         parse_identity(required_str(json, "artifact_id")?)?,
         parse_identity(required_str(json, "artifact_evidence_hash")?)?,
-    ))
-}
-
-fn parse_fact_producer_provenance(
-    json: &serde_json::Value,
-) -> Result<mfm_facts::FactProducerProvenance> {
-    Ok(mfm_facts::FactProducerProvenance::new(
-        parse_identity(required_str(json, "capability_kind")?)?,
-        required_str(json, "capability_version")?.parse()?,
-        parse_identity(required_str(json, "adapter_kind")?)?,
-        required_str(json, "adapter_version")?.parse()?,
     ))
 }
 
@@ -1184,7 +1128,6 @@ fn decode_artifact_role_tag(value: &str) -> CodecResult<ArtifactRole> {
 fn parse_capability_role(value: &str) -> Result<CapabilityRole> {
     match value {
         "read_external" => Ok(CapabilityRole::ReadExternal),
-        "managed_platform_write" => Ok(CapabilityRole::ManagedPlatformWrite),
         "support" => Ok(CapabilityRole::Support),
         "external_mutation_authority" => Ok(CapabilityRole::ExternalMutationAuthority),
         other => Err(StoreError::Identity(format!(

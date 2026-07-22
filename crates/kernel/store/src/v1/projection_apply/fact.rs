@@ -7,8 +7,12 @@ pub(super) fn apply_fact_recorded(
     artifact_bytes: &ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let claim = &payload.claim;
-    let mut record = FactRecordProjection::from_recorded_event(envelope, payload, None)?;
-    let claim_id = record.fact_claim_id.clone();
+    let claim_id = mfm_facts::derive_fact_claim_id(
+        envelope.run_id().clone(),
+        envelope.seq().as_u64(),
+        envelope.ordinal().as_u32(),
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))?;
     require_started_fact_attempt(projections, payload, &claim_id)?;
 
     let descriptor_projection = projections
@@ -32,34 +36,25 @@ pub(super) fn apply_fact_recorded(
         response.artifact_evidence_hash(),
     )?;
     validate_fact_response_evidence(response, response_evidence)?;
-    record.response_artifact_evidence = Some(response_evidence.clone());
-
-    insert_fact_record_projection(projections, record.clone())?;
-    if !matches!(
-        claim.visibility(),
-        mfm_facts::FactVisibility::Indexed { .. }
-    ) {
-        return Ok(());
-    }
-
     let recorded_at = fact_recorded_at(envelope);
     let store_commit_order = envelope.store_commit_order().as_u64();
-    let index = FactIndexProjection::from_record_projection(
-        &record,
-        envelope.commit_key().clone(),
-        store_commit_order,
-        recorded_at.clone(),
-    )?
-    .ok_or_else(|| StoreError::ProjectionConflict {
-        key: fact_claim_projection_key("fact_index", &claim_id),
-        message: "indexed fact record did not produce an index projection".to_owned(),
-    })?;
-    let metadata = mfm_facts::FactExtractionMetadata::new(
-        recorded_at.clone(),
-        claim.observed_at().map(str::to_owned),
-        store_commit_order,
-    )
-    .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let projection = FactQueryProjection::from_recorded_event(
+        envelope,
+        payload,
+        Some(response_evidence.clone()),
+    )?;
+    if projections
+        .fact_query_entries
+        .insert(claim_id.clone(), projection)
+        .is_some()
+    {
+        return Err(StoreError::ProjectionConflict {
+            key: fact_claim_projection_key("fact_query", &claim_id),
+            message: "fact claim id is already projected".to_owned(),
+        });
+    }
+    let metadata = mfm_facts::FactExtractionMetadata::new(recorded_at.clone(), store_commit_order)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
     let response_value =
         mfm_facts::parse_canonical_fact_response_bytes(&descriptor, response_bytes)
             .map_err(|error| StoreError::Identity(error.to_string()))?;
@@ -71,9 +66,6 @@ pub(super) fn apply_fact_recorded(
     )
     .map_err(|error| StoreError::Identity(error.to_string()))?;
 
-    projections
-        .fact_index_entries
-        .insert(claim_id.clone(), index);
     for term in terms {
         let key = (claim_id.clone(), term.field_id().clone());
         if projections
@@ -101,16 +93,6 @@ pub(super) fn apply_fact_recorded(
     Ok(())
 }
 
-pub(super) fn apply_fact_recorded_record_only(
-    projections: &mut ProjectionSnapshot,
-    envelope: &KernelEventEnvelope,
-    payload: &events::FactRecorded,
-) -> Result<()> {
-    let record = FactRecordProjection::from_recorded_event(envelope, payload, None)?;
-    require_started_fact_attempt(projections, payload, &record.fact_claim_id)?;
-    insert_fact_record_projection(projections, record)
-}
-
 fn require_started_fact_attempt(
     projections: &ProjectionSnapshot,
     payload: &events::FactRecorded,
@@ -130,23 +112,6 @@ fn require_started_fact_attempt(
             message: "fact requires a started attempt".to_owned(),
         }),
     }
-}
-
-fn insert_fact_record_projection(
-    projections: &mut ProjectionSnapshot,
-    record: FactRecordProjection,
-) -> Result<()> {
-    let claim_id = &record.fact_claim_id;
-    if projections.fact_records.contains_key(claim_id) {
-        return Err(StoreError::ProjectionConflict {
-            key: fact_claim_projection_key("fact_record", claim_id),
-            message: "fact claim id is already projected".to_owned(),
-        });
-    }
-    projections
-        .fact_records
-        .insert(record.fact_claim_id.clone(), record);
-    Ok(())
 }
 
 pub(super) fn apply_fact_descriptor_artifact(

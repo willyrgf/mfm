@@ -1,8 +1,5 @@
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{
-    AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    EventId, NodeId, RunId, SchemaId,
-};
+use mfm_ids::{ArtifactId, ContentDigest, EventId, NodeId, RunId, SchemaId};
 
 use crate::*;
 
@@ -174,33 +171,6 @@ impl FactSubjectRef {
     }
 }
 
-/// Optional request evidence recorded with a fact claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactRequestEvidence {
-    pub(crate) request_schema_id: SchemaId,
-    pub(crate) request_hash: ContentDigest,
-}
-
-impl FactRequestEvidence {
-    /// Creates request evidence from canonical request authority.
-    pub fn new(request_schema_id: SchemaId, request_hash: ContentDigest) -> Self {
-        Self {
-            request_schema_id,
-            request_hash,
-        }
-    }
-
-    /// Returns the request schema id.
-    pub const fn request_schema_id(&self) -> &SchemaId {
-        &self.request_schema_id
-    }
-
-    /// Returns the canonical request hash.
-    pub const fn request_hash(&self) -> &ContentDigest {
-        &self.request_hash
-    }
-}
-
 /// Response artifact evidence recorded with a fact claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactResponseEvidence {
@@ -247,71 +217,17 @@ impl FactResponseEvidence {
     }
 }
 
-/// Certified runtime provenance for a producing fact claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactProducerProvenance {
-    pub(crate) capability_kind: CapabilityKind,
-    pub(crate) capability_version: CapabilityVersion,
-    pub(crate) adapter_kind: AdapterKind,
-    pub(crate) adapter_version: AdapterVersion,
-}
-
-impl FactProducerProvenance {
-    /// Creates producer provenance from certified capability and adapter identity.
-    pub fn new(
-        capability_kind: CapabilityKind,
-        capability_version: CapabilityVersion,
-        adapter_kind: AdapterKind,
-        adapter_version: AdapterVersion,
-    ) -> Self {
-        Self {
-            capability_kind,
-            capability_version,
-            adapter_kind,
-            adapter_version,
-        }
-    }
-
-    /// Returns the producing capability kind.
-    pub const fn capability_kind(&self) -> &CapabilityKind {
-        &self.capability_kind
-    }
-
-    /// Returns the producing capability version.
-    pub const fn capability_version(&self) -> &CapabilityVersion {
-        &self.capability_version
-    }
-
-    /// Returns the producing adapter kind.
-    pub const fn adapter_kind(&self) -> &AdapterKind {
-        &self.adapter_kind
-    }
-
-    /// Returns the producing adapter version.
-    pub const fn adapter_version(&self) -> &AdapterVersion {
-        &self.adapter_version
-    }
-}
-
 /// Constructor parts for a normalized recorded fact claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactClaimParts {
-    /// Visibility selected by the producer.
-    pub visibility: FactVisibility,
     /// Fact kind from the validated descriptor.
     pub fact_kind: FactKind,
     /// Content digest of the canonical fact descriptor bytes.
     pub fact_descriptor_hash: ContentDigest,
     /// Descriptor-derived subject evidence.
     pub subject: FactSubjectEvidence,
-    /// Optional source observation timestamp.
-    pub observed_at: Option<String>,
-    /// Optional request evidence.
-    pub request: Option<FactRequestEvidence>,
     /// Response artifact evidence.
     pub response: FactResponseEvidence,
-    /// Producer provenance.
-    pub producer: FactProducerProvenance,
 }
 
 /// Normalized fact claim carried by `FactRecorded` events.
@@ -323,21 +239,7 @@ pub struct FactClaim {
 impl FactClaim {
     /// Creates a normalized fact claim from validated parts.
     pub fn new(parts: FactClaimParts) -> Result<Self> {
-        if parts
-            .observed_at
-            .as_ref()
-            .is_some_and(|value| value.is_empty())
-        {
-            return Err(FactError::descriptor(
-                "fact claim observed_at must be non-empty when present",
-            ));
-        }
         Ok(Self { parts })
-    }
-
-    /// Returns the claim visibility.
-    pub const fn visibility(&self) -> &FactVisibility {
-        &self.parts.visibility
     }
 
     /// Returns the fact kind.
@@ -355,24 +257,9 @@ impl FactClaim {
         &self.parts.subject
     }
 
-    /// Returns the optional source observation timestamp.
-    pub fn observed_at(&self) -> Option<&str> {
-        self.parts.observed_at.as_deref()
-    }
-
-    /// Returns optional request evidence.
-    pub const fn request(&self) -> Option<&FactRequestEvidence> {
-        self.parts.request.as_ref()
-    }
-
     /// Returns response artifact evidence.
     pub const fn response(&self) -> &FactResponseEvidence {
         &self.parts.response
-    }
-
-    /// Returns producer provenance.
-    pub const fn producer(&self) -> &FactProducerProvenance {
-        &self.parts.producer
     }
 }
 
@@ -387,22 +274,14 @@ pub struct InternalFactRefParts {
     pub recorded_at: String,
     /// Producing node id for the recorded fact response artifact.
     pub producer_node_id: NodeId,
-    /// Optional source observation time.
-    pub observed_at: Option<String>,
-    /// Fact visibility; must be indexed for an internal ref.
-    pub visibility: FactVisibility,
     /// Fact kind.
     pub fact_kind: FactKind,
     /// Fact descriptor hash.
     pub fact_descriptor_hash: ContentDigest,
     /// Subject identity.
     pub subject: FactSubjectRef,
-    /// Optional request evidence.
-    pub request: Option<FactRequestEvidence>,
     /// Response artifact evidence.
     pub response: FactResponseEvidence,
-    /// Producer provenance.
-    pub producer: FactProducerProvenance,
 }
 
 /// Internal trusted reference to an indexed fact projection row.
@@ -419,46 +298,24 @@ impl InternalFactRef {
         recorded_at: String,
         producer_node_id: NodeId,
         claim: &FactClaim,
-    ) -> Result<Option<Self>> {
-        if matches!(claim.visibility(), FactVisibility::RunPrivate) {
-            return Ok(None);
-        }
+    ) -> Result<Self> {
         Self::new(InternalFactRefParts {
             fact_claim_id,
             source_event_id,
             recorded_at,
             producer_node_id,
-            observed_at: claim.observed_at().map(str::to_owned),
-            visibility: claim.visibility().clone(),
             fact_kind: claim.fact_kind().clone(),
             fact_descriptor_hash: claim.fact_descriptor_hash().clone(),
             subject: FactSubjectRef::from_evidence(claim.subject()),
-            request: claim.request().cloned(),
             response: claim.response().clone(),
-            producer: claim.producer().clone(),
         })
-        .map(Some)
     }
 
     /// Creates an internal fact ref from validated parts.
     pub fn new(parts: InternalFactRefParts) -> Result<Self> {
-        if matches!(parts.visibility, FactVisibility::RunPrivate) {
-            return Err(FactError::descriptor(
-                "internal fact refs require indexed visibility",
-            ));
-        }
         if parts.recorded_at.is_empty() {
             return Err(FactError::descriptor(
                 "internal fact refs require recorded_at",
-            ));
-        }
-        if parts
-            .observed_at
-            .as_ref()
-            .is_some_and(|value| value.is_empty())
-        {
-            return Err(FactError::descriptor(
-                "internal fact refs require non-empty observed_at when present",
             ));
         }
         Ok(Self { parts })
@@ -482,16 +339,6 @@ impl InternalFactRef {
     /// Returns the producing node id for the fact response artifact.
     pub const fn producer_node_id(&self) -> &NodeId {
         &self.parts.producer_node_id
-    }
-
-    /// Returns the optional observed time.
-    pub fn observed_at(&self) -> Option<&str> {
-        self.parts.observed_at.as_deref()
-    }
-
-    /// Returns fact visibility.
-    pub const fn visibility(&self) -> &FactVisibility {
-        &self.parts.visibility
     }
 
     /// Returns the fact kind.
@@ -519,22 +366,6 @@ impl InternalFactRef {
         self.parts.subject.subject_material_hash()
     }
 
-    /// Returns the optional request schema id.
-    pub const fn request_schema_id(&self) -> Option<&SchemaId> {
-        match &self.parts.request {
-            Some(request) => Some(request.request_schema_id()),
-            None => None,
-        }
-    }
-
-    /// Returns the optional request hash.
-    pub const fn request_hash(&self) -> Option<&ContentDigest> {
-        match &self.parts.request {
-            Some(request) => Some(request.request_hash()),
-            None => None,
-        }
-    }
-
     /// Returns the response schema id.
     pub const fn response_schema_id(&self) -> &SchemaId {
         self.parts.response.response_schema_id()
@@ -553,25 +384,5 @@ impl InternalFactRef {
     /// Returns the response artifact evidence hash.
     pub const fn artifact_evidence_hash(&self) -> &ContentDigest {
         self.parts.response.artifact_evidence_hash()
-    }
-
-    /// Returns the producing capability kind.
-    pub const fn capability_kind(&self) -> &CapabilityKind {
-        self.parts.producer.capability_kind()
-    }
-
-    /// Returns the producing capability version.
-    pub const fn capability_version(&self) -> &CapabilityVersion {
-        self.parts.producer.capability_version()
-    }
-
-    /// Returns the producing adapter kind.
-    pub const fn adapter_kind(&self) -> &AdapterKind {
-        self.parts.producer.adapter_kind()
-    }
-
-    /// Returns the producing adapter version.
-    pub const fn adapter_version(&self) -> &AdapterVersion {
-        self.parts.producer.adapter_version()
     }
 }

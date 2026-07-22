@@ -23,7 +23,6 @@ mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
 mfm-effects = { path = "../../kernel/effects", version = "0.1.0" }
 mfm-evm-capabilities = { path = "../../evm-capabilities", version = "0.1.0" }
 mfm-evm-signing = { path = "../../evm-signing", version = "0.1.0" }
-mfm-fact-capabilities = { path = "../../fact-capabilities", version = "0.1.0" }
 mfm-facts = { path = "../../kernel/facts", version = "0.1.0" }
 mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
 mfm-program = { path = "../../kernel/program", version = "0.1.0" }

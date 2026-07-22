@@ -934,7 +934,7 @@ fn validate_bitcoin_wallet_network(
     else {
         return Ok(());
     };
-    let parsed = CheckedBitcoinAddress::new(address.as_str()).map_err(|_| {
+    let parsed = CheckedBitcoinAddress::parse_any(address.as_str()).map_err(|_| {
         PortfolioConfigError::BitcoinWalletAddressNetworkMismatch {
             wallet_id: wallet.wallet_id.to_string(),
             network_id: wallet.network_id.to_string(),

@@ -574,28 +574,11 @@ pub fn event_artifact_json(evidence: &events::ArtifactEvidenceRef) -> serde_json
 
 fn fact_claim_json(claim: &mfm_facts::FactClaim) -> serde_json::Value {
     serde_json::json!({
-        "visibility": fact_visibility_json(claim.visibility()),
         "fact_kind": claim.fact_kind().as_str(),
         "fact_descriptor_hash": claim.fact_descriptor_hash().as_str(),
         "subject": fact_subject_evidence_json(claim.subject()),
-        "observed_at": claim.observed_at(),
-        "request": claim.request().map(fact_request_evidence_json),
         "response": fact_response_evidence_json(claim.response()),
-        "producer": fact_producer_provenance_json(claim.producer()),
     })
-}
-
-fn fact_visibility_json(visibility: &mfm_facts::FactVisibility) -> serde_json::Value {
-    match visibility {
-        mfm_facts::FactVisibility::RunPrivate => serde_json::json!({
-            "kind": "run_private",
-        }),
-        mfm_facts::FactVisibility::Indexed { audience, scope } => serde_json::json!({
-            "kind": "indexed",
-            "audience": audience.as_str(),
-            "scope": scope.as_str(),
-        }),
-    }
 }
 
 fn fact_subject_evidence_json(evidence: &mfm_facts::FactSubjectEvidence) -> serde_json::Value {
@@ -607,30 +590,12 @@ fn fact_subject_evidence_json(evidence: &mfm_facts::FactSubjectEvidence) -> serd
     })
 }
 
-fn fact_request_evidence_json(evidence: &mfm_facts::FactRequestEvidence) -> serde_json::Value {
-    serde_json::json!({
-        "request_schema_id": evidence.request_schema_id().as_str(),
-        "request_hash": evidence.request_hash().as_str(),
-    })
-}
-
 fn fact_response_evidence_json(evidence: &mfm_facts::FactResponseEvidence) -> serde_json::Value {
     serde_json::json!({
         "response_schema_id": evidence.response_schema_id().as_str(),
         "response_hash": evidence.response_hash().as_str(),
         "artifact_id": evidence.artifact_id().as_str(),
         "artifact_evidence_hash": evidence.artifact_evidence_hash().as_str(),
-    })
-}
-
-fn fact_producer_provenance_json(
-    provenance: &mfm_facts::FactProducerProvenance,
-) -> serde_json::Value {
-    serde_json::json!({
-        "capability_kind": provenance.capability_kind().as_str(),
-        "capability_version": provenance.capability_version().as_str(),
-        "adapter_kind": provenance.adapter_kind().as_str(),
-        "adapter_version": provenance.adapter_version().as_str(),
     })
 }
 
@@ -689,10 +654,7 @@ fn run_identity_material_json(material: &events::RunIdentityMaterialV1) -> serde
 fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
     serde_json::json!({
         "binary_digest": identity.binary_digest.as_str(),
-        "cargo_package_digest": identity.cargo_package_digest.as_str(),
         "factory_id": identity.factory_id.as_str(),
-        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
-        "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
     })
 }
 

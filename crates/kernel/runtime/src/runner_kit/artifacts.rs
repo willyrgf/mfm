@@ -77,37 +77,9 @@ impl RunnerJsonArtifact {
     }
 }
 
-/// Runner-owned input for recording one typed fact claim.
-pub struct FactRecordInput<T: MfmFactType> {
-    /// Typed fact value containing the subject and response material.
-    pub(super) fact: T,
-    /// Visibility selected for the recorded claim.
-    pub(super) visibility: mfm_facts::FactVisibility,
-    /// Optional source observation timestamp.
-    pub(super) observed_at: Option<String>,
-}
-
-impl<T: MfmFactType> FactRecordInput<T> {
-    /// Creates fact record input with no source observation timestamp.
-    pub fn new(fact: T, visibility: mfm_facts::FactVisibility) -> Self {
-        Self {
-            fact,
-            visibility,
-            observed_at: None,
-        }
-    }
-
-    /// Sets the source observation timestamp.
-    pub fn observed_at(mut self, observed_at: impl Into<String>) -> Self {
-        self.observed_at = Some(observed_at.into());
-        self
-    }
-}
-
 /// Precomputed executable identity material shared by runner factories in one adapter binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerExecutableIdentityTemplate {
-    cargo_package_digest: ContentDigest,
     binary_digest: ContentDigest,
 }
 
@@ -119,10 +91,6 @@ impl RunnerExecutableIdentityTemplate {
         version: &'static str,
     ) -> Result<Self> {
         Ok(Self {
-            cargo_package_digest: executable_identity_digest(serde_json::json!({
-                "crate": cargo_package,
-                "version": version,
-            }))?,
             binary_digest: executable_identity_digest(serde_json::json!({
                 "crate": cargo_package,
                 "runner": runner,
@@ -135,10 +103,7 @@ impl RunnerExecutableIdentityTemplate {
     pub fn executable(&self, factory_id: events::RunnerFactoryId) -> events::ExecutableIdentity {
         events::ExecutableIdentity {
             factory_id,
-            cargo_package_digest: self.cargo_package_digest.clone(),
             binary_digest: self.binary_digest.clone(),
-            nix_derivation_hash: None,
-            nix_output_hash: None,
         }
     }
 

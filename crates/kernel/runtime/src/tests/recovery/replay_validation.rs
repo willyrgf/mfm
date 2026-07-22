@@ -12,7 +12,6 @@ async fn store_rejects_fact_without_started_attempt() {
         .find(|node| node.output_cell == fixture.cell_b)
         .expect("read node")
         .clone();
-    let fact_schema = node.config_ref.schema_id.clone();
     let (fact_evidence, _fact_bytes) = test_fact_response_artifact(&node, 210);
     assert!(store
         .append_prepared_commit(store_typed_commit_request! {
@@ -27,16 +26,7 @@ async fn store_rejects_fact_without_started_attempt() {
                         DigestAlgorithm::Sha256JcsV1,
                         DigestBytes::from_array([0xd3; 32]),
                     ),
-                    claim: test_fact_claim(
-                        210,
-                        fact_schema.clone(),
-                        content(0xd4),
-                        &fact_evidence,
-                        fixture.cap_kind.clone(),
-                        fixture.cap_version.clone(),
-                        fixture.adapter_kind.clone(),
-                        fixture.adapter_version.clone(),
-                    ),
+                    claim: test_fact_claim(210, &fact_evidence),
                 },
             )],
             required_artifacts: vec![fact_evidence],

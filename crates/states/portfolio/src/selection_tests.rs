@@ -66,7 +66,6 @@ fn observation(wallet_id: &str, block_number: u64, block_hash: [u8; 32]) -> Obse
                 block: EvmBlockAnchor::new(U256::from(block_number), B256::from(block_hash)),
             },
         },
-        coverage: "configured_only".to_owned(),
         metadata: PublicMetadata::default(),
     }
 }

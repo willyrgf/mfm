@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! Deterministic reusable EVM balance collection topology.
 //!
-//! [`EvmBalanceCollectionOperation`] always expands to one external read followed by one atomic
-//! fact record and exports only the resulting receipt. Parent operations compose it directly.
+//! [`EvmBalanceCollectionOperation`] expands to one fact-producing external read and exports its
+//! resulting receipt. Parent operations compose it directly.
 //!
 //! # Examples
 //!
@@ -18,23 +18,22 @@ use mfm_program::{NoContext, Operation, OperationExpansion, StateKey};
 use mfm_program_derive::OperationOutput;
 pub use mfm_states_evm::{
     CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig,
-    EvmBalanceCollectionReceipt, EvmBalanceSource, RecordEvmBalanceFactsInputHandles,
-    RecordEvmBalanceFactsState,
+    EvmBalanceCollectionReceipt, EvmBalanceSource,
 };
 
 const OP_NAMESPACE: &str = "mfm.evm";
 const OP_KIND_NAME: &str = "balance_collection";
-const OP_VERSION: &str = "mfm.evm.operation.balance_collection.v1";
+const OP_VERSION: &str = "mfm.evm.operation.balance_collection.v2";
 
 /// Output of one reusable EVM balance collection operation.
 #[derive(OperationOutput)]
 #[mfm(schema = "mfm.evm.operation_outputs.balance_collection")]
 pub struct EvmBalanceCollectionOutputs<'program, 'scope> {
-    /// Checked receipt returned by the atomic fact-recording state.
+    /// Checked receipt returned by the fact-producing read state.
     pub receipt: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
 }
 
-/// Reusable two-state EVM balance collection operation.
+/// Reusable one-state EVM balance collection operation.
 pub struct EvmBalanceCollectionOperation;
 
 impl Operation for EvmBalanceCollectionOperation {
@@ -68,18 +67,11 @@ impl Operation for EvmBalanceCollectionOperation {
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        let config = config.into_inner();
-        let batch = builder.state::<CollectEvmBalancesState, _>(
+        let receipt = builder.state::<CollectEvmBalancesState, _>(
             StateKey::new("collect_balances")?,
             NoContext,
-            config.clone(),
+            config.into_inner(),
             (),
-        )?;
-        let receipt = builder.state::<RecordEvmBalanceFactsState, _>(
-            StateKey::new("record_balance_facts")?,
-            NoContext,
-            config,
-            RecordEvmBalanceFactsInputHandles { batch },
         )?;
         Ok(EvmBalanceCollectionOutputs { receipt })
     }
@@ -92,7 +84,6 @@ mfm_certify::define_program_descriptor_registry! {
     includes: [],
     states: [
         CollectEvmBalancesState,
-        RecordEvmBalanceFactsState,
     ],
     operations: [
         EvmBalanceCollectionOperation,
@@ -137,7 +128,13 @@ mod tests {
     }
 
     #[test]
-    fn balance_operation_has_the_exact_deterministic_two_state_topology() {
+    fn balance_operation_has_the_exact_deterministic_one_state_topology() {
+        assert_eq!(
+            EvmBalanceCollectionOperation::version()
+                .expect("operation version")
+                .as_str(),
+            "mfm.evm.operation.balance_collection.v2"
+        );
         let build = || {
             build_root_with_registries(
                 ScopeKey::new("balance_operation_test")?,
@@ -162,7 +159,7 @@ mod tests {
         let first = build().expect("first draft");
         let second = build().expect("second draft");
         assert_eq!(first, second);
-        assert_eq!(first.state_nodes().len(), 2);
+        assert_eq!(first.state_nodes().len(), 1);
         assert_eq!(first.operation_lineage().len(), 1);
         assert_eq!(
             first.operation_lineage()[0].operation_kind,
@@ -171,10 +168,6 @@ mod tests {
         assert_eq!(
             first.state_nodes()[0].state_kind,
             CollectEvmBalancesState::kind().expect("collect kind")
-        );
-        assert_eq!(
-            first.state_nodes()[1].state_kind,
-            RecordEvmBalanceFactsState::kind().expect("record kind")
         );
         assert_eq!(first.public_output_spec().outputs().len(), 1);
         assert_eq!(
@@ -233,7 +226,7 @@ mod tests {
         )
         .expect("multi-parent draft");
 
-        assert_eq!(draft.state_nodes().len(), 4);
+        assert_eq!(draft.state_nodes().len(), 2);
         assert_eq!(draft.operation_lineage().len(), 2);
         assert!(draft.operation_lineage().iter().all(|operation| {
             operation.operation_name == EvmBalanceCollectionOperation::name()

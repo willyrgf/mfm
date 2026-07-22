@@ -44,19 +44,19 @@ fn expand_mfm_fact_type_derive_result(input: DeriveInput) -> syn::Result<proc_ma
         .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(quote! {
-        impl ::mfm_program::MfmFactType for #ident {
+        impl ::mfm_facts::MfmFactType for #ident {
             type Subject = #subject_ty;
             type Response = #response_ty;
 
-            fn descriptor() -> ::mfm_program::facts::Result<::mfm_program::facts::FactDescriptor> {
+            fn descriptor() -> ::mfm_facts::Result<::mfm_facts::FactDescriptor> {
                 let subject_schema_id = <Self::Subject as ::mfm_values::MfmValue>::schema_id()
-                    .map_err(|error| ::mfm_program::facts::FactError::descriptor(error.to_string()))?;
+                    .map_err(|error| ::mfm_facts::FactError::descriptor(error.to_string()))?;
                 let response_schema_id = <Self::Response as ::mfm_values::MfmValue>::schema_id()
-                    .map_err(|error| ::mfm_program::facts::FactError::descriptor(error.to_string()))?;
+                    .map_err(|error| ::mfm_facts::FactError::descriptor(error.to_string()))?;
 
-                ::mfm_program::facts::FactDescriptor::new(
-                    ::mfm_program::facts::FactKind::new(#fact_kind)?,
-                    ::mfm_program::facts::fact_descriptor_schema_id()?,
+                ::mfm_facts::FactDescriptor::new(
+                    ::mfm_facts::FactKind::new(#fact_kind)?,
+                    ::mfm_facts::fact_descriptor_schema_id()?,
                     subject_schema_id,
                     response_schema_id,
                     vec![#(#field_tokens),*],
@@ -550,21 +550,21 @@ fn fact_field_descriptor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro
     let unit = field
         .unit
         .as_ref()
-        .map(|unit| quote!(Some(::mfm_program::facts::FactUnit::new(#unit)?)))
+        .map(|unit| quote!(Some(::mfm_facts::FactUnit::new(#unit)?)))
         .unwrap_or_else(|| quote!(None));
     let scale = field
         .scale
-        .map(|scale| quote!(Some(::mfm_program::facts::FactScale::new(#scale)?)))
+        .map(|scale| quote!(Some(::mfm_facts::FactScale::new(#scale)?)))
         .unwrap_or_else(|| quote!(None));
     let sortable = field.sortable;
     let required = field.required;
 
     Ok(quote! {
-        ::mfm_program::facts::FactFieldDescriptor::new(
-            ::mfm_program::facts::FactFieldId::new(#id)?,
+        ::mfm_facts::FactFieldDescriptor::new(
+            ::mfm_facts::FactFieldId::new(#id)?,
             #value_type,
             #extraction,
-            ::mfm_program::facts::FactFieldPolicy::new(vec![#(#operators),*], #exposure)
+            ::mfm_facts::FactFieldPolicy::new(vec![#(#operators),*], #exposure)
                 .with_optional_unit(#unit)
                 .with_optional_scale(#scale)
                 .with_sortable(#sortable)
@@ -577,20 +577,20 @@ fn fact_field_extraction_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro
     match field.source {
         FactFieldAttrSource::Subject => {
             let path = field.path.as_ref().expect("validated subject path");
-            Ok(quote!(::mfm_program::facts::FactFieldExtraction::Subject(
-                ::mfm_program::facts::CanonicalValuePath::new(#path)?
+            Ok(quote!(::mfm_facts::FactFieldExtraction::Subject(
+                ::mfm_facts::CanonicalValuePath::new(#path)?
             )))
         }
         FactFieldAttrSource::Result => {
             let path = field.path.as_ref().expect("validated result path");
-            Ok(quote!(::mfm_program::facts::FactFieldExtraction::Response(
-                ::mfm_program::facts::CanonicalValuePath::new(#path)?
+            Ok(quote!(::mfm_facts::FactFieldExtraction::Response(
+                ::mfm_facts::CanonicalValuePath::new(#path)?
             )))
         }
         FactFieldAttrSource::Metadata => {
             let metadata = field.metadata.as_ref().expect("validated metadata field");
             let metadata = fact_metadata_field_tokens(metadata, Span::call_site())?;
-            Ok(quote!(::mfm_program::facts::FactFieldExtraction::Metadata(#metadata)))
+            Ok(quote!(::mfm_facts::FactFieldExtraction::Metadata(#metadata)))
         }
     }
 }
@@ -605,8 +605,8 @@ fn fact_ordering_descriptor_tokens(
         .map(fact_ordering_term_tokens)
         .collect::<syn::Result<Vec<_>>>()?;
     Ok(quote! {
-        ::mfm_program::facts::FactOrderingPolicy::new(
-            ::mfm_program::facts::FactOrderingName::new(#name)?,
+        ::mfm_facts::FactOrderingPolicy::new(
+            ::mfm_facts::FactOrderingName::new(#name)?,
             vec![#(#terms),*],
         )?
     })
@@ -618,8 +618,8 @@ fn fact_ordering_term_tokens(term: &FactOrderingTermAttr) -> syn::Result<proc_ma
     let nulls = fact_null_ordering_tokens(&term.nulls, Span::call_site())?;
     let tie_breaker = term.tie_breaker;
     Ok(quote! {
-        ::mfm_program::facts::FactOrderingTerm::new(
-            ::mfm_program::facts::FactFieldId::new(#field)?,
+        ::mfm_facts::FactOrderingTerm::new(
+            ::mfm_facts::FactFieldId::new(#field)?,
             #direction,
             #nulls,
             #tie_breaker,
@@ -629,13 +629,13 @@ fn fact_ordering_term_tokens(term: &FactOrderingTermAttr) -> syn::Result<proc_ma
 
 fn fact_value_type_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
     match value {
-        "string" => Ok(quote!(::mfm_program::facts::FactFieldValueType::String)),
-        "boolean" => Ok(quote!(::mfm_program::facts::FactFieldValueType::Boolean)),
-        "signed_integer" => Ok(quote!(::mfm_program::facts::FactFieldValueType::SignedInteger)),
-        "unsigned_integer" => Ok(quote!(::mfm_program::facts::FactFieldValueType::UnsignedInteger)),
-        "timestamp" => Ok(quote!(::mfm_program::facts::FactFieldValueType::Timestamp)),
-        "decimal_string" => Ok(quote!(::mfm_program::facts::FactFieldValueType::DecimalString)),
-        "digest" => Ok(quote!(::mfm_program::facts::FactFieldValueType::Digest)),
+        "string" => Ok(quote!(::mfm_facts::FactFieldValueType::String)),
+        "boolean" => Ok(quote!(::mfm_facts::FactFieldValueType::Boolean)),
+        "signed_integer" => Ok(quote!(::mfm_facts::FactFieldValueType::SignedInteger)),
+        "unsigned_integer" => Ok(quote!(::mfm_facts::FactFieldValueType::UnsignedInteger)),
+        "timestamp" => Ok(quote!(::mfm_facts::FactFieldValueType::Timestamp)),
+        "decimal_string" => Ok(quote!(::mfm_facts::FactFieldValueType::DecimalString)),
+        "digest" => Ok(quote!(::mfm_facts::FactFieldValueType::Digest)),
         _ => Err(syn::Error::new(
             span,
             "fact value_type must be string, boolean, signed_integer, unsigned_integer, timestamp, decimal_string, or digest",
@@ -645,11 +645,11 @@ fn fact_value_type_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::T
 
 fn fact_operator_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
     match value {
-        "equal" => Ok(quote!(::mfm_program::facts::FactQueryOperator::Equal)),
-        "less_than" => Ok(quote!(::mfm_program::facts::FactQueryOperator::LessThan)),
-        "less_than_or_equal" => Ok(quote!(::mfm_program::facts::FactQueryOperator::LessThanOrEqual)),
-        "greater_than" => Ok(quote!(::mfm_program::facts::FactQueryOperator::GreaterThan)),
-        "greater_than_or_equal" => Ok(quote!(::mfm_program::facts::FactQueryOperator::GreaterThanOrEqual)),
+        "equal" => Ok(quote!(::mfm_facts::FactQueryOperator::Equal)),
+        "less_than" => Ok(quote!(::mfm_facts::FactQueryOperator::LessThan)),
+        "less_than_or_equal" => Ok(quote!(::mfm_facts::FactQueryOperator::LessThanOrEqual)),
+        "greater_than" => Ok(quote!(::mfm_facts::FactQueryOperator::GreaterThan)),
+        "greater_than_or_equal" => Ok(quote!(::mfm_facts::FactQueryOperator::GreaterThanOrEqual)),
         _ => Err(syn::Error::new(
             span,
             "fact operator must be equal, less_than, less_than_or_equal, greater_than, or greater_than_or_equal",
@@ -659,9 +659,9 @@ fn fact_operator_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::Tok
 
 fn fact_exposure_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
     match value {
-        "returnable" => Ok(quote!(::mfm_program::facts::FactFieldExposure::Returnable)),
-        "query_only" => Ok(quote!(::mfm_program::facts::FactFieldExposure::QueryOnly)),
-        "hidden" => Ok(quote!(::mfm_program::facts::FactFieldExposure::Hidden)),
+        "returnable" => Ok(quote!(::mfm_facts::FactFieldExposure::Returnable)),
+        "query_only" => Ok(quote!(::mfm_facts::FactFieldExposure::QueryOnly)),
+        "hidden" => Ok(quote!(::mfm_facts::FactFieldExposure::Hidden)),
         _ => Err(syn::Error::new(
             span,
             "fact exposure must be returnable, query_only, or hidden",
@@ -671,22 +671,19 @@ fn fact_exposure_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::Tok
 
 fn fact_metadata_field_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
     match value {
-        "recorded_at" => Ok(quote!(::mfm_program::facts::FactMetadataField::RecordedAt)),
-        "observed_at" => Ok(quote!(::mfm_program::facts::FactMetadataField::ObservedAt)),
-        "store_commit_order" => Ok(quote!(
-            ::mfm_program::facts::FactMetadataField::StoreCommitOrder
-        )),
+        "recorded_at" => Ok(quote!(::mfm_facts::FactMetadataField::RecordedAt)),
+        "store_commit_order" => Ok(quote!(::mfm_facts::FactMetadataField::StoreCommitOrder)),
         _ => Err(syn::Error::new(
             span,
-            "fact metadata must be recorded_at, observed_at, or store_commit_order",
+            "fact metadata must be recorded_at or store_commit_order",
         )),
     }
 }
 
 fn fact_sort_direction_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
     match value {
-        "ascending" => Ok(quote!(::mfm_program::facts::SortDirection::Ascending)),
-        "descending" => Ok(quote!(::mfm_program::facts::SortDirection::Descending)),
+        "ascending" => Ok(quote!(::mfm_facts::SortDirection::Ascending)),
+        "descending" => Ok(quote!(::mfm_facts::SortDirection::Descending)),
         _ => Err(syn::Error::new(
             span,
             "fact ordering direction must be ascending or descending",
@@ -696,8 +693,8 @@ fn fact_sort_direction_tokens(value: &str, span: Span) -> syn::Result<proc_macro
 
 fn fact_null_ordering_tokens(value: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
     match value {
-        "first" => Ok(quote!(::mfm_program::facts::NullOrdering::First)),
-        "last" => Ok(quote!(::mfm_program::facts::NullOrdering::Last)),
+        "first" => Ok(quote!(::mfm_facts::NullOrdering::First)),
+        "last" => Ok(quote!(::mfm_facts::NullOrdering::Last)),
         _ => Err(syn::Error::new(
             span,
             "fact ordering nulls must be first or last",

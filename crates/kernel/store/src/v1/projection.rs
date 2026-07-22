@@ -3,7 +3,7 @@ use super::*;
 #[path = "projection_logic.rs"]
 mod projection_logic;
 pub(super) use self::projection_logic::{
-    apply_projection, apply_projection_for_external_fact_indexes, fact_claim_projection_key,
+    apply_projection, apply_projection_for_external_fact_queries, fact_claim_projection_key,
 };
 
 /// Cell terminal projection derived from committed run events.
@@ -130,36 +130,34 @@ pub struct FactDescriptorProjection {
     pub fact_subject_namespace_hash: ContentDigest,
 }
 
-/// Store-owned projection for every recorded fact claim, indexed or private.
+/// Backend-facing query projection for one recorded platform fact.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactRecordProjection {
-    /// Store-derived claim id from run-stream coordinates.
-    pub fact_claim_id: mfm_facts::FactClaimId,
-    /// Store-owned event id that recorded the fact.
-    pub source_event_id: EventId,
-    /// Producing run id.
-    pub source_run_id: RunId,
-    /// Producing stream sequence.
-    pub source_seq: u64,
-    /// Producing event ordinal.
-    pub source_ordinal: u32,
-    /// Producing node id.
-    pub node_id: NodeId,
-    /// Producing attempt id.
-    pub attempt_id: AttemptId,
-    /// Exact response artifact evidence when this projection was hydrated with artifact authority.
-    pub response_artifact_evidence: Option<ArtifactEvidenceRef>,
-    /// Normalized claim payload.
-    pub claim: mfm_facts::FactClaim,
+pub struct FactQueryProjection {
+    pub(crate) fact_claim_id: mfm_facts::FactClaimId,
+    pub(crate) source_run_id: RunId,
+    pub(crate) source_seq: u64,
+    pub(crate) source_ordinal: u32,
+    pub(crate) source_event_id: EventId,
+    pub(crate) producer_node_id: NodeId,
+    pub(crate) attempt_id: AttemptId,
+    pub(crate) commit_id: CommitKey,
+    pub(crate) store_commit_order: u64,
+    pub(crate) recorded_at: String,
+    pub(crate) fact_kind: mfm_facts::FactKind,
+    pub(crate) fact_descriptor_hash: ContentDigest,
+    pub(crate) fact_subject_namespace_hash: ContentDigest,
+    pub(crate) fact_key: mfm_facts::FactKey,
+    pub(crate) subject_material_hash: ContentDigest,
+    pub(crate) response_schema_id: SchemaId,
+    pub(crate) response_hash: ContentDigest,
+    pub(crate) artifact_id: ArtifactId,
+    pub(crate) artifact_evidence_hash: ContentDigest,
+    pub(crate) response_artifact_evidence: Option<ArtifactEvidenceRef>,
 }
 
-impl FactRecordProjection {
-    /// Builds the store-owned fact record projection for a `FactRecorded` event.
-    ///
-    /// The fact claim id is derived from the event envelope's run-stream coordinates. Attempt
-    /// State validation and indexed visibility checks remain the caller's responsibility because
-    /// they depend on the surrounding projection state. Content-addressed response artifacts may
-    /// be referenced by multiple append occurrences.
+impl FactQueryProjection {
+    /// Builds a query projection from a committed `FactRecorded` event and retained response
+    /// evidence.
     pub fn from_recorded_event(
         envelope: &KernelEventEnvelope,
         payload: &mfm_events::v1::FactRecorded,
@@ -171,215 +169,69 @@ impl FactRecordProjection {
             envelope.ordinal().as_u32(),
         )
         .map_err(|error| StoreError::Identity(error.to_string()))?;
-        Ok(Self {
+        let recorded_at = "1970-01-01T00:00:00Z".to_owned();
+        let fact_ref = mfm_facts::InternalFactRef::from_claim(
             fact_claim_id,
-            source_event_id: envelope.event_id().clone(),
-            source_run_id: envelope.run_id().clone(),
-            source_seq: envelope.seq().as_u64(),
-            source_ordinal: envelope.ordinal().as_u32(),
-            node_id: payload.node_id.clone(),
-            attempt_id: payload.attempt_id.clone(),
-            response_artifact_evidence,
-            claim: payload.claim.clone(),
-        })
-    }
-
-    /// Returns true when this stream-derived record projection agrees with an indexed row.
-    pub fn matches_index_projection(&self, index: &FactIndexProjection) -> bool {
-        let record_ref =
-            match internal_fact_ref_from_record_projection(self, index.recorded_at.clone()) {
-                Ok(Some(fact_ref)) => fact_ref,
-                Ok(None) | Err(_) => return false,
-            };
-        let index_ref = match index.internal_ref() {
-            Ok(fact_ref) => fact_ref,
-            Err(_) => return false,
-        };
-        self.fact_claim_id == index.fact_claim_id
-            && self.source_run_id == index.source_run_id
-            && self.source_seq == index.source_seq
-            && self.source_ordinal == index.source_ordinal
-            && self.source_event_id == index.source_event_id
-            && self.node_id == index.producer_node_id
-            && record_ref == index_ref
-    }
-}
-
-fn internal_fact_ref_from_record_projection(
-    record: &FactRecordProjection,
-    recorded_at: String,
-) -> Result<Option<mfm_facts::InternalFactRef>> {
-    mfm_facts::InternalFactRef::from_claim(
-        record.fact_claim_id.clone(),
-        record.source_event_id.clone(),
-        recorded_at,
-        record.node_id.clone(),
-        &record.claim,
-    )
-    .map_err(|error| StoreError::Identity(error.to_string()))
-}
-
-/// Queryable indexed fact projection for one recorded claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactIndexProjection {
-    /// Store-derived claim id from run-stream coordinates.
-    pub fact_claim_id: mfm_facts::FactClaimId,
-    /// Producing run id.
-    pub source_run_id: RunId,
-    /// Producing stream sequence.
-    pub source_seq: u64,
-    /// Producing event ordinal.
-    pub source_ordinal: u32,
-    /// Store-owned event id that recorded the fact.
-    pub source_event_id: EventId,
-    /// Producing node id.
-    pub producer_node_id: NodeId,
-    /// Commit idempotency key for the append.
-    pub commit_id: CommitKey,
-    /// Deterministic store commit ordering coordinate.
-    pub store_commit_order: u64,
-    /// Store-observed record timestamp.
-    pub recorded_at: String,
-    /// Optional source observation timestamp.
-    pub observed_at: Option<String>,
-    /// Indexed audience.
-    pub audience: mfm_facts::FactAudience,
-    /// Indexed visibility scope.
-    pub visibility_scope: mfm_facts::FactVisibilityScope,
-    /// Fact kind.
-    pub fact_kind: mfm_facts::FactKind,
-    /// Fact descriptor hash.
-    pub fact_descriptor_hash: ContentDigest,
-    /// Subject namespace hash.
-    pub fact_subject_namespace_hash: ContentDigest,
-    /// Descriptor-derived fact key.
-    pub fact_key: mfm_facts::FactKey,
-    /// Canonical subject material hash.
-    pub subject_material_hash: ContentDigest,
-    /// Request schema id, when request evidence is present.
-    pub request_schema_id: Option<SchemaId>,
-    /// Canonical request hash, when request evidence is present.
-    pub request_hash: Option<ContentDigest>,
-    /// Response schema id.
-    pub response_schema_id: SchemaId,
-    /// Canonical response hash.
-    pub response_hash: ContentDigest,
-    /// Response artifact id.
-    pub artifact_id: ArtifactId,
-    /// Canonical response artifact evidence hash.
-    pub artifact_evidence_hash: ContentDigest,
-    /// Adapter capability kind.
-    pub capability_kind: CapabilityKind,
-    /// Adapter capability version.
-    pub capability_version: CapabilityVersion,
-    /// Adapter kind.
-    pub adapter_kind: AdapterKind,
-    /// Adapter version.
-    pub adapter_version: AdapterVersion,
-}
-
-impl FactIndexProjection {
-    /// Builds an indexed fact projection from a recorded fact projection.
-    ///
-    /// Run-private records return `Ok(None)`. Indexed records are validated through the same
-    /// internal reference shape used by fact query and replay surfaces.
-    pub fn from_record_projection(
-        record: &FactRecordProjection,
-        commit_id: CommitKey,
-        store_commit_order: u64,
-        recorded_at: impl Into<String>,
-    ) -> Result<Option<Self>> {
-        let recorded_at = recorded_at.into();
-        let Some(fact_ref) = internal_fact_ref_from_record_projection(record, recorded_at.clone())?
-        else {
-            return Ok(None);
-        };
-        let _metadata = mfm_facts::FactExtractionMetadata::new(
+            envelope.event_id().clone(),
             recorded_at.clone(),
-            fact_ref.observed_at().map(str::to_owned),
-            store_commit_order,
+            payload.node_id.clone(),
+            &payload.claim,
         )
         .map_err(|error| StoreError::Identity(error.to_string()))?;
-        let projection = Self::from_internal_ref(&fact_ref, commit_id, store_commit_order)?;
-        projection.internal_ref()?;
-        if !record.matches_index_projection(&projection) {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("fact-index:{:?}", projection.fact_claim_id),
-                message: "fact index projection does not match recorded fact".to_owned(),
-            });
-        }
-        Ok(Some(projection))
+        let store_commit_order = envelope.store_commit_order().as_u64();
+        let _metadata =
+            mfm_facts::FactExtractionMetadata::new(recorded_at.clone(), store_commit_order)
+                .map_err(|error| StoreError::Identity(error.to_string()))?;
+        Self::from_internal_ref(
+            &fact_ref,
+            payload.attempt_id.clone(),
+            envelope.commit_key().clone(),
+            store_commit_order,
+            response_artifact_evidence,
+        )
     }
 
-    fn from_internal_ref(
+    /// Rehydrates a query projection from its durable fact reference and store coordinates.
+    pub fn from_internal_ref(
         fact_ref: &mfm_facts::InternalFactRef,
+        attempt_id: AttemptId,
         commit_id: CommitKey,
         store_commit_order: u64,
+        response_artifact_evidence: Option<ArtifactEvidenceRef>,
     ) -> Result<Self> {
-        let (audience, visibility_scope) = match fact_ref.visibility() {
-            mfm_facts::FactVisibility::Indexed { audience, scope } => (*audience, *scope),
-            mfm_facts::FactVisibility::RunPrivate => {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!("fact-index:{:?}", fact_ref.fact_claim_id()),
-                    message: "internal fact ref was not indexed".to_owned(),
-                });
-            }
-        };
-        Ok(Self {
+        let projection = Self {
             fact_claim_id: fact_ref.fact_claim_id().clone(),
             source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
             source_seq: fact_ref.fact_claim_id().source_seq(),
             source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
             source_event_id: fact_ref.source_event_id().clone(),
             producer_node_id: fact_ref.producer_node_id().clone(),
+            attempt_id,
             commit_id,
             store_commit_order,
             recorded_at: fact_ref.recorded_at().to_owned(),
-            observed_at: fact_ref.observed_at().map(str::to_owned),
-            audience,
-            visibility_scope,
             fact_kind: fact_ref.fact_kind().clone(),
             fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
             fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
             fact_key: fact_ref.fact_key().clone(),
             subject_material_hash: fact_ref.subject_material_hash().clone(),
-            request_schema_id: fact_ref.request_schema_id().cloned(),
-            request_hash: fact_ref.request_hash().cloned(),
             response_schema_id: fact_ref.response_schema_id().clone(),
             response_hash: fact_ref.response_hash().clone(),
             artifact_id: fact_ref.artifact_id().clone(),
             artifact_evidence_hash: fact_ref.artifact_evidence_hash().clone(),
-            capability_kind: fact_ref.capability_kind().clone(),
-            capability_version: fact_ref.capability_version().clone(),
-            adapter_kind: fact_ref.adapter_kind().clone(),
-            adapter_version: fact_ref.adapter_version().clone(),
-        })
+            response_artifact_evidence,
+        };
+        projection.internal_ref()?;
+        Ok(projection)
     }
 
     /// Builds the durable internal fact reference represented by this index row.
     pub fn internal_ref(&self) -> Result<mfm_facts::InternalFactRef> {
-        let request = match (&self.request_schema_id, &self.request_hash) {
-            (Some(schema_id), Some(hash)) => Some(mfm_facts::FactRequestEvidence::new(
-                schema_id.clone(),
-                hash.clone(),
-            )),
-            (None, None) => None,
-            _ => {
-                return Err(StoreError::Identity(
-                    "internal fact index row has partial request evidence".to_owned(),
-                ));
-            }
-        };
         let parts = mfm_facts::InternalFactRefParts {
             fact_claim_id: self.fact_claim_id.clone(),
             source_event_id: self.source_event_id.clone(),
             recorded_at: self.recorded_at.clone(),
             producer_node_id: self.producer_node_id.clone(),
-            observed_at: self.observed_at.clone(),
-            visibility: mfm_facts::FactVisibility::Indexed {
-                audience: self.audience,
-                scope: self.visibility_scope,
-            },
             fact_kind: self.fact_kind.clone(),
             fact_descriptor_hash: self.fact_descriptor_hash.clone(),
             subject: mfm_facts::FactSubjectRef::new(
@@ -387,22 +239,96 @@ impl FactIndexProjection {
                 self.fact_key.clone(),
                 self.subject_material_hash.clone(),
             ),
-            request,
             response: mfm_facts::FactResponseEvidence::new(
                 self.response_schema_id.clone(),
                 self.response_hash.clone(),
                 self.artifact_id.clone(),
                 self.artifact_evidence_hash.clone(),
             ),
-            producer: mfm_facts::FactProducerProvenance::new(
-                self.capability_kind.clone(),
-                self.capability_version.clone(),
-                self.adapter_kind.clone(),
-                self.adapter_version.clone(),
-            ),
         };
         mfm_facts::InternalFactRef::new(parts)
             .map_err(|error| StoreError::Identity(error.to_string()))
+    }
+
+    /// Returns the store-derived claim identity.
+    pub const fn fact_claim_id(&self) -> &mfm_facts::FactClaimId {
+        &self.fact_claim_id
+    }
+    /// Returns the producing run identity.
+    pub const fn source_run_id(&self) -> &RunId {
+        &self.source_run_id
+    }
+    /// Returns the producing stream sequence.
+    pub const fn source_seq(&self) -> u64 {
+        self.source_seq
+    }
+    /// Returns the producing event ordinal.
+    pub const fn source_ordinal(&self) -> u32 {
+        self.source_ordinal
+    }
+    /// Returns the store-owned source event identity.
+    pub const fn source_event_id(&self) -> &EventId {
+        &self.source_event_id
+    }
+    /// Returns the producing node identity.
+    pub const fn producer_node_id(&self) -> &NodeId {
+        &self.producer_node_id
+    }
+    /// Returns the producing attempt identity.
+    pub const fn attempt_id(&self) -> &AttemptId {
+        &self.attempt_id
+    }
+    /// Returns the settlement commit key.
+    pub const fn commit_id(&self) -> &CommitKey {
+        &self.commit_id
+    }
+    /// Returns the store-wide commit order.
+    pub const fn store_commit_order(&self) -> u64 {
+        self.store_commit_order
+    }
+    /// Returns the store-observed recording timestamp.
+    pub fn recorded_at(&self) -> &str {
+        &self.recorded_at
+    }
+    /// Returns the fact kind.
+    pub const fn fact_kind(&self) -> &mfm_facts::FactKind {
+        &self.fact_kind
+    }
+    /// Returns the fact descriptor hash.
+    pub const fn fact_descriptor_hash(&self) -> &ContentDigest {
+        &self.fact_descriptor_hash
+    }
+    /// Returns the fact subject namespace hash.
+    pub const fn fact_subject_namespace_hash(&self) -> &ContentDigest {
+        &self.fact_subject_namespace_hash
+    }
+    /// Returns the descriptor-derived fact key.
+    pub const fn fact_key(&self) -> &mfm_facts::FactKey {
+        &self.fact_key
+    }
+    /// Returns the canonical subject material hash.
+    pub const fn subject_material_hash(&self) -> &ContentDigest {
+        &self.subject_material_hash
+    }
+    /// Returns the response schema identity.
+    pub const fn response_schema_id(&self) -> &SchemaId {
+        &self.response_schema_id
+    }
+    /// Returns the canonical response hash.
+    pub const fn response_hash(&self) -> &ContentDigest {
+        &self.response_hash
+    }
+    /// Returns the response artifact identity.
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+    /// Returns the response artifact evidence hash.
+    pub const fn artifact_evidence_hash(&self) -> &ContentDigest {
+        &self.artifact_evidence_hash
+    }
+    /// Returns exact retained response artifact evidence when hydrated.
+    pub const fn response_artifact_evidence(&self) -> Option<&ArtifactEvidenceRef> {
+        self.response_artifact_evidence.as_ref()
     }
 }
 
@@ -504,8 +430,7 @@ pub struct ProjectionSnapshot {
     pub(super) attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
     pub(super) cells: BTreeMap<(RunId, CellId), CellTerminalProjection>,
     pub(super) fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
-    pub(super) fact_records: BTreeMap<mfm_facts::FactClaimId, FactRecordProjection>,
-    pub(super) fact_index_entries: BTreeMap<mfm_facts::FactClaimId, FactIndexProjection>,
+    pub(super) fact_query_entries: BTreeMap<mfm_facts::FactClaimId, FactQueryProjection>,
     pub(super) fact_term_entries:
         BTreeMap<(mfm_facts::FactClaimId, mfm_facts::FactFieldId), FactIndexTermProjection>,
     pub(super) side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
@@ -538,10 +463,8 @@ pub struct ProjectionSnapshotParts {
     pub cells: BTreeMap<(RunId, CellId), CellTerminalProjection>,
     /// Descriptor catalog projections.
     pub fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
-    /// Recorded fact projections.
-    pub fact_records: BTreeMap<mfm_facts::FactClaimId, FactRecordProjection>,
-    /// Indexed fact projections.
-    pub fact_index_entries: BTreeMap<mfm_facts::FactClaimId, FactIndexProjection>,
+    /// Queryable fact projections.
+    pub fact_query_entries: BTreeMap<mfm_facts::FactClaimId, FactQueryProjection>,
     /// Extracted fact term projections.
     pub fact_term_entries:
         BTreeMap<(mfm_facts::FactClaimId, mfm_facts::FactFieldId), FactIndexTermProjection>,
@@ -568,8 +491,7 @@ impl ProjectionSnapshotParts {
             attempts: snapshot.attempts.clone(),
             cells: snapshot.cells.clone(),
             fact_descriptors: snapshot.fact_descriptors.clone(),
-            fact_records: snapshot.fact_records.clone(),
-            fact_index_entries: snapshot.fact_index_entries.clone(),
+            fact_query_entries: snapshot.fact_query_entries.clone(),
             fact_term_entries: snapshot.fact_term_entries.clone(),
             side_effects: snapshot.side_effects.clone(),
             resource_lanes: snapshot.resource_lanes.clone(),
@@ -580,8 +502,7 @@ impl ProjectionSnapshotParts {
 
     fn replace_fact_authority_from(&mut self, authority: &ProjectionSnapshot) {
         self.fact_descriptors = authority.fact_descriptors.clone();
-        self.fact_records = authority.fact_records.clone();
-        self.fact_index_entries = authority.fact_index_entries.clone();
+        self.fact_query_entries = authority.fact_query_entries.clone();
         self.fact_term_entries = authority.fact_term_entries.clone();
     }
 

@@ -5,7 +5,7 @@ fn predicate_strings_decode_to_typed_query_primitives() {
     let predicates = parse_public_fact_predicates(
         ["network=bitcoin-mainnet"],
         ["amount_sat.gt=1000"],
-        ["metadata.observed_at.lte=timestamp:2026-07-02T00:00:00Z"],
+        ["metadata.recorded_at.lte=timestamp:2026-07-02T00:00:00Z"],
     )
     .expect("predicates");
 
@@ -27,7 +27,7 @@ fn predicate_strings_decode_to_typed_query_primitives() {
         predicates[1].value(),
         &mfm_facts::FactCanonicalScalar::UnsignedInteger(1000)
     );
-    assert_eq!(predicates[2].field_id().as_str(), "metadata.observed_at");
+    assert_eq!(predicates[2].field_id().as_str(), "metadata.recorded_at");
     assert_eq!(
         predicates[2].operator(),
         mfm_facts::FactQueryOperator::LessThanOrEqual

@@ -2,40 +2,27 @@ use mfm_btc_capabilities::*;
 use mfm_capabilities::CapabilitySpec;
 
 #[test]
-fn capability_identity_describes_read_authority() {
+fn capability_identity_describes_one_aggregate_read_authority() {
     assert_eq!(
-        BtcChainHeadReadCapability::name(),
-        "mfm.bitcoin.chain_head.read"
+        BitcoinBalanceCollectionReadCapability::name(),
+        "mfm.bitcoin.balance_collection.read"
     );
-    assert_eq!(BtcBalanceReadCapability::name(), "mfm.bitcoin.balance.read");
-    assert!(!BtcChainHeadReadCapability::name().contains("collector"));
-    assert!(!BtcChainHeadReadCapability::name().contains("workflow"));
-    assert!(!BtcBalanceReadCapability::name().contains("collector"));
-    assert!(!BtcBalanceReadCapability::name().contains("workflow"));
-
-    let kind = BtcChainHeadReadCapability::kind()
+    assert_eq!(
+        BitcoinBalanceCollectionReadCapability::version()
+            .expect("version")
+            .to_string(),
+        "mfm.bitcoin.balance_collection.read.v1"
+    );
+    assert!(BitcoinBalanceCollectionReadCapability::kind()
         .expect("kind")
-        .to_string();
-    let version = BtcChainHeadReadCapability::version()
-        .expect("version")
-        .to_string();
-    let balance_kind = BtcBalanceReadCapability::kind()
-        .expect("balance kind")
-        .to_string();
-    let balance_version = BtcBalanceReadCapability::version()
-        .expect("balance version")
-        .to_string();
-
-    assert!(kind.starts_with("capability:mfm.bitcoin:chain_head.read:"));
-    assert_eq!(version, "mfm.bitcoin.chain_head.read.v1");
-    assert!(balance_kind.starts_with("capability:mfm.bitcoin:balance.read:"));
-    assert_eq!(balance_version, "mfm.bitcoin.balance.read.v1");
+        .to_string()
+        .starts_with("capability:mfm.bitcoin:balance_collection.read:"));
 }
 
 #[test]
 fn contracts_do_not_expose_concrete_source_details() {
     let source = include_str!("../src/lib.rs");
-    let forbidden = [
+    for term in [
         concat!("rpc", "_", "url"),
         concat!("end", "point"),
         concat!("author", "ization"),
@@ -45,9 +32,7 @@ fn contracts_do_not_expose_concrete_source_details() {
         concat!("private", "_", "key"),
         concat!("mn", "emonic"),
         concat!("key", "store", "_", "path"),
-    ];
-
-    for term in forbidden {
+    ] {
         assert!(
             !source.to_ascii_lowercase().contains(term),
             "forbidden concrete source detail: {term}"
@@ -58,61 +43,12 @@ fn contracts_do_not_expose_concrete_source_details() {
 #[test]
 fn source_identity_is_semantic_not_route_material() {
     let identity = BitcoinSourceIdentity::new("public-bitcoin-core").expect("source identity");
-
     assert_eq!(identity.as_str(), "public-bitcoin-core");
-
-    let error = BitcoinSourceIdentity::new("http://node.invalid:8332")
-        .expect_err("source identity should reject route material");
-
     assert_eq!(
-        error,
-        BtcCapabilityError::InvalidRequest {
-            reason: BtcInvalidRequest::InvalidIdentifier,
+        BitcoinSourceIdentity::new("http://node.invalid:8332")
+            .expect_err("route material is not an identity"),
+        BitcoinCapabilityError::InvalidRequest {
+            reason: BitcoinInvalidRequest::InvalidSourceIdentity,
         }
     );
-}
-
-#[test]
-fn balance_request_is_operation_only_and_evidence_uses_binding() {
-    let block_hash =
-        BitcoinBlockHash::new("00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc")
-            .expect("block hash");
-    let address =
-        BitcoinAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address");
-    let binding = BitcoinSourceBinding::new(
-        BitcoinNetworkId::new("bitcoin-mainnet").expect("network"),
-        BitcoinSourceIdentity::new("bitcoin-mainnet").expect("source"),
-        BitcoinNetworkTag::Main,
-    );
-    let request = BtcBalanceReadRequest::new(address.clone(), 850_000, block_hash.clone());
-    let evidence =
-        RedactedBtcSourceEvidence::from_binding(&binding, "main", BtcSourceStatus::Synced)
-            .expect("evidence");
-    let response = BtcBalanceReadResponse {
-        evidence,
-        address: address.clone(),
-        balance_sats: 42,
-        block_height: request.block_height(),
-        block_hash: block_hash.clone(),
-    };
-
-    assert_eq!(request.address(), &address);
-    assert_eq!(request.block_height(), 850_000);
-    assert_eq!(request.block_hash(), &block_hash);
-    assert_eq!(response.evidence.network_id, binding.network_id().clone());
-    assert_eq!(
-        response.evidence.source_identity,
-        binding.source_identity().clone()
-    );
-    assert_eq!(
-        response.evidence.bitcoin_network,
-        binding.bitcoin_network().as_str()
-    );
-    assert_eq!(
-        response.evidence.observed_bitcoin_network,
-        binding.bitcoin_network().as_str()
-    );
-    assert_eq!(response.address, address);
-    assert_eq!(response.block_height, request.block_height());
-    assert_eq!(response.block_hash, block_hash);
 }

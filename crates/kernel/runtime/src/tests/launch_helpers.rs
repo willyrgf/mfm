@@ -59,32 +59,6 @@ pub(super) async fn started_fixture_run_with_registry(
     (scheduler, store)
 }
 
-pub(super) async fn started_fixture_run_with_registry_and_fact_descriptors(
-    registry: ErasedRunnerRegistry,
-    fixture: &Fixture,
-    fact_descriptors: &[mfm_facts::FactDescriptor],
-) -> (SerialTypedScheduler, TestTypedRunStore) {
-    let scheduler = fixture_scheduler(registry, fixture);
-    let mut store = TestTypedRunStore::new();
-    let mut evidence = run_start_evidence(fixture, vec![fixture.seed_ref.clone()]);
-    evidence
-        .fact_descriptor_artifacts
-        .extend(fact_descriptors.iter().map(fact_descriptor_artifact));
-    let launch = scheduler
-        .prepare_run_launch(
-            &fixture.runtime_spec,
-            fixture_run_identity_material(fixture),
-            evidence,
-            store.expected_next_seq(&fixture.run_id),
-        )
-        .await
-        .expect("start run with fact descriptors");
-    scheduler_start_run(&scheduler, &mut store, launch)
-        .await
-        .expect("commit run with fact descriptors");
-    (scheduler, store)
-}
-
 pub(super) async fn started_side_effect_fixture_run(
     fixture: &Fixture,
 ) -> (SerialTypedScheduler, TestTypedRunStore) {
@@ -549,7 +523,6 @@ pub(super) fn prepare_runner_output_for_invocation(
         node: invocation.node,
         attempt_id: invocation.attempt_id,
         caps: &invocation.caps,
-        recorded_facts: &invocation.recorded_facts,
         view: invocation.view,
         context_output_extractor: None,
         saga_terminal_proof: None,

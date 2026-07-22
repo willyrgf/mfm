@@ -20,7 +20,6 @@ mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-evm-signing = { path = "../../evm-signing" }
-mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-replay = { path = "../../kernel/replay" }

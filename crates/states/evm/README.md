@@ -3,19 +3,19 @@
 Reusable EVM state contracts with no portfolio, app, runtime, transport, storage, or signer-provider
 dependency.
 
-The crate owns exactly four state kinds:
+The crate owns exactly three state kinds:
 
 ```text
-CollectEvmBalancesState → RecordEvmBalanceFactsState
+CollectEvmBalancesState
 SubmitEvmTransactionState
 ValidateEvmContractState
 ```
 
 Balance collection uses one bounded, sorted `EvmBalanceCollectionConfig`, one checked read session,
-one exact block anchor, and one `EvmBalanceObservationBatch`. Recording validates the complete batch
-and returns `EvmBalanceCollectionReceipt` while the adapter atomically records every
-`evm.balance_snapshot` fact. The fact and receipt contain generic EVM source identity only.
+and one exact block anchor. Its reducer returns an ordered non-empty `evm.balance_snapshot` fact
+batch and `EvmBalanceCollectionReceipt`; runtime settles both atomically with the read evidence and
+completion. The fact and receipt contain generic EVM source identity only.
 
-State reducers are deterministic and replayable from retained evidence. Live execution and
-publication bindings belong to `mfm-adapters-evm`; topology belongs to
+State reducers are deterministic and replayable from retained evidence. Live execution bindings
+belong to `mfm-adapters-evm`; topology belongs to
 `mfm-op-evm-collectors`.

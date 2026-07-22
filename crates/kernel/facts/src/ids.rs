@@ -214,13 +214,6 @@ checked_fact_string!(
 );
 
 checked_fact_string!(
-    StoreScopeRef,
-    "store scope ref",
-    validate_dot_path,
-    "Non-secret store scope reference recorded in fact query evidence."
-);
-
-checked_fact_string!(
     FactQueryCompilerVersion,
     "fact query compiler version",
     validate_dot_path,

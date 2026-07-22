@@ -7,12 +7,8 @@ fn production_runner_registry_defers_malformed_runtime_config() {
     std::fs::write(&config_path, "not valid toml = [").expect("write runtime config");
     let store = store::AsyncInMemoryRunStore::default();
 
-    production_runner_registry(
-        Arc::new(store),
-        crate::ProjectionFactIndexProvider::empty_arc(),
-        Some(&config_path),
-    )
-    .expect("runner registration must not parse live runtime config");
+    production_runner_registry(Arc::new(store), Some(&config_path))
+        .expect("runner registration must not parse live runtime config");
 }
 
 #[test]
@@ -25,6 +21,7 @@ fn production_runner_registry_covers_runtime_family_matrix() {
                 r#"
 [btc.routes.public-bitcoin-core]
 rpc_url = "http://127.0.0.1:8332"
+scan_timeout_seconds = 30
 "#,
             ),
             true,
@@ -52,6 +49,7 @@ rpc_url = "http://127.0.0.1:8545"
 
 [btc.routes.public-bitcoin-core]
 rpc_url = "http://127.0.0.1:8332"
+scan_timeout_seconds = 30
 "#,
             ),
             true,
@@ -84,7 +82,6 @@ rpc_url = "http://127.0.0.1:8332"
         let store = store::AsyncInMemoryRunStore::default();
         production_runner_registry(
             Arc::new(store),
-            crate::ProjectionFactIndexProvider::empty_arc(),
             config_path.as_ref().map(|(_, path)| path.as_path()),
         )
         .unwrap_or_else(|error| panic!("{name} production registry: {error}"));
@@ -92,23 +89,20 @@ rpc_url = "http://127.0.0.1:8332"
 }
 
 #[test]
-fn production_certification_registers_balance_but_not_validation_or_transaction_states() {
+fn production_certification_registers_balance_read_but_not_other_evm_states() {
     let registry = production_certification_registry().expect("production certification registry");
     let production_digest = registry.digest().expect("production registry digest");
 
-    let mut with_balance_states = registry.clone();
-    with_balance_states
+    let mut with_balance_read = registry.clone();
+    with_balance_read
         .register_state::<mfm_states_evm::CollectEvmBalancesState>()
         .expect("balance read descriptor");
-    with_balance_states
-        .register_state::<mfm_states_evm::RecordEvmBalanceFactsState>()
-        .expect("balance record descriptor");
     assert_eq!(
-        with_balance_states
+        with_balance_read
             .digest()
-            .expect("balance-complete registry digest"),
+            .expect("balance read registry digest"),
         production_digest,
-        "portfolio composition must register its EVM balance states"
+        "portfolio composition must register its EVM balance read"
     );
 
     for (name, digest) in [

@@ -79,65 +79,6 @@ async fn replay_rejects_run_completed_without_public_output_evidence() {
 }
 
 #[tokio::test]
-async fn scheduler_rejects_uncertified_capability_use() {
-    struct BadFactRunner {
-        cap_kind: CapabilityKind,
-        cap_version: CapabilityVersion,
-    }
-
-    impl ErasedNodeRunner for BadFactRunner {
-        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-            Box::pin(async move {
-                let (response_evidence, _response_bytes) =
-                    test_fact_response_artifact(ctx.node(), 194);
-                Ok(ErasedRunnerOutput::new(vec![
-                    RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
-                        events::FactRecorded {
-                            spec_hash: ctx.spec_hash().clone(),
-                            node_id: ctx.node().node_id.clone(),
-                            attempt_id: ctx.attempt_id().clone(),
-                            claim: test_fact_claim(
-                                196,
-                                ctx.node().config_ref.schema_id.clone(),
-                                content(0xc1),
-                                &response_evidence,
-                                self.cap_kind.clone(),
-                                self.cap_version.clone(),
-                                AdapterKind::new(
-                                    "mfm.test",
-                                    "adapter",
-                                    DigestAlgorithm::Sha256JcsV1,
-                                    D1,
-                                )
-                                .expect("adapter"),
-                                AdapterVersion::new("mfm.adapter.v1").expect("adapter version"),
-                            ),
-                        },
-                    )),
-                ]))
-            })
-        }
-    }
-
-    let fixture = fixture();
-    let registry = fixture_registry_with_first_runner(
-        &fixture,
-        "pure",
-        BadFactRunner {
-            cap_kind: fixture.cap_kind.clone(),
-            cap_version: fixture.cap_version.clone(),
-        },
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-    assert_first_node_invalid_after_drive!(
-        scheduler,
-        store,
-        fixture,
-        "terminalize uncertified capability use"
-    );
-}
-
-#[tokio::test]
 async fn runner_rejects_invalid_artifact_outputs() {
     #[derive(Clone, Copy)]
     enum InvalidArtifactOutputKind {

@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Waker};
 use mfm_canonical::{sha256_digest_bytes, CanonicalValue};
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, CapabilitySpec, EffectSpec,
-    ExternalMutationAuthorityRole, ManagedPlatformWrite, ReadExternalRole,
+    ExternalMutationAuthorityRole, ReadExternalRole,
 };
 use mfm_ids::{
     ArtifactId, ContextRef, ContextResourceKind, ContextStage, DigestBytes, EffectKind,
@@ -48,10 +48,9 @@ mod fact_support;
 #[path = "runner_kit.rs"]
 mod runner_kit_tests;
 use self::fact_support::{
-    projection_snapshot_with_returned_fact_authority, test_fact_claim,
-    test_fact_claim_for_descriptor, test_fact_descriptor_with_kind, test_fact_key,
+    projection_snapshot_with_returned_fact_authority, test_fact_claim, test_fact_key,
     test_fact_query_evidence, test_fact_query_evidence_with_returned_refs,
-    test_fact_response_artifact, test_fact_subject_evidence, test_returned_fact_authority,
+    test_fact_response_artifact, test_returned_fact_authority,
 };
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
@@ -545,10 +544,7 @@ fn test_adapter_executable_identity() -> events::ExecutableIdentity {
     let factory_id = events::RunnerFactoryId::new("test_adapter").expect("factory");
     events::ExecutableIdentity {
         factory_id,
-        cargo_package_digest: content(0xe3),
         binary_digest: content(0xe4),
-        nix_derivation_hash: None,
-        nix_output_hash: None,
     }
 }
 
@@ -633,7 +629,6 @@ macro_rules! with_prepared_runner_ctx {
                 root: MaterializedInputNode::Unit,
             },
             caps: CertifiedRuntimeCapabilities::for_node(invocation_node),
-            recorded_facts: RecordedFacts::default(),
             projections: &projections,
             run_stream: &run_stream,
             view: &view,

@@ -57,9 +57,9 @@ use self::manual_resolution_support::{
 #[path = "fact_support.rs"]
 mod fact_support;
 use self::fact_support::{
-    fact_artifact_ref, fact_artifact_ref_with_height, fact_attempt_started,
-    fact_descriptor_artifact_ref, fact_descriptor_bytes, fact_descriptor_hash, fact_key,
-    fact_query_plan, fact_query_plan_with_limit, fact_recorded_with_visibility,
+    fact_artifact_ref, fact_artifact_ref_with_height, fact_attempt_completed, fact_attempt_started,
+    fact_cell_produced, fact_descriptor_artifact_ref, fact_descriptor_bytes, fact_descriptor_hash,
+    fact_key, fact_output_artifact_ref, fact_query_plan, fact_query_plan_with_limit, fact_recorded,
     fact_response_bytes, fact_response_bytes_with_height,
 };
 
@@ -144,7 +144,7 @@ pub(super) async fn test_store() -> (PostgresStore, String) {
         .expect("postgres URL")
         .options([("search_path", schema.as_str())]);
     let pool = PgPoolOptions::new()
-        .max_connections(1)
+        .max_connections(2)
         .connect_with(options)
         .await
         .expect("connect schema-scoped postgres");
@@ -176,13 +176,11 @@ pub(super) async fn drop_schema(store: &PostgresStore, schema: &str) {
 fn assert_fact_projection_counts(
     projection: &ProjectionSnapshot,
     descriptors: usize,
-    records: usize,
-    index_entries: usize,
+    query_entries: usize,
     terms: usize,
 ) {
     assert_eq!(projection.fact_descriptors().count(), descriptors);
-    assert_eq!(projection.fact_records().count(), records);
-    assert_eq!(projection.fact_index_entries().count(), index_entries);
+    assert_eq!(projection.fact_query_entries().count(), query_entries);
     assert_eq!(projection.fact_term_entries().count(), terms);
 }
 
@@ -206,7 +204,7 @@ async fn assert_fact_projection_table_counts(
         fact_projection_table_count(
             &store.pool,
             run,
-            "SELECT COUNT(*) FROM fact_index WHERE source_run_id = $1"
+            "SELECT COUNT(*) FROM fact_query_projection WHERE source_run_id = $1"
         )
         .await,
         index_entries as i64
@@ -215,7 +213,7 @@ async fn assert_fact_projection_table_counts(
         fact_projection_table_count(
             &store.pool,
             run,
-            "SELECT COUNT(*) FROM fact_index_terms WHERE source_run_id = $1"
+            "SELECT COUNT(*) FROM fact_query_terms WHERE source_run_id = $1"
         )
         .await,
         terms as i64
@@ -231,7 +229,7 @@ async fn fact_projection_table_count(pool: &PgPool, run: &RunId, sql: &'static s
 }
 
 async fn global_fact_descriptor_catalog_count(store: &PostgresStore) -> i64 {
-    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_descriptor_index")
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_descriptor_catalog")
         .fetch_one(&store.pool)
         .await
         .expect("global fact descriptor catalog count")

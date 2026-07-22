@@ -64,18 +64,17 @@ fn retained_fact_artifact_evidence_for_requirement(
         }
         Some(events::ArtifactRole::FactResponse) => Ok(view
             .projections
-            .fact_index_entries()
-            .find(|(_, index)| {
-                index.artifact_id == requirement.artifact_id
+            .fact_query_entries()
+            .find(|(_, projection)| {
+                projection.artifact_id() == &requirement.artifact_id
                     && requirement
                         .digest
                         .as_ref()
-                        .is_some_and(|digest| index.response_hash == *digest)
-                    && index.artifact_evidence_hash == requirement.evidence_hash
+                        .is_some_and(|digest| projection.response_hash() == digest)
+                    && projection.artifact_evidence_hash() == &requirement.evidence_hash
             })
-            .and_then(|(claim_id, _index)| {
-                let record = view.projections.fact_record(claim_id)?;
-                let evidence = record.response_artifact_evidence.as_ref()?;
+            .and_then(|(_claim_id, projection)| {
+                let evidence = projection.response_artifact_evidence()?;
                 let evidence_hash = evidence.evidence_hash().ok()?;
                 (evidence_hash == requirement.evidence_hash).then(|| evidence.clone())
             })),

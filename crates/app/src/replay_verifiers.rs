@@ -42,19 +42,12 @@ impl ReplayVerifierRegistry {
                     verifier: verify_portfolio,
                 },
                 ReplayVerifierRegistration {
-                    state_keys: &[
-                        state_key::<mfm_states_btc::ResolveBtcJointTipState>,
-                        state_key::<mfm_states_btc::ObserveBtcAddressBalanceState>,
-                        state_key::<mfm_states_btc::AssembleBtcNetworkCollectionReceiptState>,
-                    ],
+                    state_keys: &[state_key::<mfm_states_btc::CollectBitcoinBalancesState>],
                     intent_matcher: None,
                     verifier: verify_btc,
                 },
                 ReplayVerifierRegistration {
-                    state_keys: &[
-                        state_key::<mfm_states_evm::CollectEvmBalancesState>,
-                        state_key::<mfm_states_evm::RecordEvmBalanceFactsState>,
-                    ],
+                    state_keys: &[state_key::<mfm_states_evm::CollectEvmBalancesState>],
                     intent_matcher: None,
                     verifier: verify_evm_balance_collection,
                 },
@@ -115,7 +108,7 @@ fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) ->
 }
 
 fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_btc_jsonrpc::verify_btc_jsonrpc_replay(broker)
+    mfm_adapters_btc_jsonrpc::verify_bitcoin_jsonrpc_replay(broker)
 }
 
 fn verify_evm_balance_collection(

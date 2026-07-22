@@ -1,9 +1,8 @@
 #![warn(missing_docs)]
 //! Reusable EVM balance, transaction, and exact-anchor validation states.
 //!
-//! This package owns exactly four state kinds: [`CollectEvmBalancesState`],
-//! [`RecordEvmBalanceFactsState`], [`SubmitEvmTransactionState`], and
-//! [`ValidateEvmContractState`].
+//! This package owns exactly three state kinds: [`CollectEvmBalancesState`],
+//! [`SubmitEvmTransactionState`], and [`ValidateEvmContractState`].
 //!
 //! # Examples
 //!
@@ -37,14 +36,12 @@ mod transaction;
 mod balance_collection_tests;
 
 pub use balance_collection::{
-    evm_balance_fact_visibility, record_evm_balance_facts, reduce_evm_balance_collection,
+    decode_evm_balance_snapshot_response, reduce_evm_balance_collection,
     validate_evm_balance_collection_config, CollectEvmBalancesState, EvmBalanceAsset,
     EvmBalanceCollectionConfig, EvmBalanceCollectionError, EvmBalanceCollectionEvidence,
-    EvmBalanceCollectionPlan, EvmBalanceCollectionReceipt, EvmBalanceObservation,
-    EvmBalanceObservationBatch, EvmBalanceReadEvidence, EvmBalanceSnapshotFact,
-    EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject, EvmBalanceSource,
-    EvmTokenDecimalsEvidence, RecordEvmBalanceFactsInput, RecordEvmBalanceFactsInputHandles,
-    RecordEvmBalanceFactsState, EVM_BALANCE_COLLECTION_SOURCE_LIMIT,
+    EvmBalanceCollectionPlan, EvmBalanceCollectionReceipt, EvmBalanceReadEvidence,
+    EvmBalanceSnapshotFact, EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject,
+    EvmBalanceSource, EvmTokenDecimalsEvidence, EVM_BALANCE_COLLECTION_SOURCE_LIMIT,
 };
 pub use contract_validation::{
     validate_evm_contract, validate_evm_contract_validation_config, EvmContractCallCheck,

@@ -110,22 +110,14 @@ pub struct FactProjectionFixtureInputForTest {
     pub store_commit_order: u64,
     /// Store-recorded timestamp.
     pub recorded_at: String,
-    /// Source observation timestamp.
-    pub observed_at: Option<String>,
-    /// Fact visibility.
-    pub visibility: mfm_facts::FactVisibility,
     /// Canonical subject value used by descriptor subject extractions.
     pub subject: CanonicalValue,
     /// Canonical response value used by descriptor result extractions.
     pub response: CanonicalValue,
-    /// Optional request evidence pinned in the fact claim.
-    pub request: Option<mfm_facts::FactRequestEvidence>,
     /// Response schema id.
     pub response_schema_id: SchemaId,
     /// Optional response artifact id. Defaults to the response content digest.
     pub response_artifact_id: Option<ArtifactId>,
-    /// Fact producer provenance.
-    pub producer: mfm_facts::FactProducerProvenance,
 }
 
 /// Input for a fact fixture that is appended through the typed store.
@@ -139,32 +131,22 @@ pub struct FactRecordFixtureInputForTest {
     pub attempt_id: AttemptId,
     /// Commit idempotency key for the source fact commit.
     pub commit_id: CommitKey,
-    /// Source observation timestamp.
-    pub observed_at: Option<String>,
-    /// Fact visibility.
-    pub visibility: mfm_facts::FactVisibility,
     /// Canonical subject value used by descriptor subject extractions.
     pub subject: CanonicalValue,
     /// Canonical response value used by descriptor result extractions.
     pub response: CanonicalValue,
-    /// Optional request evidence pinned in the fact claim.
-    pub request: Option<mfm_facts::FactRequestEvidence>,
     /// Response schema id.
     pub response_schema_id: SchemaId,
     /// Optional response artifact id. Defaults to the response content digest.
     pub response_artifact_id: Option<ArtifactId>,
-    /// Fact producer provenance.
-    pub producer: mfm_facts::FactProducerProvenance,
 }
 
 /// Projected fact fixture built from descriptor, subject, and response values.
 #[derive(Debug, Clone)]
 pub struct FactProjectionFixtureForTest {
-    /// Store-owned fact record projection.
-    pub record: FactRecordProjection,
-    /// Store-owned index projection when the fact is indexed.
-    pub index: Option<FactIndexProjection>,
-    /// Extracted index term projections when the fact is indexed.
+    /// Store-owned query projection.
+    pub projection: FactQueryProjection,
+    /// Extracted query term projections.
     pub terms: Vec<FactIndexTermProjection>,
     /// Verified response artifact evidence.
     pub response_artifact_evidence: ArtifactEvidenceRef,
@@ -183,12 +165,8 @@ pub fn fact_projection_fixture_for_test(
         &descriptor_hash,
         FactClaimFixtureInput {
             node_id: &input.node_id,
-            visibility: input.visibility.clone(),
-            observed_at: input.observed_at.as_deref(),
-            request: input.request.as_ref(),
             response_schema_id: &input.response_schema_id,
             response_artifact_id: input.response_artifact_id.as_ref(),
-            producer: &input.producer,
             subject_value: &input.subject,
             response_value: &input.response,
         },
@@ -202,38 +180,24 @@ pub fn fact_projection_fixture_for_test(
     let fact_claim_id =
         mfm_facts::FactClaimId::new(input.run_id.clone(), input.source_seq, input.source_ordinal)
             .map_err(|error| StoreError::Identity(error.to_string()))?;
-    let record = FactRecordProjection {
-        fact_claim_id: fact_claim_id.clone(),
-        source_event_id: input.source_event_id.clone(),
-        source_run_id: input.run_id.clone(),
-        source_seq: input.source_seq,
-        source_ordinal: input.source_ordinal,
-        node_id: input.node_id.clone(),
-        attempt_id: input.attempt_id,
-        response_artifact_evidence: Some(response_artifact_evidence.clone()),
-        claim,
-    };
-    let Some(index) = FactIndexProjection::from_record_projection(
-        &record,
-        input.commit_id.clone(),
-        input.store_commit_order,
+    let fact_ref = mfm_facts::InternalFactRef::from_claim(
+        fact_claim_id.clone(),
+        input.source_event_id,
         input.recorded_at.clone(),
-    )?
-    else {
-        return Ok(FactProjectionFixtureForTest {
-            record,
-            index: None,
-            terms: Vec::new(),
-            response_artifact_evidence,
-            response_bytes,
-        });
-    };
-    let metadata = mfm_facts::FactExtractionMetadata::new(
-        input.recorded_at,
-        input.observed_at,
-        input.store_commit_order,
+        input.node_id,
+        &claim,
     )
     .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let projection = FactQueryProjection::from_internal_ref(
+        &fact_ref,
+        input.attempt_id,
+        input.commit_id.clone(),
+        input.store_commit_order,
+        Some(response_artifact_evidence.clone()),
+    )?;
+    let metadata =
+        mfm_facts::FactExtractionMetadata::new(input.recorded_at, input.store_commit_order)
+            .map_err(|error| StoreError::Identity(error.to_string()))?;
     let terms = mfm_facts::extract_terms_from_material(
         descriptor,
         &subject_material,
@@ -247,8 +211,7 @@ pub fn fact_projection_fixture_for_test(
     })
     .collect();
     Ok(FactProjectionFixtureForTest {
-        record,
-        index: Some(index),
+        projection,
         terms,
         response_artifact_evidence,
         response_bytes,
@@ -265,12 +228,8 @@ struct FactClaimFixtureForTest {
 
 struct FactClaimFixtureInput<'a> {
     node_id: &'a NodeId,
-    visibility: mfm_facts::FactVisibility,
-    observed_at: Option<&'a str>,
-    request: Option<&'a mfm_facts::FactRequestEvidence>,
     response_schema_id: &'a SchemaId,
     response_artifact_id: Option<&'a ArtifactId>,
-    producer: &'a mfm_facts::FactProducerProvenance,
     subject_value: &'a CanonicalValue,
     response_value: &'a CanonicalValue,
 }
@@ -303,19 +262,15 @@ fn fact_claim_fixture_for_test(
     };
     let artifact_evidence_hash = response_artifact_evidence.evidence_hash()?;
     let claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: input.visibility,
         fact_kind: descriptor.fact_kind().clone(),
         fact_descriptor_hash: descriptor_hash.clone(),
         subject,
-        observed_at: input.observed_at.map(str::to_owned),
-        request: input.request.cloned(),
         response: mfm_facts::FactResponseEvidence::new(
             input.response_schema_id.clone(),
             response_hash,
             response_artifact_id,
             artifact_evidence_hash,
         ),
-        producer: input.producer.clone(),
     })
     .map_err(|error| StoreError::Identity(error.to_string()))?;
     Ok(FactClaimFixtureForTest {
@@ -371,12 +326,8 @@ pub async fn append_platform_holding_facts_for_test(
             &descriptor_hash,
             FactClaimFixtureInput {
                 node_id: &seed.input.node_id,
-                visibility: seed.input.visibility.clone(),
-                observed_at: seed.input.observed_at.as_deref(),
-                request: seed.input.request.as_ref(),
                 response_schema_id: &seed.input.response_schema_id,
                 response_artifact_id: seed.input.response_artifact_id.as_ref(),
-                producer: &seed.input.producer,
                 subject_value: &seed.input.subject,
                 response_value: &seed.input.response,
             },
@@ -514,18 +465,80 @@ pub async fn append_platform_holding_facts_for_test(
             .await?;
 
         let fact_payload = events::KernelEventPayload::FactRecorded(events::FactRecorded {
-            spec_hash: source_spec_hash,
+            spec_hash: source_spec_hash.clone(),
             node_id: node_id.clone(),
             attempt_id: start_attempt_id.clone(),
             claim: claim_fixture.claim.clone(),
         });
         let response_evidence = claim_fixture.response_artifact_evidence.clone();
+        let state_descriptor = source_spec
+            .descriptor_identities
+            .iter()
+            .find_map(|identity| match identity {
+                DescriptorIdentity::State(descriptor)
+                    if descriptor.descriptor_id == node.descriptor_id =>
+                {
+                    Some(descriptor.as_ref())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                StoreError::Event("source fact state descriptor is missing".to_owned())
+            })?;
+        let output_bytes = br#"{"settled":true}"#.to_vec();
+        let output_digest = ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(&output_bytes),
+        );
+        let output_artifact_id =
+            ArtifactId::from_digest(output_digest.algorithm(), *output_digest.digest());
+        let output_evidence = ArtifactEvidenceRef {
+            artifact_id: output_artifact_id.clone(),
+            digest: output_digest.clone(),
+            byte_len: output_bytes.len() as u64,
+            media_type: spec::MediaType::new("application/json")
+                .expect("fact fixture output media type"),
+            schema_id: Some(state_descriptor.output_schema_id.clone()),
+            semantic_type_id: Some(state_descriptor.output_semantic_type_id.clone()),
+            producer_node_id: Some(node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::StateOutput,
+        };
+        let output_evidence_hash = output_evidence.evidence_hash()?;
+        let cell_payload = events::KernelEventPayload::CellProduced(events::CellProduced {
+            spec_hash: source_spec_hash.clone(),
+            node_id: node_id.clone(),
+            cell_id: node.output_cell.clone(),
+            scope_id: node.scope_id.clone(),
+            attempt_id: start_attempt_id.clone(),
+            semantic_type_id: state_descriptor.output_semantic_type_id.clone(),
+            schema_id: state_descriptor.output_schema_id.clone(),
+            value_lineage: spec::ValueLineageRef {
+                lineage_digest: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    sha256_digest_bytes(b"mfm.test.fact_fixture.output_lineage.v1"),
+                ),
+            },
+            context: spec::CellContextSpec::no_context(),
+            artifact_id: output_artifact_id,
+            content_digest: output_digest,
+            evidence_hash: output_evidence_hash,
+            producer_state_kind: Some(node.state_kind.clone()),
+            producer_state_version: Some(node.state_version.clone()),
+        });
+        let completed_payload =
+            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                spec_hash: source_spec_hash.clone(),
+                node_id: node_id.clone(),
+                attempt_id: start_attempt_id.clone(),
+                output_cell_id: node.output_cell.clone(),
+            });
         let fact_request = CommitRequest::from_payloads(
             source_run_id.clone(),
             store.expected_next_seq(&source_run_id).await?,
             seed.input.commit_id.clone(),
-            vec![fact_payload],
-            vec![response_evidence.clone()],
+            vec![fact_payload, cell_payload, completed_payload],
+            vec![response_evidence.clone(), output_evidence.clone()],
             CommitPreconditions {
                 required_run_state: RequiredRunState::NotCompleted,
                 certified_run_authority: Some(authority),
@@ -535,18 +548,21 @@ pub async fn append_platform_holding_facts_for_test(
         let fact_plan = PreparedCommit::<AttemptTerminal>::new(
             fact_request,
             CommitArtifactEvidenceSet::new(
-                vec![response_evidence.clone()],
-                vec![response_evidence.clone()],
+                vec![response_evidence.clone(), output_evidence.clone()],
+                vec![response_evidence.clone(), output_evidence.clone()],
             )?,
         )?;
         let fact_batch = append_batch_for_test(
             store
                 .append_prepared_commit_bundle(PreparedCommitBundle::new(
                     fact_plan.into(),
-                    vec![PreparedArtifactBytes::new(
-                        claim_fixture.response_bytes.clone(),
-                        response_evidence,
-                    )?],
+                    vec![
+                        PreparedArtifactBytes::new(
+                            claim_fixture.response_bytes.clone(),
+                            response_evidence,
+                        )?,
+                        PreparedArtifactBytes::new(output_bytes, output_evidence)?,
+                    ],
                     Vec::new(),
                 )?)
                 .await?,
@@ -571,14 +587,10 @@ pub async fn append_platform_holding_facts_for_test(
                 commit_id: fact_batch.commit_key().clone(),
                 store_commit_order: fact_batch.store_commit_order().as_u64(),
                 recorded_at: "1970-01-01T00:00:00Z".to_owned(),
-                observed_at: seed.input.observed_at,
-                visibility: seed.input.visibility,
                 subject: seed.input.subject,
                 response: seed.input.response,
-                request: seed.input.request,
                 response_schema_id: seed.input.response_schema_id,
                 response_artifact_id: seed.input.response_artifact_id,
-                producer: seed.input.producer,
             },
         )?;
         fixtures.push(fixture);
@@ -724,7 +736,9 @@ fn fact_source_spec_for_test(
         effect_kind: effect_kind.clone(),
         capability_bindings: capabilities.clone(),
         adapter_bindings: Vec::new(),
-        fact_descriptor_allowlist: vec![spec::FactDescriptorRef { descriptor_hash }],
+        fact_descriptor_allowlist: vec![spec::FactDescriptorRef {
+            descriptor_hash: descriptor_hash.clone(),
+        }],
         side_effect: None,
         framework: None,
         planning_lineage: planning_lineage.clone(),
@@ -768,7 +782,7 @@ fn fact_source_spec_for_test(
                 effect_version: EffectVersion::new("mfm.test.fact_fixture_read.v1")
                     .expect("effect version"),
                 capabilities,
-                emitted_fact_descriptors: Vec::new(),
+                emitted_fact_descriptors: vec![spec::FactDescriptorRef { descriptor_hash }],
                 runner: "mfm.test.fact_fixture_runner".to_owned(),
                 effect_contract_digest: None,
             })),

@@ -530,21 +530,12 @@ fn validate_fact_query_returned_ref_authority(
         ));
     }
 
-    let record = projections
-        .fact_record(fact_ref.fact_claim_id())
-        .ok_or_else(|| fact_query_ref_authority_error("missing source fact authority"))?;
-    if !fact_record_projection_matches_returned_ref(record, fact_ref) {
+    let projection = projections
+        .fact_query_entry(fact_ref.fact_claim_id())
+        .ok_or_else(|| fact_query_ref_authority_error("missing fact query authority"))?;
+    if projection.internal_ref().ok().as_ref() != Some(fact_ref) {
         return Err(fact_query_ref_authority_error(
-            "source fact authority does not match returned ref",
-        ));
-    }
-
-    let index = projections
-        .fact_index_entry(fact_ref.fact_claim_id())
-        .ok_or_else(|| fact_query_ref_authority_error("missing indexed fact authority"))?;
-    if !fact_index_projection_matches_returned_ref(index, fact_ref) {
-        return Err(fact_query_ref_authority_error(
-            "indexed fact authority does not match returned ref",
+            "fact query authority does not match returned ref",
         ));
     }
 
@@ -560,8 +551,8 @@ pub(crate) fn fact_query_returned_ref_retention_refs(
         .fact_descriptor(fact_ref.fact_descriptor_hash())
         .ok_or_else(|| fact_query_ref_authority_error("missing descriptor authority"))?;
     let response_evidence = projections
-        .fact_record(fact_ref.fact_claim_id())
-        .and_then(|record| record.response_artifact_evidence.as_ref())
+        .fact_query_entry(fact_ref.fact_claim_id())
+        .and_then(store::FactQueryProjection::response_artifact_evidence)
         .ok_or_else(|| fact_query_ref_authority_error("missing response artifact authority"))?;
     Ok([
         descriptor
@@ -582,72 +573,6 @@ fn fact_descriptor_projection_matches_returned_ref(
         && &descriptor.fact_kind == fact_ref.fact_kind()
         && &descriptor.response_schema_id == fact_ref.response_schema_id()
         && &descriptor.fact_subject_namespace_hash == fact_ref.fact_subject_namespace_hash()
-}
-
-fn fact_record_projection_matches_returned_ref(
-    record: &store::FactRecordProjection,
-    fact_ref: &mfm_facts::InternalFactRef,
-) -> bool {
-    let claim = &record.claim;
-    let request_schema_id = claim.request().map(|request| request.request_schema_id());
-    let request_hash = claim.request().map(|request| request.request_hash());
-    let subject_material_hash = claim.subject().subject_material().content_digest();
-    &record.fact_claim_id == fact_ref.fact_claim_id()
-        && &record.source_event_id == fact_ref.source_event_id()
-        && &record.source_run_id == fact_ref.fact_claim_id().source_run_id()
-        && record.source_seq == fact_ref.fact_claim_id().source_seq()
-        && record.source_ordinal == fact_ref.fact_claim_id().source_ordinal()
-        && claim.visibility() == fact_ref.visibility()
-        && claim.fact_kind() == fact_ref.fact_kind()
-        && claim.fact_descriptor_hash() == fact_ref.fact_descriptor_hash()
-        && claim.observed_at() == fact_ref.observed_at()
-        && claim.subject().fact_subject_namespace_hash() == fact_ref.fact_subject_namespace_hash()
-        && claim.subject().subject_material_hash() == fact_ref.subject_material_hash()
-        && &subject_material_hash == fact_ref.subject_material_hash()
-        && claim.subject().fact_key() == fact_ref.fact_key()
-        && request_schema_id == fact_ref.request_schema_id()
-        && request_hash == fact_ref.request_hash()
-        && claim.response().response_schema_id() == fact_ref.response_schema_id()
-        && claim.response().response_hash() == fact_ref.response_hash()
-        && claim.response().artifact_id() == fact_ref.artifact_id()
-        && claim.response().artifact_evidence_hash() == fact_ref.artifact_evidence_hash()
-        && &record.node_id == fact_ref.producer_node_id()
-        && claim.producer().capability_kind() == fact_ref.capability_kind()
-        && claim.producer().capability_version() == fact_ref.capability_version()
-        && claim.producer().adapter_kind() == fact_ref.adapter_kind()
-        && claim.producer().adapter_version() == fact_ref.adapter_version()
-}
-
-fn fact_index_projection_matches_returned_ref(
-    index: &store::FactIndexProjection,
-    fact_ref: &mfm_facts::InternalFactRef,
-) -> bool {
-    let index_visibility = mfm_facts::FactVisibility::indexed_default(index.audience);
-    &index.fact_claim_id == fact_ref.fact_claim_id()
-        && &index.source_run_id == fact_ref.fact_claim_id().source_run_id()
-        && index.source_seq == fact_ref.fact_claim_id().source_seq()
-        && index.source_ordinal == fact_ref.fact_claim_id().source_ordinal()
-        && &index.source_event_id == fact_ref.source_event_id()
-        && index.recorded_at == fact_ref.recorded_at()
-        && index.observed_at.as_deref() == fact_ref.observed_at()
-        && &index_visibility == fact_ref.visibility()
-        && index.visibility_scope == mfm_facts::FactVisibilityScope::Default
-        && &index.fact_kind == fact_ref.fact_kind()
-        && &index.fact_descriptor_hash == fact_ref.fact_descriptor_hash()
-        && &index.fact_subject_namespace_hash == fact_ref.fact_subject_namespace_hash()
-        && &index.fact_key == fact_ref.fact_key()
-        && &index.subject_material_hash == fact_ref.subject_material_hash()
-        && index.request_schema_id.as_ref() == fact_ref.request_schema_id()
-        && index.request_hash.as_ref() == fact_ref.request_hash()
-        && &index.response_schema_id == fact_ref.response_schema_id()
-        && &index.response_hash == fact_ref.response_hash()
-        && &index.artifact_id == fact_ref.artifact_id()
-        && &index.artifact_evidence_hash == fact_ref.artifact_evidence_hash()
-        && &index.producer_node_id == fact_ref.producer_node_id()
-        && &index.capability_kind == fact_ref.capability_kind()
-        && &index.capability_version == fact_ref.capability_version()
-        && &index.adapter_kind == fact_ref.adapter_kind()
-        && &index.adapter_version == fact_ref.adapter_version()
 }
 
 fn fact_query_ref_authority_error(message: &'static str) -> RuntimeError {

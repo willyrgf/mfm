@@ -18,12 +18,9 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
     );
 
     let plan = CanonicalFactQueryPlan::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        FactQueryCompilerVersion::new("mfm.facts.query.v2").expect("compiler"),
+        FactQueryCompilerVersion::new("mfm.facts.query.v3").expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
-        ScopeDecisionEvidence::new(digest(2)),
         canonical_query.clone(),
         ordering.clone(),
         Some(10),
@@ -35,12 +32,9 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
         &canonical_query.content_digest()
     );
     assert!(CanonicalFactQueryPlan::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        FactQueryCompilerVersion::new("mfm.facts.query.v2").expect("compiler"),
+        FactQueryCompilerVersion::new("mfm.facts.query.v3").expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
-        ScopeDecisionEvidence::new(digest(2)),
         canonical_query,
         ordering,
         Some(0),
@@ -97,7 +91,7 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
     );
     let query: serde_json::Value =
         serde_json::from_slice(plan.canonical_query().as_bytes()).expect("query json");
-    assert_eq!(query["version"], "mfm.fact-query.v2");
+    assert_eq!(query["version"], "mfm.fact-query.v3");
     assert_eq!(query["fact_kind"], "chain.head");
     assert_eq!(query["resolved_descriptor"], descriptor_hash.as_str());
     assert_eq!(query["limit"], 25);

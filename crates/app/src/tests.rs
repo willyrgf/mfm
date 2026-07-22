@@ -3,10 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use mfm_capabilities::{CapabilitySpec, ReadExternalRole};
+use mfm_facts::MfmFactType as _;
 use mfm_program::{
-    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, MfmFactType as _, NoContext,
-    PublicOutputKey, ReadState, RootBuilder, ScopeKey, StateKey, StateRegistryBuilder, StateResult,
-    StateSpec, TypedProgramLaunchPlan,
+    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, NoContext, PublicOutputKey,
+    ReadState, RootBuilder, ScopeKey, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
 use mfm_store::v1::ExecutionClaimStore as _;

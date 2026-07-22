@@ -126,7 +126,7 @@ pub(crate) fn apply_projection(
     Ok(())
 }
 
-pub(crate) fn apply_projection_for_external_fact_indexes(
+pub(crate) fn apply_projection_for_external_fact_queries(
     projections: &mut ProjectionSnapshot,
     envelope: &KernelEventEnvelope,
 ) -> Result<()> {
@@ -134,9 +134,7 @@ pub(crate) fn apply_projection_for_external_fact_indexes(
         KernelEventPayload::RunAdmitted(payload) => {
             apply_run_admitted_base(projections, envelope.run_id(), &envelope.event_id, payload)?;
         }
-        KernelEventPayload::FactRecorded(payload) => {
-            apply_fact_recorded_record_only(projections, envelope, payload)?;
-        }
+        KernelEventPayload::FactRecorded(_) => {}
         _ => apply_projection(projections, envelope, &ArtifactByteAuthorityMap::new())?,
     }
     Ok(())
@@ -417,9 +415,7 @@ use self::side_effect_handlers::{
 
 #[path = "projection_apply/fact.rs"]
 mod fact_handlers;
-use self::fact_handlers::{
-    apply_fact_descriptor_artifact, apply_fact_recorded, apply_fact_recorded_record_only,
-};
+use self::fact_handlers::{apply_fact_descriptor_artifact, apply_fact_recorded};
 
 fn apply_cell_produced(
     projections: &mut ProjectionSnapshot,

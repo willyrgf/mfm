@@ -4,38 +4,34 @@ use super::*;
 fn required_artifact_precondition_is_atomic_with_append() {
     let artifact_id = artifact_id(50);
     let artifact_digest = content_digest(51);
-    let mut store = StoreContractRunStore::new();
     let run_id = run_id(52);
-    let evidence = event_artifact_ref(artifact_id, artifact_digest);
-    let request = default_commit_request(
-        &run_id,
-        StreamSeq::FIRST,
-        "artifact-ref",
-        vec![KernelEventPayload::ArtifactReferenced(
-            events::ArtifactReferenced {
-                spec_hash: spec_hash(1),
-                node_id: Some(node_id(20)),
-                attempt_id: Some(attempt_id(23)),
-                artifact_ref: evidence.clone(),
-            },
+    let mut store = admitted_store(&run_id, "artifact-precondition-run-start");
+    let evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
+    let request = typed_commit_request! {
+        run_id: run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("artifact-ref").expect("commit key"),
+        payloads: vec![retention_refs_appended_for_run(
+            &run_id,
+            artifact_id,
+            artifact_digest,
+            ArtifactRole::StateOutput,
         )],
-        vec![store_artifact_ref(
-            evidence.artifact_id.clone(),
-            evidence.content_digest.clone(),
-        )],
-    );
+        required_artifacts: vec![evidence],
+        preconditions: run_state_preconditions(RequiredRunState::Started),
+    };
 
     let artifacts =
         CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), Vec::new())
             .expect("missing artifact evidence set");
-    let commit = PreparedCommit::<AttemptTerminal>::new(request, artifacts)
-        .expect("prepare missing artifact");
+    let commit =
+        PreparedCommit::<Retention>::new(request, artifacts).expect("prepare missing artifact");
     let error = store
         .append_test_commit_plan(commit.into())
         .expect_err("missing artifact rejects commit");
     assert!(matches!(error, StoreError::MissingArtifact { .. }));
-    assert!(store.load_run_stream(&run_id).is_empty());
-    assert_eq!(store.expected_next_seq(&run_id), StreamSeq::FIRST);
+    assert_eq!(store.load_run_stream(&run_id).len(), 1);
+    assert_eq!(store.expected_next_seq(&run_id).as_u64(), 2);
 }
 
 #[test]
@@ -43,14 +39,14 @@ fn prepared_commit_rejects_unreferenced_admitted_artifact_without_persisting_it(
     let run_id = run_id(53);
     let artifact_id = artifact_id(54);
     let artifact_digest = content_digest(55);
-    let mut store = StoreContractRunStore::new();
+    let mut store = admitted_store(&run_id, "unreferenced-artifact-run-start");
     let admitted = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
 
     let error = store
         .append_prepared_commit_with_artifacts(
             default_commit_request(
                 &run_id,
-                StreamSeq::FIRST,
+                store.expected_next_seq(&run_id),
                 "unreferenced-artifact",
                 vec![state_attempt_started()],
                 Vec::new(),
@@ -62,25 +58,24 @@ fn prepared_commit_rejects_unreferenced_admitted_artifact_without_persisting_it(
         error,
         StoreError::UnreferencedArtifactEvidence { .. }
     ));
-    assert!(store.load_run_stream(&run_id).is_empty());
+    assert_eq!(store.load_run_stream(&run_id).len(), 1);
 
     let missing_evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     let error = store
         .append_prepared_commit_with_artifacts(
-            default_commit_request(
-                &run_id,
-                StreamSeq::FIRST,
-                "artifact-still-missing",
-                vec![KernelEventPayload::ArtifactReferenced(
-                    events::ArtifactReferenced {
-                        spec_hash: spec_hash(1),
-                        node_id: Some(node_id(20)),
-                        attempt_id: Some(attempt_id(23)),
-                        artifact_ref: event_artifact_ref(artifact_id, artifact_digest),
-                    },
+            typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new("artifact-still-missing").expect("commit key"),
+                payloads: vec![retention_refs_appended_for_run(
+                    &run_id,
+                    artifact_id,
+                    artifact_digest,
+                    ArtifactRole::StateOutput,
                 )],
-                vec![missing_evidence],
-            ),
+                required_artifacts: vec![missing_evidence],
+                preconditions: run_state_preconditions(RequiredRunState::Started),
+            },
             Vec::new(),
         )
         .expect_err("rejected unreferenced evidence must not leak into store");
@@ -280,38 +275,37 @@ fn admitted_artifacts_are_rolled_back_when_commit_validation_fails() {
     let run_id = run_id(56);
     let artifact_id = artifact_id(57);
     let artifact_digest = content_digest(58);
-    let mut store = StoreContractRunStore::new();
+    let mut store = admitted_store(&run_id, "artifact-rollback-run-start");
     let evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
 
     let error = store
         .append_prepared_commit(default_commit_request(
             &run_id,
-            StreamSeq::FIRST,
+            store.expected_next_seq(&run_id),
             "cell-without-attempt-complete",
             vec![cell_produced(artifact_id.clone(), artifact_digest.clone())],
             vec![evidence],
         ))
         .expect_err("projection failure rejects commit after artifact validation");
     assert!(matches!(error, StoreError::ProjectionConflict { .. }));
-    assert!(store.load_run_stream(&run_id).is_empty());
+    assert_eq!(store.load_run_stream(&run_id).len(), 1);
 
     let missing_evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     let error = store
         .append_prepared_commit_with_artifacts(
-            default_commit_request(
-                &run_id,
-                StreamSeq::FIRST,
-                "artifact-not-leaked",
-                vec![KernelEventPayload::ArtifactReferenced(
-                    events::ArtifactReferenced {
-                        spec_hash: spec_hash(1),
-                        node_id: Some(node_id(20)),
-                        attempt_id: Some(attempt_id(23)),
-                        artifact_ref: event_artifact_ref(artifact_id, artifact_digest),
-                    },
+            typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new("artifact-not-leaked").expect("commit key"),
+                payloads: vec![retention_refs_appended_for_run(
+                    &run_id,
+                    artifact_id,
+                    artifact_digest,
+                    ArtifactRole::StateOutput,
                 )],
-                vec![missing_evidence],
-            ),
+                required_artifacts: vec![missing_evidence],
+                preconditions: run_state_preconditions(RequiredRunState::Started),
+            },
             Vec::new(),
         )
         .expect_err("failed commit must not persist admitted artifact evidence");

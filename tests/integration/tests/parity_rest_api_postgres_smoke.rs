@@ -28,7 +28,6 @@ async fn parity_rest_postgres_smoke() {
     let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
-        fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
         configured_store: Some(store.clone()),
         store,
         runtime_config_path: None,
@@ -106,7 +105,7 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
     let store_scope_id = store.load_store_scope_id().await.expect("store scope");
     let launch = mfm_app::prepare_entry_point_run_launch(
         &store,
-        "mfm.portfolio/snapshot@1",
+        "mfm.portfolio/snapshot@2",
         &publication.target,
         &mfm_app::production_certification_registry().expect("production certification registry"),
         store_scope_id.clone(),
@@ -117,7 +116,7 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
 
     assert_eq!(
         launch.evidence.entry_point.entry_point_id.as_str(),
-        "mfm.portfolio/snapshot@1"
+        "mfm.portfolio/snapshot@2"
     );
     assert_eq!(launch.evidence.entry_point.configured_targets.len(), 1);
     let source = &launch.evidence.entry_point.configured_targets[0];
@@ -134,7 +133,7 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
         .expect("production certification registry for rejection checks");
     let invalid_target = mfm_app::prepare_entry_point_run_launch(
         &store,
-        "mfm.portfolio/snapshot@1",
+        "mfm.portfolio/snapshot@2",
         "mfm.reserved",
         &registry,
         store_scope_id.clone(),
@@ -160,7 +159,7 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
         .expect("replace current schema for rejection check");
     let wrong_schema = mfm_app::prepare_entry_point_run_launch(
         &store,
-        "mfm.portfolio/snapshot@1",
+        "mfm.portfolio/snapshot@2",
         &publication.target,
         &registry,
         store_scope_id.clone(),
@@ -195,7 +194,7 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
     .expect("publish mismatched target row");
     let mismatch = mfm_app::prepare_entry_point_run_launch(
         &store,
-        "mfm.portfolio/snapshot@1",
+        "mfm.portfolio/snapshot@2",
         "acme/other",
         &registry,
         store_scope_id,
@@ -233,24 +232,23 @@ async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_repla
     let runtime_config_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &rpc_url);
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
-        fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
         configured_store: Some(store.clone()),
         store: store.clone(),
         runtime_config_path: Some(runtime_config_path.clone()),
     });
     let request = json!({
-        "entry_point": "mfm.portfolio/snapshot@1",
+        "entry_point": "mfm.portfolio/snapshot@2",
         "target": publication.target.clone(),
         "invocation_key": "postgres-rest-portfolio-snapshot",
     });
 
     for malformed_request in [
         json!({
-            "entry_point": "mfm.portfolio/snapshot@1",
+            "entry_point": "mfm.portfolio/snapshot@2",
             "request": {},
         }),
         json!({
-            "entry_point": "mfm.portfolio/snapshot@1",
+            "entry_point": "mfm.portfolio/snapshot@2",
             "target": publication.target.clone(),
             "request": {},
         }),
@@ -294,7 +292,7 @@ async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_repla
         .expect("run admission evidence");
     assert_eq!(
         admitted.entry_point.entry_point_id.as_str(),
-        "mfm.portfolio/snapshot@1"
+        "mfm.portfolio/snapshot@2"
     );
     assert_eq!(admitted.entry_point.configured_targets.len(), 1);
     let source = &admitted.entry_point.configured_targets[0];
@@ -305,7 +303,6 @@ async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_repla
     std::fs::remove_file(&runtime_config_path).expect("remove live runtime config");
     let reader = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Read,
-        fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
         configured_store: None,
         store,
         runtime_config_path: None,

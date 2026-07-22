@@ -134,10 +134,6 @@ impl StateSpec for AppFactState {
         }])
     }
 
-    fn emitted_fact_descriptors() -> mfm_program::Result<Vec<mfm_program::FactDescriptorRef>> {
-        Ok(vec![mfm_program::fact_descriptor_ref::<AppLaunchFact>()?])
-    }
-
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
         Ok(Self {
             config: config.into_inner(),
@@ -148,6 +144,7 @@ impl StateSpec for AppFactState {
 impl ReadState for AppFactState {
     type Plan = AppFactValue;
     type Evidence = AppFactValue;
+    type Facts = mfm_values::NonEmpty<AppLaunchFact>;
 
     fn plan(
         &self,
@@ -164,7 +161,7 @@ impl ReadState for AppFactState {
         input: &Self::Input,
         evidence: &mfm_program::ExternalReadEvidenceSet<Self::Evidence>,
         context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
+    ) -> StateResult<(Self::Output, Self::Facts)> {
         if !evidence.fact_query_evidence().is_empty()
             || evidence.primary_evidence() != &self.plan(input, context)?
         {
@@ -172,7 +169,16 @@ impl ReadState for AppFactState {
                 "app fact fixture evidence did not match its plan".to_owned(),
             ));
         }
-        Ok(evidence.primary_evidence().clone())
+        Ok((
+            evidence.primary_evidence().clone(),
+            mfm_values::NonEmpty::new(
+                AppLaunchFact {
+                    subject: input.clone(),
+                    response: AppFactValue { amount: 15 },
+                },
+                Vec::new(),
+            ),
+        ))
     }
 }
 
@@ -211,62 +217,32 @@ pub(super) fn app_fact_launch_plan_with_state_key(state_key: &str) -> TypedProgr
     TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds).expect("launch plan")
 }
 
-pub(super) fn app_fact_certification_registry(
-    include_fact_descriptor: bool,
-) -> CertificationRegistry {
+pub(super) fn app_fact_certification_registry() -> CertificationRegistry {
     let mut registry = CertificationRegistry::new();
     registry
         .register_state::<AppFactState>()
         .expect("certification state registration");
-    if include_fact_descriptor {
-        registry
-            .register_fact_type::<AppLaunchFact>()
-            .expect("fact descriptor registration");
-    }
     registry
 }
 
-pub(super) struct AppFactRecordingRunner {
-    visibility: mfm_program::facts::FactVisibility,
-}
+pub(super) struct AppFactReadExecutor;
 
-impl mfm_runtime::ErasedNodeRunner for AppFactRecordingRunner {
-    fn run_erased<'a>(
+impl mfm_runtime::ExternalReadPlanExecutor<AppFactState> for AppFactReadExecutor {
+    fn validate_ingress<'a>(
         &'a self,
-        ctx: mfm_runtime::ErasedRunCtx<'a>,
-    ) -> mfm_runtime::ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let value = AppFactValue { amount: 14 };
-            let artifacts = mfm_runtime::RunnerArtifactBuilder::new(&ctx);
-            let payloads = mfm_runtime::RunnerPayloadBuilder::new(&ctx);
-            let output_artifact = artifacts.state_output(&value)?;
-            let output_payload = payloads.cell_produced(&output_artifact)?;
-            let mut output = mfm_runtime::RunnerOutputBuilder::new(&ctx);
-            output.record_external_read_evidence(&value)?;
-            output.stage_attempt_artifact(&output_artifact)?;
-            output.record_fact(
-                mfm_runtime::FactRecordInput::new(
-                    AppLaunchFact {
-                        subject: AppFactValue { amount: 7 },
-                        response: AppFactValue { amount: 15 },
-                    },
-                    self.visibility.clone(),
-                )
-                .observed_at("2026-07-02T00:00:00Z"),
-                app_fact_runner_capability_binding(),
-            )?;
-            output.payload(output_payload);
-            Ok(output.finish())
-        })
+        _ctx: mfm_runtime::RunnerIngressContext<'a>,
+        _state: &'a AppFactState,
+    ) -> mfm_runtime::RunnerIngressFuture<'a> {
+        Box::pin(async { Ok(()) })
     }
-}
 
-pub(super) fn app_fact_runner_capability_binding() -> mfm_runtime::RunnerCapabilityBinding {
-    mfm_runtime::RunnerCapabilityBinding::for_capability::<AppFactReadCap>(
-        app_fact_adapter_kind(),
-        app_fact_adapter_version(),
-    )
-    .expect("runner capability binding")
+    fn execute<'a>(
+        &'a self,
+        plan: &'a AppFactValue,
+        _ctx: &'a mfm_runtime::ErasedRunCtx<'_>,
+    ) -> mfm_runtime::ExternalReadExecutionFuture<'a, AppFactValue> {
+        Box::pin(async move { Ok(mfm_runtime::ExternalReadExecution::primary(plan.clone())) })
+    }
 }
 
 pub(super) fn app_launch_fact_query_request() -> PublicFactQueryRequest {
@@ -284,7 +260,7 @@ pub(super) fn app_launch_fact_query_request() -> PublicFactQueryRequest {
 
 pub(super) fn app_fact_runner_registry(
     runtime_spec: &CertifiedRuntimeSpec,
-    visibility: mfm_program::facts::FactVisibility,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 ) -> ErasedRunnerRegistry {
     let node = runtime_spec
         .spec()
@@ -298,10 +274,7 @@ pub(super) fn app_fact_runner_registry(
     let factory_id = events::RunnerFactoryId::new(descriptor.runner.clone()).expect("factory id");
     let executable = events::ExecutableIdentity {
         factory_id: factory_id.clone(),
-        cargo_package_digest: content_digest_for_bytes(b"mfm.app.test.fact-runner.cargo"),
         binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-runner.binary"),
-        nix_derivation_hash: None,
-        nix_output_hash: None,
     };
     let mut registry = ErasedRunnerRegistry::new();
     registry
@@ -316,7 +289,10 @@ pub(super) fn app_fact_runner_registry(
             node.descriptor_id.clone(),
             factory_id.clone(),
             executable,
-            Arc::new(AppFactRecordingRunner { visibility }),
+            Arc::new(mfm_runtime::ExternalReadRunner::<AppFactState, _>::new(
+                artifacts,
+                AppFactReadExecutor,
+            )),
         )
         .expect("app fact runner registration")
         .register_adapter_executable(
@@ -324,40 +300,29 @@ pub(super) fn app_fact_runner_registry(
             app_fact_adapter_version(),
             events::ExecutableIdentity {
                 factory_id,
-                cargo_package_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.cargo"),
                 binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.binary"),
-                nix_derivation_hash: None,
-                nix_output_hash: None,
             },
         )
         .expect("app fact runner registration");
     registry
 }
 
-pub(super) fn prepare_app_fact_launch(
-    include_fact_descriptor: bool,
-) -> Result<RunLaunchRequest, PublicError> {
-    prepare_app_fact_launch_with_invocation_key(include_fact_descriptor, None)
+pub(super) fn prepare_app_fact_launch() -> Result<RunLaunchRequest, PublicError> {
+    prepare_app_fact_launch_with_invocation_key(None)
 }
 
 pub(super) fn prepare_app_fact_launch_with_invocation_key(
-    include_fact_descriptor: bool,
     invocation_key_digest: Option<ContentDigest>,
 ) -> Result<RunLaunchRequest, PublicError> {
-    prepare_app_fact_launch_with_invocation_key_and_state_key(
-        include_fact_descriptor,
-        invocation_key_digest,
-        "fact-state",
-    )
+    prepare_app_fact_launch_with_invocation_key_and_state_key(invocation_key_digest, "fact-state")
 }
 
 pub(super) fn prepare_app_fact_launch_with_invocation_key_and_state_key(
-    include_fact_descriptor: bool,
     invocation_key_digest: Option<ContentDigest>,
     state_key: &str,
 ) -> Result<RunLaunchRequest, PublicError> {
     let plan = app_fact_launch_plan_with_state_key(state_key);
-    let registry = app_fact_certification_registry(include_fact_descriptor);
+    let registry = app_fact_certification_registry();
     let (certified_spec, scoped, config_inputs, seed_inputs) =
         certify_launch_plan(&plan, &registry)?;
 
@@ -388,51 +353,30 @@ pub(super) fn default_invocation_key_digest() -> ContentDigest {
 
 pub(super) async fn launch_app_fact_run(
 ) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
-    launch_app_fact_run_with_visibility(mfm_program::facts::FactVisibility::indexed_default(
-        mfm_program::facts::FactAudience::Platform,
-    ))
-    .await
+    launch_app_fact_run_in_store(store::AsyncInMemoryRunStore::default(), None).await
 }
 
-pub(super) async fn launch_app_fact_run_with_visibility(
-    visibility: mfm_program::facts::FactVisibility,
-) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
-    let store = store::AsyncInMemoryRunStore::default();
-    launch_app_fact_run_in_store_with_visibility(store, visibility, None).await
-}
-
-pub(super) async fn launch_app_fact_run_in_store_with_visibility(
+pub(super) async fn launch_app_fact_run_in_store(
     store: store::AsyncInMemoryRunStore,
-    visibility: mfm_program::facts::FactVisibility,
     invocation_key_digest: Option<ContentDigest>,
 ) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
-    launch_app_fact_run_in_store_with_visibility_and_state_key(
-        store,
-        visibility,
-        invocation_key_digest,
-        "fact-state",
-        true,
-    )
-    .await
+    launch_app_fact_run_in_store_with_state_key(store, invocation_key_digest, "fact-state", true)
+        .await
 }
 
-pub(super) async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
+pub(super) async fn launch_app_fact_run_in_store_with_state_key(
     store: store::AsyncInMemoryRunStore,
-    visibility: mfm_program::facts::FactVisibility,
     invocation_key_digest: Option<ContentDigest>,
     state_key: &str,
     require_completion: bool,
 ) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
-    let request = prepare_app_fact_launch_with_invocation_key_and_state_key(
-        true,
-        invocation_key_digest,
-        state_key,
-    )
-    .expect("prepared app fact launch");
+    let request =
+        prepare_app_fact_launch_with_invocation_key_and_state_key(invocation_key_digest, state_key)
+            .expect("prepared app fact launch");
     let runtime_spec =
         CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
-    let runners = app_fact_runner_registry(&runtime_spec, visibility);
-    let registry = app_fact_certification_registry(true);
+    let runners = app_fact_runner_registry(&runtime_spec, Arc::new(store.clone()));
+    let registry = app_fact_certification_registry();
     let run_id = request.run_id.clone();
     let execution_scope =
         store::ExecutionClaimScope::from_run_identity_material(&request.identity_material);
@@ -472,8 +416,8 @@ pub(super) async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
         if !require_completion
             && committed
                 .projection()
-                .fact_records()
-                .any(|(_claim_id, record)| record.source_run_id == run_id)
+                .fact_query_entries()
+                .any(|(_claim_id, fact)| fact.source_run_id() == &run_id)
         {
             break;
         }

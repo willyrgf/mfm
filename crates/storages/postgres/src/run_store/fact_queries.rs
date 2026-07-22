@@ -1,4 +1,6 @@
 use super::*;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Result of a Postgres fact query execution.
 pub type PostgresFactQueryResult = mfm_facts::FactQueryResult;
@@ -7,28 +9,20 @@ pub type PostgresFactQueryResult = mfm_facts::FactQueryResult;
 pub type PostgresFactQueryRow = mfm_facts::FactQueryResultRow;
 
 struct AuthoritativeFactQueryRow {
-    index: mfm_store::v1::FactIndexProjection,
+    projection: mfm_store::v1::FactQueryProjection,
     terms: BTreeMap<mfm_facts::FactFieldId, mfm_facts::FactCanonicalScalar>,
     row: PostgresFactQueryRow,
 }
 
 struct AuthoritativeFactQuerySnapshot {
     projection: ProjectionSnapshot,
-    descriptor_catalog_watermark: mfm_facts::DescriptorCatalogWatermark,
+    store_scope_id: StoreScopeId,
     store_commit_order: mfm_facts::StoreCommitOrder,
 }
 
 impl AuthoritativeFactQuerySnapshot {
-    fn read_frontier(
-        &self,
-        plan: &mfm_facts::CanonicalFactQueryPlan,
-    ) -> mfm_facts::StoreReadFrontier {
-        mfm_facts::StoreReadFrontier::new(
-            plan.store_scope().clone(),
-            plan.query_scope().clone(),
-            self.descriptor_catalog_watermark,
-            self.store_commit_order,
-        )
+    fn read_frontier(&self) -> mfm_facts::StoreReadFrontier {
+        mfm_facts::StoreReadFrontier::new(self.store_scope_id.clone(), self.store_commit_order)
     }
 }
 
@@ -58,6 +52,24 @@ impl PostgresStore {
     }
 }
 
+impl mfm_store::v1::FactQueryStore for PostgresStore {
+    type Error = PostgresStoreError;
+
+    fn fact_query_implementation_id(&self) -> &'static str {
+        "mfm.storage.postgres.fact-query.v1"
+    }
+
+    fn execute_fact_queries<'a>(
+        &'a self,
+        plans: &'a [mfm_facts::CanonicalFactQueryPlan],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<mfm_facts::FactQueryResult>>> + Send + 'a>> {
+        if plans.is_empty() {
+            return Box::pin(std::future::ready(Ok(Vec::new())));
+        }
+        Box::pin(async move { execute_fact_queries_client(&self.pool, plans).await })
+    }
+}
+
 async fn execute_fact_queries_client(
     pool: &PgPool,
     plans: &[mfm_facts::CanonicalFactQueryPlan],
@@ -70,22 +82,27 @@ async fn execute_fact_queries_client(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_error("failed to set fact query transaction mode", error))?;
-    let authority_events = load_fact_authority_events_tx(&mut tx).await?;
+    let results = execute_fact_queries_tx(&mut tx, plans).await?;
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit fact query transaction", error))?;
+    Ok(results)
+}
+
+pub(super) async fn execute_fact_queries_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    plans: &[mfm_facts::CanonicalFactQueryPlan],
+) -> Result<Vec<PostgresFactQueryResult>> {
+    let authority_events = load_fact_authority_events_tx(tx).await?;
     let snapshot = AuthoritativeFactQuerySnapshot {
-        projection: load_authoritative_fact_projection_snapshot_tx(&mut tx, &authority_events)
-            .await?,
-        descriptor_catalog_watermark: descriptor_catalog_watermark(&authority_events)?,
-        store_commit_order: mfm_facts::StoreCommitOrder::new(
-            load_store_commit_order_tx(&mut tx).await?,
-        ),
+        projection: load_authoritative_fact_projection_snapshot_tx(tx, &authority_events).await?,
+        store_scope_id: load_store_scope_id_tx(tx).await?,
+        store_commit_order: mfm_facts::StoreCommitOrder::new(load_store_commit_order_tx(tx).await?),
     };
     let mut results = Vec::with_capacity(plans.len());
     for plan in plans {
         results.push(execute_fact_query(plan, &snapshot)?);
     }
-    tx.commit()
-        .await
-        .map_err(|error| database_error("failed to commit fact query transaction", error))?;
     Ok(results)
 }
 
@@ -106,8 +123,7 @@ fn build_fact_query_receipt(
     snapshot: &AuthoritativeFactQuerySnapshot,
 ) -> Result<mfm_facts::FactQueryReceipt> {
     mfm_facts::FactQueryReceipt::from_rows(
-        snapshot.read_frontier(plan),
-        mfm_facts::StoreReadFrontierType::Snapshot,
+        snapshot.read_frontier(),
         rows,
         !shape.return_fields().is_empty(),
         plan.limit(),
@@ -115,24 +131,13 @@ fn build_fact_query_receipt(
     .map_err(fact_error)
 }
 
-fn descriptor_catalog_watermark(
-    authority_events: &[KernelEventEnvelope],
-) -> Result<mfm_facts::DescriptorCatalogWatermark> {
-    let mut descriptors = BTreeSet::new();
-    for event in authority_events {
-        if let events::KernelEventPayload::RunAdmitted(payload) = event.payload() {
-            descriptors.extend(
-                payload
-                    .fact_descriptor_artifacts
-                    .iter()
-                    .map(|artifact| artifact.content_digest.clone()),
-            );
-        }
-    }
-    let count = u64::try_from(descriptors.len()).map_err(|_| {
-        PostgresStoreError::Corruption("fact descriptor catalog watermark overflow".to_owned())
-    })?;
-    Ok(mfm_facts::DescriptorCatalogWatermark::new(count))
+async fn load_store_scope_id_tx(tx: &mut Transaction<'_, Postgres>) -> Result<StoreScopeId> {
+    let row = sqlx::query("SELECT store_scope_id FROM store_metadata WHERE singleton")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to load store scope id", error))?;
+    StoreScopeId::new(PgRowReader::new(&row, "store_metadata").required_string("store_scope_id")?)
+        .map_err(Into::into)
 }
 
 async fn load_store_commit_order_tx(tx: &mut Transaction<'_, Postgres>) -> Result<u64> {
@@ -201,20 +206,12 @@ pub(super) async fn load_authoritative_fact_projection_snapshot_tx(
             "descriptor",
         )?;
         merge_fact_projection_family(
-            &mut parts.fact_records,
+            &mut parts.fact_query_entries,
             snapshot
-                .fact_records()
+                .fact_query_entries()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
-            "record",
-        )?;
-        merge_fact_projection_family(
-            &mut parts.fact_index_entries,
-            snapshot
-                .fact_index_entries()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            "index",
+            "query",
         )?;
         merge_fact_projection_family(
             &mut parts.fact_term_entries,
@@ -269,14 +266,11 @@ fn load_authoritative_fact_query_rows(
     snapshot: &ProjectionSnapshot,
 ) -> Result<Vec<PostgresFactQueryRow>> {
     let mut rows = Vec::new();
-    for (claim_id, index) in snapshot.fact_index_entries() {
-        if index.fact_descriptor_hash != *plan.resolved_descriptor()
-            || index.audience != plan.query_scope().audience()
-            || index.visibility_scope != plan.query_scope().scope()
-        {
+    for (claim_id, projection) in snapshot.fact_query_entries() {
+        if projection.fact_descriptor_hash() != plan.resolved_descriptor() {
             continue;
         }
-        let fact_ref = index.internal_ref()?;
+        let fact_ref = projection.internal_ref()?;
         if shape
             .content_identity()
             .is_some_and(|identity| !identity.matches_internal_ref(&fact_ref))
@@ -309,7 +303,7 @@ fn load_authoritative_fact_query_rows(
             })
             .collect::<Result<Vec<_>>>()?;
         rows.push(AuthoritativeFactQueryRow {
-            index: index.clone(),
+            projection: projection.clone(),
             terms,
             row: PostgresFactQueryRow::new(fact_ref, returned_fields),
         });
@@ -336,9 +330,17 @@ fn compare_authoritative_fact_rows(
             None => return std::cmp::Ordering::Equal,
         }
     }
-    left.index
-        .source_run_id
-        .cmp(&right.index.source_run_id)
-        .then_with(|| left.index.source_seq.cmp(&right.index.source_seq))
-        .then_with(|| left.index.source_ordinal.cmp(&right.index.source_ordinal))
+    left.projection
+        .source_run_id()
+        .cmp(right.projection.source_run_id())
+        .then_with(|| {
+            left.projection
+                .source_seq()
+                .cmp(&right.projection.source_seq())
+        })
+        .then_with(|| {
+            left.projection
+                .source_ordinal()
+                .cmp(&right.projection.source_ordinal())
+        })
 }

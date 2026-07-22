@@ -629,34 +629,7 @@ pub fn execute_fact_query_projection_for_test(
     projection: &ProjectionSnapshot,
     plan: &mfm_facts::CanonicalFactQueryPlan,
 ) -> Result<Vec<FactQueryProjectionRowForTest>> {
-    let shape = mfm_facts::parse_canonical_fact_query_shape(plan)
-        .map_err(|error| StoreError::Identity(error.to_string()))?;
-    let mut rows = Vec::new();
-    for (_claim_id, entry) in projection.fact_index_entries() {
-        if entry.fact_descriptor_hash != *plan.resolved_descriptor()
-            || entry.audience != plan.query_scope().audience()
-            || entry.visibility_scope != plan.query_scope().scope()
-        {
-            continue;
-        }
-        let fact_ref = entry.internal_ref()?;
-        if shape
-            .content_identity()
-            .is_some_and(|identity| !identity.matches_internal_ref(&fact_ref))
-            || !fact_entry_matches_predicates(projection, entry, &shape)
-        {
-            continue;
-        }
-        rows.push(FactQueryProjectionRowForTest::new(
-            fact_ref,
-            returned_fields_from_projection(projection, entry, &shape)?,
-        ));
-    }
-    rows.sort_by(|left, right| compare_fact_projection_rows(projection, plan, left, right));
-    if let Some(limit) = plan.limit() {
-        rows.truncate(limit as usize);
-    }
-    Ok(rows)
+    super::fact_query::execute_fact_query_projection(projection, plan)
 }
 
 /// Builds deterministic fact-query evidence for projection-backed query rows.
@@ -667,99 +640,22 @@ pub fn fact_query_receipt_for_projection_for_test(
 ) -> mfm_facts::FactQueryReceipt {
     let shape = mfm_facts::parse_canonical_fact_query_shape(plan).expect("query shape");
     let max_order = projection
-        .fact_index_entries()
-        .filter(|(_claim_id, entry)| {
-            entry.audience == plan.query_scope().audience()
-                && entry.visibility_scope == plan.query_scope().scope()
-        })
-        .map(|(_claim_id, entry)| entry.store_commit_order)
+        .fact_query_entries()
+        .map(|(_claim_id, entry)| entry.store_commit_order())
         .max()
         .unwrap_or_default();
     let read_frontier = mfm_facts::StoreReadFrontier::new(
-        plan.store_scope().clone(),
-        plan.query_scope().clone(),
-        mfm_facts::DescriptorCatalogWatermark::new(projection.fact_descriptors().count() as u64),
+        StoreScopeId::new("mfm.store_scope.v1:01010101010101010101010101010101")
+            .expect("store scope"),
         mfm_facts::StoreCommitOrder::new(max_order),
     );
     mfm_facts::FactQueryReceipt::from_rows(
         read_frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
         rows,
         !shape.return_fields().is_empty(),
         plan.limit(),
     )
     .expect("fact query receipt")
-}
-
-fn fact_entry_matches_predicates(
-    projection: &ProjectionSnapshot,
-    entry: &FactIndexProjection,
-    shape: &mfm_facts::CompiledFactQueryShape,
-) -> bool {
-    shape.predicates().iter().all(|predicate| {
-        projection
-            .fact_term(&entry.fact_claim_id, predicate.field_id())
-            .is_some_and(|term| predicate.matches_scalar(&term.value))
-    })
-}
-
-fn returned_fields_from_projection(
-    projection: &ProjectionSnapshot,
-    entry: &FactIndexProjection,
-    shape: &mfm_facts::CompiledFactQueryShape,
-) -> Result<Vec<mfm_facts::FactFieldValue>> {
-    shape
-        .return_fields()
-        .iter()
-        .filter_map(|return_field| {
-            projection
-                .fact_term(&entry.fact_claim_id, return_field)
-                .map(|term| {
-                    mfm_facts::FactFieldValue::new(
-                        term.field_id.clone(),
-                        term.value_type,
-                        term.value.clone(),
-                    )
-                    .map_err(|error| StoreError::Identity(error.to_string()))
-                })
-        })
-        .collect()
-}
-
-fn compare_fact_projection_rows(
-    projection: &ProjectionSnapshot,
-    plan: &mfm_facts::CanonicalFactQueryPlan,
-    left: &FactQueryProjectionRowForTest,
-    right: &FactQueryProjectionRowForTest,
-) -> std::cmp::Ordering {
-    for term in plan.ordering().terms() {
-        let left_value =
-            fact_ordering_value(projection, left.fact_ref().fact_claim_id(), term.field_id());
-        let right_value = fact_ordering_value(
-            projection,
-            right.fact_ref().fact_claim_id(),
-            term.field_id(),
-        );
-        let ordering = term
-            .compare_values(left_value, right_value)
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if ordering != std::cmp::Ordering::Equal {
-            return ordering;
-        }
-    }
-    left.fact_ref()
-        .fact_claim_id()
-        .cmp(right.fact_ref().fact_claim_id())
-}
-
-fn fact_ordering_value<'a>(
-    projection: &'a ProjectionSnapshot,
-    claim_id: &mfm_facts::FactClaimId,
-    field_id: &mfm_facts::FactFieldId,
-) -> Option<&'a mfm_facts::FactCanonicalScalar> {
-    projection
-        .fact_term(claim_id, field_id)
-        .map(|term| &term.value)
 }
 
 /// Input for a deterministic fact-query receipt fixture.
@@ -780,7 +676,6 @@ pub fn fact_query_receipt_for_test(
 ) -> mfm_facts::FactQueryReceipt {
     mfm_facts::FactQueryReceipt::from_rows(
         input.read_frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
         input.rows,
         input.include_returned_field_summaries,
         input.limit,

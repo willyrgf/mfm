@@ -2,7 +2,7 @@
 //! Typed application assembly for certified MFM runs.
 //!
 //! `mfm-app` is the typed boundary used by binaries and process adapters. Its sole published
-//! objective is `mfm.portfolio/snapshot@1`, selected with one target-keyed portfolio config. This
+//! objective is `mfm.portfolio/snapshot@2`, selected with one target-keyed portfolio config. This
 //! crate resolves the current target, plans, certifies, stages launch material, and wires typed
 //! services for start, resume, replay, and public-output rendering. Production assembly registers
 //! EVM balance collection only as a child of the portfolio objective; transaction submission and
@@ -48,24 +48,22 @@ pub use public_facts::{
     FactPublicQueryService, FactPublicRefResolver, PublicFactDescriptorRef,
     PublicFactDescriptorSummary, PublicFactExplain, PublicFactFieldSummary, PublicFactFieldValue,
     PublicFactKindSummary, PublicFactOrderingSummary, PublicFactOrderingTermSummary,
-    PublicFactPredicate, PublicFactQueryExecution, PublicFactQueryExecutor, PublicFactQueryFuture,
-    PublicFactQueryPage, PublicFactQueryRequest, PublicFactQuerySelector, PublicFactRef,
-    PublicFactRefId, PublicFactScalarValue, PublicFactShapeSelector,
+    PublicFactPredicate, PublicFactQueryPage, PublicFactQueryRequest, PublicFactQuerySelector,
+    PublicFactRef, PublicFactRefId, PublicFactScalarValue, PublicFactShapeSelector,
 };
 
 #[cfg(any(test, feature = "test-support"))]
 pub use public_facts::{
-    assert_public_fact_json_redacts_private_tokens_for_test, PublicFactVisibilityFixtureForTest,
+    assert_public_fact_json_redacts_private_tokens_for_test, PublicFactFixtureForTest,
 };
 
 #[cfg(test)]
-pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow};
+pub(crate) use public_facts::public_ref_id;
 
 mod btc_collector;
 mod config_setup;
 mod entry_point;
 mod evm_runtime;
-mod fact_index;
 mod live_transports;
 mod public_facts;
 mod replay_verifiers;
@@ -104,49 +102,52 @@ pub use self::errors::{ErrorClass, PublicError};
 /// Environment variable that selects the live runtime config file.
 pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
 
-const MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.runtime.managed-fact-record.v1";
-
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
 
 /// Builds live typed async app services with explicit certification.
-pub fn make_run_services<S, A>(
+pub fn make_run_services<S>(
     runners: ErasedRunnerRegistry,
-    store: S,
-    artifacts: A,
+    store: Arc<S>,
     certification_registry: CertificationRegistry,
-) -> RunServices<S, A>
+) -> RunServices<S>
 where
-    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + Send
+        + Sync
+        + 'static,
 {
-    let runtime_artifacts = Arc::new(artifacts.clone());
+    let runtime_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
     RunServices::new_with_certification_registry(
         SerialTypedScheduler::new(runners, runtime_artifacts),
         store,
-        artifacts,
         certification_registry,
     )
 }
 
 /// Builds evidence-only async app services with explicit certification.
-pub fn make_run_read_services<S, A>(
-    store: S,
-    artifacts: A,
+pub fn make_run_read_services<S>(
+    store: Arc<S>,
     certification_registry: CertificationRegistry,
-) -> RunReadServices<S, A>
+) -> RunReadServices<S>
 where
-    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + Send
+        + Sync
+        + 'static,
 {
-    RunReadServices::new_with_certification_registry(store, artifacts, certification_registry)
+    RunReadServices::new_with_certification_registry(store, certification_registry)
 }
 
 /// Production typed run services backed by the Postgres run store.
-pub type ProductionRunServices = RunServices<PostgresStore, PostgresStore>;
+pub type ProductionRunServices = RunServices<PostgresStore>;
 
 /// Production evidence-only run services backed by the Postgres run store.
-pub type ProductionRunReadServices = RunReadServices<PostgresStore, PostgresStore>;
+pub type ProductionRunReadServices = RunReadServices<PostgresStore>;
 
 /// Production public fact query service backed by the Postgres fact query executor.
 pub type ProductionFactPublicQueryService = FactPublicQueryService<PostgresStore>;
@@ -169,7 +170,7 @@ pub async fn connect_production_fact_public_query_service(
         .await
         .map_err(async_app_store_error)?;
     let catalog = FactCatalogService::from_retained_public_projection(&store, &projection).await?;
-    FactPublicQueryService::new(catalog, store)
+    FactPublicQueryService::new(catalog, Arc::new(store))
 }
 
 fn production_database_url(database_url: Option<&str>) -> Result<String, PublicError> {
@@ -190,61 +191,39 @@ pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, PublicError> {
-    let store = connect_production_store(database_url).await?;
-    // Portfolio SelectHoldings requires the Postgres fact-index provider.
-    let fact_index = production_fact_index_read_provider(store.clone());
-    let runners =
-        production_runner_registry(Arc::new(store.clone()), fact_index, runtime_config_path)?;
+    let store = Arc::new(connect_production_store(database_url).await?);
+    let runners = production_runner_registry(store.clone(), runtime_config_path)?;
     let certification_registry = production_certification_registry()?;
-    Ok(make_run_services(
-        runners,
-        store.clone(),
-        store,
-        certification_registry,
-    ))
+    Ok(make_run_services(runners, store, certification_registry))
 }
 
 /// Builds production evidence-only run services backed by the Postgres run store.
 pub async fn connect_production_run_read_services(
     database_url: Option<&str>,
 ) -> Result<ProductionRunReadServices, PublicError> {
-    let store = connect_production_store(database_url).await?;
+    let store = Arc::new(connect_production_store(database_url).await?);
     let certification_registry = production_certification_registry()?;
-    Ok(make_run_read_services(
-        store.clone(),
-        store.clone(),
-        certification_registry,
-    ))
+    Ok(make_run_read_services(store, certification_registry))
 }
 
 /// Builds the production typed runner registry for this process.
 ///
 /// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Domain runners
 /// register here as certified typed descriptor bindings. Portfolio snapshots require an explicit
-/// Platform/Control [`mfm_fact_capabilities::FactIndexReadProvider`] — production wiring must supply
-/// the Postgres implementation from [`production_fact_index_read_provider`].
-pub fn production_runner_registry(
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
+/// Fact queries and retained artifacts are bound to the same supplied store object.
+pub fn production_runner_registry<S>(
+    store: Arc<S>,
     runtime_config_path: Option<&Path>,
-) -> Result<ErasedRunnerRegistry, PublicError> {
+) -> Result<ErasedRunnerRegistry, PublicError>
+where
+    S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
+{
     let runtime_config = Arc::new(LiveTransportRuntime::new(
         RuntimeConfigLoader::from_path_or_env(runtime_config_path),
     ));
     let mut registry = ErasedRunnerRegistry::new();
-    registry.register_capability_spec::<mfm_fact_capabilities::FactIndexReadCapability>(
-        mfm_runtime::CapabilityImplementationId::new(fact_index.implementation_id())?,
-    )?;
-    registry.register_capability_spec::<mfm_fact_capabilities::FactRecordCapability>(
-        mfm_runtime::CapabilityImplementationId::new(
-            MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID,
-        )?,
-    )?;
-    let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
-        artifacts.clone(),
-        fact_index.clone(),
-    );
-    mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
+    mfm_adapters_portfolio::register_portfolio_runners(&mut registry, store)?;
     btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),
@@ -254,20 +233,9 @@ pub fn production_runner_registry(
     Ok(registry)
 }
 
-/// Builds the production Postgres Platform/Control fact-index provider.
-pub use fact_index::production_fact_index_read_provider;
-/// Platform/Control fact-index capability used by portfolio runners.
-pub use mfm_fact_capabilities::FactIndexReadProvider;
-
-/// Projection-backed in-memory fact-index for store-backed tests and process assembly fixtures.
-#[cfg(any(test, feature = "test-support"))]
-pub use fact_index::ProjectionFactIndexProvider;
-
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, PublicError> {
     let mut registry = CertificationRegistry::new();
-    registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
-    registry.register_fact_type::<mfm_states_evm::EvmBalanceSnapshotFact>()?;
     mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
         &mut registry,
     )?;

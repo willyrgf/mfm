@@ -1,21 +1,25 @@
 use super::*;
 
-pub(in crate::run_store) fn push_fact_index_term_projection_select_list(
+pub(in crate::run_store) fn push_fact_query_projection_term_projection_select_list(
     builder: &mut QueryBuilder<Postgres>,
 ) {
     let mut has_column = false;
     for column in FACT_INDEX_TERM_IDENTITY_COLUMNS {
-        push_fact_index_term_select_column(builder, column, &mut has_column);
+        push_fact_query_projection_term_select_column(builder, column, &mut has_column);
     }
     for column in FactTermValueColumn::ALL {
-        push_fact_index_term_select_column(builder, column.storage_column(), &mut has_column);
+        push_fact_query_projection_term_select_column(
+            builder,
+            column.storage_column(),
+            &mut has_column,
+        );
     }
     for column in FACT_INDEX_TERM_METADATA_COLUMNS {
-        push_fact_index_term_select_column(builder, column, &mut has_column);
+        push_fact_query_projection_term_select_column(builder, column, &mut has_column);
     }
 }
 
-fn push_fact_index_term_select_column(
+fn push_fact_query_projection_term_select_column(
     builder: &mut QueryBuilder<Postgres>,
     column: &str,
     has_column: &mut bool,
@@ -207,7 +211,7 @@ fn parse_term_value_from_reader(
                 .parse::<u64>()
                 .map_err(|_| {
                     PostgresStoreError::Corruption(format!(
-                        "fact_index_terms.{} was not a u64",
+                        "fact_query_terms.{} was not a u64",
                         column.storage_column()
                     ))
                 })?;
@@ -226,22 +230,6 @@ fn parse_term_value_from_reader(
             Ok(mfm_facts::FactCanonicalScalar::Digest(digest))
         }
     }
-}
-
-pub(in crate::run_store) fn parse_fact_audience(value: &str) -> Result<mfm_facts::FactAudience> {
-    value
-        .parse::<mfm_facts::FactAudience>()
-        .map_err(|_| PostgresStoreError::Corruption(format!("unknown fact audience {value}")))
-}
-
-pub(in crate::run_store) fn parse_fact_visibility_scope(
-    value: &str,
-) -> Result<mfm_facts::FactVisibilityScope> {
-    value
-        .parse::<mfm_facts::FactVisibilityScope>()
-        .map_err(|_| {
-            PostgresStoreError::Corruption(format!("unknown fact visibility scope {value}"))
-        })
 }
 
 pub(in crate::run_store) fn parse_fact_field_source(

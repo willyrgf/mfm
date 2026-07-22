@@ -799,6 +799,7 @@ impl StateSpec for ValidateEvmContractState {
 impl ReadState for ValidateEvmContractState {
     type Plan = EvmContractValidationPlan;
     type Evidence = EvmContractValidationEvidence;
+    type Facts = ();
 
     fn plan(
         &self,
@@ -813,13 +814,14 @@ impl ReadState for ValidateEvmContractState {
         input: &Self::Input,
         evidence: &ExternalReadEvidenceSet<Self::Evidence>,
         _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
+    ) -> StateResult<(Self::Output, Self::Facts)> {
         if !evidence.fact_query_evidence().is_empty() {
             return Err(StateError::Message(
                 "EVM contract validation carried unexpected fact-query evidence".to_owned(),
             ));
         }
         self.reduce(input, evidence.primary_evidence())
+            .map(|output| (output, ()))
             .map_err(StateError::from)
     }
 }
