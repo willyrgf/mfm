@@ -13,10 +13,10 @@ pub(crate) fn register_evm_balance_runners(
 ) -> Result<(), PublicError> {
     let sessions = routes.evm_read_sessions();
     let implementation_id = sessions.implementation_id().to_owned();
-    let capabilities = mfm_evm_live::EvmReadRunnerCapabilities::new(artifacts, sessions);
     mfm_evm_live::register_evm_balance_runners(
         registry,
-        capabilities,
+        artifacts,
+        sessions,
         read_factory,
         adapter_factory,
     )?;

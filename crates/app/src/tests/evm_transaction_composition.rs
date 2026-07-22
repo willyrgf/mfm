@@ -18,10 +18,7 @@ use mfm_evm::{
     EvmTransactionSuccess, SubmitEvmTransactionState, ValidateEvmContractState,
     VerifiedEvmContract, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
-use mfm_evm_live::{
-    register_evm_transaction_runner, register_evm_validation_runner, EvmReadRunnerCapabilities,
-    EvmTransactionRunnerCapabilities,
-};
+use mfm_evm_live::{register_evm_transaction_runner, register_evm_validation_runner};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, PureState, RootBuilder,
     ScopeKey, SeedKey, SideEffectSagaPolicy, SideEffectVerificationSpec, StateError, StateKey,
@@ -706,27 +703,25 @@ fn composition_runners(
     .expect("signer binder");
     register_evm_transaction_runner(
         &mut runners,
-        EvmTransactionRunnerCapabilities::new(
-            Arc::clone(&artifacts),
-            signer_binder,
-            move |binding, signer_ref| {
-                Box::pin(async move {
-                    if binding.network_id().as_str() == "ethereum-mainnet"
-                        && binding.expected_chain_id() == 1
-                        && signer_ref.as_str() == "composition-signer"
-                    {
-                        Ok(())
-                    } else {
-                        Err(mfm_runtime::RuntimeError::RunnerBinding(
-                            "unexpected composition transaction binding".to_owned(),
-                        ))
-                    }
-                })
-            },
-            Arc::new(CompositionTransactionSessions {
-                session: transaction_session,
-            }),
-        ),
+        Arc::clone(&artifacts),
+        signer_binder,
+        move |binding, signer_ref| {
+            Box::pin(async move {
+                if binding.network_id().as_str() == "ethereum-mainnet"
+                    && binding.expected_chain_id() == 1
+                    && signer_ref.as_str() == "composition-signer"
+                {
+                    Ok(())
+                } else {
+                    Err(mfm_runtime::RuntimeError::RunnerBinding(
+                        "unexpected composition transaction binding".to_owned(),
+                    ))
+                }
+            })
+        },
+        Arc::new(CompositionTransactionSessions {
+            session: transaction_session,
+        }),
         &side_effect_factory,
         &read_factory,
         &adapter_factory,
@@ -735,13 +730,11 @@ fn composition_runners(
 
     register_evm_validation_runner(
         &mut runners,
-        EvmReadRunnerCapabilities::new(
-            artifacts,
-            Arc::new(CompositionReadSessions {
-                world,
-                reads: live_validation_reads,
-            }),
-        ),
+        artifacts,
+        Arc::new(CompositionReadSessions {
+            world,
+            reads: live_validation_reads,
+        }),
         &read_factory,
         &adapter_factory,
     )

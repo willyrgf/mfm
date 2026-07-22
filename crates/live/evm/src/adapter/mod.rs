@@ -25,22 +25,20 @@ mod transaction;
 pub use balance_collection::verify_evm_balance_collection_replay;
 pub use transaction::{
     is_evm_transaction_replay_intent, register_evm_transaction_runner,
-    verify_evm_transaction_replay, EvmMutationValidationFuture, EvmTransactionRunnerCapabilities,
+    verify_evm_transaction_replay,
 };
 
 pub(crate) const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";
 const READ_FACTORY: &str = "read_external";
 
-/// Shared process resources required by reusable EVM read states.
 #[derive(Clone)]
-pub struct EvmReadRunnerCapabilities {
+struct EvmReadRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     sessions: Arc<dyn EvmReadSessionSet>,
 }
 
 impl EvmReadRunnerCapabilities {
-    /// Creates one source-bound capability assembly for all EVM reads.
-    pub fn new(
+    fn new(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         sessions: Arc<dyn EvmReadSessionSet>,
     ) -> Self {
@@ -76,10 +74,12 @@ impl EvmReadRunnerCapabilities {
 /// Registers the reusable fact-producing EVM balance collection binding.
 pub fn register_evm_balance_runners(
     registry: &mut ErasedRunnerRegistry,
-    capabilities: EvmReadRunnerCapabilities,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    sessions: Arc<dyn EvmReadSessionSet>,
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
+    let capabilities = EvmReadRunnerCapabilities::new(artifacts, sessions);
     register_evm_read_foundation(registry, capabilities.sessions.as_ref(), adapter_factory)?;
     require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
@@ -98,10 +98,12 @@ pub fn register_evm_balance_runners(
 /// Registers the reusable exact-anchor EVM contract-validation binding.
 pub fn register_evm_validation_runner(
     registry: &mut ErasedRunnerRegistry,
-    capabilities: EvmReadRunnerCapabilities,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    sessions: Arc<dyn EvmReadSessionSet>,
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
+    let capabilities = EvmReadRunnerCapabilities::new(artifacts, sessions);
     register_evm_read_foundation(registry, capabilities.sessions.as_ref(), adapter_factory)?;
     require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);

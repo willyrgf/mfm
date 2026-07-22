@@ -263,8 +263,14 @@ fn adapter_registration_accepts_a_fake_pure_session_set() {
         Arc::new(AtomicUsize::new(0)),
     );
 
-    register_evm_balance_runners(&mut registry, capabilities, &read_factory, &adapter_factory)
-        .expect("fake-session-set registration");
+    register_evm_balance_runners(
+        &mut registry,
+        capabilities.artifacts,
+        capabilities.sessions,
+        &read_factory,
+        &adapter_factory,
+    )
+    .expect("fake-session-set registration");
 }
 
 #[tokio::test]

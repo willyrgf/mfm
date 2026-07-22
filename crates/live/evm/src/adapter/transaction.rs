@@ -44,15 +44,13 @@ const VERIFY_FACTORY: &str = "read_external";
 const REPLAY_VERIFIER_ID: &str = "mfm.evm.transaction.replay.v1";
 const SIGNED_ENVELOPE_CACHE_CAPACITY: usize = 32;
 
-/// Future returned by application-owned mutation ingress validation.
-pub type EvmMutationValidationFuture =
+type EvmMutationValidationFuture =
     Pin<Box<dyn Future<Output = mfm_runtime::Result<()>> + Send + 'static>>;
 
 type ValidateMutation =
     dyn Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> EvmMutationValidationFuture + Send + Sync;
-/// Process assembly required by the generic EVM transaction runner.
 #[derive(Clone)]
-pub struct EvmTransactionRunnerCapabilities {
+struct EvmTransactionRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
     validate_mutation: Arc<ValidateMutation>,
@@ -60,23 +58,22 @@ pub struct EvmTransactionRunnerCapabilities {
 }
 
 impl EvmTransactionRunnerCapabilities {
-    /// Creates lazy, exact-bound transaction and signer capabilities.
-    pub fn new<V>(
+    fn new<V, F>(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
         validate_mutation: V,
         transaction_sessions: Arc<dyn EvmTransactionSessionSet>,
     ) -> Self
     where
-        V: Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> EvmMutationValidationFuture
-            + Send
-            + Sync
-            + 'static,
+        V: Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> F + Send + Sync + 'static,
+        F: Future<Output = mfm_runtime::Result<()>> + Send + 'static,
     {
+        let validate_mutation: Arc<ValidateMutation> =
+            Arc::new(move |binding, signer_ref| Box::pin(validate_mutation(binding, signer_ref)));
         Self {
             artifacts,
             signing_provider_binder,
-            validate_mutation: Arc::new(validate_mutation),
+            validate_mutation,
             transaction_sessions,
         }
     }
@@ -130,13 +127,28 @@ impl EvmTransactionRunnerCapabilities {
 }
 
 /// Registers the one reusable EVM transaction submit/verify runner pair.
-pub fn register_evm_transaction_runner(
+// Keep each reusable boundary explicit without publishing an adapter-owned assembly type.
+#[allow(clippy::too_many_arguments)]
+pub fn register_evm_transaction_runner<V, F>(
     registry: &mut ErasedRunnerRegistry,
-    capabilities: EvmTransactionRunnerCapabilities,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
+    validate_mutation: V,
+    transaction_sessions: Arc<dyn EvmTransactionSessionSet>,
     side_effect_factory: &RunnerFactoryBinding,
     verify_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
-) -> mfm_runtime::Result<()> {
+) -> mfm_runtime::Result<()>
+where
+    V: Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> F + Send + Sync + 'static,
+    F: Future<Output = mfm_runtime::Result<()>> + Send + 'static,
+{
+    let capabilities = EvmTransactionRunnerCapabilities::new(
+        artifacts,
+        signing_provider_binder,
+        validate_mutation,
+        transaction_sessions,
+    );
     let descriptor = mfm_program::state_descriptor::<SubmitEvmTransactionState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     registry.register_capability_spec::<EvmTransactionCapability>(

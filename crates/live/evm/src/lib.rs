@@ -8,6 +8,15 @@
 //! use mfm_evm_live::adapter;
 //! ```
 //!
+//! Adapter assembly remains private; registration accepts only reusable capability boundaries.
+//!
+//! ```compile_fail
+//! use mfm_evm_live::{
+//!     EvmMutationValidationFuture, EvmReadRunnerCapabilities,
+//!     EvmTransactionRunnerCapabilities,
+//! };
+//! ```
+//!
 //! The checked transport does not expose an arbitrary JSON-RPC call surface.
 //!
 //! ```compile_fail
@@ -25,6 +34,5 @@ pub use adapter::{
     is_evm_transaction_replay_intent, register_evm_balance_runners,
     register_evm_transaction_runner, register_evm_validation_runner,
     verify_evm_balance_collection_replay, verify_evm_transaction_replay,
-    verify_evm_validation_replay, EvmMutationValidationFuture, EvmReadRunnerCapabilities,
-    EvmTransactionRunnerCapabilities,
+    verify_evm_validation_replay,
 };

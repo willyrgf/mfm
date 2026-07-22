@@ -17,7 +17,7 @@ use mfm_evm::{
     EvmTransactionOutcome, EvmTransactionSession, EvmTransactionSessionSet,
     SubmitEvmTransactionState, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
-use mfm_evm_live::{register_evm_transaction_runner, EvmTransactionRunnerCapabilities};
+use mfm_evm_live::register_evm_transaction_runner;
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, InputBindingNodeRef, NoContext, PublicOutputKey,
     PureState, RemediationNodeParams, RemediationUnresolved, RootBuilder, ScopeKey, SeedKey,
@@ -522,25 +522,23 @@ fn transaction_runners(
     .expect("signer binder");
     register_evm_transaction_runner(
         &mut runners,
-        EvmTransactionRunnerCapabilities::new(
-            Arc::new(store.clone()),
-            signer_binder,
-            |binding, signer_ref| {
-                Box::pin(async move {
-                    if binding.network_id().as_str() == "ethereum-mainnet"
-                        && binding.expected_chain_id() == 1
-                        && signer_ref.as_str() == "deployer"
-                    {
-                        Ok(())
-                    } else {
-                        Err(mfm_runtime::RuntimeError::RunnerBinding(
-                            "unexpected transaction binding".to_owned(),
-                        ))
-                    }
-                })
-            },
-            Arc::new(TransactionSessions { session }),
-        ),
+        Arc::new(store.clone()),
+        signer_binder,
+        |binding, signer_ref| {
+            Box::pin(async move {
+                if binding.network_id().as_str() == "ethereum-mainnet"
+                    && binding.expected_chain_id() == 1
+                    && signer_ref.as_str() == "deployer"
+                {
+                    Ok(())
+                } else {
+                    Err(mfm_runtime::RuntimeError::RunnerBinding(
+                        "unexpected transaction binding".to_owned(),
+                    ))
+                }
+            })
+        },
+        Arc::new(TransactionSessions { session }),
         &side_effect_factory,
         &verify_factory,
         &adapter_factory,

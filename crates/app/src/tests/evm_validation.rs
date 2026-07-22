@@ -10,7 +10,7 @@ use mfm_evm::{
     EvmNetworkBinding, EvmReadSession, EvmReadSessionSet, EvmSessionEvidence, EvmSessionFuture,
     ValidateEvmContractState, VerifiedEvmContract, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
-use mfm_evm_live::{register_evm_validation_runner, EvmReadRunnerCapabilities};
+use mfm_evm_live::register_evm_validation_runner;
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, RootBuilder, ScopeKey,
     SeedKey, StateKey, StateRegistryBuilder,
@@ -100,10 +100,8 @@ async fn contract_validation_validates_its_async_route_before_admission() {
     let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     register_evm_validation_runner(
         &mut runners,
-        EvmReadRunnerCapabilities::new(
-            Arc::new(store.clone()),
-            Arc::new(ValidationSessions { live_reads: None }),
-        ),
+        Arc::new(store.clone()),
+        Arc::new(ValidationSessions { live_reads: None }),
         &read_factory,
         &adapter_factory,
     )
@@ -199,12 +197,10 @@ fn validation_runners(
     let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     register_evm_validation_runner(
         &mut runners,
-        EvmReadRunnerCapabilities::new(
-            Arc::new(store.clone()),
-            Arc::new(ValidationSessions {
-                live_reads: Some(live_reads),
-            }),
-        ),
+        Arc::new(store.clone()),
+        Arc::new(ValidationSessions {
+            live_reads: Some(live_reads),
+        }),
         &read_factory,
         &adapter_factory,
     )
