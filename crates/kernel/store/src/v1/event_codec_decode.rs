@@ -2,7 +2,7 @@ use super::*;
 
 /// Parses a typed kernel event payload from its store canonical JSON shape.
 pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPayload> {
-    match required_str(json, "variant")? {
+    let payload = match required_str(json, "variant")? {
         "RunAdmitted" => Ok(KernelEventPayload::RunAdmitted(Box::new(
             events::RunAdmitted {
                 run_id: parse_identity(required_str(json, "run_id")?)?,
@@ -597,7 +597,13 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
         other => Err(StoreError::Event(format!(
             "unknown event payload variant {other}"
         ))),
+    }?;
+    if super::event_codec::payload_json(&payload) != *json {
+        return Err(StoreError::Event(
+            "event payload contains unknown or noncanonical fields".to_owned(),
+        ));
     }
+    Ok(payload)
 }
 
 fn parse_descriptor_identity(json: &serde_json::Value) -> Result<DescriptorIdentity> {

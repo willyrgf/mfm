@@ -69,7 +69,7 @@ fn sorted_store_artifacts_json(artifacts: &[ArtifactEvidenceRef]) -> Vec<serde_j
     artifacts
 }
 
-fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
+pub(super) fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
     match payload {
         KernelEventPayload::RunAdmitted(payload) => serde_json::json!({
             "admitted_binding_digest": payload.admitted_binding_digest.as_str(),

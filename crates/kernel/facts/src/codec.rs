@@ -342,6 +342,11 @@ pub fn parse_canonical_fact_query_shape(
     let value = serde_json::from_slice::<serde_json::Value>(plan.canonical_query().as_bytes())
         .map_err(|error| FactError::canonical(error.to_string()))?;
     let query = CompiledQueryWire::parse(&value)?;
+    if query.canonical_bytes()?.as_bytes() != plan.canonical_query().as_bytes() {
+        return Err(FactError::canonical(
+            "canonical fact query contains unknown or noncanonical fields",
+        ));
+    }
     query.validate_plan(plan)?;
     query.into_shape()
 }
@@ -364,6 +369,11 @@ pub fn parse_canonical_fact_query_evidence_bytes(bytes: &[u8]) -> Result<FactQue
     let selection = parse_fact_selection_evidence(json_required(object, "selection")?)?;
     let evidence = FactQueryEvidence::new(plan, receipt, selection);
     validate_fact_query_evidence(&evidence)?;
+    if canonical_fact_query_evidence_bytes(&evidence)?.as_bytes() != bytes {
+        return Err(FactError::canonical(
+            "fact query evidence contains unknown or noncanonical fields",
+        ));
+    }
     Ok(evidence)
 }
 

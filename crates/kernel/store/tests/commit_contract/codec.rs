@@ -762,31 +762,51 @@ fn launch_evidence_codec_sorts_deduplicates_and_rejects_legacy_fields() {
 }
 
 #[test]
-fn unrelated_entry_point_summaries_do_not_change_admission_evidence() {
+fn event_payload_codec_rejects_unknown_and_deleted_fact_fields() {
     let payload = run_admitted(run_id(112));
     let current = payload_json_value(&payload);
     let mut with_unrelated_summaries = current.clone();
     with_unrelated_summaries["entry_point_summaries"] = serde_json::json!([
         {"entry_point_id": "mfm.unrelated/entry@1"}
     ]);
-    let decoded = payload_from_json_value(&with_unrelated_summaries)
-        .expect("unrelated summaries are not admission evidence");
-    let KernelEventPayload::RunAdmitted(decoded) = decoded else {
-        panic!("run-admitted fixture");
-    };
-    let KernelEventPayload::RunAdmitted(original) = payload else {
-        panic!("run-admitted fixture");
-    };
-    assert_eq!(decoded.entry_point, original.entry_point);
-    assert_eq!(decoded.identity_material, original.identity_material);
-    assert_eq!(
-        serde_json::to_value(&with_unrelated_summaries["identity_material"])
-            .expect("identity material JSON")
-            .as_object()
-            .expect("identity material object")
-            .len(),
-        3
-    );
+    assert!(payload_from_json_value(&with_unrelated_summaries).is_err());
+
+    let fact_payload = fact_recorded(&fact_artifact_ref());
+    let fact_json = payload_json_value(&fact_payload);
+    for deleted_field in ["visibility", "request", "producer"] {
+        let mut legacy = fact_json.clone();
+        legacy["claim"]
+            .as_object_mut()
+            .expect("fact claim object")
+            .insert(deleted_field.to_owned(), serde_json::json!({}));
+        assert!(
+            payload_from_json_value(&legacy).is_err(),
+            "deleted fact field {deleted_field} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn committed_stream_codec_rejects_unknown_envelope_fields() {
+    let run_id = run_id(113);
+    let store = admitted_store(&run_id, "committed-stream-unknown-field");
+    let committed = CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(&run_id))
+        .expect("committed stream");
+    let encoded = committed_run_stream_canonical_json(&committed).expect("committed stream json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(encoded.as_bytes()).expect("committed stream value");
+    json["events"][0]["unexpected"] = serde_json::json!(true);
+    let unknown = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&json).expect("unknown-field json"),
+    )
+    .expect("unknown-field canonical json");
+
+    assert!(committed_run_stream_from_canonical_json_slice(
+        &run_id,
+        unknown.as_bytes(),
+        &ArtifactByteAuthorityMap::new(),
+    )
+    .is_err());
 }
 
 #[test]

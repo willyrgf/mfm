@@ -322,6 +322,53 @@ fn parses_canonical_fact_query_evidence_bytes() {
 }
 
 #[test]
+fn parsing_fact_query_evidence_rejects_unknown_and_deleted_fields() {
+    let (_, _, evidence) = query_evidence_fixture();
+    let bytes = canonical_fact_query_evidence_bytes(&evidence).expect("evidence bytes");
+    let value =
+        serde_json::from_slice::<serde_json::Value>(bytes.as_bytes()).expect("evidence json");
+
+    for (path, field) in [
+        (&[][..], "unexpected"),
+        (&["plan"][..], "unexpected"),
+        (&["receipt"][..], "unexpected"),
+        (&["receipt", "read_frontier"][..], "store_scope"),
+        (
+            &["receipt", "read_frontier"][..],
+            "descriptor_catalog_watermark",
+        ),
+        (&["receipt", "read_frontier"][..], "frontier_type"),
+        (&["receipt", "returned_refs", "0"][..], "visibility"),
+        (&["receipt", "returned_refs", "0"][..], "request"),
+        (&["receipt", "returned_refs", "0"][..], "producer"),
+        (&["selection"][..], "unexpected"),
+    ] {
+        let mut legacy = value.clone();
+        let mut target = &mut legacy;
+        for segment in path {
+            target = if let Ok(index) = segment.parse::<usize>() {
+                &mut target[index]
+            } else {
+                &mut target[*segment]
+            };
+        }
+        target
+            .as_object_mut()
+            .expect("target object")
+            .insert(field.to_owned(), serde_json::json!(true));
+        let legacy = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&legacy).expect("legacy json"),
+        )
+        .expect("legacy canonical json");
+
+        assert!(
+            parse_canonical_fact_query_evidence_bytes(legacy.as_bytes()).is_err(),
+            "field {field} at {path:?} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn parsing_receipt_rejects_plan_hash_mismatch() {
     let (_, _, evidence) = query_evidence_fixture();
     let bytes = canonical_fact_query_evidence_bytes(&evidence).expect("evidence bytes");

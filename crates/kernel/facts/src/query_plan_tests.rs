@@ -112,6 +112,67 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
 }
 
 #[test]
+fn query_shape_parser_rejects_unknown_fields() {
+    let descriptor = descriptor(vec![
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
+    ])
+    .expect("descriptor");
+    let plan = compile_fact_query_plan(
+        &descriptor,
+        default_query_input(Vec::new(), &["result.height"], Some(10)),
+    )
+    .expect("plan");
+    let canonical_query = mfm_canonical::CanonicalJsonBytes::from_value(
+        &mfm_canonical::CanonicalValue::object([
+            ("content_identity", mfm_canonical::CanonicalValue::Null),
+            (
+                "fact_kind",
+                mfm_canonical::CanonicalValue::String("chain.head".to_owned()),
+            ),
+            ("limit", mfm_canonical::CanonicalValue::Unsigned(10)),
+            (
+                "ordering",
+                mfm_canonical::CanonicalValue::String("result.height.desc".to_owned()),
+            ),
+            (
+                "predicates",
+                mfm_canonical::CanonicalValue::Array(Vec::new()),
+            ),
+            (
+                "resolved_descriptor",
+                mfm_canonical::CanonicalValue::String(
+                    plan.resolved_descriptor().as_str().to_owned(),
+                ),
+            ),
+            (
+                "return_fields",
+                mfm_canonical::CanonicalValue::Array(vec![mfm_canonical::CanonicalValue::String(
+                    "result.height".to_owned(),
+                )]),
+            ),
+            ("unexpected", mfm_canonical::CanonicalValue::Bool(true)),
+            (
+                "version",
+                mfm_canonical::CanonicalValue::String("mfm.fact-query.v3".to_owned()),
+            ),
+        ])
+        .expect("canonical query value"),
+    );
+    let plan = CanonicalFactQueryPlan::new(
+        plan.query_compiler_version().clone(),
+        plan.canonicalizer_version().clone(),
+        plan.resolved_descriptor().clone(),
+        canonical_query,
+        plan.ordering().clone(),
+        plan.limit(),
+    )
+    .expect("unknown-field plan");
+
+    assert!(parse_canonical_fact_query_shape(&plan).is_err());
+}
+
+#[test]
 fn query_compiler_binds_exact_content_identity_to_the_descriptor() {
     let descriptor = descriptor(vec![
         subject_field("subject.chain"),

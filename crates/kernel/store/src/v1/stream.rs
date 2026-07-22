@@ -165,7 +165,14 @@ pub fn committed_run_stream_from_canonical_json_slice(
         });
     }
     let events = parse_vec(&json, "events", parse_kernel_event_envelope)?;
-    CommittedRunStream::from_events_with_artifact_bytes(run_id, events, artifact_bytes)
+    let committed =
+        CommittedRunStream::from_events_with_artifact_bytes(run_id, events, artifact_bytes)?;
+    if committed_run_stream_canonical_json(&committed)?.as_bytes() != canonical.as_bytes() {
+        return Err(StoreError::Event(
+            "committed stream contains unknown or noncanonical fields".to_owned(),
+        ));
+    }
+    Ok(committed)
 }
 
 /// Boxed future returned by retained artifact read providers.
