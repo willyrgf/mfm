@@ -15,7 +15,7 @@ Run the packaged CLI with `nix run .#mfm -- <ARGS>`, for example:
 
 - **User-Centric**: Commands are designed to be intuitive and easy to remember.
 - **Scriptable**: Supports non-interactive modes, input from `stdin`, and configuration via environment variables, making it suitable for automation and scripting.
-- **Secure by Default**: Uses the security-hardened keystore implementation from `crates/core` so key operations share the same security invariants.
+- **Secure by Default**: Captures one-shot secrets into opaque app inputs; app-owned services perform keystore work through the security-hardened `mfm-keystore` implementation.
 - **AI-Friendly Output**: Provides machine-readable JSON output via a global `--output-format` flag, making it ideal for AI agents and automation, while preserving human-readable text output by default.
 - **Minimalism**: Focuses on essential commands, avoiding feature bloat to maintain a clean and simple interface.
 
@@ -35,7 +35,8 @@ mfm_cli/
 │   │   ├── ops.rs         # `ops` public entry-point discovery
 │   │   └── run/           # `run` subcommands
 │   ├── support/
-│   │   ├── keystore.rs    # Keystore path/unlock/create helpers
+│   │   ├── keystore.rs    # Protected input, prompting, and public metadata presentation
+│   │   ├── keystore_selection.rs # CLI syntax to opaque app selection
 │   │   └── run_store.rs   # Event/artifact store construction helpers
 │   └── presentation/
 │       └── output.rs      # Text/JSON output models and rendering
@@ -247,6 +248,11 @@ capability routing details, RPC URLs, authorization headers, signer material, or
 
 All keystore operations are available under the `keystore` subcommand.
 
+The CLI is only the local input and presentation transport for these commands. It validates
+command-line shape, captures secret material in zeroizing buffers, and immediately transfers it as
+an opaque consuming app input. App services resolve keystore profiles and perform import, list, and
+delete work on blocking workers; the binary does not open a keystore or construct a signer.
+
 ### `keystore import`
 
 Imports a private key or a mnemonic-derived key into the keystore. Mnemonic phrases are one-time
@@ -265,7 +271,7 @@ mfm_cli keystore import [OPTIONS]
 - `--label <LABEL>`: A human-readable alias for the key. If omitted, a default label is generated.
 - `--derivation-path <PATH>`: For mnemonics, the BIP32 derivation path. Defaults to `m/44'/60'/0'/0/0`.
 - `--stdin`: Reads the key material (private key or mnemonic) from standard input instead of an interactive hidden prompt. Use this only with controlled pipes or files; stdin input must contain exactly one line of secret material.
-- `--passphrase-prompt`: For mnemonic imports, prompts for the optional BIP-39 passphrase inside the local keystore transport. Cannot be combined with `--stdin`.
+- `--passphrase-prompt`: For mnemonic imports, captures the optional BIP-39 passphrase in a hidden local prompt and transfers it directly to the app service. Cannot be combined with `--stdin`.
 - `--passphrase-file <PATH>`: For mnemonic imports, reads the optional BIP-39 passphrase from a local UTF-8 file or FIFO. Trailing `\n` and `\r\n` line endings are stripped; other bytes are used as-is.
 - `--keystore <PATH>`: Specifies a custom path to the keystore file.
 

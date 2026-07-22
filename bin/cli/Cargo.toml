@@ -15,14 +15,11 @@ mfm-app = { path = "../../crates/app" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-store = { path = "../../crates/kernel/store" }
-mfm-runtime-config = { path = "../../crates/runtime-config" }
-mfm-keystore = { path = "../../crates/keystore" }
 clap = { version = "4.4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
 hex = "0.4"
-chrono = { version = "0.4", features = ["serde"] }
 regex = "1.0"
 rpassword = "7.0"
 zeroize = "1.7"
@@ -30,6 +27,7 @@ zeroize = "1.7"
 [dev-dependencies]
 alloy-primitives = { workspace = true }
 axum = "0.7"
+mfm-app = { path = "../../crates/app", features = ["test-support"] }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-evm = { path = "../../crates/domains/evm" }
@@ -41,6 +39,7 @@ tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
 rand = { workspace = true }
+static_assertions = "1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 tower = "0.5"
 

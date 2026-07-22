@@ -12,6 +12,22 @@ const VALID_SCHEMA_ID: &str =
 
 struct FailingSerialize;
 
+#[test]
+fn rest_surface_has_no_secret_bearing_keystore_ingress() {
+    let source = include_str!("lib.rs");
+    for forbidden in [
+        "/v1/keystore",
+        "SecretInput",
+        "KeystoreImportRequest",
+        "prepare_import_keystore_access",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "REST surface must not admit secret-bearing keystore ingress: {forbidden}"
+        );
+    }
+}
+
 impl Serialize for FailingSerialize {
     fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
     where

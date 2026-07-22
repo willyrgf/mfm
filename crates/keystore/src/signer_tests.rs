@@ -140,6 +140,22 @@ async fn signatures_are_byte_identical_across_provider_and_keystore_reopen() {
 }
 
 #[tokio::test]
+async fn repeat_signing_reads_the_unlock_file_for_each_call() {
+    let keystore = test_keystore();
+    let request = evm_request(keystore.address);
+    let provider = provider(&keystore, keystore.entry_id);
+
+    provider.sign(&request).await.expect("initial sign");
+    fs::write(&keystore.unlock_file, "wrong_password_123\n").expect("replace unlock file");
+    assert!(matches!(
+        provider.sign(&request).await,
+        Err(SigningError::Provider { .. })
+    ));
+    fs::write(&keystore.unlock_file, format!("{PASSWORD}\r\n")).expect("restore unlock file");
+    provider.sign(&request).await.expect("restored sign");
+}
+
+#[tokio::test]
 async fn provider_accepts_caller_owned_domain_and_purpose() {
     let keystore = test_keystore();
     let request = request(

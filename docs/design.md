@@ -407,9 +407,13 @@ one runtime signer ref to one keystore entry without exposing a raw-key API. It 
 algorithm/profile and expected identity, and leaves domain/purpose authorization to the caller.
 Each signing call reads at most 64 KiB plus one byte from its unlock file into zeroizing storage on
 a blocking worker, rejects oversize or invalid content, strips at most one LF or CRLF, and drops the
-unlock value before returning. App
-assembly admits the signer/keystore support families without loading EVM routes, then selects the
-requested `[signers]` entry and its referenced `[keystores]` profile.
+unlock value before returning. The app layer also owns keystore selection, profile resolution, and
+all import/list/delete implementation work. A binary may capture a one-shot secret only into the
+app's consuming `SecretInput`, which has no cloning, formatting, serialization, deserialization,
+borrowing, or public accessor contract; app services consume it on a blocking worker. REST exposes
+no secret-bearing keystore ingress. App assembly admits the signer/keystore support families without
+loading EVM routes, then selects the requested `[signers]` entry and its referenced `[keystores]`
+profile.
 
 App assembly keeps evidence-only services separate from live driver services. Status, stream
 inspection, list/watch, replay, and public-output rendering construct only store, artifact, and

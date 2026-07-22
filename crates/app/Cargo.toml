@@ -19,6 +19,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
 ring = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+zeroize = "1.7"
 
 mfm-bitcoin = { path = "../domains/bitcoin" }
 mfm-bitcoin-live = { path = "../live/bitcoin" }
@@ -52,3 +54,4 @@ mfm-program-derive = { path = "../kernel/program-derive" }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
 tempfile = "3.0"
 trybuild = "1.0"
+static_assertions = "1"

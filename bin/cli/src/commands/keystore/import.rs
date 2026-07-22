@@ -52,7 +52,7 @@ pub(crate) struct ImportArgs {
 }
 
 /// Supported keystore import sources.
-#[derive(clap::ValueEnum, Clone)]
+#[derive(clap::ValueEnum, Clone, Copy)]
 pub(crate) enum ImportType {
     /// Import a raw private key.
     #[value(name = "privatekey")]
@@ -90,31 +90,41 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ImportArgs) -> ! {
 }
 
 async fn execute_internal(args: &ImportArgs) -> CommandResult<ImportResponse> {
-    let access =
-        keystore_selection::resolve_keystore_access(keystore_selection::KeystoreSelectionArgs {
+    let selection = keystore_selection::resolve_keystore_selection(
+        keystore_selection::KeystoreSelectionArgs {
             keystore: args.keystore.as_ref(),
             runtime_config: args.runtime_config.as_ref(),
             keystore_ref: args.keystore_ref.as_deref(),
-        })?;
-    let bip39_extra = resolve_bip39_extra(args)?;
-    let response = keystore::import_key(keystore::ImportKeyRequest {
-        kind: match args.import_type {
-            ImportType::PrivateKey => keystore::ImportKind::PrivateKey,
-            ImportType::Mnemonic => keystore::ImportKind::Mnemonic,
         },
-        label: args.label.clone(),
-        derivation_path: args.derivation_path.clone(),
-        stdin: args.stdin,
-        access,
-        bip39_extra,
-    })?;
+    )?;
+    let prepared = mfm_app::prepare_import_keystore_access(selection).await?;
+    let extra_source = resolve_bip39_extra(args)?;
+    let material = match args.import_type {
+        ImportType::PrivateKey => keystore::read_private_key_material(args.stdin)?,
+        ImportType::Mnemonic => keystore::read_mnemonic_material(args.stdin)?,
+    };
+    let passphrase = keystore::read_bip39_extra(extra_source)?;
+    let access = keystore::bind_prepared_access(prepared)?;
+    let request = match args.import_type {
+        ImportType::PrivateKey => {
+            mfm_app::KeystoreImportRequest::private_key(access, args.label.clone(), material)
+        }
+        ImportType::Mnemonic => mfm_app::KeystoreImportRequest::mnemonic(
+            access,
+            args.label.clone(),
+            material,
+            args.derivation_path.clone(),
+            passphrase,
+        ),
+    };
+    let response = mfm_app::import_keystore_key(request).await?;
 
     Ok(CommandOutput::new(ImportResponse {
-        id: response.id,
-        label: response.label,
-        key_type: response.key_type,
-        address: response.address,
-        created_at: response.created_at,
+        id: response.id.to_string(),
+        label: response.alias.unwrap_or_default(),
+        key_type: keystore::key_type_code(&response.key_type).to_owned(),
+        address: format!("{:?}", response.address),
+        created_at: response.created_at.to_rfc3339(),
     }))
 }
 

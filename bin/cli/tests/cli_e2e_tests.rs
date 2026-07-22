@@ -2,7 +2,7 @@
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use assert_cmd::Command;
-use mfm_keystore::{Keystore, KeystoreConfig};
+use mfm_app::{initialize_insecure_keystore_for_test, SecretInput};
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
@@ -23,12 +23,12 @@ fn create_test_env() -> TestEnv {
     let runtime_config_path = temp_dir.path().join("runtime.toml");
     fs::write(&password_file, format!("{TEST_PASSWORD}\n")).expect("write password file");
 
-    let mut keystore =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
-            .expect("create test keystore");
-    keystore
-        .unlock(TEST_PASSWORD)
-        .expect("unlock test keystore");
+    initialize_insecure_keystore_for_test(
+        keystore_path.clone(),
+        SecretInput::new(TEST_PASSWORD.to_owned()),
+        Vec::new(),
+    )
+    .expect("create test keystore");
 
     let runtime_config = format!(
         r#"
@@ -72,7 +72,9 @@ fn import_private_key(test_env: &TestEnv, label: Option<&str>, private_key: &str
         .success()
         .stdout(predicate::str::contains(
             "private key imported successfully",
-        ));
+        ))
+        .stdout(predicate::str::contains(private_key).not())
+        .stderr(predicate::str::contains(private_key).not());
 }
 
 fn import_mnemonic(test_env: &TestEnv, label: &str, derivation_path: Option<&str>, mnemonic: &str) {
@@ -94,7 +96,9 @@ fn import_mnemonic(test_env: &TestEnv, label: &str, derivation_path: Option<&str
     import_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("hd_derived imported successfully"));
+        .stdout(predicate::str::contains("hd_derived imported successfully"))
+        .stdout(predicate::str::contains(mnemonic).not())
+        .stderr(predicate::str::contains(mnemonic).not());
 }
 
 fn toml_string(value: &str) -> String {

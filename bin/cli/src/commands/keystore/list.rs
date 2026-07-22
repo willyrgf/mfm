@@ -73,37 +73,42 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
 }
 
 async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
-    let access =
-        keystore_selection::resolve_keystore_access(keystore_selection::KeystoreSelectionArgs {
+    let selection = keystore_selection::resolve_keystore_selection(
+        keystore_selection::KeystoreSelectionArgs {
             keystore: args.keystore.as_ref(),
             runtime_config: args.runtime_config.as_ref(),
             keystore_ref: args.keystore_ref.as_deref(),
-        })?;
-    let response = keystore::list_keys(keystore::ListKeysRequest {
-        access,
-        show_addresses: args.show_addresses,
-        filter_label: args.filter_label.clone(),
-        sort_by: match args.sort_by {
-            SortBy::Label => keystore::ListSortBy::Label,
-            SortBy::Created => keystore::ListSortBy::Created,
-            SortBy::Type => keystore::ListSortBy::Type,
         },
-    })?;
-
-    let keys = response
-        .keys
+    )?;
+    let prepared = mfm_app::prepare_existing_keystore_access(selection).await?;
+    let access = keystore::bind_prepared_access(prepared)?;
+    let mut keys = mfm_app::list_keystore_keys(access)
+        .await?
         .into_iter()
         .map(|key| KeyDisplay {
-            id: key.id,
-            label: key.label,
-            key_type: key.key_type,
-            address: key.address,
-            created: key.created,
+            id: key.id.to_string(),
+            label: key.alias.unwrap_or_else(|| "<no alias>".to_owned()),
+            key_type: keystore::key_type_code(&key.key_type).to_owned(),
+            address: args.show_addresses.then(|| format!("{:?}", key.address)),
+            created: key.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    if let Some(pattern) = args.filter_label.as_ref() {
+        let regex = regex::Regex::new(pattern).map_err(|_| {
+            mfm_app::PublicError::bad_request("invalid_regex", "Invalid regex pattern")
+        })?;
+        keys.retain(|key| regex.is_match(&key.label));
+    }
+
+    match args.sort_by {
+        SortBy::Label => keys.sort_by(|left, right| left.label.cmp(&right.label)),
+        SortBy::Created => keys.sort_by(|left, right| left.created.cmp(&right.created)),
+        SortBy::Type => keys.sort_by(|left, right| left.key_type.cmp(&right.key_type)),
+    }
 
     Ok(CommandOutput::new(ListResponse {
         keys,
-        show_addresses: response.show_addresses,
+        show_addresses: args.show_addresses,
     }))
 }

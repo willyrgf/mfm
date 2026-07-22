@@ -228,7 +228,10 @@ fn test_import_missing_type() {
 
 #[test]
 fn test_delete_error_cases() {
-    for args in [Vec::new(), vec!["invalid-uuid"]] {
+    for (args, expected) in [
+        (Vec::new(), "Must specify either key ID or --by-label"),
+        (vec!["invalid-uuid"], "Invalid UUID format"),
+    ] {
         let (_temp_dir, keystore_path) = create_test_keystore();
 
         let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
@@ -238,7 +241,7 @@ fn test_delete_error_cases() {
 
         cmd.assert()
             .failure()
-            .stderr(predicate::str::contains("Keystore not found"));
+            .stderr(predicate::str::contains(expected));
     }
 }
 

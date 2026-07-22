@@ -3,7 +3,7 @@
 
 use alloy_primitives::{keccak256, Address, Bytes, TxKind, U256};
 use assert_cmd::Command;
-use mfm_keystore::{Keystore, KeystoreConfig};
+use mfm_app::{initialize_insecure_keystore_for_test, SecretInput};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -336,9 +336,12 @@ fn ensure_fast_keystore_exists(path: &Path, password_file: &Path) {
         return;
     }
     let password = std::fs::read_to_string(password_file).expect("password file");
-    let mut keystore = Keystore::new_with_config(path, KeystoreConfig::insecure_integration_test())
-        .expect("fast keystore");
-    keystore.unlock(password.trim_end()).expect("unlock");
+    initialize_insecure_keystore_for_test(
+        path.to_path_buf(),
+        SecretInput::new(password.trim_end().to_owned()),
+        Vec::new(),
+    )
+    .expect("fast keystore");
 }
 
 fn write_runtime_config(

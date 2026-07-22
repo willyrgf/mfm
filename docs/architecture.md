@@ -438,10 +438,15 @@ conversion/finalization path: Alloy supplies the signing digest, signed encoding
 hash; MFM verifies the generic result profile, canonical low-s/parity, and recovered sender. The
 keystore provider is protocol-neutral and must not import EVM domain or purpose constants.
 
-The app layer may resolve one exact runtime signer binding and referenced keystore profile, build
-the generic provider, and call the canonical EVM signing function. Binaries may parse typed input,
-invoke that app service, and publish the returned bearer only to an explicit user-selected file;
-they must not open a signing key, construct a second signing path, or retain the bearer.
+The app layer owns keystore selection and profile resolution, import/list/delete application
+services, and resolution of one exact runtime signer binding and referenced keystore profile. It
+may build the generic provider and call the canonical EVM signing function. All keystore filesystem
+and implementation work runs behind app services on blocking workers. A CLI may capture a one-shot
+secret into the app's opaque consuming secret input, parse typed non-secret input, invoke an app
+service, and publish a returned bearer only to an explicit user-selected file. REST has no
+secret-bearing keystore ingress. Binaries must not depend on the keystore or signing implementation,
+open a signing key, resolve runtime profiles themselves, construct a second signing path, or retain
+the bearer.
 
 ### Configuration
 

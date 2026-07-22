@@ -387,6 +387,8 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
         (&secret, &source, "secret provider -> domain"),
         (&storage, &source, "storage -> domain"),
         (&assembly, &binary, "assembly -> binary"),
+        (&binary, &secret, "binary -> secret provider"),
+        (&binary, &signing, "binary -> signing"),
         (&binary, &source, "binary -> domain"),
         (&binary, &source_live, "binary -> live"),
     ];
@@ -494,6 +496,9 @@ fn durable_source_boundaries_follow_semantic_metadata() {
                     "toml::from_str",
                     "ValidatedConfig<",
                     "MfmConfig",
+                    "mfm_keystore",
+                    "mfm_signing::",
+                    "KeystoreSignerProvider",
                 ] {
                     assert!(
                         !source.contains(forbidden),
@@ -872,13 +877,10 @@ fn dependency_allowed(
         },
         Layer::Storage => dependency.layer == Layer::Kernel,
         Layer::Assembly => !matches!(dependency.layer, Layer::Binary | Layer::Test),
-        // The final binary-facing refinement becomes active when implementation construction has
-        // moved behind app. Even before that cut, domain, live, signing, and storage edges are
-        // forbidden and mixed lib/bin packages are evaluated as one binary package.
-        Layer::Binary => matches!(
-            dependency.layer,
-            Layer::Kernel | Layer::Assembly | Layer::SecretProvider
-        ),
+        // The final binary-facing refinement becomes active after the remaining runtime/store
+        // construction moves behind app. Secret providers and signing implementations are already
+        // prohibited, and mixed lib/bin packages are evaluated as one binary package.
+        Layer::Binary => matches!(dependency.layer, Layer::Kernel | Layer::Assembly),
         Layer::Test => true,
     }
 }

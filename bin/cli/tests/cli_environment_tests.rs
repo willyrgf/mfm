@@ -2,7 +2,7 @@
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use assert_cmd::Command;
-use mfm_keystore::{Keystore, KeystoreConfig};
+use mfm_app::{initialize_insecure_keystore_for_test, SecretInput};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -23,7 +23,9 @@ fn runtime_config_selection_uses_env_and_cli_override() {
     list_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("runtime-env-test"));
+        .stdout(predicate::str::contains("runtime-env-test"))
+        .stdout(predicate::str::contains(PASSWORD).not())
+        .stderr(predicate::str::contains(PASSWORD).not());
 
     let good = KeystoreFixture::new("runtime-arg-test");
     let bad_dir = TempDir::new().expect("bad temp dir");
@@ -45,7 +47,9 @@ fn runtime_config_selection_uses_env_and_cli_override() {
     list_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("runtime-arg-test"));
+        .stdout(predicate::str::contains("runtime-arg-test"))
+        .stdout(predicate::str::contains(PASSWORD).not())
+        .stderr(predicate::str::contains(PASSWORD).not());
 }
 
 #[test]
@@ -64,7 +68,9 @@ fn runtime_config_empty_unlock_file_fails() {
     list_cmd
         .assert()
         .failure()
-        .stderr(predicate::str::contains("credential file was empty"));
+        .stderr(predicate::str::contains("credential file was empty"))
+        .stdout(predicate::str::contains(PASSWORD).not())
+        .stderr(predicate::str::contains(PASSWORD).not());
 }
 
 struct KeystoreFixture {
@@ -81,13 +87,15 @@ impl KeystoreFixture {
         let runtime_config = dir.path().join("runtime.toml");
         std::fs::write(&password_file, format!("{PASSWORD}\n")).expect("password file");
 
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
-                .expect("keystore");
-        keystore.unlock(PASSWORD).expect("unlock");
-        keystore
-            .import_private_key(Some(label.to_owned()), PRIVATE_KEY)
-            .expect("import key");
+        initialize_insecure_keystore_for_test(
+            keystore_path.clone(),
+            SecretInput::new(PASSWORD.to_owned()),
+            vec![(
+                Some(label.to_owned()),
+                SecretInput::new(PRIVATE_KEY.to_owned()),
+            )],
+        )
+        .expect("keystore fixture");
 
         write_runtime_config(&runtime_config, &keystore_path, &password_file);
         Self {

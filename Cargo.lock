@@ -2294,7 +2294,6 @@ dependencies = [
  "alloy-primitives",
  "assert_cmd",
  "axum",
- "chrono",
  "clap",
  "hex",
  "mfm-app",
@@ -2303,11 +2302,9 @@ dependencies = [
  "mfm-events",
  "mfm-evm",
  "mfm-ids",
- "mfm-keystore",
  "mfm-program",
  "mfm-rest-api",
  "mfm-runtime",
- "mfm-runtime-config",
  "mfm-store",
  "predicates",
  "rand 0.9.5",
@@ -2316,6 +2313,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "static_assertions",
  "tempfile",
  "tokio",
  "tower",
@@ -2328,6 +2326,7 @@ name = "mfm-app"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "chrono",
  "k256",
  "mfm-bitcoin",
  "mfm-bitcoin-live",
@@ -2355,6 +2354,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "static_assertions",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2363,6 +2363,7 @@ dependencies = [
  "trybuild",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

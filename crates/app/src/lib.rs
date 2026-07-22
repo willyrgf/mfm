@@ -65,6 +65,7 @@ mod config_setup;
 mod entry_point;
 mod evm_runtime;
 mod executable_identity;
+mod keystore_services;
 mod live_transports;
 mod public_facts;
 mod replay_verifiers;
@@ -74,6 +75,14 @@ mod transaction_signing;
 pub use self::responses::*;
 #[path = "status.rs"]
 mod status;
+#[cfg(any(test, feature = "test-support"))]
+pub use self::keystore_services::initialize_insecure_keystore_for_test;
+pub use self::keystore_services::{
+    delete_keystore_key, import_keystore_key, list_keystore_keys, prepare_existing_keystore_access,
+    prepare_import_keystore_access, KeystoreAccess, KeystoreCredentialRequirement,
+    KeystoreImportRequest, KeystoreKeyMetadata, KeystoreKeySelector, KeystoreKeyType,
+    KeystoreSelection, PreparedKeystoreAccess, SecretInput,
+};
 pub use self::status::*;
 pub use self::transaction_signing::{
     sign_evm_transaction_command, EvmTransactionSigningEnvelopeInput,

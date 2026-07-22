@@ -129,8 +129,16 @@ fn test_keystore_list_json_output_sources() {
 #[test]
 fn test_keystore_import_json_errors_for_invalid_input() {
     for (import_type, stdin, error_code) in [
-        ("privatekey", "invalid_key", "invalid_key_material"),
-        ("mnemonic", "short mnemonic", "invalid_recovery_phrase"),
+        (
+            "privatekey",
+            "raw-secret-must-not-escape",
+            "invalid_key_material",
+        ),
+        (
+            "mnemonic",
+            "hidden phrase must never escape",
+            "invalid_recovery_phrase",
+        ),
     ] {
         let temp_dir = setup_temp_keystore();
         let keystore_path = temp_dir.path().join("test.keystore");
@@ -152,7 +160,9 @@ fn test_keystore_import_json_errors_for_invalid_input() {
         .failure()
         .stderr(predicate::str::contains(error_code))
         .stderr(predicate::str::contains("status"))
-        .stderr(predicate::str::contains("error"));
+        .stderr(predicate::str::contains("error"))
+        .stdout(predicate::str::contains(stdin).not())
+        .stderr(predicate::str::contains(stdin).not());
     }
 }
 

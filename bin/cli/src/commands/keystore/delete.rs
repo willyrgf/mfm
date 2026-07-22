@@ -54,21 +54,36 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &DeleteArgs) -> ! {
 }
 
 async fn execute_internal(args: &DeleteArgs) -> CommandResult<DeleteResponse> {
-    let access =
-        keystore_selection::resolve_keystore_access(keystore_selection::KeystoreSelectionArgs {
+    let selector = keystore::key_selector(args.id.clone(), args.by_label.clone())?;
+    if !args.yes {
+        let selected = args
+            .id
+            .as_deref()
+            .or(args.by_label.as_deref())
+            .unwrap_or("selected key");
+        if !keystore::confirm(&format!(
+            "Are you sure you want to delete key '{selected}'?"
+        ))? {
+            return Err(mfm_app::PublicError::bad_request(
+                "operation_cancelled",
+                "Deletion cancelled by user",
+            ));
+        }
+    }
+
+    let selection = keystore_selection::resolve_keystore_selection(
+        keystore_selection::KeystoreSelectionArgs {
             keystore: args.keystore.as_ref(),
             runtime_config: args.runtime_config.as_ref(),
             keystore_ref: args.keystore_ref.as_deref(),
-        })?;
-    let response = keystore::delete_key(keystore::DeleteKeyRequest {
-        id: args.id.clone(),
-        by_label: args.by_label.clone(),
-        yes: args.yes,
-        access,
-    })?;
+        },
+    )?;
+    let prepared = mfm_app::prepare_existing_keystore_access(selection).await?;
+    let access = keystore::bind_prepared_access(prepared)?;
+    let response = mfm_app::delete_keystore_key(access, selector).await?;
 
     Ok(CommandOutput::new(DeleteResponse {
-        id: response.id,
-        label: response.label,
+        id: response.id.to_string(),
+        label: response.alias.unwrap_or_default(),
     }))
 }
