@@ -15,7 +15,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
     };
     let implementation_id = CapabilityImplementationId::new("mfm.test.runner-kit-registration")
         .expect("implementation id");
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
 
     registry
         .register_capability_set(&node.capability_bindings, implementation_id.clone())
@@ -60,12 +60,12 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
     let typed_factory = events::RunnerFactoryId::new("read_external").expect("typed factory");
     let typed_executable = events::ExecutableIdentity {
         factory_id: typed_factory.clone(),
-        binary_digest: content(0xe4),
+        binary_digest: content(0xe2),
     };
     let typed_implementation_id =
         CapabilityImplementationId::new("mfm.test.runner-kit-typed-registration")
             .expect("typed implementation id");
-    let mut typed_registry = ErasedRunnerRegistry::new();
+    let mut typed_registry = test_runner_registry();
     typed_registry
         .register_capability_set(
             &typed_node.capability_bindings,
@@ -114,7 +114,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
     }
 
     let wrong_factory = events::RunnerFactoryId::new("pure").expect("factory");
-    let mut mismatch_registry = ErasedRunnerRegistry::new();
+    let mut mismatch_registry = test_runner_registry();
     let error = match RunnerRegistrationBuilder::new(&mut mismatch_registry).register_runner(
         node.descriptor_id.clone(),
         factory_id,
@@ -141,7 +141,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
 #[tokio::test]
 async fn launch_rejects_context_bound_output_runner_without_extractor() {
     let fixture = fixture_with_context_bound_states();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(
@@ -176,6 +176,86 @@ async fn launch_rejects_context_bound_output_runner_without_extractor() {
         RuntimeError::RunnerBinding(message)
             if message.contains("context-bound output cell")
                 && message.contains("context output extractor")
+    ));
+}
+
+#[tokio::test]
+async fn generic_pure_runner_preserves_typed_context_output_semantics() {
+    let fixture = fixture_with_context_bound_states();
+    let mut store = TestTypedRunStore::new();
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = Arc::new(store.clone());
+    let mut registry = test_runner_registry();
+    let pure_factory =
+        registry.factory_binding(events::RunnerFactoryId::new("pure").expect("pure factory id"));
+    {
+        let mut registrations = RunnerRegistrationBuilder::new(&mut registry);
+        register_pure_state::<RuntimeContextSourceState>(
+            &mut registrations,
+            &pure_factory,
+            Arc::clone(&artifacts),
+            Some(Arc::new(
+                TypedContextOutputExtractor::<RuntimeContextOutput>::new(),
+            )),
+        )
+        .expect("register generic context source");
+        register_pure_state::<RuntimeContextConsumerState>(
+            &mut registrations,
+            &pure_factory,
+            Arc::clone(&artifacts),
+            None,
+        )
+        .expect("register generic context consumer");
+    }
+    let scheduler = test_scheduler_with_artifacts(
+        register_fixture_capabilities(registry, &fixture),
+        Arc::clone(&artifacts),
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start generic pure run");
+
+    assert_eq!(
+        drive_fixture_until_blocked(&scheduler, &mut store, &fixture)
+            .await
+            .expect("drive generic pure run"),
+        SchedulerStatus::PublicOutputProjected
+    );
+    assert_eq!(
+        store.projection_snapshot().run_state(&fixture.run_id),
+        store::RunState::Completed
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_some());
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .is_some());
+}
+
+#[test]
+fn generic_pure_registration_rejects_non_pure_factory() {
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
+        Arc::new(RunnerKitArtifactProvider::default());
+    let mut registry = test_runner_registry();
+    let wrong_factory = registry
+        .factory_binding(events::RunnerFactoryId::new("read_external").expect("read factory id"));
+    let error = register_pure_state::<CertifierState>(
+        &mut RunnerRegistrationBuilder::new(&mut registry),
+        &wrong_factory,
+        artifacts,
+        None,
+    )
+    .expect_err("non-pure factory must reject");
+    assert!(matches!(
+        error,
+        RuntimeError::RunnerBinding(message) if message.contains("factory id pure")
     ));
 }
 
@@ -442,7 +522,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
     }
 
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),

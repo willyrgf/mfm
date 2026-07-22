@@ -104,7 +104,9 @@ fn replay_registration_error(error: impl std::fmt::Display) -> mfm_replay::v1::R
 }
 
 fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_portfolio::verify_portfolio_replay(broker)
+    mfm_replay::v1::verify_external_read_state::<mfm_state_portfolio::SelectHoldingsState>(broker)?;
+    mfm_replay::v1::verify_pure_state::<mfm_state_portfolio::AssembleSnapshotState>(broker)?;
+    mfm_replay::v1::verify_pure_state::<mfm_state_portfolio::ProjectReportState>(broker)
 }
 
 fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {

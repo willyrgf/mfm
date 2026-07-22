@@ -34,7 +34,7 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
         let runtime_dir = tempfile::tempdir().expect("runtime config directory");
         let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
         let store = store::AsyncInMemoryRunStore::default();
-        let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path));
+        let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path)).await;
 
         let run_id = launch_snapshot_completed(&services, &config, label).await;
         assert_atomic_evm_fact_publication(&store, &run_id, expected_evm_facts).await;
@@ -76,7 +76,7 @@ async fn snapshot_root_selects_only_the_exact_evm_receipt_content_from_store_his
         write_portfolio_runtime_config_for_test(runtime_dir.path(), &first_server.url);
     let store = store::AsyncInMemoryRunStore::default();
     let first_store = Arc::new(SnapshotStore::recording(store.clone()));
-    let services = snapshot_services(first_store.clone(), Some(&runtime_path));
+    let services = snapshot_services(first_store.clone(), Some(&runtime_path)).await;
     let config = snapshot_config(SnapshotDemand::EvmNative);
 
     launch_snapshot_completed(&services, &config, "exact-content-first").await;
@@ -103,7 +103,7 @@ async fn snapshot_root_selects_only_the_exact_evm_receipt_content_from_store_his
     .await;
     write_portfolio_runtime_config_for_test(runtime_dir.path(), &changed_server.url);
     let changed_store = Arc::new(SnapshotStore::recording(store.clone()));
-    let changed_services = snapshot_services(changed_store.clone(), Some(&runtime_path));
+    let changed_services = snapshot_services(changed_store.clone(), Some(&runtime_path)).await;
     let request =
         prepare_snapshot_request(&changed_services, config, "exact-content-different").await;
     let report = changed_services
@@ -145,7 +145,7 @@ async fn snapshot_root_fails_when_the_receipt_authorized_evm_fact_is_missing() {
         store.clone(),
         FactQueryMutation::OmitRows,
     ));
-    let services = snapshot_services(query_store.clone(), Some(&runtime_path));
+    let services = snapshot_services(query_store.clone(), Some(&runtime_path)).await;
     let response = launch_snapshot(
         &services,
         snapshot_config(SnapshotDemand::EvmNative),
@@ -174,7 +174,7 @@ async fn snapshot_root_rejects_mixed_fact_read_frontiers() {
         store.clone(),
         FactQueryMutation::SplitFrontier,
     ));
-    let services = snapshot_services(query_store.clone(), Some(&runtime_path));
+    let services = snapshot_services(query_store.clone(), Some(&runtime_path)).await;
     let response = launch_snapshot(
         &services,
         snapshot_config(SnapshotDemand::Mixed),
@@ -205,7 +205,7 @@ async fn snapshot_root_blocks_when_the_fact_query_store_is_unavailable() {
         store.clone(),
         FactQueryMutation::StoreFailure,
     ));
-    let services = snapshot_services(query_store.clone(), Some(&runtime_path));
+    let services = snapshot_services(query_store.clone(), Some(&runtime_path)).await;
     let response = launch_snapshot(
         &services,
         snapshot_config(SnapshotDemand::EvmNative),
@@ -302,7 +302,7 @@ async fn snapshot_root_replay_rejects_tampered_retained_projection_evidence() {
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
-    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path));
+    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path)).await;
     let run_id = launch_snapshot_completed(
         &services,
         &snapshot_config(SnapshotDemand::Mixed),
@@ -365,7 +365,7 @@ async fn snapshot_root_preserves_zero_btc_native_and_erc20_values() {
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
-    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path));
+    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path)).await;
     let request =
         prepare_snapshot_request(&services, snapshot_config(SnapshotDemand::Mixed), "zero").await;
 
@@ -409,7 +409,7 @@ async fn snapshot_root_keeps_zero_symbol_wallet_without_undemanded_network_work(
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
-    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path));
+    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path)).await;
     let config = snapshot_config_with_zero_symbol_bitcoin_wallet();
     let draft = portfolio_snapshot_program_draft(config.clone()).expect("zero-symbol wallet draft");
     assert!(
@@ -488,7 +488,8 @@ async fn snapshot_root_resumes_and_replays_after_live_inputs_disappear() {
     let initial_services = snapshot_services(
         Arc::new(SnapshotStore::blocking_query(store.clone(), entered_tx)),
         Some(&runtime_path),
-    );
+    )
+    .await;
     let request = prepare_snapshot_request(
         &initial_services,
         snapshot_config(SnapshotDemand::Mixed),
@@ -531,7 +532,7 @@ async fn snapshot_root_resumes_and_replays_after_live_inputs_disappear() {
     assert_eq!(prefix_replay.run_mode, mfm_app::RunModeStatus::Forward);
 
     let resumed_services =
-        snapshot_services(Arc::new(SnapshotStore::passthrough(store.clone())), None);
+        snapshot_services(Arc::new(SnapshotStore::passthrough(store.clone())), None).await;
     let resumed = resumed_services
         .resume_stored_run(&run_id)
         .await
@@ -576,6 +577,7 @@ async fn snapshot_root_replay_verifies_each_downstream_output_prefix() {
         ));
         let runners =
             mfm_app::production_runner_registry(blocked_store.clone(), Some(&runtime_path))
+                .await
                 .expect("production snapshot runners");
         let services = mfm_app::make_run_services(
             runners,
@@ -640,7 +642,7 @@ async fn snapshot_root_fails_closed_when_a_collection_source_fails() {
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
     let store = store::AsyncInMemoryRunStore::default();
-    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path));
+    let services = snapshot_services(Arc::new(store.clone()), Some(&runtime_path)).await;
     let response = launch_snapshot(
         &services,
         snapshot_config(SnapshotDemand::Bitcoin),
@@ -820,7 +822,7 @@ impl<T> SnapshotServiceStore for T where
 {
 }
 
-fn snapshot_services<S>(
+async fn snapshot_services<S>(
     store: Arc<S>,
     runtime_config_path: Option<&Path>,
 ) -> mfm_app::RunServices<S>
@@ -828,6 +830,7 @@ where
     S: SnapshotServiceStore,
 {
     let runners = mfm_app::production_runner_registry(store.clone(), runtime_config_path)
+        .await
         .expect("production snapshot runners");
     mfm_app::make_run_services(
         runners,

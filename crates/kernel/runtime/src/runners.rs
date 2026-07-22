@@ -15,8 +15,9 @@ use crate::framework::{
     framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
 use crate::{
-    CertifiedInvocationContext, CertifiedRuntimeSpec, ErasedRunCtx, PreInvocationRunCtx, Result,
-    RunLaunchArtifact, RunLaunchEvidence, RuntimeError, StagedArtifact, StagedRetentionRefs,
+    CertifiedInvocationContext, CertifiedRuntimeSpec, ErasedRunCtx, ExecutableIdentityTemplate,
+    PreInvocationRunCtx, Result, RunLaunchArtifact, RunLaunchEvidence, RunnerFactoryBinding,
+    RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by an erased typed runner.
@@ -521,8 +522,9 @@ impl AdapterExecutableBinding {
 }
 
 /// Registry of erased runners keyed by certified state descriptor id.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ErasedRunnerRegistry {
+    executable_identity_template: ExecutableIdentityTemplate,
     bindings: BTreeMap<DescriptorId, ErasedRunnerBinding>,
     side_effect_verify_bindings: BTreeMap<DescriptorId, ErasedFrameworkRunnerBinding>,
     capability_implementations: BTreeMap<(String, String), CapabilityImplementationBinding>,
@@ -537,13 +539,26 @@ struct ErasedFrameworkRunnerBinding {
 }
 
 impl ErasedRunnerRegistry {
-    /// Creates an empty registry.
-    pub fn new() -> Self {
-        Self::default()
+    /// Creates an empty registry bound to one explicitly attested executable identity.
+    pub fn new(executable_identity_template: ExecutableIdentityTemplate) -> Self {
+        Self {
+            executable_identity_template,
+            bindings: BTreeMap::new(),
+            side_effect_verify_bindings: BTreeMap::new(),
+            capability_implementations: BTreeMap::new(),
+            adapter_executables: BTreeMap::new(),
+        }
+    }
+
+    /// Mints a factory binding under this registry's executable identity.
+    pub fn factory_binding(&self, factory_id: events::RunnerFactoryId) -> RunnerFactoryBinding {
+        self.executable_identity_template
+            .factory_binding(factory_id)
     }
 
     /// Registers one erased runner binding.
     pub fn register(&mut self, binding: ErasedRunnerBinding) -> Result<()> {
+        self.validate_executable(binding.factory_id(), binding.executable())?;
         if self
             .bindings
             .insert(binding.descriptor_id.clone(), binding)
@@ -571,6 +586,7 @@ impl ErasedRunnerRegistry {
                 executable.factory_id, factory_id
             )));
         }
+        self.validate_executable(&factory_id, &executable)?;
         match self.side_effect_verify_bindings.entry(submit_descriptor_id) {
             Entry::Vacant(entry) => {
                 entry.insert(ErasedFrameworkRunnerBinding {
@@ -625,6 +641,7 @@ impl ErasedRunnerRegistry {
 
     /// Registers executable evidence for one certified adapter binding.
     pub fn register_adapter_executable(&mut self, binding: AdapterExecutableBinding) -> Result<()> {
+        self.validate_executable(&binding.executable.factory_id, &binding.executable)?;
         let key = adapter_executable_key(binding.adapter_kind(), binding.adapter_version());
         match self.adapter_executables.entry(key) {
             Entry::Vacant(entry) => {
@@ -666,28 +683,44 @@ impl ErasedRunnerRegistry {
             &node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
         ) {
-            return framework_public_output_binding(node, descriptor);
+            return framework_public_output_binding(
+                &self.executable_identity_template,
+                node,
+                descriptor,
+            );
         }
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
         ) {
-            return framework_retention_manifest_binding(node, descriptor);
+            return framework_retention_manifest_binding(
+                &self.executable_identity_template,
+                node,
+                descriptor,
+            );
         }
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::CompleteRun(_))
         ) {
-            return framework_complete_run_binding(node, descriptor);
+            return framework_complete_run_binding(
+                &self.executable_identity_template,
+                node,
+                descriptor,
+            );
         }
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
         ) {
-            return framework_resolve_saga_terminal_binding(node, descriptor);
+            return framework_resolve_saga_terminal_binding(
+                &self.executable_identity_template,
+                node,
+                descriptor,
+            );
         }
         if matches!(&node.framework, Some(spec::FrameworkNodeSpec::Bridge(_))) {
-            return framework_bridge_binding(node, descriptor);
+            return framework_bridge_binding(&self.executable_identity_template, node, descriptor);
         }
         if matches!(
             &node.framework,
@@ -788,6 +821,22 @@ impl ErasedRunnerRegistry {
             bindings.push(binding.clone());
         }
         Ok(bindings)
+    }
+
+    fn validate_executable(
+        &self,
+        factory_id: &events::RunnerFactoryId,
+        executable: &events::ExecutableIdentity,
+    ) -> Result<()> {
+        let expected = self
+            .executable_identity_template
+            .executable(factory_id.clone());
+        if executable != &expected {
+            return Err(RuntimeError::RunnerBinding(format!(
+                "factory {factory_id} executable identity does not match the registry template"
+            )));
+        }
+        Ok(())
     }
 }
 

@@ -303,7 +303,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
     }
 
     let fixture = fixture_with_first_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -412,7 +412,7 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
 #[tokio::test]
 async fn side_effect_output_before_terminal_evidence_is_rejected() {
     let fixture = fixture_with_first_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),

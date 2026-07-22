@@ -11,14 +11,8 @@ layer = "live"
 domain = "portfolio"
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-
 mfm-events = { path = "../../kernel/events" }
 mfm-facts = { path = "../../kernel/facts" }
-mfm-program = { path = "../../kernel/program" }
-mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
 mfm-store = { path = "../../kernel/store" }
-mfm-values = { path = "../../kernel/values" }

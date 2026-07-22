@@ -36,12 +36,19 @@ once at admission, records its target/schema/digest in `RunAdmitted`, and passes
 `PortfolioReportOperation`; it constructs no state directly. Resume, replay, status, stream, and
 public-output reads never consult current configuration.
 
-Domain runner behavior lives in adapter crates. `mfm-app` production assembly registers only the EVM
-balance read and atomic fact-publication bindings required by the portfolio objective. Its
+Domain live-adapter behavior lives in adapter crates; ordinary pure execution is runtime-owned.
+`mfm-app` production assembly registers only the EVM balance read and atomic fact-publication
+bindings required by the portfolio objective. Its
 read-route validator loads selective runtime configuration on a blocking worker before admission;
 no external-read ingress path performs filesystem IO on an async worker. Exact-anchor validation
 and transaction submission remain separately registerable adapter/library foundations for explicit
 consumers and tests; app certification, runner, and replay registries do not include them.
+
+Live assembly hashes the opened current executable once on a blocking worker and content-addresses
+the exact canonical `mfm.executable-bytes.v1` identity object. The resulting template supplies one
+binary digest to every distinct runner, framework, and adapter factory. If stable executable bytes
+cannot be identified, startup fails with the redacted `ExecutableIdentityUnavailable` error.
+Evidence-only services never build this registry or access the executable file.
 
 The standalone signing facade is not a second mutation workflow. It accepts raw command fields,
 canonically parses and constructs the checked unsigned envelope, resolves exactly the requested

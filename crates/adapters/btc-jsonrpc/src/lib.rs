@@ -8,7 +8,7 @@ use mfm_events::v1 as events;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry, ExternalReadExecution,
     ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
-    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
+    RunnerFactoryBinding, RunnerIngressContext, RunnerRegistrationBuilder,
 };
 use mfm_states_btc::{
     bitcoin_jsonrpc_adapter_kind, bitcoin_jsonrpc_adapter_version,
@@ -24,33 +24,41 @@ pub fn register_bitcoin_jsonrpc_runners(
     registry: &mut ErasedRunnerRegistry,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     session: Arc<dyn BitcoinBalanceSession>,
+    read_factory: &RunnerFactoryBinding,
+    adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
     registry
         .register_capability_spec::<mfm_btc_capabilities::BitcoinBalanceCollectionReadCapability>(
             CapabilityImplementationId::new(session.implementation_id())?,
         )?;
 
-    let identities = RunnerExecutableIdentityTemplate::new(
-        "mfm-adapters-btc-jsonrpc",
-        "aggregate-bitcoin-jsonrpc",
-        env!("CARGO_PKG_VERSION"),
-    )?;
-    let read_factory = identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
-    let adapter_factory =
-        identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
+    require_factory(read_factory, READ_FACTORY)?;
+    require_factory(adapter_factory, ADAPTER_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_adapter_executable_with_factory(
         bitcoin_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
         bitcoin_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
-        &adapter_factory,
+        adapter_factory,
     )?;
     registrations.register_state_runner_with_factory::<CollectBitcoinBalancesState>(
-        &read_factory,
+        read_factory,
         Arc::new(ExternalReadRunner::<CollectBitcoinBalancesState, _>::new(
             artifacts,
             CollectBitcoinBalancesExecutor { session },
         )),
     )?;
+    Ok(())
+}
+
+fn require_factory(
+    factory: &RunnerFactoryBinding,
+    expected: &'static str,
+) -> mfm_runtime::Result<()> {
+    if factory.factory_id().as_str() != expected {
+        return Err(mfm_runtime::RuntimeError::RunnerBinding(format!(
+            "Bitcoin registration requires factory id {expected}"
+        )));
+    }
     Ok(())
 }
 

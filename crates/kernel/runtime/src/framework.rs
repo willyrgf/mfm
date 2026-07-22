@@ -14,11 +14,12 @@ use crate::runners::{
     RunnerEventPayload,
 };
 use crate::{
-    canonical_json, content_digest_json, executable_identity_json, CertifiedRuntimeSpec, Result,
-    RuntimeError,
+    canonical_json, content_digest_json, executable_identity_json, CertifiedRuntimeSpec,
+    ExecutableIdentityTemplate, Result, RuntimeError,
 };
 
 pub(crate) fn framework_public_output_binding(
+    executable_identities: &ExecutableIdentityTemplate,
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
 ) -> Result<ErasedRunnerBinding> {
@@ -38,12 +39,13 @@ pub(crate) fn framework_public_output_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_executable(factory_id, "framework_public_output")?,
+        executable_identities.executable(factory_id),
         Arc::new(FrameworkPublicOutputRunner),
     )
 }
 
 pub(crate) fn framework_bridge_binding(
+    executable_identities: &ExecutableIdentityTemplate,
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
 ) -> Result<ErasedRunnerBinding> {
@@ -63,7 +65,7 @@ pub(crate) fn framework_bridge_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_executable(factory_id, "framework_bridge")?,
+        executable_identities.executable(factory_id),
         Arc::new(FrameworkBridgeRunner),
     )
 }
@@ -190,6 +192,7 @@ impl ErasedNodeRunner for FrameworkPublicOutputRunner {
 }
 
 pub(crate) fn framework_retention_manifest_binding(
+    executable_identities: &ExecutableIdentityTemplate,
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
 ) -> Result<ErasedRunnerBinding> {
@@ -209,7 +212,7 @@ pub(crate) fn framework_retention_manifest_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_executable(factory_id, "framework_retention_manifest")?,
+        executable_identities.executable(factory_id),
         Arc::new(FrameworkRetentionManifestRunner),
     )
 }
@@ -223,6 +226,7 @@ impl ErasedNodeRunner for FrameworkRetentionManifestRunner {
 }
 
 pub(crate) fn framework_complete_run_binding(
+    executable_identities: &ExecutableIdentityTemplate,
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
 ) -> Result<ErasedRunnerBinding> {
@@ -242,12 +246,13 @@ pub(crate) fn framework_complete_run_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_executable(factory_id, "framework_complete_run")?,
+        executable_identities.executable(factory_id),
         Arc::new(FrameworkCompleteRunRunner),
     )
 }
 
 pub(crate) fn framework_resolve_saga_terminal_binding(
+    executable_identities: &ExecutableIdentityTemplate,
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
 ) -> Result<ErasedRunnerBinding> {
@@ -267,25 +272,9 @@ pub(crate) fn framework_resolve_saga_terminal_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_executable(factory_id, "framework_resolve_saga_terminal")?,
+        executable_identities.executable(factory_id),
         Arc::new(FrameworkResolveSagaTerminalRunner),
     )
-}
-
-fn framework_executable(
-    factory_id: events::RunnerFactoryId,
-    runner: &'static str,
-) -> Result<events::ExecutableIdentity> {
-    let binary_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "factory_id": factory_id.as_str(),
-        "runner": runner,
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    Ok(events::ExecutableIdentity {
-        factory_id,
-        binary_digest,
-    })
 }
 
 struct FrameworkResolveSagaTerminalRunner;

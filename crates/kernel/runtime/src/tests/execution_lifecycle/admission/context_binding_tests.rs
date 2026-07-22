@@ -72,6 +72,22 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         run_admitted.adapter_executables,
         authority.bound_context().adapter_executables()
     );
+    let executables = authority
+        .bound_context()
+        .runner_executables()
+        .iter()
+        .chain(authority.bound_context().adapter_executables());
+    let factory_ids = executables
+        .clone()
+        .map(|executable| executable.factory_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        factory_ids.len() > 2,
+        "fixture must bind distinct factories"
+    );
+    assert!(executables
+        .clone()
+        .all(|executable| executable.binary_digest == content(0xe2)));
     assert_eq!(
         run_admitted.capability_implementations,
         authority.bound_context().capability_implementations()
@@ -111,7 +127,7 @@ async fn run_start_rejects_invalid_capability_implementation_bindings() {
                 },
             ),
             Case::DescriptorMismatch => {
-                let mut registry = ErasedRunnerRegistry::new();
+                let mut registry = test_runner_registry();
                 let implementation_id = CapabilityImplementationId::new("mfm.test.capability")
                     .expect("capability implementation");
                 registry
@@ -151,7 +167,6 @@ async fn resume_rejects_binding_changes_before_attempt_start() {
     enum Case {
         MissingDownstreamBinding,
         RunnerExecutableMismatch,
-        AdapterExecutableMismatch,
         CapabilityImplementationMismatch,
     }
 
@@ -167,11 +182,6 @@ async fn resume_rejects_binding_changes_before_attempt_start() {
             true,
         ),
         (
-            Case::AdapterExecutableMismatch,
-            "adapter executable identities",
-            true,
-        ),
-        (
             Case::CapabilityImplementationMismatch,
             "capability implementation identities",
             true,
@@ -183,36 +193,68 @@ async fn resume_rejects_binding_changes_before_attempt_start() {
 
         let resume_scheduler = match case {
             Case::MissingDownstreamBinding => {
-                let mut partial_registry = ErasedRunnerRegistry::new();
+                let mut partial_registry = test_runner_registry();
                 register_default_fixture_pure_runner(&mut partial_registry, &fixture);
                 test_scheduler(partial_registry)
             }
             Case::RunnerExecutableMismatch => {
-                let mut changed_registry = ErasedRunnerRegistry::new();
-                let mut changed_a = binding(
+                let changed_digest = content(0xee);
+                let mut changed_registry = test_runner_registry_with_digest(changed_digest.clone());
+                let changed_a = binding_with_digest(
                     fixture.descriptor_a.clone(),
                     "pure",
+                    changed_digest.clone(),
                     RecordingRunner {
                         expected_caps: Vec::new(),
                         output_artifact: artifact(0xa1),
                         output_digest: content(0xa2),
                     },
                 );
-                changed_a.executable.binary_digest = content(0xee);
                 changed_registry.register(changed_a).expect("binding a");
-                register_fixture_read_runner(&mut changed_registry, &fixture, "read");
-                fixture_scheduler(changed_registry, &fixture)
-            }
-            Case::AdapterExecutableMismatch => {
-                let mut changed_adapter = test_adapter_executable_identity();
-                changed_adapter.binary_digest = content(0xef);
-                test_scheduler(registered_fixture_runners_with_adapter_executable(
+                changed_registry
+                    .register(binding_with_digest(
+                        fixture.descriptor_b.clone(),
+                        "read",
+                        changed_digest.clone(),
+                        RecordingRunner {
+                            expected_caps: vec![(
+                                fixture.cap_kind.clone(),
+                                fixture.cap_version.clone(),
+                            )],
+                            output_artifact: artifact(0xb1),
+                            output_digest: content(0xb2),
+                        },
+                    ))
+                    .expect("changed read binding");
+                register_spec_capabilities_with_adapter_executable(
+                    &mut changed_registry,
+                    &fixture.runtime_spec,
+                    test_adapter_executable_identity_with_digest(changed_digest),
+                );
+                let changed_scheduler = test_scheduler(changed_registry);
+                let mut changed_store = TestTypedRunStore::new();
+                start_fixture_run(
+                    &changed_scheduler,
+                    &mut changed_store,
                     &fixture,
-                    changed_adapter,
-                ))
+                    vec![fixture.seed_ref.clone()],
+                )
+                .await
+                .expect("admit fixture under changed executable digest");
+                let original_admission = store.run_admitted(&fixture.run_id);
+                let changed_admission = changed_store.run_admitted(&fixture.run_id);
+                assert_ne!(
+                    original_admission.runner_executables,
+                    changed_admission.runner_executables
+                );
+                assert_ne!(
+                    original_admission.adapter_executables,
+                    changed_admission.adapter_executables
+                );
+                changed_scheduler
             }
             Case::CapabilityImplementationMismatch => {
-                let mut changed_registry = ErasedRunnerRegistry::new();
+                let mut changed_registry = test_runner_registry();
                 let implementation_id =
                     CapabilityImplementationId::new("mfm.test.changed-capability")
                         .expect("changed capability implementation");

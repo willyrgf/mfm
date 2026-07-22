@@ -32,6 +32,10 @@ pub use registration::RunnerRegistrationBuilder;
 mod external_read;
 pub use external_read::*;
 
+#[path = "runner_kit/pure.rs"]
+mod pure;
+pub use pure::register_pure_state;
+
 #[path = "runner_kit/artifacts.rs"]
 mod artifacts;
 pub use artifacts::*;

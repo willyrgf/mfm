@@ -508,7 +508,10 @@ fn transaction_runners(
     session: Arc<TransactionSession>,
     signer_calls: Arc<AtomicUsize>,
 ) -> ErasedRunnerRegistry {
-    let mut runners = ErasedRunnerRegistry::new();
+    let mut runners = test_runner_registry();
+    let side_effect_factory = test_factory_binding(&runners, "apply_side_effect");
+    let verify_factory = test_factory_binding(&runners, "read_external");
+    let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     let bind_session = Arc::clone(&session);
     let signer_binder = mfm_signing::DeterministicSigningProviderBinder::new(
         "mfm.test.deterministic-signer",
@@ -549,6 +552,9 @@ fn transaction_runners(
                 })
             },
         ),
+        &side_effect_factory,
+        &verify_factory,
+        &adapter_factory,
     )
     .expect("register transaction runners");
     runners

@@ -64,6 +64,7 @@ mod btc_collector;
 mod config_setup;
 mod entry_point;
 mod evm_runtime;
+mod executable_identity;
 mod live_transports;
 mod public_facts;
 mod replay_verifiers;
@@ -192,7 +193,7 @@ pub async fn connect_production_run_services(
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, PublicError> {
     let store = Arc::new(connect_production_store(database_url).await?);
-    let runners = production_runner_registry(store.clone(), runtime_config_path)?;
+    let runners = production_runner_registry(store.clone(), runtime_config_path).await?;
     let certification_registry = production_certification_registry()?;
     Ok(make_run_services(runners, store, certification_registry))
 }
@@ -209,28 +210,57 @@ pub async fn connect_production_run_read_services(
 /// Builds the production typed runner registry for this process.
 ///
 /// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Domain runners
-/// register here as certified typed descriptor bindings. Portfolio snapshots require an explicit
-/// Fact queries and retained artifacts are bound to the same supplied store object.
-pub fn production_runner_registry<S>(
+/// register here as certified typed descriptor bindings. Portfolio fact queries and retained
+/// artifacts are bound to the same supplied store object.
+pub async fn production_runner_registry<S>(
     store: Arc<S>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, PublicError>
 where
     S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
 {
+    let executable_identities = executable_identity::current_executable_identity_template().await?;
     let runtime_config = Arc::new(LiveTransportRuntime::new(
         RuntimeConfigLoader::from_path_or_env(runtime_config_path),
     ));
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = ErasedRunnerRegistry::new(executable_identities);
+    let pure_factory = runner_factory_binding(&registry, "pure")?;
+    let read_factory = runner_factory_binding(&registry, "read_external")?;
+    let bitcoin_adapter_factory = runner_factory_binding(&registry, "bitcoin_jsonrpc_adapter")?;
+    let evm_adapter_factory = runner_factory_binding(&registry, "evm_jsonrpc_adapter")?;
+    let portfolio_adapter_factory = runner_factory_binding(&registry, "portfolio_adapter")?;
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
-    mfm_adapters_portfolio::register_portfolio_runners(&mut registry, store)?;
+    mfm_adapters_portfolio::register_portfolio_runners(
+        &mut registry,
+        store,
+        &pure_factory,
+        &read_factory,
+        &portfolio_adapter_factory,
+    )?;
     btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),
         runtime_config.clone(),
+        &read_factory,
+        &bitcoin_adapter_factory,
     )?;
-    evm_runtime::register_evm_balance_runners(&mut registry, artifacts.clone(), runtime_config)?;
+    evm_runtime::register_evm_balance_runners(
+        &mut registry,
+        artifacts,
+        runtime_config,
+        &read_factory,
+        &evm_adapter_factory,
+    )?;
     Ok(registry)
+}
+
+fn runner_factory_binding(
+    registry: &ErasedRunnerRegistry,
+    factory_id: &'static str,
+) -> Result<mfm_runtime::RunnerFactoryBinding, PublicError> {
+    let factory_id = events::RunnerFactoryId::new(factory_id)
+        .map_err(|_| executable_identity::executable_identity_unavailable())?;
+    Ok(registry.factory_binding(factory_id))
 }
 
 /// Builds the trusted production certification registry for typed spec certification and replay verification.

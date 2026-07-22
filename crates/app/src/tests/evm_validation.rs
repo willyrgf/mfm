@@ -98,7 +98,9 @@ async fn contract_validation_validates_its_async_route_before_admission() {
     )
     .expect("validation launch request");
     let run_id = request.run_id.clone();
-    let mut runners = ErasedRunnerRegistry::new();
+    let mut runners = test_runner_registry();
+    let read_factory = test_factory_binding(&runners, "read_external");
+    let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     register_evm_validation_runner(
         &mut runners,
         EvmReadRunnerCapabilities::new(
@@ -106,6 +108,8 @@ async fn contract_validation_validates_its_async_route_before_admission() {
             |_binding| Box::pin(async move { Err(missing_provider_failure()) }),
             |_binding| Box::pin(async move { Err(missing_provider_failure()) }),
         ),
+        &read_factory,
+        &adapter_factory,
     )
     .expect("explicit validation runner");
     let services = make_run_services(runners, Arc::new(store.clone()), certification);
@@ -194,7 +198,9 @@ fn validation_runners(
     store: &store::AsyncInMemoryRunStore,
     live_reads: Arc<AtomicUsize>,
 ) -> ErasedRunnerRegistry {
-    let mut runners = ErasedRunnerRegistry::new();
+    let mut runners = test_runner_registry();
+    let read_factory = test_factory_binding(&runners, "read_external");
+    let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     register_evm_validation_runner(
         &mut runners,
         EvmReadRunnerCapabilities::new(
@@ -209,6 +215,8 @@ fn validation_runners(
                 })
             },
         ),
+        &read_factory,
+        &adapter_factory,
     )
     .expect("register validation runner");
     runners

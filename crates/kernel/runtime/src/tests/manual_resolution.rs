@@ -230,7 +230,7 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
 #[tokio::test]
 async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
     let fixture = fixture_with_first_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -261,7 +261,7 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
         fixture.cell_c.as_ref().expect("failing output cell"),
     )
     .clone();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),

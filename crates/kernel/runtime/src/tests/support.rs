@@ -438,7 +438,7 @@ fn fixture_registry_with_first_runner<R: ErasedNodeRunner + 'static>(
     runner_name: &'static str,
     runner: R,
 ) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(fixture.descriptor_a.clone(), runner_name, runner))
         .expect("binding a");
@@ -450,7 +450,7 @@ fn side_effect_driver_registry_with_submission_decision(
     fixture: &Fixture,
     decision: TestSubmissionDecision,
 ) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -541,11 +541,29 @@ fn register_spec_capabilities_with_adapter_executable(
 }
 
 fn test_adapter_executable_identity() -> events::ExecutableIdentity {
+    test_adapter_executable_identity_with_digest(content(0xe2))
+}
+
+fn test_adapter_executable_identity_with_digest(
+    binary_digest: ContentDigest,
+) -> events::ExecutableIdentity {
     let factory_id = events::RunnerFactoryId::new("test_adapter").expect("factory");
     events::ExecutableIdentity {
         factory_id,
-        binary_digest: content(0xe4),
+        binary_digest,
     }
+}
+
+fn test_executable_identity_template() -> ExecutableIdentityTemplate {
+    ExecutableIdentityTemplate::new(content(0xe2))
+}
+
+fn test_runner_registry() -> ErasedRunnerRegistry {
+    ErasedRunnerRegistry::new(test_executable_identity_template())
+}
+
+fn test_runner_registry_with_digest(binary_digest: ContentDigest) -> ErasedRunnerRegistry {
+    ErasedRunnerRegistry::new(ExecutableIdentityTemplate::new(binary_digest))
 }
 
 const DA: DigestBytes = DigestBytes::from_array([0x1a; 32]);

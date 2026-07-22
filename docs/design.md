@@ -263,6 +263,18 @@ Parent operation registries compose child state, operation, and certification re
 unit, then register only parent-owned types. Repeating a child's concrete inventory in its parent
 is forbidden because it creates a second topology authority that can drift independently.
 
+One live process has one `ExecutableIdentityTemplate`. The app computes it once by streaming the
+opened current executable through raw SHA-256, then content-addressing exactly the canonical object
+`{"contract":"mfm.executable-bytes.v1","sha256":"<64 lower-case hex>"}`. Linux hashes the
+opened `/proc/self/exe` inode and verifies stable file metadata; macOS verifies the opened immutable
+path and file metadata before and after the read. Blocking file work runs before scheduler work on
+a blocking worker, and every failure is the redacted `ExecutableIdentityUnavailable` startup
+error. Every runner, framework handler, and adapter factory retains its distinct `factory_id` but
+uses that one template `binary_digest`; runtime and domain crates provide no default or
+label-derived identity. Live resume under different executable bytes fails binding validation
+before an attempt or live capability call. Read-only observation and evidence-only replay never
+read or hash the current executable.
+
 ## Effects And Capabilities
 
 Effect classes are framework-owned:
@@ -415,13 +427,17 @@ bindings are deployment/ingress failures, not semantic attempt outcomes.
 
 Replay and resume semantics follow the effect class:
 
-- Pure states replay by recomputing deterministic state behavior.
+- Ordinary pure states execute through the runtime-owned generic `PureState` runner, which loads
+  certified config, the complete input tree, and certified context, then stages the canonical
+  output and validates any declared context output. They replay through the one generic replay
+  verifier by reconstructing the same retained values and recomputing exact canonical output.
 - Read states replay from recorded read evidence. Replay must not call live transports.
 - Side-effect states resume from durable phase evidence such as intent, idempotency, required
   prepared invocation authority, submission, receipt, confirmation, or recovery evidence. Resume
   must not duplicate external mutations or infer mutation status from unstored state. The kernel
   derives the full schema-bound idempotency key; adapters cannot supply or truncate it.
 - Replay never constructs live transports or signer providers.
+- Replay never resolves current configuration or current-executable identity.
 
 Portfolio holding intent is direct and aggregate-validated: each symbol is a `Native` source or an
 EVM `Erc20` source with a normalized non-zero contract address, and EVM native scale is owned by

@@ -186,6 +186,57 @@ fn runner_kit_rejects_skipped_materialized_input_cell() {
 }
 
 #[test]
+fn runner_kit_rejects_malformed_certified_config_and_input_values() {
+    let fixture = fixture();
+    let mut node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let malformed_config = b"42";
+    let config_digest = digest_for_bytes(malformed_config);
+    node.config_ref.artifact_id =
+        ArtifactId::from_digest(config_digest.algorithm(), *config_digest.digest());
+    node.config_ref.digest = config_digest;
+    node.config_ref.byte_len = malformed_config.len() as u64;
+    let config_evidence = runner_kit_config_artifact(&node, malformed_config);
+    let config_artifacts =
+        RunnerKitArtifactProvider::new(vec![(malformed_config.to_vec(), config_evidence)]);
+    let config_error = block_on_ready(load_runner_config_for_node::<RunnerKitEmptyConfig>(
+        &node,
+        &config_artifacts,
+    ))
+    .expect_err("malformed typed config must reject");
+    assert!(matches!(config_error, RuntimeError::InvalidRunnerOutput(_)));
+
+    let malformed_input = br#"{"amount":"not-an-integer"}"#;
+    let input_evidence = runner_kit_value_artifact(
+        malformed_input,
+        events::ArtifactRole::StateOutput,
+        Some(node.node_id.clone()),
+        None,
+    );
+    let input_artifacts =
+        RunnerKitArtifactProvider::new(vec![(malformed_input.to_vec(), input_evidence.clone())]);
+    let input_node = runner_kit_input_cell(
+        &input_evidence,
+        MaterializedCellTerminal::Produced {
+            producer_node_id: node.node_id.clone(),
+            artifact_id: input_evidence.artifact_id.clone(),
+            content_digest: input_evidence.digest.clone(),
+            evidence_hash: input_evidence.evidence_hash().expect("input evidence hash"),
+        },
+    );
+    let inputs = MaterializedInputs {
+        input_schema_id: <CertifierValue as mfm_values::StateInput>::input_schema_id()
+            .expect("certifier input schema"),
+        root: input_node,
+    };
+    let input_error = block_on_ready(load_materialized_input::<CertifierValue>(
+        &inputs,
+        &input_artifacts,
+    ))
+    .expect_err("malformed typed input must reject");
+    assert!(matches!(input_error, RuntimeError::InvalidRunnerOutput(_)));
+}
+
+#[test]
 fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     let fixture = fixture();
     let node = node_by_output(&fixture, &fixture.cell_a).clone();

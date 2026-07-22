@@ -2367,14 +2367,9 @@ version = "0.1.0"
 dependencies = [
  "mfm-events",
  "mfm-facts",
- "mfm-program",
- "mfm-replay",
  "mfm-runtime",
  "mfm-state-portfolio",
  "mfm-store",
- "mfm-values",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2415,6 +2410,7 @@ dependencies = [
  "mfm-transports-btc-jsonrpc-http",
  "mfm-transports-evm",
  "mfm-values",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

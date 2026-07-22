@@ -816,9 +816,13 @@ fn replay_source_does_not_import_live_authorities() {
     let source = include_str!("../../lib.rs");
     for forbidden in [
         concat!("std", "::", "env"),
+        concat!("current", "_", "exe"),
+        concat!("/proc", "/self", "/exe"),
+        concat!("Executable", "Identity", "Template"),
         concat!("mfm", "_", "transports"),
         concat!("mfm", "_", "signing", "::", "SigningProvider"),
         concat!("mfm", "_", "core", "::", "keystore"),
+        concat!("Current", "Config", "Provider"),
         concat!("Evm", "Json", "Rpc", "Client"),
     ] {
         assert!(

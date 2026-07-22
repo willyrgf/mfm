@@ -15,7 +15,7 @@ use mfm_evm_capabilities::{
 use mfm_runtime::{
     CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry, ExternalReadExecution,
     ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
-    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
+    RunnerFactoryBinding, RunnerIngressContext, RunnerRegistrationBuilder,
 };
 use mfm_states_evm::{
     evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, CollectEvmBalancesState,
@@ -104,13 +104,14 @@ impl EvmReadRunnerCapabilities {
 pub fn register_evm_balance_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: EvmReadRunnerCapabilities,
+    read_factory: &RunnerFactoryBinding,
+    adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
-    let executable_identities = register_evm_read_foundation(registry)?;
-    let read_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
+    register_evm_read_foundation(registry, adapter_factory)?;
+    require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_state_runner_with_factory::<CollectEvmBalancesState>(
-        &read_factory,
+        read_factory,
         Arc::new(ExternalReadRunner::<CollectEvmBalancesState, _>::new(
             Arc::clone(&capabilities.artifacts),
             balance_collection::CollectEvmBalancesExecutor {
@@ -125,13 +126,14 @@ pub fn register_evm_balance_runners(
 pub fn register_evm_validation_runner(
     registry: &mut ErasedRunnerRegistry,
     capabilities: EvmReadRunnerCapabilities,
+    read_factory: &RunnerFactoryBinding,
+    adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
-    let executable_identities = register_evm_read_foundation(registry)?;
-    let read_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
+    register_evm_read_foundation(registry, adapter_factory)?;
+    require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_state_runner_with_factory::<ValidateEvmContractState>(
-        &read_factory,
+        read_factory,
         Arc::new(ExternalReadRunner::<ValidateEvmContractState, _>::new(
             Arc::clone(&capabilities.artifacts),
             ValidateContractExecutor { capabilities },
@@ -142,24 +144,31 @@ pub fn register_evm_validation_runner(
 
 fn register_evm_read_foundation(
     registry: &mut ErasedRunnerRegistry,
-) -> mfm_runtime::Result<RunnerExecutableIdentityTemplate> {
+    adapter_factory: &RunnerFactoryBinding,
+) -> mfm_runtime::Result<()> {
     registry.register_capability_spec::<EvmReadCapability>(CapabilityImplementationId::new(
         EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
     )?)?;
-    let executable_identities = RunnerExecutableIdentityTemplate::new(
-        "mfm-adapters-evm",
-        "typed-evm-jsonrpc",
-        env!("CARGO_PKG_VERSION"),
-    )?;
-    let adapter_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
+    require_factory(adapter_factory, ADAPTER_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_adapter_executable_with_factory(
         evm_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
         evm_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
-        &adapter_factory,
+        adapter_factory,
     )?;
-    Ok(executable_identities)
+    Ok(())
+}
+
+fn require_factory(
+    factory: &RunnerFactoryBinding,
+    expected: &'static str,
+) -> mfm_runtime::Result<()> {
+    if factory.factory_id().as_str() != expected {
+        return Err(mfm_runtime::RuntimeError::RunnerBinding(format!(
+            "EVM registration requires factory id {expected}"
+        )));
+    }
+    Ok(())
 }
 
 struct ValidateContractExecutor {

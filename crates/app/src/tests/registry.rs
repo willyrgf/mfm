@@ -1,18 +1,19 @@
 use super::*;
 
-#[test]
-fn production_runner_registry_defers_malformed_runtime_config() {
+#[tokio::test]
+async fn production_runner_registry_defers_malformed_runtime_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("runtime.toml");
     std::fs::write(&config_path, "not valid toml = [").expect("write runtime config");
     let store = store::AsyncInMemoryRunStore::default();
 
     production_runner_registry(Arc::new(store), Some(&config_path))
+        .await
         .expect("runner registration must not parse live runtime config");
 }
 
-#[test]
-fn production_runner_registry_covers_runtime_family_matrix() {
+#[tokio::test]
+async fn production_runner_registry_covers_runtime_family_matrix() {
     let cases = [
         ("portfolio-only", None, false, false),
         (
@@ -84,6 +85,7 @@ scan_timeout_seconds = 30
             Arc::new(store),
             config_path.as_ref().map(|(_, path)| path.as_path()),
         )
+        .await
         .unwrap_or_else(|error| panic!("{name} production registry: {error}"));
     }
 }

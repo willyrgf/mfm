@@ -21,11 +21,11 @@ use mfm_runtime::{
     load_side_effect_artifact, preclaim_side_effect_resource_lane, side_effect_idempotency_key,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerRegistry, MaterializedInputs, PreInvocationRunCtx, PreInvocationRunnerFuture,
-    RunnerCapabilityBinding, RunnerExecutableIdentityTemplate, RunnerIngressContext,
-    RunnerIngressFuture, RunnerOutputSettlement, RunnerRegistrationBuilder, SideEffectAdapter,
-    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence,
-    SideEffectPreparedInvocation, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
+    RunnerCapabilityBinding, RunnerFactoryBinding, RunnerIngressContext, RunnerIngressFuture,
+    RunnerOutputSettlement, RunnerRegistrationBuilder, SideEffectAdapter, SideEffectDriver,
+    SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectPreparedInvocation,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision,
+    SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
 use mfm_states_evm::{
@@ -146,6 +146,9 @@ impl EvmTransactionRunnerCapabilities {
 pub fn register_evm_transaction_runner(
     registry: &mut ErasedRunnerRegistry,
     capabilities: EvmTransactionRunnerCapabilities,
+    side_effect_factory: &RunnerFactoryBinding,
+    verify_factory: &RunnerFactoryBinding,
+    adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
     let descriptor = mfm_program::state_descriptor::<SubmitEvmTransactionState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
@@ -160,29 +163,21 @@ pub fn register_evm_transaction_runner(
                 .as_str(),
         )?,
     )?;
-    let executable_identities = RunnerExecutableIdentityTemplate::new(
-        "mfm-adapters-evm",
-        "typed-evm-jsonrpc",
-        env!("CARGO_PKG_VERSION"),
-    )?;
-    let side_effect_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?);
-    let verify_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(VERIFY_FACTORY)?);
-    let adapter_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
+    super::require_factory(side_effect_factory, SIDE_EFFECT_FACTORY)?;
+    super::require_factory(verify_factory, VERIFY_FACTORY)?;
+    super::require_factory(adapter_factory, ADAPTER_FACTORY)?;
     let adapter = Arc::new(EvmTransactionAdapter::new(capabilities));
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_adapter_executable_with_factory(
         evm_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
         evm_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
-        &adapter_factory,
+        adapter_factory,
     )?;
     registrations.register_side_effect_state_runner_with_factory::<
         SubmitEvmTransactionState,
         EvmTransactionAdapter,
     >(
-        &side_effect_factory,
+        side_effect_factory,
         adapter.as_ref(),
         Arc::new(EvmTransactionSubmitRunner {
             adapter: Arc::clone(&adapter),
@@ -190,7 +185,7 @@ pub fn register_evm_transaction_runner(
     )?;
     registrations.register_side_effect_verify_runner_with_factory(
         descriptor.descriptor_id().clone(),
-        &verify_factory,
+        verify_factory,
         Arc::new(EvmTransactionVerifyRunner { adapter }),
     )?;
     Ok(())

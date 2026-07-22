@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
@@ -182,7 +183,7 @@ pub struct AppState<S = PostgresStore> {
 struct RouterState<S> {
     app: AppState<S>,
     configured_store: Option<PostgresStore>,
-    live_services: Arc<OnceLock<Result<RunServices<S>, ApiError>>>,
+    live_services: Arc<OnceCell<Result<RunServices<S>, ApiError>>>,
     read_services: Arc<OnceLock<Result<RunReadServices<S>, ApiError>>>,
 }
 
@@ -237,15 +238,16 @@ where
         Ok(())
     }
 
-    fn live_services(&self) -> Result<RunServices<S>, ApiError> {
+    async fn live_services(&self) -> Result<RunServices<S>, ApiError> {
         self.require_live_role()?;
         self.live_services
-            .get_or_init(|| {
+            .get_or_init(|| async {
                 let store = Arc::new(self.app.store.clone());
                 let runners = mfm_app::production_runner_registry(
                     store.clone(),
                     self.app.runtime_config_path.as_deref(),
-                )?;
+                )
+                .await?;
                 let certification_registry = mfm_app::production_certification_registry()?;
                 Ok(mfm_app::make_run_services(
                     runners,
@@ -253,6 +255,7 @@ where
                     certification_registry,
                 ))
             })
+            .await
             .clone()
     }
 
@@ -304,7 +307,7 @@ where
     let state = RouterState {
         configured_store: state.configured_store.clone(),
         app: state,
-        live_services: Arc::new(OnceLock::new()),
+        live_services: Arc::new(OnceCell::new()),
         read_services: Arc::new(OnceLock::new()),
     };
 
@@ -653,7 +656,7 @@ where
     S: RunCommandStore,
 {
     let Json(req) = body?;
-    let services = state.live_services()?;
+    let services = state.live_services().await?;
     let store_scope_id = services.load_store_scope_id().await?;
     let invocation_key = req.invocation_key.map(InvocationKey::new).transpose()?;
     let configured_store = state.configured_store.as_ref().ok_or_else(|| {
@@ -693,7 +696,11 @@ where
 {
     let run_id = parse_run_id(&run_id)?;
     let _req: RunResumeBody = parse_optional_body(body)?;
-    let data = state.live_services()?.resume_stored_run(&run_id).await?;
+    let data = state
+        .live_services()
+        .await?
+        .resume_stored_run(&run_id)
+        .await?;
 
     json_ok(data)
 }
@@ -717,7 +724,8 @@ where
     let proof_bytes =
         canonical_json_value_bytes(&req.authorization_proof, "ManualResolutionProofInvalid")?;
     let data = state
-        .live_services()?
+        .live_services()
+        .await?
         .record_manual_resolution(ManualResolutionRecordRequest {
             run_id,
             outcome: req.outcome,

@@ -1,6 +1,5 @@
 use super::*;
 
-use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -25,11 +24,7 @@ use mfm_program::{
     StateRegistryBuilder, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, PublicOutputs, StateInput};
-use mfm_runtime::{
-    load_materialized_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, RunnerExecutableIdentityTemplate,
-    RunnerRegistrationBuilder,
-};
+use mfm_runtime::{register_pure_state, ErasedRunnerRegistry, RunnerRegistrationBuilder};
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
     SigningProvider, SigningRequest, SigningResult, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
@@ -41,7 +36,6 @@ use mfm_states_evm::{
     ValidateEvmContractState, VerifiedEvmContract,
 };
 use mfm_store::v1::{self as store, StoreScopeStore as _};
-use serde::de::DeserializeOwned;
 
 const BASE_NONCE: u64 = 7;
 const RUNTIME_CODE: &[u8] = &[0x60, 0x00, 0x60, 0x01];
@@ -329,6 +323,7 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
         .expect("explicit transaction foundation replay verifier");
     mfm_adapters_evm::verify_evm_validation_replay(&broker)
         .expect("explicit validation foundation replay verifier");
+    verify_composition_pure_states(&broker);
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 0);
 }
 
@@ -404,7 +399,19 @@ async fn assert_composition_replays(
         .expect("explicit transaction foundation replay verifier");
     mfm_adapters_evm::verify_evm_validation_replay(&broker)
         .expect("explicit validation foundation replay verifier");
+    verify_composition_pure_states(&broker);
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 3);
+}
+
+fn verify_composition_pure_states(broker: &mfm_replay::v1::ReplayBroker) {
+    mfm_replay::v1::verify_pure_state::<FirstCallActionState>(broker)
+        .expect("first-call projection replay");
+    mfm_replay::v1::verify_pure_state::<SecondCallActionState>(broker)
+        .expect("second-call projection replay");
+    mfm_replay::v1::verify_pure_state::<ValidationTargetState>(broker)
+        .expect("validation-target projection replay");
+    mfm_replay::v1::verify_pure_state::<DirectValidationTargetState>(broker)
+        .expect("direct validation-target projection replay");
 }
 
 fn direct_composition_launch_material(
@@ -670,9 +677,13 @@ fn composition_runners(
     signing_key: Arc<SigningKey>,
     live_validation_reads: Arc<AtomicUsize>,
 ) -> ErasedRunnerRegistry {
-    let mut runners = ErasedRunnerRegistry::new();
+    let mut runners = test_runner_registry();
+    let pure_factory = test_factory_binding(&runners, "pure");
+    let read_factory = test_factory_binding(&runners, "read_external");
+    let side_effect_factory = test_factory_binding(&runners, "apply_side_effect");
+    let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = Arc::new(store.clone());
-    register_projection_runners(&mut runners, Arc::clone(&artifacts));
+    register_projection_runners(&mut runners, &pure_factory, Arc::clone(&artifacts));
 
     let sender = world.sender;
     let transaction_session = Arc::new(CompositionTransactionSession::new(Arc::clone(&world)));
@@ -723,6 +734,9 @@ fn composition_runners(
                 })
             },
         ),
+        &side_effect_factory,
+        &read_factory,
+        &adapter_factory,
     )
     .expect("register transaction runner");
 
@@ -741,6 +755,8 @@ fn composition_runners(
                 })
             },
         ),
+        &read_factory,
+        &adapter_factory,
     )
     .expect("register validation runner");
     runners
@@ -748,88 +764,38 @@ fn composition_runners(
 
 fn register_projection_runners(
     registry: &mut ErasedRunnerRegistry,
+    pure_factory: &mfm_runtime::RunnerFactoryBinding,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 ) {
-    let identities = RunnerExecutableIdentityTemplate::new(
-        "mfm-app",
-        "evm-transaction-composition-test",
-        env!("CARGO_PKG_VERSION"),
-    )
-    .expect("projection executable identities");
-    let factory = identities
-        .factory_binding(events::RunnerFactoryId::new("pure").expect("pure projection factory"));
     let mut registrations = RunnerRegistrationBuilder::new(registry);
-    registrations
-        .register_state_runner_with_factory::<FirstCallActionState>(
-            &factory,
-            Arc::new(ProjectionRunner::<FirstCallActionState>::new(Arc::clone(
-                &artifacts,
-            ))),
-        )
-        .expect("register first-call projection runner");
-    registrations
-        .register_state_runner_with_factory::<SecondCallActionState>(
-            &factory,
-            Arc::new(ProjectionRunner::<SecondCallActionState>::new(Arc::clone(
-                &artifacts,
-            ))),
-        )
-        .expect("register second-call projection runner");
-    registrations
-        .register_state_runner_with_factory::<ValidationTargetState>(
-            &factory,
-            Arc::new(ProjectionRunner::<ValidationTargetState>::new(Arc::clone(
-                &artifacts,
-            ))),
-        )
-        .expect("register validation-target projection runner");
-    registrations
-        .register_state_runner_with_factory::<DirectValidationTargetState>(
-            &factory,
-            Arc::new(ProjectionRunner::<DirectValidationTargetState>::new(
-                artifacts,
-            )),
-        )
-        .expect("register direct validation-target projection runner");
-}
-
-struct ProjectionRunner<S> {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    _state: PhantomData<fn() -> S>,
-}
-
-impl<S> ProjectionRunner<S> {
-    fn new(artifacts: Arc<dyn store::RetainedArtifactReadProvider>) -> Self {
-        Self {
-            artifacts,
-            _state: PhantomData,
-        }
-    }
-}
-
-impl<S> ErasedNodeRunner for ProjectionRunner<S>
-where
-    S: PureState,
-    S::Config: DeserializeOwned,
-    S::Input: DeserializeOwned,
-{
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config =
-                load_runner_config_for_node::<S::Config>(ctx.node(), self.artifacts.as_ref())
-                    .await?;
-            let state = S::new(config).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
-            let input =
-                load_materialized_input::<S::Input>(ctx.inputs(), self.artifacts.as_ref()).await?;
-            let context = ctx.certified_context::<S::Context>()?;
-            let output = state.run(input, &context).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
-            ErasedRunnerOutput::state_output(&ctx, &output)
-        })
-    }
+    register_pure_state::<FirstCallActionState>(
+        &mut registrations,
+        pure_factory,
+        Arc::clone(&artifacts),
+        None,
+    )
+    .expect("register first-call projection runner");
+    register_pure_state::<SecondCallActionState>(
+        &mut registrations,
+        pure_factory,
+        Arc::clone(&artifacts),
+        None,
+    )
+    .expect("register second-call projection runner");
+    register_pure_state::<ValidationTargetState>(
+        &mut registrations,
+        pure_factory,
+        Arc::clone(&artifacts),
+        None,
+    )
+    .expect("register validation-target projection runner");
+    register_pure_state::<DirectValidationTargetState>(
+        &mut registrations,
+        pure_factory,
+        artifacts,
+        None,
+    )
+    .expect("register direct validation-target projection runner");
 }
 
 fn validate_composition_binding(binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {

@@ -248,6 +248,42 @@ where
     Ok(())
 }
 
+/// Replays every produced output for one exact ordinary pure-state descriptor.
+///
+/// This helper reconstructs certified config, arbitrary input trees, and typed context before
+/// invoking the same deterministic state behavior used by live execution. It performs no current
+/// configuration, executable, transport, or capability IO.
+pub fn verify_pure_state<S>(broker: &ReplayBroker) -> Result<()>
+where
+    S: mfm_program::PureState,
+    S::Config: DeserializeOwned,
+    S::Input: DeserializeOwned,
+{
+    let descriptor =
+        mfm_program::state_descriptor::<S>().map_err(|error| mismatch(error.to_string()))?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.descriptor_id == *descriptor.descriptor_id())
+    })?;
+    for frame in &frames {
+        let config: S::Config = load_node_config(broker, &frame.node)?;
+        let validated =
+            ValidatedConfig::new(config).map_err(|error| mismatch(error.to_string()))?;
+        let state = S::new(validated).map_err(|error| mismatch(error.to_string()))?;
+        let input = load_node_input::<S::Input>(broker, &frame.node)?;
+        let context = load_node_context::<S::Context>(broker, &frame.node)?;
+        let expected = state
+            .run(input, &context)
+            .map_err(|error| mismatch(error.to_string()))?;
+        let expected_bytes = canonical_value_bytes(&expected)?;
+        if frame.artifact_bytes != expected_bytes.as_bytes() {
+            return Err(mismatch(
+                "replayed pure-state output did not match deterministic state behavior",
+            ));
+        }
+    }
+    Ok(())
+}
+
 trait CompareReadFactBatch {
     fn compare(&self, broker: &ReplayBroker, frame: &ProducedCellReplayFrame) -> Result<()>;
 }

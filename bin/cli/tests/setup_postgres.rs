@@ -179,6 +179,7 @@ async fn admit_configured_target_without_driving(
     let run_id = request.run_id.clone();
     let runners =
         mfm_app::production_runner_registry(Arc::new(store.clone()), Some(runtime_config_path))
+            .await
             .expect("production runners");
     let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
     let runtime_spec =

@@ -77,30 +77,28 @@ impl RunnerJsonArtifact {
     }
 }
 
-/// Precomputed executable identity material shared by runner factories in one adapter binary.
+/// Precomputed executable identity material shared by every runner factory in one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerExecutableIdentityTemplate {
+pub struct ExecutableIdentityTemplate {
     binary_digest: ContentDigest,
 }
 
-impl RunnerExecutableIdentityTemplate {
-    /// Builds executable identity material from the stable adapter package and runner labels.
-    pub fn new(
-        cargo_package: &'static str,
-        runner: &'static str,
-        version: &'static str,
-    ) -> Result<Self> {
-        Ok(Self {
-            binary_digest: executable_identity_digest(serde_json::json!({
-                "crate": cargo_package,
-                "runner": runner,
-                "version": version,
-            }))?,
-        })
+impl ExecutableIdentityTemplate {
+    /// Creates a process template from the canonical executable-bytes identity digest.
+    pub fn new(binary_digest: ContentDigest) -> Self {
+        Self { binary_digest }
+    }
+
+    /// Returns the canonical executable-bytes identity digest.
+    pub fn binary_digest(&self) -> &ContentDigest {
+        &self.binary_digest
     }
 
     /// Builds an executable identity for one logical runner or adapter factory.
-    pub fn executable(&self, factory_id: events::RunnerFactoryId) -> events::ExecutableIdentity {
+    pub(crate) fn executable(
+        &self,
+        factory_id: events::RunnerFactoryId,
+    ) -> events::ExecutableIdentity {
         events::ExecutableIdentity {
             factory_id,
             binary_digest: self.binary_digest.clone(),
@@ -108,7 +106,10 @@ impl RunnerExecutableIdentityTemplate {
     }
 
     /// Builds a reusable factory binding for one logical runner or adapter factory.
-    pub fn factory_binding(&self, factory_id: events::RunnerFactoryId) -> RunnerFactoryBinding {
+    pub(crate) fn factory_binding(
+        &self,
+        factory_id: events::RunnerFactoryId,
+    ) -> RunnerFactoryBinding {
         let executable = self.executable(factory_id.clone());
         RunnerFactoryBinding {
             factory_id,
@@ -467,12 +468,4 @@ fn side_effect_artifact_source(
             "artifact role {role:?} is not a side-effect artifact"
         ))),
     }
-}
-
-fn executable_identity_digest(value: serde_json::Value) -> Result<ContentDigest> {
-    let json = serde_json::to_string(&value)
-        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
-    Ok(PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|error| RuntimeError::Canonical(error.to_string()))?
-        .content_digest())
 }

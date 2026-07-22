@@ -141,7 +141,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         fixture.cell_c.as_ref().expect("failing output cell"),
     )
     .clone();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -493,7 +493,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
     let forward_output = effective_output_cell_for_node(&fixture, &forward_node);
     let failure_node = node_by_output(&fixture, &fixture.cell_b).clone();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     registry
         .register(binding(
             fixture.descriptor_a.clone(),

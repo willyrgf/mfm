@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use mfm_capabilities::{CapabilitySpec, ReadExternalRole};
 use mfm_facts::MfmFactType as _;
+use mfm_ids::DigestBytes;
 use mfm_program::{
     build_root_with_registries, AdapterBindingSpec, CanonicalSeed, NoContext, PublicOutputKey,
     ReadState, RootBuilder, ScopeKey, StateKey, StateRegistryBuilder, StateResult, StateSpec,
@@ -12,6 +13,22 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
 use mfm_store::v1::ExecutionClaimStore as _;
 use serde::{Deserialize, Serialize};
+
+fn test_runner_registry() -> ErasedRunnerRegistry {
+    ErasedRunnerRegistry::new(mfm_runtime::ExecutableIdentityTemplate::new(
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x72; 32]),
+        ),
+    ))
+}
+
+fn test_factory_binding(
+    registry: &ErasedRunnerRegistry,
+    factory_id: &'static str,
+) -> mfm_runtime::RunnerFactoryBinding {
+    registry.factory_binding(events::RunnerFactoryId::new(factory_id).expect("test factory id"))
+}
 
 #[path = "tests/fact_support.rs"]
 mod fact_support;

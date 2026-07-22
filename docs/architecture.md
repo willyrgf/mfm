@@ -285,9 +285,10 @@ States declare authority. Transports implement authority. Adapters bind the two 
 States may depend on capability contract crates because those crates define typed authority
 contracts. States must not depend on live transport implementation crates. Adapters translate
 state-owned plans or mutation intent into capability calls and recorded evidence. The generic
-runtime runner owns materialization, reduction, and evidence staging; the generic replay driver
-loads the same typed evidence and calls the same reducer. Transports perform protocol IO and
-implement capability contracts.
+runtime runner owns materialization, reduction, and evidence staging for ordinary pure states and
+external reads; the generic replay driver loads the same typed evidence and calls the same pure
+behavior or read reducer. Domain adapters do not copy pure runner or replay implementations.
+Transports perform protocol IO and implement capability contracts.
 
 For replay/resume semantics, including pure/read/side-effect behavior, see the authoritative
 `State Capability Boundary` and `Certified Saga Semantics` sections in `docs/design.md`.
@@ -685,6 +686,13 @@ Evidence-only app services for status, stream inspection, list/watch, replay, an
 rendering must be constructible from store, artifact, and certification/replay authority only. They
 must not construct live EVM transports, signer providers, or live capability runtime config. Live
 start/resume services may construct those live drivers because they are execution authority.
+
+Live app assembly also computes one current-executable byte identity before constructing the runner
+registry. The registry mints all logical factory bindings—including framework, pure, external-read,
+and adapter factories—from that one template, so factory ids remain distinct while their executable
+digest is identical. Runtime and domain packages accept those bindings and do not derive process
+identity. Evidence-only services do not construct the registry and therefore perform no executable
+file access.
 
 `bin/cli` and `bin/rest-api` may:
 

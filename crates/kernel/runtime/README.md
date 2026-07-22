@@ -23,6 +23,17 @@ state reducer; and stages exactly one typed primary read-evidence artifact plus 
 fact-query evidence and the canonical output. Replay performs the same materialization and
 reduction from retained evidence without constructing live capabilities.
 
+Ordinary pure states likewise use one private generic runner registered under the exact `pure`
+factory. The caller supplies retained-artifact authority, the registry-minted factory binding, and
+an optional typed context-output extractor. Runtime loads certified config, the complete input
+tree, and certified context, invokes `PureState::run`, and stages the canonical output; domain
+adapters do not implement a second pure runner.
+
+`ErasedRunnerRegistry` is created with one explicit `ExecutableIdentityTemplate`. It mints and
+validates every runner, framework, and adapter binding from the template: factory ids differ, but
+all bindings preserve the same caller-attested executable-byte digest. Runtime has no default or
+label-derived executable identity.
+
 The visible runtime model is:
 
 ```text

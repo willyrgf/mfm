@@ -268,15 +268,9 @@ pub(super) fn app_fact_runner_registry(
         .iter()
         .find(|node| node.framework.is_none())
         .expect("app fact state node");
-    let descriptor = runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("app fact state descriptor");
-    let factory_id = events::RunnerFactoryId::new(descriptor.runner.clone()).expect("factory id");
-    let executable = events::ExecutableIdentity {
-        factory_id: factory_id.clone(),
-        binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-runner.binary"),
-    };
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
+    let runner_factory = test_factory_binding(&registry, "read_external");
+    let adapter_factory = test_factory_binding(&registry, "app_fact_adapter");
     registry
         .register_capability_set(
             &node.capability_bindings,
@@ -287,8 +281,8 @@ pub(super) fn app_fact_runner_registry(
     mfm_runtime::RunnerRegistrationBuilder::new(&mut registry)
         .register_runner(
             node.descriptor_id.clone(),
-            factory_id.clone(),
-            executable,
+            runner_factory.factory_id(),
+            runner_factory.executable(),
             Arc::new(mfm_runtime::ExternalReadRunner::<AppFactState, _>::new(
                 artifacts,
                 AppFactReadExecutor,
@@ -298,10 +292,7 @@ pub(super) fn app_fact_runner_registry(
         .register_adapter_executable(
             app_fact_adapter_kind(),
             app_fact_adapter_version(),
-            events::ExecutableIdentity {
-                factory_id,
-                binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.binary"),
-            },
+            adapter_factory.executable(),
         )
         .expect("app fact runner registration");
     registry

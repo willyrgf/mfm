@@ -8,27 +8,19 @@ use std::sync::Arc;
 
 use mfm_events::v1 as events;
 use mfm_facts::FactQueryReadCapability;
-use mfm_program::StateSpec;
 use mfm_runtime::{
-    load_materialized_struct_input, load_runner_config_for_node, CapabilityImplementationId,
-    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    register_pure_state, CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry,
     ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
-    ExternalReadRunner, RunnerExecutableIdentityTemplate, RunnerRegistrationBuilder,
+    ExternalReadRunner, RunnerFactoryBinding, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    assemble_snapshot, portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
-    AssembleSnapshotInput, AssembleSnapshotState, ProjectReportConfig, ProjectReportInput,
-    ProjectReportState, SelectHoldingsConfig, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
-    SelectHoldingsState, SelectedHoldings,
+    portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotState, ProjectReportState,
+    SelectHoldingsReadEvidence, SelectHoldingsReadPlan, SelectHoldingsState,
 };
 use mfm_store::v1 as store;
-use mfm_values::MfmValue;
 
-#[path = "replay.rs"]
-mod replay;
 #[path = "selection.rs"]
 mod selection;
-pub use self::replay::verify_portfolio_replay;
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
@@ -38,6 +30,9 @@ const ADAPTER_FACTORY: &str = "portfolio_adapter";
 pub fn register_portfolio_runners<S>(
     registry: &mut ErasedRunnerRegistry,
     store: Arc<S>,
+    pure_factory: &RunnerFactoryBinding,
+    read_factory: &RunnerFactoryBinding,
+    adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()>
 where
     S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
@@ -47,24 +42,16 @@ where
     )?;
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
     let mut registrations = RunnerRegistrationBuilder::new(registry);
-    let executable_identities = RunnerExecutableIdentityTemplate::new(
-        "mfm-adapters-portfolio",
-        "typed-portfolio",
-        env!("CARGO_PKG_VERSION"),
-    )?;
-    let pure_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(PURE_FACTORY)?);
-    let read_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
-    let adapter_factory =
-        executable_identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
+    require_factory(pure_factory, PURE_FACTORY)?;
+    require_factory(read_factory, READ_FACTORY)?;
+    require_factory(adapter_factory, ADAPTER_FACTORY)?;
     registrations.register_adapter_executable_with_factory(
         portfolio_adapter_kind()?,
         portfolio_adapter_version()?,
-        &adapter_factory,
+        adapter_factory,
     )?;
     registrations.register_state_runner_with_factory::<SelectHoldingsState>(
-        &read_factory,
+        read_factory,
         Arc::new(ExternalReadRunner::<SelectHoldingsState, _>::new(
             artifacts.clone(),
             SelectHoldingsExecutor {
@@ -73,16 +60,13 @@ where
             },
         )),
     )?;
-    registrations.register_state_runner_with_factory::<AssembleSnapshotState>(
-        &pure_factory,
-        Arc::new(AssembleSnapshotRunner {
-            artifacts: artifacts.clone(),
-        }),
+    register_pure_state::<AssembleSnapshotState>(
+        &mut registrations,
+        pure_factory,
+        artifacts.clone(),
+        None,
     )?;
-    registrations.register_state_runner_with_factory::<ProjectReportState>(
-        &pure_factory,
-        Arc::new(ProjectReportRunner { artifacts }),
-    )?;
+    register_pure_state::<ProjectReportState>(&mut registrations, pure_factory, artifacts, None)?;
     Ok(())
 }
 
@@ -130,62 +114,16 @@ where
     }
 }
 
-struct AssembleSnapshotRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for AssembleSnapshotRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config = load_runner_config_for_node::<AssembleSnapshotConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let input = load_materialized_struct_input::<AssembleSnapshotInput>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let output = assemble_snapshot(config.as_ref(), input).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
-            state_output(ctx, &output)
-        })
+fn require_factory(
+    factory: &RunnerFactoryBinding,
+    expected: &'static str,
+) -> mfm_runtime::Result<()> {
+    if factory.factory_id().as_str() != expected {
+        return Err(mfm_runtime::RuntimeError::RunnerBinding(format!(
+            "portfolio registration requires factory id {expected}"
+        )));
     }
-}
-
-struct ProjectReportRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for ProjectReportRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let _config = load_runner_config_for_node::<ProjectReportConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let input = load_materialized_struct_input::<ProjectReportInput>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let output = mfm_state_portfolio::project_report_from_snapshot(input.snapshot)
-                .map_err(|error| {
-                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-                })?;
-            state_output(ctx, &output)
-        })
-    }
-}
-
-fn state_output<T>(ctx: ErasedRunCtx<'_>, value: &T) -> mfm_runtime::Result<ErasedRunnerOutput>
-where
-    T: MfmValue,
-{
-    ErasedRunnerOutput::state_output(&ctx, value)
+    Ok(())
 }
 
 fn fact_query_runtime_error<E>(_error: E) -> mfm_runtime::RuntimeError {

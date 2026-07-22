@@ -227,7 +227,7 @@ fn settlement_fixture_runners(
     fixture: &Fixture,
     settled: Arc<std::sync::atomic::AtomicUsize>,
 ) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(
@@ -434,7 +434,7 @@ pub(super) fn registered_fixture_runners_with_adapter_executable(
     fixture: &Fixture,
     adapter_executable: events::ExecutableIdentity,
 ) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities_with_adapter_executable(
         &mut registry,
         &fixture.runtime_spec,
@@ -449,7 +449,7 @@ pub(super) fn registered_context_bound_fixture_runners(
     fixture: &Fixture,
     source_runner: ContextSourceRunner,
 ) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(fixture.descriptor_a.clone(), "pure", source_runner))
@@ -465,7 +465,7 @@ pub(super) fn registered_context_bound_fixture_runners(
 }
 
 pub(super) fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     register_side_effect_verify_fixture_runner(&mut registry, fixture);
     registry
@@ -483,7 +483,7 @@ pub(super) fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 's
     fixture: &Fixture,
     runner: R,
 ) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     register_side_effect_verify_fixture_runner(&mut registry, fixture);
     registry
@@ -505,7 +505,7 @@ pub(super) fn registered_first_side_effect_and_verify_runners_with<
     runner: R,
     verify_runner: V,
 ) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     let submit_descriptor_id = side_effect_submit_descriptor_ids(fixture)
         .into_iter()
@@ -524,7 +524,7 @@ pub(super) fn registered_first_side_effect_and_verify_runners_with<
 }
 
 pub(super) fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = test_runner_registry();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     register_side_effect_verify_fixture_runner(&mut registry, fixture);
     registry
@@ -607,13 +607,22 @@ pub(super) fn binding<R: ErasedNodeRunner + 'static>(
     factory: &str,
     runner: R,
 ) -> ErasedRunnerBinding {
+    binding_with_digest(descriptor_id, factory, content(0xe2), runner)
+}
+
+pub(super) fn binding_with_digest<R: ErasedNodeRunner + 'static>(
+    descriptor_id: DescriptorId,
+    factory: &str,
+    binary_digest: ContentDigest,
+    runner: R,
+) -> ErasedRunnerBinding {
     let factory_id = events::RunnerFactoryId::new(factory).expect("factory");
     ErasedRunnerBinding::new(
         descriptor_id,
         factory_id.clone(),
         events::ExecutableIdentity {
             factory_id,
-            binary_digest: content(0xe2),
+            binary_digest,
         },
         Arc::new(runner),
     )

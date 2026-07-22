@@ -63,10 +63,10 @@ pub use runner_kit::{
     load_launch_config_for_node, load_materialized_input, load_materialized_node_value,
     load_materialized_struct_field_value, load_materialized_struct_input,
     load_non_empty_materialized_input, load_runner_config_for_node, load_side_effect_artifact,
-    materialized_input_node_json, ExternalReadExecution, ExternalReadExecutionFuture,
-    ExternalReadPlanExecutor, ExternalReadRunner, RunnerArtifactBuilder, RunnerCapabilityBinding,
-    RunnerExecutableIdentityTemplate, RunnerFactoryBinding, RunnerJsonArtifact,
-    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
+    materialized_input_node_json, register_pure_state, ExecutableIdentityTemplate,
+    ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
+    ExternalReadRunner, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerFactoryBinding,
+    RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
     TypedContextOutputExtractor,
 };
 pub use runners::{
