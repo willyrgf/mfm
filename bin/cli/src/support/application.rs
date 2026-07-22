@@ -1,31 +1,23 @@
-use crate::commands::result::PublicError;
-use clap::Args;
-use mfm_app::{ProductionRunReadServices, ProductionRunServices};
-use mfm_ids::{RunId, SchemaId};
 use std::path::Path;
 
-/// Shared run-store selection arguments.
+use crate::commands::result::PublicError;
+use clap::Args;
+use mfm_ids::{RunId, SchemaId};
+
+/// Shared production database connection arguments.
 #[derive(Args, Debug, Clone)]
-pub(crate) struct RunStoresArgs {
-    /// PostgreSQL connection string for the run store (default: $DATABASE_URL)
+pub(crate) struct DatabaseArgs {
+    /// PostgreSQL connection string (default: $DATABASE_URL).
     #[arg(long)]
     pub(crate) database_url: Option<String>,
 }
 
-/// Builds typed app services for CLI commands backed by the certified postgres run stores.
-pub(crate) async fn connect_run_services(
-    args: &RunStoresArgs,
+/// Builds one opaque application facade over the production database.
+pub(crate) async fn connect_application(
+    args: &DatabaseArgs,
     runtime_config_path: Option<&Path>,
-) -> Result<ProductionRunServices, PublicError> {
-    mfm_app::connect_production_run_services(args.database_url.as_deref(), runtime_config_path)
-        .await
-}
-
-/// Builds evidence-only typed app services for CLI read commands.
-pub(crate) async fn connect_run_read_services(
-    args: &RunStoresArgs,
-) -> Result<ProductionRunReadServices, PublicError> {
-    mfm_app::connect_production_run_read_services(args.database_url.as_deref()).await
+) -> Result<mfm_app::Application, PublicError> {
+    mfm_app::connect_production_application(args.database_url.as_deref(), runtime_config_path).await
 }
 
 /// Parses a typed run id from the persisted typed-kernel identity grammar.

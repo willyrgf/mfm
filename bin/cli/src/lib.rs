@@ -1,7 +1,7 @@
 //! Shared library surface for the `mfm` CLI.
 //!
-//! The CLI keeps transport concerns in this crate and delegates workflow execution to `mfm-app`
-//! and certified typed workflow ports.
+//! The CLI keeps transport concerns in this crate and delegates application operations and
+//! implementation assembly to the opaque `mfm-app` facade.
 //!
 //! # Examples
 //!
@@ -17,7 +17,7 @@ use mfm_app::observability::{init_observability, observability_from_env_with_def
 mod commands;
 /// CLI output formatting helpers.
 pub mod presentation;
-/// Thin CLI adaptation helpers for app services and stores.
+/// Thin CLI adaptation helpers for app inputs and presentation values.
 mod support;
 
 const CLI_DEFAULT_LOG_FILTER: &str = "warn,mfm_app=error,tower_http=error";

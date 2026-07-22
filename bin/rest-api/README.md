@@ -2,9 +2,10 @@
 
 Experimental REST API (Axum) for certified typed runs.
 
-The REST API is a typed assembly surface only. It can start, resume, inspect, replay, and render
-certified typed runs through `mfm-app`, `mfm-runtime`, `mfm-store`, and typed artifact storage. It
-accepts only certified typed run authority.
+The REST API is an HTTP transport over the opaque `mfm-app` application facade. It decodes requests,
+applies process-role route admission, invokes app operations, and renders the current response
+envelopes. Store implementations, registries, live transports, replay services, and configuration
+resolution stay behind `mfm-app`.
 
 ## Running locally
 
@@ -41,10 +42,10 @@ outside the typed run store are not read or migrated by the REST API.
 
 ### Process roles
 
-| Role | Store connector | Serves |
+| Role | Application use | Serves |
 | --- | --- | --- |
-| `live` (default) | live store connect | start/resume, status/stream/replay, public fact queries |
-| `read` | evidence-only read store connect | status, stream, list, replay, public-output, public fact queries |
+| `live` (default) | evidence services plus lazy live services | start/resume, status/stream/replay, public fact queries |
+| `read` | evidence-only facade methods | status, stream, list, replay, public-output, public fact queries |
 
 Only live start/resume requires `MFM_REST_ROLE=live`. Public fact queries are deterministic evidence
 reads and are available from either role.
@@ -52,8 +53,9 @@ reads and are available from either role.
 Public fact queries return descriptor-filtered committed facts with deterministic evidence metadata;
 they do not depend on process-local signing material.
 
-REST startup does not load or validate the explicit runtime config path; malformed or missing
-config is reported only when a live start/resume request needs the affected capability family.
+REST startup and evidence-only facade methods do not load or validate the explicit runtime config
+path; malformed or missing config is reported only when a live start/resume request needs the
+affected capability family.
 
 ## API
 

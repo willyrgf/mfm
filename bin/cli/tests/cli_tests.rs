@@ -102,12 +102,8 @@ fn facts_commands_use_public_evidence_only_services() {
         std::fs::read_to_string(manifest_dir.join("src/commands/facts.rs")).expect("facts source");
 
     assert!(
-        source.contains("connect_run_read_services"),
-        "facts commands must construct evidence-only run services"
-    );
-    assert!(
-        !source.contains("connect_run_services("),
-        "facts commands must not construct live run services"
+        source.contains("connect_application"),
+        "facts commands must use the opaque application facade"
     );
 
     for forbidden in [
@@ -116,6 +112,9 @@ fn facts_commands_use_public_evidence_only_services() {
         "audience:",
         "scope:",
         "runtime_config",
+        "start_entry_point_run",
+        "resume_run",
+        "record_manual_resolution",
     ] {
         assert!(
             !source.contains(forbidden),

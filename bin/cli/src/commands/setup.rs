@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
+use crate::support::application::{connect_application, DatabaseArgs};
 use crate::support::output_file::{self, CreateNewFileError};
-use crate::support::run_store::RunStoresArgs;
 use clap::{Args, Subcommand};
 use mfm_app::SetupConfigPublication;
 use serde::Serialize;
@@ -38,14 +38,14 @@ pub(crate) struct ImportArgs {
     #[arg(value_name = "PATH")]
     pub file: PathBuf,
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub database: DatabaseArgs,
 }
 
 /// Arguments for current-target listing.
 #[derive(Args)]
 pub(crate) struct ListArgs {
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub database: DatabaseArgs,
 }
 
 /// Arguments for current-target export.
@@ -58,7 +58,7 @@ pub(crate) struct ExportArgs {
     #[arg(long)]
     pub output: PathBuf,
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub database: DatabaseArgs,
 }
 
 impl SetupCommand {
@@ -156,8 +156,8 @@ fn publication_status_text(status: mfm_app::SetupConfigPublicationStatus) -> &'s
 
 async fn import(args: &ImportArgs) -> CommandResult<SetupImportOutput> {
     let bytes = read_setup_file(&args.file).await?;
-    let store = mfm_app::connect_production_store(args.stores.database_url.as_deref()).await?;
-    let configs = mfm_app::import_setup_toml(&store, &bytes).await?;
+    let app = connect_application(&args.database, None).await?;
+    let configs = app.import_setup(&bytes).await?;
     Ok(CommandOutput::new(SetupImportOutput { configs }))
 }
 
@@ -201,14 +201,14 @@ fn setup_file_read_error() -> PublicError {
 }
 
 async fn list(args: &ListArgs) -> CommandResult<SetupListOutput> {
-    let store = mfm_app::connect_production_store(args.stores.database_url.as_deref()).await?;
-    let targets = mfm_app::list_setup_targets(&store).await?;
+    let app = connect_application(&args.database, None).await?;
+    let targets = app.list_setup_targets().await?;
     Ok(CommandOutput::new(SetupListOutput { targets }))
 }
 
 async fn export(args: &ExportArgs) -> CommandResult<SetupExportOutput> {
-    let store = mfm_app::connect_production_store(args.stores.database_url.as_deref()).await?;
-    let bytes = mfm_app::export_setup_target(&store, &args.target).await?;
+    let app = connect_application(&args.database, None).await?;
+    let bytes = app.export_setup_target(&args.target).await?;
     let output = args.output.clone();
     tokio::task::spawn_blocking(move || output_file::create_new_atomic(&output, &bytes))
         .await

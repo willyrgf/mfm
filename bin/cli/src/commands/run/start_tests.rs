@@ -1,13 +1,13 @@
 use super::*;
 
 #[tokio::test]
-async fn start_rejects_empty_invocation_key_before_store_connection() {
+async fn start_rejects_empty_invocation_key_before_application_connection() {
     let mut args = start_args();
     args.invocation_key = Some(String::new());
 
     let error = execute_internal(&args)
         .await
-        .expect_err("empty invocation key rejects before store construction");
+        .expect_err("empty invocation key rejects before application connection");
     assert_eq!(error.code, "InvocationKeyInvalid");
 }
 
@@ -25,6 +25,6 @@ fn start_args() -> StartArgs {
         target: "acme/primary".to_owned(),
         invocation_key: None,
         runtime_config: None,
-        stores: RunStoresArgs { database_url: None },
+        database: DatabaseArgs { database_url: None },
     }
 }

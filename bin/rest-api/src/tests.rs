@@ -2,6 +2,7 @@ use super::*;
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request};
 use axum::response::IntoResponse;
+use mfm_store::v1 as store;
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -127,12 +128,11 @@ async fn run_start_recognizes_the_snapshot_entry_point_before_target_resolution(
 #[tokio::test]
 async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
     let fixture = mfm_app::PublicFactFixtureForTest::new();
-    let app = make_app(AppState {
-        role: RestProcessRole::Read,
-        store: fixture.store.clone(),
-        configured_store: None,
-        runtime_config_path: None,
-    });
+    let app = make_app(in_memory_state(
+        RestProcessRole::Read,
+        fixture.store.clone(),
+        None,
+    ));
 
     let start = app
         .clone()
@@ -173,12 +173,11 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
     let dir = test_temp_dir("live-routes-cache");
     let config_path = dir.path().join("runtime.toml");
     std::fs::write(&config_path, "").expect("write initial runtime config");
-    let app = make_app(AppState {
-        role: RestProcessRole::Live,
-        store: store::AsyncInMemoryRunStore::default(),
-        configured_store: None,
-        runtime_config_path: Some(config_path.clone()),
-    });
+    let app = make_app(in_memory_state(
+        RestProcessRole::Live,
+        store::AsyncInMemoryRunStore::default(),
+        Some(&config_path),
+    ));
 
     assert_start_requires_configured_store(&app).await;
 
@@ -189,12 +188,12 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
 
 #[tokio::test]
 async fn read_only_routes_ignore_an_explicit_malformed_runtime_config() {
-    let app = make_app(AppState {
-        role: RestProcessRole::Live,
-        store: store::AsyncInMemoryRunStore::default(),
-        configured_store: None,
-        runtime_config_path: Some(PathBuf::from("/definitely/not/runtime.toml")),
-    });
+    let malformed_path = PathBuf::from("/definitely/not/runtime.toml");
+    let app = make_app(in_memory_state(
+        RestProcessRole::Live,
+        store::AsyncInMemoryRunStore::default(),
+        Some(&malformed_path),
+    ));
 
     let routes = [
         (Method::GET, "/v1/runs".to_owned(), StatusCode::OK),
@@ -306,12 +305,11 @@ async fn fact_query_routes_reject_malformed_query_shapes() {
 #[tokio::test]
 async fn facts_routes_expose_public_projection_data() {
     let fixture = mfm_app::PublicFactFixtureForTest::new();
-    let app = make_app(AppState {
-        role: RestProcessRole::Live,
-        store: fixture.store.clone(),
-        configured_store: None,
-        runtime_config_path: None,
-    });
+    let app = make_app(in_memory_state(
+        RestProcessRole::Live,
+        fixture.store.clone(),
+        None,
+    ));
 
     let value = get_json(&app, "/v1/facts/kinds", StatusCode::OK).await;
     assert_eq!(value["data"][0]["fact_kind"], fixture.fact_kind);
@@ -401,12 +399,22 @@ fn test_temp_dir(name: &str) -> TestTempDir {
 }
 
 fn test_app() -> axum::Router {
-    make_app(AppState {
-        role: RestProcessRole::Live,
-        store: store::AsyncInMemoryRunStore::default(),
-        configured_store: None,
-        runtime_config_path: None,
-    })
+    make_app(in_memory_state(
+        RestProcessRole::Live,
+        store::AsyncInMemoryRunStore::default(),
+        None,
+    ))
+}
+
+fn in_memory_state(
+    role: RestProcessRole,
+    store: store::AsyncInMemoryRunStore,
+    runtime_config_path: Option<&std::path::Path>,
+) -> AppState {
+    AppState::new(
+        role,
+        mfm_app::in_memory_application_for_test(store, runtime_config_path),
+    )
 }
 
 fn request(method: Method, uri: impl AsRef<str>) -> Request<Body> {

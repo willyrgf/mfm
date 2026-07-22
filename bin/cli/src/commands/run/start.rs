@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_services, RunStoresArgs};
+use crate::support::application::{connect_application, DatabaseArgs};
 use clap::Args;
 use mfm_app::{InvocationKey, PublicOutputResponse, RunLaunchOutcomeStatus, RunResponse};
 use serde::Serialize;
@@ -27,9 +27,9 @@ pub(crate) struct StartArgs {
     #[arg(long, value_name = "PATH")]
     pub runtime_config: Option<PathBuf>,
 
-    /// Storage configuration for certified typed run events and artifacts.
+    /// Production database connection.
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub database: DatabaseArgs,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,19 +76,10 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         .as_deref()
         .map(InvocationKey::new)
         .transpose()?;
-    let certification_registry = mfm_app::production_certification_registry()?;
-    let services = connect_run_services(&args.stores, args.runtime_config.as_deref()).await?;
-    let store_scope_id = services.load_store_scope_id().await?;
-    let request = mfm_app::prepare_entry_point_run_launch(
-        services.store(),
-        &args.entry_point,
-        &args.target,
-        &certification_registry,
-        store_scope_id,
-        invocation_key,
-    )
-    .await?;
-    let report = services.launch_run_and_render(request).await?;
+    let app = connect_application(&args.database, args.runtime_config.as_deref()).await?;
+    let report = app
+        .start_entry_point_run(&args.entry_point, &args.target, invocation_key)
+        .await?;
     Ok(CommandOutput::new(StartOutput {
         outcome: report.outcome,
         run: report.run,

@@ -123,9 +123,7 @@ binaries, concrete storage, or secret providers. Secret providers consume only d
 kernel, signing, and their own layer. Concrete storage consumes kernel contracts, never the reverse.
 Assembly is above those layers. Binaries consume only explicitly binary-facing kernel and assembly
 contracts. Tests are unrestricted. Normal and build dependencies are checked from Cargo metadata;
-dev-only edges do not establish production ownership. During the ordered repository cut, the
-metadata evaluator narrows monotonically as direct binary implementation edges are deleted; that
-current shape is not future architecture or a named exception.
+dev-only edges do not establish production ownership.
 
 States remain free of runtime/store implementations, binaries, live transports, secret providers,
 and operation modules. Operations remain deterministic planning. Adapters bind state-owned intent
@@ -420,6 +418,12 @@ inspection, list/watch, replay, and public-output rendering construct only store
 certification/replay authority; they do not parse live runtime config, construct live EVM transports,
 or construct signer providers. Malformed or missing live capability wiring can block live
 start/resume when that run needs it, but it must not affect evidence-only reads.
+
+CLI and REST receive one opaque app facade over a shared production store. The app owns concrete
+storage, generic store bounds, registry construction, evidence/live service construction, and live
+implementation selection. Process transports pass connection and explicit runtime-config inputs,
+invoke facade operations, and render results; they cannot construct or inspect those
+implementations directly.
 
 Initial admission validates ingress for every domain node. Resume revalidates process-local live
 capability only for nonterminal domain nodes that can still execute in the verified stream; a

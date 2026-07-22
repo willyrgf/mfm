@@ -13,6 +13,15 @@ authority. It provides:
 - exact runtime signer/keystore assembly for canonical EIP-1559 signing;
 - typed start/resume/replay dispatch and public-output read authority.
 
+Process transports receive one opaque `Application` facade. Production construction connects one
+shared Postgres store and retains it behind that facade; generic store bounds, concrete storage,
+runner/certification registries, live transports, signer providers, and setup authority are not
+binary concerns. Evidence-only services and live services are initialized lazily and independently,
+so readiness, facts, status, stream, list, replay, and public-output operations never load runtime
+configuration. Setup operations use the configured-value authority on the same store without live
+services. Start, resume, and manual resolution initialize live services on first use and reuse the
+same result for later calls.
+
 Current configuration is a pre-admission surface. A setup document is a closed set of supported
 typed values; import validates every value, derives its stable target from the intrinsic domain id,
 canonicalizes it, rejects prohibited fields, and atomically creates, updates, or leaves unchanged

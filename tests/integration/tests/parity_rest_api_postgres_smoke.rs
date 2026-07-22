@@ -25,13 +25,14 @@ async fn parity_rest_postgres_smoke() {
     let schema = unique_postgres_schema("rest");
     create_postgres_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
-    let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        role: mfm_rest_api::RestProcessRole::Live,
-        configured_store: Some(store.clone()),
-        store,
-        runtime_config_path: None,
-    });
+    let _store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
+    let application = mfm_app::connect_production_application(Some(&scoped_database_url), None)
+        .await
+        .expect("connect REST application");
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState::new(
+        mfm_rest_api::RestProcessRole::Live,
+        application,
+    ));
 
     let ready = app
         .clone()
@@ -230,12 +231,16 @@ async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_repla
     let rpc_url = start_portfolio_rpc_mock().await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_config_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &rpc_url);
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        role: mfm_rest_api::RestProcessRole::Live,
-        configured_store: Some(store.clone()),
-        store: store.clone(),
-        runtime_config_path: Some(runtime_config_path.clone()),
-    });
+    let application = mfm_app::connect_production_application(
+        Some(&scoped_database_url),
+        Some(&runtime_config_path),
+    )
+    .await
+    .expect("connect live REST application");
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState::new(
+        mfm_rest_api::RestProcessRole::Live,
+        application,
+    ));
     let request = json!({
         "entry_point": "mfm.portfolio/snapshot@2",
         "target": publication.target.clone(),
@@ -301,12 +306,13 @@ async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_repla
     assert_eq!(source.digest, publication.digest);
 
     std::fs::remove_file(&runtime_config_path).expect("remove live runtime config");
-    let reader = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        role: mfm_rest_api::RestProcessRole::Read,
-        configured_store: None,
-        store,
-        runtime_config_path: None,
-    });
+    let application = mfm_app::connect_production_application(Some(&scoped_database_url), None)
+        .await
+        .expect("connect read REST application");
+    let reader = mfm_rest_api::make_app(mfm_rest_api::AppState::new(
+        mfm_rest_api::RestProcessRole::Read,
+        application,
+    ));
     let replay = reader
         .oneshot(
             Request::builder()

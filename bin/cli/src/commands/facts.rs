@@ -3,7 +3,7 @@ use std::fmt;
 use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
+use crate::support::application::{connect_application, DatabaseArgs};
 use clap::{Args, Subcommand};
 use mfm_app::{
     PublicFactDescriptorSummary, PublicFactExplain, PublicFactKindSummary, PublicFactQueryPage,
@@ -96,9 +96,9 @@ where
 /// Arguments for `mfm facts kinds`.
 #[derive(Args)]
 pub(crate) struct KindsArgs {
-    /// Storage configuration for certified typed run events and fact projections.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 /// Arguments for `mfm facts describe`.
@@ -107,9 +107,9 @@ pub(crate) struct DescribeArgs {
     /// Public fact kind to describe.
     pub(crate) kind: String,
 
-    /// Storage configuration for certified typed run events and fact projections.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 /// Arguments for `mfm facts explain`.
@@ -118,9 +118,9 @@ pub(crate) struct ExplainArgs {
     /// Public fact kind to explain.
     pub(crate) kind: String,
 
-    /// Storage configuration for certified typed run events and fact projections.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 /// Arguments for `mfm facts query`.
@@ -138,9 +138,9 @@ pub(crate) struct QueryArgs {
     #[arg(long, default_value_t = 50)]
     pub(crate) limit: u64,
 
-    /// Storage configuration for certified typed run events and fact projections.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 /// Shared public fact query selector arguments.
@@ -181,9 +181,9 @@ pub(crate) struct KindQueryArgs {
     #[command(flatten)]
     pub(crate) query: FactQuerySelectorArgs,
 
-    /// Storage configuration for certified typed run events and fact projections.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 /// Shared arguments for kind-first limited fact queries.
@@ -200,9 +200,9 @@ pub(crate) struct LimitedKindQueryArgs {
     #[arg(long, default_value_t = 50)]
     pub(crate) limit: u64,
 
-    /// Storage configuration for certified typed run events and fact projections.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 /// Arguments for `mfm facts show`.
@@ -211,9 +211,9 @@ pub(crate) struct ShowArgs {
     /// Opaque public fact reference returned by `mfm facts query`.
     pub(crate) public_ref: String,
 
-    /// Storage configuration for certified typed run events and fact projections.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -310,57 +310,57 @@ impl fmt::Display for ShowOutput {
 }
 
 async fn execute_kinds(args: &KindsArgs) -> CommandResult<KindsOutput> {
-    let services = connect_run_read_services(&args.stores).await?;
+    let app = connect_application(&args.database, None).await?;
     Ok(CommandOutput::new(KindsOutput {
-        kinds: services.fact_kinds().await?,
+        kinds: app.fact_kinds().await?,
     }))
 }
 
 async fn execute_describe(args: &DescribeArgs) -> CommandResult<DescribeOutput> {
-    let services = connect_run_read_services(&args.stores).await?;
+    let app = connect_application(&args.database, None).await?;
     Ok(CommandOutput::new(DescribeOutput {
-        descriptors: services.describe_fact_kind(&args.kind).await?,
+        descriptors: app.describe_fact_kind(&args.kind).await?,
     }))
 }
 
 async fn execute_explain(args: &ExplainArgs) -> CommandResult<ExplainOutput> {
-    let services = connect_run_read_services(&args.stores).await?;
+    let app = connect_application(&args.database, None).await?;
     Ok(CommandOutput::new(ExplainOutput {
-        explain: services.explain_fact_kind(&args.kind).await?,
+        explain: app.explain_fact_kind(&args.kind).await?,
     }))
 }
 
 async fn execute_query(args: &QueryArgs) -> CommandResult<QueryOutput> {
-    execute_kind_query(&args.stores, &args.kind, &args.query, Some(args.limit)).await
+    execute_kind_query(&args.database, &args.kind, &args.query, Some(args.limit)).await
 }
 
 async fn execute_latest(args: &KindQueryArgs) -> CommandResult<QueryOutput> {
-    execute_kind_query(&args.stores, &args.kind, &args.query, Some(1)).await
+    execute_kind_query(&args.database, &args.kind, &args.query, Some(1)).await
 }
 
 async fn execute_show(args: &ShowArgs) -> CommandResult<ShowOutput> {
     let public_ref = PublicFactRefId::new(args.public_ref.clone())?;
-    let services = connect_run_read_services(&args.stores).await?;
+    let app = connect_application(&args.database, None).await?;
     Ok(CommandOutput::new(ShowOutput {
-        fact: services.resolve_public_fact_ref(&public_ref).await?,
+        fact: app.resolve_public_fact_ref(&public_ref).await?,
     }))
 }
 
 async fn execute_limited_kind_query(args: &LimitedKindQueryArgs) -> CommandResult<QueryOutput> {
-    execute_kind_query(&args.stores, &args.kind, &args.query, Some(args.limit)).await
+    execute_kind_query(&args.database, &args.kind, &args.query, Some(args.limit)).await
 }
 
 async fn execute_kind_query(
-    stores: &RunStoresArgs,
+    database: &DatabaseArgs,
     kind: &str,
     query: &FactQuerySelectorArgs,
     limit: Option<u64>,
 ) -> CommandResult<QueryOutput> {
-    let services =
-        mfm_app::connect_production_fact_public_query_service(stores.database_url.as_deref())
-            .await?;
+    let app = connect_application(database, None).await?;
     let request = public_fact_query_request(kind, query, limit)?;
-    Ok(CommandOutput::new(services.query(request).await?.into()))
+    Ok(CommandOutput::new(
+        app.query_public_facts(request).await?.into(),
+    ))
 }
 
 fn public_fact_query_request(

@@ -113,12 +113,10 @@ async fn unknown_entry_points_do_not_bypass_configuration_authority() {
 #[tokio::test]
 async fn read_role_refuses_live_start() {
     let fixture = mfm_app::PublicFactFixtureForTest::new();
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        role: mfm_rest_api::RestProcessRole::Read,
-        store: fixture.store.clone(),
-        configured_store: None,
-        runtime_config_path: None,
-    });
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState::new(
+        mfm_rest_api::RestProcessRole::Read,
+        mfm_app::in_memory_application_for_test(fixture.store.clone(), None),
+    ));
     let response = app
         .oneshot(json_post(
             "/v1/runs/start",
@@ -163,9 +161,13 @@ async fn malformed_runtime_config_does_not_block_read_only_routes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("runtime.toml");
     std::fs::write(&path, "not valid toml = [").unwrap();
-    let mut state = mfm_integration_tests::test_support::in_memory_rest_app_state();
-    state.runtime_config_path = Some(path);
-    let app = mfm_rest_api::make_app(state);
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState::new(
+        mfm_rest_api::RestProcessRole::Live,
+        mfm_app::in_memory_application_for_test(
+            mfm_store::v1::AsyncInMemoryRunStore::default(),
+            Some(&path),
+        ),
+    ));
     let response = app
         .oneshot(
             Request::builder()

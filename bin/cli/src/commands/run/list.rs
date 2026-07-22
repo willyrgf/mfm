@@ -3,9 +3,9 @@ use std::fmt;
 use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
+use crate::support::application::{connect_application, DatabaseArgs};
 use clap::Args;
-use mfm_store::v1 as store;
+use mfm_app::{RunObservation, RunObservationPage};
 use serde::Serialize;
 
 /// Arguments for `mfm run list`.
@@ -27,9 +27,9 @@ pub(crate) struct ListArgs {
     #[arg(long)]
     pub(crate) watch: bool,
 
-    /// Storage configuration for certified run events and artifacts.
+    /// Production database connection.
     #[command(flatten)]
-    pub(crate) stores: RunStoresArgs,
+    pub(crate) database: DatabaseArgs,
 }
 
 /// CLI response for observed run list/watch pages.
@@ -51,8 +51,8 @@ struct ListRunOutput {
     change_id: Option<String>,
 }
 
-impl From<store::RunObservationPage> for ListOutput {
-    fn from(page: store::RunObservationPage) -> Self {
+impl From<RunObservationPage> for ListOutput {
+    fn from(page: RunObservationPage) -> Self {
         Self {
             next_cursor: page.next_cursor,
             runs: page.runs.into_iter().map(ListRunOutput::from).collect(),
@@ -60,8 +60,8 @@ impl From<store::RunObservationPage> for ListOutput {
     }
 }
 
-impl From<store::RunObservation> for ListRunOutput {
-    fn from(row: store::RunObservation) -> Self {
+impl From<RunObservation> for ListRunOutput {
+    fn from(row: RunObservation) -> Self {
         Self {
             run_id: row.run_id.to_string(),
             head_seq: row.head_seq.as_u64(),
@@ -104,13 +104,9 @@ async fn execute_internal(args: &ListArgs) -> CommandResult<ListOutput> {
             "`mfm run list --watch` requires --cursor from a previous list page",
         ));
     }
-    let services = connect_run_read_services(&args.stores).await?;
-    let page = services
-        .read_run_observations(store::RunObservationQuery::new(
-            args.cursor.clone(),
-            args.limit,
-            args.wait_ms,
-        ))
+    let app = connect_application(&args.database, None).await?;
+    let page = app
+        .list_runs(args.cursor.clone(), args.limit, args.wait_ms)
         .await?;
 
     Ok(CommandOutput::new(ListOutput::from(page)))

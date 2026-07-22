@@ -25,7 +25,7 @@ pub use store::test_support::{
 };
 
 /// In-memory REST app state used by integration tests.
-pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunStore>;
+pub type InMemoryRestAppState = mfm_rest_api::AppState;
 
 /// Creates a unique schema name for an isolated Postgres parity test.
 pub fn unique_postgres_schema(prefix: &str) -> String {
@@ -98,12 +98,10 @@ pub async fn connect_postgres_with_retry(
 /// Builds in-memory REST app state.
 pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     let store = store::AsyncInMemoryRunStore::default();
-    mfm_rest_api::AppState {
-        role: mfm_rest_api::RestProcessRole::Live,
-        store,
-        configured_store: None,
-        runtime_config_path: None,
-    }
+    mfm_rest_api::AppState::new(
+        mfm_rest_api::RestProcessRole::Live,
+        mfm_app::in_memory_application_for_test(store, None),
+    )
 }
 
 /// Loads all retained fact-query evidence artifacts referenced by `stream`.

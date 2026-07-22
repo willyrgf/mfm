@@ -42,6 +42,7 @@ use serde_json::{Map, Value};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 pub use mfm_storage_postgres::{PostgresSchema, PostgresStore};
+pub use mfm_store::v1::{RunObservation, RunObservationPage};
 
 pub use public_facts::{
     is_public_fact_query_parameter_error, parse_public_fact_predicates, FactCatalogService,
@@ -60,6 +61,7 @@ pub use public_facts::{
 #[cfg(test)]
 pub(crate) use public_facts::public_ref_id;
 
+mod application;
 mod btc_collector;
 mod config_setup;
 mod entry_point;
@@ -73,6 +75,9 @@ mod replay_verifiers;
 mod responses;
 mod runtime_config;
 mod transaction_signing;
+#[cfg(any(test, feature = "test-support"))]
+pub use self::application::in_memory_application_for_test;
+pub use self::application::{connect_production_application, Application};
 pub use self::responses::*;
 #[path = "status.rs"]
 mod status;

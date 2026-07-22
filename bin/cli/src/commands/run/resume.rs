@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_services, parse_run_id, RunStoresArgs};
+use crate::support::application::{connect_application, parse_run_id, DatabaseArgs};
 use clap::Args;
 use mfm_app::RunResponse;
 
@@ -13,9 +13,9 @@ pub(crate) struct ResumeArgs {
     /// Typed run id (`run:<algorithm>:<digest>`)
     pub run_id: String,
 
-    /// Storage configuration for certified typed run events and artifacts.
+    /// Production database connection.
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub database: DatabaseArgs,
 
     /// Explicit runtime configuration file for live capabilities.
     #[arg(long, value_name = "PATH")]
@@ -30,7 +30,7 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ResumeArgs) -> ! {
 
 async fn execute_internal(args: &ResumeArgs) -> CommandResult<RunResponse> {
     let run_id = parse_run_id(&args.run_id)?;
-    let services = connect_run_services(&args.stores, args.runtime_config.as_deref()).await?;
-    let response = services.resume_stored_run(&run_id).await?;
+    let app = connect_application(&args.database, args.runtime_config.as_deref()).await?;
+    let response = app.resume_run(&run_id).await?;
     Ok(CommandOutput::new(response))
 }

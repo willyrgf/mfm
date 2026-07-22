@@ -14,14 +14,21 @@ fn read_only_run_commands_use_evidence_only_services() {
         let path = run_root.join(file);
         let source = std::fs::read_to_string(&path).expect("read command source");
         assert!(
-            source.contains("connect_run_read_services"),
-            "{} must construct evidence-only run services",
+            source.contains("connect_application"),
+            "{} must use the opaque application facade",
             path.display()
         );
-        assert!(
-            !source.contains("connect_run_services"),
-            "{} must not construct live run services",
-            path.display()
-        );
+        for forbidden in [
+            "start_entry_point_run",
+            "resume_run",
+            "record_manual_resolution",
+            "runtime_config",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{} must remain evidence-only: {forbidden}",
+                path.display()
+            );
+        }
     }
 }

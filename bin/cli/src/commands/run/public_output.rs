@@ -1,8 +1,8 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{
-    connect_run_read_services, parse_run_id, parse_schema_id, RunStoresArgs,
+use crate::support::application::{
+    connect_application, parse_run_id, parse_schema_id, DatabaseArgs,
 };
 use clap::Args;
 use mfm_app::PublicOutputResponse;
@@ -17,9 +17,9 @@ pub(crate) struct PublicOutputArgs {
     #[arg(long)]
     pub schema_id: String,
 
-    /// Storage configuration for certified typed run events and artifacts.
+    /// Production database connection.
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub database: DatabaseArgs,
 }
 
 /// Executes the public-output command and terminates the process.
@@ -31,8 +31,8 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &PublicOutputArgs) -> ! 
 async fn execute_internal(args: &PublicOutputArgs) -> CommandResult<PublicOutputResponse> {
     let run_id = parse_run_id(&args.run_id)?;
     let schema_id = parse_schema_id(&args.schema_id)?;
-    let services = connect_run_read_services(&args.stores).await?;
-    let response = services.public_output(&run_id, &schema_id).await?;
+    let app = connect_application(&args.database, None).await?;
+    let response = app.public_output(&run_id, &schema_id).await?;
 
     Ok(CommandOutput::new(response))
 }

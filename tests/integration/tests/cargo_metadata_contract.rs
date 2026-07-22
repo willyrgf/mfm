@@ -341,6 +341,7 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
     let storage = PackageSemantics::plain(Layer::Storage);
     let assembly = PackageSemantics::assembly(true);
     let private_assembly = PackageSemantics::assembly(false);
+    let private_kernel = PackageSemantics::kernel(false, false);
     let binary = PackageSemantics::plain(Layer::Binary);
 
     let forbidden = [
@@ -392,6 +393,11 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
             &binary,
             &private_assembly,
             "binary -> non-binary-facing assembly",
+        ),
+        (
+            &binary,
+            &private_kernel,
+            "binary -> non-binary-facing kernel",
         ),
         (&binary, &secret, "binary -> secret provider"),
         (&binary, &signing, "binary -> signing"),
@@ -463,6 +469,12 @@ fn mixed_binary_library_dependencies_obey_the_binary_row() {
     assert!(
         !dependency_allowed(&mixed_binary.semantics, &private_assembly, &roles),
         "a mixed package cannot depend on private assembly support"
+    );
+
+    let private_kernel = PackageSemantics::kernel(false, false);
+    assert!(
+        !dependency_allowed(&mixed_binary.semantics, &private_kernel, &roles),
+        "a mixed package cannot depend on private kernel support"
     );
 
     let live_library = PackageSemantics::live("bitcoin");
@@ -889,12 +901,10 @@ fn dependency_allowed(
         },
         Layer::Storage => dependency.layer == Layer::Kernel,
         Layer::Assembly => !matches!(dependency.layer, Layer::Binary | Layer::Test),
-        // Kernel facing becomes strict after the remaining runtime/store construction moves behind
-        // app. Assembly dependencies are already limited to the reviewed binary-facing facade, and
-        // mixed lib/bin packages are evaluated as one binary package.
+        // Binaries depend only on reviewed binary-facing kernel values and assembly facades. Mixed
+        // lib/bin packages are evaluated as one binary package.
         Layer::Binary => match dependency.layer {
-            Layer::Kernel => true,
-            Layer::Assembly => dependency.binary_facing == Some(true),
+            Layer::Kernel | Layer::Assembly => dependency.binary_facing == Some(true),
             _ => false,
         },
         Layer::Test => true,

@@ -344,12 +344,14 @@ async fn configured_target_cli_and_rest_replace_current_config_with_stable_invoc
     assert_eq!(attached_b["data"]["outcome"], "attached");
     assert_eq!(attached_b["data"]["run"]["run_id"], run_b.as_str());
 
-    let rest = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        role: mfm_rest_api::RestProcessRole::Live,
-        configured_store: Some(store.clone()),
-        store: store.clone(),
-        runtime_config_path: Some(runtime_config_path.clone()),
-    });
+    let application =
+        mfm_app::connect_production_application(Some(&scoped_url), Some(&runtime_config_path))
+            .await
+            .expect("connect REST application");
+    let rest = mfm_rest_api::make_app(mfm_rest_api::AppState::new(
+        mfm_rest_api::RestProcessRole::Live,
+        application,
+    ));
     let rest_response = rest
         .oneshot(
             Request::builder()

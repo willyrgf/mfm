@@ -21,7 +21,11 @@ Run the packaged CLI with `nix run .#mfm -- <ARGS>`, for example:
 
 ## Architecture
 
-The CLI's structure is organized to separate concerns, making it maintainable and extensible.
+The CLI is a presentation transport over the opaque `mfm-app` application facade. It parses command
+input, passes database selection and an explicit runtime-config path to app, invokes one operation,
+and renders the current text or JSON envelope. Store implementations, generic store bounds,
+registries, live transports, replay services, keystores, and signer implementations remain behind
+app.
 
 ```
 mfm_cli/
@@ -37,7 +41,7 @@ mfm_cli/
 │   ├── support/
 │   │   ├── keystore.rs    # Protected input, prompting, and public metadata presentation
 │   │   ├── keystore_selection.rs # CLI syntax to opaque app selection
-│   │   └── run_store.rs   # Event/artifact store construction helpers
+│   │   └── application.rs # Opaque app connection and typed id parsing
 │   └── presentation/
 │       └── output.rs      # Text/JSON output models and rendering
 └── tests/

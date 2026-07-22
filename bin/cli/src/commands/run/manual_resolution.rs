@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandOutput, CommandResult, PublicError};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_services, parse_run_id, RunStoresArgs};
+use crate::support::application::{connect_application, parse_run_id, DatabaseArgs};
 use clap::{Args, ValueEnum};
 use mfm_app::{ManualResolutionDecision, ManualResolutionRecordRequest, RunResponse};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -34,9 +34,9 @@ pub(crate) struct ManualResolutionArgs {
     #[arg(long)]
     pub note: Option<String>,
 
-    /// Storage configuration for certified typed run events and artifacts.
+    /// Production database connection.
     #[command(flatten)]
-    pub stores: RunStoresArgs,
+    pub database: DatabaseArgs,
 }
 
 /// Manual-resolution outcomes accepted by the CLI.
@@ -72,8 +72,8 @@ async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<RunRespo
         )
     })?;
     let proof_bytes = read_canonical_proof_json(&args.authorization_proof).await?;
-    let services = connect_run_services(&args.stores, None).await?;
-    let response = services
+    let app = connect_application(&args.database, None).await?;
+    let response = app
         .record_manual_resolution(ManualResolutionRecordRequest {
             run_id,
             outcome: args.outcome.into_app(),

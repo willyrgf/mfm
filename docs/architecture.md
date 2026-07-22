@@ -690,10 +690,6 @@ Source-domain to aggregate-domain, cross-domain live, live to concrete storage/s
 to secret-provider, and store-contract to storage-implementation edges are forbidden. Dev-only
 dependencies may exercise lower surfaces without becoming production ownership.
 
-The ordered repository cut still allows binaries to reach non-facing kernel/assembly plus the
-secret provider until app services absorb implementation construction. This is not a named
-exception or approved future edge. The metadata evaluator narrows at that cutover.
-
 ## Store Boundary
 
 `mfm-store` defines the production commit contract. Implementations accept only
@@ -726,6 +722,7 @@ corruption, or low-level storage contract fixtures.
 
 `crates/app` wires:
 
+- the opaque process-facing `Application` facade
 - typed runner registries
 - typed capability backends
 - the production Postgres run store
@@ -733,13 +730,19 @@ corruption, or low-level storage contract fixtures.
 - certified start/resume/replay services
 - typed public-output rendering
 
-`crates/app` must not own workflow planning, state behavior, or adapter runner behavior. It may
-construct concrete process-local resources such as the Postgres run store, protocol clients, and
-signer providers, then pass them into adapter-owned runner factories.
-Evidence-only app services for status, stream inspection, list/watch, replay, and public-output
-rendering must be constructible from store, artifact, and certification/replay authority only. They
-must not construct live EVM transports, signer providers, or live capability runtime config. Live
-start/resume services may construct those live drivers because they are execution authority.
+`crates/app` must not own workflow planning, state behavior, or adapter runner behavior. The public
+process facade owns one shared Postgres store and keeps store implementations, generic store
+bounds, registries, live transports, signer providers, and runtime configuration resolution behind
+the app boundary. It lazily constructs and retains evidence-only or live services only when the
+selected operation requires them, then passes concrete resources into adapter-owned runner
+factories.
+
+Run evidence operations for readiness, status, stream inspection, list/watch, replay,
+public-output rendering, and public facts use only store, artifact, and certification/replay
+authority. Setup operations use the configured-value authority on that same store. Neither path may
+construct live EVM transports, signer providers, or load live capability runtime config. Start,
+resume, and manual-resolution operations may construct live drivers because they carry execution
+authority. All operations on one facade share the same store instance.
 
 Live app assembly also computes one current-executable byte identity before constructing the runner
 registry. The registry mints all logical factory bindings—including framework, pure, external-read,
@@ -750,15 +753,15 @@ file access.
 
 `bin/cli` and `bin/rest-api` may:
 
-- decode JSON/TOML/user input
-- build typed configs and certified specs through operation crates
-- construct app services over the Postgres run store
-- start, resume, replay, inspect, and render typed runs
-- read run list/watch observations through the shared app API
+- decode command-line, HTTP, and presentation input
+- parse binary-facing typed ids and canonical presentation values
+- pass database selection, an explicit runtime-config path, and opaque command inputs to app
+- invoke the opaque `Application` facade
 - emit only the current response envelopes documented by the relevant binary
 
-Read-only CLI/REST commands and routes must use evidence-only app services. Live start, resume, and
-manual-resolution drive paths may use live app services that bind runners and capabilities.
+Read-only CLI/REST commands and routes invoke evidence-only facade methods. Live start, resume, and
+manual-resolution routes invoke facade methods that bind runners and capabilities. Binaries do not
+choose or retain service implementations.
 
 `bin/cli` and `bin/rest-api` must not:
 
@@ -767,6 +770,9 @@ manual-resolution drive paths may use live app services that bind runners and ca
 - bypass typed certification
 - infer public outputs from untyped snapshots
 - accept uncertified run history as typed run authority
+- construct or inspect stores, runtime registries, replay services, live transports, keystores, or
+  signer implementations
+- depend on non-binary-facing kernel or assembly packages
 - depend directly on SQLx, filesystem artifact stores, or alternate production storage selectors
 
 ## Public Naming Rules

@@ -22,7 +22,6 @@ url = "2"
 mfm-app = { path = "../../crates/app" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-ids = { path = "../../crates/kernel/ids" }
-mfm-store = { path = "../../crates/kernel/store" }
 
 [features]
 parity-tests = []
