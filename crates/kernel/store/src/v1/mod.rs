@@ -55,13 +55,7 @@ pub trait FactQueryStore: Send + Sync {
     fn execute_fact_queries<'a>(
         &'a self,
         plans: &'a [mfm_facts::CanonicalFactQueryPlan],
-    ) -> Pin<
-        Box<
-            dyn Future<Output = std::result::Result<Vec<mfm_facts::FactQueryResult>, Self::Error>>
-                + Send
-                + 'a,
-        >,
-    >;
+    ) -> AsyncStoreFuture<'a, Vec<mfm_facts::FactQueryResult>, Self::Error>;
 }
 
 /// Backend helper APIs for durable store implementations.

@@ -240,7 +240,7 @@ async fn validate_function_contracts(pool: &PgPool) -> Result<()> {
         let row = rows
             .iter()
             .find(|row| row.try_get::<String, _>("proname").ok().as_deref() == Some(contract.name))
-            .ok_or_else(|| authority_mismatch())?;
+            .ok_or_else(authority_mismatch)?;
         let result_type: String = row
             .try_get("result_type")
             .map_err(|_| authority_mismatch())?;
@@ -307,7 +307,7 @@ fn validate_trigger_contract_row(
     let row = rows
         .iter()
         .find(|row| row.try_get::<String, _>("tgname").ok().as_deref() == Some(contract.name))
-        .ok_or_else(|| authority_mismatch())?;
+        .ok_or_else(authority_mismatch)?;
     let table_name: String = row
         .try_get("table_name")
         .map_err(|_| authority_mismatch())?;
@@ -369,7 +369,7 @@ async fn validate_store_metadata(pool: &PgPool) -> Result<PostgresStoreAuthority
         return Err(authority_mismatch());
     }
     let store_scope_id = store_scope_id
-        .ok_or_else(|| authority_mismatch())
+        .ok_or_else(authority_mismatch)
         .and_then(|value| StoreScopeId::new(value).map_err(|_| authority_mismatch()))?;
     Ok(PostgresStoreAuthority::new(store_scope_id))
 }

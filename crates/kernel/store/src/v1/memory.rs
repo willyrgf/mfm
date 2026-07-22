@@ -319,8 +319,10 @@ pub struct AsyncInMemoryRunStore {
 
 #[derive(Clone, Default)]
 struct FactQuerySnapshotHook {
-    callback: Arc<Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>>,
+    callback: Arc<Mutex<Option<FactQuerySnapshotCallback>>>,
 }
+
+type FactQuerySnapshotCallback = Box<dyn FnOnce() + Send + 'static>;
 
 impl std::fmt::Debug for FactQuerySnapshotHook {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
