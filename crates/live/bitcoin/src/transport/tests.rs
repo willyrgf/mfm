@@ -35,6 +35,9 @@ enum Mode {
     ResultAndError,
     MissingArms,
     HttpFailure,
+    Created,
+    Accepted,
+    NoContent,
     Redirect,
     OversizedLength,
     OversizedChunked,
@@ -287,8 +290,23 @@ async fn protocol_and_http_failures_are_closed_and_redacted() {
         .await
         .expect_err("HTTP failure");
     assert_provider(&error, ProviderDiagnosticCode::RpcHttpStatus, true);
+    assert_eq!(server.requests().len(), 1, "HTTP failures must not retry");
     let rendered = format!("{error:?} {error}");
     assert!(!rendered.contains("provider-secret"));
+
+    for mode in [Mode::Created, Mode::Accepted, Mode::NoContent] {
+        let server = TestServer::spawn(mode).await;
+        let error = session(&server)
+            .collect_balances(&request())
+            .await
+            .expect_err("non-200 success status");
+        assert_provider(&error, ProviderDiagnosticCode::RpcHttpStatus, false);
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "a non-200 success status must fail at the first call"
+        );
+    }
 
     let server = TestServer::spawn(Mode::Redirect).await;
     let error = session(&server)
@@ -576,6 +594,15 @@ fn response(mode: Mode, request: &Value) -> String {
     }
     if matches!(mode, Mode::Redirect) {
         return "HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:9/provider-secret\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned();
+    }
+    if matches!(mode, Mode::Created | Mode::Accepted | Mode::NoContent) {
+        let status = match mode {
+            Mode::Created => "201 Created",
+            Mode::Accepted => "202 Accepted",
+            Mode::NoContent => "204 No Content",
+            _ => unreachable!("non-200 success mode"),
+        };
+        return http_response(status, "");
     }
     if matches!(mode, Mode::OversizedLength) {
         return format!(

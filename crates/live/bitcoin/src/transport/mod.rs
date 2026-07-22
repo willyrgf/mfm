@@ -99,6 +99,7 @@ impl BitcoinRpcSession {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .no_proxy()
             .build()
             .map_err(|_| BitcoinRpcError::InvalidConfiguration)?;
@@ -203,6 +204,9 @@ impl BitcoinRpcSession {
         }
         let mut response = builder.send().await.map_err(classify_reqwest_error)?;
         let status = response.status();
+        if status != reqwest::StatusCode::OK {
+            return Err(BitcoinRpcError::HttpStatus(status.as_u16()));
+        }
         if let Some(length) = response.content_length() {
             if length > MAX_BITCOIN_JSON_RPC_BODY_BYTES as u64 {
                 return Err(BitcoinRpcError::BodyTooLarge);
@@ -220,10 +224,6 @@ impl BitcoinRpcSession {
             }
             bytes.extend_from_slice(&chunk);
         }
-        if !status.is_success() {
-            return Err(BitcoinRpcError::HttpStatus(status.as_u16()));
-        }
-
         let envelope: RpcEnvelope = decode_unique(&bytes)?;
         if envelope.jsonrpc.as_deref() != Some("2.0") || envelope.id != Some(id) {
             return Err(BitcoinRpcError::ProtocolViolation);
