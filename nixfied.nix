@@ -66,31 +66,11 @@ let
     assert pkgs.bitcoind.version == "31.0";
     pkgs.bitcoind;
   bitcoinCoreDisplayVersion = "Bitcoin Core daemon version v31.0.0 bitcoind";
-  bitcoinPrepare = pkgs.writeShellApplication {
-    name = "nixfied-bitcoin-prepare";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.findutils
-    ];
-    text = ''
-      state_dir="''${1:-}"
-      if [[ -z "$state_dir" || "$state_dir" == "/" ]]; then
-        echo "missing or unsafe Bitcoin Core state directory" >&2
-        exit 64
-      fi
-
-      bitcoin_dir="$state_dir/bitcoin"
-      if [[ -e "$bitcoin_dir" ]]; then
-        find "$bitcoin_dir" -depth -delete
-      fi
-      umask 077
-      mkdir -p "$bitcoin_dir"
-    '';
-  };
   bitcoinNode = pkgs.writeShellApplication {
     name = "nixfied-bitcoind";
     runtimeInputs = [
       pkgs.coreutils
+      pkgs.findutils
       pkgs.gnused
       bitcoinCore
     ];
@@ -122,6 +102,9 @@ let
       fi
 
       bitcoin_dir="$state_dir/bitcoin"
+      if [[ -e "$bitcoin_dir" ]]; then
+        find "$bitcoin_dir" -depth -delete
+      fi
       umask 077
       mkdir -p "$bitcoin_dir"
       export HOME="$bitcoin_dir"
@@ -249,14 +232,6 @@ in
       "file-write"
     ];
   };
-  nixfied.closures.bitcoin-core-prepare = {
-    package = bitcoinPrepare;
-    executable = "bin/nixfied-bitcoin-prepare";
-    effects = [
-      "process"
-      "file-write"
-    ];
-  };
   nixfied.closures.bitcoin-core-cli = {
     package = bitcoinCore;
     executable = "bin/bitcoin-cli";
@@ -268,7 +243,6 @@ in
 
   nixfied.services.bitcoin-core = {
     lifecycle = {
-      prepare.task = "bitcoin-core-init";
       start.invocation = {
         tools = [ "bitcoin-core-node" ];
         run = [
@@ -302,16 +276,6 @@ in
   };
 
   nixfied.tasks = {
-    bitcoin-core-init = {
-      invocation = {
-        tools = [ "bitcoin-core-prepare" ];
-        run = [
-          "nixfied-bitcoin-prepare"
-          "\${stateDir}"
-        ];
-        timeoutMs = 60000;
-      };
-    };
     fmt = cargoLeaf {
       run = [
         "cargo"
