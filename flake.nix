@@ -19,7 +19,6 @@
       systems = [
         "aarch64-darwin"
         "aarch64-linux"
-        "x86_64-darwin"
         "x86_64-linux"
       ];
       forAllSystems =
@@ -152,15 +151,25 @@
             '';
           };
         in
-        # The verification surface is generated: MFM's own task names become
-        # the verbs (`.#check`/`.#test`/`.#ci` via nixfied.surface.verbs),
-        # model admission lives at `.#model-check`. The only override is the
-        # managed local MFM app; the package remains the raw binary.
+        # Keep the generated project apps and add the managed CLI.
         projectApps
         // {
+          check = projectApps.check // {
+            meta.description = "Run formatting, Clippy, metadata, and offline SQLx checks";
+          };
+          test = projectApps.test // {
+            meta.description = "Run service-free workspace Nextest and doctests";
+          };
+          test-db = projectApps.test-db // {
+            meta.description = "Run managed PostgreSQL SQLx and parity verification";
+          };
+          ci = projectApps.ci // {
+            meta.description = "Run the complete MFM verification graph";
+          };
           mfm = {
             type = "app";
             program = "${managedMfm}/bin/mfm";
+            meta.description = "Run the MFM CLI with managed PostgreSQL";
           };
         }
       );

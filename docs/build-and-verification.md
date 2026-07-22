@@ -24,10 +24,8 @@ and native dependencies supplied by Nix. Release packaging does not act as a
 test cache, and mutable Cargo artifacts are never release inputs or trusted
 verification results.
 
-`nix run .#mfm` is a local runtime convenience around the immutable package:
-it starts the Nixfied-managed PostgreSQL service, supplies `DATABASE_URL`, and
-then delegates to the packaged CLI. It is not a separate build lane or a raw
-package entry point.
+`nix run .#mfm` is a project CLI convenience, not a separate build lane. Its managed database
+lifecycle and raw execution alternatives are owned by the [CLI reference](../bin/cli/README.md).
 
 ## Responsibility boundary
 
@@ -200,11 +198,3 @@ the version pin. The transport contract tracks the official
 [`getblockchaininfo`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/getblockchaininfo/),
 and [`getblockhash`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/getblockhash/)
 contracts.
-
-Nixfied owns deterministic service endpoint placement. Starts from independent
-state roots are coordinated by the upstream endpoint contract; an occupied
-planned endpoint is reported as `PORT_CONFLICT`. This runtime responsibility
-is independent of Cargo target placement.
-
-For coordinated Nixfied pin and runtime ABI changes, follow
-[`UPGRADE.md`](UPGRADE.md).
