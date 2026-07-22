@@ -3,7 +3,7 @@
 - Status: Accepted
 - RFC: RFC_REPO_REORG.md
 - Date: 2026-07-21
-- Delivery: one buildable, reviewable commit per numbered step
+- Delivery: 22 dependency-ordered implementation units; as-built commits are mapped below
 
 ## Binding outcome
 
@@ -37,9 +37,9 @@ Implement the RFC with these decisions fixed:
     binary digest, construct every live registry from one app-supplied template, and deliberately
     reject cross-binary/cross-build live resume; evidence-only replay performs no executable IO.
 
-If implementation evidence disproves a decision, stop at the relevant commit boundary and obtain an
-architecture decision. Do not silently introduce another crate, public role module, alternate
-execution path, or compatibility layer.
+If implementation evidence disproves a decision, stop at the relevant implementation-unit boundary
+and obtain an architecture decision. Do not silently introduce another crate, public role module,
+alternate execution path, or compatibility layer.
 
 ## Resolution of reviewed concerns
 
@@ -56,39 +56,33 @@ execution path, or compatibility layer.
 
 ## Material uncertainties
 
-The target decisions are accepted. These remaining uncertainties are empirical implementation
-questions, not permission to introduce parallel designs:
+Implementation evidence resolved the first five empirical assumptions:
 
-1. The concentrated pure-domain layout may expose a Cargo firebreak that modules, visibility, and
-   tests cannot express cleanly. If that happens, the consequence would be an unjustified public
-   surface or forbidden dependency inside a consolidated crate. Validate Bitcoin first by measuring
-   its public-item/bridge-type diff and source-role checks; stop at that commit boundary and obtain a
-   new architecture decision before copying the pattern.
-2. The atomic external-read/final-Bitcoin cut assumes both stores can admit and recover the complete
-   fact/output/completion settlement without a fact-prefix state while the product moves directly
-   from per-address reads to one aggregate read. A failure would invalidate the single execution-
-   path design or force an even larger store/runtime redesign. Resolve it with injected append
-   failures, uncertain-result recovery, exact graph, and aggregate transport tests against both
-   in-memory and Postgres stores before domain consolidation.
-3. The independent authoring catalog may still miss a domain descriptor that graph construction can
-   produce. That would make production assembly reject a valid published branch or silently omit a
-   runner. Generate catalog and typed registries from one declaration, reject undeclared children
-   in the authoring builder, and require the union of canonical Bitcoin-only, EVM-only, and mixed
-   expansions to equal every declared domain operation/state. Do not infer either direction from
-   the app registry being compared.
-4. The repository-pinned Bitcoin Core version and regtest behavior may expose a consumed response
-   field not covered by the reviewed Core 28+ contract. The consequence would be a decoder or parity
-   failure. Resolve it with raw-envelope fixtures and the pinned live parity task, updating the one
-   strict additive decoder if evidence requires it; do not add version branches.
-5. Selective configuration decoding must coexist with whole-document duplicate-key and secret-name
-   rejection for both JSON and TOML. If the current parser stack cannot prove those properties, add
-   the smallest parser support justified by focused adversarial tests; do not weaken the closed
-   security scan or deserialize every unused entry.
-6. Exact executable hashing must prove stable running-byte authority on Linux and the immutable
-   packaged-path contract on macOS while evidence-only services perform no executable IO. Validate
-   both targets where CI supports them, streaming/error redaction, and cross-digest live resume. A
-   failure requires a new execution-identity architecture decision; do not restore a package,
-   runner, environment, or shared-label digest.
+1. Consolidated Bitcoin, EVM, and portfolio crates pass the source-role, dependency, external-use,
+   and compile-fail public-surface guardrails.
+2. `uncertain_memory_fact_settlement_does_not_repeat_live_io` and
+   `parity_postgres_uncertain_fact_settlement_does_not_repeat_live_io` exercise the same production
+   settlement path with in-memory and Postgres stores, inject a committed-but-uncertain append, and
+   prove exact live-call counts.
+3. The generated authoring catalog, undeclared-child rejection, and Bitcoin-only, EVM-only, and
+   mixed reachability tests agree with production registry authority.
+4. Raw transport fixtures and the Nixfied pinned Bitcoin Core parity task pass the reviewed strict
+   additive contract.
+5. Focused JSON and TOML adversarial tests reject duplicate keys, prohibited secret names, and
+   scalar, nested, array, malformed, or direct secret-source shapes even on unselected routes.
+
+One per-revision verification dependency remains until the final revision is published:
+
+- **Choice or assumption:** exact executable hashing uses the immutable packaged path correctly on
+  macOS while evidence-only services perform no current-executable IO.
+- **Why it is uncertain:** the local development host is Linux, so it cannot exercise the supported
+  macOS implementation or its packaging environment.
+- **Consequence if wrong:** the byte-exact execution authority would lack evidence on one supported
+  target and the implementation would not be accepted.
+- **Resolution:** after local exact-head `nix run .#ci`, push that revision and require the hosted
+  macOS `ci-full` job in `.github/workflows/checks.yml` to pass for the identical Git SHA. A failure
+  requires a new execution-identity architecture decision; do not restore a package, runner,
+  environment, or shared-label digest.
 
 No backward-compatibility, migration, fallback, version-negotiation, provider-ownership, or private-
 transport question remains open.
@@ -359,8 +353,8 @@ mfm-replay owns one verify_pure_state implementation. It reconstructs config/inp
 retained artifacts, calls the same state, and compares exact canonical output. It never resolves
 current configuration or calls a live/provider interface.
 
-The introducing commit migrates every surviving ordinary pure state and deletes all copied runner
-and replay code.
+The introducing implementation unit migrates every surviving ordinary pure state and deletes all
+copied runner and replay code.
 
 ### Fact-producing external reads
 
@@ -827,7 +821,7 @@ Required fixtures:
 - a raw-envelope request assertion proving exactly one multi-descriptor scan; and
 - live parity against the repository-pinned Bitcoin Core service before final closure.
 
-The dedicated parity commit adds a Nixfied regtest Bitcoin Core service from the root pinned
+The dedicated parity unit adds a Nixfied regtest Bitcoin Core service from the root pinned
 nixpkgs, records/asserts its exact bitcoind version (which must be at least 28), creates deterministic
 RPC credentials and isolated data, mines a fixture UTXO, and adds a parity task for the checked batch
 scan. Add that task to final CI and update docs/build-and-verification.md. The flake lock is the
@@ -845,7 +839,7 @@ Use the official contracts as test references:
 
 ## Production authoring-catalog contract
 
-mfm.portfolio/snapshot@2 is the only final published run entry point. Commit 7 deletes
+mfm.portfolio/snapshot@2 is the only final published run entry point. Unit 7 deletes
 mfm.portfolio/snapshot@1 when the public snapshot and graph contract change; there is no alias or
 dual registration.
 
@@ -880,7 +874,7 @@ sorted, duplicate-rejecting sets:
 - the subset of state keys whose effect is ApplySideEffect.
 
 Included child catalogs are unioned with conflict rejection. Emitted facts come only from the
-automatic EffectRunner/ReadFactBatch descriptor path established in commit 7. The builder/insert
+automatic EffectRunner/ReadFactBatch descriptor path established in unit 7. The builder/insert
 surface used by macro expansion is doc-hidden; do not add a domain-specific catalog type or a
 second app-owned expected-set structure.
 
@@ -1025,7 +1019,7 @@ Evidence-only commands and replay do not open the runtime document.
 
 ## Keystore and binary contract
 
-In one commit, consolidate the two keystore crates and delete dangerous-secret-export,
+In one logical cutover, consolidate the two keystore crates and delete dangerous-secret-export,
 allow_secret_exports, export_private_key, related config/feature/audit/error/tests, and the
 cross-crate get_private_key/SecureKey bridge. Raw key retrieval and SecureKey become crate-private in
 that same cut. Public mfm-keystore supports import, list, metadata, delete, and signing only.
@@ -1069,7 +1063,7 @@ authority. A wrapper around one safe scalar with identical invariants is a prohi
 
 ## Architecture enforcement
 
-Package metadata describes semantics from commit 1 onward:
+Package metadata describes semantics from unit 1 onward:
 
     [package.metadata.mfm]
     layer = "domain"
@@ -1093,7 +1087,7 @@ Final domain-facing kernel packages are canonical, capabilities, certify, facts,
 program-derive, and values. Final platform-only kernel packages are events, manual-auth, replay,
 runtime, spec, and store. Only app, canonical, and ids are binary-facing. The old effects and
 fact-capabilities packages are honestly domain-facing until deleted at their semantic cut; this is
-not an exception to dependency validation. Spec is platform-only from commit 1.
+not an exception to dependency validation. Spec is platform-only from unit 1.
 
 Validate normal/build internal edges with this complete matrix:
 
@@ -1144,12 +1138,14 @@ Source scans are targeted guardrails, not a Rust parser substitute. Pair them wi
 
 Do not add a broad custom static analyzer or a new dependency solely for scans.
 
-## Commit plan
+## Implementation units
 
-Each commit leaves one buildable current design. Update affected rustdoc, README files,
-docs/architecture.md, docs/design.md, schemas, fixtures, generated metadata, and Cargo.lock in the
-same commit. A replacement deletes its old package/type/path in the same cut; no shell, re-export
-crate, compatibility reader, or dual registration survives.
+The numbered sections are dependency-ordered implementation units, not a promised one-to-one Git
+commit sequence. A unit may be delivered in one or more focused commits when that keeps each commit
+coherent and buildable. Update affected rustdoc, README files, docs/architecture.md, docs/design.md,
+schemas, fixtures, generated metadata, and Cargo.lock in the same logical change. A replacement
+deletes its old package/type/path in the same cut; no shell, re-export crate, compatibility reader,
+or dual registration survives.
 
 The order is semantic-first: delete unused product surfaces, establish platform authority and the
 single execution paths, replace Bitcoin behavior vertically, then move final code into concentrated
@@ -1218,9 +1214,9 @@ Changes:
   fact/publication, BtcChainHeadCollectorCycleOperation, drafts, launch helpers, receipt assembly,
   and production registration.
 - Keep the active portfolio balance path, including its shared coverage/status fields, buildable
-  until commit 7 replaces its facts, selection, and public snapshot atomically. Do not relocate or
+  until unit 7 replaces its facts, selection, and public snapshot atomically. Do not relocate or
   polish those doomed fields.
-- Keep only chain/source evidence internally required by that active collection until commit 7
+- Keep only chain/source evidence internally required by that active collection until unit 7
   replaces the entire path.
 - Delete app, CLI, REST, schema, and fixture surfaces reachable only from the standalone cycle.
 
@@ -1230,7 +1226,7 @@ Focused verification:
 - Run Bitcoin portfolio-snapshot, certification, replay, and cargo-metadata-contract tests.
 
 Exit condition: there is no checkpoint/standalone Bitcoin entry point; the sole remaining temporary
-Bitcoin-to-portfolio status dependency is explicitly deleted in commit 7.
+Bitcoin-to-portfolio status dependency is explicitly deleted in unit 7.
 
 ### 4. delete evm standalone collector wrapper
 
@@ -1295,10 +1291,10 @@ Changes:
   checked RPC chain tag will establish the actual chain.
 - Delete portfolio bech32/bs58 validation, weaker duplicate validators/dependencies, and handwritten
   Bitcoin primitive logic.
-- Rename only reusable primitive/domain Btc types which survive commit 7 to Bitcoin and delete
+- Rename only reusable primitive/domain Btc types which survive unit 7 to Bitcoin and delete
   their aliases. Make the minimum compile adaptation in doomed per-address types and delete them in
-  commit 7. Keep BTC only for units/protocol terms.
-- Add no unused aggregate API; commit 7 introduces the final batch behavior directly.
+  unit 7. Keep BTC only for units/protocol terms.
+- Add no unused aggregate API; unit 7 introduces the final batch behavior directly.
 
 Focused verification:
 
@@ -1416,7 +1412,7 @@ Fact query ownership in the same authority cut:
   CLI/REST construction, and test overrides to one Arc<S> carrying query and retained-artifact
   traits. Adversarial tests wrap that one store rather than inject a second provider.
 
-Final Bitcoin vertical cut in the same commit:
+Final Bitcoin vertical cut in the same implementation unit:
 
 - Replace the graph directly with BitcoinBalanceCollectionOperation ->
   CollectBitcoinBalancesState, one state for each
@@ -1434,7 +1430,7 @@ Final Bitcoin vertical cut in the same commit:
   script/outpoint,
   raw decimal/MAX_MONEY, checked sum, chain/IBD, and reorg contract above. Exact scriptPubKey bytes,
   not returned desc, are authority.
-- Add required scan_timeout_seconds to the current runtime-configuration route now; commit 20 moves
+- Add required scan_timeout_seconds to the current runtime-configuration route now; unit 20 moves
   that final field and validation into app and deletes the old configuration crate.
 - Keep no coordinator/lock, status/abort, hidden retry, alternate decoder, or version negotiation.
 - Return ordered NonEmpty<BitcoinBalanceSnapshotFact> plus the minimal receipt through the new
@@ -1594,12 +1590,12 @@ Changes:
 - Add a Nixfied isolated regtest Bitcoin Core service from root-pinned nixpkgs.
 - Record/assert the exact bitcoind version and require it to be at least 28. Use deterministic RPC
   credentials, an isolated data directory, and no host bitcoind.
-- Mine a deterministic fixture UTXO and exercise commit 7's final public typed transport against
+- Mine a deterministic fixture UTXO and exercise unit 7's final public typed transport against
   the live node, including chain/IBD validation, one multi-descriptor scan, scan-height hash
   confirmation, zero/nonzero balances, and redacted failure.
 - Add one focused parity task, compose it into final CI, and document it in
   docs/build-and-verification.md. Add no production API/state/session path in this verification-only
-  commit.
+  unit.
 
 Focused verification:
 
@@ -1827,7 +1823,7 @@ Changes:
 - Audit Cargo target-kind coherence: every package with a bin target is layer binary and mixed
   lib/bin packages obey the binary dependency row; proc-macro targets remain dedicated/non-binary.
 - Audit and promote the pure module State/Operation placement and lower-to-higher import checks
-  introduced by the consolidation commits into the final durable suite.
+  introduced by the consolidation units into the final durable suite.
 - Audit and promote the existing live checks for public transport/private adapter, transport isolation, no
   adapter-to-concrete-transport import, and portfolio-live ownership.
 - Consolidate the existing external typed-transport, fake-session, and compile-fail privacy tests;
@@ -1845,6 +1841,62 @@ Focused verification:
 
 Exit condition: one semantic matrix covers the workspace and invalid dependencies/source roles/API
 exposure fail for properties, never inventory.
+
+## As-built delivery record
+
+The 22 units produced 24 primary commits because unit 17 was split into three coherent catalog and
+production-binding changes. Review then produced 11 focused remediations, so the initial delivery
+contained 35 implementation commits through `186e69cf`. Acceptance review added six more focused
+remediations, for 41 implementation commits through `95153627`. History is intentionally preserved;
+the documentation-only commit containing this record is not part of that implementation count.
+
+| Unit | Primary as-built commit or commits |
+|---|---|
+| 1 | `cd9b6116` replace topology snapshots with semantic boundary contracts |
+| 2 | `d9bff58c` delete unused proof workflow |
+| 3 | `1c15ba74` delete bitcoin checkpoint and standalone collector |
+| 4 | `6f8c0114` delete evm standalone collector wrapper |
+| 5 | `e68da0a8` make store the retained artifact authority |
+| 6 | `c5a67be3` make rust-bitcoin the bitcoin identity authority |
+| 7 | `02128a5e` settle read facts and replace bitcoin collection |
+| 8 | `55fb6d96` fold surviving effects into capabilities |
+| 9 | `b753efa7` centralize pure execution and executable identity |
+| 10 | `29cc284f` consolidate the bitcoin pure domain |
+| 11 | `16674614` consolidate bitcoin live with a public transport |
+| 12 | `1c0583bc` add pinned bitcoin core parity |
+| 13 | `8d40f0f5` consolidate the evm pure domain |
+| 14 | `e35b6958` consolidate evm live with a public transport |
+| 15 | `85456ed1` consolidate the portfolio pure domain |
+| 16 | `271d747e` consolidate portfolio live without platform providers |
+| 17 | `bb8799ba` generate authoring catalogs from typed registries; `e55f1f00` prove published portfolio catalog reachability; `55be08de` bind production assembly to the authoring catalog |
+| 18 | `acf12442` delete secret export and consolidate keystore |
+| 19 | `3363598f` put keystore application services behind app |
+| 20 | `41243aa8` move runtime configuration into app |
+| 21 | `388f3beb` finish thin binary assembly |
+| 22 | `ab5bc4bc` install final source, api, and full-matrix guardrails |
+
+The remediation commits remain part of the unit they correct; they do not create compatibility
+phases or alternate designs.
+
+| Commit | Unit or units | Closure |
+|---|---|---|
+| `8b2ba9e9` | 22 | fix workspace Clippy diagnostics |
+| `86f2c0f6` | 18, 22 | fix the renamed signing trybuild group |
+| `2381aeb2` | 9, 12, 21 | align setup parity with executable authority |
+| `d7d79fc3` | 7, 22 | remove final obsolete contract residues |
+| `13e4f1ba` | 7 | finish the fact-query projection cutover |
+| `f94c21d8` | 7 | align exact read and fact-query contracts |
+| `98f854e4` | 7, 13, 20 | strengthen strict boundary regressions |
+| `ed5840aa` | 21 | hide production live assembly behind the application facade |
+| `0ddc4a18` | 7 | preserve the explicit fact-query future contract |
+| `208b6775` | 11, 14, 17, 20 | bind live routes once per start and resume |
+| `186e69cf` | 21, 22 | fix production assembly compile-fail coverage |
+| `f71168e4` | 7, 22 | reject unknown persisted fact, event, and query fields |
+| `1c4d2f28` | 11 | enforce exact Bitcoin RPC request boundaries |
+| `a0d62b52` | 20 | close unselected runtime secret-source shapes |
+| `bedac9ae` | 14, 22 | keep EVM adapter assembly types private |
+| `935a3cfb` | 7 | prove uncertain fact settlement recovery on both stores |
+| `95153627` | 18 | remove unused keystore administration APIs |
 
 ## Commit execution rules
 
@@ -1868,7 +1920,7 @@ Matches retained only in this RFC/plan or a deliberate rejection test must be re
 
 ## Milestone audits
 
-After commits 7, 10, 16, 20, and 22, record a short implementation note in the commit message or
+After units 7, 10, 16, 20, and 22, record a short implementation note in the commit message or
 review description:
 
 - crates deleted/added;

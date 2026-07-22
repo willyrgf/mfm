@@ -60,30 +60,24 @@ Repository taxonomy alone is not sufficient justification.
 
 ## Material uncertainties
 
-The ownership and target contracts are accepted. Six implementation assumptions still require
-evidence:
+Implementation evidence resolved five of the six empirical assumptions: the concentrated domain
+boundaries have source-role and public-API guardrails; memory and Postgres exercise uncertain
+external-read settlement without repeated live IO; catalog generation and representative branch
+coverage agree; the transport passes the pinned Bitcoin Core parity task; and adversarial JSON/TOML
+tests close selected and unselected secret-source shapes.
 
-1. Bitcoin consolidation must demonstrate that private modules and source-role tests preserve the
-   useful firebreaks while reducing public bridge types. If not, stop before applying the pattern to
-   EVM and portfolio and make a new evidence-backed architecture decision.
-2. The one atomic external-read/final-Bitcoin cut must prove memory and Postgres admission,
-   uncertain-append recovery, replay, and the direct per-address-to-aggregate transition without a
-   temporary publication path.
-3. The independently declared portfolio authoring catalog must cover every type graph construction
-   can emit. The catalog and typed authoring registries are generated from the same declaration,
-   authoring rejects undeclared children, and the union of Bitcoin-only, EVM-only, and mixed
-   expansions must cover every declared domain descriptor. Those checks test both directions
-   independently of app registration.
-4. The reviewed common Bitcoin Core 28+ response contract must pass raw fixtures and the pinned
-   regtest service. Evidence may refine the one strict additive decoder, but cannot add version
-   negotiation or fallback.
-5. The JSON/TOML implementation must support selective entry decoding while globally rejecting
-   duplicate JSON keys and prohibited secret names. Focused adversarial tests decide whether the
-   current parser support is sufficient.
-6. The target-specific current-executable reader must hash stable running bytes on Linux and the
-   immutable packaged path on macOS, fail closed on instability, and remain absent from
-   evidence-only services. Cross-binary live-resume tests validate the chosen byte-exact authority;
-   failure requires a new execution-identity decision, not a label fallback.
+One per-revision verification dependency remains until the final revision is published:
+
+- **Choice or assumption:** the target-specific executable reader hashes the immutable packaged
+  executable path correctly on macOS, while evidence-only services remain independent of current-
+  executable IO.
+- **Why it is uncertain:** the local development host is Linux; only the supported hosted macOS
+  workflow can exercise the packaged-path implementation on the exact final Git revision.
+- **Consequence if wrong:** executable identity would not be validated on both supported targets,
+  so the reorganization could not satisfy its acceptance criteria.
+- **Resolution:** push the locally verified final revision and require the macOS `ci-full` job in
+  `.github/workflows/checks.yml` to pass for that exact Git SHA. A failure requires a new execution-
+  identity decision, not a label fallback.
 
 No backward-compatibility, migration, provider-ownership, or transport-visibility decision remains
 open.
@@ -686,9 +680,9 @@ shape.
 
 ## Delivery strategy
 
-Implementation is divided into dependency-ordered, independently reviewable commits. The detailed
-commit scope, tests, and deletion ledger live in `IMPL_PLAN_RFC_REPO_REORG.md`. The ordered
-delivery phases are:
+Implementation is divided into dependency-ordered, independently reviewable logical changes. The
+detailed scope, tests, deletion ledger, and as-built commit mapping live in
+`IMPL_PLAN_RFC_REPO_REORG.md`. The ordered delivery phases are:
 
 1. install final semantic metadata and delete unused proof/checkpoint/standalone registration;
 2. move retained-artifact authority to the store;
@@ -706,10 +700,11 @@ delivery phases are:
 11. finish thin binaries; and
 12. audit source-role, transport-reuse, authoring-catalog, and full-matrix guardrails.
 
-The implementation plan divides these phases into its exact numbered commits. Each commit deletes
-its superseded code in the same commit. Verification is scope-driven under
-`docs/build-and-verification.md`; broad gates are not repeated per commit. The final cross-cutting
-revision runs `nix run .#ci` once.
+The implementation plan divides these phases into numbered implementation units, not an exact Git
+commit count. A unit may use multiple focused commits or later review remediations, provided every
+commit leaves one coherent current design and every cutover deletes its superseded code in the same
+logical change. Verification is scope-driven under `docs/build-and-verification.md`; broad gates
+are not repeated per commit. The final cross-cutting revision runs `nix run .#ci` once.
 
 ## Acceptance criteria
 
