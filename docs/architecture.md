@@ -397,9 +397,10 @@ endpoint and authorization inputs, one shared bounded HTTP runtime, bind-time ch
 verification, strict protocol decoding, and redacted errors. It implements the pure EVM read and
 transaction session contracts without importing runtime, replay, store, app, or adapter authority.
 The private adapter accepts only pure session-set traits and cannot name the concrete transport.
-App assembly owns process-local routing and caches one checked read session per `(network_id,
-source_ref)`; production constructs only balance-read authority. The former standalone EVM
-transport and adapter packages are deleted.
+App assembly owns process-local routing. Every execution-capable facade call creates one fresh
+dispatch which resolves and caches one checked read session per `(network_id, source_ref)`; only
+the secret-free bounded HTTP transport is shared across dispatches. Production constructs only
+balance-read authority. The former standalone EVM transport and adapter packages are deleted.
 
 `mfm-portfolio-live` owns only the live execution of portfolio-specific fact selection and retained
 response hydration. Its registration API accepts one shared store `Arc` implementing both
@@ -738,9 +739,9 @@ corruption, or low-level storage contract fixtures.
 `crates/app` must not own workflow planning, state behavior, or adapter runner behavior. The public
 process facade owns one shared Postgres store and keeps store implementations, generic store
 bounds, registries, live transports, signer providers, and runtime configuration resolution behind
-the app boundary. It lazily constructs and retains evidence-only or live services only when the
-selected operation requires them, then passes concrete resources into adapter-owned runner
-factories.
+the app boundary. It lazily retains evidence-only services. Each start, resume, or manual-resolution
+call constructs fresh live services and passes that call's concrete route set into adapter-owned
+runner factories.
 
 Run evidence operations for readiness, status, stream inspection, list/watch, replay,
 public-output rendering, and public facts use only store, artifact, and certification/replay
@@ -749,12 +750,12 @@ construct live EVM transports, signer providers, or load live capability runtime
 resume, and manual-resolution operations may construct live drivers because they carry execution
 authority. All operations on one facade share the same store instance.
 
-Live app assembly also computes one current-executable byte identity before constructing the runner
-registry. The registry mints all logical factory bindings—including framework, pure, external-read,
-and adapter factories—from that one template, so factory ids remain distinct while their executable
-digest is identical. Runtime and domain packages accept those bindings and do not derive process
-identity. Evidence-only services do not construct the registry and therefore perform no executable
-file access.
+Live app assembly also computes one current-executable byte identity once per application process.
+Every dispatch registry mints all logical factory bindings—including framework, pure,
+external-read, and adapter factories—from that one template, so factory ids remain distinct while
+their executable digest is identical. Runtime and domain packages accept those bindings and do not
+derive process identity. Evidence-only services do not construct a dispatch registry and therefore
+perform no executable file access.
 
 `bin/cli` and `bin/rest-api` may:
 

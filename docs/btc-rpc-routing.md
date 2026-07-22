@@ -39,10 +39,11 @@ be indirect even in an unselected route.
 
 ## Source-Bound Aggregate Reads
 
-App assembly creates one private routed session set. It selects an endpoint-bound
-`BitcoinRpcSession` by the certified semantic source identity, validates its exact
+Every start or resume creates one private routed session set. It resolves each required certified
+semantic source identity once, constructs an endpoint-bound `BitcoinRpcSession`, validates its exact
 `BitcoinSourceBinding` without network IO, and registers that routed set once for
-`BitcoinBalanceCollectionReadCapability`.
+`BitcoinBalanceCollectionReadCapability`. The selected endpoint, authentication, and timeout remain
+fixed for that dispatch; a later call creates a new set and re-resolves current routing.
 
 `rust-bitcoin` is the primitive authority for canonical address parsing, network compatibility,
 script derivation, block/transaction hashes, outpoints, and amounts. Supported Bitcoin Core chain

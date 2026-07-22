@@ -357,7 +357,7 @@ pub trait EvmReadSession: Send + Sync {
 /// One checked source of endpoint-bound EVM read sessions.
 ///
 /// A standalone session implements this as a singleton. App assembly may instead provide a routed
-/// set that resolves and caches one checked session per process-local route key.
+/// set that resolves and caches one checked session per dispatch-local route key.
 pub trait EvmReadSessionSet: Send + Sync {
     /// Returns the implementation identity shared by every session in the set.
     fn implementation_id(&self) -> &str;

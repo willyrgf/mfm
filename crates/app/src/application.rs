@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -8,20 +10,20 @@ use mfm_store::v1 as store;
 use tokio::sync::OnceCell;
 
 use crate::{
-    export_setup_target, import_setup_toml, list_setup_targets, make_run_read_services,
-    make_run_services, prepare_entry_point_run_launch, production_certification_registry,
-    production_runner_registry, InvocationKey, ManualResolutionRecordRequest, PublicError,
+    assemble_dispatch_registry, export_setup_target, import_setup_toml, list_setup_targets,
+    make_run_read_services, make_run_services, prepare_entry_point_run_launch,
+    production_certification_registry, InvocationKey, ManualResolutionRecordRequest, PublicError,
     PublicFactDescriptorSummary, PublicFactExplain, PublicFactKindSummary, PublicFactQueryPage,
     PublicFactQueryRequest, PublicFactRef, PublicFactRefId, PublicOutputResponse, ReplayResponse,
     RunReadServices, RunResponse, RunServices, RunStartReport, RunStreamResponse,
-    SetupConfigPublication,
+    RuntimeConfigLoader, SetupConfigPublication, SharedLiveTransports,
 };
 
 /// Opaque application facade used by process transports.
 ///
-/// The facade owns one shared store and lazily constructs evidence-only or live services when the
-/// selected operation requires them. Store implementations, registries, live transports, and
-/// runtime configuration remain private to application assembly.
+/// The facade owns one shared store, lazily retains evidence-only services, and constructs a fresh
+/// live dispatch for each execution-capable call. Store implementations, registries, live
+/// transports, and runtime configuration remain private to application assembly.
 #[derive(Clone)]
 pub struct Application {
     backend: Arc<dyn ApplicationBackend>,
@@ -181,11 +183,48 @@ pub fn in_memory_application_for_test(
     ))
 }
 
+/// Builds an in-memory facade whose live executable/config access panics.
+///
+/// Evidence-only tests use this boundary to prove replay and observation never initialize live
+/// process authority.
+#[cfg(any(test, feature = "test-support"))]
+pub fn in_memory_application_with_panicking_live_io_for_test(
+    store: store::AsyncInMemoryRunStore,
+) -> Application {
+    let store = Arc::new(store);
+    Application::new(StoreApplication::new_with_live_authority(
+        store,
+        None,
+        RuntimeConfigLoader::panicking_for_test(),
+        panicking_executable_identity_resolver,
+    ))
+}
+
+type ExecutableIdentityFuture = Pin<
+    Box<
+        dyn Future<Output = Result<mfm_runtime::ExecutableIdentityTemplate, PublicError>>
+            + Send
+            + 'static,
+    >,
+>;
+type ExecutableIdentityResolver = fn() -> ExecutableIdentityFuture;
+
+fn current_executable_identity_resolver() -> ExecutableIdentityFuture {
+    Box::pin(crate::executable_identity::current_executable_identity_template())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn panicking_executable_identity_resolver() -> ExecutableIdentityFuture {
+    panic!("evidence-only work accessed the current executable")
+}
+
 struct StoreApplication<S> {
     store: Arc<S>,
     configured_store: Option<Arc<PostgresStore>>,
-    runtime_config_path: Option<PathBuf>,
-    live_services: OnceCell<Result<RunServices<S>, PublicError>>,
+    runtime_config: RuntimeConfigLoader,
+    shared_live_transports: Arc<SharedLiveTransports>,
+    executable_identity: OnceCell<Result<mfm_runtime::ExecutableIdentityTemplate, PublicError>>,
+    executable_identity_resolver: ExecutableIdentityResolver,
     read_services: OnceLock<Result<RunReadServices<S>, PublicError>>,
 }
 
@@ -196,13 +235,29 @@ where
     fn new(
         store: Arc<S>,
         configured_store: Option<Arc<PostgresStore>>,
-        runtime_config_path: Option<PathBuf>,
+        runtime_config_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self::new_with_live_authority(
+            store,
+            configured_store,
+            RuntimeConfigLoader::from_path(runtime_config_path.as_deref()),
+            current_executable_identity_resolver,
+        )
+    }
+
+    fn new_with_live_authority(
+        store: Arc<S>,
+        configured_store: Option<Arc<PostgresStore>>,
+        runtime_config: RuntimeConfigLoader,
+        executable_identity_resolver: ExecutableIdentityResolver,
     ) -> Self {
         Self {
             store,
             configured_store,
-            runtime_config_path,
-            live_services: OnceCell::new(),
+            runtime_config,
+            shared_live_transports: Arc::new(SharedLiveTransports::new()),
+            executable_identity: OnceCell::new(),
+            executable_identity_resolver,
             read_services: OnceLock::new(),
         }
     }
@@ -217,24 +272,25 @@ where
             .map_err(Clone::clone)
     }
 
-    async fn live_services(&self) -> Result<&RunServices<S>, PublicError> {
-        self.live_services
-            .get_or_init(|| async {
-                let runners = production_runner_registry(
-                    self.store.clone(),
-                    self.runtime_config_path.as_deref(),
-                )
-                .await?;
-                let certification = production_certification_registry()?;
-                Ok(make_run_services(
-                    runners,
-                    self.store.clone(),
-                    certification,
-                ))
-            })
+    async fn dispatch_services(&self) -> Result<RunServices<S>, PublicError> {
+        let executable_identity = self
+            .executable_identity
+            .get_or_init(|| (self.executable_identity_resolver)())
             .await
             .as_ref()
-            .map_err(Clone::clone)
+            .map_err(Clone::clone)?
+            .clone();
+        let routes = Arc::new(
+            self.shared_live_transports
+                .new_dispatch(self.runtime_config.clone()),
+        );
+        let runners = assemble_dispatch_registry(self.store.clone(), executable_identity, routes)?;
+        let certification = production_certification_registry()?;
+        Ok(make_run_services(
+            runners,
+            self.store.clone(),
+            certification,
+        ))
     }
 
     fn configured_store(&self) -> Result<&PostgresStore, PublicError> {
@@ -338,7 +394,7 @@ where
         target: &str,
         invocation_key: Option<InvocationKey>,
     ) -> Result<RunStartReport, PublicError> {
-        let services = self.live_services().await?;
+        let services = self.dispatch_services().await?;
         let store_scope_id = services.load_store_scope_id().await?;
         let request = prepare_entry_point_run_launch(
             self.configured_store()?,
@@ -353,14 +409,17 @@ where
     }
 
     async fn resume_run(&self, run_id: &RunId) -> Result<RunResponse, PublicError> {
-        self.live_services().await?.resume_stored_run(run_id).await
+        self.dispatch_services()
+            .await?
+            .resume_stored_run(run_id)
+            .await
     }
 
     async fn record_manual_resolution(
         &self,
         request: ManualResolutionRecordRequest,
     ) -> Result<RunResponse, PublicError> {
-        self.live_services()
+        self.dispatch_services()
             .await?
             .record_manual_resolution(request)
             .await
@@ -438,5 +497,35 @@ where
 
     async fn export_setup_target(&self, target: &str) -> Result<Vec<u8>, PublicError> {
         export_setup_target(self.configured_store()?, target).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_live_facade_call_builds_a_fresh_dispatch() {
+        let backend = StoreApplication::new(
+            Arc::new(store::AsyncInMemoryRunStore::default()),
+            None,
+            None,
+        );
+
+        assert_eq!(backend.shared_live_transports.dispatch_count(), 0);
+        drop(
+            backend
+                .dispatch_services()
+                .await
+                .expect("first live dispatch"),
+        );
+        assert_eq!(backend.shared_live_transports.dispatch_count(), 1);
+        drop(
+            backend
+                .dispatch_services()
+                .await
+                .expect("second live dispatch"),
+        );
+        assert_eq!(backend.shared_live_transports.dispatch_count(), 2);
     }
 }

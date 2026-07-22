@@ -13,7 +13,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,9 +74,11 @@ mod replay_verifiers;
 mod responses;
 mod runtime_config;
 mod transaction_signing;
-#[cfg(any(test, feature = "test-support"))]
-pub use self::application::in_memory_application_for_test;
 pub use self::application::{connect_production_application, Application};
+#[cfg(any(test, feature = "test-support"))]
+pub use self::application::{
+    in_memory_application_for_test, in_memory_application_with_panicking_live_io_for_test,
+};
 pub use self::responses::*;
 #[path = "status.rs"]
 mod status;
@@ -103,7 +104,7 @@ mod services;
 use self::services::VerifiedRunReadContext;
 pub use self::services::{RunReadServices, RunServices};
 
-use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
+use live_transports::{LiveDispatchRoutes, RuntimeConfigLoader, SharedLiveTransports};
 
 pub use config_setup::{
     export_setup_target, import_setup_toml, list_setup_targets, SetupConfigPublication,
@@ -205,18 +206,15 @@ pub async fn connect_production_run_read_services(
     Ok(make_run_read_services(store, certification_registry))
 }
 
-async fn production_runner_registry<S>(
+pub(crate) fn assemble_dispatch_registry<S>(
     store: Arc<S>,
-    runtime_config_path: Option<&Path>,
+    executable_identities: mfm_runtime::ExecutableIdentityTemplate,
+    routes: Arc<LiveDispatchRoutes>,
 ) -> Result<ErasedRunnerRegistry, PublicError>
 where
     S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
 {
     let fact_query_implementation_id = store.fact_query_implementation_id().to_owned();
-    let executable_identities = executable_identity::current_executable_identity_template().await?;
-    let runtime_config = Arc::new(LiveTransportRuntime::new(RuntimeConfigLoader::from_path(
-        runtime_config_path,
-    )));
     let mut registry = ErasedRunnerRegistry::new(executable_identities);
     let pure_factory = runner_factory_binding(&registry, "pure")?;
     let read_factory = runner_factory_binding(&registry, "read_external")?;
@@ -237,14 +235,14 @@ where
     btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),
-        runtime_config.clone(),
+        routes.clone(),
         &read_factory,
         &bitcoin_adapter_factory,
     )?;
     evm_runtime::register_evm_balance_runners(
         &mut registry,
         artifacts,
-        runtime_config,
+        routes,
         &read_factory,
         &evm_adapter_factory,
     )?;
@@ -259,12 +257,17 @@ where
 #[cfg(any(test, feature = "test-support"))]
 pub async fn production_runner_registry_for_test<S>(
     store: Arc<S>,
-    runtime_config_path: Option<&Path>,
+    runtime_config_path: Option<&std::path::Path>,
 ) -> Result<ErasedRunnerRegistry, PublicError>
 where
     S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
 {
-    production_runner_registry(store, runtime_config_path).await
+    let executable_identities = executable_identity::current_executable_identity_template().await?;
+    let shared_transports = Arc::new(SharedLiveTransports::new());
+    let routes = Arc::new(
+        shared_transports.new_dispatch(RuntimeConfigLoader::from_path(runtime_config_path)),
+    );
+    assemble_dispatch_registry(store, executable_identities, routes)
 }
 
 fn runner_factory_binding(

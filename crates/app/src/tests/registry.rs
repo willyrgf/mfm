@@ -20,7 +20,7 @@ async fn production_runner_registry_defers_malformed_runtime_config() {
     std::fs::write(&config_path, "not valid toml = [").expect("write runtime config");
     let store = store::AsyncInMemoryRunStore::default();
 
-    production_runner_registry(Arc::new(store), Some(&config_path))
+    production_runner_registry_for_test(Arc::new(store), Some(&config_path))
         .await
         .expect("runner registration must not parse live runtime config");
 }
@@ -94,7 +94,7 @@ scan_timeout_seconds = 30
         }
 
         let store = store::AsyncInMemoryRunStore::default();
-        production_runner_registry(
+        production_runner_registry_for_test(
             Arc::new(store),
             config_path.as_ref().map(|(_, path)| path.as_path()),
         )

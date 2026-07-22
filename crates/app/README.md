@@ -16,11 +16,11 @@ authority. It provides:
 Process transports receive one opaque `Application` facade. Production construction connects one
 shared Postgres store and retains it behind that facade; generic store bounds, concrete storage,
 runner/certification registries, live transports, signer providers, and setup authority are not
-binary concerns. Evidence-only services and live services are initialized lazily and independently,
-so readiness, facts, status, stream, list, replay, and public-output operations never load runtime
-configuration. Setup operations use the configured-value authority on the same store without live
-services. Start, resume, and manual resolution initialize live services on first use and reuse the
-same result for later calls.
+binary concerns. Evidence-only services are initialized lazily, so readiness, facts, status, stream,
+list, replay, and public-output operations never load runtime configuration. Setup operations use
+the configured-value authority on the same store without live services. Every start, resume, or
+manual-resolution call creates a fresh live dispatch and drops its registry and endpoint-bound
+sessions when that call ends.
 
 Current configuration is a pre-admission surface. A setup document is a closed set of supported
 typed values; import validates every value, derives its stable target from the intrinsic domain id,
@@ -45,7 +45,8 @@ once at admission, records its target/schema/digest in `RunAdmitted`, and passes
 `PortfolioReportOperation`; it constructs no state directly. Resume, replay, status, stream, and
 public-output reads never consult current configuration.
 
-Domain live-adapter behavior lives in adapter crates; ordinary pure execution is runtime-owned.
+Domain live-adapter behavior lives in private adapter modules inside the live crates; ordinary pure
+execution is runtime-owned.
 `mfm-app` production assembly registers only the EVM balance read and atomic fact-publication
 bindings required by the portfolio objective. Its
 read-route validator loads selective runtime configuration on a blocking worker before admission;
@@ -53,10 +54,11 @@ no external-read ingress path performs filesystem IO on an async worker. Exact-a
 and transaction submission remain separately registerable adapter/library foundations for explicit
 consumers and tests; app certification, runner, and replay registries do not include them.
 
-Live assembly hashes the opened current executable once on a blocking worker and content-addresses
-the exact canonical `mfm.executable-bytes.v1` identity object. The resulting template supplies one
-binary digest to every distinct runner, framework, and adapter factory. If stable executable bytes
-cannot be identified, startup fails with the redacted `ExecutableIdentityUnavailable` error.
+Live assembly hashes the opened current executable once per application process on a blocking
+worker and content-addresses the exact canonical `mfm.executable-bytes.v1` identity object. The
+resulting template supplies one binary digest to every distinct runner, framework, and adapter
+factory. If stable executable bytes cannot be identified, startup fails with the redacted
+`ExecutableIdentityUnavailable` error.
 Evidence-only services never build this registry or access the executable file.
 
 The standalone signing facade is not a second mutation workflow. It accepts raw command fields,
@@ -73,6 +75,8 @@ do not consult mutable current configuration. Public-output JSON is a cache surf
 authorize
 resume, replay, certification, or another render.
 
-Runtime TOML is a separate process-local routing and signer boundary. It is loaded only when a
-live capability family needs it and is never part of current configuration, certified specs, events,
-artifacts, or replay inputs.
+Runtime TOML is a separate process-local routing and signer boundary. Each live dispatch resolves
+only the distinct routes required by its certified pending nodes and fixes each selected route for
+that dispatch. A later start or resume re-resolves the file and may bind a changed endpoint,
+credential, timeout, or source ref. Runtime TOML is never part of current configuration, certified
+specs, events, artifacts, or replay inputs.

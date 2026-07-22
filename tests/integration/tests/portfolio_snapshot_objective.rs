@@ -616,12 +616,10 @@ async fn snapshot_root_replay_verifies_each_downstream_output_prefix() {
         drop(services);
         std::fs::remove_file(&runtime_path).expect("remove runtime config before prefix replay");
 
-        let replay_services = mfm_app::make_run_read_services(
-            Arc::new(store.clone()),
-            mfm_app::production_certification_registry().expect("snapshot certification registry"),
-        );
-        let replay = replay_services
-            .verify_replay_for_run(&run_id)
+        let replay_application =
+            mfm_app::in_memory_application_with_panicking_live_io_for_test(store.clone());
+        let replay = replay_application
+            .verify_replay(&run_id)
             .await
             .unwrap_or_else(|error| panic!("{label} output prefix replay: {error:?}"));
         assert_eq!(replay.run_mode, mfm_app::RunModeStatus::Forward, "{label}");

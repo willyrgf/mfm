@@ -205,11 +205,13 @@ files. Replay verifies retained evidence and recomputes pure behavior from certi
 
 Runtime TOML is intentionally outside this semantic boundary. It maps non-secret source and signer
 references to process-local routing and capability resources, is not semantic configuration data,
-and is never persisted in specs, events, artifacts, public outputs, or replay inputs. Live assembly
-selectively resolves only the requested EVM route or the requested signer plus its referenced
-keystore; unrelated malformed entries do not block that resource. Evidence-only reads do not load
-runtime TOML. Selected EVM routes admit only HTTP(S) URLs without userinfo and valid HTTP
-authorization values. Ingress validates those rules before `RunAdmitted` and preserves
+and is never persisted in specs, events, artifacts, public outputs, or replay inputs. For each start
+or resume, live assembly derives the distinct Bitcoin and EVM route keys required by certified
+pending nodes, resolves each selected entry once into a fresh dispatch-local session set, and leaves
+unrelated malformed entries unparsed. A later call creates a new dispatch and re-resolves the
+current file. Evidence-only reads do not load runtime TOML. Selected EVM routes admit only HTTP(S)
+URLs without userinfo and valid HTTP authorization values. Ingress validates route/session bindings
+and EVM chain identity before `RunAdmitted`, or before claim acquisition on resume, and preserves
 `RuntimeConfigRequired` versus `RuntimeConfigInvalid` with closed semantic diagnostics. There is no
 fallback or compatibility surface.
 
@@ -834,7 +836,8 @@ endpoint-bound Bitcoin session is a public reusable transport under
 `mfm_bitcoin_live::transport`. App assembly constructs those sessions and supplies one app-private
 routed implementation of the same pure `BitcoinBalanceSession` trait to the private live adapter;
 the adapter cannot import or construct the concrete transport. A route is selected by certified
-semantic source identity, and a cached session must keep the exact checked network binding.
+semantic source identity. Its checked session is fixed for one start/resume dispatch and discarded
+afterward.
 
 An EVM collection attempt binds one direct route, probes its chain once, and persists one redacted
 session identity: `network_id`, chain id, `source_ref`, and transport `implementation_id`. Every
@@ -850,9 +853,10 @@ process-local route served that attempt; it may differ on a later attempt or res
 routing changes. Replay never resolves it against current runtime config or compares it with a
 current route. Post-commit changes remain detectable through ordinary artifact digest and stream
 integrity. If provider identity must influence semantic trust, the author must certify an explicit
-oracle/source identity instead of relying on process-local routing. A route that resolves but
-observes an incompatible semantic network or chain fails after `RunAdmitted` as an
-attempt/capability failure with a closed redacted provider diagnostic.
+oracle/source identity instead of relying on process-local routing. An EVM route whose bind-time
+chain probe observes an incompatible chain fails before admission, or before resume claim
+acquisition, with a closed redacted provider diagnostic. Bitcoin Core chain identity is necessarily
+observed by the operation-time `getblockchaininfo` call; its mismatch fails the admitted attempt.
 Provider diagnostics carry a
 provider family, closed diagnostic code, optional redaction-safe operation id, and closed
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,
