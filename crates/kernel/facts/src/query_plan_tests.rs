@@ -18,7 +18,7 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
     );
 
     let plan = CanonicalFactQueryPlan::new(
-        FactQueryCompilerVersion::new("mfm.facts.query.v3").expect("compiler"),
+        FactQueryCompilerVersion::new(FACT_QUERY_COMPILER_VERSION).expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
         canonical_query.clone(),
@@ -32,7 +32,7 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
         &canonical_query.content_digest()
     );
     assert!(CanonicalFactQueryPlan::new(
-        FactQueryCompilerVersion::new("mfm.facts.query.v3").expect("compiler"),
+        FactQueryCompilerVersion::new(FACT_QUERY_COMPILER_VERSION).expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
         canonical_query,
@@ -91,7 +91,7 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
     );
     let query: serde_json::Value =
         serde_json::from_slice(plan.canonical_query().as_bytes()).expect("query json");
-    assert_eq!(query["version"], "mfm.fact-query.v3");
+    assert_eq!(query["version"], FACT_QUERY_VERSION);
     assert_eq!(query["fact_kind"], "chain.head");
     assert_eq!(query["resolved_descriptor"], descriptor_hash.as_str());
     assert_eq!(query["limit"], 25);
@@ -154,7 +154,7 @@ fn query_shape_parser_rejects_unknown_fields() {
             ("unexpected", mfm_canonical::CanonicalValue::Bool(true)),
             (
                 "version",
-                mfm_canonical::CanonicalValue::String("mfm.fact-query.v3".to_owned()),
+                mfm_canonical::CanonicalValue::String(FACT_QUERY_VERSION.to_owned()),
             ),
         ])
         .expect("canonical query value"),

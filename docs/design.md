@@ -157,9 +157,9 @@ and diagnostic boundaries.
 
 ## Fact Identity And Query Terms
 
-Fact identity retains the complete canonical typed subject object. `FactSubjectMaterialV2` wraps
-that object under `mfm.fact-subject-material.v2`; it never projects identity down to a configured
-list of scalar paths. The v2 subject namespace binds the fact kind and subject schema id. `FactKey`
+Fact identity retains the complete canonical typed subject object. `FactSubjectMaterial` wraps
+that object under `mfm.fact-subject-material.v1`; it never projects identity down to a configured
+list of scalar paths. The v1 subject namespace binds the fact kind and subject schema id. `FactKey`
 then binds that namespace hash to the full subject-material hash, so an undeclared nested subject
 field, optional tagged-enum payload, account, asset, or contract address cannot disappear from
 identity merely because it is not indexed.
@@ -171,7 +171,7 @@ evidence, replay, and content-identity verification must rehydrate the retained 
 validate every declared required term, and derive terms again. No flattened path list,
 delimiter-joined asset key, or query-term cache can substitute for canonical subject material.
 
-Canonical fact-query v2 may carry one opaque `FactContentIdentityEvidence` narrowing value. The
+Canonical fact-query v1 may carry one opaque `FactContentIdentityEvidence` narrowing value. The
 compiler binds its descriptor component to the resolved descriptor, and providers compare all four
 compact components against trusted query projections before ordering and limiting. This filter is
 only a bounded candidate-narrowing mechanism: the consumer must still hydrate canonical subject and

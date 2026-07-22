@@ -9,14 +9,14 @@ use crate::*;
 
 /// Canonical subject namespace for a fact descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FactSubjectNamespaceV2 {
+pub(crate) struct FactSubjectNamespace {
     pub(crate) fact_kind: FactKind,
     pub(crate) subject_schema_id: SchemaId,
 }
 
-impl FactSubjectNamespaceV2 {
+impl FactSubjectNamespace {
     /// Stable subject namespace version string.
-    pub const VERSION: &'static str = "mfm.fact-subject-namespace.v2";
+    pub const VERSION: &'static str = "mfm.fact-subject-namespace.v1";
 
     /// Creates a namespace for one fact kind and typed subject schema.
     pub(crate) fn new(fact_kind: FactKind, subject_schema_id: SchemaId) -> Self {
@@ -78,13 +78,13 @@ impl FactFieldValue {
 
 /// Canonical full typed subject material for one fact claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactSubjectMaterialV2 {
+pub struct FactSubjectMaterial {
     pub(crate) subject: CanonicalValue,
 }
 
-impl FactSubjectMaterialV2 {
+impl FactSubjectMaterial {
     /// Stable subject material version string.
-    pub const VERSION: &'static str = "mfm.fact-subject-material.v2";
+    pub const VERSION: &'static str = "mfm.fact-subject-material.v1";
 
     /// Creates subject material from the complete canonical typed subject object.
     pub fn new(subject: CanonicalValue) -> Result<Self> {

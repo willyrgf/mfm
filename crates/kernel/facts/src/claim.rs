@@ -55,7 +55,7 @@ impl FactSubjectEvidence {
     /// Creates subject evidence from canonical subject material values.
     pub fn from_material(
         fact_subject_namespace_hash: ContentDigest,
-        material: &FactSubjectMaterialV2,
+        material: &FactSubjectMaterial,
     ) -> Result<Self> {
         let material_bytes = canonical_fact_subject_material_bytes(material)?;
         let subject_material =

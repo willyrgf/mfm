@@ -33,7 +33,7 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
             .expect("query value"),
     );
     let plan = CanonicalFactQueryPlan::new(
-        FactQueryCompilerVersion::new("mfm.facts.query.v3").expect("compiler"),
+        FactQueryCompilerVersion::new(FACT_QUERY_COMPILER_VERSION).expect("compiler"),
         FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
         digest(1),
         canonical_query,
@@ -194,7 +194,7 @@ fn canonical_goldens_match_expected_values() {
         sortable_result_field("result.height"),
     ])
     .expect("descriptor");
-    let material = FactSubjectMaterialV2::new(
+    let material = FactSubjectMaterial::new(
         CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
             .expect("subject"),
     )
@@ -211,31 +211,31 @@ fn canonical_goldens_match_expected_values() {
         canonical_fact_descriptor_bytes(&descriptor)
             .expect("descriptor bytes")
             .as_str(),
-        r#"{"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v2"}"#
+        r#"{"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v1"}"#
     );
     assert_eq!(
         fact_descriptor_hash(&descriptor)
             .expect("descriptor hash")
             .as_str(),
-        "content:sha256-jcs-v1:4ffdd6344d5e39f31d80cc9a649130d2c6cab858adf6b4480f2a4af4a4f6a45a"
+        "content:sha256-jcs-v1:178704387523ebb4cb05d04b97d008de627acc90b8e80497fdacb2d27b2e038c"
     );
     assert_eq!(
         namespace_hash.as_str(),
-        "content:sha256-jcs-v1:800f4a88fe8f1abd02ffe2003ada8c6707cc1741b76a9dfb1410dd4b426771c7"
+        "content:sha256-jcs-v1:abf7d5f96f2a05cd8535d76b5e6226d4334d6505535464d996e0be36f7d972e9"
     );
     assert_eq!(
         canonical_fact_subject_material_bytes(&material)
             .expect("material bytes")
             .as_str(),
-        r#"{"subject":{"chain":"bitcoin"},"version":"mfm.fact-subject-material.v2"}"#
+        r#"{"subject":{"chain":"bitcoin"},"version":"mfm.fact-subject-material.v1"}"#
     );
     assert_eq!(
         material_hash.as_str(),
-        "content:sha256-jcs-v1:d91032a4c9c5214904481c31292838586c89adf182d4bb857b6dc527efcd06a8"
+        "content:sha256-jcs-v1:c24db451c41798b1c7dc19463a65cdd43a8553462309d9ab8c16ef3d240167d0"
     );
     assert_eq!(
         fact_key.as_str(),
-        "content:sha256-jcs-v1:589b21a8ebc2e6b76e79c74777b01a0dbf05d1beebb9be88a6f0bfa95165fcd7"
+        "content:sha256-jcs-v1:06708207837532df9ac8d41b996f92a5bd9e7be5dacfc601199aa207fe27b2cd"
     );
     assert_eq!(
         canonical_fact_claim_id_bytes(&claim_id)
@@ -247,23 +247,23 @@ fn canonical_goldens_match_expected_values() {
         canonical_fact_query_plan_bytes(&plan)
             .expect("plan bytes")
             .as_str(),
-        r#"{"canonical_query":"{\"kind\":\"chain.head\"}","canonical_query_hash":"content:sha256-jcs-v1:63dccff9320cdcc68affe1e82a03834050ecbef8210854d4ed865721b8f03020","canonicalizer_version":"mfm.canonical.v1","limit":10,"ordering":{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]},"query_compiler_version":"mfm.facts.query.v3","resolved_descriptor":"content:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.fact-query-plan.v2"}"#
+        r#"{"canonical_query":"{\"kind\":\"chain.head\"}","canonical_query_hash":"content:sha256-jcs-v1:63dccff9320cdcc68affe1e82a03834050ecbef8210854d4ed865721b8f03020","canonicalizer_version":"mfm.canonical.v1","limit":10,"ordering":{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]},"query_compiler_version":"mfm.facts.query.v1","resolved_descriptor":"content:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.fact-query-plan.v1"}"#
     );
     assert_eq!(
         plan_hash.as_str(),
-        "content:sha256-jcs-v1:49f418c9b88b3e6a37bc7009ce4ef225b2edc36b31a4c65bd6a7c990030def6b"
+        "content:sha256-jcs-v1:e0337a7faf46fc09f632e1cceb2285e86923e284d4838fac8f356c53b9ce9501"
     );
     let evidence_bytes = canonical_fact_query_evidence_bytes(&evidence)
         .expect("evidence bytes")
         .to_vec();
     let evidence_text = String::from_utf8_lossy(&evidence_bytes);
-    assert!(evidence_text.contains("mfm.fact-query-receipt.v3"));
+    assert!(evidence_text.contains(FACT_QUERY_RECEIPT_VERSION));
     assert!(!evidence_text.contains("store_receipt"));
     assert_eq!(
         fact_query_evidence_hash(&evidence)
             .expect("evidence hash")
             .as_str(),
-        "content:sha256-jcs-v1:9a8eb4c267e370d6afd0d8626c9d0ea800ce0ea3bddaf6b91bfee929b656fae0"
+        "content:sha256-jcs-v1:1cadc36f2a93156258d5a16f66a464ee45ea90fbc6f56c9898d3915524105ba1"
     );
 }
 
@@ -366,6 +366,21 @@ fn parsing_fact_query_evidence_rejects_unknown_and_deleted_fields() {
             "field {field} at {path:?} must be rejected"
         );
     }
+}
+
+#[test]
+fn parsing_fact_query_evidence_rejects_an_unsupported_version() {
+    let (_, _, evidence) = query_evidence_fixture();
+    let bytes = canonical_fact_query_evidence_bytes(&evidence).expect("evidence bytes");
+    let mut value =
+        serde_json::from_slice::<serde_json::Value>(bytes.as_bytes()).expect("evidence json");
+    value["version"] = serde_json::json!("mfm.fact-query-evidence.unsupported");
+    let invalid = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&value).expect("invalid json"),
+    )
+    .expect("canonical invalid json");
+
+    assert!(parse_canonical_fact_query_evidence_bytes(invalid.as_bytes()).is_err());
 }
 
 #[test]

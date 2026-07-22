@@ -432,7 +432,7 @@ pub(super) fn replay_stream_fact_subject_evidence(
     descriptor: &mfm_facts::FactDescriptor,
     account: &str,
 ) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV2::new(
+    let material = mfm_facts::FactSubjectMaterial::new(
         mfm_canonical::CanonicalValue::object([(
             "account",
             mfm_canonical::CanonicalValue::String(account.to_owned()),

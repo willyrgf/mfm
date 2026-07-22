@@ -42,7 +42,7 @@ pub(super) fn parse_canonical_fact_query_plan(
     value: &serde_json::Value,
 ) -> Result<CanonicalFactQueryPlan> {
     let object = json_object(value, "fact query plan")?;
-    require_version(object, "mfm.fact-query-plan.v2", "fact query plan")?;
+    require_version(object, FACT_QUERY_PLAN_VERSION, "fact query plan")?;
     let canonical_query =
         canonical_json_bytes_from_canonical_json_str(json_str(object, "canonical_query")?)?;
     let expected_query_hash: ContentDigest = parse_json_str(object, "canonical_query_hash")?;
@@ -68,7 +68,7 @@ pub(super) fn parse_fact_query_receipt(
     expected_plan_hash: &ContentDigest,
 ) -> Result<FactQueryReceipt> {
     let object = json_object(value, "fact query receipt")?;
-    require_version(object, "mfm.fact-query-receipt.v3", "fact query receipt")?;
+    require_version(object, FACT_QUERY_RECEIPT_VERSION, "fact query receipt")?;
     let plan_hash: ContentDigest = parse_json_str(object, "plan_hash")?;
     if &plan_hash != expected_plan_hash {
         return Err(FactError::descriptor(
@@ -420,7 +420,7 @@ pub(super) struct CompiledQueryWire {
 }
 
 impl CompiledQueryWire {
-    const VERSION: &'static str = "mfm.fact-query.v3";
+    const VERSION: &'static str = FACT_QUERY_VERSION;
 
     pub(super) fn from_parts(
         descriptor: &FactDescriptor,

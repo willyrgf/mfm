@@ -48,7 +48,7 @@ fn canonical_descriptor_bytes_parse_back_to_descriptor_only_when_canonical() {
 
 #[test]
 fn subject_evidence_carries_canonical_subject_material() {
-    let material = FactSubjectMaterialV2::new(
+    let material = FactSubjectMaterial::new(
         CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
             .expect("subject"),
     )
@@ -73,6 +73,30 @@ fn subject_evidence_carries_canonical_subject_material() {
             .expect("parsed"),
         material
     );
+}
+
+#[test]
+fn subject_material_rejects_unknown_fields_and_unsupported_versions() {
+    let material = FactSubjectMaterial::new(
+        CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
+            .expect("subject"),
+    )
+    .expect("material");
+    let bytes = canonical_fact_subject_material_bytes(&material).expect("canonical");
+    let value = serde_json::from_slice::<serde_json::Value>(bytes.as_bytes()).expect("json");
+
+    let mut unsupported = value.clone();
+    unsupported["version"] = serde_json::json!("mfm.fact-subject-material.unsupported");
+    let mut unknown_field = value;
+    unknown_field["unexpected"] = serde_json::json!(true);
+
+    for invalid in [unsupported, unknown_field] {
+        let invalid = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&invalid).expect("invalid json"),
+        )
+        .expect("canonical invalid json");
+        assert!(parse_canonical_fact_subject_material_bytes(invalid.as_bytes()).is_err());
+    }
 }
 
 #[test]
@@ -103,12 +127,12 @@ fn fact_key_changes_when_subject_value_changes() {
     .expect("descriptor");
     let namespace_hash = fact_subject_namespace_hash(&descriptor).expect("namespace hash");
 
-    let bitcoin = FactSubjectMaterialV2::new(
+    let bitcoin = FactSubjectMaterial::new(
         CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
             .expect("subject"),
     )
     .expect("material");
-    let ethereum = FactSubjectMaterialV2::new(
+    let ethereum = FactSubjectMaterial::new(
         CanonicalValue::object([("chain", CanonicalValue::String("ethereum".into()))])
             .expect("subject"),
     )

@@ -12,7 +12,7 @@
 //! ```
 //! use mfm_facts::{FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, FACTS_KERNEL_CONTRACT_VERSION};
 //!
-//! assert_eq!(FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v2");
+//! assert_eq!(FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");
 //! assert_eq!(FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, "mfm.fact.content-identity.v1");
 //! ```
 
@@ -160,7 +160,7 @@ pub use receipt::{
     ReturnedFieldSummaries, StoreCommitOrder, StoreReadFrontier,
 };
 pub use scalar::FactCanonicalScalar;
-pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV2};
+pub use subject::{FactFieldValue, FactKey, FactSubjectMaterial};
 pub use tags::{
     FactFieldExposure, FactFieldExtraction, FactFieldSource, FactFieldValueType, FactMetadataField,
     FactQueryOperator, FactScale, NullOrdering, SortDirection,
@@ -172,13 +172,18 @@ pub(crate) use codec::parse_canonical_scalar_value;
 pub(crate) use extraction::json_to_typed_fact_scalar;
 
 /// Stable facts-kernel contract version for the initial collectors RFC surface.
-pub const FACTS_KERNEL_CONTRACT_VERSION: &str = "mfm.facts.v2";
+pub const FACTS_KERNEL_CONTRACT_VERSION: &str = "mfm.facts.v1";
 
-/// V2 fact-query evidence wire contract with deterministic unsigned receipt metadata.
-pub const FACT_QUERY_EVIDENCE_CONTRACT_VERSION: &str = "mfm.fact-query-evidence.v3";
+/// V1 fact-query evidence wire contract with deterministic unsigned receipt metadata.
+pub const FACT_QUERY_EVIDENCE_CONTRACT_VERSION: &str = "mfm.fact-query-evidence.v1";
 
-/// V2 fact query compiler version recorded in canonical query plans.
-pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v3";
+/// V1 fact query compiler version recorded in canonical query plans.
+pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v1";
+
+pub(crate) const FACT_QUERY_VERSION: &str = "mfm.fact-query.v1";
+pub(crate) const FACT_QUERY_PLAN_VERSION: &str = "mfm.fact-query-plan.v1";
+pub(crate) const FACT_QUERY_RECEIPT_VERSION: &str = "mfm.fact-query-receipt.v1";
+pub(crate) const FACT_QUERY_RESULT_SET_VERSION: &str = "mfm.fact-query-result-set.v1";
 
 /// V1 canonicalizer version recorded in canonical query plans.
 pub const FACT_QUERY_CANONICALIZER_VERSION: &str = "mfm.canonical.v1";

@@ -48,7 +48,7 @@ impl FactQueryPredicate {
     }
 }
 
-/// Descriptor-scoped fact query request accepted by the v3 compiler.
+/// Descriptor-scoped fact query request accepted by the v1 compiler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryInput {
     pub(crate) predicates: Vec<FactQueryPredicate>,
@@ -185,7 +185,7 @@ impl CompiledFactQueryShape {
     }
 }
 
-/// Canonical single-descriptor v2 fact query plan.
+/// Canonical single-descriptor v1 fact query plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalFactQueryPlan {
     pub(crate) query_compiler_version: FactQueryCompilerVersion,

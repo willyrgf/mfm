@@ -88,7 +88,7 @@ pub(super) fn test_fact_subject_evidence_for_descriptor(
     descriptor: &mfm_facts::FactDescriptor,
     subject_amount: u64,
 ) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV2::new(
+    let material = mfm_facts::FactSubjectMaterial::new(
         mfm_canonical::CanonicalValue::object([(
             "amount",
             mfm_canonical::CanonicalValue::Unsigned(subject_amount),

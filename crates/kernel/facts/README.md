@@ -16,7 +16,7 @@ It cannot expose an identity; consumers must rederive it from descriptor, typed 
 hydrated response, accepting the evidence only on an exact match. It is not a domain-specific
 receipt identity or a claim-occurrence identifier.
 
-Canonical fact-query v2 can bind this evidence as an exact provider-side narrowing filter. The
+Canonical fact-query v1 can bind this evidence as an exact provider-side narrowing filter. The
 provider checks trusted indexed-reference components before ordering and limiting; that compact
 check never replaces subsequent artifact hydration and typed identity rederivation.
 

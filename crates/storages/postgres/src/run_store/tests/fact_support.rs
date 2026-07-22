@@ -73,7 +73,7 @@ pub(super) fn fact_descriptor_fixture() -> FactDescriptorProjectionFixtureForTes
 }
 
 pub(super) fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV2::new(
+    let material = mfm_facts::FactSubjectMaterial::new(
         mfm_canonical::CanonicalValue::object([(
             "chain",
             mfm_canonical::CanonicalValue::String("postgres_test_chain".into()),

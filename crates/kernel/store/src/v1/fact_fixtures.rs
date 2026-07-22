@@ -213,7 +213,7 @@ pub fn fact_projection_fixture_for_test(
 
 #[derive(Debug, Clone)]
 struct FactClaimFixtureForTest {
-    subject_material: mfm_facts::FactSubjectMaterialV2,
+    subject_material: mfm_facts::FactSubjectMaterial,
     claim: mfm_facts::FactClaim,
     response_artifact_evidence: ArtifactEvidenceRef,
     response_bytes: Vec<u8>,

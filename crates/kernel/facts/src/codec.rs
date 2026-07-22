@@ -12,7 +12,7 @@ use crate::extraction::{
     validate_extracted_scalar, validate_ordering, FactJsonPathContext,
 };
 use crate::scalar::ScalarJsonContext;
-use crate::subject::FactSubjectNamespaceV2;
+use crate::subject::FactSubjectNamespace;
 use crate::*;
 
 #[path = "codec_canonical.rs"]
@@ -127,21 +127,21 @@ pub fn fact_descriptor_hash(descriptor: &FactDescriptor) -> Result<ContentDigest
     Ok(canonical_fact_descriptor_bytes(descriptor)?.content_digest())
 }
 
-fn fact_subject_namespace(descriptor: &FactDescriptor) -> Result<FactSubjectNamespaceV2> {
+fn fact_subject_namespace(descriptor: &FactDescriptor) -> Result<FactSubjectNamespace> {
     validate_descriptor(descriptor)?;
-    Ok(FactSubjectNamespaceV2::new(
+    Ok(FactSubjectNamespace::new(
         descriptor.fact_kind.clone(),
         descriptor.subject_schema_id.clone(),
     ))
 }
 
 fn canonical_fact_subject_namespace_bytes(
-    namespace: &FactSubjectNamespaceV2,
+    namespace: &FactSubjectNamespace,
 ) -> Result<CanonicalJsonBytes> {
     canonical_subject_namespace_value(namespace).map(|value| CanonicalJsonBytes::from_value(&value))
 }
 
-fn subject_namespace_hash(namespace: &FactSubjectNamespaceV2) -> Result<ContentDigest> {
+fn subject_namespace_hash(namespace: &FactSubjectNamespace) -> Result<ContentDigest> {
     Ok(canonical_fact_subject_namespace_bytes(namespace)?.content_digest())
 }
 
@@ -153,13 +153,13 @@ pub fn fact_subject_namespace_hash(descriptor: &FactDescriptor) -> Result<Conten
 
 /// Returns canonical subject material bytes.
 pub fn canonical_fact_subject_material_bytes(
-    material: &FactSubjectMaterialV2,
+    material: &FactSubjectMaterial,
 ) -> Result<CanonicalJsonBytes> {
     canonical_subject_material_value(material).map(|value| CanonicalJsonBytes::from_value(&value))
 }
 
 /// Decodes and validates canonical subject material bytes.
-pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactSubjectMaterialV2> {
+pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactSubjectMaterial> {
     PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
         .map_err(|error| FactError::canonical(error.to_string()))?;
     let value = serde_json::from_slice::<serde_json::Value>(bytes)
@@ -171,7 +171,7 @@ pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactS
         .get("version")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| FactError::descriptor("subject material version is required"))?;
-    if version != FactSubjectMaterialV2::VERSION {
+    if version != FactSubjectMaterial::VERSION {
         return Err(FactError::descriptor(format!(
             "unsupported subject material version {version:?}"
         )));
@@ -181,7 +181,7 @@ pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactS
         .ok_or_else(|| FactError::descriptor("subject material subject is required"))?;
     let subject =
         json_to_fact_canonical_value(subject, "", &BTreeMap::new(), FactJsonPathContext::Subject)?;
-    let material = FactSubjectMaterialV2::new(subject)?;
+    let material = FactSubjectMaterial::new(subject)?;
     let canonical = canonical_fact_subject_material_bytes(&material)?;
     if canonical.as_bytes() != bytes {
         return Err(FactError::descriptor(
@@ -192,7 +192,7 @@ pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactS
 }
 
 /// Derives the content digest for subject material.
-pub fn subject_material_hash(material: &FactSubjectMaterialV2) -> Result<ContentDigest> {
+pub fn subject_material_hash(material: &FactSubjectMaterial) -> Result<ContentDigest> {
     Ok(canonical_fact_subject_material_bytes(material)?.content_digest())
 }
 
@@ -500,7 +500,7 @@ pub fn selected_returned_field_summaries_digest(
 pub fn extract_subject_material(
     descriptor: &FactDescriptor,
     subject: &CanonicalValue,
-) -> Result<FactSubjectMaterialV2> {
+) -> Result<FactSubjectMaterial> {
     validate_descriptor(descriptor)?;
     for field in &descriptor.fields {
         if !matches!(field.extraction, FactFieldExtraction::Subject(_)) {
@@ -519,7 +519,7 @@ pub fn extract_subject_material(
             None => {}
         }
     }
-    FactSubjectMaterialV2::new(subject.clone())
+    FactSubjectMaterial::new(subject.clone())
 }
 
 /// Builds descriptor-derived subject evidence from an already-canonical subject value.
@@ -534,7 +534,7 @@ pub fn fact_subject_evidence(
 /// Builds descriptor-derived subject evidence from already-extracted subject material.
 pub fn fact_subject_evidence_from_material(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV2,
+    subject_material: &FactSubjectMaterial,
 ) -> Result<FactSubjectEvidence> {
     let subject_namespace = fact_subject_namespace(descriptor)?;
     let subject_namespace_hash = subject_namespace_hash(&subject_namespace)?;
@@ -605,7 +605,7 @@ pub fn parse_canonical_fact_response_bytes(
 /// Extracts query terms from persisted subject material plus canonical response material.
 pub fn extract_terms_from_material(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV2,
+    subject_material: &FactSubjectMaterial,
     response: &CanonicalValue,
     metadata: &FactExtractionMetadata,
 ) -> Result<Vec<FactQueryTerm>> {
@@ -615,7 +615,7 @@ pub fn extract_terms_from_material(
 
 pub(crate) fn typed_subject_from_material(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV2,
+    subject_material: &FactSubjectMaterial,
 ) -> Result<CanonicalValue> {
     let bytes = CanonicalJsonBytes::from_value(subject_material.subject());
     let subject = serde_json::from_slice::<serde_json::Value>(bytes.as_bytes())

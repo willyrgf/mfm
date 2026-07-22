@@ -114,12 +114,12 @@ fn canonical_ordering_descriptor_value(ordering: &FactOrderingPolicy) -> Result<
 }
 
 pub(super) fn canonical_subject_namespace_value(
-    namespace: &FactSubjectNamespaceV2,
+    namespace: &FactSubjectNamespace,
 ) -> Result<CanonicalValue> {
     canonical_object([
         (
             "version",
-            CanonicalValue::String(FactSubjectNamespaceV2::VERSION.to_owned()),
+            CanonicalValue::String(FactSubjectNamespace::VERSION.to_owned()),
         ),
         (
             "fact_kind",
@@ -133,12 +133,12 @@ pub(super) fn canonical_subject_namespace_value(
 }
 
 pub(super) fn canonical_subject_material_value(
-    material: &FactSubjectMaterialV2,
+    material: &FactSubjectMaterial,
 ) -> Result<CanonicalValue> {
     canonical_object([
         (
             "version",
-            CanonicalValue::String(FactSubjectMaterialV2::VERSION.to_owned()),
+            CanonicalValue::String(FactSubjectMaterial::VERSION.to_owned()),
         ),
         ("subject", material.subject.clone()),
     ])
@@ -162,7 +162,7 @@ pub(super) fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Resul
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-plan.v2".to_owned()),
+            CanonicalValue::String(FACT_QUERY_PLAN_VERSION.to_owned()),
         ),
         (
             "query_compiler_version",
@@ -206,7 +206,7 @@ fn canonical_query_receipt_value(
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-receipt.v3".to_owned()),
+            CanonicalValue::String(FACT_QUERY_RECEIPT_VERSION.to_owned()),
         ),
         (
             "plan_hash",
@@ -243,7 +243,7 @@ pub(super) fn canonical_fact_query_result_set_value(
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-result-set.v2".to_owned()),
+            CanonicalValue::String(FACT_QUERY_RESULT_SET_VERSION.to_owned()),
         ),
         ("returned_refs", CanonicalValue::Array(returned_refs)),
         (

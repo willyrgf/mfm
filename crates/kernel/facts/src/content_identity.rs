@@ -253,7 +253,7 @@ impl MfmValue for FactContentIdentityEvidence {
 /// function intentionally accepts no caller-authored component hashes.
 pub fn derive_fact_content_identity(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV2,
+    subject_material: &FactSubjectMaterial,
     response_bytes: &[u8],
 ) -> Result<FactContentIdentity> {
     validate_descriptor(descriptor)?;
@@ -372,7 +372,7 @@ pub fn verify_fact_claim_content_identity(
 pub fn verify_internal_fact_ref_content_identity(
     reference: &InternalFactRef,
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV2,
+    subject_material: &FactSubjectMaterial,
     response_bytes: &[u8],
 ) -> Result<FactContentIdentity> {
     let identity = derive_fact_content_identity(descriptor, subject_material, response_bytes)?;
@@ -495,7 +495,7 @@ fn canonical_fact_content_identity_value(identity: &FactContentIdentity) -> Resu
 
 fn validate_subject_material(
     descriptor: &FactDescriptor,
-    subject_material: &FactSubjectMaterialV2,
+    subject_material: &FactSubjectMaterial,
 ) -> Result<()> {
     let typed_subject = crate::codec::typed_subject_from_material(descriptor, subject_material)?;
     let checked = extract_subject_material(descriptor, &typed_subject)?;
@@ -592,7 +592,7 @@ mod tests {
         .expect("descriptor")
     }
 
-    fn subject_material(descriptor: &FactDescriptor, chain: &str) -> FactSubjectMaterialV2 {
+    fn subject_material(descriptor: &FactDescriptor, chain: &str) -> FactSubjectMaterial {
         extract_subject_material(
             descriptor,
             &CanonicalValue::object([("chain", CanonicalValue::String(chain.to_owned()))])
@@ -603,7 +603,7 @@ mod tests {
 
     fn claim(
         descriptor: &FactDescriptor,
-        material: &FactSubjectMaterialV2,
+        material: &FactSubjectMaterial,
         descriptor_hash: ContentDigest,
         response_hash: ContentDigest,
     ) -> FactClaim {
