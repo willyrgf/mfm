@@ -37,7 +37,7 @@ mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-runtime-config = { path = "../runtime-config" }
 mfm-signing = { path = "../signing" }
-mfm-signers-keystore = { path = "../signers/keystore" }
+mfm-keystore = { path = "../keystore" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
 mfm-storage-postgres = { path = "../storages/postgres" }

@@ -1,5 +1,7 @@
 use super::*;
 
+use std::io::{self, Cursor, Read};
+
 use alloy_primitives::{Address, PrimitiveSignature, B256};
 use mfm_signing::{
     ExpectedSignerIdentity, SigningAlgorithmId, SigningDomainId, SigningProfileId,
@@ -14,7 +16,7 @@ const PASSWORD: &str = "strong_password_123";
 struct TestKeystore {
     _dir: TempDir,
     keystore_path: PathBuf,
-    password_file: PathBuf,
+    unlock_file: PathBuf,
     entry_id: Uuid,
     other_entry_id: Uuid,
     address: Address,
@@ -35,8 +37,8 @@ fn profile() -> SigningProfileId {
 fn test_keystore() -> TestKeystore {
     let dir = tempfile::tempdir().expect("tempdir");
     let keystore_path = dir.path().join("wallet.keystore");
-    let password_file = dir.path().join("wallet.password");
-    fs::write(&password_file, format!("{PASSWORD}\r\n")).expect("password file");
+    let unlock_file = dir.path().join("wallet.password");
+    fs::write(&unlock_file, format!("{PASSWORD}\r\n")).expect("unlock file");
 
     let mut keystore =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
@@ -57,7 +59,7 @@ fn test_keystore() -> TestKeystore {
     TestKeystore {
         _dir: dir,
         keystore_path,
-        password_file,
+        unlock_file,
         entry_id,
         other_entry_id,
         address,
@@ -69,9 +71,10 @@ fn provider(keystore: &TestKeystore, entry_id: Uuid) -> KeystoreSignerProvider {
         signer_ref(),
         entry_id,
         &keystore.keystore_path,
-        &keystore.password_file,
+        &keystore.unlock_file,
         KeystoreConfig::insecure_integration_test(),
     )
+    .expect("checked provider paths")
 }
 
 fn request(
@@ -186,7 +189,8 @@ async fn unsupported_binding_algorithm_and_profile_fail_before_file_access() {
         Uuid::new_v4(),
         dir.path().join("missing.keystore"),
         dir.path().join("missing.password"),
-    );
+    )
+    .expect("checked provider paths");
     let expected = Address::from([0x11; 20]);
 
     let cases = [
@@ -249,10 +253,11 @@ async fn missing_expected_identity_is_rejected_before_file_access() {
 async fn every_failure_and_debug_surface_redacts_runtime_secrets() {
     let dir = tempfile::tempdir().expect("tempdir");
     let secret_path = dir.path().join("secret-wallet-file-name.keystore");
-    let password_file = dir.path().join("secret-password-file-name.txt");
-    fs::write(&password_file, "very_secret_password\n").expect("password file");
+    let unlock_file = dir.path().join("secret-unlock-file-name.txt");
+    fs::write(&unlock_file, "very_secret_password\n").expect("unlock file");
     let provider =
-        KeystoreSignerProvider::new(signer_ref(), Uuid::new_v4(), &secret_path, &password_file);
+        KeystoreSignerProvider::new(signer_ref(), Uuid::new_v4(), &secret_path, &unlock_file)
+            .expect("checked provider paths");
 
     let error = provider
         .sign(&evm_request(Address::from([0x11; 20])))
@@ -262,7 +267,7 @@ async fn every_failure_and_debug_surface_redacts_runtime_secrets() {
 
     for secret in [
         secret_path.to_string_lossy().as_ref(),
-        password_file.to_string_lossy().as_ref(),
+        unlock_file.to_string_lossy().as_ref(),
         "very_secret_password",
         TEST_KEY.trim_start_matches("0x"),
     ] {
@@ -285,11 +290,123 @@ async fn tampered_keystore_failure_stays_redacted() {
 }
 
 #[test]
-fn password_file_trims_line_endings_in_place_inside_zeroizing_storage() {
+fn unlock_file_strips_at_most_one_line_ending_in_zeroizing_storage() {
     let keystore = test_keystore();
-    let resolved = password_from_file(&keystore.password_file).expect("password");
+    let checked =
+        CheckedRuntimePath::new(keystore.unlock_file.clone(), RuntimeSourceKind::UnlockFile)
+            .expect("checked unlock path");
+    let resolved = unlock_secret_from_file(&checked).expect("unlock secret");
     assert_eq!(resolved.as_str(), PASSWORD);
-    assert_zeroizing_string(&resolved.0);
+    assert_zeroizing_string(&resolved.secret);
+
+    for (input, expected) in [
+        (&b"secret\n\n"[..], "secret\n"),
+        (&b"secret\r\n\r\n"[..], "secret\r\n"),
+        (&b"secret\r"[..], "secret\r"),
+    ] {
+        let resolved = unlock_secret_from_reader(Cursor::new(input)).expect("unlock secret");
+        assert_eq!(resolved.as_str(), expected);
+    }
+}
+
+#[test]
+fn checked_provider_paths_reject_invalid_values_without_exposing_them() {
+    for path in [
+        PathBuf::new(),
+        PathBuf::from("x".repeat(MAX_RUNTIME_PATH_BYTES + 1)),
+    ] {
+        let error =
+            KeystoreSignerProvider::new(signer_ref(), Uuid::new_v4(), path, "/run/mfm/unlock")
+                .expect_err("invalid path");
+        assert_eq!(
+            error,
+            SigningError::Provider {
+                reason: SigningProviderError::Failed
+            }
+        );
+    }
+}
+
+#[test]
+fn unlock_reader_zeroizes_success_and_every_error_path() {
+    let success_witness = ZeroizeWitness::default();
+    let string_witness = ZeroizeWitness::default();
+    let resolved = unlock_secret_from_reader_with_witness(
+        Cursor::new(b"protected-unlock\r\n"),
+        success_witness.clone(),
+    )
+    .expect("bounded UTF-8 unlock secret")
+    .with_drop_witness(string_witness.clone());
+    assert_eq!(resolved.as_str(), "protected-unlock");
+    assert!(success_witness.observed_zeroized_drop());
+    assert_zeroizing_string(&resolved.secret);
+    drop(resolved);
+    assert!(string_witness.observed_zeroized_drop());
+
+    let boundary_witness = ZeroizeWitness::default();
+    let boundary = unlock_secret_from_reader_with_witness(
+        Cursor::new(vec![b'x'; MAX_UNLOCK_FILE_BYTES]),
+        boundary_witness.clone(),
+    )
+    .expect("exact unlock-file limit");
+    assert_eq!(boundary.as_str().len(), MAX_UNLOCK_FILE_BYTES);
+    assert!(boundary_witness.observed_zeroized_drop());
+    drop(boundary);
+
+    let cases = [
+        (Vec::new(), "empty"),
+        (vec![0xff, 0xfe], "invalid UTF-8"),
+        (vec![b'x'; MAX_UNLOCK_FILE_BYTES + 1], "oversize"),
+    ];
+    for (bytes, case) in cases {
+        let witness = ZeroizeWitness::default();
+        let error =
+            match unlock_secret_from_reader_with_witness(Cursor::new(bytes), witness.clone()) {
+                Ok(_) => panic!("{case} must reject"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            KeystoreSignerError::InvalidRuntimeSource {
+                kind: RuntimeSourceKind::UnlockFile
+            }
+        ));
+        assert!(witness.observed_zeroized_drop(), "{case}");
+    }
+
+    let partial_witness = ZeroizeWitness::default();
+    let error = match unlock_secret_from_reader_with_witness(
+        PartialReadFailure::default(),
+        partial_witness.clone(),
+    ) {
+        Ok(_) => panic!("partial read failure must reject"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        KeystoreSignerError::UnreadableRuntimeSource {
+            kind: RuntimeSourceKind::UnlockFile
+        }
+    ));
+    assert!(partial_witness.observed_zeroized_drop());
 }
 
 fn assert_zeroizing_string(_: &Zeroizing<String>) {}
+
+#[derive(Default)]
+struct PartialReadFailure {
+    emitted: bool,
+}
+
+impl Read for PartialReadFailure {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.emitted {
+            return Err(io::Error::other("injected partial read failure"));
+        }
+        self.emitted = true;
+        let secret = b"partially-read-secret";
+        let count = secret.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&secret[..count]);
+        Ok(count)
+    }
+}

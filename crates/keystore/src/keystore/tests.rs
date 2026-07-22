@@ -110,13 +110,3 @@ fn assert_import_after_tamper_fails_without_rewrite(mutate: impl FnOnce(&mut ser
     ));
     assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
 }
-
-#[cfg(feature = "dangerous-secret-export")]
-fn test_keystore_with_exports() -> (tempfile::TempDir, Keystore) {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("test.keystore");
-    let mut config = KeystoreConfig::development();
-    config.allow_secret_exports = true;
-    let keystore = Keystore::new_with_config(&keystore_path, config).unwrap();
-    (temp_dir, keystore)
-}

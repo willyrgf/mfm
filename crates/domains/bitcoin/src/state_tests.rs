@@ -167,7 +167,7 @@ fn pure_bitcoin_manifest_stays_inside_domain_boundaries() {
         "mfm-store",
         "mfm-storage-postgres",
         "mfm-bitcoin-live",
-        "mfm-signers-keystore",
+        "mfm-keystore",
         "reqwest",
         "tokio",
         "url",

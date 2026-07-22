@@ -16,7 +16,7 @@ mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-store = { path = "../../crates/kernel/store" }
 mfm-runtime-config = { path = "../../crates/runtime-config" }
-mfm_core = { path = "../../crates/core" }
+mfm-keystore = { path = "../../crates/keystore" }
 clap = { version = "4.4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

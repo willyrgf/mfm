@@ -2,7 +2,7 @@
 
 use crate::commands::result::PublicError;
 use chrono::Utc;
-use mfm_core::keystore::{KeyType, Keystore, KeystoreConfig, KeystoreError};
+use mfm_keystore::{KeyType, Keystore, KeystoreConfig, KeystoreError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -176,7 +176,7 @@ impl SecretInput for ProcessSecretInput {
     }
 }
 
-/// Imports a key directly through `mfm_core::keystore`.
+/// Imports a key through the consolidated keystore provider.
 pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, PublicError> {
     let mut input = ProcessSecretInput;
     validate_import_request(&req)?;
@@ -233,7 +233,7 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, PublicErr
     }
 }
 
-/// Lists keys directly through `mfm_core::keystore`.
+/// Lists public key metadata through the consolidated keystore provider.
 pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, PublicError> {
     let keystore = load_unlocked_keystore(&req.access)?;
     let mut keys: Vec<ListedKey> = keystore
@@ -271,7 +271,7 @@ pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, PublicError>
     })
 }
 
-/// Deletes a key directly through `mfm_core::keystore`.
+/// Deletes a key through the consolidated keystore provider.
 pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, PublicError> {
     let mut keystore = load_unlocked_keystore(&req.access)?;
     let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;

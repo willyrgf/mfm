@@ -1,23 +1,4 @@
-//! Security-sensitive Ethereum private-key helpers.
-//!
-//! This module owns parsing, validation, address derivation, and prehash signing for raw
-//! secp256k1 Ethereum private keys. It intentionally does not own transaction encoding; callers
-//! pass the returned non-secret signature to EVM transaction primitives in downstream crates.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use mfm_core::crypto::EthereumPrivateKey;
-//!
-//! let key = EthereumPrivateKey::from_hex_secret(
-//!     "0x0000000000000000000000000000000000000000000000000000000000000001",
-//! )?;
-//! assert_eq!(
-//!     format!("{:?}", key.address()?),
-//!     "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
-//! );
-//! # Ok::<(), mfm_core::crypto::EthereumKeyError>(())
-//! ```
+//! Crate-private Ethereum private-key parsing, address derivation, and prehash signing.
 
 use alloy_primitives::{Address, PrimitiveSignature, B256};
 use k256::ecdsa::SigningKey;
@@ -27,13 +8,7 @@ use zeroize::Zeroizing;
 
 /// Error returned by Ethereum private-key helpers.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum EthereumKeyError {
-    /// The supplied key was not valid hex.
-    #[error("signing key hex was invalid")]
-    InvalidHex,
-    /// The supplied key did not decode to exactly 32 bytes.
-    #[error("signing key must be exactly 32 bytes")]
-    InvalidLength,
+pub(crate) enum EthereumKeyError {
     /// The supplied bytes did not form a valid secp256k1 private key.
     #[error("signing key did not form a valid secp256k1 key")]
     InvalidPrivateKey,
@@ -43,7 +18,7 @@ pub enum EthereumKeyError {
 }
 
 /// Zeroizing wrapper for a raw Ethereum secp256k1 private key.
-pub struct EthereumPrivateKey {
+pub(crate) struct EthereumPrivateKey {
     key_bytes: Zeroizing<[u8; 32]>,
 }
 
@@ -56,37 +31,8 @@ impl std::fmt::Debug for EthereumPrivateKey {
 }
 
 impl EthereumPrivateKey {
-    /// Parses a raw private key from a `0x`-prefixed or bare hex string.
-    pub fn from_hex_secret(raw: &str) -> Result<Self, EthereumKeyError> {
-        let mut value = raw.trim();
-        value = value
-            .strip_prefix("0x")
-            .or_else(|| value.strip_prefix("0X"))
-            .unwrap_or(value);
-
-        if value.is_empty() {
-            return Err(EthereumKeyError::InvalidHex);
-        }
-
-        let normalized = Zeroizing::new(if value.len().is_multiple_of(2) {
-            value.to_string()
-        } else {
-            format!("0{value}")
-        });
-        let bytes = Zeroizing::new(
-            hex::decode(normalized.as_str()).map_err(|_| EthereumKeyError::InvalidHex)?,
-        );
-        if bytes.len() != 32 {
-            return Err(EthereumKeyError::InvalidLength);
-        }
-
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(bytes.as_slice());
-        Self::from_secret_bytes(key_bytes)
-    }
-
     /// Builds a private key from already-decoded secret bytes.
-    pub fn from_secret_bytes(key_bytes: [u8; 32]) -> Result<Self, EthereumKeyError> {
+    pub(crate) fn from_secret_bytes(key_bytes: [u8; 32]) -> Result<Self, EthereumKeyError> {
         SecretKey::from_slice(&key_bytes).map_err(|_| EthereumKeyError::InvalidPrivateKey)?;
         Ok(Self {
             key_bytes: Zeroizing::new(key_bytes),
@@ -99,7 +45,7 @@ impl EthereumPrivateKey {
     }
 
     /// Derives the Ethereum address for this private key.
-    pub fn address(&self) -> Result<Address, EthereumKeyError> {
+    pub(crate) fn address(&self) -> Result<Address, EthereumKeyError> {
         let secret_key = self.secret_key()?;
         let public_key = secret_key.public_key();
 
@@ -114,7 +60,7 @@ impl EthereumPrivateKey {
     }
 
     /// Signs a 32-byte prehash and returns a recoverable Ethereum signature.
-    pub fn sign_hash_recoverable(
+    pub(crate) fn sign_hash_recoverable(
         &self,
         hash: &[u8; 32],
     ) -> Result<PrimitiveSignature, EthereumKeyError> {
@@ -137,7 +83,3 @@ impl EthereumPrivateKey {
         .normalized_s())
     }
 }
-
-#[cfg(test)]
-#[path = "crypto_tests.rs"]
-mod tests;

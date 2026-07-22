@@ -5,8 +5,8 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mfm_evm::{EvmSigningError, TransientSignedEip1559Envelope, UnsignedEip1559Envelope};
+use mfm_keystore::KeystoreSignerProvider;
 use mfm_runtime_config::{RuntimeConfig, RuntimeConfigErrorKind};
-use mfm_signers_keystore::KeystoreSignerProvider;
 use mfm_signing::{SignerRef, SigningError};
 use serde::Serialize;
 
@@ -293,12 +293,19 @@ pub(crate) fn assemble_keystore_signer(
         })?;
     let signer = binding.signer();
     let keystore = binding.keystore();
-    Ok(KeystoreSignerProvider::new(
+    KeystoreSignerProvider::new(
         signer_ref,
         signer.entry_id(),
         keystore.keystore_path().expose_path(),
         keystore.unlock_file().expose_path(),
-    ))
+    )
+    .map_err(|_| {
+        PublicError::backend(
+            ErrorClass::ServiceUnavailable,
+            "SignerRuntimePathInvalid",
+            "EVM signer runtime configuration is invalid",
+        )
+    })
 }
 
 fn public_signing_error(error: EvmSigningError) -> PublicError {

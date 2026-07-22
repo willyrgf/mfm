@@ -40,10 +40,6 @@ pub enum KeystoreError {
     /// The caller supplied an invalid input value.
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-
-    /// The requested operation is disabled by policy.
-    #[error("Operation not permitted: {0}")]
-    OperationNotPermitted(String),
 }
 
 // Convert from common error types

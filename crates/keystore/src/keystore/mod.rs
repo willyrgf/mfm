@@ -1,69 +1,19 @@
-//! # Keystore Module
-//!
-//! Minimal secure keystore for Ethereum private keys and one-time mnemonic imports.
-//!
-//! This is a simplified, focused implementation that provides only essential
-//! functionality for storing and retrieving Ethereum private keys. Mnemonics are accepted only as
-//! import inputs for deriving one selected key; the mnemonic phrase and BIP-39 passphrase are not
-//! stored.
-//!
-//! ## Quick Start
-//!
-//! ```rust
-//! use mfm_core::keystore::{Keystore, KeystoreConfig};
-//!
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Use minimal config for doctest (don't use in production!)
-//!     let unsafe_fast_config = KeystoreConfig {
-//!         argon2_memory_kb: 64,    // 64KB - minimal for doctest
-//!         argon2_iterations: 1,    // 1 iteration - minimal
-//!         argon2_parallelism: 1,
-//!         allow_secret_exports: false,
-//!     };
-//!     let temp_dir = tempfile::tempdir()?;
-//!     let keystore_path = temp_dir.path().join("keystore.json");
-//!
-//!     let mut keystore = Keystore::new_with_config(&keystore_path, unsafe_fast_config)?;
-//!     keystore.unlock("secure_password")?;
-//!
-//!     // Import a private key
-//!     let key_id = keystore.import_private_key(
-//!         Some("my-wallet".to_string()),
-//!         "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-//!     )?;
-//!
-//!     // List all keys
-//!     let keys = keystore.list_keys()?;
-//!     println!("Stored {} keys", keys.len());
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Security Model
+//! Encrypted Ethereum private-key storage and one-time mnemonic import.
 //!
 //! - **Full disk encryption** (including swap) assumed to be enabled
 //! - **Single-threaded usage** - not designed for concurrent access
 //! - **Local-only operation** - no network features or remote storage
 //! - **Trusted application environment** - assumes application is not compromised
-//! - **No secret-bearing persistence outside the keystore file** - callers must not log or store
-//!   exported secrets elsewhere
-//!
-//! ## Design Principles
-//!
-//! - **Simplicity over feature completeness**: Only essential functionality
-//! - **Security by default**: Secure configurations are the default
-//! - **Minimal attack surface**: Fewer features mean fewer vulnerabilities
-//! - **Clear separation of concerns**: Each component has a single responsibility
-//!
-/// Error types produced by keystore operations.
-pub mod error;
+//! - **No raw-key export** - decrypted key material is reachable only by the sibling signer
+//!   implementation
+
+mod error;
 
 mod secure_key;
-pub use self::secure_key::SecureKey;
+use self::secure_key::SecureKey;
 mod model;
-use self::model::{ArgonParams, KeystoreFile, KeystoreHeader};
-pub use self::model::{AuditEvent, AuditLogEntry, KeyEntry, KeyInfo, KeyType, KeystoreConfig};
+use self::model::{ArgonParams, AuditEvent, AuditLogEntry, KeyEntry, KeystoreFile, KeystoreHeader};
+pub use self::model::{KeyInfo, KeyType, KeystoreConfig};
 mod lifecycle;
 mod operations;
 mod persistence;
@@ -87,7 +37,7 @@ use zeroize::Zeroizing;
 #[cfg(test)]
 use alloy_primitives::Address;
 
-pub use error::KeystoreError;
+pub use self::error::KeystoreError;
 
 const KEYSTORE_FILE_VERSION: u8 = 3;
 const FILE_INTEGRITY_CONTEXT: &[u8] = b"mfm_keystore_file_integrity_v1";

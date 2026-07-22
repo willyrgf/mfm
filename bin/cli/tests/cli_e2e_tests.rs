@@ -2,7 +2,7 @@
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use assert_cmd::Command;
-use mfm_core::keystore::{Keystore, KeystoreConfig};
+use mfm_keystore::{Keystore, KeystoreConfig};
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;

@@ -3,8 +3,8 @@ use super::*;
 impl std::fmt::Debug for Keystore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Keystore")
-            .field("path", &self.path)
-            .field("config", &self.config)
+            .field("path", &"<redacted>")
+            .field("config", &"<redacted>")
             .field(
                 "unlocked",
                 &(self.master_key.is_some() && !self.has_unlock_expired()),
@@ -154,17 +154,6 @@ impl Keystore {
                 },
             );
         }
-    }
-
-    #[cfg(feature = "dangerous-secret-export")]
-    pub(super) fn ensure_secret_exports_enabled(&self) -> Result<(), KeystoreError> {
-        if self.config.allow_secret_exports {
-            return Ok(());
-        }
-
-        Err(KeystoreError::OperationNotPermitted(
-            "Secret export operations are disabled by policy".to_string(),
-        ))
     }
 
     fn initialize_new(&mut self, password: &str) -> Result<(), KeystoreError> {

@@ -28,6 +28,7 @@ fn keystore_debug_output_redacts_secret_material() {
         .unwrap();
 
     let master_key_hex = hex::encode(keystore.master_key.as_ref().unwrap().as_ref());
+    let keystore_path = keystore.path.to_string_lossy().into_owned();
     let debug = format!("{keystore:?}");
 
     assert!(debug.contains("Keystore"));
@@ -46,6 +47,7 @@ fn keystore_debug_output_redacts_secret_material() {
         "debug-secret-alias",
         "debug-secret-mnemonic",
         master_key_hex.as_str(),
+        keystore_path.as_str(),
     ] {
         assert!(
             !debug.contains(forbidden),

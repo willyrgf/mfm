@@ -101,40 +101,11 @@ impl Keystore {
         Ok(id)
     }
 
-    /// Get private key for signing.
-    pub fn get_private_key(&mut self, id: Uuid) -> Result<SecureKey, KeystoreError> {
+    pub(crate) fn get_private_key(&mut self, id: Uuid) -> Result<SecureKey, KeystoreError> {
         self.ensure_master_key_available()?;
         let key_bytes = self.decrypt_entry_key(id)?;
         self.record_successful_audit(AuditEvent::GetPrivateKey { id })?;
         Ok(SecureKey::new(*key_bytes))
-    }
-
-    /// Export the private key as a hex string (0x-prefixed).
-    ///
-    /// - For `KeyType::PrivateKey`, this returns the stored private key.
-    /// - For `KeyType::HdDerived`, this returns the one-time derived private key.
-    #[cfg(feature = "dangerous-secret-export")]
-    pub fn export_private_key(&mut self, id: Uuid) -> Result<Zeroizing<String>, KeystoreError> {
-        let result: Result<Zeroizing<String>, KeystoreError> = (|| {
-            self.ensure_secret_exports_enabled()?;
-            self.ensure_master_key_available()?;
-            let key_bytes = self.decrypt_entry_key(id)?;
-            Ok(Zeroizing::new(format!(
-                "0x{}",
-                hex::encode(key_bytes.as_ref())
-            )))
-        })();
-
-        match result {
-            Ok(private_key_hex) => {
-                self.record_successful_audit(AuditEvent::ExportPrivateKey { id })?;
-                Ok(private_key_hex)
-            }
-            Err(err) => {
-                self.record_failed_audit_if_unlocked(AuditEvent::ExportPrivateKey { id });
-                Err(err)
-            }
-        }
     }
 
     /// List stored keys (metadata only). Requires an unlocked session.
@@ -286,18 +257,5 @@ impl Keystore {
             return Err(err);
         }
         Ok(())
-    }
-
-    #[cfg(feature = "dangerous-secret-export")]
-    fn record_failed_audit_if_unlocked(&mut self, event: AuditEvent) {
-        if self.master_key.is_none() || self.has_unlock_expired() {
-            return;
-        }
-
-        let previous_audit_log = self.audit_log.clone();
-        self.append_audit_event(event, false);
-        if self.save_to_disk().is_err() {
-            self.audit_log = previous_audit_log;
-        }
     }
 }

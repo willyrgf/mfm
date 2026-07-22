@@ -1,4 +1,5 @@
 use alloy_primitives::{Address, PrimitiveSignature};
+#[cfg(test)]
 use k256::{ecdsa::SigningKey, SecretKey};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
@@ -6,8 +7,8 @@ use crate::crypto::{EthereumKeyError, EthereumPrivateKey};
 
 use super::KeystoreError;
 
-/// Secure key wrapper that zeroizes on drop.
-pub struct SecureKey {
+/// Crate-private secure key wrapper that zeroizes on drop.
+pub(crate) struct SecureKey {
     key_bytes: Zeroizing<[u8; 32]>,
 }
 
@@ -18,12 +19,17 @@ impl SecureKey {
         }
     }
 
+    #[cfg(test)]
     fn secret_key(&self) -> Result<SecretKey, KeystoreError> {
         SecretKey::from_slice(self.key_bytes.as_ref()).map_err(|_| KeystoreError::InvalidPrivateKey)
     }
 
     /// Sign a 32-byte hash (returns k256::Signature).
-    pub fn sign_hash(&self, hash: &[u8; 32]) -> Result<k256::ecdsa::Signature, KeystoreError> {
+    #[cfg(test)]
+    pub(crate) fn sign_hash(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<k256::ecdsa::Signature, KeystoreError> {
         let secret_key = self.secret_key()?;
         let signing_key = SigningKey::from(&secret_key);
 
@@ -38,7 +44,7 @@ impl SecureKey {
     }
 
     /// Sign a 32-byte hash and return an Ethereum recoverable signature.
-    pub fn sign_hash_recoverable(
+    pub(crate) fn sign_hash_recoverable(
         &self,
         hash: &[u8; 32],
     ) -> Result<PrimitiveSignature, KeystoreError> {
@@ -51,12 +57,13 @@ impl SecureKey {
     }
 
     /// Get Ethereum address for this key.
-    pub fn ethereum_address(&self) -> Result<Address, KeystoreError> {
+    pub(crate) fn ethereum_address(&self) -> Result<Address, KeystoreError> {
         ethereum_address_from_key_bytes(self.key_bytes.as_ref())
     }
 
     /// Get public key.
-    pub fn public_key(&self) -> Result<k256::PublicKey, KeystoreError> {
+    #[cfg(test)]
+    pub(crate) fn public_key(&self) -> Result<k256::PublicKey, KeystoreError> {
         let secret_key = self.secret_key()?;
         // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped.
         Ok(secret_key.public_key())
@@ -76,9 +83,7 @@ pub(super) fn ethereum_address_from_key_bytes(key_bytes: &[u8]) -> Result<Addres
 
 fn keystore_error_from_ethereum_key(err: EthereumKeyError) -> KeystoreError {
     match err {
-        EthereumKeyError::InvalidHex
-        | EthereumKeyError::InvalidLength
-        | EthereumKeyError::InvalidPrivateKey => KeystoreError::InvalidPrivateKey,
+        EthereumKeyError::InvalidPrivateKey => KeystoreError::InvalidPrivateKey,
         EthereumKeyError::SigningFailed => {
             KeystoreError::CryptoError("failed to sign prehashed payload".to_string())
         }

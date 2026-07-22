@@ -402,10 +402,12 @@ upstream Alloy support, not a parallel MFM envelope implementation.
 
 `mfm-signing` carries the protocol-neutral algorithm and explicit signing-profile ids on every
 transient request/result. The admitted EVM profile is deterministic RFC 6979 recoverable
-secp256k1 with canonical low-s output. `mfm-signers-keystore` binds exactly one runtime signer ref
-to one keystore entry, enforces that generic algorithm/profile and expected identity, and leaves
-domain/purpose authorization to the caller. It performs file access, password resolution,
-unlock/KDF, key access, and signing on a blocking worker with one-request unlock scope. App
+secp256k1 with canonical low-s output. `mfm-keystore` owns encrypted key storage and binds exactly
+one runtime signer ref to one keystore entry without exposing a raw-key API. It enforces the generic
+algorithm/profile and expected identity, and leaves domain/purpose authorization to the caller.
+Each signing call reads at most 64 KiB plus one byte from its unlock file into zeroizing storage on
+a blocking worker, rejects oversize or invalid content, strips at most one LF or CRLF, and drops the
+unlock value before returning. App
 assembly admits the signer/keystore support families without loading EVM routes, then selects the
 requested `[signers]` entry and its referenced `[keystores]` profile.
 

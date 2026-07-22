@@ -12,11 +12,6 @@ pub struct KeystoreConfig {
     pub argon2_iterations: u32,
     /// Argon2 parallelism (default: 1).
     pub argon2_parallelism: u32,
-    /// Whether private-key export APIs are enabled.
-    ///
-    /// Exporting private keys increases exfiltration risk and is disabled by default. This flag is
-    /// only effective when the crate is compiled with `dangerous-secret-export`.
-    pub allow_secret_exports: bool,
 }
 
 impl Default for KeystoreConfig {
@@ -25,7 +20,6 @@ impl Default for KeystoreConfig {
             argon2_memory_kb: 1_048_576, // 1GB - production secure
             argon2_iterations: 8,        // 8 iterations - secure default
             argon2_parallelism: 1,       // Single threaded
-            allow_secret_exports: false,
         }
     }
 }
@@ -43,7 +37,6 @@ impl KeystoreConfig {
             argon2_memory_kb: 8192, // 8MB for faster tests
             argon2_iterations: 2,   // 2 iterations
             argon2_parallelism: 1,
-            allow_secret_exports: false,
         }
     }
 
@@ -53,7 +46,6 @@ impl KeystoreConfig {
             argon2_memory_kb: 64, // 64KB - minimal for fast tests
             argon2_iterations: 1, // 1 iteration - minimal
             argon2_parallelism: 1,
-            allow_secret_exports: false,
         }
     }
 }
@@ -145,11 +137,6 @@ pub enum AuditEvent {
     },
     /// A private key retrieval was attempted for signing.
     GetPrivateKey {
-        /// Identifier of the requested entry.
-        id: Uuid,
-    },
-    /// A private key export was attempted.
-    ExportPrivateKey {
         /// Identifier of the requested entry.
         id: Uuid,
     },

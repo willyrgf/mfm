@@ -2303,12 +2303,12 @@ dependencies = [
  "mfm-events",
  "mfm-evm",
  "mfm-ids",
+ "mfm-keystore",
  "mfm-program",
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-runtime-config",
  "mfm-store",
- "mfm_core",
  "predicates",
  "rand 0.9.5",
  "regex",
@@ -2339,6 +2339,7 @@ dependencies = [
  "mfm-evm-live",
  "mfm-facts",
  "mfm-ids",
+ "mfm-keystore",
  "mfm-portfolio",
  "mfm-portfolio-live",
  "mfm-program",
@@ -2346,7 +2347,6 @@ dependencies = [
  "mfm-replay",
  "mfm-runtime",
  "mfm-runtime-config",
- "mfm-signers-keystore",
  "mfm-signing",
  "mfm-spec",
  "mfm-storage-postgres",
@@ -2564,6 +2564,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-keystore"
+version = "0.1.30"
+dependencies = [
+ "aes-gcm",
+ "alloy-primitives",
+ "argon2",
+ "bip32",
+ "bip39",
+ "chrono",
+ "fs2",
+ "hex",
+ "k256",
+ "mfm-ids",
+ "mfm-signing",
+ "rand 0.9.5",
+ "ring",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tiny-keccak",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "mfm-manual-auth"
 version = "0.1.0"
 dependencies = [
@@ -2730,21 +2759,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-signers-keystore"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-ids",
- "mfm-signing",
- "mfm_core",
- "tempfile",
- "thiserror",
- "tokio",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "mfm-signing"
 version = "0.1.0"
 dependencies = [
@@ -2812,32 +2826,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "mfm_core"
-version = "0.1.30"
-dependencies = [
- "aes-gcm",
- "alloy-primitives",
- "argon2",
- "bip32",
- "bip39",
- "chrono",
- "fs2",
- "hex",
- "k256",
- "rand 0.9.5",
- "ring",
- "serde",
- "serde_json",
- "static_assertions",
- "subtle",
- "tempfile",
- "thiserror",
- "tiny-keccak",
- "uuid",
- "zeroize",
 ]
 
 [[package]]

@@ -117,21 +117,18 @@ fn test_keystore_new_variants() {
     let keystore_path1 = temp_dir.path().join("test1.keystore");
     let keystore1 = Keystore::new(&keystore_path1).unwrap();
     assert_eq!(keystore1.config.argon2_memory_kb, 1_048_576); // 1GB default
-    assert!(!keystore1.config.allow_secret_exports);
 
     // Test new_with_config() with development config
     let keystore_path2 = temp_dir.path().join("test2.keystore");
     let keystore2 =
         Keystore::new_with_config(&keystore_path2, KeystoreConfig::development()).unwrap();
     assert_eq!(keystore2.config.argon2_memory_kb, 8192); // 8MB development
-    assert!(!keystore2.config.allow_secret_exports);
 
     // Test with production config
     let keystore_path3 = temp_dir.path().join("test3.keystore");
     let keystore3 =
         Keystore::new_with_config(&keystore_path3, KeystoreConfig::production()).unwrap();
     assert_eq!(keystore3.config.argon2_memory_kb, 1_048_576); // 1GB production
-    assert!(!keystore3.config.allow_secret_exports);
 }
 
 #[test]

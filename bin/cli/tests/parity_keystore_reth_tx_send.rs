@@ -3,7 +3,7 @@
 
 use alloy_primitives::{keccak256, Address, Bytes, TxKind, U256};
 use assert_cmd::Command;
-use mfm_core::keystore::{Keystore, KeystoreConfig};
+use mfm_keystore::{Keystore, KeystoreConfig};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Output;

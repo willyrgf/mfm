@@ -10,7 +10,7 @@ members = [
 	"crates/live/bitcoin",
 	"crates/live/evm",
 	"crates/live/portfolio",
-	"crates/core",
+	"crates/keystore",
 	"crates/kernel/canonical",
 	"crates/kernel/capabilities",
 	"crates/kernel/certify",
@@ -29,7 +29,6 @@ members = [
 	"crates/domains/evm",
 	"crates/domains/portfolio",
 	"crates/signing",
-	"crates/signers/keystore",
 	"crates/runtime-config",
 	"crates/storages/postgres",
 ]
