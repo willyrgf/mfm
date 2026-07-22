@@ -230,7 +230,7 @@ where
     let evm_adapter_factory = runner_factory_binding(&registry, "evm_jsonrpc_adapter")?;
     let portfolio_adapter_factory = runner_factory_binding(&registry, "portfolio_adapter")?;
     let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
-    mfm_adapters_portfolio::register_portfolio_runners(
+    mfm_portfolio_live::register_portfolio_live(
         &mut registry,
         store,
         &pure_factory,

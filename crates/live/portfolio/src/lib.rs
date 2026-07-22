@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Portfolio adapter runners for certified portfolio snapshots.
+//! Portfolio live selection and hydration for certified portfolio snapshots.
 //!
 //! The store-owned fact-query binding rereads and verifies Bitcoin and generic EVM facts before
 //! portfolio assembly. Family collection execution belongs to the family adapters.
@@ -19,7 +19,6 @@ use mfm_runtime::{
 };
 use mfm_store::v1 as store;
 
-#[path = "selection.rs"]
 mod selection;
 
 const PURE_FACTORY: &str = "pure";
@@ -27,7 +26,7 @@ const READ_FACTORY: &str = "read_external";
 const ADAPTER_FACTORY: &str = "portfolio_adapter";
 
 /// Registers receipt-pinned selection and snapshot projection runners.
-pub fn register_portfolio_runners<S>(
+pub fn register_portfolio_live<S>(
     registry: &mut ErasedRunnerRegistry,
     store: Arc<S>,
     pure_factory: &RunnerFactoryBinding,
@@ -54,10 +53,7 @@ where
         read_factory,
         Arc::new(ExternalReadRunner::<SelectHoldingsState, _>::new(
             artifacts.clone(),
-            SelectHoldingsExecutor {
-                artifacts: artifacts.clone(),
-                store,
-            },
+            SelectHoldingsExecutor::new(store),
         )),
     )?;
     register_pure_state::<AssembleSnapshotState>(
@@ -73,6 +69,16 @@ where
 struct SelectHoldingsExecutor<S> {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     store: Arc<S>,
+}
+
+impl<S> SelectHoldingsExecutor<S>
+where
+    S: store::RetainedArtifactReadProvider + 'static,
+{
+    fn new(store: Arc<S>) -> Self {
+        let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
+        Self { artifacts, store }
+    }
 }
 
 impl<S> ExternalReadPlanExecutor<SelectHoldingsState> for SelectHoldingsExecutor<S>
@@ -145,14 +151,6 @@ fn portfolio_state_runtime_error(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fact_query_store_failures_block_without_exposing_backend_detail() {
-        assert_eq!(
-            fact_query_runtime_error("private backend detail"),
-            mfm_runtime::RuntimeError::Blocked("fact-query store is unavailable".to_owned())
-        );
-    }
-}
+mod role_tests;
+#[cfg(test)]
+mod tests;

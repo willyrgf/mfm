@@ -3,7 +3,7 @@
 #[test]
 fn production_app_links_only_supported_transport_crates() {
     let manifest = include_str!("../Cargo.toml");
-    for required in ["mfm-adapters-portfolio", "mfm-evm-live", "mfm-bitcoin-live"] {
+    for required in ["mfm-portfolio-live", "mfm-evm-live", "mfm-bitcoin-live"] {
         assert!(
             manifest.contains(required),
             "production app manifest must link {required}"
@@ -11,6 +11,7 @@ fn production_app_links_only_supported_transport_crates() {
     }
     for forbidden in [
         concat!("mfm-adapters-", "evm"),
+        concat!("mfm-adapters-", "portfolio"),
         concat!("mfm-transports-", "evm"),
         "mfm-transports-exec",
         "mfm-transports-local-evm",
@@ -28,7 +29,7 @@ fn production_app_links_only_supported_transport_crates() {
 
 #[test]
 fn portfolio_live_source_excludes_artifact_write_surfaces() {
-    let source = include_str!("../../adapters/portfolio/src/lib.rs");
+    let source = include_str!("../../live/portfolio/src/lib.rs");
     for banned in [
         concat!("request: serde_json::", "Value"),
         "PortfolioArtifactStore",

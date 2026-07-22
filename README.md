@@ -85,6 +85,7 @@ Crate docs:
 - Pure EVM domain: [`crates/domains/evm/README.md`](crates/domains/evm/README.md)
 - Pure portfolio domain: [`crates/domains/portfolio/README.md`](crates/domains/portfolio/README.md)
 - EVM live transport and runtime/replay bindings: [`crates/live/evm/README.md`](crates/live/evm/README.md)
+- Portfolio live fact selection and hydration: [`crates/live/portfolio/README.md`](crates/live/portfolio/README.md)
 - Storage (typed run events and current configuration, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
 
 Development and operations:

@@ -20,7 +20,6 @@ uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
 ring = { workspace = true }
 
-mfm-adapters-portfolio = { path = "../adapters/portfolio" }
 mfm-bitcoin = { path = "../domains/bitcoin" }
 mfm-bitcoin-live = { path = "../live/bitcoin" }
 mfm-canonical = { path = "../kernel/canonical" }
@@ -32,6 +31,7 @@ mfm-evm-live = { path = "../live/evm" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-portfolio = { path = "../domains/portfolio" }
+mfm-portfolio-live = { path = "../live/portfolio" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }

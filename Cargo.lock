@@ -2324,23 +2324,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-adapters-portfolio"
-version = "0.1.0"
-dependencies = [
- "mfm-events",
- "mfm-facts",
- "mfm-portfolio",
- "mfm-runtime",
- "mfm-store",
-]
-
-[[package]]
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "k256",
- "mfm-adapters-portfolio",
  "mfm-bitcoin",
  "mfm-bitcoin-live",
  "mfm-canonical",
@@ -2352,6 +2340,7 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-portfolio",
+ "mfm-portfolio-live",
  "mfm-program",
  "mfm-program-derive",
  "mfm-replay",
@@ -2609,6 +2598,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "mfm-portfolio-live"
+version = "0.1.0"
+dependencies = [
+ "mfm-events",
+ "mfm-facts",
+ "mfm-ids",
+ "mfm-portfolio",
+ "mfm-runtime",
+ "mfm-store",
 ]
 
 [[package]]

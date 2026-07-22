@@ -1,8 +1,8 @@
 [package]
-name = "mfm-adapters-portfolio"
+name = "mfm-portfolio-live"
 version = "0.1.0"
 edition = "2021"
-description = "Portfolio adapter runners for typed fact-backed report execution"
+description = "Portfolio live selection and hydration bindings for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -16,3 +16,6 @@ mfm-facts = { path = "../../kernel/facts" }
 mfm-portfolio = { path = "../../domains/portfolio" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-store = { path = "../../kernel/store" }
+
+[dev-dependencies]
+mfm-ids = { path = "../../kernel/ids" }

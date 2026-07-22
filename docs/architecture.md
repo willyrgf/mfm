@@ -401,6 +401,14 @@ App assembly owns process-local routing and caches one checked read session per 
 source_ref)`; production constructs only balance-read authority. The former standalone EVM
 transport and adapter packages are deleted.
 
+`mfm-portfolio-live` owns only the live execution of portfolio-specific fact selection and retained
+response hydration. Its registration API accepts one shared store `Arc` implementing both
+`FactQueryStore` and `RetainedArtifactReadProvider`, then narrows clones of that same value
+internally. It cannot combine query authority from one store with artifact authority from another.
+It decodes source responses through `mfm-portfolio` and the pure Bitcoin/EVM contracts and owns no
+generic provider implementation, transport, source-live dependency, concrete store, or app
+assembly.
+
 ### Signer
 
 Signers provide generic key material and signature capabilities.
