@@ -21,7 +21,7 @@ use mfm_program_derive::OperationOutput;
 
 const OP_NAMESPACE: &str = "mfm.evm";
 const OP_KIND_NAME: &str = "balance_collection";
-const OP_VERSION: &str = "mfm.evm.operation.balance_collection.v2";
+const OP_VERSION: &str = "mfm.evm.operation.balance_collection.v1";
 
 /// Output of one reusable EVM balance collection operation.
 #[derive(OperationOutput)]
@@ -133,7 +133,7 @@ mod tests {
             EvmBalanceCollectionOperation::version()
                 .expect("operation version")
                 .as_str(),
-            "mfm.evm.operation.balance_collection.v2"
+            "mfm.evm.operation.balance_collection.v1"
         );
         let build = || {
             build_root_with_registries(

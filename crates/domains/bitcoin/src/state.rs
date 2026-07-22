@@ -24,7 +24,7 @@ use mfm_program_derive::{MfmConfig, MfmFactType as DeriveMfmFactType, MfmValue};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
-const ADAPTER_VERSION: &str = "mfm.bitcoin.jsonrpc.adapter.v2";
+const ADAPTER_VERSION: &str = "mfm.bitcoin.jsonrpc.adapter.v1";
 const STATE_VERSION: &str = "mfm.bitcoin.state.collect_balances.v1";
 
 /// Redaction-safe aggregate Bitcoin state error.

@@ -89,13 +89,13 @@ fn collection_state_uses_the_replacement_semantic_identities() {
         CollectEvmBalancesState::version()
             .expect("state version")
             .as_str(),
-        "mfm.evm.state.collect_balances.v2"
+        "mfm.evm.state.collect_balances.v1"
     );
     assert_eq!(
         crate::evm_jsonrpc_adapter_version()
             .expect("adapter version")
             .as_str(),
-        "mfm.evm.jsonrpc.adapter.v2"
+        "mfm.evm.jsonrpc.adapter.v1"
     );
 }
 

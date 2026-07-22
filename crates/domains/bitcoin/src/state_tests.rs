@@ -57,7 +57,7 @@ fn aggregate_state_identities_and_automatic_fact_descriptor_are_exact() {
     assert_eq!(bindings.len(), 1);
     assert_eq!(
         bindings[0].adapter_version.as_str(),
-        "mfm.bitcoin.jsonrpc.adapter.v2"
+        "mfm.bitcoin.jsonrpc.adapter.v1"
     );
     assert_eq!(
         BitcoinBalanceSnapshotFact::descriptor()

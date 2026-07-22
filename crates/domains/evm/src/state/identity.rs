@@ -6,7 +6,7 @@ use mfm_program::AdapterBindingSpec;
 
 const NAMESPACE: &str = "mfm.evm";
 const EVM_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
-const EVM_JSONRPC_ADAPTER_VERSION: &str = "mfm.evm.jsonrpc.adapter.v2";
+const EVM_JSONRPC_ADAPTER_VERSION: &str = "mfm.evm.jsonrpc.adapter.v1";
 
 /// Returns the stable EVM JSON-RPC adapter kind.
 pub fn evm_jsonrpc_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
@@ -45,7 +45,6 @@ pub(crate) fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
 }
 
 pub(crate) fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
-    let version = if name == "collect_balances" { 2 } else { 1 };
-    StateVersion::new(format!("mfm.evm.state.{name}.v{version}"))
+    StateVersion::new(format!("mfm.evm.state.{name}.v1"))
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
