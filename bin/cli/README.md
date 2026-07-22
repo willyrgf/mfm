@@ -387,8 +387,9 @@ mfm_cli keystore tx-sign [OPTIONS]
 
 **Optional options:**
 - `--data <0xHEX>` (default: `0x`)
-- `--runtime-config <PATH>` (default: `MFM_RUNTIME_CONFIG_FILE`)
 - `--overwrite`: Replace an existing regular output file. Without this flag, `--out` must be a new path.
+
+`--runtime-config <PATH>` is required and selects the exact signer and keystore binding.
 
 **Example:**
 ```sh
@@ -402,6 +403,7 @@ mfm_cli --output-format json keystore tx-sign \
   --max-fee-per-gas 2000000000 \
   --max-priority-fee-per-gas 1000000000 \
   --gas-limit 21000 \
+  --runtime-config /run/mfm/runtime.toml \
   --out /tmp/signed.tx
 ```
 
@@ -495,8 +497,8 @@ mfm_cli run start <ENTRY_POINT> <TARGET> [OPTIONS]
   omitted, the app mints a fresh opaque invocation key. The raw key is not persisted; only a
   domain-separated digest enters run identity material.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
-- `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
-  `$MFM_RUNTIME_CONFIG_FILE`). Read-only commands do not use this option.
+- `--runtime-config <PATH>`: Explicit runtime config file for live capabilities. Read-only commands
+  do not use this option. A providerless run does not require it.
 
 The repository includes a complete strict-import fixture at
 `examples/setup/organization.toml`; copy it to a local setup file before importing.
@@ -561,8 +563,7 @@ It rejects non-typed run ids before storage access.
 Key live options:
 
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
-- `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
-  `$MFM_RUNTIME_CONFIG_FILE`)
+- `--runtime-config <PATH>`: Explicit runtime config file for pending live capabilities
 
 Manual `run resume <RUN_ID>` is the v1 recovery trigger for a run left with an open execution claim,
 side-effect uncertainty, or a resumable frontier. Automatic dead-driver takeover and background
@@ -716,18 +717,18 @@ The CLI's process-level configuration is intentionally narrow.
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 
-- **`MFM_RUNTIME_CONFIG_FILE`**: Runtime-only TOML or JSON config file used by live capability
-  drivers. Live `run start` and `run resume` may also pass `--runtime-config <PATH>`, which takes
-  precedence over this environment variable. Read-only run commands do not load runtime config.
+- **`--runtime-config <PATH>`**: Explicit runtime-only TOML or JSON config file used by live
+  capability drivers. There is no environment-selected config path. Read-only run commands and
+  replay do not load runtime config.
 
   ```toml
   [evm.routes.reth-dev]
   source_ref = "reth-local"
-  rpc_url = "http://127.0.0.1:8545"
+  rpc_url = { direct = "http://127.0.0.1:8545" }
 
   [keystores.default]
-  keystore_path = "/run/mfm/deployer.keystore"
-  unlock_file = "/run/mfm/deployer.password"
+  keystore_path = { direct = "/run/mfm/deployer.keystore" }
+  unlock_file_path = { direct = "/run/mfm/deployer.password" }
 
   [signers.deployer]
   provider = "keystore"
@@ -737,9 +738,9 @@ The CLI's process-level configuration is intentionally narrow.
 
 - Keystore administration commands (`import`, `list`, and `delete`) use either `--keystore <PATH>`,
   which prompts locally for credentials, or a runtime-config keystore profile selected by
-  `--runtime-config <PATH>` or `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to
-  `default` for those administration commands. `tx-sign` instead requires `--signer-ref` and loads
-  that exact signer-to-keystore binding; it does not accept direct keystore or key selectors.
+  `--runtime-config <PATH>`. `--keystore-ref <REF>` defaults to `default` for those administration
+  commands. `tx-sign` instead requires the runtime config plus `--signer-ref` and loads that exact
+  signer-to-keystore binding; it does not accept direct keystore or key selectors.
 - Live BTC/EVM provider failures are reported with redacted diagnostic codes such as
   `bitcoin_rpc_http_status`, `bitcoin_rpc_json_error`, `evm_rpc_http_status`, or
   `evm_source_mismatch`. Diagnostics may include closed operation ids and numeric status/error

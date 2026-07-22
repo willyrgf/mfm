@@ -6,42 +6,30 @@ use mfm_app::{initialize_insecure_keystore_for_test, SecretInput};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-const PASSWORD: &str = "env_password_123";
+const PASSWORD: &str = "config_password_123";
 const PRIVATE_KEY: &str = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
 #[test]
-fn runtime_config_selection_uses_env_and_cli_override() {
-    let env_fixture = KeystoreFixture::new("runtime-env-test");
-
+fn runtime_config_selection_requires_an_explicit_path() {
     let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    list_cmd.env(
-        "MFM_RUNTIME_CONFIG_FILE",
-        env_fixture.runtime_config.to_str().unwrap(),
-    );
     list_cmd.args(["keystore", "list"]);
 
     list_cmd
         .assert()
-        .success()
-        .stdout(predicate::str::contains("runtime-env-test"))
+        .failure()
+        .stderr(predicate::str::contains(
+            "provide --keystore or --runtime-config",
+        ))
         .stdout(predicate::str::contains(PASSWORD).not())
         .stderr(predicate::str::contains(PASSWORD).not());
 
-    let good = KeystoreFixture::new("runtime-arg-test");
-    let bad_dir = TempDir::new().expect("bad temp dir");
-    let bad_runtime_config = bad_dir.path().join("bad-runtime.toml");
-    std::fs::write(&bad_runtime_config, "[keystores.default]\n").expect("bad runtime config");
-
+    let fixture = KeystoreFixture::new("runtime-arg-test");
     let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    list_cmd.env(
-        "MFM_RUNTIME_CONFIG_FILE",
-        bad_runtime_config.to_str().unwrap(),
-    );
     list_cmd.args([
         "keystore",
         "list",
         "--runtime-config",
-        good.runtime_config.to_str().unwrap(),
+        fixture.runtime_config.to_str().unwrap(),
     ]);
 
     list_cmd
@@ -114,8 +102,8 @@ fn write_runtime_config(
     let config = format!(
         r#"
 [keystores.default]
-keystore_path = {keystore_path}
-unlock_file = {password_file}
+keystore_path = {{ direct = {keystore_path} }}
+unlock_file_path = {{ direct = {password_file} }}
 "#,
         keystore_path = toml_string(&keystore_path.display().to_string()),
         password_file = toml_string(&password_file.display().to_string()),

@@ -9,24 +9,24 @@ outputs, fixtures, or replay inputs.
 ## Direct routes
 
 Live CLI start accepts `--runtime-config <PATH>`. Resume needs it only while verified history still
-has a pending EVM live node. CLI and REST use `MFM_RUNTIME_CONFIG_FILE` when no explicit path is
-provided. Evidence-only commands do not load this file.
+has a pending EVM live node. The REST server accepts the same explicit flag. There is no
+environment-selected config path. Evidence-only commands and replay do not load this file.
 
 Each semantic EVM network has exactly one direct route:
 
 ```toml
 [evm.routes.reth-dev]
 source_ref = "reth-local"
-rpc_url = "http://127.0.0.1:8545"
+rpc_url = { direct = "http://127.0.0.1:8545" }
 
 [evm.routes.ethereum-mainnet]
 source_ref = "mainnet-primary"
-rpc_url_file = "/run/mfm/mainnet-rpc-url"
-auth_header_file = "/run/mfm/mainnet-auth-header"
+rpc_url = { file = "/run/mfm/mainnet-rpc-url" }
+auth_header = { file = "/run/mfm/mainnet-auth-header" }
 
 [keystores.default]
-keystore_path = "/run/mfm/deployer.keystore"
-unlock_file = "/run/mfm/deployer.password"
+keystore_path = { direct = "/run/mfm/deployer.keystore" }
+unlock_file_path = { direct = "/run/mfm/deployer.password" }
 
 [signers.deployer]
 provider = "keystore"
@@ -37,6 +37,9 @@ entry_id = "00000000-0000-0000-0000-000000000000"
 JSON with the same shape is accepted. Expected chain id comes from certified workflow semantics;
 runtime routes cannot override it. There are no source registries, policy ids, ordered candidates,
 or fallback rotation.
+
+Every runtime value is an exact-one source object: `direct`, `env`, `file`, or `file_env`.
+Authorization cannot use `direct`; its source must be indirect even in an unselected route.
 
 Live reads load only the requested route. Transaction assembly loads that route plus the exact
 referenced signer and keystore. Unrelated malformed EVM routes or signer entries do not block the
@@ -148,8 +151,8 @@ see [EVM Transactions](evm-transactions.md).
 
 Contributor ownership:
 
-- `mfm-runtime-config` parses and selectively resolves routes and signers;
-- app assembly selects runtime resources and binds sessions;
+- private app assembly parses and selectively resolves routes and signers, selects runtime
+  resources, and binds sessions;
 - the public `mfm_evm_live::transport` module owns bounded JSON-RPC, checked sessions, and typed
   protocol decoding;
 - the private adapter in `mfm-evm-live` owns reusable balance collection/publication,

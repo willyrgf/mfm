@@ -94,8 +94,9 @@ enclosing composite adds. Use a leaf only when its test is independently valid.
 
 For repeated parity debugging, the incremental lane can be faster: start the
 required service once, set explicit variables such as `DATABASE_URL` or
-`MFM_RUNTIME_CONFIG_FILE`, and repeatedly run the focused Cargo test. This
-caller-managed path does not produce Nixfied service or run evidence.
+provider values referenced by an explicit `--runtime-config <PATH>`, and
+repeatedly run the focused Cargo test. This caller-managed path does not
+produce Nixfied service or run evidence.
 
 ## Selecting verification scope
 

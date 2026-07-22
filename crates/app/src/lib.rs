@@ -71,6 +71,7 @@ mod public_facts;
 mod replay_verifiers;
 #[path = "responses.rs"]
 mod responses;
+mod runtime_config;
 mod transaction_signing;
 pub use self::responses::*;
 #[path = "status.rs"]
@@ -108,9 +109,6 @@ pub use entry_point::{entry_point_ids, prepare_entry_point_run_launch};
 #[path = "errors.rs"]
 mod errors;
 pub use self::errors::{ErrorClass, PublicError};
-
-/// Environment variable that selects the live runtime config file.
-pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
@@ -230,9 +228,9 @@ where
 {
     let fact_query_implementation_id = store.fact_query_implementation_id().to_owned();
     let executable_identities = executable_identity::current_executable_identity_template().await?;
-    let runtime_config = Arc::new(LiveTransportRuntime::new(
-        RuntimeConfigLoader::from_path_or_env(runtime_config_path),
-    ));
+    let runtime_config = Arc::new(LiveTransportRuntime::new(RuntimeConfigLoader::from_path(
+        runtime_config_path,
+    )));
     let mut registry = ErasedRunnerRegistry::new(executable_identities);
     let pure_factory = runner_factory_binding(&registry, "pure")?;
     let read_factory = runner_factory_binding(&registry, "read_external")?;

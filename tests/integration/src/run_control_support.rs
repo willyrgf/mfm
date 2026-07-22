@@ -1,8 +1,5 @@
 use std::path::Path;
 
-/// Environment variable carrying the runtime config file path.
-pub const ENV_RUNTIME_CONFIG_FILE: &str = mfm_app::MFM_RUNTIME_CONFIG_FILE;
-
 /// Runtime signer binding used by test runtime config files.
 pub struct RuntimeConfigSignerBinding<'a> {
     /// Workflow signer reference.
@@ -13,23 +10,6 @@ pub struct RuntimeConfigSignerBinding<'a> {
     pub keystore_path: &'a Path,
     /// Unlock password file path.
     pub unlock_file: &'a Path,
-}
-
-/// Restores an environment variable to its previous test value when dropped.
-pub struct EnvVarRestore {
-    previous: Vec<(&'static str, Option<String>)>,
-    _temp_dirs: Vec<tempfile::TempDir>,
-}
-
-impl Drop for EnvVarRestore {
-    fn drop(&mut self) {
-        for (name, previous) in self.previous.drain(..) {
-            match previous {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-    }
 }
 
 /// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by portfolio integration tests.
@@ -134,7 +114,7 @@ pub fn write_evm_runtime_config_for_test(
         r#"
 [evm.routes.{network}]
 source_ref = {network}
-rpc_url = {rpc_url}
+rpc_url = {{ direct = {rpc_url} }}
 "#,
         network = toml_string(network_id),
         rpc_url = toml_string(rpc_url),
@@ -143,8 +123,8 @@ rpc_url = {rpc_url}
         config.push_str(&format!(
             r#"
 [keystores.default]
-keystore_path = {keystore_path}
-unlock_file = {unlock_file}
+keystore_path = {{ direct = {keystore_path} }}
+unlock_file_path = {{ direct = {unlock_file} }}
 
 [signers.{signer_ref}]
 provider = "keystore"
@@ -168,36 +148,16 @@ pub fn write_portfolio_runtime_config_for_test(dir: &Path, rpc_url: &str) -> std
         r#"
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
-rpc_url = {rpc_url}
+rpc_url = {{ direct = {rpc_url} }}
 
-[btc.routes.public-bitcoin-core]
-rpc_url = {rpc_url}
+[bitcoin.routes.public-bitcoin-core]
+rpc_url = {{ direct = {rpc_url} }}
 scan_timeout_seconds = 30
 "#,
         rpc_url = toml_string(rpc_url),
     );
     std::fs::write(&config_path, config).expect("write portfolio runtime config");
     config_path
-}
-
-/// Sets the runtime config env var for one EVM route plus optional signer binding.
-pub fn set_evm_runtime_config_env_with_signer_for_test(
-    network_id: &str,
-    rpc_url: &str,
-    signer: Option<RuntimeConfigSignerBinding<'_>>,
-) -> EnvVarRestore {
-    let previous = vec![(
-        ENV_RUNTIME_CONFIG_FILE,
-        std::env::var(ENV_RUNTIME_CONFIG_FILE).ok(),
-    )];
-    let temp_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let config_path =
-        write_evm_runtime_config_for_test(temp_dir.path(), network_id, rpc_url, signer);
-    std::env::set_var(ENV_RUNTIME_CONFIG_FILE, config_path);
-    EnvVarRestore {
-        previous,
-        _temp_dirs: vec![temp_dir],
-    }
 }
 
 fn toml_string(value: &str) -> String {

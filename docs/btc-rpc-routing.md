@@ -15,22 +15,27 @@ Normative architecture references:
 ## Runtime Config File
 
 Live CLI start accepts `--runtime-config <PATH>`. A resume needs it only while verified history has
-a pending Bitcoin live-source node. CLI and REST also read `MFM_RUNTIME_CONFIG_FILE` when no
-explicit path is provided. Read-only commands and REST startup do not load this file.
+a pending Bitcoin live-source node. The REST server accepts the same explicit flag. There is no
+environment-selected config path. Read-only commands, replay, and REST startup do not load this
+file.
 
 Example TOML:
 
 ```toml
-[btc.routes.public-bitcoin-core]
+[bitcoin.routes.public-bitcoin-core]
 scan_timeout_seconds = 30
-rpc_url_env = "MFM_BITCOIN_RPC_URL"
-rpc_user_env = "MFM_BITCOIN_RPC_USER"
-rpc_password_env = "MFM_BITCOIN_RPC_PASSWORD"
+rpc_url = { env = "MFM_BITCOIN_RPC_URL" }
+rpc_user = { env = "MFM_BITCOIN_RPC_USER" }
+rpc_password = { env = "MFM_BITCOIN_RPC_PASSWORD" }
 ```
 
 The route key is the semantic `BitcoinSourceIdentity`, not an endpoint name, URL, credential id, or
 routing policy. `scan_timeout_seconds` is required and must be in `1..=86_400`. Basic-auth user and
 password are either both absent or both present.
+
+Each value source is exactly one of `{ direct = "..." }`, `{ env = "NAME" }`,
+`{ file = "/path" }`, or `{ file_env = "NAME" }`. Passwords cannot use `direct`; their source must
+be indirect even in an unselected route.
 
 ## Source-Bound Aggregate Reads
 

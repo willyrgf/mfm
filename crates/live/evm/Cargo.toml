@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
+zeroize = "1.7"
 
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
@@ -37,4 +38,5 @@ mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
+static_assertions = "1"
 tokio = { workspace = true, features = ["test-util"] }

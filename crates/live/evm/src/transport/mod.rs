@@ -47,6 +47,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
 use serde_json::{json, Map, Value};
 use tokio::sync::Semaphore;
 use tracing::debug;
+use zeroize::Zeroizing;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -114,30 +115,24 @@ impl fmt::Debug for EvmRpcEndpoint {
 
 /// Consumed resolved authorization header for one EVM JSON-RPC source.
 pub struct EvmRpcAuthorization {
-    value: HeaderValue,
+    value: Zeroizing<String>,
 }
 
 impl EvmRpcAuthorization {
     /// Admits one non-empty HTTP authorization header value.
-    pub fn new(value: impl AsRef<str>) -> TransportResult<Self> {
-        if value.as_ref().is_empty() {
+    pub fn new(value: Zeroizing<String>) -> TransportResult<Self> {
+        if value.is_empty() {
             return Err(EvmTransportError::InvalidConfiguration);
         }
-        let value = HeaderValue::from_str(value.as_ref())
+        HeaderValue::from_str(value.as_str())
             .map_err(|_| EvmTransportError::InvalidConfiguration)?;
         Ok(Self { value })
     }
 }
 
-impl fmt::Debug for EvmRpcAuthorization {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("EvmRpcAuthorization(<redacted>)")
-    }
-}
-
 struct BoundEndpoint {
     url: reqwest::Url,
-    authorization: Option<HeaderValue>,
+    authorization: Option<EvmRpcAuthorization>,
     source_limit: Arc<Semaphore>,
 }
 
@@ -188,7 +183,7 @@ impl EvmJsonRpcTransport {
         let source_limit = self.source_limit(&source_ref)?;
         let endpoint = BoundEndpoint {
             url: endpoint.url,
-            authorization: authorization.map(|authorization| authorization.value),
+            authorization,
             source_limit,
         };
         let unbound = EvmJsonRpcSession {
@@ -536,7 +531,9 @@ impl EvmJsonRpcSession {
                 "params": params,
             }));
         if let Some(authorization) = &self.endpoint.authorization {
-            request = request.header(AUTHORIZATION, authorization.clone());
+            let authorization = HeaderValue::from_str(authorization.value.as_str())
+                .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+            request = request.header(AUTHORIZATION, authorization);
         }
         debug!(operation = %operation, "evm rpc request");
         let mut response =

@@ -23,7 +23,7 @@ pub(crate) struct StartArgs {
     #[arg(long, value_name = "KEY")]
     pub invocation_key: Option<String>,
 
-    /// Runtime configuration file for live capabilities (default: $MFM_RUNTIME_CONFIG_FILE).
+    /// Explicit runtime configuration file for live capabilities.
     #[arg(long, value_name = "PATH")]
     pub runtime_config: Option<PathBuf>,
 

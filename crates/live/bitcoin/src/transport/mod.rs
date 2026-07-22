@@ -17,6 +17,7 @@ use mfm_capabilities::ProviderDiagnosticCode;
 use reqwest::header::CONTENT_TYPE;
 use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use zeroize::Zeroizing;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const ORDINARY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -27,37 +28,50 @@ const MAX_DESCRIPTOR_BYTES: usize = 4_096;
 const MAX_SCRIPT_BYTES: usize = 10_000;
 const MAX_BITCOIN_JSON_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-/// Resolved Basic authentication for one Bitcoin RPC endpoint.
+/// Checked resolved endpoint for one Bitcoin Core JSON-RPC source.
 #[derive(Clone)]
+pub struct BitcoinRpcEndpoint {
+    url: reqwest::Url,
+}
+
+impl BitcoinRpcEndpoint {
+    /// Admits one HTTP(S) endpoint without embedded credentials, query, or fragment material.
+    pub fn new(endpoint: impl AsRef<str>) -> Result<Self, BitcoinRpcError> {
+        let url = reqwest::Url::parse(endpoint.as_ref())
+            .map_err(|_| BitcoinRpcError::InvalidConfiguration)?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(BitcoinRpcError::InvalidConfiguration);
+        }
+        Ok(Self { url })
+    }
+}
+
+impl fmt::Debug for BitcoinRpcEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BitcoinRpcEndpoint(<redacted>)")
+    }
+}
+
+/// Consumed resolved Basic authentication for one Bitcoin RPC endpoint.
 pub struct BitcoinRpcAuthentication {
     username: String,
-    password: String,
+    password: Zeroizing<String>,
 }
 
 impl BitcoinRpcAuthentication {
     /// Creates resolved Basic authentication. Empty components are rejected.
-    pub fn new(
-        username: impl Into<String>,
-        password: impl Into<String>,
-    ) -> Result<Self, BitcoinRpcError> {
-        let authentication = Self {
-            username: username.into(),
-            password: password.into(),
-        };
+    pub fn new(username: String, password: Zeroizing<String>) -> Result<Self, BitcoinRpcError> {
+        let authentication = Self { username, password };
         if authentication.username.is_empty() || authentication.password.is_empty() {
             return Err(BitcoinRpcError::InvalidConfiguration);
         }
         Ok(authentication)
-    }
-}
-
-impl fmt::Debug for BitcoinRpcAuthentication {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("BitcoinRpcAuthentication")
-            .field("username", &"<redacted>")
-            .field("password", &"<redacted>")
-            .finish()
     }
 }
 
@@ -74,23 +88,12 @@ pub struct BitcoinRpcSession {
 impl BitcoinRpcSession {
     /// Creates a session from resolved endpoint, authentication, binding, and scan deadline.
     pub fn new(
-        endpoint: impl AsRef<str>,
+        endpoint: BitcoinRpcEndpoint,
         authentication: Option<BitcoinRpcAuthentication>,
         binding: BitcoinSourceBinding,
         scan_timeout: Duration,
     ) -> Result<Self, BitcoinRpcError> {
         if !(MIN_SCAN_TIMEOUT..=MAX_SCAN_TIMEOUT).contains(&scan_timeout) {
-            return Err(BitcoinRpcError::InvalidConfiguration);
-        }
-        let endpoint = reqwest::Url::parse(endpoint.as_ref())
-            .map_err(|_| BitcoinRpcError::InvalidConfiguration)?;
-        if !matches!(endpoint.scheme(), "http" | "https")
-            || endpoint.host_str().is_none()
-            || !endpoint.username().is_empty()
-            || endpoint.password().is_some()
-            || endpoint.query().is_some()
-            || endpoint.fragment().is_some()
-        {
             return Err(BitcoinRpcError::InvalidConfiguration);
         }
         let client = reqwest::Client::builder()
@@ -100,7 +103,7 @@ impl BitcoinRpcSession {
             .build()
             .map_err(|_| BitcoinRpcError::InvalidConfiguration)?;
         Ok(Self {
-            endpoint,
+            endpoint: endpoint.url,
             authentication,
             binding,
             scan_timeout,
@@ -193,7 +196,10 @@ impl BitcoinRpcSession {
             .timeout(timeout)
             .json(&body);
         if let Some(authentication) = &self.authentication {
-            builder = builder.basic_auth(&authentication.username, Some(&authentication.password));
+            builder = builder.basic_auth(
+                &authentication.username,
+                Some(authentication.password.as_str()),
+            );
         }
         let mut response = builder.send().await.map_err(classify_reqwest_error)?;
         let status = response.status();
@@ -258,15 +264,17 @@ impl BitcoinBalanceSession for BitcoinRpcSession {
         BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
     }
 
-    fn validate_binding(
-        &self,
-        binding: &BitcoinSourceBinding,
-    ) -> Result<(), BitcoinCapabilityError> {
-        if binding == &self.binding {
-            Ok(())
-        } else {
-            Err(BitcoinCapabilityError::SourceMismatch)
-        }
+    fn validate_binding<'a>(
+        &'a self,
+        binding: &'a BitcoinSourceBinding,
+    ) -> BitcoinSessionFuture<'a, ()> {
+        Box::pin(async move {
+            if binding == &self.binding {
+                Ok(())
+            } else {
+                Err(BitcoinCapabilityError::SourceMismatch)
+            }
+        })
     }
 
     fn collect_balances<'a>(

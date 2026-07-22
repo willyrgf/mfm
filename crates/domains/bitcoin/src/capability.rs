@@ -52,10 +52,10 @@ pub trait BitcoinBalanceSession: Send + Sync {
     fn implementation_id(&self) -> &'static str;
 
     /// Validates that the semantic binding can be served without live network IO.
-    fn validate_binding(
-        &self,
-        binding: &BitcoinSourceBinding,
-    ) -> std::result::Result<(), BitcoinCapabilityError>;
+    fn validate_binding<'a>(
+        &'a self,
+        binding: &'a BitcoinSourceBinding,
+    ) -> BitcoinSessionFuture<'a, ()>;
 
     /// Executes one complete aggregate balance read for the checked request.
     fn collect_balances<'a>(

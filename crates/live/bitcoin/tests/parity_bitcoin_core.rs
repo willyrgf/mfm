@@ -9,7 +9,9 @@ use mfm_bitcoin::{
     BitcoinBalanceCollectionRequest, BitcoinBalanceSession, BitcoinCapabilityError,
     BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceBinding, BitcoinSourceIdentity,
 };
-use mfm_bitcoin_live::transport::{BitcoinRpcAuthentication, BitcoinRpcSession};
+use mfm_bitcoin_live::transport::{
+    BitcoinRpcAuthentication, BitcoinRpcEndpoint, BitcoinRpcSession,
+};
 use mfm_capabilities::ProviderDiagnosticCode;
 
 const EXPECTED_BITCOIN_CORE_VERSION: &str = "31.0";
@@ -163,10 +165,11 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
     let request = BitcoinBalanceCollectionRequest::new(regtest_binding(), addresses)
         .expect("deterministic aggregate request");
     let (username, password) = config.credentials();
-    let authentication = BitcoinRpcAuthentication::new(username.clone(), password.clone())
-        .expect("resolved fixture authentication");
+    let authentication =
+        BitcoinRpcAuthentication::new(username.clone(), zeroize::Zeroizing::new(password.clone()))
+            .expect("resolved fixture authentication");
     let session = BitcoinRpcSession::new(
-        config.endpoint(),
+        BitcoinRpcEndpoint::new(config.endpoint()).expect("endpoint"),
         Some(authentication),
         regtest_binding(),
         Duration::from_secs(30),
@@ -204,10 +207,13 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
     )
     .expect("mainnet probe request");
     let mainnet_session = BitcoinRpcSession::new(
-        config.endpoint(),
+        BitcoinRpcEndpoint::new(config.endpoint()).expect("endpoint"),
         Some(
-            BitcoinRpcAuthentication::new(username.clone(), password.clone())
-                .expect("resolved fixture authentication"),
+            BitcoinRpcAuthentication::new(
+                username.clone(),
+                zeroize::Zeroizing::new(password.clone()),
+            )
+            .expect("resolved fixture authentication"),
         ),
         mainnet_binding,
         Duration::from_secs(30),
@@ -220,10 +226,13 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
 
     let rejected_credential = "mfm-parity-rejected-public-fixture";
     let rejected_session = BitcoinRpcSession::new(
-        config.endpoint(),
+        BitcoinRpcEndpoint::new(config.endpoint()).expect("endpoint"),
         Some(
-            BitcoinRpcAuthentication::new(username.clone(), rejected_credential)
-                .expect("rejected fixture authentication"),
+            BitcoinRpcAuthentication::new(
+                username.clone(),
+                zeroize::Zeroizing::new(rejected_credential.to_owned()),
+            )
+            .expect("rejected fixture authentication"),
         ),
         regtest_binding(),
         Duration::from_secs(30),

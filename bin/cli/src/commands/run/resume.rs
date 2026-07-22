@@ -17,7 +17,7 @@ pub(crate) struct ResumeArgs {
     #[command(flatten)]
     pub stores: RunStoresArgs,
 
-    /// Runtime configuration file for live capabilities (default: $MFM_RUNTIME_CONFIG_FILE).
+    /// Explicit runtime configuration file for live capabilities.
     #[arg(long, value_name = "PATH")]
     pub runtime_config: Option<PathBuf>,
 }

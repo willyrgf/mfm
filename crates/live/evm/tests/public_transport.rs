@@ -6,8 +6,14 @@ use mfm_evm_live::transport::{
     EvmJsonRpcTransport, EvmRpcAuthorization, EvmRpcEndpoint, EvmTransportError,
 };
 use mfm_ids::LocalPublicId;
+use static_assertions::assert_not_impl_any;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use zeroize::Zeroizing;
+
+assert_not_impl_any!(EvmRpcAuthorization: Clone, Copy, std::fmt::Debug, std::fmt::Display, serde::Serialize);
+assert_not_impl_any!(EvmRpcAuthorization: serde::de::DeserializeOwned);
+assert_not_impl_any!(EvmRpcAuthorization: AsRef<str>, std::borrow::Borrow<str>);
 
 fn binding() -> EvmNetworkBinding {
     EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet").expect("network"), 1)
@@ -50,7 +56,9 @@ async fn public_transport_binds_without_runtime_or_registry_assembly() {
             .expect("write response");
     });
     let endpoint = EvmRpcEndpoint::new(format!("http://{address}")).expect("endpoint");
-    let authorization = EvmRpcAuthorization::new("Bearer resolved-secret").expect("authorization");
+    let authorization =
+        EvmRpcAuthorization::new(Zeroizing::new("Bearer resolved-secret".to_owned()))
+            .expect("authorization");
     let session = EvmJsonRpcTransport::new()
         .expect("transport")
         .bind(
@@ -94,10 +102,5 @@ fn public_transport_rejects_and_redacts_endpoint_material() {
     }
 
     let endpoint = EvmRpcEndpoint::new("https://rpc.example.invalid/private").expect("endpoint");
-    let authorization = EvmRpcAuthorization::new("Bearer resolved-secret").expect("authorization");
     assert_eq!(format!("{endpoint:?}"), "EvmRpcEndpoint(<redacted>)");
-    assert_eq!(
-        format!("{authorization:?}"),
-        "EvmRpcAuthorization(<redacted>)"
-    );
 }

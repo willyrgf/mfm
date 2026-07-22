@@ -33,8 +33,8 @@ async fn production_runner_registry_covers_runtime_family_matrix() {
             "portfolio-btc",
             Some(
                 r#"
-[btc.routes.public-bitcoin-core]
-rpc_url = "http://127.0.0.1:8332"
+[bitcoin.routes.public-bitcoin-core]
+rpc_url = { direct = "http://127.0.0.1:8332" }
 scan_timeout_seconds = 30
 "#,
             ),
@@ -47,7 +47,7 @@ scan_timeout_seconds = 30
                 r#"
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
-rpc_url = "http://127.0.0.1:8545"
+rpc_url = { direct = "http://127.0.0.1:8545" }
 "#,
             ),
             false,
@@ -59,10 +59,10 @@ rpc_url = "http://127.0.0.1:8545"
                 r#"
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
-rpc_url = "http://127.0.0.1:8545"
+rpc_url = { direct = "http://127.0.0.1:8545" }
 
-[btc.routes.public-bitcoin-core]
-rpc_url = "http://127.0.0.1:8332"
+[bitcoin.routes.public-bitcoin-core]
+rpc_url = { direct = "http://127.0.0.1:8332" }
 scan_timeout_seconds = 30
 "#,
             ),
@@ -78,20 +78,20 @@ scan_timeout_seconds = 30
             std::fs::write(&path, raw).expect("write runtime config");
             (dir, path)
         });
-        let parsed = config_path.as_ref().map(|(_, path)| {
-            mfm_runtime_config::RuntimeConfig::load_path(path)
-                .unwrap_or_else(|error| panic!("{name} runtime config: {error}"))
-        });
-        assert_eq!(
-            parsed.as_ref().and_then(|config| config.btc()).is_some(),
-            expect_btc,
-            "{name} Bitcoin family"
-        );
-        assert_eq!(
-            parsed.as_ref().and_then(|config| config.evm()).is_some(),
-            expect_evm,
-            "{name} EVM family"
-        );
+        if let Some((_, path)) = &config_path {
+            let bitcoin = runtime_config::load_bitcoin_route(
+                path,
+                &mfm_bitcoin::BitcoinSourceIdentity::new("public-bitcoin-core").expect("source"),
+            );
+            assert_eq!(bitcoin.is_ok(), expect_btc, "{name} Bitcoin family");
+            let evm = runtime_config::load_evm_route(
+                path,
+                &LocalPublicId::new("ethereum-mainnet").expect("network"),
+            );
+            assert_eq!(evm.is_ok(), expect_evm, "{name} EVM family");
+        } else {
+            assert!(!expect_btc && !expect_evm);
+        }
 
         let store = store::AsyncInMemoryRunStore::default();
         production_runner_registry(

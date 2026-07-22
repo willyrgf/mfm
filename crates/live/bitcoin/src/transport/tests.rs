@@ -101,7 +101,13 @@ fn request() -> BitcoinBalanceCollectionRequest {
 }
 
 fn session(server: &TestServer) -> BitcoinRpcSession {
-    BitcoinRpcSession::new(&server.url, None, binding(), Duration::from_secs(1)).expect("session")
+    BitcoinRpcSession::new(
+        BitcoinRpcEndpoint::new(&server.url).expect("endpoint"),
+        None,
+        binding(),
+        Duration::from_secs(1),
+    )
+    .expect("session")
 }
 
 #[tokio::test]
@@ -302,31 +308,42 @@ fn configuration_and_debug_surfaces_reject_or_redact_secret_bearing_inputs() {
         "http://127.0.0.1#secret",
     ] {
         assert!(matches!(
-            BitcoinRpcSession::new(endpoint, None, binding(), Duration::from_secs(1)),
+            BitcoinRpcEndpoint::new(endpoint),
             Err(BitcoinRpcError::InvalidConfiguration)
         ));
     }
     for timeout in [Duration::ZERO, Duration::from_secs(86_401)] {
         assert!(matches!(
-            BitcoinRpcSession::new("http://127.0.0.1", None, binding(), timeout),
+            BitcoinRpcSession::new(
+                BitcoinRpcEndpoint::new("http://127.0.0.1").expect("endpoint"),
+                None,
+                binding(),
+                timeout
+            ),
             Err(BitcoinRpcError::InvalidConfiguration)
         ));
     }
     assert!(matches!(
-        BitcoinRpcAuthentication::new("", "password"),
+        BitcoinRpcAuthentication::new(
+            "".to_owned(),
+            zeroize::Zeroizing::new("password".to_owned())
+        ),
         Err(BitcoinRpcError::InvalidConfiguration)
     ));
 
-    let authentication =
-        BitcoinRpcAuthentication::new("secret-user", "secret-password").expect("authentication");
+    let authentication = BitcoinRpcAuthentication::new(
+        "secret-user".to_owned(),
+        zeroize::Zeroizing::new("secret-password".to_owned()),
+    )
+    .expect("authentication");
     let session = BitcoinRpcSession::new(
-        "http://127.0.0.1:18443/secret-path",
-        Some(authentication.clone()),
+        BitcoinRpcEndpoint::new("http://127.0.0.1:18443/secret-path").expect("endpoint"),
+        Some(authentication),
         binding(),
         Duration::from_secs(1),
     )
     .expect("session");
-    let rendered = format!("{authentication:?} {session:?}");
+    let rendered = format!("{session:?}");
     for secret in ["secret-user", "secret-password", "secret-path", "18443"] {
         assert!(!rendered.contains(secret));
     }

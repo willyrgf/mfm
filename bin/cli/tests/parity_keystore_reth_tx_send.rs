@@ -230,7 +230,6 @@ fn run_import_private_key(
     let runtime_config = write_runtime_config(keystore_path, password_file, None);
     let mut command = Command::cargo_bin("mfm_cli").expect("binary exists");
     support::sanitize_machine_readable_cli_env(&mut command)
-        .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
             "--output-format",
@@ -242,6 +241,8 @@ fn run_import_private_key(
             "--label",
             label,
             "--stdin",
+            "--runtime-config",
+            runtime_config.to_str().expect("runtime config path"),
         ])
         .write_stdin(private_key_hex)
         .output()
@@ -293,7 +294,6 @@ fn run_tx_sign(
     );
     let mut command = Command::cargo_bin("mfm_cli").expect("binary exists");
     support::sanitize_machine_readable_cli_env(&mut command)
-        .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
             "--output-format",
@@ -320,6 +320,8 @@ fn run_tx_sign(
             args.gas_limit,
             "--out",
             args.out.to_str().expect("path"),
+            "--runtime-config",
+            runtime_config.to_str().expect("runtime config path"),
         ])
         .output()
         .expect("execute tx-sign")
@@ -366,8 +368,8 @@ entry_id = {entry_id}
     let config = format!(
         r#"
 [keystores.default]
-keystore_path = {keystore_path}
-unlock_file = {password_file}
+keystore_path = {{ direct = {keystore_path} }}
+unlock_file_path = {{ direct = {password_file} }}
 {signer}
 "#,
         keystore_path = toml_string(&keystore_path.display().to_string()),

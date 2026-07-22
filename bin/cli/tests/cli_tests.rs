@@ -116,7 +116,6 @@ fn facts_commands_use_public_evidence_only_services() {
         "audience:",
         "scope:",
         "runtime_config",
-        "MFM_RUNTIME_CONFIG_FILE",
     ] {
         assert!(
             !source.contains(forbidden),

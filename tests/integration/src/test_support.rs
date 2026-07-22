@@ -14,9 +14,8 @@ use sqlx::{AssertSqlSafe, PgPool};
 mod run_control_support;
 
 pub use run_control_support::{
-    set_evm_runtime_config_env_with_signer_for_test, start_portfolio_rpc_mock,
-    write_evm_runtime_config_for_test, write_portfolio_runtime_config_for_test, EnvVarRestore,
-    RuntimeConfigSignerBinding, ENV_RUNTIME_CONFIG_FILE,
+    start_portfolio_rpc_mock, write_evm_runtime_config_for_test,
+    write_portfolio_runtime_config_for_test, RuntimeConfigSignerBinding,
 };
 
 /// Re-export: merge-safe Platform holding seed for store-backed portfolio report tests.

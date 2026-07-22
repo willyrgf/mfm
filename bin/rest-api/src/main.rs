@@ -1,9 +1,19 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
+use clap::Parser;
 use mfm_app::observability::{init_observability, observability_from_env};
 use tokio::net::TcpListener;
 
 const ENV_ADDR: &str = "MFM_REST_API_ADDR";
+
+#[derive(Parser)]
+#[command(name = "mfm_rest_api")]
+struct Args {
+    /// Explicit runtime configuration file for live capability-backed runs.
+    #[arg(long, value_name = "PATH")]
+    runtime_config: Option<PathBuf>,
+}
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
@@ -13,6 +23,7 @@ async fn shutdown_signal() {
 #[tokio::main]
 #[allow(clippy::disallowed_methods)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
     init_observability(observability_from_env("mfm_rest_api"))
         .map_err(|e| std::io::Error::other(format!("observability init failed: {}", e.message)))?;
 
@@ -21,7 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|_| format!("invalid {ENV_ADDR} socket addr"))?;
 
-    let app = mfm_rest_api::make_app(mfm_rest_api::make_default_app_state().await?);
+    let app =
+        mfm_rest_api::make_app(mfm_rest_api::make_default_app_state(args.runtime_config).await?);
 
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "listening");

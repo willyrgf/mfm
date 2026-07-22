@@ -3,4 +3,4 @@
 
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
-rpc_url_env = "MFM_ETHEREUM_MAINNET_RPC_URL"
+rpc_url = { env = "MFM_ETHEREUM_MAINNET_RPC_URL" }

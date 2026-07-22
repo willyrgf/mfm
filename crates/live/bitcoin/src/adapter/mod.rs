@@ -76,7 +76,8 @@ impl ExternalReadPlanExecutor<CollectBitcoinBalancesState> for CollectBitcoinBal
             let request = state.config().request().map_err(bitcoin_state_error)?;
             self.session
                 .validate_binding(request.binding())
-                .map_err(bitcoin_capability_error)
+                .await
+                .map_err(bitcoin_ingress_error)
         })
     }
 
@@ -133,6 +134,29 @@ fn bitcoin_capability_error(error: BitcoinCapabilityError) -> mfm_runtime::Runti
             )
         }
     }
+}
+
+fn bitcoin_ingress_error(error: BitcoinCapabilityError) -> mfm_runtime::RuntimeError {
+    let BitcoinCapabilityError::Provider { diagnostic, .. } = &error else {
+        return bitcoin_capability_error(error);
+    };
+    let (code, message) = match diagnostic.code() {
+        mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationMissing => {
+            ("RuntimeConfigRequired", "runtime configuration is required")
+        }
+        mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid => {
+            ("RuntimeConfigInvalid", "runtime configuration is invalid")
+        }
+        _ => return bitcoin_capability_error(error),
+    };
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("runtime configuration error code is checked text"),
+        events::ErrorCategory::Capability,
+        message,
+        vec![diagnostic.clone()],
+    )
+    .expect("runtime configuration failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::Failure(failure)
 }
 
 fn bitcoin_state_error(_error: BitcoinBalanceCollectionError) -> mfm_runtime::RuntimeError {

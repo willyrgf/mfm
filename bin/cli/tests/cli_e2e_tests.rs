@@ -33,8 +33,8 @@ fn create_test_env() -> TestEnv {
     let runtime_config = format!(
         r#"
 [keystores.default]
-keystore_path = {keystore_path}
-unlock_file = {password_file}
+keystore_path = {{ direct = {keystore_path} }}
+unlock_file_path = {{ direct = {password_file} }}
 "#,
         keystore_path = toml_string(&keystore_path.display().to_string()),
         password_file = toml_string(&password_file.display().to_string()),
@@ -48,19 +48,20 @@ unlock_file = {password_file}
     }
 }
 
-/// Helper to run CLI commands with runtime config set.
-fn cli_with_runtime_config(env: &TestEnv) -> Command {
+/// Builds a CLI command with an explicit runtime config argument.
+fn cli_with_runtime_config(env: &TestEnv, args: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.env(
-        "MFM_RUNTIME_CONFIG_FILE",
-        env.runtime_config_path.to_str().unwrap(),
-    );
+    cmd.args(args)
+        .arg("--runtime-config")
+        .arg(&env.runtime_config_path);
     cmd
 }
 
 fn import_private_key(test_env: &TestEnv, label: Option<&str>, private_key: &str) {
-    let mut import_cmd = cli_with_runtime_config(test_env);
-    import_cmd.args(&["keystore", "import", "--import-type", "privatekey"]);
+    let mut import_cmd = cli_with_runtime_config(
+        test_env,
+        &["keystore", "import", "--import-type", "privatekey"],
+    );
     if let Some(label) = label {
         import_cmd.args(&["--label", label]);
     }
@@ -78,15 +79,17 @@ fn import_private_key(test_env: &TestEnv, label: Option<&str>, private_key: &str
 }
 
 fn import_mnemonic(test_env: &TestEnv, label: &str, derivation_path: Option<&str>, mnemonic: &str) {
-    let mut import_cmd = cli_with_runtime_config(test_env);
-    import_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--label",
-        label,
-    ]);
+    let mut import_cmd = cli_with_runtime_config(
+        test_env,
+        &[
+            "keystore",
+            "import",
+            "--import-type",
+            "mnemonic",
+            "--label",
+            label,
+        ],
+    );
     if let Some(derivation_path) = derivation_path {
         import_cmd.args(&["--derivation-path", derivation_path]);
     }
@@ -123,8 +126,7 @@ fn test_e2e_private_key_workflow() {
     );
 
     // Step 2: List keys to verify explicit and generated labels.
-    let mut list_cmd = cli_with_runtime_config(&test_env);
-    list_cmd.args(&["keystore", "list"]);
+    let mut list_cmd = cli_with_runtime_config(&test_env, &["keystore", "list"]);
 
     list_cmd
         .assert()
@@ -134,8 +136,8 @@ fn test_e2e_private_key_workflow() {
         .stdout(predicate::str::contains("privatekey"));
 
     // Step 3: List keys in JSON format
-    let mut list_json_cmd = cli_with_runtime_config(&test_env);
-    list_json_cmd.args(&["--output-format", "json", "keystore", "list"]);
+    let mut list_json_cmd =
+        cli_with_runtime_config(&test_env, &["--output-format", "json", "keystore", "list"]);
 
     list_json_cmd
         .assert()
@@ -144,8 +146,8 @@ fn test_e2e_private_key_workflow() {
         .stdout(predicate::str::contains("\"key_type\": \"privatekey\""));
 
     // Step 4: List keys with addresses
-    let mut list_addr_cmd = cli_with_runtime_config(&test_env);
-    list_addr_cmd.args(&["keystore", "list", "--show-addresses"]);
+    let mut list_addr_cmd =
+        cli_with_runtime_config(&test_env, &["keystore", "list", "--show-addresses"]);
 
     list_addr_cmd
         .assert()
@@ -170,8 +172,7 @@ fn test_e2e_mnemonic_workflow() {
     );
 
     // Step 2: List keys to verify import
-    let mut list_cmd = cli_with_runtime_config(&test_env);
-    list_cmd.args(&["keystore", "list"]);
+    let mut list_cmd = cli_with_runtime_config(&test_env, &["keystore", "list"]);
 
     list_cmd
         .assert()
@@ -187,8 +188,8 @@ fn test_e2e_mnemonic_workflow() {
     );
 
     // Step 4: List should now show 2 keys
-    let mut list_cmd2 = cli_with_runtime_config(&test_env);
-    list_cmd2.args(&["--output-format", "json", "keystore", "list"]);
+    let mut list_cmd2 =
+        cli_with_runtime_config(&test_env, &["--output-format", "json", "keystore", "list"]);
 
     let _output = list_cmd2
         .assert()
@@ -205,20 +206,22 @@ fn test_e2e_mnemonic_passphrase_file_workflow() {
     let extra_str = extra_path.to_str().unwrap();
     let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-    let mut import_with_extra = cli_with_runtime_config(&test_env);
-    import_with_extra.args(&[
-        "--output-format",
-        "json",
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--label",
-        "hd-wallet-extra",
-        "--passphrase-file",
-        extra_str,
-        "--stdin",
-    ]);
+    let mut import_with_extra = cli_with_runtime_config(
+        &test_env,
+        &[
+            "--output-format",
+            "json",
+            "keystore",
+            "import",
+            "--import-type",
+            "mnemonic",
+            "--label",
+            "hd-wallet-extra",
+            "--passphrase-file",
+            extra_str,
+            "--stdin",
+        ],
+    );
     import_with_extra.write_stdin(mnemonic);
     let with_extra_output = import_with_extra
         .assert()
@@ -233,18 +236,20 @@ fn test_e2e_mnemonic_passphrase_file_workflow() {
         .expect("import output should include address")
         .to_string();
 
-    let mut import_without_extra = cli_with_runtime_config(&test_env);
-    import_without_extra.args(&[
-        "--output-format",
-        "json",
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--label",
-        "hd-wallet-no-extra",
-        "--stdin",
-    ]);
+    let mut import_without_extra = cli_with_runtime_config(
+        &test_env,
+        &[
+            "--output-format",
+            "json",
+            "keystore",
+            "import",
+            "--import-type",
+            "mnemonic",
+            "--label",
+            "hd-wallet-no-extra",
+            "--stdin",
+        ],
+    );
     import_without_extra.write_stdin(mnemonic);
     let without_extra_output = import_without_extra
         .assert()
@@ -268,16 +273,18 @@ fn test_e2e_mnemonic_passphrase_file_workflow() {
 fn test_e2e_mnemonic_stdin_rejects_two_field_protocol() {
     let test_env = create_test_env();
 
-    let mut import_cmd = cli_with_runtime_config(&test_env);
-    import_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--label",
-        "hd-wallet",
-        "--stdin",
-    ]);
+    let mut import_cmd = cli_with_runtime_config(
+        &test_env,
+        &[
+            "keystore",
+            "import",
+            "--import-type",
+            "mnemonic",
+            "--label",
+            "hd-wallet",
+            "--stdin",
+        ],
+    );
     import_cmd.write_stdin(
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\nsecond-field\n",
     );
@@ -310,8 +317,7 @@ fn test_e2e_delete_workflow() {
     );
 
     // Step 3: List keys to verify both exist
-    let mut list_cmd = cli_with_runtime_config(&test_env);
-    list_cmd.args(&["keystore", "list"]);
+    let mut list_cmd = cli_with_runtime_config(&test_env, &["keystore", "list"]);
 
     list_cmd
         .assert()
@@ -320,8 +326,10 @@ fn test_e2e_delete_workflow() {
         .stdout(predicate::str::contains("keepme"));
 
     // Step 4: Delete by label with --yes flag
-    let mut delete_cmd = cli_with_runtime_config(&test_env);
-    delete_cmd.args(&["keystore", "delete", "--by-label", "deleteme", "--yes"]);
+    let mut delete_cmd = cli_with_runtime_config(
+        &test_env,
+        &["keystore", "delete", "--by-label", "deleteme", "--yes"],
+    );
 
     delete_cmd
         .assert()
@@ -329,8 +337,7 @@ fn test_e2e_delete_workflow() {
         .stdout(predicate::str::contains("deleted successfully"));
 
     // Step 5: List keys to verify only one remains
-    let mut list_cmd2 = cli_with_runtime_config(&test_env);
-    list_cmd2.args(&["keystore", "list"]);
+    let mut list_cmd2 = cli_with_runtime_config(&test_env, &["keystore", "list"]);
 
     list_cmd2
         .assert()
@@ -359,14 +366,16 @@ fn test_e2e_mixed_key_types_workflow() {
     );
 
     // List all keys
-    let mut list_cmd = cli_with_runtime_config(&test_env);
-    list_cmd.args(&[
-        "--output-format",
-        "json",
-        "keystore",
-        "list",
-        "--show-addresses",
-    ]);
+    let mut list_cmd = cli_with_runtime_config(
+        &test_env,
+        &[
+            "--output-format",
+            "json",
+            "keystore",
+            "list",
+            "--show-addresses",
+        ],
+    );
 
     list_cmd
         .assert()
@@ -377,8 +386,8 @@ fn test_e2e_mixed_key_types_workflow() {
         .stdout(predicate::str::contains("hd_derived"));
 
     // Test filtering by label pattern
-    let mut filter_cmd = cli_with_runtime_config(&test_env);
-    filter_cmd.args(&["keystore", "list", "--filter-label", "pk.*"]);
+    let mut filter_cmd =
+        cli_with_runtime_config(&test_env, &["keystore", "list", "--filter-label", "pk.*"]);
 
     filter_cmd
         .assert()
@@ -401,8 +410,8 @@ fn test_e2e_sorting_and_formatting() {
     }
 
     // Test sorting by label
-    let mut sort_label_cmd = cli_with_runtime_config(&test_env);
-    sort_label_cmd.args(&["keystore", "list", "--sort-by", "label"]);
+    let mut sort_label_cmd =
+        cli_with_runtime_config(&test_env, &["keystore", "list", "--sort-by", "label"]);
 
     sort_label_cmd
         .assert()
@@ -412,16 +421,18 @@ fn test_e2e_sorting_and_formatting() {
         .stdout(predicate::str::contains("zebra"));
 
     // Test JSON format with addresses
-    let mut json_cmd = cli_with_runtime_config(&test_env);
-    json_cmd.args(&[
-        "--output-format",
-        "json",
-        "keystore",
-        "list",
-        "--show-addresses",
-        "--sort-by",
-        "created",
-    ]);
+    let mut json_cmd = cli_with_runtime_config(
+        &test_env,
+        &[
+            "--output-format",
+            "json",
+            "keystore",
+            "list",
+            "--show-addresses",
+            "--sort-by",
+            "created",
+        ],
+    );
 
     json_cmd
         .assert()

@@ -12,7 +12,7 @@ accepts only certified typed run authority.
 nix develop
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
 cargo sqlx migrate run --source crates/storages/postgres/migrations
-cargo run -p mfm-rest-api
+cargo run -p mfm-rest-api -- --runtime-config /run/mfm/runtime.toml
 ```
 
 The repository does not expose a managed REST API app. The caller owns the
@@ -26,7 +26,9 @@ Environment variables:
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_REST_ROLE`: process role (`live` or `read`; default `live`)
-- `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
+
+The optional `--runtime-config <PATH>` process argument explicitly selects the runtime config for
+live capability-backed runs. There is no environment-selected config path.
 
 The REST API validates the PostgreSQL schema on startup and does not create or
 alter tables. Apply the `mfm-storage-postgres` migrations before starting the
@@ -50,7 +52,7 @@ reads and are available from either role.
 Public fact queries return descriptor-filtered committed facts with deterministic evidence metadata;
 they do not depend on process-local signing material.
 
-REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
+REST startup does not load or validate the explicit runtime config path; malformed or missing
 config is reported only when a live start/resume request needs the affected capability family.
 
 ## API

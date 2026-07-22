@@ -29,7 +29,6 @@ members = [
 	"crates/domains/evm",
 	"crates/domains/portfolio",
 	"crates/signing",
-	"crates/runtime-config",
 	"crates/storages/postgres",
 ]
 

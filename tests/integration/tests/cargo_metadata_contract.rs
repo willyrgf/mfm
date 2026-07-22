@@ -340,6 +340,7 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
     let secret = PackageSemantics::plain(Layer::SecretProvider);
     let storage = PackageSemantics::plain(Layer::Storage);
     let assembly = PackageSemantics::assembly(true);
+    let private_assembly = PackageSemantics::assembly(false);
     let binary = PackageSemantics::plain(Layer::Binary);
 
     let forbidden = [
@@ -387,6 +388,11 @@ fn semantic_matrix_rejects_forbidden_edges_without_exceptions() {
         (&secret, &source, "secret provider -> domain"),
         (&storage, &source, "storage -> domain"),
         (&assembly, &binary, "assembly -> binary"),
+        (
+            &binary,
+            &private_assembly,
+            "binary -> non-binary-facing assembly",
+        ),
         (&binary, &secret, "binary -> secret provider"),
         (&binary, &signing, "binary -> signing"),
         (&binary, &source, "binary -> domain"),
@@ -452,6 +458,12 @@ fn mixed_binary_library_dependencies_obey_the_binary_row() {
         &facing_app,
         &roles
     ));
+
+    let private_assembly = PackageSemantics::assembly(false);
+    assert!(
+        !dependency_allowed(&mixed_binary.semantics, &private_assembly, &roles),
+        "a mixed package cannot depend on private assembly support"
+    );
 
     let live_library = PackageSemantics::live("bitcoin");
     assert!(
@@ -877,10 +889,14 @@ fn dependency_allowed(
         },
         Layer::Storage => dependency.layer == Layer::Kernel,
         Layer::Assembly => !matches!(dependency.layer, Layer::Binary | Layer::Test),
-        // The final binary-facing refinement becomes active after the remaining runtime/store
-        // construction moves behind app. Secret providers and signing implementations are already
-        // prohibited, and mixed lib/bin packages are evaluated as one binary package.
-        Layer::Binary => matches!(dependency.layer, Layer::Kernel | Layer::Assembly),
+        // Kernel facing becomes strict after the remaining runtime/store construction moves behind
+        // app. Assembly dependencies are already limited to the reviewed binary-facing facade, and
+        // mixed lib/bin packages are evaluated as one binary package.
+        Layer::Binary => match dependency.layer {
+            Layer::Kernel => true,
+            Layer::Assembly => dependency.binary_facing == Some(true),
+            _ => false,
+        },
         Layer::Test => true,
     }
 }

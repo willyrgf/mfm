@@ -112,7 +112,7 @@ fn endpoint(value: &str) -> EvmRpcEndpoint {
 }
 
 fn authorization(value: &str) -> EvmRpcAuthorization {
-    EvmRpcAuthorization::new(value).expect("authorization")
+    EvmRpcAuthorization::new(zeroize::Zeroizing::new(value.to_owned())).expect("authorization")
 }
 
 async fn session(server: &TestServer) -> EvmJsonRpcSession {

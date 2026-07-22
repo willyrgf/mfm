@@ -28,11 +28,11 @@ impl BitcoinBalanceSession for FakeSession {
         BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
     }
 
-    fn validate_binding(
-        &self,
-        _binding: &BitcoinSourceBinding,
-    ) -> Result<(), BitcoinCapabilityError> {
-        Ok(())
+    fn validate_binding<'a>(
+        &'a self,
+        _binding: &'a BitcoinSourceBinding,
+    ) -> BitcoinSessionFuture<'a, ()> {
+        Box::pin(std::future::ready(Ok(())))
     }
 
     fn collect_balances<'a>(

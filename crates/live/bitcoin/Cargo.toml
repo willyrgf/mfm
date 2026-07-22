@@ -20,6 +20,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
+zeroize = "1.7"
 
 mfm-bitcoin = { path = "../../domains/bitcoin" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
@@ -30,6 +31,7 @@ mfm-runtime = { path = "../../kernel/runtime" }
 mfm-store = { path = "../../kernel/store" }
 
 [dev-dependencies]
+static_assertions = "1"
 tokio = { workspace = true }
 
 [[test]]

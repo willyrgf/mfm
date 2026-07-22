@@ -37,7 +37,6 @@ mfm-portfolio-live = { path = "../live/portfolio" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
-mfm-runtime-config = { path = "../runtime-config" }
 mfm-signing = { path = "../signing" }
 mfm-keystore = { path = "../keystore" }
 mfm-spec = { path = "../kernel/spec" }

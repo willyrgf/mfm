@@ -4,7 +4,6 @@ use axum::http::{Method, Request};
 use axum::response::IntoResponse;
 use tower::ServiceExt;
 
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001";
 const VALID_SCHEMA_ID: &str =
@@ -90,7 +89,6 @@ async fn runtime_config_error_keeps_shared_payload_without_cli_syntax() {
 
 #[tokio::test]
 async fn run_start_accepts_entry_point_and_target_shape_before_configuration_lookup() {
-    let _env_guard = ENV_LOCK.lock().await;
     let response = test_app()
         .oneshot(json_post(
             "/v1/runs/start",
@@ -190,13 +188,13 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
 }
 
 #[tokio::test]
-async fn read_only_routes_ignore_malformed_runtime_config_env() {
-    let _env = locked_env([(
-        mfm_app::MFM_RUNTIME_CONFIG_FILE,
-        "/definitely/not/runtime.toml",
-    )])
-    .await;
-    let app = test_app();
+async fn read_only_routes_ignore_an_explicit_malformed_runtime_config() {
+    let app = make_app(AppState {
+        role: RestProcessRole::Live,
+        store: store::AsyncInMemoryRunStore::default(),
+        configured_store: None,
+        runtime_config_path: Some(PathBuf::from("/definitely/not/runtime.toml")),
+    });
 
     let routes = [
         (Method::GET, "/v1/runs".to_owned(), StatusCode::OK),
@@ -372,35 +370,6 @@ async fn assert_start_requires_configured_store(app: &axum::Router) {
     assert_eq!(value["error"]["code"], "ConfiguredStoreUnavailable");
 }
 
-async fn locked_env<const N: usize>(pairs: [(&'static str, &str); N]) -> EnvGuard {
-    let guard = ENV_LOCK.lock().await;
-    let mut previous = Vec::new();
-    for (key, value) in pairs {
-        previous.push((key, std::env::var(key).ok()));
-        set_env(key, value);
-    }
-    EnvGuard {
-        _guard: guard,
-        previous,
-    }
-}
-
-struct EnvGuard {
-    _guard: tokio::sync::MutexGuard<'static, ()>,
-    previous: Vec<(&'static str, Option<String>)>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in &self.previous {
-            match value {
-                Some(value) => set_env(key, value),
-                None => remove_env(key),
-            }
-        }
-    }
-}
-
 struct TestTempDir {
     path: std::path::PathBuf,
 }
@@ -429,18 +398,6 @@ fn test_temp_dir(name: &str) -> TestTempDir {
     let path = std::env::temp_dir().join(unique);
     std::fs::create_dir(&path).expect("create temp dir");
     TestTempDir { path }
-}
-
-fn set_env(key: &str, value: &str) {
-    // SAFETY: these tests serialize environment mutation through ENV_LOCK and
-    // restore each variable before releasing that lock.
-    unsafe { std::env::set_var(key, value) };
-}
-
-fn remove_env(key: &str) {
-    // SAFETY: these tests serialize environment mutation through ENV_LOCK and
-    // restore each variable before releasing that lock.
-    unsafe { std::env::remove_var(key) };
 }
 
 fn test_app() -> axum::Router {

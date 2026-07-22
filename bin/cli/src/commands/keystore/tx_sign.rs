@@ -58,7 +58,7 @@ pub(crate) struct TxSignArgs {
     #[arg(long, default_value = "0x")]
     pub data: String,
 
-    /// Runtime configuration file (default: $MFM_RUNTIME_CONFIG_FILE)
+    /// Explicit runtime configuration file.
     #[arg(long)]
     pub runtime_config: Option<PathBuf>,
 }

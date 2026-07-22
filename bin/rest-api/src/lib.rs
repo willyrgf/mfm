@@ -11,7 +11,7 @@
 //! use mfm_rest_api::{make_app, make_default_app_state};
 //!
 //! async fn build_router() -> Result<axum::Router, mfm_rest_api::ApiError> {
-//!     let state = make_default_app_state().await?;
+//!     let state = make_default_app_state(None).await?;
 //!     Ok(make_app(state))
 //! }
 //! ```
@@ -272,20 +272,25 @@ where
     }
 }
 
-/// Builds production REST API state for an explicit process role.
-pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultAppState, ApiError> {
+/// Builds production REST API state for an explicit process role and runtime config path.
+pub async fn make_app_state_for_role(
+    role: RestProcessRole,
+    runtime_config_path: Option<PathBuf>,
+) -> Result<DefaultAppState, ApiError> {
     let store = mfm_app::connect_production_store(None).await?;
     Ok(AppState {
         role,
         configured_store: Some(store.clone()),
         store,
-        runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
+        runtime_config_path,
     })
 }
 
-/// Builds default production REST API state from environment-selected role and stores.
-pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
-    make_app_state_for_role(RestProcessRole::from_env()?).await
+/// Builds default production REST API state from the environment-selected role and stores.
+pub async fn make_default_app_state(
+    runtime_config_path: Option<PathBuf>,
+) -> Result<DefaultAppState, ApiError> {
+    make_app_state_for_role(RestProcessRole::from_env()?, runtime_config_path).await
 }
 
 /// Builds the `axum` router for the public REST API surface.

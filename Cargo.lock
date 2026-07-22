@@ -2345,7 +2345,6 @@ dependencies = [
  "mfm-program-derive",
  "mfm-replay",
  "mfm-runtime",
- "mfm-runtime-config",
  "mfm-signing",
  "mfm-spec",
  "mfm-storage-postgres",
@@ -2400,8 +2399,10 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "static_assertions",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2506,9 +2507,11 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "static_assertions",
  "thiserror",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -2703,6 +2706,7 @@ name = "mfm-rest-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "http",
  "mfm-app",
  "mfm-canonical",
@@ -2740,23 +2744,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "trybuild",
-]
-
-[[package]]
-name = "mfm-runtime-config"
-version = "0.1.0"
-dependencies = [
- "http",
- "mfm-bitcoin",
- "mfm-ids",
- "mfm-signing",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml 0.8.23",
- "url",
- "uuid",
 ]
 
 [[package]]

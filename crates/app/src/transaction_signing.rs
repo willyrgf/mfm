@@ -1,4 +1,3 @@
-use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -6,16 +5,15 @@ use std::str::FromStr;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mfm_evm::{EvmSigningError, TransientSignedEip1559Envelope, UnsignedEip1559Envelope};
 use mfm_keystore::KeystoreSignerProvider;
-use mfm_runtime_config::{RuntimeConfig, RuntimeConfigErrorKind};
 use mfm_signing::{SignerRef, SigningError};
 use serde::Serialize;
 
-use crate::{ErrorClass, PublicError, MFM_RUNTIME_CONFIG_FILE};
+use crate::{runtime_config, ErrorClass, PublicError};
 
 /// Raw command input for one explicit EIP-1559 signing request.
 #[derive(Debug, Clone)]
 pub struct EvmTransactionSigningRequest {
-    /// Explicit runtime configuration path, or `None` to use the environment binding.
+    /// Explicit runtime configuration path.
     pub runtime_config_path: Option<PathBuf>,
     /// Exact process-local signer reference.
     pub signer_ref: String,
@@ -179,8 +177,7 @@ pub async fn sign_evm_transaction_command(
 
 /// Signs one checked EIP-1559 envelope through the exact runtime signer binding.
 ///
-/// The explicit path takes precedence over [`MFM_RUNTIME_CONFIG_FILE`]. Runtime
-/// configuration and keystore work stay below this application boundary; the
+/// Runtime configuration and keystore work stay below this application boundary; the
 /// returned signed envelope remains transient bearer material.
 async fn sign_checked_eip1559_transaction(
     runtime_config_path: Option<&Path>,
@@ -188,15 +185,12 @@ async fn sign_checked_eip1559_transaction(
     expected_sender: Address,
     envelope: &UnsignedEip1559Envelope,
 ) -> Result<TransientSignedEip1559Envelope, PublicError> {
-    let runtime_config_path = runtime_config_path
-        .map(Path::to_path_buf)
-        .or_else(|| env::var_os(MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from))
-        .ok_or_else(|| {
-            PublicError::bad_request(
-                "RuntimeConfigRequired",
-                "EVM signing requires --runtime-config or MFM_RUNTIME_CONFIG_FILE",
-            )
-        })?;
+    let runtime_config_path = runtime_config_path.map(Path::to_path_buf).ok_or_else(|| {
+        PublicError::bad_request(
+            "RuntimeConfigRequired",
+            "EVM signing requires an explicit runtime configuration path",
+        )
+    })?;
     let provider_signer_ref = signer_ref.clone();
     let provider = tokio::task::spawn_blocking(move || {
         assemble_keystore_signer(runtime_config_path, provider_signer_ref)
@@ -277,35 +271,29 @@ pub(crate) fn assemble_keystore_signer(
     runtime_config_path: PathBuf,
     signer_ref: SignerRef,
 ) -> Result<KeystoreSignerProvider, PublicError> {
-    let binding =
-        RuntimeConfig::load_signer_binding(runtime_config_path, &signer_ref).map_err(|error| {
-            match error.kind() {
-                RuntimeConfigErrorKind::MissingSigner => PublicError::bad_request(
-                    "SignerNotConfigured",
-                    "Requested signer is not configured",
-                ),
-                _ => PublicError::backend(
-                    ErrorClass::ServiceUnavailable,
-                    "RuntimeConfigInvalid",
-                    "EVM signer runtime configuration is invalid",
-                ),
-            }
-        })?;
-    let signer = binding.signer();
-    let keystore = binding.keystore();
-    KeystoreSignerProvider::new(
-        signer_ref,
-        signer.entry_id(),
-        keystore.keystore_path().expose_path(),
-        keystore.unlock_file().expose_path(),
+    let binding = runtime_config::load_signer_binding(&runtime_config_path, &signer_ref).map_err(
+        |error| match error.kind() {
+            runtime_config::RuntimeConfigErrorKind::MissingSigner => PublicError::bad_request(
+                "SignerNotConfigured",
+                "Requested signer is not configured",
+            ),
+            _ => PublicError::backend(
+                ErrorClass::ServiceUnavailable,
+                "RuntimeConfigInvalid",
+                "EVM signer runtime configuration is invalid",
+            ),
+        },
+    )?;
+    let (entry_id, keystore_path, unlock_file_path) = binding.into_parts();
+    KeystoreSignerProvider::new(signer_ref, entry_id, &keystore_path, &unlock_file_path).map_err(
+        |_| {
+            PublicError::backend(
+                ErrorClass::ServiceUnavailable,
+                "SignerRuntimePathInvalid",
+                "EVM signer runtime configuration is invalid",
+            )
+        },
     )
-    .map_err(|_| {
-        PublicError::backend(
-            ErrorClass::ServiceUnavailable,
-            "SignerRuntimePathInvalid",
-            "EVM signer runtime configuration is invalid",
-        )
-    })
 }
 
 fn public_signing_error(error: EvmSigningError) -> PublicError {

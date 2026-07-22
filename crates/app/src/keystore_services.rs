@@ -1,15 +1,13 @@
-use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use mfm_keystore::{Keystore, KeystoreConfig, KeystoreError};
-use mfm_runtime_config::{KeystoreRef, RuntimeConfig, RuntimeConfigRequirement};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{PublicError, MFM_RUNTIME_CONFIG_FILE};
+use crate::{runtime_config, PublicError};
 
 const DEFAULT_KEYSTORE_REF: &str = "default";
 const MAX_RUNTIME_PATH_BYTES: usize = 4_096;
@@ -173,39 +171,34 @@ fn prepare_keystore_access_on_worker(
             runtime_config_path,
             keystore_ref,
         } => {
-            let runtime_config_path = runtime_config_path
-                .or_else(|| env::var_os(MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from))
-                .ok_or_else(|| {
-                    PublicError::bad_request(
-                        "missing_keystore_selection",
-                        "provide --keystore or --runtime-config",
-                    )
-                })?;
+            let runtime_config_path = runtime_config_path.ok_or_else(|| {
+                PublicError::bad_request(
+                    "missing_keystore_selection",
+                    "provide --keystore or --runtime-config",
+                )
+            })?;
             validate_runtime_path(&runtime_config_path)?;
-            let keystore_ref = KeystoreRef::new(
-                keystore_ref.as_deref().unwrap_or(DEFAULT_KEYSTORE_REF),
-            )
-            .map_err(|_| {
-                PublicError::bad_request(
-                    "invalid_argument",
-                    "--keystore-ref is not a valid profile ref",
-                )
-            })?;
-            let config = RuntimeConfig::load_path_with_requirements(
-                runtime_config_path,
-                RuntimeConfigRequirement::keystores(),
-            )
-            .map_err(|_| {
-                PublicError::bad_request("RuntimeConfigInvalid", "Runtime configuration is invalid")
-            })?;
-            let profile = config.keystores().get(&keystore_ref).ok_or_else(|| {
-                PublicError::bad_request(
-                    "keystore_profile_not_found",
-                    "runtime config keystore profile was not found",
-                )
-            })?;
-            let path = profile.keystore_path().expose_path().to_path_buf();
-            let unlock_file = profile.unlock_file().expose_path().to_path_buf();
+            let keystore_ref = keystore_ref.as_deref().unwrap_or(DEFAULT_KEYSTORE_REF);
+            let profile = runtime_config::load_keystore_profile(&runtime_config_path, keystore_ref)
+                .map_err(|error| match error.kind() {
+                    runtime_config::RuntimeConfigErrorKind::InvalidIdentifier => {
+                        PublicError::bad_request(
+                            "invalid_argument",
+                            "--keystore-ref is not a valid profile ref",
+                        )
+                    }
+                    runtime_config::RuntimeConfigErrorKind::MissingKeystore => {
+                        PublicError::bad_request(
+                            "keystore_profile_not_found",
+                            "runtime config keystore profile was not found",
+                        )
+                    }
+                    _ => PublicError::bad_request(
+                        "RuntimeConfigInvalid",
+                        "Runtime configuration is invalid",
+                    ),
+                })?;
+            let (path, unlock_file) = profile.into_paths();
             validate_runtime_path(&path)?;
             validate_runtime_path(&unlock_file)?;
             (path, PreparedCredential::File(unlock_file))
@@ -691,7 +684,7 @@ mod tests {
         fs::write(
             &runtime_config,
             format!(
-                "[keystores.default]\nkeystore_path = {}\nunlock_file = {}\n",
+                "[keystores.default]\nkeystore_path = {{ direct = {} }}\nunlock_file_path = {{ direct = {} }}\n",
                 serde_json::to_string(&path.display().to_string()).expect("path"),
                 serde_json::to_string(&unlock_file.display().to_string()).expect("unlock path")
             ),
