@@ -171,7 +171,7 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn copy_utf8(bytes: &ProtectedBytes) -> Result<Zeroizing<String>> {
+pub(super) fn copy_utf8(bytes: &ProtectedBytes) -> Result<Zeroizing<String>> {
     copy_utf8_with_kind(bytes, RuntimeConfigErrorKind::InvalidUtf8)
 }
 

@@ -160,6 +160,42 @@ fn balance_asset_deserialization_preserves_the_closed_fact_shape() {
 }
 
 #[test]
+fn retained_balance_response_decoder_requires_canonical_closed_domain_bytes() {
+    let canonical = format!(
+        r#"{{"block_anchor":{{"hash":"{ANCHOR_HASH}","number":"10"}},"decimals":18,"raw_units":"42"}}"#
+    );
+    let response =
+        decode_evm_balance_snapshot_response(canonical.as_bytes()).expect("canonical response");
+    assert_eq!(response.block_anchor().number(), "10");
+    assert_eq!(response.block_anchor().hash(), ANCHOR_HASH);
+    assert_eq!(response.decimals(), 18);
+    assert_eq!(response.raw_units(), "42");
+
+    let rejected = [
+        format!(
+            r#"{{"block_anchor":{{"hash":"{ANCHOR_HASH}","number":"10"}},"raw_units":"42","decimals":18}}"#
+        ),
+        format!(
+            r#"{{"block_anchor":{{"hash":"{ANCHOR_HASH}","number":"10"}},"decimals":18,"extra":false,"raw_units":"42"}}"#
+        ),
+        format!(
+            r#"{{"block_anchor":{{"hash":"{ANCHOR_HASH}","number":"010"}},"decimals":18,"raw_units":"42"}}"#
+        ),
+        format!(
+            r#"{{"block_anchor":{{"hash":"{ANCHOR_HASH}","number":"10"}},"decimals":18,"raw_units":"042"}}"#
+        ),
+        format!(r#"{{"anchor_hash":"{ANCHOR_HASH}","balance_sats":42}}"#),
+        format!("{canonical}\n"),
+    ];
+    for bytes in rejected {
+        assert!(
+            decode_evm_balance_snapshot_response(bytes.as_bytes()).is_err(),
+            "accepted invalid retained response: {bytes}"
+        );
+    }
+}
+
+#[test]
 fn reducer_deduplicates_metadata_and_emits_one_unified_fact_per_source() {
     let config = collection_config(vec![
         token_source(SECOND_ACCOUNT),

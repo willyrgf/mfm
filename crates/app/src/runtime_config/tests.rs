@@ -8,7 +8,7 @@ use mfm_ids::LocalPublicId;
 use mfm_signing::SignerRef;
 use static_assertions::assert_not_impl_any;
 
-use super::value::{read_bounded_with_witness, ResolvedValue};
+use super::value::{copy_utf8, read_bounded_with_witness, ResolvedValue};
 use super::*;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -505,7 +505,13 @@ fn indirection_files_reject_empty_invalid_utf8_and_limit_plus_one() {
 fn protected_read_buffers_zeroize_on_success_and_every_error_path() {
     for (name, reader, limit, succeeds) in [
         ("success", PartialReader::success(b"protected"), 64, true),
-        ("empty", PartialReader::success(b""), 64, true),
+        ("empty", PartialReader::success(b""), 64, false),
+        (
+            "invalid UTF-8",
+            PartialReader::success(b"\xffprotected"),
+            64,
+            false,
+        ),
         (
             "partial failure",
             PartialReader::failure_after(b"partial-secret"),
@@ -515,7 +521,8 @@ fn protected_read_buffers_zeroize_on_success_and_every_error_path() {
         ("limit plus one", PartialReader::success(b"12345"), 4, false),
     ] {
         let witness = Arc::new(AtomicBool::new(false));
-        let result = read_bounded_with_witness(reader, limit, Arc::clone(&witness));
+        let result = read_bounded_with_witness(reader, limit, Arc::clone(&witness))
+            .and_then(|bytes| copy_utf8(&bytes));
         assert_eq!(result.is_ok(), succeeds, "{name}");
         drop(result);
         assert!(witness.load(Ordering::SeqCst), "{name} zeroize witness");

@@ -57,8 +57,8 @@ canonical addresses in strict UTF-8 order. A successful attempt performs exactly
 3. `getblockhash(scan.height)`, requiring the hash to equal the scan anchor.
 
 Tip advancement is valid. A changed hash at the scan height is a reorganization and fails the
-attempt. MFM never calls `getblockheader`, `scantxoutset status`, or `scantxoutset abort`; it has no
-process-local scan coordinator and no hidden transport retry.
+attempt. MFM issues no additional RPC or scan-control requests; it has no process-local scan
+coordinator and no hidden transport retry.
 
 The selected deadline is the overall `scantxoutset start` timeout. Timeout or cancellation drops
 MFM's HTTP request but does not abort Bitcoin Core's global scan. A later full-attempt retry may

@@ -2,8 +2,8 @@
 //!
 //! Policy id: `mfm.portfolio.holding.collection-receipt-anchor.v1`.
 //! The typed family receipts fix every source, anchor, and fact-content identity before this module
-//! projects hydrated, identity-matching facts into observations. Family status/coverage semantics
-//! are normalized only after exact identity has been established.
+//! projects hydrated, identity-matching facts into observations. Receipt and fact eligibility are
+//! normalized only after exact identity has been established.
 
 use std::collections::BTreeMap;
 
@@ -89,7 +89,7 @@ impl PortfolioHoldingSelectionError {
     }
 }
 
-/// One acceptable candidate fact for a required holding (post coverage/status filter).
+/// One acceptable candidate fact for a required holding after receipt and identity validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HoldingCandidate {
     /// Network id of the holding.
