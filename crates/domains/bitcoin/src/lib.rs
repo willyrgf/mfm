@@ -20,9 +20,9 @@ pub use model::{
     BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT,
 };
 pub use operation::{
-    bitcoin_collectors_operation_registry, bitcoin_collectors_state_registry,
-    register_bitcoin_collectors_certification_descriptors, BitcoinBalanceCollectionOperation,
-    BitcoinBalanceCollectionOutputs,
+    bitcoin_collectors_authoring_catalog, bitcoin_collectors_operation_registry,
+    bitcoin_collectors_state_registry, register_bitcoin_collectors_certification_descriptors,
+    BitcoinBalanceCollectionOperation, BitcoinBalanceCollectionOutputs,
 };
 pub use state::{
     bitcoin_jsonrpc_adapter_kind, bitcoin_jsonrpc_adapter_version,

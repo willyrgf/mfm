@@ -22,9 +22,9 @@ pub use capability::{
 };
 pub use model::{EvmBlockAnchor, EvmBlockAnchorError};
 pub use operation::{
-    evm_collectors_operation_registry, evm_collectors_state_registry,
-    register_evm_collectors_certification_descriptors, EvmBalanceCollectionOperation,
-    EvmBalanceCollectionOutputs,
+    evm_collectors_authoring_catalog, evm_collectors_operation_registry,
+    evm_collectors_state_registry, register_evm_collectors_certification_descriptors,
+    EvmBalanceCollectionOperation, EvmBalanceCollectionOutputs,
 };
 pub use signing::{
     sign_eip1559, Eip1559QuantityField, EvmSignatureError, EvmSigningError,

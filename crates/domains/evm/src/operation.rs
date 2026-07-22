@@ -79,6 +79,7 @@ mfm_certify::define_program_descriptor_registry! {
     state_registry: pub evm_collectors_state_registry,
     operation_registry: pub evm_collectors_operation_registry,
     certification: pub register_evm_collectors_certification_descriptors,
+    authoring_catalog: pub evm_collectors_authoring_catalog,
     includes: [],
     states: [
         CollectEvmBalancesState,

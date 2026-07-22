@@ -65,6 +65,7 @@ mfm_certify::define_program_descriptor_registry! {
     state_registry: pub bitcoin_collectors_state_registry,
     operation_registry: pub bitcoin_collectors_operation_registry,
     certification: pub register_bitcoin_collectors_certification_descriptors,
+    authoring_catalog: pub bitcoin_collectors_authoring_catalog,
     includes: [],
     states: [
         CollectBitcoinBalancesState,

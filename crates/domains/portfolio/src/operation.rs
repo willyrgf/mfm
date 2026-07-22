@@ -445,16 +445,19 @@ mfm_certify::define_program_descriptor_registry! {
     state_registry: pub portfolio_snapshot_state_registry,
     operation_registry: pub portfolio_snapshot_operation_registry,
     certification: pub register_portfolio_snapshot_certification_descriptors,
+    authoring_catalog: pub portfolio_snapshot_authoring_catalog,
     includes: [
         {
             state_registry: mfm_bitcoin::bitcoin_collectors_state_registry,
             operation_registry: mfm_bitcoin::bitcoin_collectors_operation_registry,
             certification: mfm_bitcoin::register_bitcoin_collectors_certification_descriptors,
+            authoring_catalog: mfm_bitcoin::bitcoin_collectors_authoring_catalog,
         },
         {
             state_registry: mfm_evm::evm_collectors_state_registry,
             operation_registry: mfm_evm::evm_collectors_operation_registry,
             certification: mfm_evm::register_evm_collectors_certification_descriptors,
+            authoring_catalog: mfm_evm::evm_collectors_authoring_catalog,
         },
     ],
     states: [
@@ -640,6 +643,22 @@ mod tests {
             .register_operation::<PortfolioReportOperation>()
             .expect("report operation");
         assert_eq!(actual, expected);
+
+        let catalog = portfolio_snapshot_authoring_catalog().expect("snapshot authoring catalog");
+        assert_eq!(catalog.state_descriptors().len(), states.len());
+        assert_eq!(catalog.operation_descriptors().len(), operations.len());
+        assert_eq!(
+            catalog.emitted_fact_descriptors().len(),
+            mfm_bitcoin::bitcoin_collectors_authoring_catalog()
+                .expect("Bitcoin authoring catalog")
+                .emitted_fact_descriptors()
+                .len()
+                + mfm_evm::evm_collectors_authoring_catalog()
+                    .expect("EVM authoring catalog")
+                    .emitted_fact_descriptors()
+                    .len()
+        );
+        assert_eq!(catalog.side_effect_state_descriptor_ids().len(), 0);
     }
 
     #[test]

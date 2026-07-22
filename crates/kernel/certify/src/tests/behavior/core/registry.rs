@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn authoring_catalog_derives_state_capability_fact_and_operation_contracts() {
+    let mut catalog = ProgramAuthoringCatalog::__new();
+    catalog
+        .__register_state::<FactEmittingState>()
+        .expect("fact-emitting state catalog");
+    catalog
+        .__register_operation::<MultiplyOperation>()
+        .expect("operation catalog");
+
+    assert_eq!(catalog.state_descriptors().len(), 1);
+    assert_eq!(catalog.operation_descriptors().len(), 1);
+    assert_eq!(catalog.capability_descriptors().len(), 1);
+    assert_eq!(catalog.emitted_fact_descriptors().len(), 1);
+    assert_eq!(catalog.adapter_bindings().len(), 0);
+    assert_eq!(catalog.side_effect_state_descriptor_ids().len(), 0);
+    assert_eq!(
+        catalog
+            .capability_descriptors()
+            .next()
+            .expect("capability")
+            .kind,
+        FactReadCap::kind().expect("fact-read capability kind")
+    );
+    assert_eq!(
+        catalog
+            .emitted_fact_descriptors()
+            .next()
+            .expect("fact descriptor"),
+        &mfm_program::fact_descriptor_ref::<ChainHeadFact>().expect("chain-head descriptor")
+    );
+}
+
+#[test]
+fn authoring_catalog_union_rejects_conflicting_state_semantic_keys() {
+    let mut first = ProgramAuthoringCatalog::__new();
+    first
+        .__register_state::<MultiplyState>()
+        .expect("first state catalog");
+    let mut conflicting = ProgramAuthoringCatalog::__new();
+    conflicting
+        .__register_state::<ConflictingMultiplyState>()
+        .expect("conflicting state is independently valid");
+
+    let error = first
+        .union(&conflicting)
+        .expect_err("conflicting state kind/version must reject");
+    assert_invalid_semantic_contains(error, "authoring catalog");
+}
+
+#[test]
 fn certification_registry_rejects_duplicate_state_kind_version() {
     let mut registry = CertificationRegistry::new();
     registry

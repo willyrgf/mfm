@@ -27,6 +27,9 @@ use mfm_values::MfmConfig;
 mod registry;
 pub use self::registry::{CertificationRegistry, ConfigValidationSource};
 use self::registry::{ConfigValidator, ContextValidator};
+#[path = "authoring_catalog.rs"]
+mod authoring_catalog;
+pub use self::authoring_catalog::ProgramAuthoringCatalog;
 #[path = "lowering.rs"]
 mod lowering;
 use self::lowering::{CellInfo, DraftLowerer};
@@ -200,11 +203,13 @@ macro_rules! define_program_descriptor_registry {
         state_registry: $state_vis:vis $state_registry:ident,
         operation_registry: $operation_vis:vis $operation_registry:ident,
         certification: $cert_vis:vis $certification:ident,
+        authoring_catalog: $catalog_vis:vis $authoring_catalog:ident,
         includes: [
             $({
                 state_registry: $include_state:path,
                 operation_registry: $include_operation:path,
-                certification: $include_certification:path $(,)?
+                certification: $include_certification:path,
+                authoring_catalog: $include_catalog:path $(,)?
             }),* $(,)?
         ],
         states: [$($state:ty),* $(,)?],
@@ -235,6 +240,15 @@ macro_rules! define_program_descriptor_registry {
             $(registry.register_operation::<$operation>()?;)*
 
             Ok(())
+        }
+
+        #[doc = "Builds the sealed semantic authoring catalog from the same descriptor lists."]
+        $catalog_vis fn $authoring_catalog() -> $crate::Result<$crate::ProgramAuthoringCatalog> {
+            let mut catalog = $crate::ProgramAuthoringCatalog::__new();
+            $(catalog.__include($include_catalog()?)?;)*
+            $(catalog.__register_state::<$state>()?;)*
+            $(catalog.__register_operation::<$operation>()?;)*
+            Ok(catalog)
         }
     };
 }
