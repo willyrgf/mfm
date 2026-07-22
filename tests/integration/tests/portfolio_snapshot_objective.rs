@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use axum::extract::State;
 use axum::{Json, Router};
-use mfm_integration_tests::test_support::write_portfolio_runtime_config_for_test;
+use mfm_integration_tests::test_support::{
+    write_portfolio_runtime_config_for_test, UncertainFactSettlementStore,
+};
 use mfm_portfolio::portfolio_snapshot_program_draft;
 use mfm_portfolio::{PortfolioConfig, ValidatedPortfolioConfig};
 use mfm_store::v1::{self as store, RunEventStore as _};
@@ -63,6 +65,48 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
             "{label} replay must not re-open a live provider"
         );
     }
+}
+
+/// An uncertain result after the fact/output commit reloads durable authority without repeating
+/// the EVM collection that produced it.
+#[tokio::test]
+async fn uncertain_memory_fact_settlement_does_not_repeat_live_io() {
+    let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let inner = store::AsyncInMemoryRunStore::default();
+    let uncertain = Arc::new(UncertainFactSettlementStore::new(inner.clone()));
+    let services = snapshot_services(uncertain.clone(), Some(&runtime_path)).await;
+
+    let run_id = launch_snapshot_completed(
+        &services,
+        &snapshot_config(SnapshotDemand::EvmNative),
+        "uncertain-memory-fact-settlement",
+    )
+    .await;
+
+    assert!(
+        uncertain.injected(),
+        "the fact settlement must be uncertain"
+    );
+    assert_atomic_evm_fact_publication(&inner, &run_id, 1).await;
+    let methods = server.methods();
+    assert_eq!(method_count(&methods, "eth_chainId"), 1, "{methods:?}");
+    assert_eq!(
+        method_count(&methods, "eth_getBlockByNumber"),
+        2,
+        "{methods:?}"
+    );
+    assert_eq!(method_count(&methods, "eth_getBalance"), 1, "{methods:?}");
+    assert_eq!(
+        methods.len(),
+        4,
+        "unexpected or repeated live IO: {methods:?}"
+    );
+}
+
+fn method_count(methods: &[String], expected: &str) -> usize {
+    methods.iter().filter(|method| *method == expected).count()
 }
 
 /// Repeated collection proves that receipt authority is content based: eleven byte-identical

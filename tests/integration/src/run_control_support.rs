@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// Runtime signer binding used by test runtime config files.
 pub struct RuntimeConfigSignerBinding<'a> {
@@ -12,9 +13,33 @@ pub struct RuntimeConfigSignerBinding<'a> {
     pub unlock_file: &'a Path,
 }
 
-/// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by portfolio integration tests.
-pub async fn start_portfolio_rpc_mock() -> String {
-    let app = axum::Router::new().route("/", axum::routing::post(portfolio_rpc_handler));
+/// Running JSON-RPC mock with a complete record of requested method names.
+pub struct PortfolioRpcMock {
+    url: String,
+    methods: Arc<Mutex<Vec<String>>>,
+}
+
+impl PortfolioRpcMock {
+    /// Returns the mock's loopback endpoint.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Returns the requested JSON-RPC methods in observed order.
+    pub fn methods(&self) -> Vec<String> {
+        self.methods
+            .lock()
+            .expect("portfolio RPC method record")
+            .clone()
+    }
+}
+
+/// Starts one counted JSON-RPC mock serving the portfolio EVM and Bitcoin calls.
+pub async fn start_counted_portfolio_rpc_mock() -> PortfolioRpcMock {
+    let methods = Arc::new(Mutex::new(Vec::new()));
+    let app = axum::Router::new()
+        .route("/", axum::routing::post(portfolio_rpc_handler))
+        .with_state(Arc::clone(&methods));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind portfolio RPC mock");
     let addr = listener.local_addr().expect("portfolio RPC mock address");
     listener
@@ -33,10 +58,19 @@ pub async fn start_portfolio_rpc_mock() -> String {
                 .expect("portfolio RPC mock serve");
         });
     });
-    format!("http://{addr}")
+    PortfolioRpcMock {
+        url: format!("http://{addr}"),
+        methods,
+    }
+}
+
+/// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by portfolio integration tests.
+pub async fn start_portfolio_rpc_mock() -> String {
+    start_counted_portfolio_rpc_mock().await.url
 }
 
 async fn portfolio_rpc_handler(
+    axum::extract::State(methods): axum::extract::State<Arc<Mutex<Vec<String>>>>,
     axum::Json(request): axum::Json<serde_json::Value>,
 ) -> axum::Json<serde_json::Value> {
     let id = request
@@ -47,6 +81,10 @@ async fn portfolio_rpc_handler(
         .get("method")
         .and_then(|value| value.as_str())
         .expect("portfolio JSON-RPC method");
+    methods
+        .lock()
+        .expect("portfolio RPC method record")
+        .push(method.to_owned());
     let result = match method {
         "eth_chainId" => serde_json::json!("0x1"),
         "eth_getBlockByNumber" => serde_json::json!({

@@ -6,8 +6,9 @@ use axum::http::{Request, StatusCode};
 use mfm_events::v1::KernelEventPayload;
 use mfm_integration_tests::test_support::{
     connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema, json_post,
-    response_json, schema_scoped_database_url, start_portfolio_rpc_mock, unique_postgres_schema,
-    write_portfolio_runtime_config_for_test,
+    response_json, schema_scoped_database_url, start_counted_portfolio_rpc_mock,
+    start_portfolio_rpc_mock, unique_postgres_schema, write_portfolio_runtime_config_for_test,
+    UncertainFactSettlementStore,
 };
 use mfm_portfolio::PortfolioConfig;
 use mfm_store::v1::{RunEventStore, StoreScopeStore};
@@ -208,6 +209,122 @@ async fn parity_portfolio_snapshot_admission_resolves_the_current_configured_tar
     configured_pool.close().await;
 
     drop_postgres_schema(&database_url, &schema).await;
+}
+
+#[tokio::test]
+async fn parity_postgres_uncertain_fact_settlement_does_not_repeat_live_io() {
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+    let schema = unique_postgres_schema("uncertain_fact_settlement");
+    create_postgres_schema(&database_url, &schema).await;
+    let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
+    let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
+    let publication = mfm_app::import_setup_toml(
+        &store,
+        include_bytes!("../../../examples/setup/organization.toml"),
+    )
+    .await
+    .expect("publish portfolio setup")
+    .into_iter()
+    .next()
+    .expect("one setup publication");
+    let rpc = start_counted_portfolio_rpc_mock().await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_config_path =
+        write_portfolio_runtime_config_for_test(runtime_dir.path(), rpc.url());
+    let uncertain = std::sync::Arc::new(UncertainFactSettlementStore::new(store.clone()));
+    let runners =
+        mfm_app::production_runner_registry_for_test(uncertain.clone(), Some(&runtime_config_path))
+            .await
+            .expect("production snapshot runners");
+    let certification = mfm_app::production_certification_registry()
+        .expect("production snapshot certification registry");
+    let launch = mfm_app::prepare_entry_point_run_launch(
+        &store,
+        "mfm.portfolio/snapshot@2",
+        &publication.target,
+        &certification,
+        store.load_store_scope_id().await.expect("store scope"),
+        Some(
+            mfm_app::InvocationKey::new("postgres-uncertain-fact-settlement")
+                .expect("invocation key"),
+        ),
+    )
+    .await
+    .expect("prepare snapshot launch");
+    let run_id = launch.run_id.clone();
+    let services = mfm_app::make_run_services(runners, uncertain.clone(), certification);
+
+    let response = services
+        .launch_run(launch)
+        .await
+        .expect("uncertain snapshot launch")
+        .into_response_parts()
+        .1
+        .expect("uncertain snapshot response");
+
+    assert_eq!(response.run_mode, mfm_app::RunModeStatus::Completed);
+    assert!(
+        uncertain.injected(),
+        "the fact settlement must be uncertain"
+    );
+    let stream = store
+        .load_run_stream(&run_id)
+        .await
+        .expect("uncertain snapshot stream");
+    let facts = stream
+        .iter()
+        .filter_map(|event| match event.payload() {
+            KernelEventPayload::FactRecorded(payload) => Some((event, payload)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        facts.len(),
+        2,
+        "both collector facts must commit completely"
+    );
+    for (fact_event, fact) in facts {
+        assert!(
+            stream.iter().any(|event| matches!(
+                event.payload(),
+                KernelEventPayload::CellProduced(payload)
+                    if payload.node_id == fact.node_id
+                        && payload.attempt_id == fact.attempt_id
+                        && event.commit_key() == fact_event.commit_key()
+                        && event.store_commit_order() == fact_event.store_commit_order()
+            )),
+            "every fact must share its commit with the collection output"
+        );
+    }
+
+    let methods = rpc.methods();
+    for method in [
+        "eth_chainId",
+        "eth_getBalance",
+        "getblockchaininfo",
+        "scantxoutset",
+        "getblockhash",
+    ] {
+        assert_eq!(method_count(&methods, method), 1, "{methods:?}");
+    }
+    assert_eq!(
+        method_count(&methods, "eth_getBlockByNumber"),
+        2,
+        "{methods:?}"
+    );
+    assert_eq!(
+        methods.len(),
+        7,
+        "unexpected or repeated live IO: {methods:?}"
+    );
+
+    drop(services);
+    drop_postgres_schema(&database_url, &schema).await;
+}
+
+fn method_count(methods: &[String], expected: &str) -> usize {
+    methods.iter().filter(|method| *method == expected).count()
 }
 
 #[tokio::test]

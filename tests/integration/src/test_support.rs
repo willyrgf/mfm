@@ -1,6 +1,8 @@
 #![warn(missing_docs)]
 //! Shared helpers for MFM integration tests.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -14,8 +16,8 @@ use sqlx::{AssertSqlSafe, PgPool};
 mod run_control_support;
 
 pub use run_control_support::{
-    start_portfolio_rpc_mock, write_evm_runtime_config_for_test,
-    write_portfolio_runtime_config_for_test, RuntimeConfigSignerBinding,
+    start_counted_portfolio_rpc_mock, start_portfolio_rpc_mock, write_evm_runtime_config_for_test,
+    write_portfolio_runtime_config_for_test, PortfolioRpcMock, RuntimeConfigSignerBinding,
 };
 
 /// Re-export: merge-safe Platform holding seed for store-backed portfolio report tests.
@@ -23,6 +25,238 @@ pub use store::test_support::{
     append_platform_holding_facts_for_test, FactRecordFixtureInputForTest,
     PlatformHoldingFactSeedForTest,
 };
+
+/// Store error that can represent a deliberately injected stale-sequence append result.
+pub trait InjectedStaleExpectedNextSeqError {
+    /// Builds the backend's typed stale-sequence error.
+    fn injected_stale_expected_next_seq(
+        expected: store::StreamSeq,
+        actual: store::StreamSeq,
+    ) -> Self;
+}
+
+impl InjectedStaleExpectedNextSeqError for store::StoreError {
+    fn injected_stale_expected_next_seq(
+        expected: store::StreamSeq,
+        actual: store::StreamSeq,
+    ) -> Self {
+        Self::StaleExpectedNextSeq { expected, actual }
+    }
+}
+
+impl InjectedStaleExpectedNextSeqError for mfm_storage_postgres::PostgresStoreError {
+    fn injected_stale_expected_next_seq(
+        expected: store::StreamSeq,
+        actual: store::StreamSeq,
+    ) -> Self {
+        Self::Store(store::StoreError::StaleExpectedNextSeq { expected, actual })
+    }
+}
+
+/// Decorates a store by committing one fact-producing settlement and reporting its result as stale.
+///
+/// The runtime must reload the committed stream after this injected uncertain result instead of
+/// repeating the external read that produced the fact batch.
+#[derive(Clone)]
+pub struct UncertainFactSettlementStore<S> {
+    inner: S,
+    injected: Arc<AtomicBool>,
+}
+
+impl<S> UncertainFactSettlementStore<S> {
+    /// Wraps a concrete store and arms one uncertain fact-settlement result.
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            injected: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Returns whether a committed fact settlement has been reported as uncertain.
+    pub fn injected(&self) -> bool {
+        self.injected.load(Ordering::SeqCst)
+    }
+}
+
+impl<S> store::RunEventStore for UncertainFactSettlementStore<S>
+where
+    S: store::RunEventStore + Sync,
+    S::Error: InjectedStaleExpectedNextSeqError,
+{
+    type Error = S::Error;
+
+    fn append_prepared_commit_bundle<'a>(
+        &'a self,
+        bundle: store::PreparedCommitBundle,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        let is_fact_settlement = bundle
+            .request()
+            .payloads()
+            .iter()
+            .any(|payload| matches!(payload, KernelEventPayload::FactRecorded(_)));
+        let expected = bundle.request().expected_next_seq();
+        let run_id = bundle.request().run_id().clone();
+        Box::pin(async move {
+            let outcome = self.inner.append_prepared_commit_bundle(bundle).await?;
+            let inject = is_fact_settlement
+                && matches!(outcome, store::CommitOutcome::Appended(_))
+                && self
+                    .injected
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok();
+            if inject {
+                let actual = self.inner.expected_next_seq(&run_id).await?;
+                return Err(Self::Error::injected_stale_expected_next_seq(
+                    expected, actual,
+                ));
+            }
+            Ok(outcome)
+        })
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        self.inner.load_run_stream(run_id)
+    }
+
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        self.inner.load_committed_run_stream(run_id)
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        self.inner.expected_next_seq(run_id)
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.status_projection_snapshot(run_id)
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.fact_projection_snapshot()
+    }
+}
+
+impl<S> store::StoreScopeStore for UncertainFactSettlementStore<S>
+where
+    S: store::StoreScopeStore,
+{
+    type Error = S::Error;
+
+    fn load_store_scope_id<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, mfm_ids::StoreScopeId, Self::Error> {
+        self.inner.load_store_scope_id()
+    }
+}
+
+impl<S> store::ExecutionClaimStore for UncertainFactSettlementStore<S>
+where
+    S: store::ExecutionClaimStore,
+{
+    type Error = S::Error;
+
+    fn acquire_execution_claim<'a>(
+        &'a self,
+        scope: &'a store::ExecutionClaimScope,
+        holder_run_id: &'a mfm_ids::RunId,
+        token: store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+        self.inner
+            .acquire_execution_claim(scope, holder_run_id, token)
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        scope: &'a store::ExecutionClaimScope,
+    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+        self.inner.execution_claim_status(scope)
+    }
+
+    fn renew_execution_claim<'a>(
+        &'a self,
+        scope: &'a store::ExecutionClaimScope,
+        holder_run_id: &'a mfm_ids::RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+        self.inner
+            .renew_execution_claim(scope, holder_run_id, token)
+    }
+
+    fn release_execution_claim<'a>(
+        &'a self,
+        scope: &'a store::ExecutionClaimScope,
+        holder_run_id: &'a mfm_ids::RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner
+            .release_execution_claim(scope, holder_run_id, token)
+    }
+
+    fn expired_execution_claims<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+        self.inner.expired_execution_claims()
+    }
+
+    fn reap_expired_execution_claim<'a>(
+        &'a self,
+        scope: &'a store::ExecutionClaimScope,
+        holder_run_id: &'a mfm_ids::RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner
+            .reap_expired_execution_claim(scope, holder_run_id, token)
+    }
+}
+
+impl<S> store::FactQueryStore for UncertainFactSettlementStore<S>
+where
+    S: store::FactQueryStore,
+{
+    type Error = S::Error;
+
+    fn fact_query_implementation_id(&self) -> &'static str {
+        self.inner.fact_query_implementation_id()
+    }
+
+    fn execute_fact_queries<'a>(
+        &'a self,
+        plans: &'a [mfm_facts::CanonicalFactQueryPlan],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<mfm_facts::FactQueryResult>, Self::Error>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.execute_fact_queries(plans)
+    }
+}
+
+impl<S> store::RetainedArtifactReadProvider for UncertainFactSettlementStore<S>
+where
+    S: store::RetainedArtifactReadProvider,
+{
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        self.inner.read_retained_artifact(requirement)
+    }
+}
 
 /// In-memory REST app state used by integration tests.
 pub type InMemoryRestAppState = mfm_rest_api::AppState;
