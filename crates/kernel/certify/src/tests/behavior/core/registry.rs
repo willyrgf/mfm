@@ -51,6 +51,49 @@ fn authoring_catalog_union_rejects_conflicting_state_semantic_keys() {
 }
 
 #[test]
+fn certification_registry_requires_exact_catalog_descriptors_and_fact_artifacts() {
+    let mut domain = ProgramAuthoringCatalog::__new();
+    domain
+        .__register_state::<FactEmittingState>()
+        .expect("fact state catalog");
+    domain
+        .__register_operation::<MultiplyOperation>()
+        .expect("operation catalog");
+    let public_schema = <TestPublicOutputs<'static, 'static> as mfm_program::PublicOutputs<
+        'static,
+        'static,
+    >>::public_schema_id()
+    .expect("public schema");
+    let expected = domain
+        .union(&__framework_authoring_catalog(&public_schema).expect("sealed framework catalog"))
+        .expect("combined catalog");
+
+    let mut exact = CertificationRegistry::new();
+    exact
+        .register_state::<FactEmittingState>()
+        .expect("fact state registry");
+    exact
+        .register_operation::<MultiplyOperation>()
+        .expect("operation registry");
+    exact
+        .validate_authoring_catalog(&expected)
+        .expect("exact catalog coverage");
+
+    let missing = CertificationRegistry::new()
+        .validate_authoring_catalog(&expected)
+        .expect_err("missing descriptors must reject");
+    assert_invalid_semantic_contains(missing, "authoring catalog");
+
+    exact
+        .register_state::<MultiplyState>()
+        .expect("extra state registry");
+    let extra = exact
+        .validate_authoring_catalog(&expected)
+        .expect_err("extra descriptor must reject");
+    assert_invalid_semantic_contains(extra, "authoring catalog");
+}
+
+#[test]
 fn certification_registry_rejects_duplicate_state_kind_version() {
     let mut registry = CertificationRegistry::new();
     registry

@@ -273,3 +273,69 @@ fn catalog_conflict(surface: &'static str, key: impl fmt::Display) -> CertifyErr
         format!("conflicting {surface} in authoring catalog for {key}"),
     )
 }
+
+/// Builds the framework-only catalog used by the runtime's sealed production bootstrap.
+#[doc(hidden)]
+pub fn __framework_authoring_catalog(
+    public_output_schema_id: &SchemaId,
+) -> Result<ProgramAuthoringCatalog> {
+    let mut catalog = ProgramAuthoringCatalog::__new();
+    let placeholder_node = NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0; 32]),
+    );
+
+    let render_config = spec::framework_config_ref("public_output_render", &placeholder_node)
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    catalog.__register_framework_state_descriptor(framework_render_descriptor(
+        &spec::public_output_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+        &spec::public_output_receipt_semantic_type_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+        &render_config.schema_id,
+        public_output_schema_id,
+        spec::StateContextDescriptorSpec::no_context(),
+    )?)?;
+
+    let retention_config =
+        spec::framework_config_ref("project_retention_manifest", &placeholder_node)
+            .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    catalog.__register_framework_state_descriptor(
+        framework_project_retention_manifest_descriptor(
+            &spec::retention_manifest_receipt_schema_id()
+                .map_err(|error| CertifyError::Spec(error.to_string()))?,
+            &spec::retention_manifest_receipt_semantic_type_id()
+                .map_err(|error| CertifyError::Spec(error.to_string()))?,
+            &retention_config.schema_id,
+            &spec::public_output_receipt_schema_id()
+                .map_err(|error| CertifyError::Spec(error.to_string()))?,
+        )?,
+    )?;
+
+    let complete_config = spec::framework_config_ref("complete_run", &placeholder_node)
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    catalog.__register_framework_state_descriptor(framework_complete_run_descriptor(
+        &spec::complete_run_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+        &spec::complete_run_receipt_semantic_type_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+        &complete_config.schema_id,
+        &spec::retention_manifest_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+    )?)?;
+
+    let resolve_config = spec::framework_config_ref("resolve_saga_terminal", &placeholder_node)
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    let resolve_input = spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+    catalog.__register_framework_state_descriptor(framework_resolve_saga_terminal_descriptor(
+        &spec::resolve_saga_terminal_receipt_schema_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+        &spec::resolve_saga_terminal_receipt_semantic_type_id()
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+        &resolve_config.schema_id,
+        &resolve_input.input_schema_id,
+    )?)?;
+
+    Ok(catalog)
+}

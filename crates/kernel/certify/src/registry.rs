@@ -92,6 +92,121 @@ impl CertificationRegistry {
         Self::default()
     }
 
+    /// Validates exact semantic coverage against a published authoring catalog.
+    ///
+    /// Domain descriptors and emitted fact artifacts must be present exactly once. Framework
+    /// descriptors remain sealed built-ins and therefore must not be installed as domain registry
+    /// entries.
+    pub fn validate_authoring_catalog(&self, catalog: &ProgramAuthoringCatalog) -> Result<()> {
+        let expected_states = catalog
+            .state_descriptors()
+            .filter(|descriptor| !catalog.is_framework_state(&descriptor.descriptor_id))
+            .collect::<Vec<_>>();
+        if self.states.len() != expected_states.len() {
+            return Err(authoring_catalog_mismatch(
+                "state descriptors",
+                expected_states.len(),
+                self.states.len(),
+            ));
+        }
+        for expected in expected_states {
+            match self.states.get(expected.descriptor_id.as_str()) {
+                Some(actual) if actual == expected => {}
+                _ => {
+                    return Err(problem(
+                        ProblemClass::InvalidSemanticTransition,
+                        format!(
+                        "certification state descriptor {} does not match the authoring catalog",
+                        expected.descriptor_id
+                    ),
+                    ))
+                }
+            }
+        }
+
+        let expected_operations = catalog.operation_descriptors().collect::<Vec<_>>();
+        if self.operations.len() != expected_operations.len() {
+            return Err(authoring_catalog_mismatch(
+                "operation descriptors",
+                expected_operations.len(),
+                self.operations.len(),
+            ));
+        }
+        for expected in expected_operations {
+            match self.operations.get(expected.descriptor_id.as_str()) {
+                Some(actual) if actual == expected => {}
+                _ => {
+                    return Err(problem(
+                        ProblemClass::InvalidSemanticTransition,
+                        format!(
+                            "certification operation descriptor {} does not match the authoring catalog",
+                            expected.descriptor_id
+                        ),
+                    ))
+                }
+            }
+        }
+
+        let expected_facts = catalog.emitted_fact_descriptors().collect::<Vec<_>>();
+        if self.fact_descriptor_artifacts.len() != expected_facts.len() {
+            return Err(authoring_catalog_mismatch(
+                "emitted fact descriptor artifacts",
+                expected_facts.len(),
+                self.fact_descriptor_artifacts.len(),
+            ));
+        }
+        for expected in expected_facts {
+            let Some(artifact) = self
+                .fact_descriptor_artifacts
+                .get(expected.descriptor_hash.as_str())
+            else {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "certification fact descriptor {} is missing from the authoring catalog binding",
+                        expected.descriptor_hash
+                    ),
+                ));
+            };
+            let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(&artifact.bytes)
+                .map_err(|_| {
+                    problem(
+                        ProblemClass::InvalidDataShape,
+                        "certification fact descriptor artifact was not canonical JSON",
+                    )
+                })?;
+            if artifact.descriptor_hash != expected.descriptor_hash
+                || canonical.content_digest() != expected.descriptor_hash
+            {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "certification fact descriptor artifact {} does not match the authoring catalog",
+                        expected.descriptor_hash
+                    ),
+                ));
+            }
+        }
+
+        for framework in catalog
+            .state_descriptors()
+            .filter(|descriptor| catalog.is_framework_state(&descriptor.descriptor_id))
+        {
+            if !framework.name.starts_with("mfm.framework.")
+                || self.states.contains_key(framework.descriptor_id.as_str())
+            {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "framework descriptor {} is not owned exclusively by the sealed bootstrap",
+                        framework.descriptor_id
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the deterministic digest of this registry authority.
     pub fn digest(&self) -> Result<ContentDigest> {
         let operations = self
@@ -605,4 +720,17 @@ impl CertificationRegistry {
         }
         Ok(())
     }
+}
+
+fn authoring_catalog_mismatch(
+    surface: &'static str,
+    expected: usize,
+    actual: usize,
+) -> CertifyError {
+    problem(
+        ProblemClass::InvalidSemanticTransition,
+        format!(
+            "certification {surface} do not equal the authoring catalog: expected {expected}, found {actual}"
+        ),
+    )
 }

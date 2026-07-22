@@ -1,4 +1,4 @@
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -286,6 +286,14 @@ pub struct ErasedRunnerOutput {
     settlement: Option<RunnerOutputSettlement>,
 }
 
+type ErasedRunnerOutputParts = (
+    Vec<StagedArtifact>,
+    Vec<StagedRetentionRefs>,
+    Vec<events::FactRecorded>,
+    Vec<RunnerEventPayload>,
+    Option<RunnerOutputSettlement>,
+);
+
 impl std::fmt::Debug for ErasedRunnerOutput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -358,15 +366,7 @@ impl ErasedRunnerOutput {
         &mut self.payloads
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Vec<StagedArtifact>,
-        Vec<StagedRetentionRefs>,
-        Vec<events::FactRecorded>,
-        Vec<RunnerEventPayload>,
-        Option<RunnerOutputSettlement>,
-    ) {
+    pub(crate) fn into_parts(self) -> ErasedRunnerOutputParts {
         (
             self.staged_artifacts,
             self.staged_retention_refs,
@@ -554,6 +554,147 @@ impl ErasedRunnerRegistry {
     pub fn factory_binding(&self, factory_id: events::RunnerFactoryId) -> RunnerFactoryBinding {
         self.executable_identity_template
             .factory_binding(factory_id)
+    }
+
+    /// Validates exact runtime binding coverage for a published authoring catalog.
+    ///
+    /// The catalog supplies semantic keys only. Concrete capability implementation and executable
+    /// identities remain process bindings validated independently by this registry.
+    pub fn validate_authoring_catalog(
+        &self,
+        catalog: &mfm_certify::ProgramAuthoringCatalog,
+    ) -> Result<()> {
+        let domain_states = catalog
+            .state_descriptors()
+            .filter(|descriptor| !catalog.is_framework_state(&descriptor.descriptor_id))
+            .collect::<Vec<_>>();
+        if self.bindings.len() != domain_states.len() {
+            return Err(runtime_catalog_mismatch(
+                "runner bindings",
+                domain_states.len(),
+                self.bindings.len(),
+            ));
+        }
+        for descriptor in domain_states {
+            let Some(binding) = self.bindings.get(&descriptor.descriptor_id) else {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "missing runner binding for catalog state {}",
+                    descriptor.descriptor_id
+                )));
+            };
+            if binding.descriptor_id() != &descriptor.descriptor_id
+                || binding.factory_id().as_str() != descriptor.runner
+            {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "runner binding for catalog state {} has the wrong semantic key",
+                    descriptor.descriptor_id
+                )));
+            }
+            self.validate_executable(binding.factory_id(), binding.executable())?;
+        }
+
+        for descriptor in catalog
+            .state_descriptors()
+            .filter(|descriptor| catalog.is_framework_state(&descriptor.descriptor_id))
+        {
+            if !is_closed_framework_catalog_state(&descriptor.name)
+                || self.bindings.contains_key(&descriptor.descriptor_id)
+            {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "catalog framework state {} is not owned exclusively by the runtime bootstrap",
+                    descriptor.descriptor_id
+                )));
+            }
+        }
+
+        let expected_capabilities = catalog.capability_descriptors().collect::<Vec<_>>();
+        if self.capability_implementations.len() != expected_capabilities.len() {
+            return Err(runtime_catalog_mismatch(
+                "capability bindings",
+                expected_capabilities.len(),
+                self.capability_implementations.len(),
+            ));
+        }
+        for descriptor in expected_capabilities {
+            let key = capability_implementation_key(descriptor);
+            match self.capability_implementations.get(&key) {
+                Some(binding) if binding.descriptor() == descriptor => {}
+                _ => {
+                    return Err(RuntimeError::RunnerBinding(format!(
+                        "capability binding {}:{} does not match the authoring catalog",
+                        descriptor.kind, descriptor.version
+                    )))
+                }
+            }
+        }
+
+        let expected_adapters = catalog.adapter_bindings().collect::<Vec<_>>();
+        if self.adapter_executables.len() != expected_adapters.len() {
+            return Err(runtime_catalog_mismatch(
+                "adapter executable bindings",
+                expected_adapters.len(),
+                self.adapter_executables.len(),
+            ));
+        }
+        for expected in expected_adapters {
+            let key = adapter_executable_key(&expected.adapter_kind, &expected.adapter_version);
+            let Some(binding) = self.adapter_executables.get(&key) else {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "missing adapter executable for catalog binding {}:{}",
+                    expected.adapter_kind, expected.adapter_version
+                )));
+            };
+            if binding.adapter_kind() != &expected.adapter_kind
+                || binding.adapter_version() != &expected.adapter_version
+            {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "adapter executable does not match catalog binding {}:{}",
+                    expected.adapter_kind, expected.adapter_version
+                )));
+            }
+            self.validate_executable(&binding.executable().factory_id, binding.executable())?;
+        }
+
+        let expected_side_effects = catalog
+            .side_effect_state_descriptor_ids()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actual_side_effects = self
+            .side_effect_verify_bindings
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if actual_side_effects != expected_side_effects {
+            return Err(RuntimeError::RunnerBinding(
+                "side-effect verification bindings do not equal the authoring catalog".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates the implementation id selected by the same live object used for execution.
+    pub fn validate_capability_implementation<C>(&self, implementation_id: &str) -> Result<()>
+    where
+        C: CapabilitySpec,
+    {
+        let descriptor =
+            C::descriptor().map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
+        let key = capability_implementation_key(&descriptor);
+        let Some(binding) = self.capability_implementations.get(&key) else {
+            return Err(RuntimeError::RunnerBinding(format!(
+                "missing capability implementation for {}:{}",
+                descriptor.kind, descriptor.version
+            )));
+        };
+        if binding.descriptor() != &descriptor
+            || binding.implementation_id().as_str() != implementation_id
+        {
+            return Err(RuntimeError::RunnerBinding(format!(
+                "selected capability implementation does not match {}:{}",
+                descriptor.kind, descriptor.version
+            )));
+        }
+        Ok(())
     }
 
     /// Registers one erased runner binding.
@@ -874,4 +1015,413 @@ fn capability_implementation_key(descriptor: &CapabilityDescriptor) -> (String, 
 
 fn adapter_executable_key(kind: &AdapterKind, version: &AdapterVersion) -> (String, String) {
     (kind.as_str().to_owned(), version.as_str().to_owned())
+}
+
+fn runtime_catalog_mismatch(surface: &'static str, expected: usize, actual: usize) -> RuntimeError {
+    RuntimeError::RunnerBinding(format!(
+        "runtime {surface} do not equal the authoring catalog: expected {expected}, found {actual}"
+    ))
+}
+
+fn is_closed_framework_catalog_state(name: &str) -> bool {
+    matches!(
+        name,
+        "mfm.framework.bridge_same_value"
+            | "mfm.framework.side_effect_verify"
+            | "mfm.framework.render_public_outputs"
+            | "mfm.framework.project_retention_manifest"
+            | "mfm.framework.complete_run"
+            | "mfm.framework.resolve_saga_terminal"
+    )
+}
+
+#[cfg(test)]
+mod authoring_catalog_tests {
+    use super::*;
+    use mfm_capabilities::{CapabilitySpec, ReadExternal, ReadExternalRole};
+    use mfm_ids::{
+        AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, ContentDigest,
+        DigestAlgorithm, DigestBytes, StateKind, StateVersion,
+    };
+    use mfm_program::{
+        AdapterBindingSpec, CertifiedContext, ExternalReadEvidenceSet, NoContext, ReadState,
+        StateResult, StateSpec,
+    };
+    use mfm_program_derive::{MfmConfig, MfmValue};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+    struct CatalogConfig {
+        multiplier: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+    #[mfm(
+        namespace = "mfm.runtime.catalog-test",
+        name = "value",
+        version = "1",
+        schema = "mfm.runtime.catalog_test.value"
+    )]
+    struct CatalogValue {
+        amount: u64,
+    }
+
+    struct CatalogReadCapability;
+
+    impl CapabilitySpec for CatalogReadCapability {
+        type Role = ReadExternalRole;
+
+        fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+            CapabilityKind::new(
+                "mfm.runtime.catalog-test",
+                "read",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x31; 32]),
+            )
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+        }
+
+        fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+            CapabilityVersion::new("mfm.runtime.catalog_test.read.v1")
+                .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+        }
+
+        fn name() -> &'static str {
+            "mfm.runtime.catalog-test.read"
+        }
+    }
+
+    struct ExtraCapability;
+
+    impl CapabilitySpec for ExtraCapability {
+        type Role = ReadExternalRole;
+
+        fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+            CapabilityKind::new(
+                "mfm.runtime.catalog-test",
+                "extra",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x32; 32]),
+            )
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+        }
+
+        fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+            CapabilityVersion::new("mfm.runtime.catalog_test.extra.v1")
+                .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+        }
+
+        fn name() -> &'static str {
+            "mfm.runtime.catalog-test.extra"
+        }
+    }
+
+    struct CatalogReadState {
+        _config: CatalogConfig,
+    }
+
+    impl StateSpec for CatalogReadState {
+        type Config = CatalogConfig;
+        type Context = NoContext;
+        type Input = CatalogValue;
+        type Output = CatalogValue;
+        type Effect = ReadExternal;
+        type Caps = (CatalogReadCapability,);
+
+        fn kind() -> mfm_program::Result<StateKind> {
+            StateKind::new(
+                "mfm.runtime.catalog-test",
+                "read",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x33; 32]),
+            )
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+        }
+
+        fn version() -> mfm_program::Result<StateVersion> {
+            StateVersion::new("mfm.runtime.catalog_test.read_state.v1")
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+        }
+
+        fn name() -> &'static str {
+            "mfm.runtime.catalog-test.read-state"
+        }
+
+        fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+            Ok(vec![catalog_adapter()])
+        }
+
+        fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+            Ok(Self {
+                _config: config.into_inner(),
+            })
+        }
+    }
+
+    impl ReadState for CatalogReadState {
+        type Plan = CatalogValue;
+        type Evidence = CatalogValue;
+        type Facts = ();
+
+        fn plan(
+            &self,
+            input: &Self::Input,
+            _context: &CertifiedContext<Self::Context>,
+        ) -> StateResult<Self::Plan> {
+            Ok(input.clone())
+        }
+
+        fn reduce(
+            &self,
+            _input: &Self::Input,
+            evidence: &ExternalReadEvidenceSet<Self::Evidence>,
+            _context: &CertifiedContext<Self::Context>,
+        ) -> StateResult<(Self::Output, Self::Facts)> {
+            Ok((evidence.primary_evidence().clone(), ()))
+        }
+    }
+
+    struct EmptyRunner;
+
+    impl ErasedNodeRunner for EmptyRunner {
+        fn run_erased<'a>(&'a self, _ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async { Ok(ErasedRunnerOutput::new(Vec::new())) })
+        }
+    }
+
+    fn digest(byte: u8) -> ContentDigest {
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([byte; 32]),
+        )
+    }
+
+    fn catalog_adapter() -> AdapterBindingSpec {
+        AdapterBindingSpec {
+            adapter_kind: AdapterKind::new(
+                "mfm.runtime.catalog-test",
+                "adapter",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x34; 32]),
+            )
+            .expect("adapter kind"),
+            adapter_version: AdapterVersion::new("mfm.runtime.catalog_test.adapter.v1")
+                .expect("adapter version"),
+        }
+    }
+
+    fn extra_adapter() -> AdapterBindingSpec {
+        AdapterBindingSpec {
+            adapter_kind: AdapterKind::new(
+                "mfm.runtime.catalog-test",
+                "extra-adapter",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x35; 32]),
+            )
+            .expect("extra adapter kind"),
+            adapter_version: AdapterVersion::new("mfm.runtime.catalog_test.extra_adapter.v1")
+                .expect("extra adapter version"),
+        }
+    }
+
+    fn fixture() -> (mfm_certify::ProgramAuthoringCatalog, ErasedRunnerRegistry) {
+        let mut catalog = mfm_certify::ProgramAuthoringCatalog::__new();
+        catalog
+            .__register_state::<CatalogReadState>()
+            .expect("catalog state");
+
+        let mut registry = ErasedRunnerRegistry::new(ExecutableIdentityTemplate::new(digest(0x41)));
+        let read_factory = registry
+            .factory_binding(events::RunnerFactoryId::new("read_external").expect("read factory"));
+        let adapter_factory = registry.factory_binding(
+            events::RunnerFactoryId::new("catalog_adapter").expect("adapter factory"),
+        );
+        registry
+            .register_capability_spec::<CatalogReadCapability>(
+                CapabilityImplementationId::new("mfm.runtime.catalog-test.read.impl")
+                    .expect("implementation id"),
+            )
+            .expect("capability registration");
+        let mut registrations = crate::RunnerRegistrationBuilder::new(&mut registry);
+        registrations
+            .register_state_runner_with_factory::<CatalogReadState>(
+                &read_factory,
+                Arc::new(EmptyRunner),
+            )
+            .expect("runner registration");
+        let adapter = catalog_adapter();
+        registrations
+            .register_adapter_executable_with_factory(
+                adapter.adapter_kind,
+                adapter.adapter_version,
+                &adapter_factory,
+            )
+            .expect("adapter registration");
+        (catalog, registry)
+    }
+
+    #[test]
+    fn catalog_validation_rejects_missing_and_extra_runtime_surfaces() {
+        let (catalog, registry) = fixture();
+        registry
+            .validate_authoring_catalog(&catalog)
+            .expect("exact runtime catalog");
+
+        let mut missing_runner = registry.clone();
+        missing_runner.bindings.clear();
+        assert!(missing_runner.validate_authoring_catalog(&catalog).is_err());
+
+        let mut extra_runner = registry.clone();
+        let existing = extra_runner
+            .bindings
+            .values()
+            .next()
+            .expect("runner binding")
+            .clone();
+        let extra_id = DescriptorId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x42; 32]),
+        );
+        let mut extra_binding = existing;
+        extra_binding.descriptor_id = extra_id.clone();
+        extra_runner.bindings.insert(extra_id, extra_binding);
+        assert!(extra_runner.validate_authoring_catalog(&catalog).is_err());
+
+        let mut missing_capability = registry.clone();
+        missing_capability.capability_implementations.clear();
+        assert!(missing_capability
+            .validate_authoring_catalog(&catalog)
+            .is_err());
+
+        let mut extra_capability = registry.clone();
+        let descriptor = ExtraCapability::descriptor().expect("extra capability");
+        extra_capability.capability_implementations.insert(
+            capability_implementation_key(&descriptor),
+            CapabilityImplementationBinding::new(
+                descriptor,
+                CapabilityImplementationId::new("mfm.runtime.catalog-test.extra.impl")
+                    .expect("extra implementation"),
+            ),
+        );
+        assert!(extra_capability
+            .validate_authoring_catalog(&catalog)
+            .is_err());
+
+        let mut missing_adapter = registry.clone();
+        missing_adapter.adapter_executables.clear();
+        assert!(missing_adapter
+            .validate_authoring_catalog(&catalog)
+            .is_err());
+
+        let mut extra_adapter_registry = registry.clone();
+        let adapter = extra_adapter();
+        let factory = extra_adapter_registry.factory_binding(
+            events::RunnerFactoryId::new("extra_adapter").expect("extra adapter factory"),
+        );
+        extra_adapter_registry.adapter_executables.insert(
+            adapter_executable_key(&adapter.adapter_kind, &adapter.adapter_version),
+            AdapterExecutableBinding::new(
+                adapter.adapter_kind,
+                adapter.adapter_version,
+                factory.executable(),
+            ),
+        );
+        assert!(extra_adapter_registry
+            .validate_authoring_catalog(&catalog)
+            .is_err());
+
+        let mut extra_side_effect_verifier = registry;
+        let factory = extra_side_effect_verifier.factory_binding(
+            events::RunnerFactoryId::new("read_external").expect("verify factory"),
+        );
+        extra_side_effect_verifier
+            .side_effect_verify_bindings
+            .insert(
+                DescriptorId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    DigestBytes::from_array([0x43; 32]),
+                ),
+                ErasedFrameworkRunnerBinding {
+                    factory_id: factory.factory_id(),
+                    executable: factory.executable(),
+                    runner: Arc::new(EmptyRunner),
+                },
+            );
+        assert!(extra_side_effect_verifier
+            .validate_authoring_catalog(&catalog)
+            .is_err());
+    }
+
+    #[test]
+    fn catalog_validation_rejects_wrong_executables_and_implementation_ids() {
+        let (catalog, registry) = fixture();
+
+        let mut wrong_runner_executable = registry.clone();
+        wrong_runner_executable
+            .bindings
+            .values_mut()
+            .next()
+            .expect("runner binding")
+            .executable
+            .binary_digest = digest(0x51);
+        assert!(wrong_runner_executable
+            .validate_authoring_catalog(&catalog)
+            .is_err());
+
+        let mut wrong_adapter_executable = registry.clone();
+        wrong_adapter_executable
+            .adapter_executables
+            .values_mut()
+            .next()
+            .expect("adapter binding")
+            .executable
+            .binary_digest = digest(0x52);
+        assert!(wrong_adapter_executable
+            .validate_authoring_catalog(&catalog)
+            .is_err());
+
+        registry
+            .validate_capability_implementation::<CatalogReadCapability>(
+                "mfm.runtime.catalog-test.read.impl",
+            )
+            .expect("selected implementation");
+        assert!(registry
+            .validate_capability_implementation::<CatalogReadCapability>(
+                "mfm.runtime.catalog-test.wrong.impl",
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn duplicate_runtime_bindings_are_rejected() {
+        let (_catalog, mut registry) = fixture();
+        let runner = registry
+            .bindings
+            .values()
+            .next()
+            .expect("runner binding")
+            .clone();
+        assert!(registry.register(runner).is_err());
+
+        let descriptor = CatalogReadCapability::descriptor().expect("capability descriptor");
+        assert!(registry
+            .register_capability(CapabilityImplementationBinding::new(
+                descriptor,
+                CapabilityImplementationId::new("mfm.runtime.catalog-test.conflict.impl")
+                    .expect("conflicting implementation"),
+            ))
+            .is_err());
+
+        let adapter = catalog_adapter();
+        let conflicting_factory = registry.factory_binding(
+            events::RunnerFactoryId::new("conflicting_adapter").expect("conflicting factory"),
+        );
+        assert!(registry
+            .register_adapter_executable(AdapterExecutableBinding::new(
+                adapter.adapter_kind,
+                adapter.adapter_version,
+                conflicting_factory.executable(),
+            ))
+            .is_err());
+    }
 }

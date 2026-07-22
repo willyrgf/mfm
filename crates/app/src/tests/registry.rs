@@ -1,5 +1,18 @@
 use super::*;
 
+#[test]
+fn production_semantic_registries_equal_the_published_catalog() {
+    let catalog = production_authoring_catalog().expect("published production catalog");
+    let certification =
+        production_certification_registry().expect("production certification registry");
+    certification
+        .validate_authoring_catalog(&catalog)
+        .expect("exact certification catalog coverage");
+    replay_verifiers::ReplayVerifierRegistry::production()
+        .validate_authoring_catalog(&catalog)
+        .expect("exact replay catalog coverage");
+}
+
 #[tokio::test]
 async fn production_runner_registry_defers_malformed_runtime_config() {
     let dir = tempfile::tempdir().expect("tempdir");

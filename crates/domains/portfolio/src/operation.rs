@@ -301,6 +301,11 @@ pub fn portfolio_snapshot_program_draft(
     )
 }
 
+/// Returns the published portfolio snapshot public-output schema identity.
+pub fn portfolio_snapshot_public_output_schema_id() -> mfm_program::Result<mfm_ids::SchemaId> {
+    <PortfolioPublicOutputs<'static, 'static> as mfm_program::PublicOutputs<'static, 'static>>::public_schema_id()
+}
+
 /// Builds the launch plan for one complete typed portfolio snapshot program.
 pub fn portfolio_snapshot_program_launch_plan(
     config: PortfolioConfig,
@@ -728,6 +733,8 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let mut observed_states = BTreeSet::new();
         let mut observed_operations = BTreeSet::new();
+        let published_public_schema = portfolio_snapshot_public_output_schema_id()
+            .expect("published portfolio public-output schema");
 
         for branch in [
             portfolio_config(true, false, false),
@@ -738,6 +745,10 @@ mod tests {
                 .expect("canonical branch portfolio")
                 .into_config();
             let draft = portfolio_snapshot_program_draft(config).expect("canonical branch draft");
+            assert_eq!(
+                draft.public_output_spec().public_schema_id(),
+                &published_public_schema
+            );
             observed_states.extend(
                 draft
                     .state_nodes()

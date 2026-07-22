@@ -43,6 +43,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit::{CommitPlanner, RunnerOutputCommitInput};
 
+#[test]
+fn framework_authoring_catalog_matches_the_closed_certified_lifecycle() {
+    let public_schema = <CertifierPublicOutputs<'static, 'static> as mfm_program::PublicOutputs<
+        'static,
+        'static,
+    >>::public_schema_id()
+    .expect("fixture public schema");
+    let catalog = framework_authoring_catalog(&public_schema).expect("framework catalog");
+    let (certified, _) = certifier_backed_runtime_authority();
+    let lifecycle = certified.framework_lifecycle();
+    let expected_ids = [
+        lifecycle.render().descriptor_id(),
+        lifecycle.retention().descriptor_id(),
+        lifecycle.complete().descriptor_id(),
+        lifecycle.resolve().descriptor_id(),
+    ]
+    .into_iter()
+    .cloned()
+    .collect::<BTreeSet<_>>();
+    let catalog_ids = catalog
+        .state_descriptors()
+        .map(|descriptor| descriptor.descriptor_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(catalog_ids, expected_ids);
+    for descriptor in catalog.state_descriptors() {
+        assert!(catalog.is_framework_state(&descriptor.descriptor_id));
+        assert_eq!(
+            certified.descriptor_set().state(&descriptor.descriptor_id),
+            Some(descriptor)
+        );
+    }
+    assert_eq!(catalog.operation_descriptors().len(), 0);
+    assert_eq!(catalog.capability_descriptors().len(), 0);
+    assert_eq!(catalog.emitted_fact_descriptors().len(), 0);
+    assert_eq!(catalog.adapter_bindings().len(), 0);
+    assert_eq!(catalog.side_effect_state_descriptor_ids().len(), 0);
+}
+
 #[path = "fact_support.rs"]
 mod fact_support;
 #[path = "runner_kit.rs"]

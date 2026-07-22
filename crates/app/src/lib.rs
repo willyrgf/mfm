@@ -219,6 +219,7 @@ pub async fn production_runner_registry<S>(
 where
     S: store::FactQueryStore + store::RetainedArtifactReadProvider + 'static,
 {
+    let fact_query_implementation_id = store.fact_query_implementation_id().to_owned();
     let executable_identities = executable_identity::current_executable_identity_template().await?;
     let runtime_config = Arc::new(LiveTransportRuntime::new(
         RuntimeConfigLoader::from_path_or_env(runtime_config_path),
@@ -237,6 +238,9 @@ where
         &read_factory,
         &portfolio_adapter_factory,
     )?;
+    registry.validate_capability_implementation::<mfm_facts::FactQueryReadCapability>(
+        &fact_query_implementation_id,
+    )?;
     btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),
@@ -251,6 +255,7 @@ where
         &read_factory,
         &evm_adapter_factory,
     )?;
+    registry.validate_authoring_catalog(&production_authoring_catalog()?)?;
     Ok(registry)
 }
 
@@ -267,7 +272,19 @@ fn runner_factory_binding(
 pub fn production_certification_registry() -> Result<CertificationRegistry, PublicError> {
     let mut registry = CertificationRegistry::new();
     mfm_portfolio::register_portfolio_snapshot_certification_descriptors(&mut registry)?;
+    let catalog = production_authoring_catalog()?;
+    registry.validate_authoring_catalog(&catalog)?;
+    replay_verifiers::ReplayVerifierRegistry::production().validate_authoring_catalog(&catalog)?;
     Ok(registry)
+}
+
+pub(crate) fn production_authoring_catalog(
+) -> Result<mfm_certify::ProgramAuthoringCatalog, PublicError> {
+    let domain = mfm_portfolio::portfolio_snapshot_authoring_catalog()?;
+    let public_output_schema = mfm_portfolio::portfolio_snapshot_public_output_schema_id()
+        .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
+    let framework = mfm_runtime::framework_authoring_catalog(&public_output_schema)?;
+    Ok(domain.union(&framework)?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

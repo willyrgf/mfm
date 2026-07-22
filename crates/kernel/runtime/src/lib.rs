@@ -106,6 +106,15 @@ use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemp
 /// Result type for typed runtime operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
+/// Returns the closed framework lifecycle catalog for one published public-output schema.
+///
+/// The bootstrap contains framework primitives only and cannot register domain descriptors.
+pub fn framework_authoring_catalog(
+    public_output_schema_id: &SchemaId,
+) -> mfm_certify::Result<mfm_certify::ProgramAuthoringCatalog> {
+    mfm_certify::__framework_authoring_catalog(public_output_schema_id)
+}
+
 fn validate_public_output(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,

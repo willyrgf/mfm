@@ -42,7 +42,7 @@ pub(super) fn expand_program_public_outputs_derive_result(
         impl #impl_generics ::mfm_program::PublicOutputs<#program_lifetime, #scope_lifetime>
             for #ident #ty_generics #where_clause
         {
-            fn public_schema_id(&self) -> ::mfm_program::Result<::mfm_ids::SchemaId> {
+            fn public_schema_id() -> ::mfm_program::Result<::mfm_ids::SchemaId> {
                 let descriptor = (|| -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     ::mfm_values::SchemaDescriptor::new(
                         ::mfm_values::SchemaIdentity::new(

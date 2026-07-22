@@ -29,7 +29,7 @@ pub use self::registry::{CertificationRegistry, ConfigValidationSource};
 use self::registry::{ConfigValidator, ContextValidator};
 #[path = "authoring_catalog.rs"]
 mod authoring_catalog;
-pub use self::authoring_catalog::ProgramAuthoringCatalog;
+pub use self::authoring_catalog::{__framework_authoring_catalog, ProgramAuthoringCatalog};
 #[path = "lowering.rs"]
 mod lowering;
 use self::lowering::{CellInfo, DraftLowerer};

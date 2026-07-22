@@ -50,9 +50,9 @@ pub use model::wallet::{
 pub use operation::{
     portfolio_snapshot_authoring_catalog, portfolio_snapshot_operation_registry,
     portfolio_snapshot_program_draft, portfolio_snapshot_program_launch_plan,
-    portfolio_snapshot_state_registry, register_portfolio_snapshot_certification_descriptors,
-    PortfolioReportOperation, PortfolioReportOperationOutputs, PortfolioSnapshotOperation,
-    PortfolioSnapshotOperationOutputs,
+    portfolio_snapshot_public_output_schema_id, portfolio_snapshot_state_registry,
+    register_portfolio_snapshot_certification_descriptors, PortfolioReportOperation,
+    PortfolioReportOperationOutputs, PortfolioSnapshotOperation, PortfolioSnapshotOperationOutputs,
 };
 pub use state::{
     portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
