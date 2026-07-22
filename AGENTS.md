@@ -67,7 +67,7 @@ the commands, verification-selection matrix, build lanes, gate composition, inte
 and artifact lifecycle. [`nixfied.nix`](nixfied.nix) owns the exact executable graph and task ids.
 
 Follow the upstream
-[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/main/docs/GUIDE.md) for framework
+[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/HEAD/docs/GUIDE.md) for framework
 integration and coordinated pin/runtime changes. Two rules are non-negotiable:
 
 - do not run broad gates merely because a commit is about to be created

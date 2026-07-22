@@ -152,9 +152,21 @@
             '';
           };
         in
-        # Keep the generated control/verification apps and add the managed CLI.
+        # Keep the generated project apps and add the managed CLI.
         projectApps
         // {
+          check = projectApps.check // {
+            meta.description = "Run formatting, Clippy, metadata, and offline SQLx checks";
+          };
+          test = projectApps.test // {
+            meta.description = "Run service-free workspace Nextest and doctests";
+          };
+          test-db = projectApps.test-db // {
+            meta.description = "Run managed PostgreSQL SQLx and parity verification";
+          };
+          ci = projectApps.ci // {
+            meta.description = "Run the complete MFM verification graph";
+          };
           mfm = {
             type = "app";
             program = "${managedMfm}/bin/mfm";

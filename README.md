@@ -94,7 +94,7 @@ Development and operations:
 
 - Nixfied project model: [`nixfied.nix`](nixfied.nix)
 - Nixfied integration and upgrade guide:
-  [upstream adopter guide](https://github.com/willyrgf/nixfied/blob/main/docs/GUIDE.md)
+  [upstream adopter guide](https://github.com/willyrgf/nixfied/blob/HEAD/docs/GUIDE.md)
 
 ## Development
 
@@ -102,9 +102,10 @@ Use the pinned default Nix shell for Rust development. The
 [build and verification contract](docs/build-and-verification.md) owns the focused commands, task
 selection, gate composition, and artifact policy.
 
-Run binaries locally:
+Discover runnable flake apps and run binaries locally:
 
 ```bash
+nix run .#help
 nix run .#mfm -- --help
 nix run .#mfm -- ops list
 nix develop -c cargo run -p mfm -- --help

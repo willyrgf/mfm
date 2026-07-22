@@ -177,6 +177,3 @@ adds keystore/Reth parity coverage and the closing source revision. Do not run
 the three component gates immediately before `.#ci` on the same revision: that
 repeats their work in separate Nixfied runs. Run a component independently when
 it is the smallest sufficient boundary gate or when isolating a failure.
-
-For framework integration and coordinated Nixfied pin/runtime changes, follow the upstream
-[Nixfied adopter guide](https://github.com/willyrgf/nixfied/blob/main/docs/GUIDE.md).
