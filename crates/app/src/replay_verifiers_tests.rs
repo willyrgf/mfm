@@ -23,7 +23,7 @@ fn production_dispatch_scopes_are_explicit_and_unique() {
     }
 
     let validation =
-        state_key::<mfm_states_evm::ValidateEvmContractState>().expect("validation state key");
+        state_key::<mfm_evm::ValidateEvmContractState>().expect("validation state key");
     assert!(!state_keys.contains(&(validation.kind, validation.version)));
     assert!(
         registry

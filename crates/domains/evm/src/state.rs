@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Reusable EVM balance, transaction, and exact-anchor validation states.
 //!
 //! This package owns exactly three state kinds: [`CollectEvmBalancesState`],
@@ -9,7 +8,7 @@
 //! ```rust
 //! use alloy_primitives::{Address, U256};
 //! use mfm_signing::SignerRef;
-//! use mfm_states_evm::{
+//! use mfm_evm::{
 //!     EvmTransactionAction, EvmTransactionActionKind, EvmTransactionConfig,
 //! };
 //!
@@ -26,29 +25,34 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#[path = "state/balance_collection.rs"]
 mod balance_collection;
+#[path = "state/canonical.rs"]
 mod canonical;
+#[path = "state/contract_validation.rs"]
 mod contract_validation;
+#[path = "state/identity.rs"]
 mod identity;
+#[path = "state/transaction.rs"]
 mod transaction;
 
 #[cfg(test)]
+#[path = "state/balance_collection_tests.rs"]
 mod balance_collection_tests;
 
 pub use balance_collection::{
-    decode_evm_balance_snapshot_response, reduce_evm_balance_collection,
-    validate_evm_balance_collection_config, CollectEvmBalancesState, EvmBalanceAsset,
-    EvmBalanceCollectionConfig, EvmBalanceCollectionError, EvmBalanceCollectionEvidence,
-    EvmBalanceCollectionPlan, EvmBalanceCollectionReceipt, EvmBalanceReadEvidence,
-    EvmBalanceSnapshotFact, EvmBalanceSnapshotResponse, EvmBalanceSnapshotSubject,
-    EvmBalanceSource, EvmTokenDecimalsEvidence, EVM_BALANCE_COLLECTION_SOURCE_LIMIT,
+    decode_evm_balance_snapshot_response, reduce_evm_balance_collection, CollectEvmBalancesState,
+    EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceCollectionError,
+    EvmBalanceCollectionEvidence, EvmBalanceCollectionPlan, EvmBalanceCollectionReceipt,
+    EvmBalanceReadEvidence, EvmBalanceSnapshotFact, EvmBalanceSnapshotResponse,
+    EvmBalanceSnapshotSubject, EvmBalanceSource, EvmTokenDecimalsEvidence,
+    EVM_BALANCE_COLLECTION_SOURCE_LIMIT,
 };
 pub use contract_validation::{
-    validate_evm_contract, validate_evm_contract_validation_config, EvmContractCallCheck,
-    EvmContractCallContext, EvmContractValidationConfig, EvmContractValidationEvidence,
-    EvmContractValidationEvidenceBuilder, EvmContractValidationObservation,
-    EvmContractValidationPlan, EvmContractValidationTarget, ValidateEvmContractState,
-    VerifiedEvmContract, EVM_CONTRACT_VALIDATION_MAX_CALLS,
+    EvmContractCallCheck, EvmContractCallContext, EvmContractValidationConfig,
+    EvmContractValidationEvidence, EvmContractValidationEvidenceBuilder,
+    EvmContractValidationObservation, EvmContractValidationPlan, EvmContractValidationTarget,
+    ValidateEvmContractState, VerifiedEvmContract, EVM_CONTRACT_VALIDATION_MAX_CALLS,
     EVM_CONTRACT_VALIDATION_MAX_EVIDENCE_BYTES,
     EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_ENTRIES,
     EVM_CONTRACT_VALIDATION_MAX_TOTAL_ACCESS_LIST_STORAGE_KEYS,

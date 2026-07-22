@@ -2,12 +2,11 @@
 
 use std::str::FromStr;
 
+use crate::capability::{EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID};
+use crate::model::EvmBlockAnchor;
 use alloy_primitives::{Address, B256, U256};
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
-};
 
-use crate::EvmStateError;
+use super::EvmStateError;
 
 pub(crate) fn parse_address(value: &str) -> Result<Address, EvmStateError> {
     let address = Address::from_str(value).map_err(|_| invalid("EVM address was invalid"))?;

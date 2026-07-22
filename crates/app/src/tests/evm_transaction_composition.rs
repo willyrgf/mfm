@@ -12,11 +12,14 @@ use mfm_adapters_evm::{
 };
 use mfm_certify::CertificationRegistry;
 use mfm_events::v1 as events;
-use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
-    EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction, EvmReadSession, EvmReceipt,
-    EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture, EvmTransactionEstimate,
-    EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+use mfm_evm::{
+    evm_diagnostic, evm_sender_lane_resource_claim, EvmBlockAnchor, EvmBlockSelector, EvmCall,
+    EvmCapabilityError, EvmCode, EvmContractCallCheck, EvmContractValidationConfig,
+    EvmContractValidationTarget, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
+    EvmReadSession, EvmReceipt, EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture,
+    EvmTransactionAction, EvmTransactionConfig, EvmTransactionEstimate, EvmTransactionOutcome,
+    EvmTransactionResult, EvmTransactionSession, EvmTransactionSuccess, SubmitEvmTransactionState,
+    ValidateEvmContractState, VerifiedEvmContract, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, PureState, RootBuilder,
@@ -28,12 +31,6 @@ use mfm_runtime::{register_pure_state, ErasedRunnerRegistry, RunnerRegistrationB
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
     SigningProvider, SigningRequest, SigningResult, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
-};
-use mfm_states_evm::{
-    evm_sender_lane_resource_claim, EvmContractCallCheck, EvmContractValidationConfig,
-    EvmContractValidationTarget, EvmTransactionAction, EvmTransactionConfig, EvmTransactionOutcome,
-    EvmTransactionResult, EvmTransactionSuccess, SubmitEvmTransactionState,
-    ValidateEvmContractState, VerifiedEvmContract,
 };
 use mfm_store::v1::{self as store, StoreScopeStore as _};
 
@@ -798,7 +795,7 @@ fn register_projection_runners(
     .expect("register direct validation-target projection runner");
 }
 
-fn validate_composition_binding(binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
+fn validate_composition_binding(binding: &EvmNetworkBinding) -> mfm_evm::EvmCapabilityResult<()> {
     if binding.network_id().as_str() == "ethereum-mainnet" && binding.expected_chain_id() == 1 {
         Ok(())
     } else {

@@ -49,7 +49,7 @@ fn portfolio_live_source_excludes_artifact_write_surfaces() {
 
 #[test]
 fn transport_provider_boundaries_expose_only_checked_bound_sessions() {
-    let evm_capabilities = include_str!("../../evm-capabilities/src/lib.rs");
+    let evm_capabilities = include_str!("../../domains/evm/src/capability.rs");
     assert!(evm_capabilities.contains("EvmReadCapability"));
     assert!(evm_capabilities.contains("pub trait EvmReadSession"));
     assert!(evm_capabilities.contains("EvmTransactionCapability"));

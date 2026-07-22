@@ -1,7 +1,7 @@
-# mfm-states-evm
+# mfm-evm
 
-Reusable EVM state contracts with no portfolio, app, runtime, transport, storage, or signer-provider
-dependency.
+Pure EVM model, capability, signing, state, and operation contracts with no portfolio, app,
+runtime, transport, storage, keystore, or concrete signer-provider dependency.
 
 The crate owns exactly three state kinds:
 
@@ -16,6 +16,5 @@ and one exact block anchor. Its reducer returns an ordered non-empty `evm.balanc
 batch and `EvmBalanceCollectionReceipt`; runtime settles both atomically with the read evidence and
 completion. The fact and receipt contain generic EVM source identity only.
 
-State reducers are deterministic and replayable from retained evidence. Live execution bindings
-belong to `mfm-adapters-evm`; topology belongs to
-`mfm-op-evm-collectors`.
+State reducers are deterministic and replayable from retained evidence. The balance operation
+expands directly to `CollectEvmBalancesState`; live execution bindings belong outside this crate.

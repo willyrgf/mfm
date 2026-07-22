@@ -2301,7 +2301,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-certify",
  "mfm-events",
- "mfm-evm-signing",
+ "mfm-evm",
  "mfm-ids",
  "mfm-program",
  "mfm-rest-api",
@@ -2332,15 +2332,13 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-events",
- "mfm-evm-capabilities",
- "mfm-evm-signing",
+ "mfm-evm",
  "mfm-ids",
  "mfm-program",
  "mfm-replay",
  "mfm-runtime",
  "mfm-signing",
  "mfm-spec",
- "mfm-states-evm",
  "mfm-store",
  "mfm-values",
  "serde",
@@ -2373,11 +2371,9 @@ dependencies = [
  "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
- "mfm-evm-capabilities",
- "mfm-evm-signing",
+ "mfm-evm",
  "mfm-facts",
  "mfm-ids",
- "mfm-op-evm-collectors",
  "mfm-op-portfolio-snapshot",
  "mfm-portfolio-model",
  "mfm-program",
@@ -2389,7 +2385,6 @@ dependencies = [
  "mfm-signing",
  "mfm-spec",
  "mfm-state-portfolio",
- "mfm-states-evm",
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-transports-evm",
@@ -2500,24 +2495,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-evm-capabilities"
-version = "0.1.0"
-dependencies = [
- "alloy-eips",
- "alloy-primitives",
- "derive_more 1.0.0",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-ids",
- "mfm-program-derive",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mfm-evm-signing"
+name = "mfm-evm"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
@@ -2525,10 +2503,17 @@ dependencies = [
  "alloy-primitives",
  "derive_more 1.0.0",
  "hex",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-certify",
+ "mfm-facts",
  "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
  "mfm-signing",
  "mfm-values",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "trybuild",
@@ -2566,8 +2551,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-certify",
  "mfm-events",
- "mfm-evm-capabilities",
- "mfm-evm-signing",
+ "mfm-evm",
  "mfm-facts",
  "mfm-ids",
  "mfm-op-portfolio-snapshot",
@@ -2576,7 +2560,6 @@ dependencies = [
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-signing",
- "mfm-states-evm",
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-transports-evm",
@@ -2606,34 +2589,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-evm-collectors"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-canonical",
- "mfm-certify",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-states-evm",
- "mfm-values",
-]
-
-[[package]]
 name = "mfm-op-portfolio-snapshot"
 version = "0.1.0"
 dependencies = [
  "mfm-bitcoin",
  "mfm-canonical",
  "mfm-certify",
+ "mfm-evm",
  "mfm-facts",
  "mfm-ids",
- "mfm-op-evm-collectors",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
  "mfm-state-portfolio",
- "mfm-states-evm",
  "mfm-values",
  "serde_json",
 ]
@@ -2644,7 +2612,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "mfm-bitcoin",
- "mfm-evm-capabilities",
+ "mfm-evm",
  "mfm-ids",
  "mfm-program",
  "mfm-program-derive",
@@ -2816,38 +2784,15 @@ dependencies = [
  "mfm-bitcoin",
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-evm-capabilities",
+ "mfm-evm",
  "mfm-facts",
  "mfm-ids",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
- "mfm-states-evm",
  "mfm-values",
  "num-bigint",
  "num-traits",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mfm-states-evm"
-version = "0.1.0"
-dependencies = [
- "alloy-eips",
- "alloy-primitives",
- "hex",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-evm-capabilities",
- "mfm-evm-signing",
- "mfm-facts",
- "mfm-ids",
- "mfm-program",
- "mfm-program-derive",
- "mfm-signing",
- "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2899,7 +2844,7 @@ dependencies = [
  "derive_more 1.0.0",
  "hex",
  "mfm-capabilities",
- "mfm-evm-capabilities",
+ "mfm-evm",
  "mfm-ids",
  "reqwest",
  "serde_json",

@@ -1,6 +1,6 @@
 use super::*;
 use alloy_primitives::{B256, U256};
-use mfm_evm_capabilities::EvmBlockAnchor;
+use mfm_evm::EvmBlockAnchor;
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::ExecutionAnchor;
 use mfm_portfolio_model::symbol::{

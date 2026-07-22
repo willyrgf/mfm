@@ -1,5 +1,5 @@
 use mfm_capabilities::CapabilitySpec;
-use mfm_evm_capabilities::{EvmReadCapability, EvmTransactionCapability};
+use mfm_evm::{EvmReadCapability, EvmTransactionCapability};
 
 #[test]
 fn capability_surface_has_exactly_two_authority_names() {
@@ -13,7 +13,10 @@ fn capability_surface_has_exactly_two_authority_names() {
 
 #[test]
 fn contracts_contain_no_runtime_secret_storage() {
-    let source = include_str!("../src/lib.rs");
+    let source = concat!(
+        include_str!("../src/model.rs"),
+        include_str!("../src/capability.rs")
+    );
     for forbidden in [
         concat!("rpc", "_", "url"),
         concat!("author", "ization"),

@@ -1,5 +1,7 @@
 //! Canonical checked EVM block identity shared by live protocol and persisted evidence.
 
+//! Canonical EVM domain values.
+
 use std::str::FromStr;
 
 use alloy_primitives::{B256, U256};

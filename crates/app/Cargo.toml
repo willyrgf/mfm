@@ -28,11 +28,9 @@ mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-events = { path = "../kernel/events" }
-mfm-evm-capabilities = { path = "../evm-capabilities" }
-mfm-evm-signing = { path = "../evm-signing" }
+mfm-evm = { path = "../domains/evm" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
-mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
 mfm-op-portfolio-snapshot = { path = "../ops/portfolio-snapshot-op" }
 mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-program = { path = "../kernel/program" }
@@ -40,7 +38,6 @@ mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-runtime-config = { path = "../runtime-config" }
 mfm-state-portfolio = { path = "../states/portfolio" }
-mfm-states-evm = { path = "../states/evm" }
 mfm-signing = { path = "../signing" }
 mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-spec = { path = "../kernel/spec" }

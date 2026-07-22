@@ -1,34 +1,36 @@
 [package]
-name = "mfm-adapters-evm"
+name = "mfm-evm"
 version = "0.1.0"
 edition = "2021"
-description = "EVM balance, transaction, and exact-anchor validation adapter runners for MFM"
+description = "Pure EVM model, capability, signing, state, and operation contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-layer = "live"
+layer = "domain"
 domain = "evm"
+domain-role = "source"
 
 [dependencies]
+alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
-alloy-primitives = { workspace = true }
+alloy-primitives = { workspace = true, features = ["k256", "serde"] }
+derive_more = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-events = { path = "../../kernel/events" }
-mfm-evm = { path = "../../domains/evm" }
+mfm-certify = { path = "../../kernel/certify" }
+mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
-mfm-replay = { path = "../../kernel/replay" }
-mfm-runtime = { path = "../../kernel/runtime" }
-mfm-spec = { path = "../../kernel/spec" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-signing = { path = "../../signing" }
-mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
-serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-mfm-store = { path = "../../kernel/store", features = ["test-support"] }
+trybuild = "1.0"

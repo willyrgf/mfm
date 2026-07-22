@@ -47,7 +47,7 @@ impl ReplayVerifierRegistry {
                     verifier: verify_btc,
                 },
                 ReplayVerifierRegistration {
-                    state_keys: &[state_key::<mfm_states_evm::CollectEvmBalancesState>],
+                    state_keys: &[state_key::<mfm_evm::CollectEvmBalancesState>],
                     intent_matcher: None,
                     verifier: verify_evm_balance_collection,
                 },

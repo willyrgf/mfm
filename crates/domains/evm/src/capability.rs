@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Source-bound EVM capability contracts.
 //!
 //! The capability surface has two coherent views: checked external reads and
@@ -9,7 +8,7 @@
 //! ```rust
 //! use alloy_primitives::{B256, U256};
 //! use mfm_capabilities::CapabilitySpec;
-//! use mfm_evm_capabilities::{EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability};
+//! use mfm_evm::{EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability};
 //! use mfm_ids::LocalPublicId;
 //!
 //! let binding = EvmNetworkBinding::new(LocalPublicId::new("ethereum-mainnet")?, 1)?;
@@ -20,10 +19,6 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-mod block;
-
-pub use block::{EvmBlockAnchor, EvmBlockAnchorError};
-
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
@@ -31,7 +26,7 @@ use std::pin::Pin;
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_canonical::sha256_digest_bytes;
-pub use mfm_capabilities::ProviderDiagnosticCode;
+use mfm_capabilities::ProviderDiagnosticCode;
 use mfm_capabilities::{
     CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ProviderDiagnosticValue,
     ReadExternalRole, RedactedProviderDiagnostic,
@@ -39,6 +34,8 @@ use mfm_capabilities::{
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
 use mfm_program_derive::MfmValue;
 use serde::{de, Deserialize, Serialize};
+
+use crate::model::EvmBlockAnchor;
 
 /// Result type for EVM capability contracts.
 pub type Result<T> = std::result::Result<T, EvmCapabilityError>;
@@ -891,5 +888,5 @@ fn public_id(value: &str) -> LocalPublicId {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "capability_tests.rs"]
 mod tests;

@@ -8,19 +8,17 @@ use std::sync::Arc;
 
 use mfm_capabilities::ProviderDiagnosticCode;
 use mfm_events::v1 as events;
-use mfm_evm_capabilities::{
-    EvmCapabilityError, EvmCapabilityFailureDisposition, EvmCapabilityPhase, EvmInvalidRequest,
-    EvmNetworkBinding, EvmReadCapability, EvmReadSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+use mfm_evm::{
+    evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, CollectEvmBalancesState,
+    EvmCapabilityError, EvmCapabilityFailureDisposition, EvmCapabilityPhase,
+    EvmContractValidationEvidence, EvmContractValidationEvidenceBuilder, EvmContractValidationPlan,
+    EvmInvalidRequest, EvmNetworkBinding, EvmReadCapability, EvmReadSession,
+    ValidateEvmContractState, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_runtime::{
     CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry, ExternalReadExecution,
     ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
     RunnerFactoryBinding, RunnerIngressContext, RunnerRegistrationBuilder,
-};
-use mfm_states_evm::{
-    evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, CollectEvmBalancesState,
-    EvmContractValidationEvidence, EvmContractValidationEvidenceBuilder, EvmContractValidationPlan,
-    ValidateEvmContractState,
 };
 use mfm_store::v1 as store;
 
@@ -40,13 +38,13 @@ const READ_FACTORY: &str = "read_external";
 /// Future returned by the application-owned EVM read-session binder.
 pub type EvmReadSessionBindFuture = Pin<
     Box<
-        dyn Future<Output = mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>>> + Send + 'static,
+        dyn Future<Output = mfm_evm::EvmCapabilityResult<Arc<dyn EvmReadSession>>> + Send + 'static,
     >,
 >;
 
 /// Future returned by the application-owned EVM read-route validator.
 pub type EvmReadRouteValidationFuture =
-    Pin<Box<dyn Future<Output = mfm_evm_capabilities::Result<()>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = mfm_evm::EvmCapabilityResult<()>> + Send + 'static>>;
 
 type ValidateEvmReadRoute = dyn Fn(EvmNetworkBinding) -> EvmReadRouteValidationFuture + Send + Sync;
 type BindEvmReadSession = dyn Fn(EvmNetworkBinding) -> EvmReadSessionBindFuture + Send + Sync;
@@ -80,14 +78,14 @@ impl EvmReadRunnerCapabilities {
     pub(crate) async fn validate_read_route(
         &self,
         binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<()> {
+    ) -> mfm_evm::EvmCapabilityResult<()> {
         (self.validate_evm_read_route)(binding).await
     }
 
     pub(crate) async fn bind(
         &self,
         binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn EvmReadSession>> {
+    ) -> mfm_evm::EvmCapabilityResult<Arc<dyn EvmReadSession>> {
         let session = (self.bind_evm_read_session)(binding.clone()).await?;
         if !session.evidence().matches_binding(&binding)
             || session.evidence().implementation_id() != EVM_JSONRPC_SESSION_IMPLEMENTATION_ID
@@ -322,7 +320,7 @@ fn evm_capability_runtime_error(
     }
 }
 
-fn evm_state_runtime_error(error: mfm_states_evm::EvmStateError) -> mfm_runtime::RuntimeError {
+fn evm_state_runtime_error(error: mfm_evm::EvmStateError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 

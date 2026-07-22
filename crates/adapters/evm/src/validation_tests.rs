@@ -5,16 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence, EvmSessionFuture,
-    ProviderDiagnosticCode, EVM_CODE_MAX_RESPONSE_BYTES,
+use mfm_capabilities::ProviderDiagnosticCode;
+use mfm_evm::{
+    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceSource,
+    EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmContractCallCheck,
+    EvmContractValidationConfig, EvmContractValidationTarget, EvmSessionEvidence, EvmSessionFuture,
+    EVM_CODE_MAX_RESPONSE_BYTES, EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES,
 };
 use mfm_program::{StateSpec, ValidatedConfig};
-use mfm_states_evm::{
-    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig, EvmBalanceSource,
-    EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
-    EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES,
-};
 
 struct MissingArtifacts;
 
@@ -54,7 +52,7 @@ impl CountingReadSession {
     fn used<'a, T: Send + 'a>(&'a self) -> EvmSessionFuture<'a, T> {
         self.uses.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(Err(
-            EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+            EvmCapabilityError::provider_failure(mfm_evm::evm_diagnostic(
                 ProviderDiagnosticCode::ProviderConfigurationInvalid,
             )),
         )))
@@ -120,7 +118,7 @@ async fn wrong_session_binding_fails_before_using_validation_authority() {
     assert_eq!(
         error,
         EvmCapabilityError::InvalidRequest {
-            reason: mfm_evm_capabilities::EvmInvalidRequest::SessionAuthorityMismatch,
+            reason: mfm_evm::EvmInvalidRequest::SessionAuthorityMismatch,
         }
     );
     assert_eq!(session.uses.load(Ordering::SeqCst), 0);
@@ -141,9 +139,7 @@ async fn both_evm_read_families_share_async_route_validation_before_binding_or_r
             Box::pin(async move {
                 validation_counter.fetch_add(1, Ordering::SeqCst);
                 Err(EvmCapabilityError::provider_failure(
-                    mfm_evm_capabilities::evm_diagnostic(
-                        ProviderDiagnosticCode::ProviderConfigurationInvalid,
-                    ),
+                    mfm_evm::evm_diagnostic(ProviderDiagnosticCode::ProviderConfigurationInvalid),
                 ))
             })
         },
@@ -207,7 +203,7 @@ async fn both_evm_read_families_share_async_route_validation_before_binding_or_r
 
 #[test]
 fn validation_provider_availability_blocks_while_contract_failures_terminalize() {
-    let unavailable = EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+    let unavailable = EvmCapabilityError::provider_failure(mfm_evm::evm_diagnostic(
         ProviderDiagnosticCode::TransportFailed,
     ));
     assert!(matches!(
@@ -215,7 +211,7 @@ fn validation_provider_availability_blocks_while_contract_failures_terminalize()
         mfm_runtime::RuntimeError::Blocked(_)
     ));
 
-    let malformed = EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+    let malformed = EvmCapabilityError::provider_failure(mfm_evm::evm_diagnostic(
         ProviderDiagnosticCode::ResponseInvalid,
     ));
     assert!(matches!(
@@ -225,7 +221,7 @@ fn validation_provider_availability_blocks_while_contract_failures_terminalize()
 
     for (code, blocks) in [(-32603, true), (-32602, false)] {
         let error = EvmCapabilityError::provider_failure(
-            mfm_evm_capabilities::evm_diagnostic(ProviderDiagnosticCode::RpcJsonError).with_field(
+            mfm_evm::evm_diagnostic(ProviderDiagnosticCode::RpcJsonError).with_field(
                 mfm_ids::LocalPublicId::new("rpc_code").expect("field"),
                 mfm_capabilities::ProviderDiagnosticValue::I64(code),
             ),
@@ -240,7 +236,7 @@ fn validation_provider_availability_blocks_while_contract_failures_terminalize()
     }
     for (status, blocks) in [(503, true), (400, false)] {
         let error = EvmCapabilityError::provider_failure(
-            mfm_evm_capabilities::evm_diagnostic(ProviderDiagnosticCode::RpcHttpStatus).with_field(
+            mfm_evm::evm_diagnostic(ProviderDiagnosticCode::RpcHttpStatus).with_field(
                 mfm_ids::LocalPublicId::new("http_status").expect("field"),
                 mfm_capabilities::ProviderDiagnosticValue::U64(status),
             ),
@@ -267,9 +263,7 @@ fn ingress_preserves_runtime_configuration_codes_and_diagnostics() {
             "RuntimeConfigInvalid",
         ),
     ] {
-        let error = EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
-            diagnostic_code,
-        ));
+        let error = EvmCapabilityError::provider_failure(mfm_evm::evm_diagnostic(diagnostic_code));
         let mfm_runtime::RuntimeError::Failure(failure) = evm_ingress_runtime_error(error) else {
             panic!("expected structured runtime configuration failure");
         };
@@ -437,9 +431,9 @@ async fn hostile_call_result_is_consumed_once_before_execution_stops() {
 async fn forged_aggregate_crossing_plan_is_rejected_before_rpc() {
     let code = Bytes::from_static(&[0x60, 0x00]);
     let valid_plan = validation_plan(&code, &[]);
-    let maximum = vec![0x5a; mfm_evm_capabilities::EVM_CALL_MAX_RESPONSE_BYTES];
+    let maximum = vec![0x5a; mfm_evm::EVM_CALL_MAX_RESPONSE_BYTES];
     let mut calls = (0..(EVM_CONTRACT_VALIDATION_MAX_TOTAL_RETURN_BYTES
-        / mfm_evm_capabilities::EVM_CALL_MAX_RESPONSE_BYTES))
+        / mfm_evm::EVM_CALL_MAX_RESPONSE_BYTES))
         .map(|_| {
             EvmContractCallCheck::new(
                 Address::from([0x22; 20]),

@@ -97,7 +97,7 @@ fn production_certification_registers_balance_read_but_not_other_evm_states() {
 
     let mut with_balance_read = registry.clone();
     with_balance_read
-        .register_state::<mfm_states_evm::CollectEvmBalancesState>()
+        .register_state::<mfm_evm::CollectEvmBalancesState>()
         .expect("balance read descriptor");
     assert_eq!(
         with_balance_read
@@ -111,14 +111,14 @@ fn production_certification_registers_balance_read_but_not_other_evm_states() {
         ("validation", {
             let mut expanded = registry.clone();
             expanded
-                .register_state::<mfm_states_evm::ValidateEvmContractState>()
+                .register_state::<mfm_evm::ValidateEvmContractState>()
                 .expect("validation descriptor can be registered explicitly");
             expanded.digest().expect("validation registry digest")
         }),
         ("transaction", {
             let mut expanded = registry.clone();
             expanded
-                .register_state::<mfm_states_evm::SubmitEvmTransactionState>()
+                .register_state::<mfm_evm::SubmitEvmTransactionState>()
                 .expect("transaction descriptor can be registered explicitly");
             expanded.digest().expect("transaction registry digest")
         }),

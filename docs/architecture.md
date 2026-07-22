@@ -66,6 +66,13 @@ package-only re-export bridge are deleted. The consolidated public surface also 
 Bitcoin `Result` alias, raw validation/reduction helpers, and duplicate address-limit export that
 existed only to cross those package boundaries.
 
+`mfm-evm` is the single pure EVM package. Its private `model`, `capability`, `signing`, `state`, and
+`operation` modules point only downward in that order; generic signing contracts remain in the
+lower `mfm-signing` package. The explicit crate root exposes the balance, exact-anchor validation,
+and one-transaction contracts needed by final consumers, while package-only validation helpers,
+generic result bridges, and the former operation-to-state re-export are private or deleted. The
+crate owns no runtime, replay, store, app, keystore, filesystem, or network implementation.
+
 `mfm-op-portfolio-snapshot` owns that complete internal graph through two operations.
 `PortfolioSnapshotOperation` projects normalized `PortfolioConfig` into child Bitcoin/EVM
 collector calls and one `PortfolioReportOperation` call; it constructs no state directly. The
@@ -400,7 +407,7 @@ Signer crates must not:
   raw signed transaction bytes in typed semantic surfaces
 
 Raw signed transactions are bearer mutation material. They remain transient submit-time bytes below
-the typed semantic boundary. `mfm-evm-signing` owns the sole domain-specific EIP-1559 envelope
+the typed semantic boundary. `mfm-evm` owns the sole domain-specific EIP-1559 envelope
 conversion/finalization path: Alloy supplies the signing digest, signed encoding, and transaction
 hash; MFM verifies the generic result profile, canonical low-s/parity, and recovered sender. The
 keystore provider is protocol-neutral and must not import EVM domain or purpose constants.

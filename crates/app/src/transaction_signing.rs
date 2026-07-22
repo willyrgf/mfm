@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use alloy_primitives::{Address, Bytes, TxKind, U256};
-use mfm_evm_signing::{EvmSigningError, TransientSignedEip1559Envelope, UnsignedEip1559Envelope};
+use mfm_evm::{EvmSigningError, TransientSignedEip1559Envelope, UnsignedEip1559Envelope};
 use mfm_runtime_config::{RuntimeConfig, RuntimeConfigErrorKind};
 use mfm_signers_keystore::KeystoreSignerProvider;
 use mfm_signing::{SignerRef, SigningError};
@@ -210,7 +210,7 @@ async fn sign_checked_eip1559_transaction(
         )
     })??;
 
-    mfm_evm_signing::sign_eip1559(envelope, signer_ref, expected_sender, &provider)
+    mfm_evm::sign_eip1559(envelope, signer_ref, expected_sender, &provider)
         .await
         .map_err(public_signing_error)
 }

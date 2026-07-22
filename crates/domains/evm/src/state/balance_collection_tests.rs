@@ -1,9 +1,8 @@
 use super::*;
 
+use crate::capability::{EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID};
+use crate::model::EvmBlockAnchor;
 use alloy_primitives::{Address, U256};
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
-};
 use mfm_facts::MfmFactType;
 use mfm_ids::LocalPublicId;
 use mfm_program::{ReadState, StateSpec, ValidatedConfig};

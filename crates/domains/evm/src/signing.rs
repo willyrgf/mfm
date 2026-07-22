@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Canonical EIP-1559 transaction signing.
 //!
 //! This crate admits one checked Alloy EIP-1559 envelope, converts its
@@ -10,7 +9,7 @@
 //! ```rust
 //! use alloy_eips::eip2930::AccessList;
 //! use alloy_primitives::{address, Bytes, TxKind, U256};
-//! use mfm_evm_signing::UnsignedEip1559Envelope;
+//! use mfm_evm::UnsignedEip1559Envelope;
 //!
 //! let envelope = UnsignedEip1559Envelope::new(
 //!     U256::from(1),
@@ -24,7 +23,7 @@
 //!     Bytes::new(),
 //! )?;
 //! assert_ne!(envelope.signing_digest(), alloy_primitives::B256::ZERO);
-//! # Ok::<(), mfm_evm_signing::EvmSigningError>(())
+//! # Ok::<(), mfm_evm::EvmSigningError>(())
 //! ```
 
 use std::fmt;
@@ -39,13 +38,10 @@ use mfm_signing::{
     SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
 
-/// Result type for canonical EVM signing operations.
-pub type Result<T> = std::result::Result<T, EvmSigningError>;
+type Result<T> = std::result::Result<T, EvmSigningError>;
 
-/// EVM transaction signing domain id.
-pub const EVM_TRANSACTION_DOMAIN_ID: &str = "evm.transaction";
-/// EIP-1559 transaction signing purpose id.
-pub const EVM_EIP1559_TRANSACTION_PURPOSE_ID: &str = "evm.transaction.eip1559";
+const EVM_TRANSACTION_DOMAIN_ID: &str = "evm.transaction";
+const EVM_EIP1559_TRANSACTION_PURPOSE_ID: &str = "evm.transaction.eip1559";
 
 /// One checked, unsigned Alloy EIP-1559 envelope.
 #[derive(Clone, PartialEq, Eq)]
@@ -152,7 +148,7 @@ impl UnsignedEip1559Envelope {
     }
 
     /// Builds the one generic signing request for this envelope.
-    pub fn signing_request(
+    fn signing_request(
         &self,
         signer_ref: SignerRef,
         expected_sender: Address,
@@ -173,7 +169,7 @@ impl UnsignedEip1559Envelope {
     }
 
     /// Verifies one provider result and finalizes the exact Alloy envelope.
-    pub fn finalize_signed(
+    fn finalize_signed(
         &self,
         request: &SigningRequest,
         expected_sender: Address,
@@ -267,14 +263,14 @@ pub async fn sign_eip1559(
 }
 
 /// Returns the generic recoverable secp256k1 EVM signing algorithm id.
-pub fn evm_signing_algorithm_id() -> Result<SigningAlgorithmId> {
+fn evm_signing_algorithm_id() -> Result<SigningAlgorithmId> {
     Ok(SigningAlgorithmId::new(
         SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID,
     )?)
 }
 
 /// Returns the deterministic canonical EVM signing profile id.
-pub fn evm_deterministic_signing_profile_id() -> Result<SigningProfileId> {
+fn evm_deterministic_signing_profile_id() -> Result<SigningProfileId> {
     Ok(SigningProfileId::new(SECP256K1_RFC6979_LOW_S_PROFILE_ID)?)
 }
 
@@ -412,5 +408,5 @@ pub enum EvmSignatureError {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "signing_tests.rs"]
 mod tests;

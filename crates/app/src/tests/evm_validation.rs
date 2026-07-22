@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
 use mfm_adapters_evm::{register_evm_validation_runner, EvmReadRunnerCapabilities};
 use mfm_certify::CertificationRegistry;
-use mfm_evm_capabilities::{
+use mfm_evm::{
     evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCapabilityError, EvmCode,
+    EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
     EvmNetworkBinding, EvmReadSession, EvmSessionEvidence, EvmSessionFuture,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+    ValidateEvmContractState, VerifiedEvmContract, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, NoContext, PublicOutputKey, RootBuilder, ScopeKey,
@@ -16,10 +17,6 @@ use mfm_program::{
 };
 use mfm_program_derive::PublicOutputs;
 use mfm_runtime::ErasedRunnerRegistry;
-use mfm_states_evm::{
-    EvmContractCallCheck, EvmContractValidationConfig, EvmContractValidationTarget,
-    ValidateEvmContractState, VerifiedEvmContract,
-};
 use mfm_store::v1::{self as store, StoreScopeStore as _};
 
 const CONTRACT: Address = address!("1111111111111111111111111111111111111111");
@@ -222,7 +219,7 @@ fn validation_runners(
     runners
 }
 
-fn validate_binding(binding: &EvmNetworkBinding) -> mfm_evm_capabilities::Result<()> {
+fn validate_binding(binding: &EvmNetworkBinding) -> mfm_evm::EvmCapabilityResult<()> {
     if binding.network_id().as_str() == "ethereum-mainnet" && binding.expected_chain_id() == 1 {
         Ok(())
     } else {

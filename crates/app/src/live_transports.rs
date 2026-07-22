@@ -13,7 +13,7 @@ use mfm_bitcoin_live::transport::{BitcoinRpcAuthentication, BitcoinRpcSession};
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
-use mfm_evm_capabilities::{EvmCapabilityError, EvmNetworkBinding};
+use mfm_evm::{EvmCapabilityError, EvmNetworkBinding};
 use mfm_ids::LocalPublicId;
 
 use crate::MFM_RUNTIME_CONFIG_FILE;
@@ -75,14 +75,14 @@ impl LiveTransportRuntime {
     pub(crate) async fn validate_evm_read_route(
         &self,
         binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<()> {
+    ) -> mfm_evm::EvmCapabilityResult<()> {
         self.load_evm_route_async(binding).await.map(|_| ())
     }
 
     pub(crate) async fn bind_evm_read_session(
         &self,
         binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_evm_capabilities::EvmReadSession>> {
+    ) -> mfm_evm::EvmCapabilityResult<Arc<dyn mfm_evm::EvmReadSession>> {
         let route = self.load_evm_route_async(binding.clone()).await?;
         self.evm_transport(&binding)?
             .bind(
@@ -94,14 +94,14 @@ impl LiveTransportRuntime {
                     .map(|value| value.expose_secret().to_owned()),
             )
             .await
-            .map(|session| Arc::new(session) as Arc<dyn mfm_evm_capabilities::EvmReadSession>)
+            .map(|session| Arc::new(session) as Arc<dyn mfm_evm::EvmReadSession>)
             .map_err(|error| evm_transport_capability_error(&binding, error))
     }
 
     fn load_evm_route(
         &self,
         binding: &EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<mfm_runtime_config::EvmRpcRoute> {
+    ) -> mfm_evm::EvmCapabilityResult<mfm_runtime_config::EvmRpcRoute> {
         let Some(path) = self.runtime_config.path.as_ref() else {
             return Err(evm_provider_failure(
                 binding,
@@ -125,7 +125,7 @@ impl LiveTransportRuntime {
     fn evm_transport(
         &self,
         binding: &EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<mfm_transports_evm::EvmJsonRpcTransport> {
+    ) -> mfm_evm::EvmCapabilityResult<mfm_transports_evm::EvmJsonRpcTransport> {
         self.evm_transport
             .get_or_init(mfm_transports_evm::EvmJsonRpcTransport::new)
             .clone()
@@ -135,7 +135,7 @@ impl LiveTransportRuntime {
     async fn load_evm_route_async(
         &self,
         binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<mfm_runtime_config::EvmRpcRoute> {
+    ) -> mfm_evm::EvmCapabilityResult<mfm_runtime_config::EvmRpcRoute> {
         let runtime_config = self.runtime_config.clone();
         let diagnostic_binding = binding.clone();
         load_runtime_config_on_blocking_worker(move || {
@@ -329,7 +329,7 @@ fn evm_provider_failure(
 ) -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(enrich_evm_diagnostic(
         binding,
-        mfm_evm_capabilities::evm_diagnostic(code),
+        mfm_evm::evm_diagnostic(code),
     ))
 }
 
@@ -585,7 +585,7 @@ rpc_url = "http://127.0.0.1:8545"
     #[test]
     fn transport_source_mismatch_stays_repairable_typed_authority() {
         let binding = evm_binding();
-        let mismatch = mfm_evm_capabilities::source_mismatch_error(
+        let mismatch = mfm_evm::source_mismatch_error(
             &binding,
             alloy_primitives::U256::from(2),
             &LocalPublicId::new("wrong-route").expect("source"),
@@ -600,8 +600,8 @@ rpc_url = "http://127.0.0.1:8545"
 
         assert!(matches!(error, EvmCapabilityError::SourceMismatch { .. }));
         assert_eq!(
-            error.failure_disposition(mfm_evm_capabilities::EvmCapabilityPhase::ReadOnly),
-            mfm_evm_capabilities::EvmCapabilityFailureDisposition::OperationalBlock
+            error.failure_disposition(mfm_evm::EvmCapabilityPhase::ReadOnly),
+            mfm_evm::EvmCapabilityFailureDisposition::OperationalBlock
         );
     }
 }

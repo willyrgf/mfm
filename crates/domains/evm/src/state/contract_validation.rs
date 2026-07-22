@@ -1,13 +1,14 @@
 //! Exact-anchor EVM contract validation state and evidence reducer.
 
+use crate::capability::{
+    EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
+    EVM_CALL_MAX_RESPONSE_BYTES, EVM_CODE_MAX_RESPONSE_BYTES,
+};
+use crate::model::EvmBlockAnchor;
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::ReadExternal;
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmNetworkBinding, EvmReadCapability,
-    EvmSessionEvidence, EVM_CALL_MAX_RESPONSE_BYTES, EVM_CODE_MAX_RESPONSE_BYTES,
-};
 use mfm_ids::LocalPublicId;
 use mfm_program::{
     AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, ReadState, StateError, StateResult,
@@ -16,13 +17,13 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, MfmValue};
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::{
+use super::canonical::{
     block_anchor_hash, block_anchor_number, canonical_address, canonical_bytes,
     canonical_bytes_len, canonical_hash, invalid, parse_address, parse_bytes, parse_hash,
     parse_quantity, validate_block_anchor, validate_session,
 };
-use crate::identity::{adapter_binding, state_kind, state_version};
-use crate::{EvmAccessListEntry, EvmStateError, EVM_TRANSACTION_DATA_MAX_BYTES};
+use super::identity::{adapter_binding, state_kind, state_version};
+use super::{EvmAccessListEntry, EvmStateError, EVM_TRANSACTION_DATA_MAX_BYTES};
 
 /// Maximum checked calls admitted by one validation node.
 pub const EVM_CONTRACT_VALIDATION_MAX_CALLS: usize = 64;

@@ -66,7 +66,7 @@ fn source_with_ref(network: &str, chain_id: u64, source_ref: &str) -> EvmSession
     EvmSessionEvidence::new(
         &binding,
         LocalPublicId::new(source_ref).expect("source"),
-        LocalPublicId::new(mfm_evm_capabilities::EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
+        LocalPublicId::new(crate::capability::EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
             .expect("implementation"),
     )
 }

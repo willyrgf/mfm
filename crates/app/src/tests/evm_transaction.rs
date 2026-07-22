@@ -11,10 +11,12 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_certify::CertificationRegistry;
 use mfm_events::v1::KernelEventPayload;
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmBlockSelector, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
-    EvmReceipt, EvmReceiptStatus, EvmSessionEvidence, EvmSessionFuture, EvmTransactionEstimate,
-    EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+use mfm_evm::{
+    evm_sender_lane_resource_claim, EvmBlockAnchor, EvmBlockSelector, EvmFeeInputs,
+    EvmNetworkBinding, EvmObservedTransaction, EvmReceipt, EvmReceiptStatus, EvmSessionEvidence,
+    EvmSessionFuture, EvmTransactionAction, EvmTransactionConfig, EvmTransactionEstimate,
+    EvmTransactionOutcome, EvmTransactionSession, SubmitEvmTransactionState,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, InputBindingNodeRef, NoContext, PublicOutputKey,
@@ -27,10 +29,6 @@ use mfm_runtime::ErasedRunnerRegistry;
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
     SigningProvider, SigningRequest, SigningResult, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
-};
-use mfm_states_evm::{
-    evm_sender_lane_resource_claim, EvmTransactionAction, EvmTransactionConfig,
-    EvmTransactionOutcome, SubmitEvmTransactionState,
 };
 use mfm_store::v1::{self as store, StoreScopeStore as _};
 
@@ -96,7 +94,7 @@ impl PureState for SequenceTransactionState {
     ) -> StateResult<Self::Output> {
         if !matches!(
             input.previous.result(),
-            mfm_states_evm::EvmTransactionResult::Succeeded { .. }
+            mfm_evm::EvmTransactionResult::Succeeded { .. }
         ) {
             return Err(mfm_program::StateError::Message(
                 "the preceding EVM transaction did not succeed".to_owned(),
@@ -784,20 +782,16 @@ fn vector_calldata() -> Vec<u8> {
     hex!("a22cb4650000000000000000000000005eee75727d804a2b13038928d36f8b188945a57a0000000000000000000000000000000000000000000000000000000000000000").to_vec()
 }
 
-fn provider_failure() -> mfm_evm_capabilities::EvmCapabilityError {
-    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-        mfm_evm_capabilities::evm_diagnostic(
-            mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
-        ),
-    )
+fn provider_failure() -> mfm_evm::EvmCapabilityError {
+    mfm_evm::EvmCapabilityError::provider_failure(mfm_evm::evm_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
+    ))
 }
 
-fn observation_provider_failure() -> mfm_evm_capabilities::EvmCapabilityError {
-    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-        mfm_evm_capabilities::evm_diagnostic(
-            mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
-        ),
-    )
+fn observation_provider_failure() -> mfm_evm::EvmCapabilityError {
+    mfm_evm::EvmCapabilityError::provider_failure(mfm_evm::evm_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
+    ))
 }
 
 fn state_input_cells(node: &mfm_program::StateNodeSpec) -> Vec<&str> {

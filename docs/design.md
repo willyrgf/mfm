@@ -383,7 +383,7 @@ signed-hash, reducer, and certified-authority violations remain terminal. Replay
 typed intent, preparation, transaction, receipt, and confirmation artifacts and recomputes their
 relations without network, signer, keystore, or current runtime config.
 
-The retained transaction-signing foundation is one canonical path in `mfm-evm-signing`. It admits
+The retained transaction-signing foundation is one canonical path in `mfm-evm`. It admits
 one opaque Alloy `TxEip1559`, obtains its signing digest from Alloy, builds one generic digest-sign
 request, verifies the exact deterministic profile, low-s signature, recoverable parity, public
 identity, and expected sender, then asks Alloy to finalize and EIP-2718 encode the envelope. The

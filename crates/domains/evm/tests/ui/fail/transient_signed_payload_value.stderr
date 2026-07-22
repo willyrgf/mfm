@@ -28,17 +28,16 @@ error[E0277]: the trait bound `TransientSignedEip1559Envelope: MfmValue` is not 
 10 |     require_mfm_value::<TransientSignedEip1559Envelope>();
    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `MfmValue` is not implemented for `TransientSignedEip1559Envelope`
    |
-help: the following other types implement trait `MfmValue`
-  --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
-   |
-   | impl MfmValue for ContextRefValue {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ContextRefValue`
-...
-   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MaybeValue<T>`
-...
-   | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ArtifactRef<T>`
+   = help: the following other types implement trait `MfmValue`:
+             ArtifactRef<T>
+             ContextRefValue
+             EvmAccessListEntry
+             EvmBalanceAsset
+             EvmBalanceCollectionEvidence
+             EvmBalanceCollectionPlan
+             EvmBalanceCollectionReceipt
+             EvmBalanceReadEvidence
+           and $N others
 note: required by a bound in `require_mfm_value`
   --> tests/ui/fail/transient_signed_payload_value.rs:6:25
    |

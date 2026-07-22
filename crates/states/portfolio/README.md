@@ -24,5 +24,5 @@ same fact-index path.
 
 Portfolio admission bounds networks, wallets, symbols, wallet-symbol relations, and distinct EVM
 sources per network before graph expansion. Generic EVM collection contracts live in
-`mfm-states-evm`. This crate does not own live IO, family fact publication, runner registration,
+`mfm-evm`. This crate does not own live IO, family fact publication, runner registration,
 store commits, CLI/REST rendering, or the complete graph/root binding.

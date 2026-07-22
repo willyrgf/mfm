@@ -8,16 +8,14 @@ use std::time::Duration;
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, U256};
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
-use mfm_evm_capabilities::{
-    EvmNetworkBinding, EvmTransactionSession, EVM_EIP1559_TRANSACTION_TYPE,
+use mfm_evm::{
+    EvmNetworkBinding, EvmTransactionAction, EvmTransactionConfig, EvmTransactionIntent,
+    EvmTransactionSession, EvmUnsignedTransaction, EVM_EIP1559_TRANSACTION_TYPE,
 };
 use mfm_ids::LocalPublicId;
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SignerRef, SigningFuture,
     SigningProvider, SigningRequest, SigningResult, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
-};
-use mfm_states_evm::{
-    EvmTransactionAction, EvmTransactionConfig, EvmTransactionIntent, EvmUnsignedTransaction,
 };
 use mfm_transports_evm::EvmJsonRpcTransport;
 use serde_json::{json, Value};
@@ -90,7 +88,7 @@ async fn reth_estimates_and_submits_the_same_type_two_description() {
         signing_key,
         sender,
     };
-    let signed = mfm_evm_signing::sign_eip1559(
+    let signed = mfm_evm::sign_eip1559(
         &unsigned.to_signing_envelope().expect("signing envelope"),
         signer_ref,
         sender,
@@ -224,7 +222,7 @@ async fn fund_ephemeral_sender(
 async fn wait_for_transaction(
     session: &impl EvmTransactionSession,
     transaction_hash: alloy_primitives::B256,
-) -> mfm_evm_capabilities::EvmObservedTransaction {
+) -> mfm_evm::EvmObservedTransaction {
     for _ in 0..100 {
         if let Some(transaction) = session
             .transaction_by_hash(transaction_hash)

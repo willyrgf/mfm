@@ -9,11 +9,15 @@ use alloy_primitives::U256;
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
-use mfm_evm_capabilities::{
-    EvmBlockSelector, EvmCapabilityError, EvmCapabilityPhase, EvmNetworkBinding,
-    EvmTransactionCapability, EvmTransactionSession, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+use mfm_evm::{
+    evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, EvmBlockSelector, EvmCapabilityError,
+    EvmCapabilityPhase, EvmNetworkBinding, EvmPreparedTransaction, EvmSenderLane,
+    EvmTransactionAction, EvmTransactionCapability, EvmTransactionConfig,
+    EvmTransactionConfirmation, EvmTransactionIntent, EvmTransactionOutcome, EvmTransactionReceipt,
+    EvmTransactionRecoveryEvidence, EvmTransactionSession, EvmTransactionSubmission,
+    EvmUnsignedTransaction, SubmitEvmTransactionState, TransientSignedEip1559Envelope,
+    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID, EVM_SENDER_LANE_NAMESPACE,
 };
-use mfm_evm_signing::TransientSignedEip1559Envelope;
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
@@ -28,13 +32,6 @@ use mfm_runtime::{
     SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
-use mfm_states_evm::{
-    evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, EvmPreparedTransaction, EvmSenderLane,
-    EvmTransactionAction, EvmTransactionConfig, EvmTransactionConfirmation, EvmTransactionIntent,
-    EvmTransactionOutcome, EvmTransactionReceipt, EvmTransactionRecoveryEvidence,
-    EvmTransactionSubmission, EvmUnsignedTransaction, SubmitEvmTransactionState,
-    EVM_SENDER_LANE_NAMESPACE,
-};
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
 use serde::de::DeserializeOwned;
@@ -50,7 +47,7 @@ const SIGNED_ENVELOPE_CACHE_CAPACITY: usize = 32;
 /// Future returned by the application-owned transaction-session binder.
 pub type EvmTransactionSessionBindFuture = Pin<
     Box<
-        dyn Future<Output = mfm_evm_capabilities::Result<Arc<dyn EvmTransactionSession>>>
+        dyn Future<Output = mfm_evm::EvmCapabilityResult<Arc<dyn EvmTransactionSession>>>
             + Send
             + 'static,
     >,
@@ -309,10 +306,9 @@ impl EvmTransactionAdapter {
         let signer_ref = intent.signer_reference().map_err(state_error)?;
         let signer = self.capabilities.bind_signer(signer_ref.clone()).await?;
         let signing_envelope = unsigned.to_signing_envelope().map_err(state_error)?;
-        let signed =
-            mfm_evm_signing::sign_eip1559(&signing_envelope, signer_ref, sender, signer.as_ref())
-                .await
-                .map_err(signing_error)?;
+        let signed = mfm_evm::sign_eip1559(&signing_envelope, signer_ref, sender, signer.as_ref())
+            .await
+            .map_err(signing_error)?;
         let transaction_hash = signed.transaction_hash();
         let prepared = EvmPreparedTransaction::new(
             intent.clone(),
@@ -1031,7 +1027,7 @@ async fn broadcast_and_lookup(
 async fn lookup_submission(
     session: &dyn EvmTransactionSession,
     prepared: &EvmPreparedTransaction,
-) -> mfm_evm_capabilities::Result<LookupSubmission> {
+) -> mfm_evm::EvmCapabilityResult<LookupSubmission> {
     let Ok(expected_hash) = prepared.expected_hash() else {
         return Ok(LookupSubmission::Mismatched);
     };

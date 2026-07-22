@@ -2,9 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, B256, U256};
-use mfm_evm_capabilities::{
-    EvmBlockSelector, EvmReadSession, EvmReceiptStatus, EvmTransactionSession,
-};
+use mfm_evm::{EvmBlockSelector, EvmReadSession, EvmReceiptStatus, EvmTransactionSession};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

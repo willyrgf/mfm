@@ -52,10 +52,10 @@ Evidence-only services never build this registry or access the executable file.
 
 The standalone signing facade is not a second mutation workflow. It accepts raw command fields,
 canonically parses and constructs the checked unsigned envelope, resolves exactly the requested
-generic runtime signer and its referenced keystore, and invokes `mfm-evm-signing`. The returned
+generic runtime signer and its referenced keystore, and invokes `mfm-evm`. The returned
 signed envelope is transient bearer material; the app does not serialize, persist, clone, submit,
 or render its bytes. The CLI uses this facade for its explicit local bearer-output command, and the
-owned transaction adapter calls the same canonical `mfm-evm-signing` primitive during transaction
+owned transaction adapter calls the same canonical `mfm-evm` primitive during transaction
 preparation.
 
 After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output

@@ -75,7 +75,7 @@ fn parity_keystore_cli_uses_canonical_eip1559_signing_service() {
     assert_ne!(signing_digest, transaction_hash);
     assert!(sign_json.get("out_path").is_none());
 
-    let unsigned = mfm_evm_signing::UnsignedEip1559Envelope::new(
+    let unsigned = mfm_evm::UnsignedEip1559Envelope::new(
         U256::from(31_337),
         U256::ZERO,
         U256::from(1_000_000_000_u64),

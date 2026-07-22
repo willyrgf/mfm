@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
+use crate::capability::{
+    EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
+};
+use crate::model::EvmBlockAnchor;
 use alloy_primitives::{Address, U256};
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmNetworkBinding, EvmReadCapability, EvmSessionEvidence,
-    EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
-};
 use mfm_facts::{FactContentIdentityEvidence, MfmFactType};
 use mfm_ids::LocalPublicId;
 use mfm_program::{
@@ -19,8 +19,8 @@ use mfm_program_derive::{MfmConfig, MfmFactType as DeriveMfmFactType, MfmValue};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::{canonical_address, parse_address};
-use crate::identity::{adapter_binding, state_kind, state_version};
+use super::canonical::{canonical_address, parse_address};
+use super::identity::{adapter_binding, state_kind, state_version};
 
 /// Maximum source demand admitted by one EVM balance collection.
 pub const EVM_BALANCE_COLLECTION_SOURCE_LIMIT: usize = 1_024;

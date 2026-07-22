@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Deterministic reusable EVM balance collection topology.
 //!
 //! [`EvmBalanceCollectionOperation`] expands to one fact-producing external read and exports its
@@ -7,19 +6,18 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_op_evm_collectors::EvmBalanceCollectionOperation;
+//! use mfm_evm::EvmBalanceCollectionOperation;
 //! use mfm_program::Operation as _;
 //!
 //! assert_eq!(EvmBalanceCollectionOperation::name(), "mfm.evm.balance_collection");
 //! ```
 
+use crate::state::{
+    CollectEvmBalancesState, EvmBalanceCollectionConfig, EvmBalanceCollectionReceipt,
+};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{NoContext, Operation, OperationExpansion, StateKey};
 use mfm_program_derive::OperationOutput;
-pub use mfm_states_evm::{
-    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionConfig,
-    EvmBalanceCollectionReceipt, EvmBalanceSource,
-};
 
 const OP_NAMESPACE: &str = "mfm.evm";
 const OP_KIND_NAME: &str = "balance_collection";
@@ -93,6 +91,7 @@ mfm_certify::define_program_descriptor_registry! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{EvmBalanceAsset, EvmBalanceSource};
     use alloy_primitives::address;
     use mfm_program::{
         build_root_with_registries, BridgeKey, BridgePolicy, OperationKey, PublicOutputKey,

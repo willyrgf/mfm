@@ -1,13 +1,14 @@
 //! One-transaction EVM side-effect state and deterministic evidence reducers.
 
+use crate::capability::{
+    EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction as CapabilityTransaction,
+    EvmReceipt as CapabilityReceipt, EvmReceiptStatus as CapabilityReceiptStatus,
+    EvmSessionEvidence, EvmTransactionEstimate,
+};
+use crate::model::EvmBlockAnchor;
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_capabilities::ApplySideEffect;
-use mfm_evm_capabilities::{
-    EvmBlockAnchor, EvmFeeInputs, EvmNetworkBinding,
-    EvmObservedTransaction as CapabilityTransaction, EvmReceipt as CapabilityReceipt,
-    EvmReceiptStatus as CapabilityReceiptStatus, EvmSessionEvidence, EvmTransactionEstimate,
-};
 use mfm_ids::LocalPublicId;
 use mfm_program::{
     AdapterBindingSpec, NoContext, ResourceClaim, ResourceNamespace, SideEffectIntent,
@@ -18,13 +19,13 @@ use mfm_signing::{SignerRef, SigningCapability, SECP256K1_RFC6979_LOW_S_PROFILE_
 use mfm_values::MfmValue as _;
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::{
+use super::canonical::{
     block_anchor_hash, block_anchor_number, canonical_address, canonical_bytes, canonical_hash,
     invalid, parse_address, parse_bytes, parse_hash, parse_quantity, validate_block_anchor,
     validate_session,
 };
-use crate::identity::{adapter_binding, state_kind, state_version};
-use crate::EvmStateError;
+use super::identity::{adapter_binding, state_kind, state_version};
+use super::EvmStateError;
 
 /// Maximum init-code or calldata size admitted into typed transaction intent.
 pub const EVM_TRANSACTION_DATA_MAX_BYTES: usize = 128 * 1024;
@@ -582,7 +583,7 @@ impl EvmUnsignedTransaction {
 
     /// Returns the EIP-2718 transaction type.
     pub const fn transaction_type(&self) -> u8 {
-        mfm_evm_capabilities::EVM_EIP1559_TRANSACTION_TYPE
+        crate::capability::EVM_EIP1559_TRANSACTION_TYPE
     }
 
     /// Returns the exact chain id.
@@ -633,13 +634,13 @@ impl EvmUnsignedTransaction {
     /// Reconstructs the canonical Alloy signing envelope.
     pub fn to_signing_envelope(
         &self,
-    ) -> Result<mfm_evm_signing::UnsignedEip1559Envelope, EvmStateError> {
+    ) -> Result<crate::signing::UnsignedEip1559Envelope, EvmStateError> {
         self.validate()?;
         let to = match &self.to {
             Some(to) => TxKind::Call(parse_address(to)?),
             None => TxKind::Create,
         };
-        mfm_evm_signing::UnsignedEip1559Envelope::new(
+        crate::signing::UnsignedEip1559Envelope::new(
             U256::from(self.chain_id),
             parse_quantity(&self.nonce)?,
             parse_quantity(&self.max_priority_fee_per_gas)?,
@@ -783,7 +784,7 @@ impl EvmPreparedTransaction {
     /// Reconstructs the exact unsigned signing envelope.
     pub fn signing_envelope(
         &self,
-    ) -> Result<mfm_evm_signing::UnsignedEip1559Envelope, EvmStateError> {
+    ) -> Result<crate::signing::UnsignedEip1559Envelope, EvmStateError> {
         self.validate()?;
         self.unsigned.to_signing_envelope()
     }
@@ -1011,7 +1012,7 @@ pub enum EvmExecutionStatus {
 /// evidence or knowing its private field layout:
 ///
 /// ```rust
-/// use mfm_states_evm::{EvmTransactionLog, EvmTransactionReceipt};
+/// use mfm_evm::{EvmTransactionLog, EvmTransactionReceipt};
 ///
 /// fn matching_event<'a>(
 ///     receipt: &'a EvmTransactionReceipt,
@@ -1040,7 +1041,7 @@ pub enum EvmExecutionStatus {
 /// The read surface cannot mutate retained evidence:
 ///
 /// ```compile_fail
-/// use mfm_states_evm::EvmTransactionLog;
+/// use mfm_evm::EvmTransactionLog;
 ///
 /// fn mark_removed(log: &mut EvmTransactionLog) {
 ///     log.removed = true;
@@ -1616,7 +1617,7 @@ impl StateSpec for SubmitEvmTransactionState {
     type Output = EvmTransactionOutcome;
     type Effect = ApplySideEffect;
     type Caps = (
-        mfm_evm_capabilities::EvmTransactionCapability,
+        crate::capability::EvmTransactionCapability,
         SigningCapability,
     );
 

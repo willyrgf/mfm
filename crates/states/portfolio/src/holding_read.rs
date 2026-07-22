@@ -4,6 +4,10 @@ use mfm_bitcoin::{
     decode_bitcoin_balance_snapshot_response, BitcoinBalanceCollectionReceipt,
     BitcoinBalanceSnapshotResponse,
 };
+use mfm_evm::{
+    decode_evm_balance_snapshot_response, EvmBalanceAsset, EvmBalanceCollectionReceipt,
+    EvmBalanceSnapshotResponse, EvmBalanceSource,
+};
 use mfm_facts::{
     compile_fact_query_plan, fact_query_evidence_hash, fact_query_result_rows_from_receipt,
     CanonicalFactQueryPlan, FactCanonicalScalar, FactContentIdentityEvidence, FactFieldId,
@@ -14,10 +18,6 @@ use mfm_facts::{
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig};
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program_derive::MfmValue;
-use mfm_states_evm::{
-    decode_evm_balance_snapshot_response, EvmBalanceAsset, EvmBalanceCollectionReceipt,
-    EvmBalanceSnapshotResponse, EvmBalanceSource,
-};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
@@ -51,7 +51,7 @@ enum ReceiptSource {
         network_id: String,
         chain_id: u64,
         source: EvmBalanceSource,
-        block_anchor: mfm_evm_capabilities::EvmBlockAnchor,
+        block_anchor: mfm_evm::EvmBlockAnchor,
         fact_content_identity: FactContentIdentityEvidence,
     },
 }

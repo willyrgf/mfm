@@ -6,16 +6,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, b256, Address, Bytes, B256, U256};
-use mfm_evm_capabilities::{
-    evm_diagnostic, EvmBlockAnchor, EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence,
-    EvmSessionFuture, ProviderDiagnosticCode,
+use mfm_capabilities::ProviderDiagnosticCode;
+use mfm_evm::{
+    evm_diagnostic, reduce_evm_balance_collection, CollectEvmBalancesState, EvmBalanceAsset,
+    EvmBalanceCollectionConfig, EvmBalanceCollectionPlan, EvmBalanceSource, EvmBlockAnchor,
+    EvmBlockSelector, EvmCall, EvmCode, EvmSessionEvidence, EvmSessionFuture,
 };
 use mfm_ids::LocalPublicId;
 use mfm_program::{ReadState, StateSpec, ValidatedConfig};
-use mfm_states_evm::{
-    reduce_evm_balance_collection, CollectEvmBalancesState, EvmBalanceAsset,
-    EvmBalanceCollectionConfig, EvmBalanceCollectionPlan, EvmBalanceSource,
-};
 
 use crate::balance_collection::{
     collect_evm_balances, ERC20_BALANCE_OF_SELECTOR, ERC20_DECIMALS_SELECTOR,

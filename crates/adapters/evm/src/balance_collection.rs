@@ -5,15 +5,15 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use alloy_primitives::{Address, Bytes, U256};
-use mfm_evm_capabilities::{EvmBlockSelector, EvmCall, EvmReadSession};
+use mfm_evm::{
+    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionEvidence,
+    EvmBalanceCollectionPlan, EvmBalanceReadEvidence, EvmBlockSelector, EvmCall, EvmReadSession,
+    EvmTokenDecimalsEvidence,
+};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     ErasedRunCtx, ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
     RunnerIngressContext,
-};
-use mfm_states_evm::{
-    CollectEvmBalancesState, EvmBalanceAsset, EvmBalanceCollectionEvidence,
-    EvmBalanceCollectionPlan, EvmBalanceReadEvidence, EvmTokenDecimalsEvidence,
 };
 
 use crate::{evm_ingress_runtime_error, evm_read_runtime_error, EvmReadRunnerCapabilities};
@@ -273,7 +273,7 @@ pub fn verify_evm_balance_collection_replay(broker: &replay::ReplayBroker) -> re
 }
 
 fn balance_state_runtime_error(
-    error: mfm_states_evm::EvmBalanceCollectionError,
+    error: mfm_evm::EvmBalanceCollectionError,
 ) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }

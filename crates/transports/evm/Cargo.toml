@@ -22,7 +22,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 
 mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-evm-capabilities = { path = "../../evm-capabilities" }
+mfm-evm = { path = "../../domains/evm" }
 mfm-ids = { path = "../../kernel/ids" }
 
 [dev-dependencies]

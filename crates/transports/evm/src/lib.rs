@@ -8,7 +8,7 @@
 //! before JSON decoding. Routing and secret resolution stay in app assembly.
 //!
 //! ```no_run
-//! use mfm_evm_capabilities::EvmNetworkBinding;
+//! use mfm_evm::EvmNetworkBinding;
 //! use mfm_ids::LocalPublicId;
 //! use mfm_transports_evm::EvmJsonRpcTransport;
 //!
@@ -35,7 +35,7 @@ use alloy_primitives::{keccak256, Address, Bytes, TxKind, B256, U256};
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
-use mfm_evm_capabilities::{
+use mfm_evm::{
     evm_diagnostic, source_mismatch_error, EvmBlockAnchor, EvmBlockSelector, EvmCall,
     EvmCapabilityError, EvmCode, EvmFeeInputs, EvmNetworkBinding, EvmObservedTransaction,
     EvmReadSession, EvmReceipt, EvmReceiptLog, EvmReceiptStatus, EvmSessionEvidence,

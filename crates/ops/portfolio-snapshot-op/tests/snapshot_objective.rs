@@ -257,7 +257,7 @@ fn assert_one_state_evm_slice(draft: &TypedProgramDraft, network_count: usize) {
     );
 }
 
-fn evm_collection_config(draft: &TypedProgramDraft) -> mfm_states_evm::EvmBalanceCollectionConfig {
+fn evm_collection_config(draft: &TypedProgramDraft) -> mfm_evm::EvmBalanceCollectionConfig {
     let node = draft
         .state_nodes()
         .iter()

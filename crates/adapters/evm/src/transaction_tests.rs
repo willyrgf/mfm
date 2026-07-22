@@ -5,7 +5,7 @@ use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{
     address, b256, hex, keccak256, Address, PrimitiveSignature, TxKind, B256, U256,
 };
-use mfm_evm_capabilities::{
+use mfm_evm::{
     EvmBlockAnchor, EvmFeeInputs, EvmObservedTransaction, EvmSessionEvidence, EvmSessionFuture,
     EvmTransactionEstimate,
 };
@@ -172,9 +172,7 @@ impl EvmTransactionSession for MockSession {
         {
             return Box::pin(async {
                 Err(EvmCapabilityError::provider_failure(
-                    mfm_evm_capabilities::evm_diagnostic(
-                        mfm_capabilities::ProviderDiagnosticCode::RpcJsonError,
-                    ),
+                    mfm_evm::evm_diagnostic(mfm_capabilities::ProviderDiagnosticCode::RpcJsonError),
                 ))
             });
         }
@@ -197,7 +195,7 @@ impl EvmTransactionSession for MockSession {
         if self.lookup_unavailable.load(Ordering::SeqCst) {
             return Box::pin(async {
                 Err(EvmCapabilityError::provider_failure(
-                    mfm_evm_capabilities::evm_diagnostic(
+                    mfm_evm::evm_diagnostic(
                         mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
                     ),
                 ))
@@ -213,7 +211,7 @@ impl EvmTransactionSession for MockSession {
     fn receipt_by_hash(
         &self,
         _transaction_hash: B256,
-    ) -> EvmSessionFuture<'_, Option<mfm_evm_capabilities::EvmReceipt>> {
+    ) -> EvmSessionFuture<'_, Option<mfm_evm::EvmReceipt>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -337,7 +335,7 @@ fn other_intent() -> EvmTransactionIntent {
 }
 
 fn response_invalid_error() -> EvmCapabilityError {
-    EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+    EvmCapabilityError::provider_failure(mfm_evm::evm_diagnostic(
         mfm_capabilities::ProviderDiagnosticCode::ResponseInvalid,
     ))
 }
