@@ -9,7 +9,7 @@ use mfm_integration_tests::test_support::{
     response_json, schema_scoped_database_url, start_portfolio_rpc_mock, unique_postgres_schema,
     write_portfolio_runtime_config_for_test,
 };
-use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_portfolio::PortfolioConfig;
 use mfm_store::v1::{RunEventStore, StoreScopeStore};
 use mfm_values::MfmConfig;
 use serde_json::json;

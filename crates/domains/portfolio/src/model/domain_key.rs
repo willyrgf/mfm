@@ -19,11 +19,6 @@ macro_rules! stable_domain_key_type {
                 let value = StableAuthorKey::new(value)?.into_string();
                 Ok(Self { $field: value })
             }
-
-            /// Returns the validated key string.
-            pub fn as_str(&self) -> &str {
-                &self.$field
-            }
         }
 
         impl<'de> Deserialize<'de> for $ty {
@@ -62,5 +57,4 @@ impl mfm_program::StableDomainKey for HoldingsDomainKey {}
 impl mfm_program::StableDomainKey for ReportDomainKey {}
 
 #[cfg(test)]
-#[path = "domain_key_tests.rs"]
 mod tests;

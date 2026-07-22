@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
-use mfm_portfolio_model::portfolio::{
+use mfm_portfolio::{
     decode_portfolio_config, NetworkConfig, NetworkFamilyConfig, PortfolioConfigError,
     EVM_NETWORK_HOLDING_SOURCE_LIMIT, PORTFOLIO_HOLDING_RELATION_LIMIT, PORTFOLIO_NETWORK_LIMIT,
     PORTFOLIO_SYMBOL_LIMIT, PORTFOLIO_WALLET_LIMIT,
 };
-use mfm_portfolio_model::symbol::{QuoteCode, SymbolConfigError};
+use mfm_portfolio::{QuoteCode, SymbolConfigError};
 use serde_json::{json, Value};
 
 const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";

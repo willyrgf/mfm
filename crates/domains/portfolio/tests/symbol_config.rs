@@ -1,4 +1,4 @@
-use mfm_portfolio_model::symbol::{
+use mfm_portfolio::{
     validate_symbol_config, HoldingSourceConfig, QuoteCode, QuoteValuationConfig, SymbolConfig,
     SymbolConfigError, SymbolValuationConfig,
 };

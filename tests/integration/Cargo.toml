@@ -28,9 +28,8 @@ mfm-storage-postgres = { path = "../../crates/storages/postgres" }
 mfm-values = { path = "../../crates/kernel/values" }
 mfm-evm = { path = "../../crates/domains/evm" }
 mfm-evm-live = { path = "../../crates/live/evm" }
-mfm-op-portfolio-snapshot = { path = "../../crates/ops/portfolio-snapshot-op" }
+mfm-portfolio = { path = "../../crates/domains/portfolio" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
-mfm-portfolio-model = { path = "../../crates/portfolio/model" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]

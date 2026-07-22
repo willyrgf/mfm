@@ -1,9 +1,8 @@
 use super::*;
-use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig};
-use mfm_portfolio_model::symbol::HoldingSourceConfig;
+use crate::{ExecutionAnchor, HoldingSourceConfig, NetworkConfig};
 
 /// Builds quantity-only observations from selected holdings (valuation join deferred).
-pub fn observations_from_selected_holdings(
+pub(super) fn observations_from_selected_holdings(
     selected: &[SelectedHolding],
     symbols_by_id: &BTreeMap<&str, &SymbolConfig>,
 ) -> Result<Vec<Observation>, PortfolioHoldingSelectionError> {
@@ -208,7 +207,7 @@ fn observation_error(
 }
 
 /// Assembles the canonical portfolio snapshot (hard-fail; pins from selected observations).
-pub fn assemble_snapshot(
+pub(super) fn assemble_snapshot(
     config: &AssembleSnapshotConfig,
     input: AssembleSnapshotInput,
 ) -> StateResult<PortfolioSnapshot> {
@@ -279,7 +278,9 @@ pub fn assemble_snapshot(
 }
 
 /// Projects the version-1 canonical portfolio report from a version-2 snapshot.
-pub fn project_report_from_snapshot(snapshot: PortfolioSnapshot) -> StateResult<PortfolioReport> {
+pub(super) fn project_report_from_snapshot(
+    snapshot: PortfolioSnapshot,
+) -> StateResult<PortfolioReport> {
     if snapshot.schema_version != PortfolioSnapshot::SCHEMA_VERSION {
         return Err(StateError::Message(
             "portfolio snapshot schema version is not supported".to_owned(),
@@ -313,7 +314,7 @@ pub fn project_report_from_snapshot(snapshot: PortfolioSnapshot) -> StateResult<
 }
 
 /// Builds a symbols-by-id index for assemble / observation join.
-pub fn symbols_by_id_map(
+pub(super) fn symbols_by_id_map(
     symbols: &[SymbolConfig],
 ) -> Result<BTreeMap<&str, &SymbolConfig>, PortfolioHoldingSelectionError> {
     symbols_by_id(symbols)

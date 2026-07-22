@@ -1,8 +1,8 @@
 use mfm_certify::CertificationRegistry;
 use mfm_ids::{StableAuthorKey, StoreScopeId};
-use mfm_op_portfolio_snapshot::portfolio_snapshot_program_launch_plan;
-use mfm_portfolio_model::ids::PortfolioId;
-use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_portfolio::portfolio_snapshot_program_launch_plan;
+use mfm_portfolio::PortfolioConfig;
+use mfm_portfolio::PortfolioId;
 use mfm_storage_postgres::PostgresStore;
 use mfm_values::{MfmConfig, ValidatedConfig};
 
@@ -185,7 +185,7 @@ async fn resolve_portfolio_target(
 #[cfg(test)]
 mod tests {
     use super::{entry_point_ids, PORTFOLIO_SNAPSHOT_ID};
-    use mfm_portfolio_model::ids::PortfolioId;
+    use mfm_portfolio::PortfolioId;
 
     #[test]
     fn discovery_exposes_only_the_portfolio_snapshot_objective() {

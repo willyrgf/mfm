@@ -73,7 +73,14 @@ and one-transaction contracts needed by final consumers, while package-only vali
 generic result bridges, and the former operation-to-state re-export are private or deleted. The
 crate owns no runtime, replay, store, app, keystore, filesystem, or network implementation.
 
-`mfm-op-portfolio-snapshot` owns that complete internal graph through two operations.
+`mfm-portfolio` is the single pure portfolio package. Its private `model`, `state`, and `operation`
+roles point only downward in that order. It may depend on the pure Bitcoin and EVM domains, while
+those source domains remain independent of portfolio. Its explicit root API replaces the former
+model, state, and snapshot-operation package paths and exposes no role module or glob bridge. It
+owns no live IO, runtime, replay, concrete store, app, filesystem, or network implementation.
+
+The private operation role in `mfm-portfolio` owns that complete internal graph through two
+operations.
 `PortfolioSnapshotOperation` projects normalized `PortfolioConfig` into child Bitcoin/EVM
 collector calls and one `PortfolioReportOperation` call; it constructs no state directly. The
 report operation receives the typed family receipt handles and owns receipt-pinned selection,

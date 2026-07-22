@@ -6,19 +6,21 @@ use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ids::{
+use super::ids::{
     BitcoinSourceIdentityId, NetworkId, PortfolioId, PortfolioScalarError, SymbolId, WalletId,
 };
-use crate::metadata::PublicMetadata;
-use crate::symbol::{
+use super::metadata::PublicMetadata;
+use super::symbol::{
     validate_symbol_config, HoldingSourceConfig, Observation, QuoteCode, SymbolConfig,
     SymbolConfigError,
 };
-use crate::wallet::{WalletConfig, WalletSubject, WalletSubjectKind};
+use super::wallet::{WalletConfig, WalletSubject, WalletSubjectKind};
 
-#[path = "portfolio_snapshot.rs"]
 mod portfolio_snapshot;
-pub use self::portfolio_snapshot::*;
+pub use self::portfolio_snapshot::{
+    ExecutionAnchor, NetworkPin, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
+    WalletReport, WalletSnapshot,
+};
 
 /// Maximum networks admitted by one portfolio config.
 pub const PORTFOLIO_NETWORK_LIMIT: usize = 64;

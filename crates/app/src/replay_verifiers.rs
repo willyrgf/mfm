@@ -34,9 +34,9 @@ impl ReplayVerifierRegistry {
             registrations: &[
                 ReplayVerifierRegistration {
                     state_keys: &[
-                        state_key::<mfm_state_portfolio::SelectHoldingsState>,
-                        state_key::<mfm_state_portfolio::AssembleSnapshotState>,
-                        state_key::<mfm_state_portfolio::ProjectReportState>,
+                        state_key::<mfm_portfolio::SelectHoldingsState>,
+                        state_key::<mfm_portfolio::AssembleSnapshotState>,
+                        state_key::<mfm_portfolio::ProjectReportState>,
                     ],
                     intent_matcher: None,
                     verifier: verify_portfolio,
@@ -104,9 +104,9 @@ fn replay_registration_error(error: impl std::fmt::Display) -> mfm_replay::v1::R
 }
 
 fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_replay::v1::verify_external_read_state::<mfm_state_portfolio::SelectHoldingsState>(broker)?;
-    mfm_replay::v1::verify_pure_state::<mfm_state_portfolio::AssembleSnapshotState>(broker)?;
-    mfm_replay::v1::verify_pure_state::<mfm_state_portfolio::ProjectReportState>(broker)
+    mfm_replay::v1::verify_external_read_state::<mfm_portfolio::SelectHoldingsState>(broker)?;
+    mfm_replay::v1::verify_pure_state::<mfm_portfolio::AssembleSnapshotState>(broker)?;
+    mfm_replay::v1::verify_pure_state::<mfm_portfolio::ProjectReportState>(broker)
 }
 
 fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {

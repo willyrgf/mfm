@@ -7,11 +7,11 @@ use mfm_bitcoin::BitcoinAddress as CheckedBitcoinAddress;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{
+use super::ids::{
     ExternalSignerId, KeystoreEntryId, NetworkId, NormalizedEvmAddress, PortfolioScalarError,
     SymbolId, WalletId,
 };
-use crate::metadata::PublicMetadata;
+use super::metadata::PublicMetadata;
 
 /// Canonical subject kind selected for one wallet declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -335,5 +335,4 @@ pub enum WalletConfigError {
 }
 
 #[cfg(test)]
-#[path = "wallet_tests.rs"]
 mod tests;

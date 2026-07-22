@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use mfm_ids::{ContentDigest, SchemaId, StableAuthorKey};
-use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_portfolio::PortfolioConfig;
 use mfm_storage_postgres::{
     ConfiguredValuePublication, ConfiguredValuePublicationStatus, ConfiguredValueRow,
     PostgresStore, MAX_CONFIGURED_VALUE_BYTES,

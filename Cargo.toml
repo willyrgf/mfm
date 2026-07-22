@@ -26,14 +26,12 @@ members = [
 	"crates/kernel/values",
 	"crates/domains/bitcoin",
 	"crates/domains/evm",
+	"crates/domains/portfolio",
 	"crates/adapters/portfolio",
 	"crates/signing",
 	"crates/signers/keystore",
 	"crates/runtime-config",
-	"crates/portfolio/model",
-	"crates/states/portfolio",
 	"crates/storages/postgres",
-	"crates/ops/portfolio-snapshot-op",
 ]
 
 # Core dependencies

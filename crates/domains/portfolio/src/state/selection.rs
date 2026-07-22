@@ -7,18 +7,17 @@
 
 use std::collections::BTreeMap;
 
+use crate::{AnchoredHoldingSource, ExecutionAnchor, HoldingSourceConfig, NetworkPin, Observation};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
-use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkPin};
-use mfm_portfolio_model::symbol::{AnchoredHoldingSource, HoldingSourceConfig, Observation};
 
 /// Certified selection policy id for receipt-pinned portfolio holding selection.
 pub const PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID: &str =
     "mfm.portfolio.holding.collection-receipt-anchor.v1";
 
 /// Content digest of the selection policy id bytes (for selection evidence).
-pub fn portfolio_holding_selection_policy_digest() -> ContentDigest {
+pub(super) fn portfolio_holding_selection_policy_digest() -> ContentDigest {
     ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         sha256_digest_bytes(PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID.as_bytes()),
@@ -92,7 +91,7 @@ impl PortfolioHoldingSelectionError {
 
 /// One acceptable candidate fact for a required holding (post coverage/status filter).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HoldingCandidate {
+pub(super) struct HoldingCandidate {
     /// Network id of the holding.
     pub network_id: String,
     /// Anchor at which the balance was proven.
@@ -107,7 +106,7 @@ pub struct HoldingCandidate {
 
 /// Selected holding material after pure selection (family-normalized fields + join keys).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectedHoldingMaterial {
+pub(super) struct SelectedHoldingMaterial {
     /// Wallet id (joined by report, not present on facts).
     pub wallet_id: String,
     /// Symbol id (joined by report).
@@ -133,7 +132,7 @@ pub(crate) struct BitcoinHoldingCandidateFields {
 }
 
 pub(crate) fn holding_candidate_from_bitcoin(
-    key: &crate::HoldingRequirementKey,
+    key: &super::HoldingRequirementKey,
     store_commit_order: u64,
     fact_claim_id: FactClaimId,
     fields: BitcoinHoldingCandidateFields,
@@ -164,9 +163,9 @@ pub(crate) fn holding_candidate_from_bitcoin(
 
 /// One selected holding after receipt-pinned identity filtering and ordering.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectedHolding {
+pub(super) struct SelectedHolding {
     /// Required holding key.
-    pub key: crate::HoldingRequirementKey,
+    pub key: super::HoldingRequirementKey,
     /// Anchor verified against the exact receipt entry.
     pub anchor: ExecutionAnchor,
     /// Store commit order of the winning candidate.
@@ -180,7 +179,7 @@ pub struct SelectedHolding {
 /// Projects `network_pins` purely from selected observation anchors.
 ///
 /// One pin per network; residual same-network disagreement → inconsistent_network_anchors.
-pub fn project_network_pins_from_observations(
+pub(super) fn project_network_pins_from_observations(
     observations: &[Observation],
 ) -> Result<Vec<NetworkPin>, PortfolioHoldingSelectionError> {
     let mut by_network: BTreeMap<String, ExecutionAnchor> = BTreeMap::new();
@@ -236,5 +235,4 @@ fn execution_anchor_from_anchored_holding_source(
 }
 
 #[cfg(test)]
-#[path = "selection_tests.rs"]
 mod tests;

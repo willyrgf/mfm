@@ -9,8 +9,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! use mfm_op_portfolio_snapshot::portfolio_snapshot_program_draft;
-//! use mfm_portfolio_model::portfolio::PortfolioConfig;
+//! use mfm_portfolio::{portfolio_snapshot_program_draft, PortfolioConfig};
 //!
 //! fn draft(config: PortfolioConfig) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
 //!     portfolio_snapshot_program_draft(config)
@@ -28,22 +27,22 @@ use mfm_evm::{
 };
 use mfm_facts::MfmFactType;
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
-use mfm_portfolio_model::domain_key::{HoldingsDomainKey, ReportDomainKey};
-use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig, ValidatedPortfolioConfig};
-use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
     build_root_with_registries, BridgeKey, BridgePolicy, NoContext, Operation, OperationExpansion,
     OperationInputHandles, OperationKey, PublicOutputKey, RootBuilder, ScopeKey,
     TypedProgramLaunchPlan, ValidatedConfig,
 };
 use mfm_program_derive::OperationOutput;
-use mfm_state_portfolio::{
+use mfm_values::ConfigError;
+
+use crate::model::domain_key::{HoldingsDomainKey, ReportDomainKey};
+use crate::state::{
     AssembleSnapshotConfig, AssembleSnapshotInputHandles, AssembleSnapshotState,
     PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
     SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput,
     SelectHoldingsInputHandles, SelectHoldingsState,
 };
-use mfm_values::ConfigError;
+use crate::{HoldingSourceConfig, NetworkConfig, PortfolioConfig, ValidatedPortfolioConfig};
 
 const OP_NAMESPACE: &str = "mfm.portfolio";
 const OP_KIND_NAME: &str = "snapshot";
@@ -60,11 +59,9 @@ const PUBLIC_OUTPUT_KEY: &str = "portfolio_snapshot";
 #[mfm(schema = "mfm.portfolio.operation_outputs.snapshot")]
 pub struct PortfolioSnapshotOperationOutputs<'program, 'scope> {
     /// Fully assembled portfolio snapshot.
-    pub snapshot:
-        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioSnapshot>,
+    pub snapshot: mfm_program::Handle<'program, 'scope, crate::PortfolioSnapshot>,
     /// Public report projection derived from the snapshot.
-    pub report:
-        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioReport>,
+    pub report: mfm_program::Handle<'program, 'scope, crate::PortfolioReport>,
 }
 
 /// Internal handles produced by receipt-pinned portfolio report composition.
@@ -72,11 +69,9 @@ pub struct PortfolioSnapshotOperationOutputs<'program, 'scope> {
 #[mfm(schema = "mfm.portfolio.operation_outputs.report")]
 pub struct PortfolioReportOperationOutputs<'program, 'scope> {
     /// Fully assembled portfolio snapshot.
-    pub snapshot:
-        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioSnapshot>,
+    pub snapshot: mfm_program::Handle<'program, 'scope, crate::PortfolioSnapshot>,
     /// Public report projection derived from the snapshot.
-    pub report:
-        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioReport>,
+    pub report: mfm_program::Handle<'program, 'scope, crate::PortfolioReport>,
 }
 
 /// Deterministic operation for one complete receipt-pinned portfolio snapshot.
@@ -463,9 +458,9 @@ mfm_certify::define_program_descriptor_registry! {
         },
     ],
     states: [
-        mfm_state_portfolio::SelectHoldingsState,
-        mfm_state_portfolio::AssembleSnapshotState,
-        mfm_state_portfolio::ProjectReportState,
+        crate::state::SelectHoldingsState,
+        crate::state::AssembleSnapshotState,
+        crate::state::ProjectReportState,
     ],
     operations: [
         PortfolioSnapshotOperation,
@@ -630,13 +625,13 @@ mod tests {
         mfm_evm::register_evm_collectors_certification_descriptors(&mut expected)
             .expect("EVM certification descriptors");
         expected
-            .register_state::<mfm_state_portfolio::SelectHoldingsState>()
+            .register_state::<crate::state::SelectHoldingsState>()
             .expect("selection state");
         expected
-            .register_state::<mfm_state_portfolio::AssembleSnapshotState>()
+            .register_state::<crate::state::AssembleSnapshotState>()
             .expect("assembly state");
         expected
-            .register_state::<mfm_state_portfolio::ProjectReportState>()
+            .register_state::<crate::state::ProjectReportState>()
             .expect("report state");
         expected
             .register_operation::<PortfolioSnapshotOperation>()

@@ -83,7 +83,7 @@ Crate docs:
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
 - Pure EVM domain: [`crates/domains/evm/README.md`](crates/domains/evm/README.md)
-- Portfolio snapshot/report operations: [`crates/ops/portfolio-snapshot-op/README.md`](crates/ops/portfolio-snapshot-op/README.md)
+- Pure portfolio domain: [`crates/domains/portfolio/README.md`](crates/domains/portfolio/README.md)
 - EVM live transport and runtime/replay bindings: [`crates/live/evm/README.md`](crates/live/evm/README.md)
 - Storage (typed run events and current configuration, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
 

@@ -1,10 +1,8 @@
 use std::collections::BTreeSet;
 
 use mfm_ids::CellId;
-use mfm_op_portfolio_snapshot::{
-    portfolio_snapshot_program_draft, portfolio_snapshot_program_launch_plan,
-};
-use mfm_portfolio_model::portfolio::{PortfolioConfig, ValidatedPortfolioConfig};
+use mfm_portfolio::{portfolio_snapshot_program_draft, portfolio_snapshot_program_launch_plan};
+use mfm_portfolio::{PortfolioConfig, ValidatedPortfolioConfig};
 use mfm_program::{
     BridgeKind, InputBindingNode, InputBindingNodeRef, OperationLineageFrameSpec, StateNodeSpec,
     TypedProgramDraft,

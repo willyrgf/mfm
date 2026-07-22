@@ -2329,8 +2329,8 @@ version = "0.1.0"
 dependencies = [
  "mfm-events",
  "mfm-facts",
+ "mfm-portfolio",
  "mfm-runtime",
- "mfm-state-portfolio",
  "mfm-store",
 ]
 
@@ -2351,8 +2351,7 @@ dependencies = [
  "mfm-evm-live",
  "mfm-facts",
  "mfm-ids",
- "mfm-op-portfolio-snapshot",
- "mfm-portfolio-model",
+ "mfm-portfolio",
  "mfm-program",
  "mfm-program-derive",
  "mfm-replay",
@@ -2361,7 +2360,6 @@ dependencies = [
  "mfm-signers-keystore",
  "mfm-signing",
  "mfm-spec",
- "mfm-state-portfolio",
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-values",
@@ -2559,8 +2557,7 @@ dependencies = [
  "mfm-evm-live",
  "mfm-facts",
  "mfm-ids",
- "mfm-op-portfolio-snapshot",
- "mfm-portfolio-model",
+ "mfm-portfolio",
  "mfm-program",
  "mfm-rest-api",
  "mfm-runtime",
@@ -2593,34 +2590,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-portfolio-snapshot"
-version = "0.1.0"
-dependencies = [
- "mfm-bitcoin",
- "mfm-canonical",
- "mfm-certify",
- "mfm-evm",
- "mfm-facts",
- "mfm-ids",
- "mfm-portfolio-model",
- "mfm-program",
- "mfm-program-derive",
- "mfm-state-portfolio",
- "mfm-values",
- "serde_json",
-]
-
-[[package]]
-name = "mfm-portfolio-model"
+name = "mfm-portfolio"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "mfm-bitcoin",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-certify",
  "mfm-evm",
+ "mfm-facts",
  "mfm-ids",
  "mfm-program",
  "mfm-program-derive",
  "mfm-values",
+ "num-bigint",
+ "num-traits",
  "serde",
  "serde_json",
  "thiserror",
@@ -2776,28 +2761,6 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mfm-state-portfolio"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-bitcoin",
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-evm",
- "mfm-facts",
- "mfm-ids",
- "mfm-portfolio-model",
- "mfm-program",
- "mfm-program-derive",
- "mfm-values",
- "num-bigint",
- "num-traits",
- "serde",
  "serde_json",
  "thiserror",
 ]

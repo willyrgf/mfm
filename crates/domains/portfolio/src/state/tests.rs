@@ -2,21 +2,19 @@ use super::*;
 
 use std::collections::BTreeMap;
 
+use crate::PublicMetadata;
+use crate::{
+    ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioReport,
+    PortfolioSnapshot,
+};
+use crate::{
+    HoldingSourceConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolValuationConfig,
+};
+use crate::{WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind};
 use alloy_primitives::U256;
 use mfm_bitcoin::BitcoinBalanceSnapshotFact;
 use mfm_evm::{EvmBalanceSnapshotFact, EvmBlockAnchor};
 use mfm_facts::MfmFactType;
-use mfm_portfolio_model::metadata::PublicMetadata;
-use mfm_portfolio_model::portfolio::{
-    ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioReport,
-    PortfolioSnapshot,
-};
-use mfm_portfolio_model::symbol::{
-    HoldingSourceConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolValuationConfig,
-};
-use mfm_portfolio_model::wallet::{
-    WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
-};
 
 const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";

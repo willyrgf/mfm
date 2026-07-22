@@ -13,6 +13,6 @@ domain = "portfolio"
 [dependencies]
 mfm-events = { path = "../../kernel/events" }
 mfm-facts = { path = "../../kernel/facts" }
+mfm-portfolio = { path = "../../domains/portfolio" }
 mfm-runtime = { path = "../../kernel/runtime" }
-mfm-state-portfolio = { path = "../../states/portfolio" }
 mfm-store = { path = "../../kernel/store" }

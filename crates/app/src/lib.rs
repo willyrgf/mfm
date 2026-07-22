@@ -266,9 +266,7 @@ fn runner_factory_binding(
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, PublicError> {
     let mut registry = CertificationRegistry::new();
-    mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
-        &mut registry,
-    )?;
+    mfm_portfolio::register_portfolio_snapshot_certification_descriptors(&mut registry)?;
     Ok(registry)
 }
 

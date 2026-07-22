@@ -1,8 +1,8 @@
 [package]
-name = "mfm-portfolio-model"
+name = "mfm-portfolio"
 version = "0.1.0"
 edition = "2021"
-description = "Canonical portfolio, symbol, and wallet model for MFM portfolio snapshots"
+description = "Pure portfolio model, state, and operation contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -13,12 +13,18 @@ domain-role = "aggregate"
 
 [dependencies]
 alloy-primitives = { workspace = true }
+num-bigint = "0.4"
+num-traits = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-mfm-bitcoin = { path = "../../domains/bitcoin" }
-mfm-evm = { path = "../../domains/evm" }
+mfm-bitcoin = { path = "../bitcoin" }
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-certify = { path = "../../kernel/certify" }
+mfm-evm = { path = "../evm" }
+mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }

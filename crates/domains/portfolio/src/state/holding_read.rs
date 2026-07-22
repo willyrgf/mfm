@@ -1,5 +1,6 @@
 //! State-owned fact-query plan, evidence, and reducer for portfolio holding selection.
 
+use crate::{ExecutionAnchor, HoldingSourceConfig, NetworkConfig, NetworkPin, PortfolioConfig};
 use mfm_bitcoin::{
     decode_bitcoin_balance_snapshot_response, BitcoinBalanceCollectionReceipt,
     BitcoinBalanceSnapshotResponse,
@@ -15,15 +16,13 @@ use mfm_facts::{
     FactQueryPredicate, FactQueryResult, FactSelectionEvidence, QueryResultCardinality,
     StoreReadFrontier,
 };
-use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig};
-use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
-use crate::selection::{holding_candidate_from_bitcoin, BitcoinHoldingCandidateFields};
-use crate::{
+use super::selection::{holding_candidate_from_bitcoin, BitcoinHoldingCandidateFields};
+use super::{
     observations_from_selected_holdings, portfolio_holding_selection_policy_digest,
     project_network_pins_from_observations, symbols_by_id_map, HoldingCandidate,
     HoldingRequirementKey, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,

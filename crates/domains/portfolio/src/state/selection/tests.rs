@@ -1,11 +1,9 @@
 use super::*;
+use crate::ExecutionAnchor;
+use crate::PublicMetadata;
+use crate::{AnchoredHoldingSource, HoldingSourceConfig, Observation, ObservationQuantity};
 use alloy_primitives::{B256, U256};
 use mfm_evm::EvmBlockAnchor;
-use mfm_portfolio_model::metadata::PublicMetadata;
-use mfm_portfolio_model::portfolio::ExecutionAnchor;
-use mfm_portfolio_model::symbol::{
-    AnchoredHoldingSource, HoldingSourceConfig, Observation, ObservationQuantity,
-};
 
 #[test]
 fn receipt_anchor_policy_digest_is_stable() {

@@ -8,14 +8,14 @@ use std::sync::Arc;
 
 use mfm_events::v1 as events;
 use mfm_facts::FactQueryReadCapability;
+use mfm_portfolio::{
+    portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotState, ProjectReportState,
+    SelectHoldingsReadEvidence, SelectHoldingsReadPlan, SelectHoldingsState,
+};
 use mfm_runtime::{
     register_pure_state, CapabilityImplementationId, ErasedRunCtx, ErasedRunnerRegistry,
     ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
     ExternalReadRunner, RunnerFactoryBinding, RunnerRegistrationBuilder,
-};
-use mfm_state_portfolio::{
-    portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotState, ProjectReportState,
-    SelectHoldingsReadEvidence, SelectHoldingsReadPlan, SelectHoldingsState,
 };
 use mfm_store::v1 as store;
 
@@ -131,7 +131,7 @@ fn fact_query_runtime_error<E>(_error: E) -> mfm_runtime::RuntimeError {
 }
 
 fn portfolio_state_runtime_error(
-    error: mfm_state_portfolio::PortfolioHoldingSelectionError,
+    error: mfm_portfolio::PortfolioHoldingSelectionError,
 ) -> mfm_runtime::RuntimeError {
     let code = error.code.as_str();
     let failure = mfm_runtime::RuntimeFailure::new(

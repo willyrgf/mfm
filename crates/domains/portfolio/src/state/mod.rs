@@ -1,53 +1,46 @@
-#![warn(missing_docs)]
-//! Typed portfolio-domain state contracts for certified portfolio snapshots.
-//!
-//! [`SelectHoldingsState`] consumes Bitcoin and generic EVM collection receipts directly, then
-//! reads and reverifies every selected balance from the fact store before snapshot assembly.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use mfm_portfolio_model::portfolio::PortfolioConfig;
-//!
-//! fn workflow_config(config: PortfolioConfig) -> PortfolioConfig {
-//!     config.normalized()
-//! }
-//! ```
+//! Typed portfolio state contracts and deterministic reducers.
 
 mod collection_receipt;
+mod config;
+mod decimal;
 mod holding_read;
 mod selection;
+mod states;
+mod transforms;
 
-#[path = "decimal.rs"]
-mod decimal;
-use self::decimal::{multiply_decimal_strings, DecimalValue};
-
-pub use collection_receipt::{
-    HoldingRequirementKey, SelectHoldingsInput, SelectHoldingsInputHandles,
+use collection_receipt::HoldingRequirementKey;
+pub use collection_receipt::{SelectHoldingsInput, SelectHoldingsInputHandles};
+pub use config::{
+    AssembleSnapshotConfig, ProjectReportConfig, SelectHoldingsConfig,
+    SelectHoldingsFactDescriptors,
 };
+use decimal::{multiply_decimal_strings, DecimalValue};
 pub use holding_read::{
     PortfolioHoldingFactEvidence, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
 };
-pub use selection::{
+use selection::{
     portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
-    HoldingCandidate, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, SelectedHolding,
-    SelectedHoldingMaterial, PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
+    HoldingCandidate, SelectedHolding, SelectedHoldingMaterial,
+    PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
+};
+pub use selection::{PortfolioHoldingErrorCode, PortfolioHoldingSelectionError};
+pub use states::{AssembleSnapshotState, ProjectReportState, SelectHoldingsState};
+use transforms::{
+    assemble_snapshot, observations_from_selected_holdings, project_report_from_snapshot,
+    symbols_by_id_map,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::{
+    AnchoredHoldingSource, Observation, ObservationQuantity, ObservationValue, PortfolioConfig,
+    PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot, QuoteCode, SymbolConfig,
+    ValidatedPortfolioConfig, WalletReport, WalletSnapshot,
+};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{NoCaps, Pure, ReadExternal};
 use mfm_facts::FactQueryReadCapability;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
-use mfm_portfolio_model::portfolio::{
-    PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
-    ValidatedPortfolioConfig, WalletReport, WalletSnapshot,
-};
-use mfm_portfolio_model::symbol::{
-    AnchoredHoldingSource, Observation, ObservationQuantity, ObservationValue, QuoteCode,
-    SymbolConfig,
-};
 use mfm_program::{
     AdapterBindingSpec, ExternalReadEvidenceSet, NoContext, PureState, ReadState, StateError,
     StateResult, StateSpec,
@@ -59,16 +52,6 @@ use serde::{Deserialize, Serialize};
 const NAMESPACE: &str = "mfm.portfolio";
 const ADAPTER_NAME: &str = "typed-portfolio";
 const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v2";
-
-#[path = "config.rs"]
-mod config;
-pub use self::config::*;
-#[path = "transforms.rs"]
-mod transforms;
-pub use self::transforms::*;
-#[path = "states.rs"]
-mod states;
-pub use self::states::*;
 
 /// Returns the typed portfolio adapter kind.
 pub fn portfolio_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {

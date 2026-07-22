@@ -31,13 +31,11 @@ mfm-evm = { path = "../domains/evm" }
 mfm-evm-live = { path = "../live/evm" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
-mfm-op-portfolio-snapshot = { path = "../ops/portfolio-snapshot-op" }
-mfm-portfolio-model = { path = "../portfolio/model" }
+mfm-portfolio = { path = "../domains/portfolio" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-runtime-config = { path = "../runtime-config" }
-mfm-state-portfolio = { path = "../states/portfolio" }
 mfm-signing = { path = "../signing" }
 mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-spec = { path = "../kernel/spec" }
@@ -50,7 +48,6 @@ url = { workspace = true }
 [dev-dependencies]
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
 tempfile = "3.0"

@@ -1,5 +1,5 @@
 use mfm_facts::FactQueryResult;
-use mfm_state_portfolio::{PortfolioHoldingFactEvidence, SelectHoldingsReadPlan};
+use mfm_portfolio::{PortfolioHoldingFactEvidence, SelectHoldingsReadPlan};
 use mfm_store::v1 as store;
 
 /// Hydrates every retained fact response in query-row order without applying selection policy.

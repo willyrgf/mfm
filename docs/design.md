@@ -223,9 +223,9 @@ operations, while the report operation constructs only selection, snapshot assem
 projection. The state validates exact portfolio demand, receipt family/chain/source coverage, and
 receipt uniqueness before it authors any query. There is no portfolio manifest identity, generic
 receipt entry, count/readiness value, app-only fan-in runner, or separate replay verifier. This
-explicit downstream state-to-state contract is the sole approved reason for
-`mfm-state-portfolio` to depend on the Bitcoin and EVM pure-domain contracts; pure domains remain
-independent of adapters, transports, app assembly, and runtime config.
+explicit downstream state-to-state contract is why the portfolio state role depends on the
+Bitcoin and EVM pure-domain contracts; source domains remain independent of portfolio, adapters,
+transports, app assembly, and runtime config.
 
 ## Typed Program Authoring
 

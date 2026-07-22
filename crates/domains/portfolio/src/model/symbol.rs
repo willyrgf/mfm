@@ -5,10 +5,10 @@ use std::fmt;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{
+use super::ids::{
     NetworkId, NormalizedEvmAddress, PortfolioScalarError, SymbolId, UnitPriceDecimal,
 };
-use crate::metadata::PublicMetadata;
+use super::metadata::PublicMetadata;
 
 /// Supported quote codes for the canonical portfolio snapshot surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, MfmValue)]
@@ -342,7 +342,7 @@ pub struct AnchoredHoldingSource {
     /// The direct semantic holding source.
     pub holding: HoldingSourceConfig,
     /// Concrete pinned execution anchor.
-    pub anchor: crate::portfolio::ExecutionAnchor,
+    pub anchor: super::portfolio::ExecutionAnchor,
 }
 
 /// Validation errors for canonical symbol configs.
