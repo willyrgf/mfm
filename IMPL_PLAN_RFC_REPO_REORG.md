@@ -1847,8 +1847,9 @@ exposure fail for properties, never inventory.
 The 22 units produced 24 primary commits because unit 17 was split into three coherent catalog and
 production-binding changes. Review then produced 11 focused remediations, so the initial delivery
 contained 35 implementation commits through `186e69cf`. Acceptance review added six more focused
-remediations, for 41 implementation commits through `95153627`. History is intentionally preserved;
-the documentation-only commit containing this record is not part of that implementation count.
+remediations, and the first hosted macOS run added one service-lifecycle correction, for 42
+implementation commits through `5cd92609`. History is intentionally preserved; documentation-only
+commits containing or updating this record are not part of that implementation count.
 
 | Unit | Primary as-built commit or commits |
 |---|---|
@@ -1897,6 +1898,7 @@ phases or alternate designs.
 | `bedac9ae` | 14, 22 | keep EVM adapter assembly types private |
 | `935a3cfb` | 7 | prove uncertain fact settlement recovery on both stores |
 | `95153627` | 18 | remove unused keystore administration APIs |
+| `5cd92609` | 12 | fold Bitcoin preparation into its service after hosted macOS exposed the short-task race |
 
 ## Commit execution rules
 
