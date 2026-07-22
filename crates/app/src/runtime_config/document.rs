@@ -170,7 +170,7 @@ fn scan_object(value: &Value, path: &mut Vec<String>) -> Result<()> {
                             RuntimeConfigErrorKind::ForbiddenSecretField,
                         ));
                     }
-                    if reviewed_secret && contains_direct_source(child) {
+                    if reviewed_secret && !is_indirect_secret_source_shape(child) {
                         return Err(RuntimeConfigError::new(
                             RuntimeConfigErrorKind::DirectSecretValue,
                         ));
@@ -212,12 +212,14 @@ fn is_reviewed_secret_slot(path: &[String]) -> bool {
     )
 }
 
-fn contains_direct_source(value: &Value) -> bool {
-    value.as_object().is_some_and(|object| {
-        object
-            .keys()
-            .any(|key| normalize_field(key).as_str() == "direct")
-    })
+fn is_indirect_secret_source_shape(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let Some((key, source)) = object.iter().next().filter(|_| object.len() == 1) else {
+        return false;
+    };
+    matches!(normalize_field(key).as_str(), "env" | "file" | "file_env") && source.is_string()
 }
 
 fn normalize_field(field: &str) -> String {

@@ -213,6 +213,129 @@ unsafe_{marker}_field = "must-not-be-admitted"
 }
 
 #[test]
+fn reviewed_secret_slots_reject_bypass_shapes_in_unselected_routes() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let cases = [
+        (
+            "toml-scalar",
+            "toml",
+            r#"
+[evm.routes.dev]
+source_ref = "primary"
+rpc_url = { direct = "http://127.0.0.1:8545" }
+
+[evm.routes.unused]
+auth_header = "Bearer plaintext"
+"#,
+        ),
+        (
+            "toml-array",
+            "toml",
+            r#"
+[evm.routes.dev]
+source_ref = "primary"
+rpc_url = { direct = "http://127.0.0.1:8545" }
+
+[bitcoin.routes.unused]
+rpc_password = [{ direct = "plaintext" }]
+"#,
+        ),
+        (
+            "toml-nested",
+            "toml",
+            r#"
+[evm.routes.dev]
+source_ref = "primary"
+rpc_url = { direct = "http://127.0.0.1:8545" }
+
+[evm.routes.unused]
+auth_header = { nested = { direct = "Bearer plaintext" } }
+"#,
+        ),
+        (
+            "json-scalar",
+            "json",
+            r#"{
+  "evm": {"routes": {
+    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}}
+  }},
+  "bitcoin": {"routes": {"unused": {"rpc_password": "plaintext"}}}
+}"#,
+        ),
+        (
+            "json-nested-array",
+            "json",
+            r#"{
+  "evm": {"routes": {
+    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}},
+    "unused": {"auth_header": [{"direct": "Bearer plaintext"}]}
+  }}
+}"#,
+        ),
+        (
+            "json-malformed-indirection",
+            "json",
+            r#"{
+  "evm": {"routes": {
+    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}},
+    "unused": {"auth_header": {"env": ["MFM_AUTH"]}}
+  }}
+}"#,
+        ),
+        (
+            "json-normalized-direct",
+            "json",
+            r#"{
+  "evm": {"routes": {
+    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}},
+    "unused": {"auth-header": {"DiReCt": "Bearer plaintext"}}
+  }}
+}"#,
+        ),
+    ];
+
+    for (name, extension, raw) in cases {
+        let path = directory.path().join(format!("{name}.{extension}"));
+        std::fs::write(&path, raw).expect("config");
+        assert_eq!(
+            load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
+                .err()
+                .expect(name)
+                .kind(),
+            RuntimeConfigErrorKind::DirectSecretValue,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn reviewed_secret_slots_allow_only_indirect_shapes_in_unselected_routes() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("indirect-unselected.toml");
+    std::fs::write(
+        &path,
+        r#"
+[evm.routes.dev]
+source_ref = "primary"
+rpc_url = { direct = "http://127.0.0.1:8545" }
+
+[evm.routes.unused]
+auth_header = { env = "MFM_UNUSED_AUTH" }
+
+[bitcoin.routes.file]
+rpc_password = { file = "/not/resolved" }
+
+[bitcoin.routes.file-env]
+rpc_password = { file_env = "MFM_UNUSED_PATH" }
+"#,
+    )
+    .expect("config");
+
+    load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
+        .expect("indirect unselected secret slots");
+}
+
+#[test]
 fn expected_chain_id_and_unknown_top_level_sections_fail_globally() {
     let directory = tempfile::tempdir().expect("tempdir");
     let expected_chain = directory.path().join("expected-chain.toml");
