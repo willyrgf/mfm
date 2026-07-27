@@ -2,8 +2,8 @@
 
 Status: proposed
 
-Scope: typed runtime, certified specs, run journal, external-access audit, recoverability, replay,
-facts, app status, and mutation adapters
+Scope: typed state execution, certified specs, run journal, external-access audit, recoverability,
+replay, facts, framework enforcement, execution catalogs, and app status
 
 This RFC proposes a breaking replacement of the current event, projection, attempt, side-effect,
 and generic saga machinery. It is not the current authoritative contract. If accepted, the
@@ -19,7 +19,7 @@ Every committed state transition will be independently traceable from:
 - the exact certified run and node;
 - the exact journal head the state observed;
 - every typed input binding and its lineage;
-- the plan, request, or committed external observation it consumed;
+- the request or committed external observation it consumed;
 - the typed result, outputs, facts, and reviewed error evidence it produced; and
 - the resulting run and node state.
 
@@ -59,11 +59,18 @@ ensure(committed effect key, immutable semantic request)
 Repeated, concurrent, and delayed `ensure` calls must converge on one logical external effect. A
 destination without a native form of that property must sit behind a durable keyed executor with
 an independently reviewed downstream convergence mechanism, or remain unsupported as a certified
-`ApplySideEffect` capability. A keyed ledger alone is not that mechanism.
+effect state. A keyed ledger alone is not that mechanism.
 
 Generic saga, compensation, manual resolution, phase ledgers, worker attempts, resource lanes,
 recovery modes, and the public universal projection are removed. Domain correction is expressed as
 a separately certified run consuming immutable source-transition evidence.
+
+The runtime becomes one stateless `drive_once` interpreter over three closed state protocols:
+pure, external read, and recoverable effect. Extensibility means adding typed states, values,
+capabilities, and executors, not adding runner kinds or lifecycle phases. The runtime obtains live
+evidence only for a read or pending effect that lacks sufficient committed evidence; whenever it
+does invoke a live capability, authorization before entry and observation after every surviving
+wrapper result are mandatory, never optional.
 
 ## Problem Situation
 
@@ -179,6 +186,11 @@ inside the source run.
 - Preserve stable effect identity across crashes, workers, and retries.
 - Prevent a different request from replacing a pending effect.
 - Keep state logic pure and all live IO behind audited capabilities.
+- Execute every state through one of three closed typed protocols and one generic runtime path.
+- Keep all outcome-affecting request authorship, evidence acceptance, reduction, validation,
+  failure policy, output construction, and fact emission in the certified state contract.
+- Keep universal framework enforcement in a sealed same-transition envelope, and specify the
+  activation contract for future separately traceable semantic pre/post graph expansion.
 - Preserve atomic appends, content addressing, canonical JSON, float-free hashed structures, and
   no-secret persisted surfaces.
 - Replace generic saga semantics with explicit typed corrective runs.
@@ -198,26 +210,45 @@ inside the source run.
 - Cross-system atomicity, generic rollback, or generic compensation equivalence.
 - Concurrency control over wallets, validators, operators, or applications outside MFM.
 - Automatic or guaranteed admission of a corrective follow-up run.
+- Extensible runtime lifecycle protocols, custom runner event algebras, or adapter-owned reducers.
+- Treating best-effort telemetry callbacks as semantic pre/post execution.
+- Replacing kernel/store structural validation with framework-injected states.
+- Implementing semantic framework graph expansion before a concrete mandatory rule exists.
+- Runtime-loaded native libraries, WASM states, or remote state-execution ABIs in this cutover.
+- Cross-store import of run-source authority.
 - Backward compatibility with current event, projection, attempt, saga, or store schemas.
 
 ## Material Uncertainties
 
 | Choice or assumption | Why it is uncertain | Consequence if wrong | Resolution or validation |
 | --- | --- | --- | --- |
-| One audited access means one certified capability-boundary invocation. | An in-process adapter or remote executor may perform several HTTP/RPC exchanges internally. | MFM's run journal would not enumerate every downstream physical request. | Forbid hidden retries and redirects in in-process capabilities. Require linked executor-supplied audit evidence when executor-internal calls are in scope. |
+| One audited access means one certified capability-boundary invocation. | An in-process capability or remote executor may perform several HTTP/RPC exchanges internally. | MFM's run journal would not enumerate every downstream physical request. | Forbid hidden retries and redirects in in-process capabilities. Require linked executor-supplied audit evidence when executor-internal calls are in scope. |
 | A durable authorization is acceptable as the honest pre-call audit fact. | No local database protocol can atomically prove that a remote boundary was physically entered. | Consumers could incorrectly read authorization as proof that a request was sent. | Name and document the record as authorization, expose unmatched records as `CrashAmbiguous`, and never claim exact physical delivery. |
 | Reviewed typed results and safe failure summaries provide enough audit detail. | Raw provider bodies or error chains may contain useful diagnostics as well as secrets. | Redaction may omit forensic detail; retaining raw material may violate the no-secret invariant. | Define bounded public result/failure schemas per capability and adversarially test credential, bearer, and low-entropy-secret leakage. |
 | Audit correlation and retention are acceptable in the run journal. | Even redacted access order, frequency, source choice, and wall-clock metadata may reveal tenant behavior or provider incidents. | Indefinite immutable retention could conflict with privacy, erasure, or least-access requirements. | Classify every audit field, omit source and precise time by default, restrict audit export, and define the production retention policy before rollout. If deletion is mandatory, resolve the journal-integrity and archival contract in a follow-up RFC rather than silently weakening this trace. |
 | Semantic closure may be followed by audit-only observations. | Current terminal models often prohibit every later run append. | A stale call returning after closure could not be recorded, or one crashed call could block closure forever. | Make closure absorbing for semantic transitions and new authorizations while allowing one observation for a pre-closure unmatched authorization. |
 | Two durable audit appends per live access are affordable. | High-frequency reads can create substantial latency and journal volume. | The audit primitive may dominate execution cost. | Implement correctness first, measure representative workloads, and optimize only without hiding individual authorization identities or weakening affine access authority. |
 | Strict audit availability may gate every live access. | Durable authorization must succeed before the capability becomes callable. | A journal outage becomes a provider-access outage rather than degraded audit coverage. | Keep the protocol fail closed and measure the availability budget. A deployment requiring a best-effort bypass does not implement this contract and cannot register the audited live capability. |
-| Intended mutation adapters can provide permanent keyed convergence. | Some systems have finite idempotency windows or no client-chosen identity. | A delayed call could create another mutation or cost-bearing operation. | Inventory adapters and certify permanent destination-native convergence or a keyed executor with its own reviewed downstream convergence proof. Unsupported adapters remain unregistered. |
+| Database HA can provide non-rollback exclusive writer fencing for one preserved store identity. | A restored clone may otherwise accept writes while an old or sibling primary is still writable. | Identical run/store coordinates could name divergent journals, invalidating facts, cross-run refs, and effect recovery. | Qualify the deployment fence, require proof of the unique latest prefix before promotion, test stale-primary/restore split brain, and fail closed if a published suffix may be lost. |
+| Intended mutation executors can provide permanent keyed convergence. | Some systems have finite idempotency windows or no client-chosen identity. | A delayed call could create another mutation or cost-bearing operation. | Inventory executors and certify permanent destination-native convergence or a keyed executor with its own reviewed downstream convergence proof. Unsupported effect states remain unregistered. |
 | Executor-owned delivery state is acceptable as an irreducible external authority. | The goal is to remove secondary run-state stores, but an executor ledger still does not create destination convergence by itself. | Mistaking the ledger for a generic idempotency proof could duplicate a downstream mutation after `target applied -> executor crash`. | Treat the ledger as external-delivery authority only and require an independently reviewed downstream convergence mechanism, permanent anti-rollback bindings, and disaster-recovery tests. |
-| Cross-effect resource coordination can leave the kernel. | Different effect keys may still compete for one nonce, UTXO, sequence, inventory item, or business resource. | Removing resource lanes without a replacement owner could admit conflicting external operations. | Require the executor/destination to provide exclusive ownership, one shared durable coordinator, or atomic domain preconditions. Keep an adapter unregistered until that ownership is concrete. |
-| One read state's requests can be planned independently from one input manifest. | Some provider workflows are adaptive: request B depends on response A. | Hiding that dependency inside one state would make unmatched authorizations and planning lineage unverifiable. | Inventory read adapters. Split adaptive workflows into typed states; revisit only with an explicit persisted planning-dependency model. |
+| Cross-effect resource coordination can leave the kernel. | Different effect keys may still compete for one nonce, UTXO, sequence, inventory item, or business resource. | Removing resource lanes without a replacement owner could admit conflicting external operations. | Require the executor/destination to provide exclusive ownership, one shared durable coordinator, or atomic domain preconditions. Keep an effect state unregistered until that ownership is concrete. |
+| One typed semantic request and one accepted observation are sufficient per read state. | Current provider workflows may contain several independent or response-dependent calls. | A hidden multi-call capability implementation would recreate orchestration and untracked semantic choices outside the state graph. | Inventory every read implementation. Use one reviewed reusable typed batch only when it is genuinely one capability request with complete member evidence; split adaptive or independent work into typed state chains. |
+| Read and effect request authorship can be total over certified typed inputs. | Existing planners may accept weak types and report domain errors before producing a request. | A generic pre-call runner-failure path would reintroduce another lifecycle. | Move fallible validation into an upstream pure state that produces a stronger type and property-test request totality. If a legitimate case remains, specify one closed local typed-failure transition rather than generic runner errors. |
+| A future concrete semantic pre/post rule can use deterministic graph expansion without runtime hooks. | A postcondition may need to gate downstream visibility, and current operations may not expose all required typed lineage. | A callback that merely runs after a state could be bypassed, observe the wrong transition, or falsely claim enforcement. | Keep expansion out of this baseline. A follow-up activation must name/type-check the rule, make transform identity and policy hash-defining, bind permits/effective outputs, and pass the contract below. |
+| Future multiple mandatory rules compose with one canonical typed onion order. | Rules may transform or gate the same input/output types. | Rule order could change semantics or make effective handles incompatible. | Before activation, define rule compatibility constraints and golden-test every supported composition; certification rejects an incompatible profile. |
+| Future production entry points can own the minimum certification profile. | Library consumers may assemble MFM with different mandatory policies. | An operation or weaker assembly could omit a guarantee that the framework claims globally. | The activation RFC must pin and publish one minimum profile per entry point, bind it into the certified spec/admission root, and reject weaker admission. |
+| Required post-states need only explicit typed inputs and the protected typed output. | A proposed policy may ask to inspect arbitrary journal or audit internals. | A privileged post context would recreate a second runtime API and couple policy to storage representation. | Inventory concrete postconditions. Keep observation/effect-evidence verification in the producing state and reject generic journal-inspecting post hooks. |
+| The generic evidence-reference bag can be removed completely. | Existing states may retain auxiliary evidence outside outputs or facts. | Migration may lose trace material or reintroduce an untyped escape hatch. | Inventory every evidence producer and consumer; convert each to the exact access-observation reference, an explicit typed output/fact slot, or delete it. |
+| Canonical expansion can occur once before final node identities are frozen. | Child-operation composition may currently lower graphs in several stages. | Framework nodes could be duplicated or acquire unstable identities, changing graph hashes and effect keys. | Freeze expansion/identity ordering and golden-test direct, nested-child, fan-out, and fan-in construction while certification independently revalidates the result. |
+| Operational telemetry remains non-semantic. | Some deployments may require durable compliance evidence or guaranteed delivery to an external sink. | Treating such delivery as a best-effort hook would overstate the guarantee; treating ordinary telemetry as states would bloat and couple semantics. | Derive ordinary telemetry from journal/driver observations without authority. Model compliance evidence that affects decisions as explicit typed states, and guaranteed external delivery as a qualified effect. |
+| Compiled Rust registration is sufficient for extensibility. | Future consumers may request WASM, dynamic-library, or remote state implementations. | The proposed state catalog does not define a stable ABI or isolation boundary for them. | Keep this cutover to compiled, certified registrations. Design dynamic execution as a separate authority and isolation contract. |
 | Full transition and artifact retention is acceptable initially. | Complete future analysis requires the referenced bytes, not only their hashes. | Indefinite retention can produce material storage growth. | Measure expected volume. Design garbage collection only after a complete dependency-closure and archival contract exists. |
-| A transition-history scan is sufficient for initial fact queries. | Fact volume and latency objectives are not defined. | Cross-run selection can become unbounded. | Locate every fact-bearing transition through a validated routing column and batch-verify it initially. Add only a rebuildable, watermarked candidate index when measurement requires it. |
+| A same-journal history scan is sufficient for the initial reserved fact-selection capability. | Fact volume and latency objectives are not defined. | Cross-run selection can become unbounded, and its two audit appends may be material. | Locate every fact-bearing transition through a validated routing column and batch-verify it initially. Measure full audited requests, and add only a rebuildable, watermarked candidate index when required. |
 | Replay has authoritative fact history through every pinned frontier. | A portable bundle may otherwise contain only selected facts or omit a whole fact-bearing commit. | It can verify selected values but cannot detect omitted qualifying facts. | Require the contiguous global commit/record prefix through the frontier or an authenticated census/completeness export; downgrade every unauthenticated subset instead of claiming complete replay. |
+| Portable replay can carry the transitive proof closure of cross-run root sources. | A correction chain may reference several earlier closed runs and profiles. | Bundles may grow materially, while omitting one source would make effective-output or evidence-role verification incomplete. | Require an acyclic closed-source dependency DAG, deduplicate proof objects, measure bundle size, and reject verified replay when any dependency proof is absent. |
+| Cross-run consumers can author queries from base inputs, and same-run fact flow can use graph edges. | Existing code may derive a second query adaptively from selected facts or use the fact store as indirect same-run wiring. | Hidden multi-phase reads or compatibility materializers would return. | Inventory consumers; split adaptive queries into typed read-state chains and replace same-run queries with explicit typed edges. |
+| Generic typed read-response materialization can resolve selected fact value references. | Existing materialization may be limited to state inputs. | A fact-specific loader would create another runtime path. | Generalize the ordinary content-addressed response materializer and prohibit a fact-only loader. |
 | The canonical semantic-state digest schema can be frozen independently of Rust layout. | The RFC defines its components but not final byte-level versioned schemas. | An implementation refactor could invalidate history or Postgres/memory parity. | Specify canonical test vectors for genesis and every transition variant before implementation cutover. |
 | All semantic live probes can move after `RunAdmitted`. | Current launch or routing paths may probe providers before a run exists. | The platform-wide audit claim would have an unjournaled prefix. | Inventory admission paths and model each necessary probe as a bootstrap read state; otherwise explicitly narrow the product claim before acceptance. |
 | Every logical start has a stable non-secret invocation identity. | Some callers may currently rely on server-generated run IDs and retry by starting again. | Admission acknowledgement loss could create another run and therefore another effect-key namespace for the same business request. | Require a caller-supplied or deterministically derived invocation identity at every admission API and test retry/attach across transport ambiguity. |
@@ -240,7 +271,18 @@ may bind its required or newly admitted immutable objects.
 
 **Transition input manifest**
 : The exact typed bindings consumed by a state, including source lineage, config, context, selected
-facts, schema identities, and content-addressed value evidence.
+same-run facts, schema identities, and content-addressed value evidence. Cross-run selections are
+committed read observations, not pre-materialized inputs.
+
+**State execution contract**
+: The certified closed choice of pure, external-read, or recoverable-effect callbacks for one state
+descriptor, including its schemas, capability or executor identity, canonicalizers, failure policy,
+and live/replay verifier identity.
+
+**State frame**
+: One typed, immutable execution view over the deterministically prepared input-manifest candidate,
+decoded config, input tree, and certified context for one node occurrence. It is not append
+authority by itself.
 
 **External access**
 : One invocation of a certified live read capability or keyed effect executor at the MFM-controlled
@@ -265,7 +307,7 @@ be in flight, or a result may have been lost before persistence.
 classification and explicitly approved metadata may be retained.
 
 **Effect request**
-: The immutable semantic request and stable key produced by an `ApplySideEffect` state before any
+: The immutable semantic request and stable key produced by an effect state before any
 mutation-capable access.
 
 **Keyed ensure**
@@ -278,6 +320,11 @@ request digest and must converge on one logical external effect.
 **Candidate index**
 : Rebuildable data used only to narrow a query. Returned candidates are rehydrated and verified from
 the journal and objects.
+
+**Framework graph expansion**
+: The deferred activation contract for a deterministic, hash-defining certification step that may
+surround eligible authored nodes with ordinary typed framework states. It is not implemented by
+this baseline and can never be a runtime callback or operation-author convention.
 
 ## End-State Authority Model
 
@@ -357,11 +404,12 @@ RunAdmitted {
     spec_hash,
     certified_spec_ref,
     certificate_ref,
-    state_contract_registry_ref,
-    public_capability_binding_manifest_ref,
+    state_implementation_manifest_ref,
+    capability_implementation_manifest_ref,
     config_manifest_ref,
     seed_manifest_ref,
     context_manifest_ref,
+    cross_run_source_manifest_ref,
     initial_bindings,
     genesis_digest,
     initial_run_state_digest,
@@ -383,6 +431,8 @@ run_id = H(
 one admission for `(store_scope_id, operation_id, invocation_identity)`. Repeating the same
 identity with the exact root candidate reloads/attaches to the existing run; changing spec,
 contract, config, seeds, context, or certificate conflicts rather than creating another run.
+`store_scope_id` is a never-reused lineage namespace: a destructive reset must generate a fresh
+scope and epoch before it can admit another run.
 
 A lost admission acknowledgement is resolved by the same derived `run_id` and
 `append_request_id`. It never generates a fresh run identity. This is required because a fresh run
@@ -395,19 +445,71 @@ commit; different root content returns `Conflict`. Only a directly observed firs
 `NewlyAdmitted`, and connection ambiguity returns `OutcomeUnknown`.
 
 The manifests enumerate every typed root slot, schema and semantic type, content digest, object
-evidence, context constraint, and admitted public binding used by the certified graph. Capability
-bindings identify reviewed contracts and implementations but contain no credentials, endpoints, or
-secret-derived identifiers. `initial_bindings` are the exact cells available before the first
-state transition.
+evidence, context constraint, and exact state/capability implementation selected for this graph.
+They contain only entries required by the certified spec. Capability entries identify reviewed
+contracts and implementations but contain no credentials, endpoints, or secret-derived
+identifiers. `initial_bindings` are the exact cells available before the first state transition.
+Any cross-run root binding must use the spec-resolved effective-output or evidence-only source role;
+copying a raw object reference cannot bypass source lineage or framework post-gating.
+
+The canonical root source manifest contains:
+
+```text
+CrossRunSourceManifest {
+    bindings: [
+        {
+            root_field_path,
+            source: CrossRunSourceRef,
+        }
+    ],
+}
+
+CrossRunSourceRef =
+    EffectiveOutputSource {
+        source_store_scope_id,
+        source_store_epoch,
+        source_admission_ref,
+        source_run_id,
+        source_spec_hash,
+        logical_source_occurrence_id,
+        effective_transition_ref,
+        effective_output_ref,
+        source_closure_ref,
+    }
+  | EvidenceOnlySource {
+        source_store_scope_id,
+        source_store_epoch,
+        source_admission_ref,
+        source_run_id,
+        source_spec_hash,
+        logical_source_occurrence_id,
+        raw_transition_ref,
+        raw_result_or_evidence_ref,
+        certified_evidence_role_ref,
+        source_closure_ref,
+    }
+```
+
+`EffectiveOutputSource` resolves the logical source through the source certified spec. If a later
+spec activates framework expansion, that resolution reaches its final effective post output.
+`EvidenceOnlySource` is legal only for a destination slot whose certified contract explicitly
+accepts that correction-evidence role. It cannot satisfy an ordinary domain value, output, fact,
+public output, or equivalence claim. Producer-bound semantic types cannot be supplied as anonymous
+config/context merely by copying identical bytes. Every source run is closed before destination
+admission, making the transitive source dependency graph acyclic. In this baseline,
+`source_store_scope_id` and `source_store_epoch` must equal the destination store; cross-store
+source authority is rejected rather than fetched through ambient IO.
 
 Objects first produced by admission use `ThisAdmission(slot)` or logical seed/config identities,
 never the future `RunAdmitted` record coordinate. `certified_spec_ref` is the retained canonical
 spec object whose content digest equals `spec_hash`.
 
-Admission verifies the certificate, invocation identity, operation/spec relationship, registry and
-public capability bindings, all object bytes/evidence, the explicit genesis predecessor, and the
-canonical initial semantic-state digest. The first transition can therefore prove every root input
-without consulting current configuration or deployment state.
+Admission verifies the certificate, invocation identity, operation/spec relationship, exact
+selected state/capability implementation manifests, every cross-run source
+closure/lineage/role/effective-output resolution, all object bytes/evidence, the explicit genesis
+predecessor, and the canonical initial semantic-state digest. Adding an unrelated entry to a
+process catalog cannot change an existing run. The first transition can therefore prove every root
+input without consulting current configuration or deployment state.
 
 ## Complete State Transition Record
 
@@ -434,7 +536,8 @@ StateTransitionCommitted {
         }
       | ReadSettled {
             input_manifest_ref,
-            consumed_observation_refs,
+            request_ref,
+            consumed_observation_ref,
             settlement,
         }
       | EffectRequested {
@@ -474,13 +577,13 @@ request slot, and rejects a second or mismatched settlement.
 
 Body legality is closed:
 
-| Certified node class and phase | Legal body |
+| Certified execution case and derived condition | Legal body |
 | --- | --- |
-| Pure, ready | `PureSettled` |
-| External read, ready | `ReadSettled` |
-| Effect, ready | `EffectRequested` |
-| Any class, not started and certified skip-eligible | `DependencySkipped` |
-| Effect, awaiting | `EffectSettled` only |
+| Pure, `Ready(Unstarted)` | `PureSettled` |
+| Read, `Ready(Unstarted)` | `ReadSettled` |
+| Effect, `Ready(Unstarted)` | `EffectRequested` |
+| Any case, `Unstarted` and certified skip-eligible | `DependencySkipped` |
+| Effect, `AwaitingEffect` | `EffectSettled` only |
 
 An awaiting effect cannot fail or skip through another variant. It must remain pending until
 terminal effect evidence justifies `EffectSettled`.
@@ -503,39 +606,34 @@ InputManifestObject {
             field_path,
             source:
                 RunAdmission { record_ref, field_ref }
-              | TransitionOutput { run_id, transition_ref, output_ref }
-              | TransitionFact { run_id, transition_ref, fact_ref }
+              | TransitionOutput { this_run_id, transition_ref, output_ref }
+              | TransitionFact { this_run_id, transition_ref, fact_ref }
               | Context { context_ref, field_ref }
               | Config { config_ref, field_ref },
             value_ref,
-        }
-    ],
-    fact_queries: [
-        {
-            canonical_query_ref,
-            query_schema_id,
-            selection_contract_ref,
-            extractor_canonicalizer_ref,
-            ordering_limit_tiebreak,
-            store_read_frontier,
-            selected_fact_refs,        # explicit empty list is meaningful
         }
     ],
 }
 ```
 
 There is no independently serialized inline copy. A pure or effect-request transition admits and
-references the object in its own commit. The first read authorization admits and references it
-before access; later authorizations and `ReadSettled` reuse the exact same reference. Trace readers
-resolve it once. `EffectSettled.request_input_manifest_ref` must equal the reference in its request
-transition.
+references the object in its own commit. The first read authorization atomically admits and
+references the input manifest and its one state-authored request before access; later
+authorizations and `ReadSettled` reuse those exact references. Trace readers resolve each once.
+`EffectSettled.request_input_manifest_ref` must equal the reference in its request transition.
+Before that admitting commit, `StateFrame` is only a verified view over this deterministic
+manifest candidate; possession of the frame or staged object cannot mint journal authority.
 
 The input-tree contract versions the field-path grammar. Paths are unique and ordered by the
 certified schema, not map iteration. Optional absence, empty collections, fan-in order, and union
 discriminants are represented explicitly. Validation proves completeness against
 `input_schema_id`; duplicate, unknown, omitted required, or differently ordered slots reject.
 `Config` and `Context` sources ultimately reference immutable objects in `RunAdmitted`, never
-mutable current configuration.
+mutable current configuration. Direct `TransitionOutput` and `TransitionFact` bindings are same-run
+certified graph edges only. Every cross-run value enters through a hash-bound
+`RunAdmitted.cross_run_source_manifest_ref`; cross-run fact selection enters through the ordinary
+audited read protocol defined below. Neither can appear through later pre-execution input
+materialization.
 
 `settlement` is:
 
@@ -543,7 +641,6 @@ mutable current configuration.
 Succeeded {
     output_bindings,
     fact_emissions,
-    evidence_refs,
 }
 |
 Failed {
@@ -556,6 +653,12 @@ successful typed output, not a failed node with a cell. `DependencySkipped` is a
 transition and names every blocking source transition/output or certified run-failure source, its
 closed reason, and the certified skip rule; it produces no output or fact.
 
+There is no variable-cardinality generic `evidence_refs` bag. Read evidence is the exact
+`ReadSettled.consumed_observation_ref`; effect evidence is reachable only through
+`EffectSettled.consumed_terminal_observation_ref`. Any other domain evidence is an explicitly
+declared typed output or fact slot with certified cardinality, schema, role, and lineage. Required
+safety evidence is never optional. Operational telemetry is not transition evidence.
+
 `EffectSettled` does not resolve config, facts, context, or state inputs again. It reuses the exact
 request transition and input-manifest reference, then adds one committed terminal observation and
 its result-bound evidence. It does not repeat an independently authoritative evidence reference;
@@ -563,15 +666,16 @@ the terminal observation is the only route to the `TerminalEffectEvidence` envel
 Rust representation uses sealed variant-specific types rather than one public bag. The persisted
 canonical representation nevertheless exposes the complete reviewed trace above.
 
-`state_contract_ref` binds the state/descriptor version, input and output schemas, request planner,
-pure reducer or verifier, canonicalizers, required executable identity, and certified failure and
-skip policy. Replay verifies each body variant under that exact contract.
+`state_contract_ref` binds the state/descriptor version, closed execution protocol, input and output
+schemas, read/effect request author, pure reducer or verifier, canonicalizers, required executable
+identity, capability or executor contract, and certified failure and skip policy. Replay verifies
+each body variant under that exact contract.
 
 ### Before and after
 
-The state-local before view is the exact transition input manifest, or the complete blocking-source
-and skip proof for `DependencySkipped`. The state-local after view is the typed result, outputs,
-facts, and evidence.
+The state-local before view is the exact transition input manifest plus the exact committed request
+or observation required by its execution case, or the complete blocking-source and skip proof for
+`DependencySkipped`. The state-local after view is the typed result, outputs, facts, and evidence.
 
 The run-wide before view is the verified fold at `before.journal_head`. The run-wide after view is
 the deterministic result of applying the transition.
@@ -583,16 +687,19 @@ snapshot is derived by folding the journal.
 
 ### Exact input lineage
 
-Every semantic input must identify:
+Every input-manifest binding must identify:
 
 - its named position in the certified input tree;
-- seed, config, prior cell, cross-run fact, or context origin;
+- seed, config, prior output, same-run fact, or context origin;
 - producing transition where applicable;
 - schema and semantic type identity;
 - context constraint;
 - content digest;
-- retained object evidence; and
-- fact query and pinned store frontier when selection occurred.
+- retained object evidence.
+
+For cross-run fact selection, the consumed authorization/observation chain records the canonical
+query, authorization-order frontier, exact selected fact and producer identities, object evidence,
+and explicit empty results. The read transition then records which observation it accepted.
 
 Input bytes are not duplicated into every transition. They are stored once as immutable
 content-addressed objects and referenced by the manifest.
@@ -615,8 +722,9 @@ its own future record hash or store-assigned coordinate.
 A typed terminal failure carries reviewed redacted error evidence and produces no consumable
 output or fact. Runtime or provider raw errors never cross this boundary.
 
-Public output is the typed output of its certified render transition. It is not a separate
-completion authority.
+Public output is a direct certified typed binding, or the typed output of an ordinary pure state
+when a real semantic projection is required. Transport text/JSON rendering is not completion
+authority and cannot change the semantic value.
 
 ## Commit Batch Contract
 
@@ -626,7 +734,8 @@ The legal shapes are exhaustive:
 
 ```text
 run admission:
-  certified spec, certificate, config, seed, and context object bindings
+  certified spec, certificate, selected-implementation, config, seed, context,
+  cross-run-source-manifest, and source-proof object bindings
   + RunAdmitted
 
 pure, read, or dependency-skip settlement:
@@ -635,7 +744,7 @@ pure, read, or dependency-skip settlement:
   + RunClosed?                         # when this transition terminalizes the run
 
 external-access authorization:
-  required and admit-or-verify input-manifest, public-plan, and request object bindings
+  required and admit-or-verify input-manifest and request object bindings
   + ExternalAccessAuthorized
 
 external-access observation:
@@ -643,7 +752,7 @@ external-access observation:
   + ExternalAccessObserved
 
 effect request:
-  required and admit-or-verify semantic request object bindings
+  required and admit-or-verify input-manifest and semantic-request object bindings
   + StateTransitionCommitted(EffectRequested)
 
 effect settlement:
@@ -806,9 +915,9 @@ ArtifactAdmissionIntent {
 }
 ```
 
-Path bindings cover existing inputs and cross-run facts as well as new outputs and evidence.
-`authority_use` is derived and validated from the closed record/field schema; it does not report
-whether a database insertion happened.
+Path bindings cover existing inputs, same-run facts, selected cross-run fact values referenced by a
+committed response, and new outputs/evidence. `authority_use` is derived and validated from the
+closed record/field schema; it does not report whether a database insertion happened.
 
 Admission intents are deduplicated by the complete artifact/evidence identity. If any path uses
 `Preexisting`, the one canonical mode is `RequireExisting`, and the authority must exist before
@@ -871,21 +980,24 @@ structure remains independently enforced.
 
 Every invocation of an MFM-supplied live capability for:
 
-- an external read state; or
-- a keyed `ensure` call for an `ApplySideEffect` state
+- a read state; or
+- a keyed `ensure` call for an effect state
 
 must use this audit protocol.
 
-Journal/artifact persistence, fact-index queries, runtime configuration loading, metrics, and
-telemetry are not audited capability calls. Otherwise recording an audit record would itself
-require another audit record indefinitely.
+Low-level journal, artifact, index, and audit-append database calls, runtime configuration loading,
+metrics, and telemetry are not individually audited capability calls. Otherwise recording an audit
+record would itself require another audit record indefinitely. A state-requested invocation of the
+reserved journal-backed fact-selection capability is a semantic read and uses this audit protocol
+once at that capability boundary.
 
 An audited access is one entry into an explicit MFM-controlled certified capability API. An
 in-process capability may initiate at most one independent application-protocol operation under
-that entry and must not retry, redirect, fail over, or reselect a provider invisibly. A state that
-needs several logical requests creates several authorizations. A deterministic bounded batch may
-be one access only when its certified public result describes the complete batch and no
-semantically dependent hidden subcall is omitted.
+that entry and must not retry, redirect, fail over, or reselect a provider invisibly. One read state
+authors exactly one typed semantic request. A deterministic bounded batch may be that one request
+only when the capability contract defines the complete reusable batch, its observation accounts
+for every member, and no semantically dependent hidden subcall is omitted. Independent or adaptive
+requests are separate typed states.
 
 Kernel/TCP retransmission is not another semantic capability entry and cannot be counted from
 local Rust typestate. The capability's read or keyed-convergence contract must make such
@@ -895,6 +1007,24 @@ application request is not a transport detail and requires a fresh authorization
 A remote keyed executor may make internal target calls. MFM audits its call to that executor, not
 the executor's internal network exchanges. A product requiring those exchanges in the MFM trace
 must require linked, replay-verifiable executor audit evidence.
+
+Every new live invocation requires this protocol. “Obtain audited evidence” is conditional only in
+the following senses: pure and skipped states perform no live access, and a read/effect state may
+reuse sufficient committed evidence instead of calling again. Once runtime decides to invoke a
+live capability, durable authorization before entry and durable observation for every surviving
+wrapper result are mandatory. There is no unaudited or best-effort evidence path.
+
+Four distinct rules follow:
+
+1. auditing a new live call is mandatory;
+2. persisting its observation is mandatory whenever the wrapper result survives;
+3. semantic consumption is conditional because stale, losing, failed, or unmatched observations
+   may remain audit-only; and
+4. auxiliary domain evidence is optional only when the state schema declares an explicit typed
+   optional slot whose presence and absence are canonical.
+
+A generic optional collection of evidence references is forbidden, and required safety evidence
+cannot use an optional slot.
 
 Run admission itself performs no external provider, routing, filesystem, signer, or executor probe.
 Any live information needed to select or validate a source is modeled as an audited bootstrap read
@@ -918,8 +1048,6 @@ ExternalAccessAuthorized {
     scope:
         Read {
             input_manifest_ref,
-            public_plan_ref,
-            planner_contract_ref,
         }
       | EnsureEffect {
             effect_request_transition_ref,
@@ -929,7 +1057,7 @@ ExternalAccessAuthorized {
     admitted_implementation_ref,
     safe_classifier_contract_ref,
     operation_id,
-    public_request_ref,
+    request_ref,
     reviewed_source_alias?,
 }
 ```
@@ -937,7 +1065,7 @@ ExternalAccessAuthorized {
 The record coordinate is the access identity. There is no generic worker `AttemptId`, attempt
 number, owner, lease, epoch, or retry counter.
 
-The semantic anchor binds a read to the exact verified state view from which its public plan was
+The semantic anchor binds a read to the exact verified state view from which its typed request was
 authored, including the initial view where no predecessor state transition exists. An effect
 authorization additionally binds the already committed request transition.
 
@@ -947,7 +1075,7 @@ endpoint, URL, hostname, filesystem path, provider-supplied identifier, or arbit
 Under the append transaction, the store requires:
 
 - the anchored journal head and state digest are still current;
-- a read node remains ready under the same certified plan;
+- a read node remains ready under the same certified request;
 - an effect remains `AwaitingEffect` for the exact request transition, key, and digest;
 - capability, operation, request, and executor contracts still match certified authority; and
 - the run is not closed.
@@ -955,17 +1083,16 @@ Under the append transaction, the store requires:
 A stale worker cannot authorize a read for a settled node or an `ensure` call for a settled effect.
 Audit records that win the physical-head race force reload; no live access has happened yet.
 
-The certified planner reauthors every read plan purely from the retained input manifest under the
-anchored state view. A `ReadSettled` transition must use that same manifest reference. Multiple
-independent requests may be planned together from one manifest. A later request may not depend on
-an earlier uncommitted access observation; such a dependency is another typed state transition
-whose output becomes the next state's input.
+The certified state request callback reauthors exactly one read request purely from the retained
+input manifest under the anchored state view. A `ReadSettled` transition must use that same
+manifest and request reference. Request authorship is total over the certified `StateFrame`; input
+validation that can fail semantically belongs in an earlier pure state that produces a stronger
+typed input. A callback fault blocks execution and is not converted into a semantic failure.
 
-For `Read`, `public_request_ref` is the canonical capability request derived from
-`public_plan_ref` under `planner_contract_ref`; replay rederives and compares it. For
-`EnsureEffect`, it resolves to the immutable request already bound by the referenced transition.
-It is semantic public request material, not HTTP/RPC bytes, headers, endpoint selection, or signer
-payload.
+For `Read`, `request_ref` is the canonical typed request authored by the state under
+`state_contract_ref`; replay reauthors and compares it. For `EnsureEffect`, it must equal the
+immutable semantic request already bound by the referenced transition. It is semantic public
+request material, not HTTP/RPC bytes, headers, endpoint selection, or signer payload.
 
 Its normative meaning is:
 
@@ -985,8 +1112,8 @@ Rejected
 OutcomeUnknown
 ```
 
-Only a positively acknowledged `NewlyAppended` result mints a crate-private, non-cloneable,
-non-serializable, affine authority. The concrete type seals:
+Only a positively acknowledged `NewlyAppended` result mints a publicly nameable but privately
+constructible, non-cloneable, non-serializable, affine authority. The concrete type seals:
 
 ```text
 authorization_ref
@@ -995,13 +1122,13 @@ semantic_anchor
 scope
 capability_contract_ref
 operation_id
-public_request_ref
+request_ref
 committed effect request                       # ensure only
 ```
 
 An idempotently found record, reload, stale response, commit-then-error, or lost acknowledgement
 mints no authority. A later physical call requires a fresh authorization append identity even when
-the semantic read plan or effect request is unchanged.
+the semantic read request or effect request is unchanged.
 
 The audited wrapper consumes and destroys the affine authority when it accepts the invocation,
 before local validation or external boundary entry. It never returns that authority. It may then
@@ -1104,12 +1231,12 @@ The read-side capability shape is likewise bound:
 
 ```text
 trait AuditedReadCapability {
-    type Plan;
-    type Result;
+    type Request;
+    type Response;
 
     async fn read(
-        access: AuthorizedReadAccess<CommittedReadPlan<Plan>>,
-    ) -> AccessReturn<Result>;
+        access: AuthorizedReadAccess<CommittedRequest<Read, Request>>,
+    ) -> AccessReturn<Response>;
 }
 ```
 
@@ -1130,13 +1257,17 @@ This intentionally adds a durable boundary after a live call and before state re
 reducer, output validation, or later transition append fails, the external return remains auditable
 and recovery can retry pure verification without repeating the access.
 
-The transition records the exact observations it consumed. Other returned, stale, failed, or
+The transition records the exact one observation it consumed. Other returned, stale, failed, or
 unmatched authorizations remain audit-only history.
+
+For `ReadSettled`, the direct `request_ref` is trace convenience, not another authority. It must
+equal the unique request reached through
+`consumed_observation_ref -> authorization_ref -> request_ref`; any mismatch rejects.
 
 Observation use is scope-checked:
 
-- `ReadSettled` accepts only observations authorized for that run, node, input-manifest reference,
-  plan, capability, operation, request, and result schema.
+- `ReadSettled` accepts exactly one observation authorized for that run, node,
+  input-manifest reference, capability, operation, request, and response schema.
 - `EffectSettled` accepts only `Returned(Terminal)` for its exact request transition and executor.
 - `Returned(Pending)`, unmatched authorization, and `CrashAmbiguous` are never settlement evidence.
 - `DidNotEnter` or `Indeterminate` may be consumed only by an explicitly certified pure read-failure
@@ -1147,37 +1278,45 @@ Observation use is scope-checked:
 The store rejects cross-run, cross-node, cross-capability, cross-operation, cross-request,
 wrong-schema, stale-authority, and already-consumed substitution.
 
-### External-read workflow
+### Read workflow
 
 ```text
 Ready node
-  -> author deterministic public read plan
+  -> author one deterministic typed read request
   -> append ExternalAccessAuthorized
   -> audited wrapper consumes AuthorizedReadAccess
   -> perform at most one capability invocation
   -> append ExternalAccessObserved
-  -> verify Returned evidence and reduce purely
+  -> state accepts the committed observation and reduces purely
   -> append StateTransitionCommitted(ReadSettled)
 ```
 
 Rules:
 
+- Exactly one state-authored request exists for the node occurrence. Every retry reauthors the same
+  request and creates a distinct authorization.
+- The state contract examines eligible committed observations in journal order. The first
+  `Settlement` fixes the exact consumed observation. If every eligible observation returns
+  `InsufficientEvidence`, `drive_once` authorizes another call with the same request instead of
+  repeatedly retrying a no-op settlement. Runtime arrival time, retry count, and worker policy
+  never choose the semantic response.
 - `Returned` evidence may settle the state only after the state verifier accepts it.
-- `DidNotEnter`, `Indeterminate`, and unmatched authorizations ordinarily produce no state output.
+- `DidNotEnter` and `Indeterminate` may settle only through the certified typed failure policy.
+  Unmatched authorizations never produce state output.
 - A retry creates a new authorization and a new affine authority.
 - Because the certified read contract is non-mutating, crash ambiguity permits another read.
 - An operation that marks data read, initiates work, consumes a one-shot token, or creates a
   material cost is not certified as a read unless that cost/retry policy is explicit; a semantic
   mutation uses the keyed-effect path.
-- Snapshot-sensitive reads pin their external frontier in the public plan and evidence contract.
-- If several returned observations exist, the winning transition explicitly identifies which ones
-  it consumed.
+- Snapshot-sensitive reads pin their external frontier in the typed request and evidence contract.
+- If several observations exist for retries, the winning transition identifies the exact one it
+  consumed; every other observation remains audit-only.
 - A terminal read failure is a separate semantic transition justified by reviewed failure policy
   and committed audit evidence; an access failure does not automatically terminalize a state.
 
-### Keyed-write workflow
+### Effect workflow
 
-A side-effect state first commits:
+An effect state first commits:
 
 ```text
 Ready
@@ -1214,8 +1353,11 @@ checks it against the original inputs, immutable request, certified executor con
 external identity, and assurance/finality policy. Only then may a semantic transition settle the
 node.
 
-Recovery creates a fresh authorization and calls `ensure` again with the same effect key and
-request digest. Access-record identity is never used as the effect key.
+Compatible terminal observations are scanned in journal order. The first `Settlement` fixes the
+consumed observation. `InvalidEvidence` is an integrity failure and returns `Waiting` without
+trying another observation or inventing a domain result. If every terminal observation is
+`InsufficientEvidence`, recovery creates a fresh authorization and calls `ensure` again with the
+same effect key and request digest. Access-record identity is never used as the effect key.
 
 An audit record never:
 
@@ -1257,12 +1399,13 @@ An external-access authorization:
 - pairs with at most one immutable observation.
 
 Pure computation, worker execution, scheduling, and process takeover have no persisted attempt
-events. One state evaluation may produce zero, one, or several external-access pairs. Exactly one
-later semantic transition records the observations it consumed.
+events. One read or pending-effect evaluation may produce several audit pairs across retries, but
+each live invocation has its own pair and exactly one later semantic transition names the one
+observation it accepts.
 
 ## Keyed-Convergent Effect Contract
 
-### Core adapter shape
+### Core executor shape
 
 The kernel-facing contract is:
 
@@ -1284,8 +1427,8 @@ enum Ensure<Evidence> {
 
 Request authorship is pure and non-mutating. It receives only certified config, exact transition
 inputs, and context. A request that needs a live quote, nonce, UTXO, or other observed semantic
-input must consume the typed output of an explicit earlier external-read state or leave that choice
-to the executor under a certified equivalence constraint.
+input must consume the typed output of an explicit earlier read state or leave that choice to the
+executor under a certified equivalence constraint.
 
 Volatile delivery choices should normally remain executor-owned within explicit semantic bounds.
 If a committed request deliberately pins an expiring quote or resource, it also binds its validity
@@ -1295,7 +1438,7 @@ prove permanent non-application and may leave the effect pending.
 Only `AuthorizedEnsureAccess`, already bound to a `CommittedEffectRequest` reconstructed from a
 verified pending transition, can reach `ensure`. Request and authority cannot be substituted
 independently. The raw mutation transport is not supplied to state code or ordinary runtime
-runners.
+execution.
 
 ### Effect identity and terminal evidence
 
@@ -1320,11 +1463,13 @@ second ambiguous `effect_contract_ref`.
 
 The key deliberately excludes request bytes. Its one immutable request digest is bound by the
 pending transition, and reuse with another digest fails closed. `store_scope_id` remains stable
-across backup and restore; restoring a resumable store under a new scope is forbidden. Concurrent
-clones must share the same executor ledger and deployment fence or only one may drive effects.
-`executor_namespace` authenticates tenant and durable ledger generation. Contract upgrades must
-route an existing pending key back to its original non-rolled-back ledger; inability to do so leaves
-the effect blocked rather than treating the key as new.
+across a verified non-rollback backup restoration of the same lineage; restoring a resumable store
+under a new scope is forbidden. A destructive reset must use a never-before-used
+`store_scope_id` and a fresh `store_epoch`, so it cannot recreate a prior run or effect key.
+Concurrent clones must share the same executor ledger and deployment fence or only one may drive
+effects. `executor_namespace` authenticates tenant and durable ledger generation. Contract
+upgrades must route an existing pending key back to its original non-rolled-back ledger; inability
+to do so leaves the effect blocked rather than treating the key as new.
 
 Executor evidence is wrapped by a kernel envelope:
 
@@ -1435,8 +1580,8 @@ after request commit and before dispatch can wedge forever. Exact transport byte
 wrong generic abstraction. They are insufficient for a non-idempotent destination and unnecessary
 for a destination that enforces semantic idempotency by key.
 
-Non-convergent one-shot mutations remain outside certified `ApplySideEffect`. A separate product
-may expose them as explicitly unrecoverable operations, but they do not weaken this primitive.
+Non-convergent one-shot mutations remain outside certified effect states. A separate product may
+expose them as explicitly unrecoverable operations, but they do not weaken this primitive.
 
 ## Cross-Effect Coordination Is Executor or Domain Authority
 
@@ -1454,61 +1599,542 @@ revoke an affine authority already issued to a delayed call, so it cannot establ
 quiescence. The executor must make that delayed call converge safely even after later effects
 begin.
 
-## State Lifecycle
+## Thin Runtime and Typed State Execution
 
-### Pure states
+The runtime is a stateless interpreter of one certified graph and one verified journal view. It
+does not expose an extensible runner lifecycle.
 
-```text
-Ready
-  -> materialize exact inputs
-  -> run pure state
-  -> validate output
-  -> StateTransitionCommitted(PureSettled)
-```
+### Closed state execution contract
 
-A crash before commit permits recomputation. No semantic transition and no attempt record exist.
-
-### External-read states
-
-External reads use one or more audited access pairs followed by one semantic transition. A
-committed observation survives reducer failure and can be replayed or retried without another live
-read when its contract remains sufficient.
-
-### Side-effect states
+The conceptual author-facing contract is:
 
 ```text
-Ready
-  -> StateTransitionCommitted(EffectRequested)
-  -> zero or more audited ensure accesses
-  -> StateTransitionCommitted(EffectSettled)
+trait State {
+    type Config;
+    type Context;
+    type Input;
+    type Output;
+    type Facts;
+    type Failure;
+
+    fn execution() -> StateExecution<Self>;
+}
+
+StateExecution::pure(apply)
+StateExecution::read<Request, Response, Capability>(request, apply)
+StateExecution::effect<Request, Evidence, Executor>(request, settle)
 ```
 
-The effect key and request survive every worker. The state never authors a different request after
-becoming pending.
+The concrete Rust API may express the three cases through sealed traits, but they remain one closed
+sum. There are no optional lifecycle callbacks and no public custom runner kinds. A third party may
+register another compiled state, value, request, response, fact, capability, or executor. It cannot
+add another semantic phase or event protocol.
 
-### Scheduling
-
-The deterministic scheduler consumes one `VerifiedRunView` and returns:
+The callbacks are:
 
 ```text
-ExecutePureOrRead(node)
-DrivePendingEffect(node, request_transition)
-CommitDependencySkip(node, blocking_sources, skip_rule)
-Finished(run_closure)
-Blocked(reason)
+pure:
+  apply(StateFrame)
+    -> Settlement
+
+read:
+  request(StateFrame)
+    -> one immutable typed Request
+
+  apply(StateFrame, CommittedObservation<Read, Response>)
+    -> Settlement | InsufficientEvidence
+
+effect:
+  request(StateFrame)
+    -> one immutable typed Request
+
+  settle(
+      original StateFrame,
+      CommittedRequest<Ensure, Request>,
+      CommittedObservation<Ensure, TerminalEvidence>
+  )
+    -> Settlement | InsufficientEvidence | InvalidEvidence
 ```
 
-`Blocked` reports missing deployment capability, corrupt evidence, or an operational prerequisite.
-It is not a generic manual outcome and appends no semantic truth by itself.
+`Settlement` is exactly `Succeeded { output_bindings, fact_emissions }` or
+`Failed { typed_failure_ref }`. A typed failure is domain truth and commits. Invalid inputs,
+corrupt evidence, callback faults, noncanonical output, and broken contract invariants are
+execution/integrity failures: they block or reject and never become an invented semantic failure.
 
-When failure makes ready downstream nodes unexecutable, the scheduler emits deterministic
-`CommitDependencySkip` actions in certified spec order. Closure waits until every certified node
-occurrence is settled or has its explicit skip transition. A failure does not permit immediate
-closure while required skip traces remain absent.
+Read and effect request authorship is pure and total over the certified `StateFrame`. A domain
+condition that may fail before request authorship belongs in an upstream pure validation state
+that produces a stronger typed value. `InsufficientEvidence` appends no semantic transition and
+cannot authorize a different read request or effect request. It permits another audited read retry
+for the same request or another keyed `ensure` call that may return stronger evidence.
 
-No worker attempt, execution claim, or lease is required for correctness. An operational lease may
-reduce duplicate work, but it cannot authorize a state transition, external access, effect
-replacement, or closure.
+The exact same callbacks and canonicalizers run in live execution and replay. There is no
+replay-specific reducer, verifier, or adapter.
+
+### Minimal phase algebra
+
+The complete semantic node phase algebra is:
+
+```text
+Unstarted | AwaitingEffect | Terminal
+```
+
+`Ready` is derived from `Unstarted`, the certified graph, exact available bindings, and dependency
+rules. `Succeeded`, `Failed`, and `Skipped` are terminal outcomes, not phases. Read authorization
+and observation are audit records, not node phases. `Blocked` is operational and appends nothing.
+The run phase is only `Open | Closed`; success or failure is derived from terminal transitions.
+
+The state flows are:
+
+```text
+pure:
+  Ready
+    -> materialize StateFrame
+    -> apply
+    -> StateTransitionCommitted(PureSettled)
+
+read:
+  Ready
+    -> materialize StateFrame
+    -> author one Request
+    -> zero or more retry audit pairs for that same Request
+    -> accept exactly one committed observation
+    -> apply
+    -> StateTransitionCommitted(ReadSettled)
+
+effect:
+  Ready
+    -> materialize StateFrame
+    -> author one Request
+    -> StateTransitionCommitted(EffectRequested)
+    -> zero or more audited ensure calls
+    -> accept one committed terminal observation
+    -> settle
+    -> StateTransitionCommitted(EffectSettled)
+
+skip:
+  certified blocking proof
+    -> StateTransitionCommitted(DependencySkipped)
+```
+
+A pure crash before commit permits recomputation. A committed read observation survives reducer or
+settlement-append failure. The effect key, request, and original input manifest survive every
+worker, and an awaiting effect can never author another request.
+
+### Authority-bearing execution types
+
+Keep only the public or crate-visible phase types that prevent an unsafe crossing:
+
+```text
+StateFrame<S>
+  verified typed view over one deterministic input-manifest candidate; no append authority
+
+CommittedRequest<K, T>
+  the exact read or effect request with durable authorization/transition authority
+
+AuthorizedAccess<K, T>
+  non-cloneable affine authority for one boundary invocation
+
+CommittedObservation<K, R>
+  one verified observation that a state callback may examine
+
+Settlement<S>
+  typed success or typed domain failure ready for transition validation
+```
+
+`K` is a sealed `Read` or `Ensure` marker. The read request becomes committed in its authorization
+batch; the effect request becomes committed in `EffectRequested`.
+`AuthorizedReadAccess` and `AuthorizedEnsureAccess` may be aliases over the one implementation.
+These authority types are publicly nameable so implementations in other crates can accept them,
+but constructors and fields remain private. The pre-observation wrapper result, variant-specific
+transition candidates, and erased catalog dispatch remain private.
+
+### Computation ownership
+
+All outcome-affecting computation belongs in the certified state contract:
+
+- domain validation and canonicalization;
+- read and effect request authorship;
+- cross-run fact-query authorship and interpretation;
+- exact observation acceptance and selection;
+- safe-access-failure-to-typed-failure policy;
+- read reduction;
+- terminal effect-evidence verification;
+- output and fact construction; and
+- every computation replay must reproduce.
+
+Operations and the certified spec own only static topology, exact typed bindings, dependency/skip
+rules, state execution contracts, capability/executor identities, public-output bindings, and
+terminal conditions.
+
+Runtime owns verified-view loading, deterministic readiness, exact input materialization, typed
+callback dispatch, audited capability orchestration, canonical result validation, transition
+construction, and exact-head retry. It owns no domain policy, protocol phase progression, business
+retry count, compensation, finality policy, or public projection model.
+
+A read capability owns one external boundary invocation for the exact typed request, including
+bounded protocol encoding/decoding, source validation, and safe error classification. It cannot
+reduce a state, construct output/facts/failure, choose graph behavior, retry invisibly, or define
+replay behavior. A private live-crate helper may translate protocol types, but adapter is no longer
+a runtime abstraction or semantic execution layer.
+
+The effect executor owns external convergence, delivery state, cross-effect resource coordination,
+signing/delivery choices, and durable terminal evidence within its certified equivalence contract.
+It cannot settle an MFM node.
+
+Store owns append idempotency, exact-head compare-and-swap, atomic object admission, record and slot
+legality, closure/tail rules, hashes, coordinates, and structural fold validation. It never
+executes states or decides domain outcomes.
+
+Cross-run fact selection is an ordinary read state using the reserved same-journal fact capability
+defined below. The state authors the query from base inputs and interprets the committed response;
+the capability owns only verified prefix scanning and deterministic response construction. A
+completed `StateFrame` never authors the query used to construct itself. Public semantic output is
+a certified binding. An ordinary pure state performs any real semantic projection; CLI/API JSON or
+text rendering is transport presentation and cannot reinterpret the typed value.
+
+### One runtime entry point
+
+The only post-admission mutating execution API is:
+
+```text
+async fn drive_once(run_id: RunId) -> Result<DriveOutcome>
+
+DriveOutcome =
+    Advanced { journal_head }
+  | Waiting {
+        journal_head,
+        reason: RetryableEvidenceGap | OperationalBlock | IntegrityBlock,
+    }
+  | Closed { closure_ref }
+```
+
+`drive_once`:
+
+1. loads the certified spec, committed journal, and required objects into one `VerifiedRunView`;
+2. purely derives one next action in certified node order;
+3. performs at most one semantic transition or one audited capability invocation;
+4. appends against the exact journal head; and
+5. returns without retaining semantic process state.
+
+One audited invocation may append its authorization and observation as two distinct journal
+commits. The “one action” bound is one new live invocation, not one physical store append.
+
+After committing an observation, `drive_once` purely scans it with the retained compatible
+observations. It returns `Advanced` only when a settlement candidate now exists. `Returned(Pending)`
+or all-`InsufficientEvidence` returns `Waiting::RetryableEvidenceGap` after preserving the audit
+record; invalid evidence returns `Waiting::IntegrityBlock`. A later host call may retry according to
+its backoff and budget, but `drive_until_waiting` stops and never hot-loops another live call.
+Missing capabilities and other operational prerequisites return `Waiting::OperationalBlock`.
+
+The crate-private action algebra is:
+
+```text
+CommitPure
+CallRead
+SettleRead
+CommitEffectRequest
+CallEnsure
+SettleEffect
+CommitDependencySkip
+Closed
+Blocked
+```
+
+`CallRead` and `CallEnsure` include authorization, at most one boundary invocation, and mandatory
+observation persistence for every surviving wrapper result. `SettleRead` considers matching
+observations in journal order but lets the certified state callback accept or reject each one;
+arrival time or worker policy never selects semantic evidence. `SettleEffect` invokes the exact
+state terminal verifier.
+
+Next-action derivation closes the insufficient-evidence case:
+
+```text
+scan compatible observations in journal order
+  first Settlement     -> SettleRead | SettleEffect with that observation
+  InvalidEvidence      -> Blocked integrity failure
+  all insufficient:
+    read               -> CallRead with the identical authored request
+    effect             -> CallEnsure with the committed effect request
+```
+
+The scan is pure and may repeat. `SettleRead` and `SettleEffect` are selected only when they can
+construct a settlement candidate, so `drive_once` cannot livelock on the same insufficient
+observation. The next later `drive_once` after a retryable wait may derive `CallRead` or
+`CallEnsure`; the automatic loop cannot do so in the same drive-until-waiting call.
+
+On stale compare-and-swap, runtime reloads. Pure work may be recomputed. A committed observation is
+reused and no live access is repeated merely because transition append lost the race.
+
+The deterministic scheduler still emits dependency skips in certified order. Closure waits until
+every occurrence is terminal. A missing deployment capability, corrupt evidence, or operational
+prerequisite returns `Waiting`; it appends no semantic truth.
+
+No worker attempt, execution claim, or lease is required for correctness. A host may repeatedly
+call `drive_once` and choose wakeups, backoff, budgets, or leases, but those operational choices
+cannot construct a request, select evidence, create a failure, authorize access, replace an effect,
+or close the run.
+
+### Minimal catalogs and replay
+
+Process-private runtime bindings contain:
+
+```text
+StateCatalog
+  (state_contract_ref, executable_identity_ref)
+    -> erased typed request/apply/settle functions
+
+CapabilityCatalog
+  (
+    capability_or_executor_contract_ref,
+    admitted_implementation_ref,
+    operation_id,
+    executor_namespace_ref?,
+  )
+    -> pure schema/classifier verifiers plus optional live implementation
+```
+
+The immutable per-run implementation manifests select only the exact catalog entries required by
+the certified spec. A process catalog may be a superset; unrelated additions or removal of
+unselected entries cannot change the run contract. Admission and resume fail closed when a
+selected entry is missing or mismatched. Catalog construction and binding perform no semantic IO;
+provider, source, chain, signer, or route probing belongs in an audited post-admission read state.
+The reserved `mfm.journal.fact-selection.v1` entry is constructed internally from the exact
+`RunJournalStore` used by the runtime; app assembly cannot override it or supply a separate fact
+store.
+
+Type erasure exists only at heterogeneous catalog dispatch and is checked against the selected
+manifest, certified schemas, and executable identity. There is no separate runner identity, runner
+factory, runner output event algebra, or adapter registry.
+
+Replay loads the same selected `StateCatalog` entries and the verification-only portion of the same
+selected `CapabilityCatalog` entries. It installs no live implementation or invocation authority,
+walks the recorded transitions, and invokes the same pure functions. It does not run the live
+scheduler or a replay broker.
+
+## Framework-Owned Pre/Post Execution
+
+MFM distinguishes three mechanisms that must not be conflated:
+
+1. **Kernel structural invariants** are unconditional sealed certification/runtime/store checks.
+2. **Semantic safety policy** is typed state-machine behavior in the certified graph or in the
+   sealed same-transition execution envelope.
+3. **Operational telemetry** is derived observation that cannot affect semantic execution.
+
+There is no generic pre-hook, post-hook, middleware callback, or runtime plugin chain.
+“Per state” means one certified authored node occurrence. It never means every callback
+recomputation, read retry, `ensure` invocation, or worker attempt.
+
+### Same-transition framework envelope
+
+If a pre/post check must pass before the user transition becomes authoritative, it runs as a
+sealed typed in-memory phase:
+
+```text
+StateFrame<User>
+  -> FrameworkPrechecked<User>
+  -> UserEvaluated<User>
+  -> FrameworkPostchecked<User>
+  -> CommitReady<User>
+  -> StateTransitionCommitted
+```
+
+Only `CommitReady<User>` can construct sealed `CommitTransition` authority. These are not
+additional persisted node phases. They are appropriate for universal mechanical enforcement such
+as typed input completeness, output schema/canonicalization, no-secret checks, evidence scoping,
+and transition-contract validation. Hashing, exact-head CAS, affine authorization,
+committed-observation-only reduction, effect-key derivation, object admission, and closure legality
+likewise remain unconditional kernel/store code. A skippable or fallible graph node can never own
+an invariant required on every path.
+
+Same-transition checks are a sealed kernel set, not third-party callbacks. Their contract/version
+and canonical order are bound by the certified state contract and rerun during replay. There is no
+framework-function catalog or mutable runtime hook lookup.
+
+### Deferred semantic graph-expansion activation contract
+
+This baseline does not implement semantic graph expansion, persist `NodeOrigin`, install a graph
+expander, or inject framework nodes. No concrete separately traceable mandatory semantic rule has
+been identified, so shipping generic machinery now would work against the simplification goal.
+The following contract records the one accepted direction for a future activation RFC; that RFC
+must name and type-check the first real rule and cut its schema, code, tests, and documentation over
+together.
+
+When activated, separately traceable pre/post semantics use deterministic framework graph
+expansion:
+
+```text
+operation builds authored typed program
+  -> mandatory FrameworkGraphExpansion
+  -> complete expanded typed graph
+  -> certification
+  -> CertifiedTypedSpec
+  -> thin runtime executes only ordinary certified nodes
+```
+
+The operation builder is the authoring entry point, but operation code does not choose whether a
+mandatory framework rule applies. Every published framework entry point pins and documents a
+minimum `CertificationProfile`. The builder applies it while constructing effective handles, and
+certification independently rederives and validates the expansion from the retained canonical
+authored graph. Only the final expanded graph is runtime authority.
+
+```text
+CertificationProfile {
+    profile_ref,
+    graph_expander_contract_ref,
+    ordered_mandatory_rule_refs,
+}
+
+NodeOrigin =
+    Authored {
+        operation_contract_ref,
+        operation_call_path,
+    }
+  | Framework {
+        profile_ref,
+        rule_ref,
+        protected_node_occurrence_id,
+        position: Before | After,
+        wrapper_ordinal,
+    }
+```
+
+Authored graph, profile, expander implementation/version, canonical rule order, expanded
+nodes/edges, origins, state/capability contracts, and protected-node relations are hash-defining
+spec and certificate material. Logical authored occurrence identities freeze before expansion;
+final expanded node identities freeze afterward. Policy is never loaded from mutable runtime
+configuration during admission, drive, resume, or replay.
+
+Multiple rules use canonical onion order:
+
+```text
+Rule1.Pre -> Rule2.Pre -> AuthoredState -> Rule2.Post -> Rule1.Post
+```
+
+The order comes from `ordered_mandatory_rule_refs`, never registry discovery or map iteration.
+
+Expansion applies exactly once to authored nodes. Framework-created nodes are not recursively
+expanded, child-operation composition cannot expand the same occurrence twice, and user operations
+cannot construct `NodeOrigin::Framework`, request profile `none`, obtain raw bypass handles, or
+omit mandatory rules. Stable wrapper identities derive canonically from the protected logical
+occurrence, profile/rule, before/after role, ordinal, and state contract.
+
+```text
+expanded_node_id = H(
+    "mfm.framework-node.v1",
+    logical_protected_occurrence_id,
+    profile_ref,
+    rule_ref,
+    position,
+    wrapper_ordinal,
+    state_contract_ref,
+)
+```
+
+A semantic pre-state is an ordinary certified pure or audited read state:
+
+```text
+typed inputs
+  -> FrameworkPre
+  -> producer-bound SafetyPermit<Rule, ProtectedState>
+  -> protected state
+```
+
+The activation adds a separate typed `framework_preconditions` section to the protected
+`StateFrame` and input manifest, so a certification profile does not change the state's domain
+`Input` type. Only the exact framework node occurrence may produce it. Runtime cannot materialize
+the protected frame until every required permit verifies against its rule, producer, protected
+occurrence, and profile. Guard failure is an ordinary typed failed transition; the protected state
+receives a deterministic `DependencySkipped` transition. An external precheck records only what it
+observed. If safety can change between check and mutation, the destination or effect executor must
+enforce the precondition atomically.
+
+A semantic post-state consumes the protected typed output:
+
+```text
+protected state
+  -> FrameworkPost
+  -> verified effective output
+  -> downstream consumers and public output
+```
+
+The builder exposes only the effective post-state handle. Certification rejects a public output,
+consumer edge, or successful closure path that bypasses a required post-state. A post-state gates
+downstream use, publication, and successful closure; it cannot retroactively prevent or validate an
+already applied external mutation. Evidence acceptance required for `EffectSettled` remains in the
+effect state's pure `settle` callback.
+
+The gate also crosses run boundaries. An ordinary cross-run source names the logical protected
+occurrence and resolves under the source certified spec to the effective post-state output. A raw
+protected transition remains inspectable history but cannot satisfy an ordinary typed input, fact,
+public output, or corrective-run approved-result slot. A corrective workflow that genuinely needs
+the raw record must declare a distinct certified evidence-only role as defined below.
+
+Fact emissions require the same precision. A fact emitted by the protected transition is
+authoritative and queryable immediately; rewiring a later output edge cannot hide or retract it.
+Certification therefore rejects a separate framework post-gate around any fact-emitting protected
+state. Fact correctness must either be validated in the same-transition envelope before the
+emitting commit, or the protected state must emit zero facts and produce private typed
+`FactCandidates<F>`. Those candidates thread through every mandatory post in canonical onion
+order; the protected state and every inner/intermediate post emit zero facts, and only the final
+outermost effective post may emit them after all gates succeed. Certification rejects a rule
+composition that cannot preserve this typed chain or lets an earlier post emit. There is no
+unpublished, promote, or retract fact lifecycle.
+
+Framework states receive only certified typed inputs, config, context, and their normal committed
+read observation where applicable. They cannot inspect arbitrary journal records, projections,
+runtime internals, or raw provider material.
+
+For an effect state, the enforceable order is:
+
+```text
+FrameworkPre settles
+  -> EffectRequested consumes the exact permit
+  -> audited ensure authorization and invocation
+  -> committed observation
+  -> effect settle verifies terminal evidence
+  -> FrameworkPost becomes ready
+```
+
+A framework precheck is therefore not a substitute for an atomic external conditional write, and
+a post-state is not the terminal-evidence verifier.
+
+An ordinary downstream post-state runs only when its required typed input was produced. It is not a
+generic `finally` hook after success, typed failure, and skip. Telemetry covering every terminal
+outcome derives from journal records. If a concrete semantic policy must execute after any outcome,
+the graph would need an explicit certified settlement-dependency value carrying a closed outcome
+and transition reference; that is a new core contract and is outside this baseline.
+
+Injected framework nodes obey the same pure/read protocols, transition trace, audit, replay, and
+failure/skip rules as authored states. This RFC forbids framework-injected effect states: a
+platform-mandated external mutation is explicit domain workflow or corrective-run behavior, not a
+hidden wrapper. A future relaxation requires a separate design.
+
+The framework can guarantee that the protected occurrence never becomes ready without its required
+pre permits, that no successful protected output becomes usable or publishable before its required
+post-state succeeds, and that every wrapper occurrence is terminal—settled or explicitly
+skipped—before any run closes. It does not claim that an ordinary post-state runs after protected
+failure/skip, nor can it guarantee finite-time physical execution after permanent worker or
+capability loss.
+
+### Telemetry is not a semantic hook
+
+Metrics, tracing spans, duration, CPU use, queue delay, logs, and unsuccessful pure recomputations
+are operational observations. They are emitted best-effort from process-local driver spans or
+derived asynchronously from committed journal records. They:
+
+- cannot block, fail, schedule, settle, skip, or close a run;
+- are excluded from state digests and transition inputs;
+- cannot mint authority; and
+- are not replayed as state computation.
+
+Committed-transition telemetry comes from transition records; external-access telemetry comes from
+authorization and observation records. Generic telemetry events are not added to the semantic
+journal.
+
+If a value must be durable, replayed, or allowed to change an outcome, it is not telemetry. It must
+be an explicit typed input, output, fact, access observation, or structural journal field. If
+delivery to an external compliance sink must itself be guaranteed, it is an explicit qualified
+effect in a user-visible operation, not a framework hook.
 
 ## Run Closure
 
@@ -1544,11 +2170,11 @@ through legal audit-only tail commits.
 Runtime and replay rederive terminality from the certified graph, transition results, pending
 effects, facts, and public output and reject an early, missing, or mismatched closure.
 
-`RunClosed` is illegal while any node remains `AwaitingEffect`. A failure on another branch cannot
-close a run around an externally ambiguous or applied-but-unsettled effect.
-
-Closure is also illegal until every non-effect node is settled or explicitly
-`DependencySkipped`. The final settlement or skip transition carries `RunClosed` in its batch.
+`RunClosed` is illegal until every certified occurrence is `Terminal`. This uniformly includes
+unstarted pure/read/effect nodes, effects still `AwaitingEffect`, and occurrences waiting for a
+certified `DependencySkipped` transition. A failure on another branch cannot close a run around an
+externally ambiguous or applied-but-unsettled effect. The final settlement or skip transition
+carries `RunClosed` in its batch.
 
 Closure prohibits:
 
@@ -1595,7 +2221,7 @@ Initial retention is indefinite for:
 - certified spec, certificate, config, seeds, and contexts;
 - transition input manifests;
 - transition input and output values;
-- external public plans and requests;
+- external typed read and effect requests;
 - committed representable access results;
 - safe failure evidence;
 - fact responses and descriptors;
@@ -1609,20 +2235,100 @@ cross-run references.
 
 ## Facts and Cross-Run Inputs
 
-Facts are outputs of their producing transition. A consuming transition records:
+Facts are outputs of their producing transition. Direct same-run consumption uses ordinary
+certified graph edges. Cross-run selection is an ordinary `StateExecution::read` using the reserved,
+non-overridable `mfm.journal.fact-selection.v1` capability backed by the same journal store:
 
-- the retained canonical query object and schema;
-- the extractor/canonicalizer and selection-algorithm versions;
-- ordering, limit, and tie-break policy;
-- the exact `StoreReadFrontier { store_scope_id, store_epoch, store_commit_order }`;
-- the exact selected fact identities;
-- each producing transition;
-- descriptor and response object evidence; and
-- an explicit empty result when none qualified.
+```text
+typed base inputs
+  -> state authors one FactSelectionRequest
+  -> append ExternalAccessAuthorized
+  -> audited same-journal fact-selection capability
+  -> append ExternalAccessObserved(FactSelectionResponse)
+  -> the same state reducer interprets the committed response
+  -> StateTransitionCommitted(ReadSettled)
+```
 
-Replay performs no external IO, but it reruns the deterministic `FactHistoryScan` against
-authoritative history through the pinned frontier and requires the selected identities to match
-exactly. This proves omissions as well as selected-item validity.
+There is no pre-execution fact materializer, fact-query field in `StateFrame`, query runner, or
+separate fact store.
+
+The canonical request is bounded, ordered, float-free, and state-authored:
+
+```text
+FactSelectionRequest {
+    version,
+    producer_scope: OtherRuns,
+    queries: [
+        {
+            fact_descriptor_ref,
+            canonical_predicate,
+            content_identity_filter?,
+            ordering,
+            limit,
+            tie_break,
+        }
+    ],
+}
+```
+
+Adaptive selection uses another typed read state whose output feeds the next request. Same-run
+facts are excluded from this capability because their dataflow must be visible in the certified
+graph.
+
+The committed reviewed response is:
+
+```text
+FactSelectionResponse {
+    request_digest,
+    frontier: StoreReadFrontier {
+        store_scope_id,
+        store_epoch,
+        store_commit_order,
+    },
+    results: [
+        {
+            query_ordinal,
+            selected: [
+                {
+                    fact_ref,
+                    producing_transition_ref,
+                    descriptor_ref,
+                    subject_ref,
+                    response_ref,
+                    content_identity,
+                }
+            ],
+        }
+    ],
+}
+```
+
+The frontier is exactly the `store_commit_order` of the response's
+`ExternalAccessAuthorized` commit. Every lower committed order is already visible, the
+authorization emits no fact, and later concurrent facts cannot enter the result. Empty selections
+are explicit.
+
+Before returning, the reserved capability verifies every producing transition and object binding,
+rederives descriptor, subject, response, and content identity, evaluates the exact query, and
+applies deterministic ordering, limit, and tie-break. Selected subject/response values remain
+content-addressed objects; the ordinary typed read-response materializer resolves their declared
+references without inline duplication or a fact-specific state loader.
+
+`FactHistoryScan` is only the capability/store's private implementation algorithm. It:
+
+1. scans the authoritative dense global prefix through the authorization frontier;
+2. locates fact-bearing transition records through the validated `emits_facts` routing column;
+3. rehydrates every candidate from the journal and object annex;
+4. verifies its transition, descriptor, response, and routing evidence; and
+5. produces the complete deterministic response.
+
+The state owns query construction and response interpretation. The capability cannot construct
+state output, facts, typed failure, graph behavior, or transition authority.
+
+Replay reauthors the same request from the retained base-input manifest, verifies the authorization
+and observation, and verifies the response against authoritative history through the recorded
+frontier before invoking the same state reducer. This proves omissions as well as selected-item
+validity.
 
 A self-contained portable replay bundle must include either:
 
@@ -1635,18 +2341,9 @@ A collection merely labeled “all fact-bearing transitions” does not prove th
 commit was not omitted. A bundle containing only selected facts or an unauthenticated subset can
 verify those items but must report selection completeness as unverified.
 
-The initial `FactHistoryScan`:
-
-1. pins one repeatable-read store frontier;
-2. locates every transition record carrying fact emissions at or before that frontier through a
-   validated `emits_facts` routing column;
-3. batch-loads only the producing transitions and descriptor/response objects;
-4. verifies evidence and rederives query terms; and
-5. filters and orders under the pinned frontier.
-
-The baseline intentionally scans all fact-bearing transitions rather than claiming an index can
-select relevant embedded facts without representing their query terms. It does not rebuild a
-universal run projection for every admitted run.
+The baseline intentionally scans all fact-bearing transitions through the frontier rather than
+claiming an index can select relevant embedded facts without complete routing. It does not rebuild
+a universal run projection for every admitted run.
 
 If measurement later requires a candidate index, it must:
 
@@ -1659,7 +2356,8 @@ If measurement later requires a candidate index, it must:
 - be disposable and rebuildable without changing semantic truth.
 
 Candidate verification catches false positives. Only a completeness frontier prevents silent false
-negatives.
+negatives. An incomplete index scans the verified tail or fails closed; it never becomes semantic
+authority.
 
 ## One Journal, One Fold, One Verified View
 
@@ -1687,10 +2385,16 @@ VerifiedRunView
 Do not expose `CommittedRunStream -> RunJournalFold -> VerifiedRunView` as three public authority
 layers. The fold is a private implementation detail of the committed journal or verified view.
 
+`VerifiedRunView` never performs IO or “optionally obtains” evidence. It verifies evidence already
+in the journal and exposes the exact legal next action. Only `drive_once` may decide that a read or
+pending effect lacks sufficient committed evidence and enter the mandatory audited access
+protocol.
+
 Purpose-specific readers operate over that same authority:
 
 - `TransitionTraceReader` returns exact before/input/result/output/after frames.
-- `FactHistoryScan` locates and verifies fact emissions.
+- The reserved fact-selection capability privately scans and verifies fact emissions, exposing
+  only its typed response and verification result.
 - `PendingEffectReader` returns exact unresolved request transitions for redrive.
 - `RunObservationReader` scans commit envelopes for list/watch.
 - replay invokes the same pure request/evidence/verifier contracts used live.
@@ -1703,26 +2407,34 @@ digest and fold-version identity and be discarded on any mismatch.
 ## Replay Contract
 
 Replay performs zero live semantic-capability, provider, executor, network, filesystem-domain, or
-signer IO. It may read only the explicitly supplied journal, object annex, and fact-history/proof
-bundle through replay storage readers.
+signer IO. It may read only the explicitly supplied journal, object annex, fact-history/proof
+bundle, and cross-run source dependency bundles through replay storage readers.
+
+Before replaying transitions, it revalidates `RunAdmitted` and every `CrossRunSourceRef` through the
+same predicate used by live admission. For each source, the portable dependency bundle contains the
+source admission, certified spec/certificate and—if graph expansion is activated for that source—
+profile plus authored/expanded graph proof, journal chain through the relevant effective or raw
+transition and source closure, referenced output/evidence objects, and certified destination role.
+Replay re-resolves effective post output or evidence-only legality; a missing or downgraded source
+proof rejects verified replay rather than trusting the destination root hash.
 
 For each semantic transition it:
 
 1. verifies the predecessor head and before-state digest;
 2. reconstructs every exact input binding from certified spec and retained objects;
-3. reruns each fact selection through its pinned frontier or verifies an equivalent completeness
-   proof;
-4. reauthors a pure plan or effect request where the state contract requires it;
-5. verifies every consumed access observation and its result object;
-6. invokes the same pure state verifier/reducer used live;
-7. recomputes outputs, facts, binding delta, and after-state digest; and
-8. verifies terminal closure when present.
+3. reauthors the exact typed read or effect request where the state contract requires it;
+4. verifies the exact consumed access observation and its result object;
+5. invokes the same pure state verifier/reducer used live;
+6. recomputes outputs, facts, binding delta, and after-state digest; and
+7. verifies terminal closure when present.
 
 Variant rules are closed:
 
 - `PureSettled` reruns the pure reducer from its manifest.
-- `ReadSettled` reauthors the plan, checks every observation against that plan and manifest, and
-  runs the pure result or certified safe-failure reducer.
+- `ReadSettled` reauthors the one request, verifies the exact consumed observation against that
+  request and manifest, and runs the same pure acceptance/reduction callback used live. A reserved
+  fact-selection response additionally verifies the complete journal prefix or authenticated
+  completeness proof through its authorization-order frontier.
 - `EffectRequested` reauthors the semantic request and kernel effect key without live mutation.
 - `EffectSettled` reuses the request transition's exact manifest, verifies the terminal evidence
   envelope under its stated proof basis, and runs the pure settlement verifier.
@@ -1732,7 +2444,7 @@ Variant rules are closed:
 For access audit it:
 
 1. verifies every authorization against its semantic anchor, capability contract, operation, and
-   public request;
+   typed request;
 2. verifies at most one observation per authorization;
 3. permits unmatched and indeterminate authorizations as honest audit history;
 4. verifies safe-failure and result schemas;
@@ -1743,26 +2455,25 @@ For access audit it:
 Replay proves that the recorded typed result follows from certified inputs and accepted evidence.
 It does not prove the exact number of physical remote calls or current external truth.
 
+Same-transition framework envelopes rerun as part of transition verification. If a future source
+spec activates certified graph expansion, replay independently verifies its profile and canonical
+expansion, and injected states replay as ordinary states through the same `StateCatalog`. Replay
+emits no operational telemetry and constructs no runtime hook or live capability registry.
+
 ## Explicit Corrective Runs
 
 Generic saga policy, remediation roles, obligations, reverse ordering, manual terminalization, and
 public `compensated` run modes are removed.
 
-A corrective run consumes an immutable typed source reference:
+A corrective run consumes the root `CrossRunSourceRef` contract. `EffectiveOutputSource` resolves
+the logical source through its certified framework expansion; for an unwrapped source, the source
+transition is already effective. `EvidenceOnlySource` is admitted only into an explicitly declared
+correction-evidence input slot. It cannot satisfy an approved domain value, ordinary output, fact,
+public output, or equivalence claim merely because the raw transition succeeded.
 
-```text
-SettledTransitionRef {
-    source_run_id,
-    source_spec_hash,
-    source_transition_ref,
-    source_node_id,
-    source_result_ref,
-    source_closure_ref,
-}
-```
-
-Initially the source run must be semantically closed. The new run has its own certified spec,
-invocation identity, exact inputs, effect keys, external-access audit, and output.
+Initially the source run must be semantically closed. Certification and admission verify the source
+spec, closure, lineage, role, and effective-output resolution. The new run has its own certified
+spec, invocation identity, exact inputs, effect keys, external-access audit, and output.
 
 There is no hidden liveness guarantee between source closure and corrective-run admission. If
 guaranteed initiation is required, a domain recovery controller or outbox scans source transitions
@@ -1854,7 +2565,7 @@ must establish that the identifier is bounded, public, non-secret, non-bearer, a
 correctness.
 
 Credentials are injected below the audited boundary after authorization commits. The authorization
-contains only the reviewed public semantic plan/request and an optional closed source alias.
+contains only the reviewed public semantic request and an optional closed source alias.
 Provider-generated request IDs are omitted unless a capability-specific review proves them bounded,
 non-secret, non-bearer, and necessary.
 
@@ -1962,9 +2673,22 @@ Required database constraints include:
 - conflict checks for idempotent object admission and every hash/digest identity.
 
 `store_identity` is a singleton immutable after bootstrap. Scope and epoch rotation is forbidden
-once any run is admitted; a destructive reset creates a new store identity, while backup/restore
-preserves the old one. `store_schema_metadata` may evolve only through reviewed migrations and
-never changes the identity bound into roots, facts, or effect keys.
+once any run is admitted. A destructive reset must generate both a never-before-used
+`store_scope_id` and a fresh `store_epoch`; reusing the old scope with only a new epoch is invalid.
+Only verified non-rollback backup restoration or failover continuation of the same authoritative
+lineage preserves both values. `store_schema_metadata` may evolve only through reviewed migrations
+and never changes the identity bound into roots, facts, or effect keys.
+
+One `(store_scope_id, store_epoch)` has exactly one authoritative writable journal lineage. A
+database/HA generation fence outside the semantic runtime must cover every admission, transition,
+authorization, observation, and closure append—not only effects. Before restore or failover
+promotion, it permanently fences every old/sibling writer and proves that the candidate contains
+the unique latest published commit prefix. A restored clone cannot serve writes concurrently under
+the same identity. If a published suffix may be missing, the store fails closed; divergent
+histories are never merged or resumed as one store.
+
+The HA/WAL consensus or primary-fencing mechanism is irreducible storage authority, not a second
+run-lifecycle model. Worker leases, process epochs, and executor fences cannot substitute for it.
 
 The application role has insert/select access but no update, delete, or truncate access to
 `store_identity`, journal commits, records, blobs, admissions, or bindings. Owner-only guard
@@ -2030,6 +2754,10 @@ succeeded
 failed
 ```
 
+`active` is exactly `run_phase = Open`. `succeeded` and `failed` both require
+`run_phase = Closed` and derive from the certified terminal/public-output contract and terminal
+outcomes. No separately persisted status may disagree with that fold.
+
 An active run may expose:
 
 - current runnable node;
@@ -2040,10 +2768,10 @@ An active run may expose:
 Transition inspection exposes:
 
 - transition identity and containing commit;
-- before/after state digests and safe phases;
+- before/after state digests, `Open | Closed` run phase, exact node phase, and terminal outcome;
 - exact named input lineage;
-- public plan/request identity;
-- consumed access observations;
+- typed request identity;
+- consumed access observation;
 - result, outputs, facts, and evidence; and
 - closure identity when terminal.
 
@@ -2067,6 +2795,11 @@ vault references.
 There is no generic manual “mark successful,” “mark not applied,” “abandon effect,” or
 evidence-submission endpoint.
 
+The app exposes `drive_once` directly or implements `drive_until_waiting` as a mechanical loop over
+it. CLI/REST may choose when to call that service and render `DriveOutcome`; they cannot select the
+next node, construct state requests, choose observations, install execution hooks, or interpret
+typed results.
+
 ## Complete Cutover and Deletion Scope
 
 ### Program, spec, and certification
@@ -2078,18 +2811,26 @@ Delete:
 - manual-resolution policy and evidence roles;
 - generic receipt/finality phase policy;
 - resource-claim classes;
+- extensible runner-kind and adapter-binding semantics;
+- static fact-query materializer entries and direct cross-run fact input bindings;
 - synthetic completion and retention nodes; and
 - `mfm-manual-auth`.
 
 Add:
 
 - complete transition input/output/evidence contracts;
-- external-read public plan and result contracts;
+- one closed `StateExecution` contract with pure, read, and effect cases;
+- `StateFrame`, exact typed failure, and evidence-verdict contracts;
+- external-read typed request and response contracts;
+- `FactSelectionRequest`, `FactSelectionResponse`, and the reserved same-journal capability
+  contract;
 - audited capability contract identity;
 - pure effect-request authorship;
 - keyed executor identity and convergence assurance;
-- explicit executor/domain cross-effect ownership; and
-- pure terminal evidence verification.
+- explicit executor/domain cross-effect ownership;
+- pure terminal evidence verification;
+- sealed same-transition framework enforcement contracts; and
+- spec-resolved effective-output and correction-evidence cross-run source roles.
 
 ### Events and store
 
@@ -2098,6 +2839,7 @@ Delete:
 - state worker attempt start/completed/interrupted/failed events;
 - standalone cell produced/skipped lifecycle events;
 - standalone fact lifecycle events as semantic authority;
+- unpublished, approved, promoted, or retracted fact variants;
 - side-effect intent, claim, takeover, preparation, start, submission, receipt, confirmation,
   ambiguity, and failure event families;
 - resource-lane claim/release events and waiter protocols;
@@ -2127,28 +2869,44 @@ Delete:
 - side-effect phase drivers and recovery classifiers;
 - first/repeat effect recovery modes and permits;
 - saga scheduling, remediation ordering, and manual-block branches;
-- duplicate replay brokers and phase maps;
+- `RunnerKind`, effect-runner traits, custom adapter-binding specs, and custom erased-runner
+  registration;
+- erased node-runner contexts, invocations, outputs, event payloads, output settlements, and
+  runner-kit builders;
+- external-read runner/executor wrappers and adapter-owned state execution;
+- replay-specific reducers, side-effect verifiers, semantic brokers, and phase maps;
+- pre-execution fact selection, query-materializer registries, fact-specific state loaders,
+  portfolio selection runners, and separate fact-query store/projection authority;
 - framework completion and retention runners; and
 - copied runtime history/view maps.
 
 Add:
 
-- one pure next-action decision;
+- one `drive_once` mutating entry point and one closed private next-action decision;
+- the minimal `Unstarted | AwaitingEffect | Terminal` phase algebra;
+- one process-private `StateCatalog` and `CapabilityCatalog`, plus exact immutable per-run selected
+  implementation manifests;
 - complete transition-frame construction and verification;
 - audited capability wrappers;
-- bound affine access authorities;
+- common bound affine access and committed-observation authorities;
+- one read request and one accepted observation per read occurrence;
+- the non-overridable same-journal fact-selection binding and its pure recorded-response verifier;
+- generic typed read-response materialization of content-addressed value references;
 - committed-observation-only reduction;
 - keyed `ensure`;
-- the shared live/replay verifier path; and
+- the exact same state callbacks for live and replay;
+- same-transition sealed framework enforcement; and
 - transition/audit trace readers.
 
 ### App and binaries
 
-Delete generic saga, manual-resolution, worker-attempt, resource-lane, and side-effect-phase DTOs,
-commands, modes, and routes.
+Delete generic saga, manual-resolution, worker-attempt, resource-lane, side-effect-phase,
+runner-factory, and adapter-lifecycle DTOs, commands, modes, and routes. App assembly supplies the
+compiled `StateCatalog` and `CapabilityCatalog` but owns no execution callbacks or framework-hook
+registry and cannot replace the reserved fact-selection binding.
 
-Add transition inspection, safe access-audit inspection, pending-effect status, and one explicit
-resume/drive action.
+Add transition inspection, safe access-audit inspection, pending-effect status, and the one
+`drive_once` action plus an optional mechanical drive-until-waiting convenience.
 
 ### Postgres
 
@@ -2163,8 +2921,9 @@ hash-bound `commit_artifact_bindings` relation. Keep content-addressed blobs, ar
 evidence, and the canonical commit-to-object binding; they are required to prove both existing
 inputs and newly admitted outputs.
 
-Replace the physical fact projection with the targeted history scan initially. If measurements
-require a candidate index, add it only with a complete watermark and parity tests.
+Replace the physical fact projection with the reserved capability's private targeted history scan
+initially. If measurements require a candidate index, add it only with a complete watermark and
+parity tests.
 
 ### Documentation
 
@@ -2177,7 +2936,9 @@ Rewrite:
 - EVM transaction documentation.
 
 Delete `docs/saga.md` after its honest guarantee losses are incorporated into the new design
-contract.
+contract. Explicitly delete the `CertifiedFrameworkLifecycle`, framework public-output runner,
+erased runner plan/factory, and Adapter-responsibility taxonomy; do not rename them into the new
+model.
 
 ## Crash and Ambiguity Matrix
 
@@ -2191,6 +2952,8 @@ contract.
 | Transition append acknowledgement lost | Reload by `append_request_id`, candidate digest, and expected head. Never infer absence from a transport error. |
 | Objects staged but append fails | Objects are orphaned bytes without authority. |
 | Two transitions race | Expected-head validation admits one. The loser reloads the winning state. |
+| Restore/failover promotion | Fence every old/sibling writer and prove the unique latest published prefix before any append; fail closed on possible rollback. |
+| Destructive store reset | Generate a never-before-used `store_scope_id` and a fresh `store_epoch`; never resume or recreate runs under the old scope. |
 | Terminal transition commits | Its `RunClosed` companion commits atomically or neither commits. |
 | Closure acknowledgement lost | Reload and return the fixed semantic result. |
 
@@ -2238,9 +3001,15 @@ contract.
 - Prove the input manifest is one content-addressed object: admitted by the first read authorization
   or its pure/effect-request transition and reused exactly thereafter.
 - Verify seed, config, context, cell, fact, and cross-run lineage.
+- Reject a cross-run `TransitionOutput` or `TransitionFact` in a later input manifest; admit
+  cross-run values only through the root `CrossRunSourceManifest` and ordinary cross-run facts only
+  through the reserved audited read.
+- Reject a `CrossRunSourceRef` from another store scope or epoch.
 - Verify before-state digest against the predecessor fold.
 - Verify output/fact/evidence binding and after-state digest.
 - Verify `RunAdmitted` root lineage and canonical genesis/initial-state test vectors.
+- Prove admission atomically binds every selected implementation manifest, cross-run source
+  manifest, and complete source-proof object.
 - Retry and attach the same logical admission across ambiguous `COMMIT`; reject changed root
   material and prove no second effect-key namespace appears.
 - Reject every illegal transition-body field combination and verify dependency-skip blockers/rule.
@@ -2250,14 +3019,49 @@ contract.
 - Compare full-fold and incremental-fold results.
 - Accept only the four exhaustive batch purposes and reject observation-plus-transition,
   authorization-plus-closure, reordered closure, and every multi-audit combination.
+- Prove an effect-request batch binds both its input manifest and semantic request atomically.
 - Prove one semantic transition per batch and whole-batch atomicity.
 - Prove no full universal before/after snapshot is persisted.
 - Export and rehydrate a transition trace without mutable current configuration.
+
+### Typed execution runtime
+
+- Compile and register states through exactly the pure, read, or effect `StateExecution` case;
+  reject custom lifecycle/runner kinds and missing executable identity.
+- Derive only `Unstarted`, `AwaitingEffect`, and `Terminal` node phases; prove ready and blocked are
+  derived and worker activity creates no phase.
+- Property-test that every registered read/effect request callback is deterministic and total over
+  generated valid `StateFrame` values.
+- Distinguish typed `Settlement::Failed` from invalid inputs, callback faults, invalid evidence,
+  and noncanonical output; prove the latter append no semantic failure.
+- Prove one read occurrence authors one request, every retry reauthors identical content, and one
+  settlement consumes exactly one state-accepted observation.
+- Prove `InsufficientEvidence` appends no transition and cannot change a request.
+- Prove all-insufficient read observations derive `CallRead`, all-insufficient terminal effect
+  observations derive `CallEnsure`, and invalid evidence derives a blocking integrity result
+  without a no-op settlement loop.
+- Prove a newly committed pending/all-insufficient observation returns
+  `Waiting::RetryableEvidenceGap`, makes `drive_until_waiting` stop after at most that one live call,
+  and leaves retry timing/backoff to the next host invocation.
+- Exercise every private `drive_once` action and prove the public result is only advanced, waiting,
+  or closed.
+- Prove `drive_once` retains no process semantic state and that another process can continue from
+  the exact journal.
+- Inject compare-and-swap loss after pure computation, observation, and terminal-effect
+  verification; prove only pure callbacks repeat and committed evidence is reused.
+- Run live and replay through the same state callback identity and canonical output.
+- Reject a missing or mismatched selected catalog entry while proving that unrelated process-catalog
+  additions do not change an admitted run.
+- Compile-fail capability or executor code attempting to construct state output, facts, typed
+  failure, transition candidates, or store authority.
+- Prove the runtime has no public runner factory, adapter reducer, replay broker, or hook registry.
 
 ### External-access audit
 
 - Compile-fail live capability access without its bound `AuthorizedReadAccess` or
   `AuthorizedEnsureAccess`.
+- Compile-fail direct calls that try to bypass the audited wrapper or substitute raw request data
+  for `CommittedRequest`.
 - Prove only `NewlyAppended` authorization mints affine authority.
 - Prove idempotent, ambiguous, stale, and rejected authorization results mint no authority.
 - Reject authority substitution across run, node, capability, operation, request, and effect.
@@ -2276,8 +3080,42 @@ contract.
 - Admit one late observation for a pre-closure authorization and reject every other post-closure
   append.
 - Prove audit records do not change semantic state or authorize effect settlement.
-- Verify read retries create distinct authorizations and identify the observations actually
-  consumed by the winning transition.
+- Verify read retries create distinct authorizations and identify the exact observation consumed
+  by the winning transition.
+
+### Framework envelope and telemetry
+
+- Prove same-transition framework pre/post checks must mint `CommitReady` before append and that
+  any check failure admits no transition or object authority.
+- Prove operational telemetry cannot change scheduling, transition payloads, state digests,
+  closure, or replay; derive committed telemetry from journal records.
+
+### Future framework graph-expansion activation
+
+These are gates for a follow-up RFC after it names the first concrete mandatory semantic rule; they
+are not implementation work in this baseline:
+
+- Golden-test canonical expansion, wrapper IDs, node origins, and onion ordering for direct,
+  nested-child, fan-out, and fan-in operations.
+- Prove expansion applies once to authored nodes and never recursively to framework nodes or twice
+  through child-operation composition.
+- Reject an operation or persisted spec that omits, forges, duplicates, reorders, weakens, or
+  bypasses a mandatory certification-profile rule.
+- Prove only the exact pre-state occurrence can produce the protected state's required typed
+  permit.
+- Prove a required post-state hides the raw protected output from consumers and public output, and
+  that successful closure depends on the effective post-state output.
+- Reject cross-run and corrective-run use of a raw protected output as an approved value; resolve
+  ordinary source references through the source certified spec to the effective post output.
+- Reject a separate framework post-gate around a fact-emitting protected state; prove
+  same-transition fact validation or zero protected/intermediate facts plus typed candidate
+  threading to the final outermost post. Fail that outer post and prove an inner post emitted
+  nothing.
+- Prove injected states use only ordinary pure/read protocols, and any injected read uses mandatory
+  authorization/observation and the normal replay path.
+- Reject framework-injected effects, mutable drive-time policy, arbitrary journal introspection,
+  raw output bypass, runtime callbacks, and recursive instrumentation.
+- Prove a post-state cannot authorize or reinterpret an already committed effect settlement.
 
 ### Keyed effects
 
@@ -2299,10 +3137,13 @@ contract.
 ### Replay and views
 
 - Replay performs zero live semantic-capability, provider, executor, signer, or domain IO and reads
-  only its supplied journal/object/fact-history bundle.
+  only its supplied journal/object/fact-history and cross-run source dependency bundles.
 - Replay recomputes requests and pure reducers from retained inputs/evidence.
 - Replay each transition variant and distinguish proof, executor-attestation, and trusted-observer
   assurance.
+- Revalidate every effective-output/evidence-only cross-run source from its complete source
+  admission/spec/journal/closure/object/role proof plus profile/graph proof when activated; reject a
+  missing or downgraded dependency bundle.
 - Tampered request, observation, evidence, output, fact, or closure fails verification.
 - Status, scheduling, resume, replay, and transition trace consume one verified journal view at one
   loaded journal head. That view reports the fixed semantic closure coordinate separately from any
@@ -2312,16 +3153,25 @@ contract.
 
 ### Facts and objects
 
-- Query fact emissions at one repeatable `StoreReadFrontier`.
-- Preserve deterministic ordering and tie-breaking.
-- Verify selected facts and objects against producing transitions.
+- Prove a read state authors `FactSelectionRequest` from base inputs without selected facts or a
+  fact-query materializer in its `StateFrame`.
+- Make the authorization commit order the exact response frontier; admit matching facts committed
+  before it and reject later or same-run facts.
+- Replay empty, one-result, bounded-many, ordering, limiting, and tie-breaking cases exactly.
+- Verify selected facts and objects against producing transitions, descriptors, subjects,
+  responses, content identities, store scope, epoch, and frontier.
 - Detect an omitted qualifying fact, including an omitted fact from an otherwise selected
   transition, and verify explicit empty results.
+- Reject app-supplied replacement of the reserved same-journal fact-selection capability or a
+  separate fact store.
 - Reject portable replay completeness when the contiguous global history prefix or authenticated
   frontier census/completeness proof is absent.
 - Test missing, swapped, tampered, or wrong-schema objects.
 - Measure history-scan volume and latency.
-- If a candidate index exists, property-test scan/index parity and incomplete-frontier behavior.
+- If a candidate index exists, property-test scan/index parity and require an incomplete index to
+  scan the verified tail or fail closed.
+- Prove no fact publication flag, promotion record, dual reader, or compatibility materializer
+  exists.
 - Prove failed commits admit no object authority.
 
 ### Security
@@ -2338,7 +3188,10 @@ contract.
 
 ### Correction
 
-- Consume a closed source transition in a separately certified corrective run.
+- Consume a closed source's spec-resolved effective output in a separately certified corrective
+  run.
+- Admit a raw protected transition only through an explicit evidence-only input role and prove it
+  cannot satisfy an approved value, fact, public output, or equivalence claim.
 - Reject missing, unverified, nonterminal, or wrong-source evidence.
 - Prove source closure creates no hidden correction obligation.
 - Deduplicate controller-launched correction by deterministic source identity.
@@ -2361,6 +3214,10 @@ contract.
 - Verify genesis and predecessor-linked candidate/record/commit digests, complete object bindings,
   append idempotency conflicts, and store-order behavior.
 - Verify database constraints and no-update/no-delete/no-truncate enforcement.
+- Fork a backup/restore clone at one head and prove only one fenced writable lineage may append;
+  reject stale-primary, sibling-promotion, published-suffix rollback, and history merge.
+- Prove destructive reset generates a never-before-used scope and fresh epoch, while verified
+  non-rollback restore preserves both; reject same-scope reset even with a new epoch.
 - Treat ambiguous `COMMIT` as `OutcomeUnknown` and prove it never mints access authority.
 - Prove every semantic live probe occurs after `RunAdmitted`.
 - Reject legacy event/projection/saga schemas explicitly.
@@ -2379,11 +3236,14 @@ contract.
    Perform one inseparable vertical cutover across program, spec, certification, events, store,
    runtime, replay, app, binaries, Postgres, tests, and documentation. Introduce complete transition
    records, external-access authorization/observation, affine access authority, keyed effect
-   requests, semantic closure with audit tails, and transition facts. Delete worker attempts,
-   phase ledgers, saga/manual resolution, resource lanes, universal projections, synthetic
-   completion/retention, physical fact-projection authority, old events, and every compatibility
-   path. Cut fact storage, selection, completeness replay, and transition emission over in this
-   same commit; use the fact-bearing history scan at one store frontier with no dual fact reader.
+   requests, the closed three-case `StateExecution`, `drive_once`, state/capability catalogs,
+   sealed same-transition framework enforcement, semantic closure with audit tails, and transition
+   facts. Delete worker attempts, custom runners/adapters, replay brokers, phase ledgers,
+   saga/manual resolution, resource lanes, universal projections, synthetic completion/retention,
+   physical fact-projection authority, old events, and every compatibility path. Cut fact storage,
+   selection, completeness replay, and transition emission over in this same commit; use the
+   reserved audited read capability and its private history scan at the authorization frontier
+   with no dual fact reader.
 
 3. **`qualify evm writes through a durable keyed executor`**
 
@@ -2411,6 +3271,26 @@ folding provide complete traceability without duplicating the entire run on ever
 Rejected. Worker attempts mix process ownership, scheduling, recovery, and semantic state. The
 required audit primitive is only the external capability authorization/observation pair.
 
+### Keep extensible runner and adapter lifecycles
+
+Rejected. New state semantics should extend typed state contracts, requests, and capabilities, not
+the kernel's lifecycle algebra. Custom runners, runner-owned event payloads, adapter reducers, and
+replay implementations let equivalent states take different execution paths and move semantic
+computation outside the state contract.
+
+### Allow several independent or adaptive requests inside one read state
+
+Rejected. It requires request scheduling, partial evidence sets, and observation-selection policy
+inside runtime or adapters. One read state owns one typed request and accepts one committed
+observation. A capability may define a genuine reusable bounded batch; response-dependent or
+independent requests are explicit state chains.
+
+### Keep a generic variable-cardinality evidence bag
+
+Rejected. Required evidence cardinality and role become implicit and substitution-prone. Read and
+effect evidence use their exact consumed-observation fields; other domain evidence is a declared
+typed output or fact slot.
+
 ### Record only successful external results
 
 Rejected. Unmatched authorizations, pre-entry rejection, transport ambiguity, and unrepresentable
@@ -2427,6 +3307,27 @@ The honest generic guarantee is durable authorization before every MFM-controlle
 
 Rejected. It makes physical access count and ambiguity invisible. Every in-process capability
 boundary invocation needs its own authorization and bound affine authority.
+
+### Implement framework safety as runtime pre/post hooks
+
+Rejected. Hooks are absent from the certified graph and journal, can vary across live/resume/replay,
+and create another extensible execution lifecycle. Universal structural checks remain sealed
+runtime/store invariants. Separately traceable semantic policy is deterministic certified graph
+expansion over ordinary states only after the deferred activation contract is satisfied.
+
+### Let each operation opt into mandatory framework wrappers
+
+Rejected as the source of a platform guarantee. Operations are an authoring surface and may use
+typed wrapper combinators. If graph expansion is later activated, production entry points pin a
+certification profile and the framework expander plus certifier enforce it. An operation cannot
+omit or bypass a mandatory rule.
+
+### Inject telemetry states around every user state
+
+Rejected. It makes observation part of semantic progress, can block closure, recursively
+instruments itself, and greatly expands the graph and journal. Ordinary telemetry derives from
+driver spans and committed journal records. Anything whose delivery or value must affect the run
+is explicit typed workflow behavior, not telemetry.
 
 ### Keep the current phase ledger and add transition manifests
 
@@ -2477,9 +3378,12 @@ equivalence claim.
 
 The target core is an auditable, event-sourced typed state machine:
 
+- one stateless `drive_once` interpreter over closed pure, read, and effect contracts;
+- only `Unstarted`, `AwaitingEffect`, and `Terminal` semantic node phases;
 - one complete state-transition record per semantic change;
 - one atomic commit envelope around each transition and its objects;
-- exact input/output/fact/evidence lineage retained indefinitely at first;
+- exact input/output/fact/evidence lineage with no generic evidence bag, retained indefinitely at
+  first;
 - one durable external-access authorization before every MFM-controlled live capability call;
 - one mandatory immutable observation for every surviving wrapper result, recording returned,
   pre-entry, indeterminate, or unrepresentable outcomes;
@@ -2487,11 +3391,21 @@ The target core is an auditable, event-sourced typed state machine:
 - one stable pending effect request and one keyed-convergent executor contract backed by a reviewed
   downstream convergence mechanism;
 - verifier-backed terminal settlement;
+- one typed read request and one state-accepted committed observation per read occurrence;
+- one compiled state catalog, one live capability catalog, exact per-run selected-entry manifests,
+  and the same state callbacks in replay;
+- cross-run fact selection as an ordinary audited read through one non-overridable same-journal
+  capability, with no pre-state query materializer or fact projection authority;
+- unconditional framework safety checks in the sealed same-transition envelope, with separately
+  traceable semantic graph expansion deferred until a concrete mandatory rule exists;
+- spec-resolved cross-run source roles that cannot bypass a future effective post output;
+- one fenced writable journal lineage for each store identity;
+- operational telemetry derived without semantic authority;
 - semantic closure that still accepts constrained late audit observations;
 - one private fold and one opaque verified run view;
 - facts, status, recovery, replay, public output, and analysis derived from the journal;
-- no generic worker attempts, phase ledger, saga, manual resolution, resource lanes, or universal
-  projection; and
+- no generic worker attempts, custom runner/adapter lifecycle, replay broker, phase ledger, saga,
+  manual resolution, resource lanes, runtime hook chain, or universal projection; and
 - explicit typed corrective runs for domain remediation.
 
 If data affects a semantic transition, it must appear in that transition's certified inputs,
