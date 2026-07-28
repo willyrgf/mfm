@@ -1,0 +1,26 @@
+[package]
+name = "mfm-storage-executor-file"
+version = "0.1.0"
+edition = "2021"
+description = "Fsync-qualified durable reference storage for the MFM executor conformance gate"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+
+[package.metadata.mfm]
+layer = "storage"
+
+[lib]
+name = "mfm_storage_executor_file"
+path = "src/lib.rs"
+
+[dependencies]
+fs2 = "0.4.3"
+mfm-executor = { path = "../../kernel/executor" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-ids = { path = "../../kernel/ids" }
+serde_json = { workspace = true }
+tempfile = "3.8"

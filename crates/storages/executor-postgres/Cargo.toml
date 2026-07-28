@@ -1,0 +1,34 @@
+[package]
+name = "mfm-storage-executor-postgres"
+version = "0.1.0"
+edition = "2021"
+description = "Fenced PostgreSQL storage for the MFM keyed executor"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+readme = "README.md"
+build = "build.rs"
+
+[package.metadata.mfm]
+layer = "storage"
+
+[lib]
+name = "mfm_storage_executor_postgres"
+path = "src/lib.rs"
+
+[dependencies]
+mfm-executor = { path = "../../kernel/executor" }
+mfm-ids = { path = "../../kernel/ids" }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "migrate"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+mfm-canonical = { path = "../../kernel/canonical" }
+tokio = { workspace = true }
+
+[features]
+qualification-tests = []
+
+[[test]]
+name = "qualification"
+path = "tests/qualification.rs"
+required-features = ["qualification-tests"]

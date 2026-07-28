@@ -40,6 +40,9 @@ they do not own workflow semantics.
 - Side effects use one state-authored typed intent plus idempotency input, required typed prepared
   invocation authority, durable ledger events, and typed submission, receipt, confirmation, or
   recovery evidence. State logic is pure; adapters alone prepare and submit external mutations.
+- Recoverable target entry uses a tenant-bound immutable executor binding, a kernel-derived effect
+  key and request digest, a separately durable append-only executor ledger, cumulative bounded
+  evidence, and an affine receipt. A committed request is identity data, not target-entry authority.
 - Side-effect verification policy is hash-defining certified config. `RunAdmitted` may record
   launch audit evidence, but it is not independent finality or verification authority.
 - Certified saga decisions are derived from the certified spec plus append-only stream facts.
@@ -68,6 +71,11 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 | `CertifiedRunStoreAuthority` | yes, store admission | Policy-bound run-start/certified run authority minted from the certified typed spec and tied to run id, certified spec hash, saga policy, and side-effect terminal policies. Store admission checks the token spec hash against the projected `RunAdmitted.spec_hash`, not only the incoming saga payload. |
 | `ManualResolutionProofAuthority` / `VerifiedManualResolutionForPrefix` | yes, manual resolution | Prefix-bound proof authority over a certified manual-blocked stream prefix, retained artifacts, canonical proof bytes, and certified operator policy. |
 | `CertifiedSideEffectContract` | yes, side-effect verification | Certified resource-claim and side-effect contract authority shared by live execution, resume, and replay. |
+| `VerifiedExecutorBinding` | yes, executor-ledger access | Exact tenant, deployment generation, evidence authority, and optional resource ownership admitted for one executor ledger. |
+| `CommittedEffectRequest` | no | Immutable request, request digest, effect key, tenant, and binding identity. It cannot authorize target entry. |
+| `TargetEntryAuthority` / `TargetOperationReceipt` | yes, one-shot target boundary | The ledger returns affine entry authority only after committing authorization. Target entry consumes it and returns a non-clone receipt; only that receipt can append the exact observation, including a late observation for a pre-tombstone authorization. |
+| `ExecutorTerminalClaim` | evidence only | Complete verified audit, tombstone, exact-attempt proof, safe result, assurance policy, and proof provenance awaiting run-journal admission. It is not journal mutation authority and contains no producer-bound `ValueRef`; the admitting store creates those references. |
+| Executor memory/file checkpoints | no, qualification bytes | Bounded checksummed restart encodings for conformance and fault injection. They provide neither production anti-rollback authority nor permission to resume a restored generation. |
 | `SideEffectLedgerState` | yes, store transition | Typed ledger state used by store/runtime to admit only legal side-effect transitions. |
 | `SagaTerminalProof` | yes, terminal saga | Store-required proof object for completed, compensated, manually resolved, or failed-without-claim terminal saga outcomes. |
 | `CommittedRunStream` / `EventArtifactRequirement` / `VerifiedRunArtifactStore` | yes, stream/history evidence | Store-owned committed stream authority, event-derived retained-artifact requirements, and verified retained-artifact authority tied to that stream. |
@@ -114,6 +122,7 @@ Kernel dependency direction remains strict:
 ```text
 ids -> canonical -> values -> capabilities
   -> program/spec -> certify/events/store -> runtime/replay
+ids + canonical + capabilities -> executor
 ```
 
 Kernel packages depend only on kernel packages. Pure domains consume only domain-facing kernel and
@@ -298,6 +307,46 @@ invoke the state planner, let an adapter execute only the resulting plan, retain
 external-read evidence artifact plus any fact-query evidence, and invoke the reducer. Replay loads
 the same config/input/context and retained evidence and calls the same reducer. It constructs no
 live capability implementation and rejects missing, duplicate, or wrong-schema primary evidence.
+
+### Keyed Executor Substrate
+
+`mfm-executor` owns the domain-free recovery protocol for independently meaningful target
+operations. It derives an `EffectKey` and `RequestDigest`, verifies one immutable tenant/deployment
+binding, and converges repeated `ensure` calls on one request. Its ledger remains separate from the
+run journal.
+
+`KeyedExecutorLedger<Store>` is the sole high-level implementation. It asynchronously loads complete
+immutable histories through `ExecutorLedgerStore`, strictly folds them, evaluates typed resource
+policy, derives deterministic attempts, and submits one atomic compare-and-append proposal. The raw
+store owns only its exact fenced identity, immutable effect/resource records, exact content-object
+loads, and CAS; it does not own folding, policy, attempt, observation, or terminal rules.
+
+A proposal may bind and allocate in one append, including upgrading a previously bound effect that
+has no target attempt. `Applied` is the only append outcome that grants affine
+`TargetEntryAuthority`; `AlreadyApplied`, `Conflict`, and acknowledgement-ambiguous
+`OutcomeUnknown` grant none. The target consumes that authority and returns a non-clone
+`TargetOperationReceipt`, which is consumed to append the exact observation. A shared account
+sequence cannot advance until the prior allocation's effect has immutable terminal evidence.
+
+Authorization takes one complete schema-qualified target-entry descriptor. Its content object and
+the authorization naming its derived reference commit atomically. Recovery resolves the exact
+descriptor by effect and attempt before another target entry; a fixed operation-family reference
+cannot stand in for candidate-specific public input. Domain descriptors exclude credentials,
+signatures, raw signed envelopes, and other bearer material.
+
+Delivery frontiers retain exact results or closed redaction-safe failures and reserve cumulative
+capacity for every unmatched authorization plus the terminal tombstone while it is absent. A
+terminal proof must name the same returned attempt, observation, and result committed in the audit.
+`ExecutorTerminalClaim` exposes the canonical objects and provenance needed for store admission; it
+does not manufacture journal producer identity or producer-bound references.
+
+Every reopen enumerates and strictly refolds the complete effect/resource graph and executor-owned
+content inventory. Missing, extra, duplicate, byte-mismatched, forked, or partially linked content
+fails closed. Memory and file stores are qualification surfaces only.
+`mfm-storage-executor-postgres` implements the production raw store under an independent,
+deployment-supplied writer-generation fence. Destination-specific convergence and resource fencing
+remain separate qualification requirements, so the generic substrate alone registers no live
+product mutation.
 
 ## State Capability Boundary
 

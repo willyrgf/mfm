@@ -526,6 +526,22 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    executor-postgres-qualification = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-storage-executor-postgres"
+        "--features"
+        "qualification-tests"
+        "--test"
+        "qualification"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
     prototype-postgres-ha-writer-fence = cargoLeaf {
       run = [
         "cargo"
@@ -639,6 +655,7 @@ in
     test-db = {
       kind = "composite";
       steps = {
+        executor-postgres-qualification.task = "executor-postgres-qualification";
         postgres-sqlx-check.task = "postgres-sqlx-check";
         mfm-cli-build = {
           task = "mfm-cli-build";

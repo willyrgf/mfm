@@ -140,6 +140,12 @@ impl ValidatedCanonicalValueV1 {
     pub fn as_str(&self) -> &str {
         self.canonical.as_str()
     }
+
+    /// Reconstructs the typed canonical value for composition into another
+    /// annex-validated object.
+    pub fn canonical_value(&self) -> std::result::Result<CanonicalValue, RecoverabilityError> {
+        json_to_canonical_value(&self.value)
+    }
 }
 
 /// Opaque canonical location of one projected schema reference.

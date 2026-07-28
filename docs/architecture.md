@@ -11,9 +11,9 @@ and tests.
 
 MFM runs event-sourced typed state-machine workflows: operations plan certified typed specs, states
 own reusable domain semantics, adapters bind state intent to explicit capabilities, transports and
-signers implement reusable platform primitives, runtime schedules certified saga-aware authority,
-store commits append-only typed events, replay verifies from evidence only, and CLI/REST remain
-transport-only surfaces.
+signers implement reusable platform primitives, keyed executors own durable target-entry authority,
+runtime schedules certified saga-aware authority, store commits append-only typed events, replay
+verifies from evidence only, and CLI/REST remain transport-only surfaces.
 
 ## Core Runtime Shape
 
@@ -36,6 +36,22 @@ entry-point id plus target
 
 The certified typed execution spec is the runtime contract. Runner plans, route names, command
 names, source scans, CI summary keys, rendered JSON, and projection rows are not semantic authority.
+
+The reusable executor qualification path is a separate authority flow:
+
+```text
+committed request identity
+  -> tenant-checked immutable executor binding
+  -> append/CAS effect and typed-resource ledger
+  -> committed affine target-entry authority
+  -> stateless target entry returns one affine receipt
+  -> exact observation and terminal tombstone
+  -> verified terminal claim awaiting run-journal object admission
+```
+
+The executor ledger is not the run journal, and neither its request data nor a returned terminal
+claim can mutate the journal. The store that admits executor evidence owns producer identity and
+producer-bound value references.
 
 Process fungibility is part of this boundary. Certified runs are store-owned durable work, not
 process-owned work. Run identity comes from `RunAdmitted`; execution lanes only choose the current
@@ -149,6 +165,14 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `ManualResolutionProofAuthority` and `VerifiedManualResolutionForPrefix` are manual proof
   authority over a certified blocked prefix
 - `CertifiedSideEffectContract` is shared live, resume, and replay authority for side-effect claims
+- `VerifiedExecutorBinding` is exact tenant/deployment/generation authority for executor-ledger
+  access
+- `CommittedEffectRequest` is immutable identity data and grants no target entry
+- `TargetEntryAuthority` and `TargetOperationReceipt` are the affine authorization/observation
+  pair across the target boundary
+- `ExecutorTerminalClaim` is verified evidence awaiting store admission, not store mutation
+  authority and not a source of producer-bound value references
+- executor memory and file checkpoints are conformance bytes, not production recovery authority
 - `SideEffectLedgerState` is the typed store view for legal side-effect ledger transitions
 - `SagaTerminalProof` is required authority for terminal saga outcomes
 - `CommittedRunStream` is store-owned append-only stream authority
@@ -181,6 +205,7 @@ modules, one-way source dependencies, narrow exports, and focused tests.
 |---|---|---|
 | Platform primitive | Reusable infrastructure such as signing, protocol clients, source routing, artifact access, process execution | Workflow topology or domain-specific semantics |
 | Kernel | Framework-owned typed authority contracts such as specs, events, store, runtime, replay, and manual authorization proof contracts | Domain semantics, live IO, signer providers, storage implementations |
+| Executor | Domain-free effect identity, durable append/CAS ledger semantics, bounded delivery evidence, affine target-entry authority, terminal proofs, and typed resource-policy refold | Run scheduling, journal mutation, credentials, domain settlement, transports, or concrete production persistence |
 | Capability contract | Typed authority contracts such as capability specs, request/response evidence types, redacted errors, and traits consumed by states/adapters | Live IO, endpoint routing, signer material resolution, workflow topology |
 | Domain model/config | Pure domain types, validation, canonical config, schema descriptors | Runtime IO, signer resolution, transport clients |
 | State | Reusable executable domain semantics and typed state contracts | Ambient IO, app/store authority, protocol implementation |
@@ -188,7 +213,7 @@ modules, one-way source dependencies, narrow exports, and focused tests.
 | Adapter | Runner binding from state intent to capabilities and evidence recording | Generic protocol clients, signer provider internals, operation topology |
 | Transport | Reusable protocol implementation and live/replay capability backend | Workflow recipes, signer material, domain topology |
 | Signer | Generic signer refs, signing requests/results, signing provider implementations | Workflow recipes, raw signed transaction persistence |
-| Storage | Typed run-event or artifact persistence implementation | Domain semantics, scheduler behavior |
+| Storage | Concrete persistence and atomicity for a kernel store or executor-ledger contract | Domain semantics, scheduler behavior, retry policy, target IO, or executor evidence semantics |
 | App assembly | Registry/store/artifact/capability wiring and typed run services | Workflow planning or state behavior |
 | Binary/API | Input decoding, routing, response envelopes | Domain semantics, runtime authority, direct state execution |
 
@@ -655,6 +680,8 @@ Source scans may be useful as guardrails, but they are not architecture proof by
   reusable modules and adapters remain private registration modules.
 - New generic signer contract: `signing`; secret-bearing implementation: `secret-provider`.
 - New concrete store: `storage`; the store contract remains `kernel`.
+- New domain-free keyed-executor contract: `kernel`; a concrete executor-ledger backend is
+  `storage`.
 - New process construction or application service: `assembly`.
 - New command/API shape: `binary`, backed by binary-facing assembly services.
 - Cross-package fixtures and parity harnesses: `test`.
@@ -669,6 +696,7 @@ Kernel crates point inward only through the kernel dependency DAG:
 ```text
 ids -> canonical -> values -> capabilities
   -> program/spec -> certify/events/store/manual-auth -> runtime/replay
+ids + canonical + capabilities -> executor
 ```
 
 Normal and build dependencies use this semantic direction:
@@ -690,6 +718,24 @@ Normal and build dependencies use this semantic direction:
 Source-domain to aggregate-domain, cross-domain live, live to concrete storage/secret/app, signing
 to secret-provider, and store-contract to storage-implementation edges are forbidden. Dev-only
 dependencies may exercise lower surfaces without becoming production ownership.
+
+`mfm-executor` is the kernel owner of keyed convergence semantics.
+`KeyedExecutorLedger<Store>` is the sole high-level implementation: it strictly refolds complete
+effect/resource histories, validates typed policy, derives deterministic attempts, and owns
+observation and terminal rules. Executor storage crates implement only its asynchronous raw-store
+contract for one exact fenced identity, complete immutable reads, exact content reads, and atomic
+compare-and-append; the kernel crate never depends on a concrete backend.
+
+Memory and file stores are qualification surfaces. `mfm-storage-executor-postgres` is the production
+raw store under a dedicated schema and independent writer-generation fence. Its immutable rows are
+authority and its heads are rebuildable views. Every reopen uses the shared engine to reject
+missing, extra, forked, or partially linked records. Store transactions end before destination IO,
+and only an `Applied` append may mint affine target-entry authority.
+
+Stateless destination adapters consume only that authority and return an affine receipt. They do not
+acquire ledger locks, choose retries, persist credentials or signed bearer material, or mint journal
+references. One authorization atomically retains the complete schema-qualified non-secret target
+descriptor needed to recover the exact attempt.
 
 ## Store Boundary
 

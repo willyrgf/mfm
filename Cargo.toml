@@ -15,6 +15,7 @@ members = [
 	"crates/kernel/capabilities",
 	"crates/kernel/certify",
 	"crates/kernel/events",
+	"crates/kernel/executor",
 	"crates/kernel/facts",
 	"crates/kernel/ids",
 	"crates/kernel/manual-auth",
@@ -29,6 +30,8 @@ members = [
 	"crates/domains/evm",
 	"crates/domains/portfolio",
 	"crates/signing",
+	"crates/storages/executor-file",
+	"crates/storages/executor-postgres",
 	"crates/storages/postgres",
 ]
 
