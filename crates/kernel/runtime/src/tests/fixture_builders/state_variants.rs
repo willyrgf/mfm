@@ -49,7 +49,9 @@ pub(in crate::tests::support) fn fixture_with_manual_resolution_side_effect_stat
         evidence_schema: fixture.seed_ref.schema_id.clone(),
         authorization: manual_authorization(0xe0),
     };
-    envelope.spec.saga = spec::SagaPolicySpec::ManualResolution { manual };
+    envelope.spec.saga = spec::SagaPolicySpec::ManualResolution {
+        manual: Box::new(manual),
+    };
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");

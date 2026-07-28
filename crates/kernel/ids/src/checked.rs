@@ -223,10 +223,38 @@ checked_string_type!(
 );
 
 checked_string_type!(
+    StableId,
+    "recoverability stable id",
+    validate_stable_id,
+    "Stable identifier using the frozen recoverability-v1 primitive grammar."
+);
+
+checked_string_type!(
+    EntryPointId,
+    "recoverability entry-point id",
+    validate_entry_point_id,
+    "Versioned public entry-point identifier using the frozen recoverability-v1 grammar."
+);
+
+checked_string_type!(
+    AppendRequestId,
+    "append request id",
+    validate_stable_id,
+    "Stable caller-selected idempotency identity for one append request."
+);
+
+checked_string_type!(
+    InvocationIdentity,
+    "invocation identity",
+    validate_invocation_identity,
+    "Canonical lowercase UUIDv4 identity for one external invocation."
+);
+
+checked_string_type!(
     FieldSegment,
     "field segment",
     validate_field_segment,
-    "Checked field-path segment."
+    "Checked nonempty segment used by a field path or typed source projection."
 );
 
 checked_string_type!(
@@ -234,13 +262,6 @@ checked_string_type!(
     "field path",
     validate_field_path,
     "Checked dot-separated field path."
-);
-
-checked_string_type!(
-    ResourceNamespace,
-    "resource namespace",
-    validate_resource_namespace,
-    "Checked cross-run resource namespace."
 );
 
 checked_string_type!(
@@ -255,6 +276,13 @@ checked_string_type!(
     "runtime env name",
     validate_runtime_env_name,
     "Checked runtime environment variable name."
+);
+
+checked_string_type!(
+    ResourceNamespace,
+    "resource namespace",
+    validate_resource_namespace,
+    "Checked cross-run resource namespace."
 );
 
 checked_string_type!(

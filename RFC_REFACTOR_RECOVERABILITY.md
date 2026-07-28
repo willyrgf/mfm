@@ -1,7 +1,7 @@
 # RFC: Complete Transition Journal and Recoverable External Access
 
-Status: accepted target contract — retained contract-shaping evidence closed; schema-freeze and
-production-rollout gates remain open
+Status: schema-frozen accepted target contract — retained contract-shaping, identity, schema, and
+golden-vector gates closed; implementation-cutover and production-rollout gates remain open
 
 Scope: typed state execution, certified specs, run journal, external-access audit, recoverability,
 replay, facts, framework enforcement, execution catalogs, and app status
@@ -10,14 +10,14 @@ This RFC defines the target breaking replacement of the current event, projectio
 side-effect, and generic saga machinery. Its architecture and fixed contract choices are closed,
 with repository evidence and remaining gate classification recorded in the versioned
 [recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md). It is not yet
-the current implementation authority. Identity, schema, and golden-vector gates must close before
-the atomic vertical cutover moves the
+the current implementation authority. The frozen identity, schema, and golden-vector artifacts
+constrain the implementation work, but only the atomic vertical cutover moves the
 [design contract](docs/design.md), [architecture guide](docs/architecture.md), affected companion
 documents, code, schemas, and tests to this design together. The retained prototypes and
-inventories close the contract-shaping evidence gate; identity, schema, and golden-vector work
-remain the next freeze boundary. Production-rollout gates block deployment or capability
-registration, not schema freeze, and cannot create an alternate schema, compatibility reader, or
-optional audit mode.
+inventories close the contract-shaping evidence gate; the commit-2 annex and shared corpus close
+the identity, schema, and golden-vector gate. Production-rollout gates remain open and block
+deployment or capability registration, not implementation of the frozen target. They cannot
+create an alternate schema, compatibility reader, or optional audit mode.
 
 ## Executive Decision
 
@@ -4030,12 +4030,13 @@ absence, and nonce observation do not prove permanent non-executability.
 
 ### Durable reference-executor gate
 
-The generic executor, binding, evidence, restore, and failover schemas are not frozen solely from
-mocks. Before the complete journal schema freezes, one narrow durable reference executor must
+The generic executor, binding, evidence, restore, and failover schemas were not frozen solely from
+mocks. Before the complete journal schema froze, one narrow durable reference executor had to
 implement the logical contract against a convergence-safe semantic destination. A transactional
-durable queue whose enqueue key is the destination identity is sufficient; it need not enable EVM.
+durable queue whose enqueue key is the destination identity was sufficient; it did not need to
+enable EVM.
 
-The prototype must exercise:
+The retained prototype exercised:
 
 - same key and same request under repeated, concurrent, delayed, and post-terminal `ensure`;
 - same key with a different request or binding;
@@ -4054,10 +4055,10 @@ closed five-record evidence algebra, atomic effect/resource compare-and-swap, ex
 destination receipts including exact post-tombstone audit strengthening, cumulative completion
 reserve, the 256 UTF-8-byte effect-identifier bound, two materially different typed resource
 policies, strict refolded restore, generation-race rejection, bounded hostile decoding, and
-secret-free retained surfaces. Its binding and evidence objects become golden-vector inputs. If
-the annex requires a field or authority not expressible by this contract, the contract and
-prototype change together before memory, PostgreSQL, runtime, and replay implementations proceed
-independently.
+secret-free retained surfaces. Its binding and evidence objects are golden-vector inputs. If
+the frozen annex or corpus cannot express a later implementation requirement, v1 rejects that
+implementation; changing the contract requires a deliberate new version rather than modifying
+these schemas or prototype evidence in place.
 
 This closure is not physical production-HA qualification. Real WAL/backup lineage, commit-error
 ambiguity under process or network loss, an independently non-rollback generation fence,
@@ -4200,7 +4201,7 @@ The common EVM/Bitcoin mapping is:
 | `transport_failed` after possible entry | `Indeterminate` | `transport` | `boundary_entry` | none |
 | `http_status` | `Indeterminate` | `destination` | `boundary_observation` | `HttpStatus` |
 | `json_rpc_error` | `Indeterminate` | `destination` | `boundary_observation` | `JsonRpcError` |
-| `response_invalid` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid` |
+| `response_invalid` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { malformed_envelope \| invalid_result }` |
 | `response_missing_result` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { missing_result }` |
 | `response_too_large` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { too_large }` |
 | `unclassified_failure` | `Indeterminate` | `unclassified` | `boundary_observation` | none |
@@ -4216,6 +4217,62 @@ classifier matches Bitcoin Core's exact scan-busy condition, including JSON-RPC 
 provider text may be compared to the reviewed constant and is then discarded; a near match is
 ordinary `json_rpc_error`. HTTP `408`, `425`, `429`, `500`, `502`, `503`, `504`, and `507` are
 operationally retryable; only exact `scan_busy` is a retryable Bitcoin JSON-RPC busy result in v1.
+
+For every decomposed EVM or Bitcoin read state, the certified callback verdict for a structurally
+admissible observation is exactly:
+
+| Safe-failure condition | EVM verdict | Bitcoin verdict |
+| --- | --- | --- |
+| `routing_generation_unavailable` | `InvalidEvidence` | `InvalidEvidence` |
+| `configuration_invalid` | `InvalidEvidence` | `InvalidEvidence` |
+| `request_invalid` | `InvalidEvidence` | `InvalidEvidence` |
+| either legal `access_cancelled` stage | `InsufficientEvidence` | `InsufficientEvidence` |
+| either legal `transport_failed` stage | `InsufficientEvidence` | `InsufficientEvidence` |
+| `http_status` in the exact retryable set | `InsufficientEvidence` | `InsufficientEvidence` |
+| any other classifier-admitted HTTP `u16` | typed terminal read-validation `Settlement::Failed` | typed terminal read-validation `Settlement::Failed` |
+| `json_rpc_error` in `{-32603, -32001, -32002, -32005}` | `InsufficientEvidence` | typed terminal read-validation `Settlement::Failed` |
+| any other classifier-admitted JSON-RPC `i64` | typed terminal read-validation `Settlement::Failed` | typed terminal read-validation `Settlement::Failed` |
+| exact Bitcoin `scan_busy` | not admitted by the EVM contract | `InsufficientEvidence` |
+| `response_invalid`, `response_missing_result`, or `response_too_large` | `InvalidEvidence` | `InvalidEvidence` |
+| `unclassified_failure` | `InsufficientEvidence` | `InsufficientEvidence` |
+
+The first three codes are valid wrapper shapes but violate the state evidence contract: exact
+routing generation and qualified configuration resolve before authorization under `P-AR-04` and
+`P-AR-11`, and a total checked request author cannot produce `request_invalid`. They therefore
+block as `InvalidEvidence`; they are not retryable operating conditions or invented domain
+failures. Unrepresentable-response codes likewise prove that no schema-valid typed result exists
+for the callback and block as `InvalidEvidence`. `response_invalid` pairs only with
+`malformed_envelope` or `invalid_result`; the missing-result and too-large kinds pair only with
+their homonymous stable codes. Every other pairing, wrong contract reference, unknown code,
+wrong class or stage, wrong diagnostic union, or invalid size combination rejects structurally
+before callback execution.
+
+Exact semantic reproduction reruns this same state policy. Recorded-history verification checks
+only the frozen structural relationships and never upgrades, retries, or terminalizes an
+observation itself.
+
+The two closed typed terminal failure schemas are fieldless tagged unions:
+
+```text
+EvmReadTerminalFailure {
+    version: "mfm.evm-read-terminal-failure.v1",
+    kind: destination_rejected | source_mismatch | anchor_changed,
+}
+
+BitcoinReadTerminalFailure {
+    version: "mfm.bitcoin-read-terminal-failure.v1",
+    kind: destination_rejected | source_mismatch | scan_incomplete | anchor_changed,
+}
+```
+
+Only a nonretryable numeric HTTP or JSON-RPC safe failure maps to `destination_rejected`. EVM
+chain mismatch maps to `source_mismatch`; Bitcoin network mismatch maps to `source_mismatch`; and
+`scantxoutset.success = false` maps to `scan_incomplete`. The failure value does not duplicate the
+numeric status/code, source, chain, network, anchor, raw provider text, or diagnostic. The frozen
+read intent names the exact operation-specific typed-failure schema reference, and the committed
+`Settlement::Failed` names a `ValueRef` resolving that schema. Exact reproduction derives the tag
+again from the consumed observation.
+
 Observed EVM source/chain mismatch and anchor drift, and Bitcoin source/network mismatch,
 `scantxoutset.success = false`, and anchor drift, are bounded `Returned` typed semantic failures,
 not safe-failure codes. Bitcoin remains unregistered because its repeat-work-safe provider
@@ -4272,11 +4329,42 @@ provider-controlled content.
 
 ## Canonical Schema and Golden-Vector Gate
 
-The logical schemas in this RFC become implementation authority only through one versioned
+Gate status: **closed for the recoverability v1 target** by the fixed commit-2 artifact set:
+
+- `contracts/recoverability/v1/annex.json` — the normative machine-readable schema registry;
+- `contracts/recoverability/v1/corpus.json` — the shared positive/negative canonical-vector
+  corpus; and
+- `contracts/recoverability/v1/README.md` — the non-normative artifact index and consumer guide.
+
+The artifacts are not current implementation authority: memory, PostgreSQL, runtime, replay, app,
+CLI, and REST continue to follow the current design until the atomic cutover. The frozen artifacts
+instead prohibit later implementation packages from changing bytes, identities, tags, or
+semantics without a new version.
+
+Exact artifact metadata derived from the final commit-2 bytes is:
+
+```text
+COMMIT2_ARTIFACT_METADATA
+annex_sha256: a3fb5cf2e0486a1a1e906c2fd93b10b3f0f52c5a785b163b6cc758ff39a4defe
+corpus_sha256: 8d10c1a05820a18781a4864fb2d47248d6de41689db5fe0ed4800dd8b0742f82
+readme_sha256: bdec7624585a046407b9aaac6c36868050af2c52fa4f815cb05ebafecc5a8ed0
+annex_byte_count: 222127
+corpus_byte_count: 1706315
+annex_schema_count: 259
+annex_invariant_clause_count: 231
+annex_domain_count: 26
+corpus_positive_case_count: 427
+corpus_negative_case_count: 59
+corpus_relational_case_count: 84
+corpus_total_case_count: 570
+corpus_schema_acceptance_case_count: 373
+```
+
+The logical schemas in this RFC obtain their frozen target encoding only through the versioned
 canonical schema annex. Rust layout, serde defaults, database column order, and backend-specific
 representation are never hash contracts.
 
-Before memory and PostgreSQL implement the cutover independently, the annex freezes:
+The annex freezes:
 
 - every top-level record and transition-body variant;
 - every logical key, including admission, node/slot, observation, and closure uniqueness;
@@ -4290,6 +4378,11 @@ Before memory and PostgreSQL implement the cutover independently, the annex free
 - frozen read intent, compatible observation-chain identity, and head-relative consumability
   predicates;
 - input manifests, binding deltas, facts, outputs, evidence, and cross-run sources;
+- the exact input-manifest, fact-claim-envelope, and frozen-read-intent journal protocol
+  contracts carried by each certified spec;
+- repeated bounded fact slots and the exact slot ordinal carried by every emitted fact;
+- the whole-executable component qualification, its shared evidence/profile contracts, and the
+  composite planner semantic and sole-callback surfaces;
 - object-path bindings and artifact-admission intents;
 - enum tags, field names, integer widths, ordering, optional absence, explicit null where legal,
   empty strings, empty collections, and union discriminants; and
@@ -4306,11 +4399,11 @@ admission under a changed executable identity.
 Memory, PostgreSQL, runtime, replay, trace export, and the durable reference executor consume the
 same corpus and shared domain-free codec/digest/fold implementation.
 
-Schema freeze follows every contract-shaping prototype and inventory in the pre-cutover gate,
+Schema freeze followed every contract-shaping prototype and inventory in the pre-cutover gate,
 including framework/executor expansion, production reads, request totality, the durable reference
 executor/resource policies, fact selection, admission probes, evidence and fact consumers, legacy
-history export, and historical-executable isolation. Their results may change the candidate
-schemas; after freeze they cannot silently add a field or reinterpret a tag. A deliberate
+history export, and historical-executable isolation. Those results shaped the frozen schemas; later
+implementation work cannot silently add a field or reinterpret a tag. A deliberate
 persisted-contract change requires a new version and, under this pre-production cutover, explicit
 rejection rather than a compatibility reader.
 
@@ -4543,10 +4636,12 @@ outcomes. No separately persisted status may disagree with that fold.
 
 An active run may expose:
 
-- the derived ready/access-eligible node set and scheduler-selected next candidate;
+- the derived ready node set;
 - pending effect keys and their safe executor statuses;
-- redacted blocked reason; and
 - latest journal and semantic heads.
+
+Access eligibility, scheduler candidate selection, and waiting classification remain runtime-owned
+and are exposed only by the separately authorized one-step drive result.
 
 Complete transition data is not public merely because its closed schemas contain no secrets. The
 `TransitionTraceReader`, external-access audit reader, portable export, and their
@@ -4567,8 +4662,12 @@ cannot enumerate, dereference, export, or receive an unselected fact or producer
 that operation.
 
 The ordinary CLI/REST/API surface requires `ReadPublic` and defaults to status plus the certified
-public output. It does not dereference transition inputs, non-public outputs, facts, observations,
-or evidence. A separately authorized trace inspection may expose:
+public output. It dereferences only the single folded aggregate `PublicOutputAssembly` authority
+and projects its exact canonical subtrees in certified binding order. Each public item retains the
+authored destination name, certified binding schema, raw SHA-256 content digest of the exact
+subtree bytes, and subtree value; it never dereferences producer outputs through a second path. It
+does not dereference transition inputs, non-public outputs, facts, observations, or evidence. A
+separately authorized trace inspection may expose:
 
 - transition identity and containing commit;
 - before/after state digests, `Open | Closed` run phase, exact node phase, and terminal outcome;
@@ -5241,9 +5340,9 @@ runner authority rather than the architectural role.
 
 ### Store parity and schema
 
-- Freeze canonical bytes and derived identities for every record, transition body, logical key,
-  binding, manifest, reference, digest preimage, absent/empty case, and enum tag before backend
-  implementation diverges.
+- Use the frozen canonical bytes and derived identities for every record, transition body, logical
+  key, binding, manifest, reference, digest preimage, absent/empty case, and enum tag; backend
+  implementation cannot diverge from them.
 - Run the same positive and negative golden-vector corpus through memory, PostgreSQL, runtime,
   replay, trace export, and the durable reference executor.
 - Inject failure after every database operation in each legal batch shape.
@@ -5266,9 +5365,9 @@ runner authority rather than the architectural role.
   non-rollback restore preserves both; reject same-scope reset even with a new epoch.
 - Treat ambiguous `COMMIT` as `OutcomeUnknown` and prove it never mints access authority.
 - Prove every semantic live probe occurs after `RunAdmitted`.
-- Qualify the durable reference executor, including destination mutation followed by executor crash,
-  tombstone retention, original-binding upgrade routing, restore, rollback, and split brain, before
-  freezing its generic binding/evidence schemas.
+- Preserve the durable-reference-executor qualification that shaped the frozen generic
+  binding/evidence schemas, including destination mutation followed by executor crash, tombstone
+  retention, original-binding upgrade routing, restore, rollback, and split-brain candidates.
 - Reject legacy event/projection/saga schemas explicitly.
 - Prove no `store_commit_order` schema/hash/API, global allocator, old compatibility path, dual
   writer, or dual fact reader exists.
@@ -5281,15 +5380,16 @@ record for repository-wide producer/consumer disposition. The target choices are
 gate cannot reintroduce an alternate lifecycle, schema, route fallback, public fact/list surface,
 or weaker capability.
 
-Schema- and implementation-shaping gates close before the canonical schema freezes or before the
-affected capability registers. They include the program value-view/runtime-proof/store-permit
-vertical proof, exact routing-generation/bootstrap contracts, composite expansion prototypes,
-request totality, evidence/fact consumer disposal, reference-executor and resource-policy
-prototypes, tenant fact-frontier behavior, one retained historical executable reproducing in the
-selected OS-enforced capability-free boundary, and the canonical vector corpus. The historical
-isolation gate demonstrates the implementation path before persisted schemas freeze; it does not
-decide the production retention horizon. An EVM or Bitcoin capability that misses its specific
-qualification gate remains unregistered; it does not block an otherwise complete core cutover.
+The schema- and implementation-shaping gates are closed for the frozen target. Their evidence
+includes the program value-view/runtime-proof/store-permit vertical proof, exact
+routing-generation/bootstrap contracts, composite expansion prototypes, request totality,
+evidence/fact consumer disposal, reference-executor and resource-policy prototypes, tenant
+fact-frontier behavior, one retained historical executable reproducing in the selected
+OS-enforced capability-free boundary, and the canonical annex/vector corpus. The historical
+isolation gate demonstrated the implementation path without deciding the production retention
+horizon. An EVM or Bitcoin capability that misses its capability-specific qualification gate
+remains unregistered; it does not reopen the frozen core schema or block implementation of the
+otherwise complete core target.
 
 The following are production-rollout gates, not schema-freeze gates:
 
@@ -5332,8 +5432,10 @@ The vertical cutover does not begin until these gates close in order:
    every generic evidence-bag producer/consumer, pre-admission semantic probe, fact consumer,
    published entry point/profile, and retained legacy history/export requirement. Code-level
    deletion remains part of the atomic cutover.
-3. **Identity and schema freeze:** finalize node-occurrence derivation, terminal/dependency
-   contracts, every canonical persisted schema, and the complete golden-vector corpus.
+3. **Identity and schema freeze — closed:** the commit-2 artifact set fixes node-occurrence
+   derivation, terminal/dependency contracts, every canonical persisted schema, and the complete
+   golden-vector corpus. Exact artifact hashes and counts are recorded in the searchable
+   `COMMIT2_ARTIFACT_METADATA` ledger above.
 4. **Implementation package plan:** assign crate ownership, dependency order, deletion checkpoints,
    focused verification, and final integration responsibility for every package below.
 
@@ -5360,7 +5462,8 @@ J  deletion of attempts, phases, saga, lanes, projections, adapter lifecycle/red
    and documentation
 ```
 
-Package B and the contract-closing prototypes produce contracts consumed by the later packages.
+Package B's frozen artifact set and the contract-closing prototypes define the contracts consumed
+by the later packages.
 Packages C
 through J may be developed and reviewed behind the cutover branch boundary, but they do not ship
 as a parallel lifecycle, dual writer, compatibility reader, or partially selectable runtime. The

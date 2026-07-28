@@ -242,7 +242,9 @@ fn side_effect_spec_with_manual(
         .validated_spec()
         .spec()
         .clone();
-    typed.saga = spec::SagaPolicySpec::ManualResolution { manual };
+    typed.saga = spec::SagaPolicySpec::ManualResolution {
+        manual: Box::new(manual),
+    };
     (registry, typed)
 }
 

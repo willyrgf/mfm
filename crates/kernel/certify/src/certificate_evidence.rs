@@ -254,7 +254,7 @@ pub(super) fn manual_resolution_specs(
 ) -> Vec<&spec::ManualResolutionEvidenceSpec> {
     let mut manuals = Vec::new();
     match &spec.saga {
-        spec::SagaPolicySpec::ManualResolution { manual } => manuals.push(manual),
+        spec::SagaPolicySpec::ManualResolution { manual } => manuals.push(manual.as_ref()),
         spec::SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
         } => manuals.push(manual.as_ref()),

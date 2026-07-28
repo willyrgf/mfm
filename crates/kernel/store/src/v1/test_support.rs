@@ -356,9 +356,9 @@ fixed_digest_id_for_test! {
     fixed_artifact_id_for_test -> ArtifactId
 }
 
-fixed_digest_id_for_test! {
-    /// Returns a deterministic attempt id made from one repeated digest byte.
-    fixed_attempt_id_for_test -> AttemptId
+/// Returns a deterministic attempt id made from one repeated digest byte.
+pub fn fixed_attempt_id_for_test(byte: u8) -> AttemptId {
+    AttemptId::from_digest(fixed_digest_bytes_for_test(byte))
 }
 
 fixed_digest_id_for_test! {

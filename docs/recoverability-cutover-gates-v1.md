@@ -1,6 +1,6 @@
 # Recoverability Cutover Gate and Inventory v1
 
-Status: contract-closure evidence for
+Status: contract-closure and schema-freeze evidence for
 [`RFC_REFACTOR_RECOVERABILITY.md`](../RFC_REFACTOR_RECOVERABILITY.md)
 
 Contract id: `mfm.recoverability-cutover-gates.v1`
@@ -8,10 +8,15 @@ Contract id: `mfm.recoverability-cutover-gates.v1`
 Companion app and transport contract:
 [`recoverability-app-surface-v1.md`](recoverability-app-surface-v1.md)
 
-This document records the repository inventory and fixed disposition needed before the
-recoverability schema freezes. It is not a second runtime or persisted-data contract. Until the
-atomic vertical cutover lands, [`design.md`](design.md) and [`architecture.md`](architecture.md)
-remain authoritative for the current implementation.
+This document records the repository inventory and fixed disposition that closed before the
+recoverability schema freeze. The frozen target artifacts are
+`contracts/recoverability/v1/annex.json`, `contracts/recoverability/v1/corpus.json`, and
+`contracts/recoverability/v1/README.md`; their exact metadata is recorded by the searchable
+`COMMIT2_ARTIFACT_METADATA` block in the RFC's
+[Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate).
+This is not a second runtime or persisted-data contract. Until the atomic vertical cutover lands,
+[`design.md`](design.md) and [`architecture.md`](architecture.md) remain authoritative for the
+current implementation.
 
 ## Fixed closure decisions
 
@@ -38,7 +43,11 @@ remain authoritative for the current implementation.
   `cancellation`; class, boundary-stage, and `zero|up_to_16_kib|up_to_1_mib|over_1_mib` size
   vocabularies are closed, while exact EVM, Bitcoin, and executor stable codes/diagnostic unions
   are selected by `safe_failure_contract_ref`. Open diagnostic maps and raw provider text are
-  deleted.
+  deleted. Each read state contract also fixes the exact callback verdict for every admissible
+  code: cancellation, transport, unclassified, and the exact reviewed numeric/busy retry rows
+  yield `InsufficientEvidence`; only closed nonretryable numeric destination rejections become a
+  typed terminal read-validation failure; and invariant or unrepresentable-response evidence
+  yields `InvalidEvidence`.
 - All authority-bearing admission, journal, object, and fact-completeness reads, and all writes,
   use the fenced authoritative writer in v1. Offline bundle verification is separate. A replica
   cannot claim store-backed authority without a later applied-through-barrier and lineage
@@ -55,10 +64,10 @@ remain authoritative for the current implementation.
 - The core cutover has no registered EVM mutation. EVM writes return only after durable keyed
   executor qualification. Bitcoin collection remains unregistered unless `scantxoutset "start"`
   passes its repeat-work-safe read qualification.
-- Schema- and implementation-shaping gates close before schema freeze. One retained historical
-  executable must also reproduce in an OS-enforced capability-free boundary before that freeze.
-  Deployment privacy, capacity, authoritative-writer fencing, the long-term executable
-  retention horizon, and per-deployment legacy-history disposition are rollout-only gates.
+- Schema- and implementation-shaping gates, including one retained historical executable
+  reproducing in an OS-enforced capability-free boundary, closed before schema freeze. Deployment
+  privacy, capacity, authoritative-writer fencing, the long-term executable retention horizon, and
+  per-deployment legacy-history disposition remain rollout-only gates.
 
 ## Fixed implementation commit sequence
 
@@ -221,13 +230,13 @@ derived telemetry.
 
 | Capability | Core-cutover disposition | Gate to register |
 | --- | --- | --- |
-| EVM balance/metadata reads | Replace aggregate reader with source/chain bootstrap, initial anchor, one state per independently meaningful RPC, final anchor confirmation, and pure aggregation. | Exact-call, routing-generation, cancellation, partial-failure, anchor, and fan-out conformance. Leave unregistered if the graph is not qualified. |
-| Bitcoin balance collection | Replace aggregate reader with source bootstrap, one qualified `scantxoutset "start"`, block-hash confirmation, and pure aggregation. | Lost response, cancellation, concurrent scans, delayed reissue, bounded result/work, provider cost, and no hidden status/abort/retry. Otherwise leave unregistered pending a keyed work executor design. |
+| EVM balance/metadata reads | Replace aggregate reader with source/chain bootstrap, initial anchor, one state per independently meaningful RPC, final anchor confirmation, and pure aggregation. | Exact-call, routing-generation, exhaustive safe-failure verdict, cancellation, partial-failure, anchor, and fan-out conformance. Leave unregistered if the graph is not qualified. |
+| Bitcoin balance collection | Replace aggregate reader with source bootstrap, one qualified `scantxoutset "start"`, block-hash confirmation, and pure aggregation. | Exact safe-failure verdict, lost response, cancellation, concurrent scans, delayed reissue, bounded result/work, provider cost, and no hidden status/abort/retry. Otherwise leave unregistered pending a keyed work executor design. |
 | EVM mutation | Remove registration in the core cutover. | A durable wallet/relayer must qualify immutable signer/envelope/nonce ownership, keyed convergence, delivery audit, restart/reorg behavior, and no-secret retention before a later registration commit. |
 
 ## Gate classification
 
-### Before schema freeze or relevant capability registration
+### Closed before schema freeze or relevant capability registration
 
 - Compile-only vertical proof of the program value-view/runtime-proof/store-permit boundary.
 - Exact routing-generation schemas and bootstrap read graphs.
@@ -259,7 +268,10 @@ derived telemetry.
 - One retained historical executable reproducing in the selected OS-enforced capability-free
   boundary with network and writable host access denied. This closes the implementation-path gate
   before schema freeze without deciding the production retention horizon.
-- Canonical schema annex and shared positive/negative golden vectors.
+- Canonical schema annex and shared positive/negative golden vectors, frozen in
+  `contracts/recoverability/v1/annex.json` and `contracts/recoverability/v1/corpus.json` and indexed
+  by `contracts/recoverability/v1/README.md`. Exact artifact hashes and counts are recorded in the
+  RFC's `COMMIT2_ARTIFACT_METADATA` ledger.
 - EVM/Bitcoin capability conformance, or explicit absence of the unqualified registration.
 
 ### Before resetting a deployment

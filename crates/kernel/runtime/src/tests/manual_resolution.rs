@@ -102,7 +102,7 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
         &fixture.runtime_spec,
         &fixture.run_id,
         &store,
-        manual.clone(),
+        manual.as_ref().clone(),
     )
     .expect_err("manual prefix rejects open attempt");
     assert!(

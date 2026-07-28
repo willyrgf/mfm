@@ -36,7 +36,7 @@ pub(super) fn lower_saga_policy(policy: &program::SagaPolicy) -> spec::SagaPolic
         program::SagaPolicy::FailWithoutAcdcClaim => spec::SagaPolicySpec::FailWithoutAcdcClaim,
         program::SagaPolicy::ManualResolution { manual } => {
             spec::SagaPolicySpec::ManualResolution {
-                manual: lower_manual_resolution_evidence(manual),
+                manual: Box::new(lower_manual_resolution_evidence(manual)),
             }
         }
         program::SagaPolicy::CompensateCompleted {

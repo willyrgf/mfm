@@ -167,7 +167,7 @@ fn node_id(seed: u8) -> NodeId {
 }
 
 fn attempt_id(seed: u8) -> mfm_ids::AttemptId {
-    mfm_ids::AttemptId::from_digest(mfm_ids::DigestAlgorithm::Sha256JcsV1, digest_bytes(seed))
+    mfm_ids::AttemptId::from_digest(digest_bytes(seed))
 }
 
 fn event_id(seed: u8) -> mfm_ids::EventId {

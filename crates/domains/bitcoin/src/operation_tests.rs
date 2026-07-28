@@ -149,6 +149,94 @@ enum PrototypeBitcoinFailure {
     AnchorChanged { expected: String, observed: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeReadFailureVerdict {
+    InvalidEvidence,
+    InsufficientEvidence,
+    Failed(PrototypeBitcoinReadTerminalFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeBitcoinReadTerminalFailure {
+    DestinationRejected,
+    SourceMismatch,
+    ScanIncomplete,
+    AnchorChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeBitcoinSafeFailure {
+    RoutingGenerationUnavailable,
+    ConfigurationInvalid,
+    RequestInvalid,
+    AccessCancelledBeforeEntry,
+    AccessCancelledAfterEntry,
+    TransportFailedBeforeEntry,
+    TransportFailedAfterEntry,
+    HttpStatus(u16),
+    JsonRpcError(i64),
+    ScanBusy,
+    ResponseInvalidMalformedEnvelope,
+    ResponseInvalidResult,
+    ResponseMissingResult,
+    ResponseTooLarge,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeBitcoinReturnedFailure {
+    SourceMismatch,
+    NetworkMismatch,
+    ScanIncomplete,
+    AnchorChanged,
+}
+
+fn settle_bitcoin_safe_failure(
+    failure: PrototypeBitcoinSafeFailure,
+) -> PrototypeReadFailureVerdict {
+    use PrototypeBitcoinReadTerminalFailure::DestinationRejected;
+    use PrototypeBitcoinSafeFailure::{
+        AccessCancelledAfterEntry, AccessCancelledBeforeEntry, ConfigurationInvalid, HttpStatus,
+        JsonRpcError, RequestInvalid, ResponseInvalidMalformedEnvelope, ResponseInvalidResult,
+        ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable, ScanBusy,
+        TransportFailedAfterEntry, TransportFailedBeforeEntry, Unclassified,
+    };
+    use PrototypeReadFailureVerdict::{Failed, InsufficientEvidence, InvalidEvidence};
+
+    match failure {
+        RoutingGenerationUnavailable | ConfigurationInvalid | RequestInvalid => InvalidEvidence,
+        AccessCancelledBeforeEntry
+        | AccessCancelledAfterEntry
+        | TransportFailedBeforeEntry
+        | TransportFailedAfterEntry
+        | ScanBusy
+        | Unclassified => InsufficientEvidence,
+        HttpStatus(408 | 425 | 429 | 500 | 502 | 503 | 504 | 507) => InsufficientEvidence,
+        HttpStatus(_) | JsonRpcError(_) => Failed(DestinationRejected),
+        ResponseInvalidMalformedEnvelope
+        | ResponseInvalidResult
+        | ResponseMissingResult
+        | ResponseTooLarge => InvalidEvidence,
+    }
+}
+
+fn settle_bitcoin_returned_failure(
+    failure: PrototypeBitcoinReturnedFailure,
+) -> PrototypeReadFailureVerdict {
+    use PrototypeBitcoinReadTerminalFailure::{AnchorChanged, ScanIncomplete, SourceMismatch};
+    use PrototypeBitcoinReturnedFailure::{
+        AnchorChanged as ReturnedAnchorChanged, NetworkMismatch,
+        ScanIncomplete as ReturnedScanIncomplete,
+    };
+    use PrototypeReadFailureVerdict::Failed;
+
+    match failure {
+        PrototypeBitcoinReturnedFailure::SourceMismatch | NetworkMismatch => Failed(SourceMismatch),
+        ReturnedScanIncomplete => Failed(ScanIncomplete),
+        ReturnedAnchorChanged => Failed(AnchorChanged),
+    }
+}
+
 fn settle_block_hash_confirmation(
     request: &PrototypeBlockHashRequest,
     observed_hash: &str,
@@ -461,5 +549,80 @@ fn recoverability_prototype_maximum_descriptor_demand_remains_one_scan_node() {
             .count(),
         1,
         "maximum descriptor demand is one indivisible scan operation"
+    );
+}
+
+#[test]
+fn recoverability_prototype_freezes_bitcoin_read_failure_verdicts() {
+    use PrototypeBitcoinReadTerminalFailure::{
+        AnchorChanged as TerminalAnchorChanged, DestinationRejected,
+        ScanIncomplete as TerminalScanIncomplete, SourceMismatch as TerminalSourceMismatch,
+    };
+    use PrototypeBitcoinReturnedFailure::{
+        AnchorChanged, NetworkMismatch, ScanIncomplete, SourceMismatch,
+    };
+    use PrototypeBitcoinSafeFailure::{
+        AccessCancelledAfterEntry, AccessCancelledBeforeEntry, ConfigurationInvalid, HttpStatus,
+        JsonRpcError, RequestInvalid, ResponseInvalidMalformedEnvelope, ResponseInvalidResult,
+        ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable, ScanBusy,
+        TransportFailedAfterEntry, TransportFailedBeforeEntry, Unclassified,
+    };
+    use PrototypeReadFailureVerdict::{Failed, InsufficientEvidence, InvalidEvidence};
+
+    for failure in [
+        RoutingGenerationUnavailable,
+        ConfigurationInvalid,
+        RequestInvalid,
+        ResponseInvalidMalformedEnvelope,
+        ResponseInvalidResult,
+        ResponseMissingResult,
+        ResponseTooLarge,
+    ] {
+        assert_eq!(settle_bitcoin_safe_failure(failure), InvalidEvidence);
+    }
+    for failure in [
+        AccessCancelledBeforeEntry,
+        AccessCancelledAfterEntry,
+        TransportFailedBeforeEntry,
+        TransportFailedAfterEntry,
+        ScanBusy,
+        Unclassified,
+    ] {
+        assert_eq!(settle_bitcoin_safe_failure(failure), InsufficientEvidence);
+    }
+    for status in [408, 425, 429, 500, 502, 503, 504, 507] {
+        assert_eq!(
+            settle_bitcoin_safe_failure(HttpStatus(status)),
+            InsufficientEvidence
+        );
+    }
+    for status in [307, 400, 401, 403, 404, 413, 422, 501, 505] {
+        assert_eq!(
+            settle_bitcoin_safe_failure(HttpStatus(status)),
+            Failed(DestinationRejected)
+        );
+    }
+    for code in [-32700, -32603, -32602, -32005, -8, 0, i64::MAX] {
+        assert_eq!(
+            settle_bitcoin_safe_failure(JsonRpcError(code)),
+            Failed(DestinationRejected),
+            "only the distinct exact scan_busy condition is retryable for Bitcoin"
+        );
+    }
+    assert_eq!(
+        settle_bitcoin_returned_failure(SourceMismatch),
+        Failed(TerminalSourceMismatch)
+    );
+    assert_eq!(
+        settle_bitcoin_returned_failure(NetworkMismatch),
+        Failed(TerminalSourceMismatch)
+    );
+    assert_eq!(
+        settle_bitcoin_returned_failure(ScanIncomplete),
+        Failed(TerminalScanIncomplete)
+    );
+    assert_eq!(
+        settle_bitcoin_returned_failure(AnchorChanged),
+        Failed(TerminalAnchorChanged)
     );
 }

@@ -70,10 +70,10 @@ fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
 
 pub(super) fn manual_saga_policy(byte: u8) -> SagaPolicySpec {
     SagaPolicySpec::ManualResolution {
-        manual: ManualResolutionEvidenceSpec {
+        manual: Box::new(ManualResolutionEvidenceSpec {
             evidence_schema: schema_id("mfm.test.manual_evidence", byte + 1),
             authorization: manual_authorization(byte),
-        },
+        }),
     }
 }
 
@@ -180,7 +180,7 @@ pub(super) fn manual_resolution_request(
 
 pub(super) fn proof_manual_saga_policy() -> SagaPolicySpec {
     SagaPolicySpec::ManualResolution {
-        manual: proof_manual_evidence_spec(),
+        manual: Box::new(proof_manual_evidence_spec()),
     }
 }
 

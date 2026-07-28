@@ -127,7 +127,7 @@ pub(super) fn node_id(byte: u8) -> NodeId {
 }
 
 pub(super) fn attempt_id(byte: u8) -> AttemptId {
-    AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+    AttemptId::from_digest(digest_bytes(byte))
 }
 
 pub(super) fn descriptor_id(byte: u8) -> mfm_ids::DescriptorId {

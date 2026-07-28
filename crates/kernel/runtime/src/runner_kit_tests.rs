@@ -117,10 +117,9 @@ fn fact_authority_fixture(subject_height: u64) -> FactAuthorityFixture {
                 DigestAlgorithm::Sha256JcsV1,
                 mfm_ids::DigestBytes::from_array([0x19; 32]),
             ),
-            attempt_id: mfm_ids::AttemptId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                mfm_ids::DigestBytes::from_array([0x42; 32]),
-            ),
+            attempt_id: mfm_ids::AttemptId::from_digest(mfm_ids::DigestBytes::from_array(
+                [0x42; 32],
+            )),
             commit_id: store::CommitKey::new("fact-query-authority").expect("commit key"),
             store_commit_order: 1,
             recorded_at: "2026-07-01T00:00:00Z".to_owned(),

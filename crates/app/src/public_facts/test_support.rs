@@ -245,7 +245,7 @@ fn node_id(n: u8) -> mfm_ids::NodeId {
 }
 
 fn attempt_id(n: u8) -> mfm_ids::AttemptId {
-    mfm_ids::AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(n))
+    mfm_ids::AttemptId::from_digest(digest_bytes(n))
 }
 
 fn digest_bytes(n: u8) -> mfm_ids::DigestBytes {

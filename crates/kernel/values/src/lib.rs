@@ -33,6 +33,11 @@ mod generic_values;
 pub use self::generic_values::{
     ArtifactRef, ContextRefValue, MaybeValue, NonEmpty, SkipCode, SkipReason,
 };
+mod retained;
+pub use self::retained::{
+    component_object_evidence_contract_canonical, component_object_evidence_contract_ref,
+    RetainedValueContract,
+};
 
 // Keep this list intentionally small and high-signal to avoid false positives on public
 // descriptive fields while still blocking common secret-bearing persisted surfaces.
@@ -87,6 +92,12 @@ pub enum ValueError {
     /// Config validation failed.
     #[error("config error: {0}")]
     Config(String),
+    /// A retained-value contract failed exact annex validation.
+    #[error("invalid retained-value contract")]
+    RetainedValueContract,
+    /// The frozen recoverability codec rejected a retained-value contract.
+    #[error(transparent)]
+    Recoverability(#[from] mfm_canonical::RecoverabilityError),
 }
 
 /// Returns `true` when `input` matches MFM's high-signal secret-marker policy.

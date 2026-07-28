@@ -7,9 +7,11 @@
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
+#[cfg(test)]
+use mfm_ids::DigestAlgorithm;
 use mfm_ids::{
     AdapterKind, AdapterVersion, AttemptId, CapabilityKind, CapabilityVersion, ContentDigest,
-    DescriptorId, DigestAlgorithm, NodeId, RunId, SchemaId, SpecHash,
+    DescriptorId, NodeId, RunId, SchemaId, SpecHash,
 };
 use mfm_spec::v1 as spec;
 
@@ -245,10 +247,7 @@ fn attempt_id(
         "run_id": run_id.as_str(),
         "spec_hash": spec_hash.as_str(),
     }))?;
-    Ok(AttemptId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        *canonical.content_digest().digest(),
-    ))
+    Ok(AttemptId::from_digest(canonical.digest_bytes()))
 }
 
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {

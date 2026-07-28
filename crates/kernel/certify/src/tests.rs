@@ -819,7 +819,9 @@ fn manual_resolution_draft() -> (
     let manual_spec = manual.to_spec();
     let draft = side_effect_draft_with_policy(
         program::SideEffectVerificationSpec::Receipt,
-        program::SideEffectSagaPolicy::ManualResolution { manual },
+        program::SideEffectSagaPolicy::ManualResolution {
+            manual: Box::new(manual),
+        },
     );
     (draft, manual_spec)
 }

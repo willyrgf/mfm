@@ -195,6 +195,85 @@ enum PrototypeAnchorFailure {
     AnchorChanged { expected: B256, observed: B256 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeReadFailureVerdict {
+    InvalidEvidence,
+    InsufficientEvidence,
+    Failed(PrototypeEvmReadTerminalFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeEvmReadTerminalFailure {
+    DestinationRejected,
+    SourceMismatch,
+    AnchorChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeEvmSafeFailure {
+    RoutingGenerationUnavailable,
+    ConfigurationInvalid,
+    RequestInvalid,
+    AccessCancelledBeforeEntry,
+    AccessCancelledAfterEntry,
+    TransportFailedBeforeEntry,
+    TransportFailedAfterEntry,
+    HttpStatus(u16),
+    JsonRpcError(i64),
+    ResponseInvalidMalformedEnvelope,
+    ResponseInvalidResult,
+    ResponseMissingResult,
+    ResponseTooLarge,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeEvmReturnedFailure {
+    SourceMismatch,
+    ChainMismatch,
+    AnchorChanged,
+}
+
+fn settle_evm_safe_failure(failure: PrototypeEvmSafeFailure) -> PrototypeReadFailureVerdict {
+    use PrototypeEvmReadTerminalFailure::DestinationRejected;
+    use PrototypeEvmSafeFailure::{
+        AccessCancelledAfterEntry, AccessCancelledBeforeEntry, ConfigurationInvalid, HttpStatus,
+        JsonRpcError, RequestInvalid, ResponseInvalidMalformedEnvelope, ResponseInvalidResult,
+        ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable,
+        TransportFailedAfterEntry, TransportFailedBeforeEntry, Unclassified,
+    };
+    use PrototypeReadFailureVerdict::{Failed, InsufficientEvidence, InvalidEvidence};
+
+    match failure {
+        RoutingGenerationUnavailable | ConfigurationInvalid | RequestInvalid => InvalidEvidence,
+        AccessCancelledBeforeEntry
+        | AccessCancelledAfterEntry
+        | TransportFailedBeforeEntry
+        | TransportFailedAfterEntry
+        | Unclassified => InsufficientEvidence,
+        HttpStatus(408 | 425 | 429 | 500 | 502 | 503 | 504 | 507)
+        | JsonRpcError(-32603 | -32001 | -32002 | -32005) => InsufficientEvidence,
+        HttpStatus(_) | JsonRpcError(_) => Failed(DestinationRejected),
+        ResponseInvalidMalformedEnvelope
+        | ResponseInvalidResult
+        | ResponseMissingResult
+        | ResponseTooLarge => InvalidEvidence,
+    }
+}
+
+fn settle_evm_returned_failure(
+    failure: PrototypeEvmReturnedFailure,
+) -> PrototypeReadFailureVerdict {
+    use PrototypeEvmReadTerminalFailure::{AnchorChanged, SourceMismatch};
+    use PrototypeEvmReturnedFailure::{AnchorChanged as ReturnedAnchorChanged, ChainMismatch};
+    use PrototypeReadFailureVerdict::Failed;
+
+    match failure {
+        PrototypeEvmReturnedFailure::SourceMismatch | ChainMismatch => Failed(SourceMismatch),
+        ReturnedAnchorChanged => Failed(AnchorChanged),
+    }
+}
+
 fn settle_confirmation(
     request: &PrototypeConfirmationRequest,
     observed_hash: B256,
@@ -520,4 +599,78 @@ fn recoverability_prototype_maximum_fanout_has_a_fixed_structural_bound() {
     assert_eq!(graph.nodes.len(), expected_external_operations + 1);
     assert_eq!(expected_external_operations, 2_051);
     assert_eq!(graph.nodes.len(), 2_052);
+}
+
+#[test]
+fn recoverability_prototype_freezes_evm_read_failure_verdicts() {
+    use PrototypeEvmReadTerminalFailure::{
+        AnchorChanged as TerminalAnchorChanged, DestinationRejected,
+        SourceMismatch as TerminalSourceMismatch,
+    };
+    use PrototypeEvmReturnedFailure::{AnchorChanged, ChainMismatch, SourceMismatch};
+    use PrototypeEvmSafeFailure::{
+        AccessCancelledAfterEntry, AccessCancelledBeforeEntry, ConfigurationInvalid, HttpStatus,
+        JsonRpcError, RequestInvalid, ResponseInvalidMalformedEnvelope, ResponseInvalidResult,
+        ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable,
+        TransportFailedAfterEntry, TransportFailedBeforeEntry, Unclassified,
+    };
+    use PrototypeReadFailureVerdict::{Failed, InsufficientEvidence, InvalidEvidence};
+
+    for failure in [
+        RoutingGenerationUnavailable,
+        ConfigurationInvalid,
+        RequestInvalid,
+        ResponseInvalidMalformedEnvelope,
+        ResponseInvalidResult,
+        ResponseMissingResult,
+        ResponseTooLarge,
+    ] {
+        assert_eq!(settle_evm_safe_failure(failure), InvalidEvidence);
+    }
+    for failure in [
+        AccessCancelledBeforeEntry,
+        AccessCancelledAfterEntry,
+        TransportFailedBeforeEntry,
+        TransportFailedAfterEntry,
+        Unclassified,
+    ] {
+        assert_eq!(settle_evm_safe_failure(failure), InsufficientEvidence);
+    }
+    for status in [408, 425, 429, 500, 502, 503, 504, 507] {
+        assert_eq!(
+            settle_evm_safe_failure(HttpStatus(status)),
+            InsufficientEvidence
+        );
+    }
+    for status in [307, 400, 401, 403, 404, 413, 422, 501, 505] {
+        assert_eq!(
+            settle_evm_safe_failure(HttpStatus(status)),
+            Failed(DestinationRejected)
+        );
+    }
+    for code in [-32603, -32001, -32002, -32005] {
+        assert_eq!(
+            settle_evm_safe_failure(JsonRpcError(code)),
+            InsufficientEvidence
+        );
+    }
+    for code in [-32700, -32602, -32000, -8, 0, i64::MAX] {
+        assert_eq!(
+            settle_evm_safe_failure(JsonRpcError(code)),
+            Failed(DestinationRejected)
+        );
+    }
+
+    assert_eq!(
+        settle_evm_returned_failure(SourceMismatch),
+        Failed(TerminalSourceMismatch)
+    );
+    assert_eq!(
+        settle_evm_returned_failure(ChainMismatch),
+        Failed(TerminalSourceMismatch)
+    );
+    assert_eq!(
+        settle_evm_returned_failure(AnchorChanged),
+        Failed(TerminalAnchorChanged)
+    );
 }
