@@ -150,10 +150,7 @@ pub(super) fn test_returned_fact_authority(
             source_ordinal: 0,
             source_event_id,
             node_id: node.node_id.clone(),
-            attempt_id: AttemptId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0x79; 32]),
-            ),
+            attempt_id: AttemptId::from_digest(DigestBytes::from_array([0x79; 32])),
             commit_id: store::CommitKey::new("test-returned-fact").expect("commit key"),
             store_commit_order: 2,
             recorded_at: "2026-07-01T00:00:00Z".to_owned(),

@@ -29,7 +29,7 @@ pub(in crate::tests::support) async fn append_manual_resolution(
         &fixture.runtime_spec,
         &fixture.run_id,
         store,
-        manual.clone(),
+        manual.as_ref().clone(),
     )
     .expect("manual prefix authority");
     let claim = prefix

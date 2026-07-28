@@ -1,11 +1,16 @@
 # Recoverability Predicate Owners v1
 
-Status: pre-schema-freeze ownership inventory for the accepted target contract
+Status: schema-frozen predicate-ownership inventory for the accepted target contract
 
 Contract id: `mfm.recoverability-predicate-owners.v1`
 
-This document closes the predicate-ownership inventory required before the recoverability schema
-freezes. It refines the accepted target in
+This document records the predicate-ownership inventory that closed before the recoverability
+schema freeze. The frozen target encodings and shared vectors are
+`contracts/recoverability/v1/annex.json`, `contracts/recoverability/v1/corpus.json`, and
+`contracts/recoverability/v1/README.md`; exact artifact hashes and counts are recorded by
+`COMMIT2_ARTIFACT_METADATA` in the RFC's
+[Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate).
+It refines the accepted target in
 [`RFC_REFACTOR_RECOVERABILITY.md`](../RFC_REFACTOR_RECOVERABILITY.md), especially
 [Predicate ownership](../RFC_REFACTOR_RECOVERABILITY.md#predicate-ownership), without creating a
 second runtime or persisted-data contract. Until the atomic vertical cutover lands,
@@ -69,6 +74,16 @@ malformed_envelope | missing_result | invalid_result | too_large }`; Bitcoin add
 the fieldless `ScanBusy`. The accepted RFC's security table owns the exhaustive observation,
 class, and stage mapping. Source/chain/network mismatch, anchor drift, and Bitcoin
 `scantxoutset.success = false` remain returned typed semantic failures, not safe-failure codes.
+
+The same RFC table also owns the exact `P-AR-06` callback verdict for every structurally
+admissible EVM or Bitcoin read failure. Route-generation, configuration, and request-invalid
+observations are `InvalidEvidence` because they violate the pre-authorization catalog and total
+request-author invariants. Unrepresentable-response observations are also `InvalidEvidence`.
+Cancellation, transport, unclassified failures, the exact retryable numeric sets, and exact
+Bitcoin `scan_busy` are `InsufficientEvidence`; every other classifier-admitted numeric
+destination rejection becomes the frozen typed terminal read-validation failure. Exact semantic
+reproduction reruns those verdicts under `P-AR-09`; structural append/load/replay verifies the
+envelope relation but never chooses a verdict.
 
 ## Typed construction and certification
 
@@ -143,7 +158,7 @@ class, and stage mapping. Source/chain/network mismatch, anchor drift, and Bitco
 | `P-RV-01` | Supplied journal, objects, certificate/proof closure, executor evidence, cross-run sources, fact assurances, folds, and closure form one callback-free `VerifiedRunView`; a portable cross-run closure is acyclic, complete, and deduplicates payload bytes without erasing any logical `ValueRef` binding. | The shared recorded-history verifier. | A private, non-cloneable closure-verification session contains the root, deterministic pending traversal, active/verified sets, object offsets, and counters. Each step consumes it; bounded `More` results have no positive meaning, and only an empty pending set after every reachable typed object verifies constructs the opaque view. Missing/conflicting/cyclic/tampered data rejects, while total source/object/byte size does not. | Store-backed loading may supply writer-qualified bytes and same-store fact completeness, but cannot skip verification. Lost scratch restarts from immutable inputs; runtime consumes only the complete view and cannot repair it. |
 | `P-RV-02` | Exact semantic reproduction is attempted only after `P-RV-01`, exact executable/component equality, and OS-enforced capability denial; it reports `Matched`, `Mismatch`, or `Unavailable` without changing history or fact assurance. | The exact-reproduction service. | A separate process/boundary gates identity and invokes only admitted pure planner/state callbacks over retained inputs. | Sandbox attestation and reproduction tests check no live/store mutation authority. `Matched` is evidence about that run, not executable equivalence or authority to append. |
 | `P-RV-03` | Cross-version comparison binds one explicit candidate executable/profile/manifests and reports per-plan/per-transition `Agrees`, `Differs`, or `NotComparable` without feeding candidate outputs forward or minting authority. | The candidate-comparison diagnostic service. | It consumes an existing `VerifiedRunView`, gates candidate identity, and stops before evidence use on request/schema mismatch. | Tests verify no live capability, store append, public output, correction, fact, resume, or completeness-upgrade path exists. |
-| `P-RV-04` | Transition trace, run status, pending-effect view, certified public output, and render payload are exact purpose-specific derivations from one verified journal view and certified graph; rendered JSON and projections are non-authoritative. | The corresponding purpose-specific reader over `VerifiedRunView`. | Readers expose only their closed DTO/proof and never persist a lifecycle snapshot. | App/binary rendering compares typed evidence and access scope. Rebuilding after projection/cache loss must produce the same result. |
+| `P-RV-04` | Transition trace, run status, ready-node and pending-effect views, certified public output, and render payload are exact purpose-specific derivations from one verified journal view and certified graph; rendered JSON and projections are non-authoritative. | The corresponding purpose-specific reader over `VerifiedRunView`. | Readers expose only their closed DTO/proof and never persist a lifecycle snapshot. | App/binary rendering compares typed evidence and access scope. Rebuilding after projection/cache loss must produce the same result. |
 
 ## App authorization and purpose-bound access
 
@@ -151,7 +166,7 @@ class, and stage mapping. Source/chain/network mismatch, anchor drift, and Bitco
 | --- | --- | --- | --- | --- |
 | `P-ACL-01` | An authenticated principal may receive a particular `Admit`, `Drive`, `Replay`, `ReadPublic`, `InspectTrace`, `InspectAudit`, or `Export` grant for an exact store/tenant/run or admission candidate. | App authentication and authorization policy. | App mints a sealed, non-serializable `RunAccessAuthority<Grant>`; credentials, principals, and ACL snapshots do not enter the journal. | Kernel/store validate only token type and binding. They never consult another policy oracle or broaden a grant. Revocation prevents future minting rather than rewriting history. |
 | `P-ACL-02` | A presented run authority's grant, store scope, tenant, run/admission identity, and requested operation match exactly. | Kernel/store sealed authority-binding validator. | Every authority-bearing entry point validates before loading records, objects, or constructing drive/replay authority. | Purpose-specific app services may precheck for UX, but cannot mint a positive result when the sealed binding fails. |
-| `P-ACL-03` | Each grant dereferences only objects reachable in its reviewed closure: public output for `ReadPublic`; exact run history for `Replay`; reviewed trace/audit/export closure for privileged grants; no arbitrary object, source-run, or unselected-fact access. | The purpose-specific app/store reader. | Reachability is checked before each record/object load and result construction; record ids, digests, fact refs, run ids, and export manifests are not bearer tokens. | Trace/export/replay codecs recheck closure membership. Cross-run source dereference requires its own authority except the sealed non-disclosing fact verifier. |
+| `P-ACL-03` | Each grant dereferences only objects reachable in its reviewed closure: the single folded aggregate `PublicOutputAssembly` for `ReadPublic`; exact run history for `Replay`; reviewed trace/audit/export closure for privileged grants; no arbitrary object, producer-output, source-run, or unselected-fact access. | The purpose-specific app/store reader. | Reachability is checked before each record/object load and result construction; public-output subtrees are projected in certified binding order from the aggregate, and record ids, digests, fact refs, run ids, and export manifests are not bearer tokens. | Trace/export/replay codecs recheck closure membership. Cross-run source dereference requires its own authority except the sealed non-disclosing fact verifier. |
 | `P-ACL-04` | An offline bundle may be verified only from supplied canonical bytes and conveys no live store/object dereference, drive, append, or same-store completeness authority. The bundle/manifest contains no digest of itself; its sole transport integrity value is `SHA-256(exact final canonical bytes)` returned externally as `PortableRunExport.digest` and `Mfm-Content-Digest`. | The offline verification and purpose-bound export entry points. | Export constructs complete bytes only after deterministic closure `Complete`; verification checks the external digest then constructs only a callback-free view with portable fact assurance and no store handle or run token. | API/compile-time tests keep live store methods and `AuthorizedAccess` unreachable and reject internal/circular digests, missing/extra members, or partial closure. |
 | `P-ACL-05` | Ordinary public status exposes only `active|succeeded|failed` plus reviewed active/public-output fields; trace, audit, facts, cross-run list/watch, arbitrary objects, and manual semantic overrides are absent without separate contracts. | App public-surface contract, rendered by CLI/REST. | Opaque facade methods require `ReadPublic` and return closed DTOs; binaries only decode and render. | CLI/REST contract tests reject deleted fact/list/watch routes, implementation construction, generic object access, and “mark successful/not applied” endpoints. |
 
@@ -226,8 +241,9 @@ The accepted RFC's original ownership families map without remainder:
 
 ## Retained contract-shaping evidence
 
-These prototypes exercise the ownership cuts; they do not themselves mint production authority or
-replace the schema/golden-vector gates:
+These prototypes exercised the ownership cuts that shaped the frozen annex and corpus. They do not
+themselves mint production authority, override the frozen schema/golden-vector artifacts, or make
+the target the current implementation:
 
 - The retained
   [composite-planner prototype](../crates/kernel/certify/src/tests/composite_planner_prototype.rs)
@@ -295,20 +311,22 @@ replace the schema/golden-vector gates:
   destination-owner qualification, or production promotion/failover; those are rollout evidence
   obligations under `P-EX-08`.
 
-## Freeze rule
+## Frozen-schema rule
 
-Before schema freeze, every candidate field, constructor, decoder, verification pass, database
-constraint, and test must name the `P-*` row it enforces. A proposed check with no row is either:
+At schema freeze, every candidate field, constructor, decoder, verification pass, database
+constraint, and vector named the `P-*` row it enforces. During implementation, a proposed check
+with no row is either:
 
-1. a missing predicate that must be added here and to the accepted RFC before freeze;
+1. a missing predicate that requires a deliberate new contract version rather than a silent
+   change to v1;
 2. non-authoritative defense or telemetry that must be labeled as such; or
 3. a duplicate authority path that must be deleted.
 
-Conversely, every row must have at least one positive and one hostile/negative verification vector
-at its unavoidable trust boundary. Temporal claims that retained bytes cannot rederive—currently
-the fact-barrier freshness attestation in `P-FA-03`/`P-PG-03` and deployment writer lineage in
-`P-PG-06`—must remain explicitly qualified attestations. They must not be relabeled as portable
-proof.
+Every row has positive and hostile/negative vector obligations at its unavoidable trust boundary
+in the frozen corpus; implementation consumers must preserve and execute that coverage. Temporal
+claims that retained bytes cannot rederive—currently the fact-barrier freshness attestation in
+`P-FA-03`/`P-PG-03` and deployment writer lineage in `P-PG-06`—remain explicitly qualified
+attestations. They must not be relabeled as portable proof.
 
 ## Material uncertainties
 

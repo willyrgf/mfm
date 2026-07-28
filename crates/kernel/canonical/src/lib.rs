@@ -36,6 +36,14 @@ use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 use ring::digest::{digest, SHA256};
 use serde::de::{self, Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 
+mod recoverability_v1;
+
+pub use recoverability_v1::{
+    CanonicalReferencePathV1, RecoverabilityContractV1, RecoverabilityError,
+    RecoverabilityErrorCode, ReferenceTerminalKindV1, SchemaReferenceEdgeV1,
+    ValidatedCanonicalValueV1,
+};
+
 /// Result type for canonicalization operations.
 pub type Result<T> = std::result::Result<T, CanonicalError>;
 

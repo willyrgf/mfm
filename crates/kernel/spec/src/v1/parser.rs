@@ -102,7 +102,9 @@ fn parse_saga_policy(value: &serde_json::Value) -> Result<SagaPolicySpec> {
         "no_side_effects" => Ok(SagaPolicySpec::NoSideEffects),
         "fail_without_acdc_claim" => Ok(SagaPolicySpec::FailWithoutAcdcClaim),
         "manual_resolution" => Ok(SagaPolicySpec::ManualResolution {
-            manual: parse_manual_resolution_evidence(required(object, "manual")?)?,
+            manual: Box::new(parse_manual_resolution_evidence(required(
+                object, "manual",
+            )?)?),
         }),
         "compensate_completed" => Ok(SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved: parse_remediation_unresolved(required(

@@ -4,9 +4,9 @@ Contract id: `mfm.request-author-totality-audit.v1`
 
 This is retained pre-cutover evidence for the
 [`mfm.portfolio/snapshot@1`](recoverability-cutover-gates-v1.md#published-entry-points-and-planning-profiles)
-schema-freeze gate. It does not change the current runtime, registry, admission API, or authoritative
-design. The eventual vertical cutover must delete the aggregate readers and carry forward only the
-qualified shapes recorded here.
+schema-freeze gate closed by the commit-2 annex and corpus. It does not change the current runtime,
+registry, admission API, or authoritative design. The eventual vertical cutover must delete the
+aggregate readers and carry forward only the qualified frozen shapes recorded here.
 
 ## Closed production-state inventory
 
@@ -49,7 +49,23 @@ determinism.
 
 The current fallible `ReadState::plan` signature is not grandfathered. These tests identify the
 validation/decomposition boundary to carry into the new closed `StateExecution` callback contract;
-they do not certify the current aggregate states as schema-freeze-ready.
+they do not certify the current aggregate states as implementations of the frozen target.
+
+## Failure-policy consequence
+
+Total request authorship is also an evidence invariant. Once a checked frame has authored and
+frozen a request, a structurally admissible `request_invalid` observation cannot describe a
+retryable operating condition or domain truth; the EVM or Bitcoin state callback returns
+`InvalidEvidence`. The same applies to post-authorization route-generation and configuration
+failures, because exact qualified binding resolution must precede authorization.
+
+Cancellation, transport, unclassified failure, the exact retryable HTTP/EVM JSON-RPC sets, and
+exact Bitcoin `scan_busy` return `InsufficientEvidence`. Other classifier-admitted numeric
+destination rejections produce the frozen typed terminal read-validation failure. A response with
+no schema-valid typed result returns `InvalidEvidence`. Returned source/network/chain mismatch,
+anchor drift, and Bitcoin `scantxoutset.success = false` remain typed terminal domain failures.
+The exhaustive code/class/stage/diagnostic relationships and callback verdicts are owned by the
+RFC and shared corpus; these prototypes test only the domain-owned policy.
 
 ## Exact entry-point/profile fixture
 
@@ -79,15 +95,16 @@ again, independently reruns the private profile-aware composite graph encoding, 
 byte-identical expanded bytes plus a certificate bound to their hash. Unknown entry-point ids,
 changed profiles, omitted policy lists, cross-substituted identities, raw library drafts, and raw
 library certificates cannot mint the private admission authority. This fixture remains
-conformance-only until the schema freeze defines the production `PlanningProfile`, retained
-authored-program artifact, certificate fields, and sealed app admission boundary.
+conformance-only: the schema freeze now defines the production `PlanningProfile`, retained
+authored-program artifact, certificate fields, and sealed app admission boundary, but the current
+runtime does not adopt that authority until the atomic cutover.
 
 Every retained prototype reference and hash derives only as
 `SHA256(JCS({"domain": <prototype-local domain>, "value": <typed value>}))`. Raw-value, bare-prefix,
 NUL-prefix, and wrong-domain hashes differ and cannot satisfy the retained certificate. Strict
 envelope parsing rejects noncanonical bytes, floats, and duplicate keys. These prototype-local
-domain tags do not define the production domain registry; the canonical schema annex owns that
-registry and its shared vectors.
+domain tags do not define the production domain registry; the frozen canonical schema annex owns
+that registry and the corpus owns its shared vectors.
 
 ## Material uncertainties
 

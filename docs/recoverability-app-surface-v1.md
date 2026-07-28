@@ -1,12 +1,17 @@
 # Recoverability App, CLI, and REST Surface v1
 
-Status: target contract for the atomic cutover described by
+Status: schema-frozen target contract for the atomic cutover described by
 [`RFC_REFACTOR_RECOVERABILITY.md`](../RFC_REFACTOR_RECOVERABILITY.md)
 
 Contract id: `mfm.recoverability-app-surface.v1`
 
-This document freezes the minimal application and transport surface for recoverability v1. It is a
-contract-only companion to
+This document records the frozen minimal application and transport surface for recoverability v1.
+Its target encodings and vectors are fixed by
+`contracts/recoverability/v1/annex.json`, `contracts/recoverability/v1/corpus.json`, and
+`contracts/recoverability/v1/README.md`; exact artifact hashes and counts are recorded by
+`COMMIT2_ARTIFACT_METADATA` in the RFC's
+[Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate).
+It is a contract-only companion to
 [`recoverability-cutover-gates-v1.md`](recoverability-cutover-gates-v1.md), not a description of
 the pre-cutover implementation. The cutover replaces the old surface atomically and retains no
 compatibility commands, routes, DTOs, or readers.
@@ -14,7 +19,7 @@ compatibility commands, routes, DTOs, or readers.
 ## Canonical annex boundary
 
 The field names, variants, route shapes, command shapes, authorization purposes, and disclosure
-rules below are fixed. The canonical schema annex still owns:
+rules below are fixed. The frozen canonical schema annex owns:
 
 - textual encodings of typed identifiers, content digests, journal heads, and references;
 - canonical bytes and content addresses of planning profiles and other hashed structures;
@@ -569,6 +574,63 @@ CrossRunRedactedLineage {
 and has `value: null`. An authorized same-tenant source is dereferenced only after the separate
 source-run `InspectTrace` decision. Every retained value is inlined through this enclosing reader;
 there is no follow-up object endpoint.
+`source_ref_digest` is the `mfm.cross-run-source-redaction.v1` semantic digest of the complete,
+annex-validated `mfm.cross-run-source-ref.v1` tagged value:
+
+```text
+SHA-256(JCS({
+    "domain": "mfm.cross-run-source-redaction.v1",
+    "value": exact_cross_run_source_ref,
+}))
+```
+
+The preimage includes the selected source-reference variant and all of its fields. It excludes the
+destination input's separately rendered `source_field_path`. The destination reader derives the
+digest from its verified input manifest before source authorization or dereference; it never
+substitutes a source-run id, source-closure digest, retained-content digest, or selected source
+object.
+
+A retained `ValueRef` is inlined only after the reader rechecks its selected reachability,
+producer binding, certified contract, schema, media type, byte length, and raw content digest.
+The rendered `schema_id`, `digest`, and `media_type` are the exact verified reference fields.
+`application/json` bytes must already be canonical JSON and use the `canonical_json`
+`AnnexEncodedValue` variant. Every other admitted media type uses `bytes` with canonical unpadded
+base64url. Invalid JSON never falls back to the byte variant.
+
+`consumed_observation` is not the returned or diagnostic object alone. For `ReadSettled` and
+`EffectSettled`, it is the exact consumed `mfm.external-access-observed.v1` journal payload wrapped
+for this trace as a `RetainedValue`: that contract's annex schema id, the raw content digest of the
+payload's exact canonical bytes, media type `application/json`, and canonical-JSON content. This
+preserves the `Returned`, `DidNotEnter`, or `Indeterminate` outcome and its safe-failure metadata.
+The wrapper is not persisted, receives no synthetic `ValueRef`, and grants no object authority.
+
+The remaining retained fields have one variant-specific projection:
+
+| Transition | `request` | `result` | `evidence` |
+| --- | --- | --- | --- |
+| `PureSettled` | null | exact typed failure on failed settlement; otherwise null | empty |
+| `ReadSettled` | exact `request_ref` value | exact typed failure on failed settlement; otherwise null | returned value at `outcome.result_ref`, plus an optional `fact_selection_scan_attestation_ref`; or the safe-failure diagnostic at `outcome.safe_failure.diagnostic_ref` |
+| `EffectRequested` | exact `semantic_request_ref` value | null | empty |
+| `EffectSettled` | exact semantic request from its verified referenced `EffectRequested` | exact typed failure on failed settlement; otherwise null | terminal ensure result, terminal evidence, and the complete verified executor retained closure reached through the consumed observation |
+| `DependencySkipped` | null | null | empty |
+
+An effect settlement accepts only its exact returned terminal ensure result. A safe failure,
+pending ensure result, wrong request transition, or mismatched authorization, effect, or request
+identity fails integrity verification. Its evidence contains each verified external-observation
+producer path exactly once: `executor.ensure_result`, `executor.terminal_evidence`, and all reached
+members under `executor.delivery_audit.<content-digest>`, `executor.frontier.<content-digest>`,
+`executor.terminal_tombstone.<content-digest>`, `executor.terminal_proof.<content-digest>`, and
+`executor.domain_evidence.<content-digest>`. It is a typed transitive closure, not a scan of
+arbitrary same-authorization objects.
+
+Every evidence item uses its exact external-observation producer field path as `name`, a null
+`ordinal`, and annex `field:name` ordering. Output items use their certified output field path as
+`name`, their exact output ordinal, and certified binding order. Facts use the exact emission
+ordinal and dereference the exact claim envelope, subject, and response authorities. A successful
+settlement has `result: null`; its success material exists only in outputs and facts. A failed
+settlement has no outputs or facts, but retains the observation evidence that caused the failed
+callback. Only the observation named by the settlement is projected; earlier, insufficient,
+failed, or unmatched observations remain audit-only.
 
 ### External-access audit request and response
 
@@ -702,7 +764,7 @@ The EVM and Bitcoin mappings are:
 | `transport_failed` after possible entry | `Indeterminate` | `transport` | `boundary_entry` | none |
 | `http_status` | `Indeterminate` | `destination` | `boundary_observation` | `HttpStatus` |
 | `json_rpc_error` | `Indeterminate` | `destination` | `boundary_observation` | `JsonRpcError` |
-| `response_invalid` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid` |
+| `response_invalid` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { malformed_envelope \| invalid_result }` |
 | `response_missing_result` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { missing_result }` |
 | `response_too_large` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { too_large }` |
 | `unclassified_failure` | `Indeterminate` | `unclassified` | `boundary_observation` | none |
@@ -715,6 +777,44 @@ Bitcoin uses the same retryable HTTP set. `scan_busy` is exactly
 `Indeterminate/destination/boundary_observation/ScanBusy` and requires the reviewed Bitcoin Core
 code `-8` and exact-message classifier; a near match is `json_rpc_error`. It is the only retryable
 Bitcoin JSON-RPC result in v1.
+
+The state callback policy is also closed; wrapper-shape validity alone does not decide semantic
+sufficiency:
+
+| Safe-failure condition | EVM callback verdict | Bitcoin callback verdict |
+| --- | --- | --- |
+| `routing_generation_unavailable`, `configuration_invalid`, or `request_invalid` | `InvalidEvidence` | `InvalidEvidence` |
+| either legal `access_cancelled` or `transport_failed` stage | `InsufficientEvidence` | `InsufficientEvidence` |
+| `http_status` in the exact retryable set | `InsufficientEvidence` | `InsufficientEvidence` |
+| any other classifier-admitted HTTP `u16` | typed terminal read-validation failure | typed terminal read-validation failure |
+| `json_rpc_error` in the exact EVM retryable set | `InsufficientEvidence` | typed terminal read-validation failure |
+| any other classifier-admitted JSON-RPC `i64` | typed terminal read-validation failure | typed terminal read-validation failure |
+| exact `scan_busy` | not admitted | `InsufficientEvidence` |
+| `response_invalid`, `response_missing_result`, or `response_too_large` | `InvalidEvidence` | `InvalidEvidence` |
+| `unclassified_failure` | `InsufficientEvidence` | `InsufficientEvidence` |
+
+The route/configuration/request rows are post-authorization invariant violations: exact route and
+configuration resolution must already have succeeded, and request authorship is total over a
+checked frame. The response-invalid rows contain no schema-valid typed result. These rows block;
+they do not become a retry or an invented domain failure. `response_invalid` admits only
+`malformed_envelope` or `invalid_result`; `response_missing_result` and `response_too_large`
+exclusively admit their homonymous diagnostic kinds. A wrong contract reference, code/class/stage,
+diagnostic pairing, or size combination rejects structurally before the callback.
+
+The only typed terminal read-failure values are:
+
+```text
+{ version: "mfm.evm-read-terminal-failure.v1",
+  kind: destination_rejected | source_mismatch | anchor_changed }
+
+{ version: "mfm.bitcoin-read-terminal-failure.v1",
+  kind: destination_rejected | source_mismatch | scan_incomplete | anchor_changed }
+```
+
+They contain no numeric status/code, source, chain, network, anchor, provider text, or diagnostic;
+the consumed observation remains the evidence. Only a nonretryable numeric destination rejection
+uses `destination_rejected`. EVM chain mismatch and Bitcoin network mismatch use
+`source_mismatch`; `scantxoutset.success = false` uses `scan_incomplete`.
 
 Observed EVM source/chain mismatch and anchor drift, and Bitcoin source/network mismatch, anchor
 drift, and `scantxoutset.success = false`, are bounded `Returned` typed semantic failures rather
@@ -850,7 +950,7 @@ These assumptions affect deployment readiness, not the logical app or transport 
 
 ## Material uncertainties
 
-None. The canonical annex and shared golden-vector corpus remain required artifacts before schema
-freeze, but the ownership and logical choices they must encode are fixed above. The rollout
-assumptions block deployment or capability registration rather than opening an alternate app,
-CLI, REST, digest, reference, or executor contract.
+None. The canonical annex and shared golden-vector corpus close the target schema gate without
+making this the current app, CLI, or REST implementation. The rollout assumptions remain open and
+block deployment or capability registration rather than opening an alternate app, CLI, REST,
+digest, reference, or executor contract.

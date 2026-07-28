@@ -9,9 +9,12 @@ mod planner;
 #[path = "composite_planner_prototype/terminal.rs"]
 mod terminal;
 
+use mfm_canonical::RecoverabilityContractV1;
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes};
 use planner::{
     expand, AuthoredNode, AuthoredProgram, Execution, ExecutionKind, ExecutorCatalog,
     ExecutorExpansion, FrameworkPolicy, InjectedState, PlanningProfile, PrototypePlanError,
+    ReviewedContractRef,
 };
 use std::collections::BTreeMap;
 use terminal::{
@@ -22,6 +25,34 @@ use terminal::{
 const LEAF_EXECUTOR: &str = "executor.leaf.v1";
 const AUDIT_EXECUTOR: &str = "executor.audit.v1";
 const MAIN_EXECUTOR: &str = "executor.main.v1";
+
+fn reviewed_contract_ref(label: &str, fixture_tag: u8) -> ReviewedContractRef {
+    let contract = RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+    let schema_id = contract
+        .schema_id("mfm.component-implementation-descriptor.v1")
+        .expect("registered component descriptor schema")
+        .clone();
+    let content_digest = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        DigestBytes::from_array([fixture_tag; 32]),
+    );
+    ReviewedContractRef::new(
+        label,
+        ContentRef::new(schema_id, content_digest).expect("reviewed fixture content ref"),
+    )
+}
+
+fn leaf_executor_ref() -> ReviewedContractRef {
+    reviewed_contract_ref(LEAF_EXECUTOR, 0xe1)
+}
+
+fn audit_executor_ref() -> ReviewedContractRef {
+    reviewed_contract_ref(AUDIT_EXECUTOR, 0xe2)
+}
+
+fn main_executor_ref() -> ReviewedContractRef {
+    reviewed_contract_ref(MAIN_EXECUTOR, 0xe3)
+}
 
 #[test]
 fn composite_expansion_covers_authored_shapes_and_stable_path_ordinals() {
@@ -195,7 +226,7 @@ fn framework_outer_executor_inner_expansion_rewires_only_final_outputs() {
 
 #[test]
 fn executor_expansion_rejects_unresolved_non_leaf_and_cyclic_fragments() {
-    let authored = effect_only_program(MAIN_EXECUTOR);
+    let authored = effect_only_program(main_executor_ref());
     let missing = ExecutorCatalog::default();
     assert_eq!(
         expand(&authored, &PlanningProfile::default(), &missing),
@@ -205,11 +236,11 @@ fn executor_expansion_rejects_unresolved_non_leaf_and_cyclic_fragments() {
     );
 
     let unresolved_nested = ExecutorCatalog::new([(
-        MAIN_EXECUTOR,
+        main_executor_ref(),
         ExecutorExpansion::Chain {
             pre: vec![InjectedState::new(
-                "executor.needs.missing",
-                Execution::effect("executor.missing.v1"),
+                reviewed_contract_ref("executor.needs.missing", 0x70),
+                Execution::effect(reviewed_contract_ref("executor.missing.v1", 0xe4)),
             )],
             post: Vec::new(),
         },
@@ -223,20 +254,20 @@ fn executor_expansion_rejects_unresolved_non_leaf_and_cyclic_fragments() {
 
     let non_leaf = ExecutorCatalog::new([
         (
-            MAIN_EXECUTOR,
+            main_executor_ref(),
             ExecutorExpansion::Chain {
                 pre: vec![InjectedState::new(
-                    "executor.recursive",
-                    Execution::effect(AUDIT_EXECUTOR),
+                    reviewed_contract_ref("executor.recursive", 0x71),
+                    Execution::effect(audit_executor_ref()),
                 )],
                 post: Vec::new(),
             },
         ),
         (
-            AUDIT_EXECUTOR,
+            audit_executor_ref(),
             ExecutorExpansion::Chain {
                 pre: vec![InjectedState::new(
-                    "executor.audit.prepare",
+                    reviewed_contract_ref("executor.audit.prepare", 0x72),
                     Execution::Pure,
                 )],
                 post: Vec::new(),
@@ -253,21 +284,21 @@ fn executor_expansion_rejects_unresolved_non_leaf_and_cyclic_fragments() {
 
     let cyclic = ExecutorCatalog::new([
         (
-            MAIN_EXECUTOR,
+            main_executor_ref(),
             ExecutorExpansion::Chain {
                 pre: vec![InjectedState::new(
-                    "executor.to.audit",
-                    Execution::effect(AUDIT_EXECUTOR),
+                    reviewed_contract_ref("executor.to.audit", 0x73),
+                    Execution::effect(audit_executor_ref()),
                 )],
                 post: Vec::new(),
             },
         ),
         (
-            AUDIT_EXECUTOR,
+            audit_executor_ref(),
             ExecutorExpansion::Chain {
                 pre: vec![InjectedState::new(
-                    "executor.to.main",
-                    Execution::effect(MAIN_EXECUTOR),
+                    reviewed_contract_ref("executor.to.main", 0x74),
+                    Execution::effect(main_executor_ref()),
                 )],
                 post: Vec::new(),
             },
@@ -421,7 +452,7 @@ fn authored_program(reverse: bool) -> AuthoredProgram {
             "normalize",
             Vec::<String>::new(),
             "normalize",
-            "domain.normalize",
+            reviewed_contract_ref("domain.normalize", 0x01),
             Execution::Pure,
             Vec::<String>::new(),
         ),
@@ -429,7 +460,7 @@ fn authored_program(reverse: bool) -> AuthoredProgram {
             "read-alpha",
             ["branch-alpha"],
             "read",
-            "domain.read.alpha",
+            reviewed_contract_ref("domain.read.alpha", 0x02),
             Execution::Read,
             ["normalize"],
         ),
@@ -437,14 +468,14 @@ fn authored_program(reverse: bool) -> AuthoredProgram {
             "bridge-alpha",
             ["branch-alpha"],
             "export",
-            "framework.bridge",
+            reviewed_contract_ref("framework.bridge", 0x03),
             "read-alpha",
         ),
         AuthoredNode::state(
             "read-beta",
             ["branch-beta"],
             "read",
-            "domain.read.beta",
+            reviewed_contract_ref("domain.read.beta", 0x04),
             Execution::Read,
             ["normalize"],
         ),
@@ -452,14 +483,14 @@ fn authored_program(reverse: bool) -> AuthoredProgram {
             "bridge-beta",
             ["branch-beta"],
             "export",
-            "framework.bridge",
+            reviewed_contract_ref("framework.bridge", 0x03),
             "read-beta",
         ),
         AuthoredNode::state(
             "join",
             Vec::<String>::new(),
             "join",
-            "domain.join",
+            reviewed_contract_ref("domain.join", 0x06),
             Execution::Pure,
             ["bridge-alpha", "bridge-beta"],
         ),
@@ -467,8 +498,8 @@ fn authored_program(reverse: bool) -> AuthoredProgram {
             "send",
             Vec::<String>::new(),
             "send",
-            "domain.send",
-            Execution::effect(MAIN_EXECUTOR),
+            reviewed_contract_ref("domain.send", 0x07),
+            Execution::effect(main_executor_ref()),
             ["join"],
         ),
     ];
@@ -478,13 +509,13 @@ fn authored_program(reverse: bool) -> AuthoredProgram {
     AuthoredProgram::new(nodes, [("result", "send")])
 }
 
-fn effect_only_program(executor_contract_ref: &str) -> AuthoredProgram {
+fn effect_only_program(executor_contract_ref: ReviewedContractRef) -> AuthoredProgram {
     AuthoredProgram::new(
         vec![AuthoredNode::state(
             "effect",
             Vec::<String>::new(),
             "effect",
-            "domain.effect",
+            reviewed_contract_ref("domain.effect", 0x08),
             Execution::effect(executor_contract_ref),
             Vec::<String>::new(),
         )],
@@ -494,40 +525,52 @@ fn effect_only_program(executor_contract_ref: &str) -> AuthoredProgram {
 
 fn planning_profile() -> PlanningProfile {
     PlanningProfile::new(vec![FrameworkPolicy::new(
-        "policy.guard.v1",
+        reviewed_contract_ref("policy.guard.v1", 0xd1),
         [
-            "domain.normalize",
-            "domain.read.alpha",
-            "domain.read.beta",
-            "domain.join",
-            "domain.send",
+            reviewed_contract_ref("domain.normalize", 0x01),
+            reviewed_contract_ref("domain.read.alpha", 0x02),
+            reviewed_contract_ref("domain.read.beta", 0x04),
+            reviewed_contract_ref("domain.join", 0x06),
+            reviewed_contract_ref("domain.send", 0x07),
         ],
         vec![InjectedState::new(
-            "framework.audit.effect",
-            Execution::effect(AUDIT_EXECUTOR),
+            reviewed_contract_ref("framework.audit.effect", 0x20),
+            Execution::effect(audit_executor_ref()),
         )],
-        vec![InjectedState::new("framework.release", Execution::Pure)],
+        vec![InjectedState::new(
+            reviewed_contract_ref("framework.release", 0x21),
+            Execution::Pure,
+        )],
     )])
 }
 
 fn executor_catalog() -> ExecutorCatalog {
     ExecutorCatalog::new([
-        (LEAF_EXECUTOR, ExecutorExpansion::Leaf),
+        (leaf_executor_ref(), ExecutorExpansion::Leaf),
         (
-            AUDIT_EXECUTOR,
+            audit_executor_ref(),
             ExecutorExpansion::Chain {
                 pre: vec![InjectedState::new(
-                    "executor.audit.prepare",
-                    Execution::effect(LEAF_EXECUTOR),
+                    reviewed_contract_ref("executor.audit.prepare", 0x30),
+                    Execution::effect(leaf_executor_ref()),
                 )],
-                post: vec![InjectedState::new("executor.audit.finish", Execution::Pure)],
+                post: vec![InjectedState::new(
+                    reviewed_contract_ref("executor.audit.finish", 0x31),
+                    Execution::Pure,
+                )],
             },
         ),
         (
-            MAIN_EXECUTOR,
+            main_executor_ref(),
             ExecutorExpansion::Chain {
-                pre: vec![InjectedState::new("executor.main.prepare", Execution::Pure)],
-                post: vec![InjectedState::new("executor.main.confirm", Execution::Read)],
+                pre: vec![InjectedState::new(
+                    reviewed_contract_ref("executor.main.prepare", 0x32),
+                    Execution::Pure,
+                )],
+                post: vec![InjectedState::new(
+                    reviewed_contract_ref("executor.main.confirm", 0x33),
+                    Execution::Read,
+                )],
             },
         ),
     ])

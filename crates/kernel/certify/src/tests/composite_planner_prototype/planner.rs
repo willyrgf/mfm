@@ -1,22 +1,66 @@
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_ids::{DigestAlgorithm, NodeId};
-use serde::Deserialize;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV1};
+use mfm_ids::{ContentRef, DigestAlgorithm, NodeId};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-const NODE_IDENTITY_DOMAIN: &str = "mfm.node-occurrence.v1";
 const NODE_IDENTITY_CONTRACT_VERSION: &str = "mfm.node-occurrence.v1";
+
+#[derive(Debug, Clone)]
+pub(super) struct ReviewedContractRef {
+    label: String,
+    content_ref: ContentRef,
+}
+
+impl ReviewedContractRef {
+    pub(super) fn new(label: impl Into<String>, content_ref: ContentRef) -> Self {
+        Self {
+            label: label.into(),
+            content_ref,
+        }
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
+}
+
+impl PartialEq for ReviewedContractRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.content_ref == other.content_ref
+    }
+}
+
+impl Eq for ReviewedContractRef {}
+
+impl PartialOrd for ReviewedContractRef {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ReviewedContractRef {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.content_ref.cmp(&other.content_ref)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Execution {
     Pure,
     Read,
-    Effect { executor_contract_ref: String },
+    Effect {
+        executor_contract_ref: Box<ReviewedContractRef>,
+    },
 }
 
 impl Execution {
-    pub(super) fn effect(executor_contract_ref: impl Into<String>) -> Self {
+    pub(super) fn effect(executor_contract_ref: ReviewedContractRef) -> Self {
         Self::Effect {
-            executor_contract_ref: executor_contract_ref.into(),
+            executor_contract_ref: Box::new(executor_contract_ref),
         }
     }
 
@@ -28,11 +72,11 @@ impl Execution {
         }
     }
 
-    fn executor_contract_ref(&self) -> Option<&str> {
+    fn executor_contract_ref(&self) -> Option<&ReviewedContractRef> {
         match self {
             Self::Effect {
                 executor_contract_ref,
-            } => Some(executor_contract_ref),
+            } => Some(executor_contract_ref.as_ref()),
             Self::Pure | Self::Read => None,
         }
     }
@@ -65,7 +109,7 @@ pub(super) struct AuthoredNode {
     logical_output: String,
     child_scopes: Vec<String>,
     stable_key: String,
-    state_contract_ref: String,
+    state_contract_ref: ReviewedContractRef,
     execution: Execution,
     input_outputs: Vec<String>,
     kind: AuthoredKind,
@@ -76,7 +120,7 @@ impl AuthoredNode {
         logical_output: impl Into<String>,
         child_scopes: impl IntoIterator<Item = impl Into<String>>,
         stable_key: impl Into<String>,
-        state_contract_ref: impl Into<String>,
+        state_contract_ref: ReviewedContractRef,
         execution: Execution,
         input_outputs: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
@@ -84,7 +128,7 @@ impl AuthoredNode {
             logical_output: logical_output.into(),
             child_scopes: child_scopes.into_iter().map(Into::into).collect(),
             stable_key: stable_key.into(),
-            state_contract_ref: state_contract_ref.into(),
+            state_contract_ref,
             execution,
             input_outputs: input_outputs.into_iter().map(Into::into).collect(),
             kind: AuthoredKind::State,
@@ -95,14 +139,14 @@ impl AuthoredNode {
         logical_output: impl Into<String>,
         child_scopes: impl IntoIterator<Item = impl Into<String>>,
         stable_key: impl Into<String>,
-        state_contract_ref: impl Into<String>,
+        state_contract_ref: ReviewedContractRef,
         input_output: impl Into<String>,
     ) -> Self {
         Self {
             logical_output: logical_output.into(),
             child_scopes: child_scopes.into_iter().map(Into::into).collect(),
             stable_key: stable_key.into(),
-            state_contract_ref: state_contract_ref.into(),
+            state_contract_ref,
             execution: Execution::Pure,
             input_outputs: vec![input_output.into()],
             kind: AuthoredKind::Bridge,
@@ -133,14 +177,14 @@ impl AuthoredProgram {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InjectedState {
-    state_contract_ref: String,
+    state_contract_ref: ReviewedContractRef,
     execution: Execution,
 }
 
 impl InjectedState {
-    pub(super) fn new(state_contract_ref: impl Into<String>, execution: Execution) -> Self {
+    pub(super) fn new(state_contract_ref: ReviewedContractRef, execution: Execution) -> Self {
         Self {
-            state_contract_ref: state_contract_ref.into(),
+            state_contract_ref,
             execution,
         }
     }
@@ -148,32 +192,33 @@ impl InjectedState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FrameworkPolicy {
-    policy_ref: String,
-    eligible_state_contracts: BTreeSet<String>,
+    policy_ref: ReviewedContractRef,
+    eligible_state_contracts: BTreeSet<ContentRef>,
     pre: Vec<InjectedState>,
     post: Vec<InjectedState>,
 }
 
 impl FrameworkPolicy {
     pub(super) fn new(
-        policy_ref: impl Into<String>,
-        eligible_state_contracts: impl IntoIterator<Item = impl Into<String>>,
+        policy_ref: ReviewedContractRef,
+        eligible_state_contracts: impl IntoIterator<Item = ReviewedContractRef>,
         pre: Vec<InjectedState>,
         post: Vec<InjectedState>,
     ) -> Self {
         Self {
-            policy_ref: policy_ref.into(),
+            policy_ref,
             eligible_state_contracts: eligible_state_contracts
                 .into_iter()
-                .map(Into::into)
+                .map(|contract_ref| contract_ref.content_ref)
                 .collect(),
             pre,
             post,
         }
     }
 
-    fn applies_to(&self, state_contract_ref: &str) -> bool {
-        self.eligible_state_contracts.contains(state_contract_ref)
+    fn applies_to(&self, state_contract_ref: &ReviewedContractRef) -> bool {
+        self.eligible_state_contracts
+            .contains(state_contract_ref.content_ref())
     }
 }
 
@@ -199,17 +244,17 @@ pub(super) enum ExecutorExpansion {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ExecutorCatalog {
-    contracts: BTreeMap<String, ExecutorExpansion>,
+    contracts: BTreeMap<ContentRef, ExecutorExpansion>,
 }
 
 impl ExecutorCatalog {
     pub(super) fn new(
-        contracts: impl IntoIterator<Item = (impl Into<String>, ExecutorExpansion)>,
+        contracts: impl IntoIterator<Item = (ReviewedContractRef, ExecutorExpansion)>,
     ) -> Self {
         Self {
             contracts: contracts
                 .into_iter()
-                .map(|(contract_ref, expansion)| (contract_ref.into(), expansion))
+                .map(|(contract_ref, expansion)| (contract_ref.content_ref, expansion))
                 .collect(),
         }
     }
@@ -253,28 +298,28 @@ enum PathStep {
         ordinal: usize,
     },
     FrameworkPre {
-        policy_ref: String,
+        policy_ref: ReviewedContractRef,
         policy_ordinal: usize,
         state_ordinal: usize,
     },
     FrameworkProtected {
-        policy_ref: String,
+        policy_ref: ReviewedContractRef,
         policy_ordinal: usize,
     },
     FrameworkPost {
-        policy_ref: String,
+        policy_ref: ReviewedContractRef,
         policy_ordinal: usize,
         state_ordinal: usize,
     },
     ExecutorPre {
-        executor_contract_ref: String,
+        executor_contract_ref: ReviewedContractRef,
         state_ordinal: usize,
     },
     ExecutorProtected {
-        executor_contract_ref: String,
+        executor_contract_ref: ReviewedContractRef,
     },
     ExecutorPost {
-        executor_contract_ref: String,
+        executor_contract_ref: ReviewedContractRef,
         state_ordinal: usize,
     },
 }
@@ -316,7 +361,7 @@ impl PathStep {
             } => serde_json::json!({
                 "kind": "framework_pre",
                 "policy_ordinal": policy_ordinal,
-                "policy_ref": policy_ref,
+                "policy_ref": policy_ref.content_ref(),
                 "state_ordinal": state_ordinal,
             }),
             Self::FrameworkProtected {
@@ -325,7 +370,7 @@ impl PathStep {
             } => serde_json::json!({
                 "kind": "framework_protected",
                 "policy_ordinal": policy_ordinal,
-                "policy_ref": policy_ref,
+                "policy_ref": policy_ref.content_ref(),
             }),
             Self::FrameworkPost {
                 policy_ref,
@@ -334,28 +379,28 @@ impl PathStep {
             } => serde_json::json!({
                 "kind": "framework_post",
                 "policy_ordinal": policy_ordinal,
-                "policy_ref": policy_ref,
+                "policy_ref": policy_ref.content_ref(),
                 "state_ordinal": state_ordinal,
             }),
             Self::ExecutorPre {
                 executor_contract_ref,
                 state_ordinal,
             } => serde_json::json!({
-                "executor_contract_ref": executor_contract_ref,
+                "executor_contract_ref": executor_contract_ref.content_ref(),
                 "kind": "executor_pre",
                 "state_ordinal": state_ordinal,
             }),
             Self::ExecutorProtected {
                 executor_contract_ref,
             } => serde_json::json!({
-                "executor_contract_ref": executor_contract_ref,
+                "executor_contract_ref": executor_contract_ref.content_ref(),
                 "kind": "executor_protected",
             }),
             Self::ExecutorPost {
                 executor_contract_ref,
                 state_ordinal,
             } => serde_json::json!({
-                "executor_contract_ref": executor_contract_ref,
+                "executor_contract_ref": executor_contract_ref.content_ref(),
                 "kind": "executor_post",
                 "state_ordinal": state_ordinal,
             }),
@@ -381,27 +426,42 @@ impl PathStep {
                 policy_ref,
                 policy_ordinal,
                 state_ordinal,
-            } => format!("framework-pre[{policy_ordinal}:{state_ordinal}]={policy_ref}"),
+            } => format!(
+                "framework-pre[{policy_ordinal}:{state_ordinal}]={}",
+                policy_ref.label()
+            ),
             Self::FrameworkProtected {
                 policy_ref,
                 policy_ordinal,
-            } => format!("framework-protected[{policy_ordinal}]={policy_ref}"),
+            } => format!(
+                "framework-protected[{policy_ordinal}]={}",
+                policy_ref.label()
+            ),
             Self::FrameworkPost {
                 policy_ref,
                 policy_ordinal,
                 state_ordinal,
-            } => format!("framework-post[{policy_ordinal}:{state_ordinal}]={policy_ref}"),
+            } => format!(
+                "framework-post[{policy_ordinal}:{state_ordinal}]={}",
+                policy_ref.label()
+            ),
             Self::ExecutorPre {
                 executor_contract_ref,
                 state_ordinal,
-            } => format!("executor-pre[{state_ordinal}]={executor_contract_ref}"),
+            } => format!(
+                "executor-pre[{state_ordinal}]={}",
+                executor_contract_ref.label()
+            ),
             Self::ExecutorProtected {
                 executor_contract_ref,
-            } => format!("executor-protected={executor_contract_ref}"),
+            } => format!("executor-protected={}", executor_contract_ref.label()),
             Self::ExecutorPost {
                 executor_contract_ref,
                 state_ordinal,
-            } => format!("executor-post[{state_ordinal}]={executor_contract_ref}"),
+            } => format!(
+                "executor-post[{state_ordinal}]={}",
+                executor_contract_ref.label()
+            ),
         }
     }
 }
@@ -464,7 +524,7 @@ enum PendingSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingNode {
     path: CanonicalExpansionPath,
-    state_contract_ref: String,
+    state_contract_ref: ReviewedContractRef,
     execution: Execution,
     inputs: Vec<PendingSource>,
     authored_output: String,
@@ -552,7 +612,7 @@ pub(super) fn expand(
             Ok(ExpandedNode {
                 node_id: ids[index].clone(),
                 path: node.path,
-                state_contract_ref: node.state_contract_ref,
+                state_contract_ref: node.state_contract_ref.label,
                 execution: node.execution.kind(),
                 input_nodes,
                 authored_output: node.authored_output,
@@ -905,7 +965,7 @@ fn push_pending(
 }
 
 fn ensure_fragment_executor_is_leaf(
-    parent: &str,
+    parent: &ReviewedContractRef,
     state: &InjectedState,
     executors: &ExecutorCatalog,
 ) -> Result<(), PrototypePlanError> {
@@ -913,37 +973,40 @@ fn ensure_fragment_executor_is_leaf(
         return Ok(());
     };
     let expansion =
-        resolve_executor_expansion(nested, executors, &mut vec![parent.to_owned()], false)?;
+        resolve_executor_expansion(nested, executors, &mut vec![parent.clone()], false)?;
     if matches!(expansion, ExecutorExpansion::Leaf) {
         Ok(())
     } else {
         Err(PrototypePlanError::NonLeafExecutor {
-            parent: parent.to_owned(),
-            nested: nested.to_owned(),
+            parent: parent.label().to_owned(),
+            nested: nested.label().to_owned(),
         })
     }
 }
 
 fn resolve_executor_expansion<'a>(
-    contract_ref: &str,
+    contract_ref: &ReviewedContractRef,
     executors: &'a ExecutorCatalog,
-    stack: &mut Vec<String>,
+    stack: &mut Vec<ReviewedContractRef>,
     root: bool,
 ) -> Result<&'a ExecutorExpansion, PrototypePlanError> {
     if let Some(cycle_start) = stack.iter().position(|entry| entry == contract_ref) {
-        let mut cycle = stack[cycle_start..].to_vec();
-        cycle.push(contract_ref.to_owned());
+        let mut cycle = stack[cycle_start..]
+            .iter()
+            .map(|entry| entry.label().to_owned())
+            .collect::<Vec<_>>();
+        cycle.push(contract_ref.label().to_owned());
         return Err(PrototypePlanError::ExecutorCycle(cycle));
     }
     let expansion = executors
         .contracts
-        .get(contract_ref)
-        .ok_or_else(|| PrototypePlanError::UnresolvedExecutor(contract_ref.to_owned()))?;
+        .get(contract_ref.content_ref())
+        .ok_or_else(|| PrototypePlanError::UnresolvedExecutor(contract_ref.label().to_owned()))?;
     if matches!(expansion, ExecutorExpansion::Leaf) {
         return Ok(expansion);
     }
 
-    stack.push(contract_ref.to_owned());
+    stack.push(contract_ref.clone());
     if let ExecutorExpansion::Chain { pre, post } = expansion {
         for state in pre.iter().chain(post) {
             let Some(nested) = state.execution.executor_contract_ref() else {
@@ -953,8 +1016,8 @@ fn resolve_executor_expansion<'a>(
             if !root && !matches!(nested_expansion, ExecutorExpansion::Leaf) {
                 stack.pop();
                 return Err(PrototypePlanError::NonLeafExecutor {
-                    parent: contract_ref.to_owned(),
-                    nested: nested.to_owned(),
+                    parent: contract_ref.label().to_owned(),
+                    nested: nested.label().to_owned(),
                 });
             }
         }
@@ -965,91 +1028,146 @@ fn resolve_executor_expansion<'a>(
 
 fn final_node_id(
     path: &CanonicalExpansionPath,
-    state_contract_ref: &str,
+    state_contract_ref: &ReviewedContractRef,
 ) -> Result<NodeId, PrototypePlanError> {
+    let contract = RecoverabilityContractV1::embedded()
+        .map_err(|error| PrototypePlanError::CanonicalIdentity(error.to_string()))?;
+    let domain = "mfm.node-occurrence.v1";
+    let (preimage_schema, result_kind) = contract
+        .domain_contract(domain)
+        .map_err(|error| PrototypePlanError::CanonicalIdentity(error.to_string()))?;
+    if result_kind != "node_id" {
+        return Err(PrototypePlanError::CanonicalIdentity(
+            "registered node occurrence domain has the wrong result kind".to_owned(),
+        ));
+    }
+
     let path_json = path.canonical_json()?;
     let path_value: serde_json::Value = serde_json::from_slice(path_json.as_bytes())
         .map_err(|error| PrototypePlanError::CanonicalIdentity(error.to_string()))?;
     let preimage = serde_json::json!({
         "canonical_expansion_path": path_value,
         "identity_contract_version": NODE_IDENTITY_CONTRACT_VERSION,
-        "state_contract_ref": state_contract_ref,
+        "state_contract_ref": state_contract_ref.content_ref(),
     });
-    let envelope = serde_json::json!({
-        "domain": NODE_IDENTITY_DOMAIN,
-        "value": preimage,
-    });
-    let envelope = serde_json::to_string(&envelope)
+    let preimage = serde_json::to_string(&preimage)
         .map_err(|error| PrototypePlanError::CanonicalIdentity(error.to_string()))?;
-    let canonical = PlainCanonicalJsonBytes::from_json_str(&envelope)
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&preimage)
         .map_err(|error| PrototypePlanError::CanonicalIdentity(error.to_string()))?;
-    node_id_from_canonical_envelope(canonical.as_bytes())
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PrototypeDigestEnvelope {
-    domain: String,
-    value: serde_json::Value,
-}
-
-fn node_id_from_canonical_envelope(bytes: &[u8]) -> Result<NodeId, PrototypePlanError> {
-    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+    let validated = contract
+        .strict_decode(preimage_schema, canonical.as_bytes())
         .map_err(|error| PrototypePlanError::CanonicalIdentity(error.to_string()))?;
-    let envelope: PrototypeDigestEnvelope = serde_json::from_slice(canonical.as_bytes())
+    let digest = contract
+        .semantic_digest(domain, &validated)
         .map_err(|error| PrototypePlanError::CanonicalIdentity(error.to_string()))?;
-    if envelope.domain != NODE_IDENTITY_DOMAIN {
-        return Err(PrototypePlanError::CanonicalIdentity(
-            "node identity digest domain mismatch".to_owned(),
-        ));
-    }
-    let _ = envelope.value;
     Ok(NodeId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        canonical.digest_bytes(),
+        *digest.digest(),
     ))
 }
 
 #[test]
-fn node_identity_digest_uses_one_canonical_domain_value_envelope() {
-    let path = CanonicalExpansionPath::entry_point();
+fn node_identity_digest_uses_registered_contract_and_shared_corpus() {
+    let contract = RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+    let corpus: serde_json::Value = serde_json::from_slice(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../contracts/recoverability/v1/corpus.json"
+    )))
+    .expect("shared recoverability corpus");
+    let corpus_vector = corpus["positive_vectors"]
+        .as_array()
+        .expect("positive corpus vectors")
+        .iter()
+        .find(|vector| vector["id"] == "domain/mfm.node-occurrence.v1/minimum")
+        .expect("registered node-occurrence corpus vector");
+    let corpus_value_bytes = decode_corpus_hex(
+        corpus_vector["value_hex"]
+            .as_str()
+            .expect("node corpus value hex"),
+    );
+    let corpus_validated = contract
+        .strict_decode(
+            corpus_vector["preimage_schema"]
+                .as_str()
+                .expect("node corpus preimage schema"),
+            &corpus_value_bytes,
+        )
+        .expect("shared corpus node preimage");
+    let corpus_digest = contract
+        .semantic_digest(
+            corpus_vector["domain"]
+                .as_str()
+                .expect("node corpus domain"),
+            &corpus_validated,
+        )
+        .expect("shared corpus node digest");
+    let corpus_node_id = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, *corpus_digest.digest());
+    assert_eq!(
+        corpus_node_id.as_str(),
+        corpus_vector["expected"]["value"]
+            .as_str()
+            .expect("node corpus expected identity")
+    );
+
+    let corpus_value: serde_json::Value =
+        serde_json::from_slice(&corpus_value_bytes).expect("node corpus value");
+    let state_contract_ref: ContentRef =
+        serde_json::from_value(corpus_value["state_contract_ref"].clone())
+            .expect("reviewed corpus state contract ref");
+    let state_contract_ref = ReviewedContractRef::new("domain.read", state_contract_ref);
+    let path = CanonicalExpansionPath::entry_point().with_step(PathStep::Authored {
+        stable_key: "read".to_owned(),
+        ordinal: 0,
+    });
     let path_json = path.canonical_json().expect("canonical path");
     let path_value: serde_json::Value =
         serde_json::from_slice(path_json.as_bytes()).expect("path value");
     let value = serde_json::json!({
         "canonical_expansion_path": path_value,
         "identity_contract_version": NODE_IDENTITY_CONTRACT_VERSION,
-        "state_contract_ref": "domain.read",
+        "state_contract_ref": state_contract_ref.content_ref(),
     });
     let raw_value = PlainCanonicalJsonBytes::from_json_str(
         &serde_json::to_string(&value).expect("raw value JSON"),
     )
     .expect("canonical raw value");
-    let accepted_envelope = PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&serde_json::json!({
-            "domain": NODE_IDENTITY_DOMAIN,
-            "value": value,
-        }))
-        .expect("envelope JSON"),
-    )
-    .expect("canonical envelope");
-    let accepted =
-        final_node_id(&path, "domain.read").expect("universally enveloped node identity");
+    let domain = "mfm.node-occurrence.v1";
+    let (preimage_schema, result_kind) = contract
+        .domain_contract(domain)
+        .expect("registered node occurrence domain");
+    assert_eq!(preimage_schema, "mfm.node-identity-preimage.v1");
+    assert_eq!(result_kind, "node_id");
+    let validated = contract
+        .strict_decode(preimage_schema, raw_value.as_bytes())
+        .expect("annex-valid node identity preimage");
+    let registered_digest = contract
+        .semantic_digest(domain, &validated)
+        .expect("registered node digest");
+    let accepted = final_node_id(&path, &state_contract_ref)
+        .expect("shared-contract node identity derivation");
     assert_eq!(
         accepted,
-        node_id_from_canonical_envelope(accepted_envelope.as_bytes())
-            .expect("exact envelope representation")
+        NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, *registered_digest.digest())
+    );
+    let relabeled_state_contract_ref = ReviewedContractRef::new(
+        "display-only-label",
+        state_contract_ref.content_ref().clone(),
+    );
+    assert_eq!(
+        accepted,
+        final_node_id(&path, &relabeled_state_contract_ref)
+            .expect("display labels do not participate in node identity")
     );
 
     let raw_value_digest =
         NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, raw_value.digest_bytes());
-    let mut prefix_preimage = NODE_IDENTITY_DOMAIN.as_bytes().to_vec();
+    let mut prefix_preimage = domain.as_bytes().to_vec();
     prefix_preimage.extend_from_slice(raw_value.as_bytes());
     let prefix_digest = NodeId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         sha256_digest_bytes(&prefix_preimage),
     );
-    let mut nul_prefix_preimage = NODE_IDENTITY_DOMAIN.as_bytes().to_vec();
+    let mut nul_prefix_preimage = domain.as_bytes().to_vec();
     nul_prefix_preimage.push(0);
     nul_prefix_preimage.extend_from_slice(raw_value.as_bytes());
     let nul_prefix_digest = NodeId::from_digest(
@@ -1059,8 +1177,7 @@ fn node_identity_digest_uses_one_canonical_domain_value_envelope() {
     let wrong_domain_envelope = PlainCanonicalJsonBytes::from_json_str(
         &serde_json::to_string(&serde_json::json!({
             "domain": "mfm.node-occurrence.wrong.v1",
-            "value": serde_json::from_slice::<serde_json::Value>(raw_value.as_bytes())
-                .expect("raw identity value"),
+            "value": value,
         }))
         .expect("wrong-domain envelope JSON"),
     )
@@ -1079,17 +1196,20 @@ fn node_identity_digest_uses_one_canonical_domain_value_envelope() {
         assert_ne!(accepted, confused);
     }
 
-    let noncanonical = format!(
-        r#"{{"value":{},"domain":"{NODE_IDENTITY_DOMAIN}"}}"#,
-        raw_value.as_str()
-    );
-    let float = format!(r#"{{"domain":"{NODE_IDENTITY_DOMAIN}","value":1.5}}"#);
+    let noncanonical = format!(" {}", raw_value.as_str());
+    let original_value: serde_json::Value =
+        serde_json::from_slice(raw_value.as_bytes()).expect("float mutation source");
+    let mut float_value = original_value.clone();
+    float_value["canonical_expansion_path"][1]["ordinal"] = serde_json::json!(0.5);
+    let float = serde_json::to_string(&float_value).expect("float representation");
+    let path_fragment =
+        serde_json::to_string(&original_value["canonical_expansion_path"]).expect("path fragment");
+    let state_ref_fragment =
+        serde_json::to_string(state_contract_ref.content_ref()).expect("state ref fragment");
     let duplicate_key = format!(
-        r#"{{"domain":"{NODE_IDENTITY_DOMAIN}","domain":"{NODE_IDENTITY_DOMAIN}","value":{}}}"#,
-        raw_value.as_str()
+        r#"{{"canonical_expansion_path":{path_fragment},"identity_contract_version":"{domain}","identity_contract_version":"{domain}","state_contract_ref":{state_ref_fragment}}}"#
     );
     for hostile in [
-        raw_value.as_bytes(),
         prefix_preimage.as_slice(),
         nul_prefix_preimage.as_slice(),
         wrong_domain_envelope.as_bytes(),
@@ -1098,8 +1218,33 @@ fn node_identity_digest_uses_one_canonical_domain_value_envelope() {
         duplicate_key.as_bytes(),
     ] {
         assert!(
-            node_id_from_canonical_envelope(hostile).is_err(),
+            contract.strict_decode(preimage_schema, hostile).is_err(),
             "hostile digest representation must reject"
         );
     }
+    assert!(
+        contract
+            .semantic_digest("mfm.node-occurrence.wrong.v1", &validated)
+            .is_err(),
+        "unregistered domain must reject"
+    );
+    let path_only = contract
+        .strict_decode("mfm.canonical-expansion-path.v1", path_json.as_bytes())
+        .expect("annex-valid expansion path");
+    assert!(
+        contract.semantic_digest(domain, &path_only).is_err(),
+        "registered domain must reject a different validated schema"
+    );
+}
+
+fn decode_corpus_hex(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0, "corpus hex has complete bytes");
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("corpus hex is ASCII");
+            u8::from_str_radix(pair, 16).expect("corpus hex byte")
+        })
+        .collect()
 }

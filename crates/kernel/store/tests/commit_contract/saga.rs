@@ -427,10 +427,10 @@ fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     assert!(obligation.remediation.is_none());
 
     let manual_policy = SagaPolicySpec::ManualResolution {
-        manual: ManualResolutionEvidenceSpec {
+        manual: Box::new(ManualResolutionEvidenceSpec {
             evidence_schema: schema_id("mfm.test.manual_evidence", 180),
             authorization: manual_authorization(181),
-        },
+        }),
     };
     let manual_projection = store
         .projection_snapshot()

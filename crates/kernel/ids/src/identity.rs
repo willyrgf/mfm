@@ -3,6 +3,8 @@ use super::*;
 /// Digest algorithm identifiers accepted by typed kernel identity strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DigestAlgorithm {
+    /// SHA-256 over exact retained bytes.
+    Sha256V1,
     /// SHA-256 over JCS-style canonical JSON bytes.
     Sha256JcsV1,
 }
@@ -11,6 +13,7 @@ impl DigestAlgorithm {
     /// Returns the canonical persisted spelling for this algorithm.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Sha256V1 => "sha256-v1",
             Self::Sha256JcsV1 => "sha256-jcs-v1",
         }
     }
@@ -27,10 +30,9 @@ impl FromStr for DigestAlgorithm {
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
+            "sha256-v1" => Ok(Self::Sha256V1),
             "sha256-jcs-v1" => Ok(Self::Sha256JcsV1),
-            _ => Err(IdentityError::new(format!(
-                "unsupported digest algorithm '{value}'"
-            ))),
+            _ => Err(IdentityError::new("unsupported digest algorithm")),
         }
     }
 }
@@ -93,11 +95,377 @@ impl FromStr for DigestBytes {
     }
 }
 
+/// SHA-256 digest of one registered semantic-domain canonical envelope.
+///
+/// The algorithm is fixed by the type and therefore cannot be substituted by a caller.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SemanticDigest {
+    raw: String,
+    digest: DigestBytes,
+}
+
+impl SemanticDigest {
+    const PREFIX: &'static str = "sha256-jcs-v1:";
+
+    /// Constructs a semantic digest from already computed SHA-256 bytes.
+    pub fn from_digest(digest: DigestBytes) -> Self {
+        Self {
+            raw: format!("{}{digest}", Self::PREFIX),
+            digest,
+        }
+    }
+
+    /// Parses the exact recoverability v1 semantic-digest grammar.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let value = value.as_ref();
+        let digest = value
+            .strip_prefix(Self::PREFIX)
+            .ok_or_else(|| IdentityError::new("semantic digest prefix mismatch"))?
+            .parse()?;
+        Ok(Self {
+            raw: value.to_owned(),
+            digest,
+        })
+    }
+
+    /// Returns the persisted semantic digest string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Returns the SHA-256 digest bytes.
+    pub const fn digest(&self) -> &DigestBytes {
+        &self.digest
+    }
+}
+
+impl fmt::Debug for SemanticDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SemanticDigest").field(&self.raw).finish()
+    }
+}
+
+impl fmt::Display for SemanticDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SemanticDigest {
+    type Err = IdentityError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::parse(value)
+    }
+}
+
+impl Serialize for SemanticDigest {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SemanticDigest {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+macro_rules! semantic_identity {
+    ($(#[$meta:meta])* $name:ident, $prefix:literal, $label:literal) => {
+        $(#[$meta])*
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name {
+            raw: String,
+            semantic_digest: SemanticDigest,
+        }
+
+        impl $name {
+            /// Constructs the identity from already computed semantic digest bytes.
+            pub fn from_digest(digest: DigestBytes) -> Self {
+                Self::from_semantic_digest(SemanticDigest::from_digest(digest))
+            }
+
+            /// Constructs the identity from a checked semantic digest.
+            pub fn from_semantic_digest(semantic_digest: SemanticDigest) -> Self {
+                Self {
+                    raw: format!("{}{}", $prefix, semantic_digest),
+                    semantic_digest,
+                }
+            }
+
+            /// Parses the exact recoverability v1 identity grammar.
+            pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+                let value = value.as_ref();
+                let semantic_digest = SemanticDigest::parse(
+                    value
+                        .strip_prefix($prefix)
+                        .ok_or_else(|| IdentityError::new(concat!($label, " prefix mismatch")))?,
+                )?;
+                Ok(Self {
+                    raw: value.to_owned(),
+                    semantic_digest,
+                })
+            }
+
+            /// Returns the persisted identity string.
+            pub fn as_str(&self) -> &str {
+                &self.raw
+            }
+
+            /// Returns the semantic digest carried by this identity.
+            pub const fn semantic_digest(&self) -> &SemanticDigest {
+                &self.semantic_digest
+            }
+
+            /// Returns the SHA-256 digest bytes.
+            pub const fn digest(&self) -> &DigestBytes {
+                self.semantic_digest.digest()
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_tuple(stringify!($name)).field(&self.raw).finish()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = IdentityError;
+
+            fn from_str(value: &str) -> Result<Self> {
+                Self::parse(value)
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::parse(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+macro_rules! branded_semantic_digest {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(SemanticDigest);
+
+        impl $name {
+            /// Constructs the branded digest from already computed SHA-256 bytes.
+            pub fn from_digest(digest: DigestBytes) -> Self {
+                Self(SemanticDigest::from_digest(digest))
+            }
+
+            /// Constructs the branded digest from a checked semantic digest.
+            pub const fn from_semantic_digest(digest: SemanticDigest) -> Self {
+                Self(digest)
+            }
+
+            /// Parses the exact recoverability v1 semantic-digest grammar.
+            pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+                SemanticDigest::parse(value).map(Self)
+            }
+
+            /// Returns the persisted semantic-digest string.
+            pub fn as_str(&self) -> &str {
+                self.0.as_str()
+            }
+
+            /// Returns the underlying checked semantic digest.
+            pub const fn semantic_digest(&self) -> &SemanticDigest {
+                &self.0
+            }
+
+            /// Returns the SHA-256 digest bytes.
+            pub const fn digest(&self) -> &DigestBytes {
+                self.0.digest()
+            }
+
+            /// Consumes this value into its underlying checked semantic digest.
+            pub fn into_semantic_digest(self) -> SemanticDigest {
+                self.0
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_tuple(stringify!($name)).field(&self.0).finish()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = IdentityError;
+
+            fn from_str(value: &str) -> Result<Self> {
+                Self::parse(value)
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::parse(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+branded_semantic_digest!(
+    /// Logical identity used to make run admission idempotent.
+    AdmissionLogicalKey
+);
+
+branded_semantic_digest!(
+    /// Identity of one reviewed correction invocation.
+    CorrectionInvocationDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of one executor frontier.
+    ExecutorFrontierDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of one executor-owned recoverability record.
+    ExecutorRecordDigest
+);
+
+branded_semantic_digest!(
+    /// Content identity digest for one retained fact.
+    FactContentIdentityDigest
+);
+
+branded_semantic_digest!(
+    /// Logical identity digest for one retained fact.
+    FactLogicalIdentityDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of one closed fact-selection request.
+    FactQueryDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of one run genesis preimage.
+    GenesisDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of one unassigned journal commit candidate.
+    JournalCandidateDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of one assigned journal commit.
+    JournalCommitDigest
+);
+
+branded_semantic_digest!(
+    /// Semantic hash of one complete journal record.
+    JournalRecordHash
+);
+
+branded_semantic_digest!(
+    /// Digest of retained-object evidence.
+    ObjectEvidenceDigest
+);
+
+branded_semantic_digest!(
+    /// Logical identity digest for one output occurrence.
+    OutputLogicalIdentityDigest
+);
+
+branded_semantic_digest!(
+    /// Semantic digest of a reviewed external request.
+    RequestDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of the semantic state reconstructed for a run.
+    RunSemanticStateDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of one closed cross-run source closure.
+    SourceClosureDigest
+);
+
+branded_semantic_digest!(
+    /// Digest of terminal effect evidence.
+    TerminalEffectEvidenceDigest
+);
+
+semantic_identity!(
+    /// Immutable keyed-executor effect identity.
+    EffectKey,
+    "effect:",
+    "effect key"
+);
+
+semantic_identity!(
+    /// Immutable executor delivery-attempt identity.
+    AttemptId,
+    "attempt:",
+    "attempt id"
+);
+
+semantic_identity!(
+    /// Immutable journal record identity.
+    RecordId,
+    "record:",
+    "record id"
+);
+
 /// Category-branded identity with private fields and checked construction.
 pub struct Identity<K> {
     pub(super) raw: String,
     pub(super) canonical_name: Option<String>,
-    pub(super) version: Option<String>,
     pub(super) algorithm: DigestAlgorithm,
     pub(super) digest: DigestBytes,
     pub(super) _kind: PhantomData<fn(K) -> K>,
@@ -108,7 +476,6 @@ impl<K> Clone for Identity<K> {
         Self {
             raw: self.raw.clone(),
             canonical_name: self.canonical_name.clone(),
-            version: self.version.clone(),
             algorithm: self.algorithm,
             digest: self.digest,
             _kind: PhantomData,
@@ -180,7 +547,13 @@ where
 
     /// Returns the embedded version when the identity grammar carries one.
     pub fn version(&self) -> Option<&str> {
-        self.version.as_deref()
+        match K::LAYOUT {
+            private::IdentityLayout::NamespaceNameVersionDigest => self.raw.split(':').nth(3),
+            private::IdentityLayout::NameVersionDigest => self.raw.split(':').nth(2),
+            private::IdentityLayout::NamespaceNameDigest | private::IdentityLayout::DigestOnly => {
+                None
+            }
+        }
     }
 
     /// Returns the digest algorithm.
@@ -205,6 +578,31 @@ where
     }
 }
 
+impl<K> Serialize for Identity<K>
+where
+    K: private::IdentityCategory,
+{
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de, K> Deserialize<'de> for Identity<K>
+where
+    K: private::IdentityCategory,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl<K> Identity<K>
 where
     K: private::DigestOnlyCategory,
@@ -215,7 +613,6 @@ where
         Self {
             raw,
             canonical_name: None,
-            version: None,
             algorithm,
             digest,
             _kind: PhantomData,
@@ -271,8 +668,8 @@ macro_rules! impl_kind_identity_constructor {
     };
 }
 
-impl_kind_identity_constructor!(StateKindKind, "state");
 impl_kind_identity_constructor!(EffectKindKind, "effect");
 impl_kind_identity_constructor!(CapabilityKindKind, "capability");
+impl_kind_identity_constructor!(StateKindKind, "state");
 impl_kind_identity_constructor!(AdapterKindKind, "adapter");
 impl_kind_identity_constructor!(OperationKindKind, "operation");

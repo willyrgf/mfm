@@ -233,7 +233,7 @@ fn saga_policy_and_remediations_are_hash_defining() {
 
     let mut manual_spec = base.clone();
     manual_spec.saga = SagaPolicySpec::ManualResolution {
-        manual: manual.clone(),
+        manual: Box::new(manual.clone()),
     };
     assert_ne!(
         manual_spec.spec_hash().expect("manual hash"),

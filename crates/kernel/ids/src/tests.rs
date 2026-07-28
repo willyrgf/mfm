@@ -16,8 +16,10 @@ macro_rules! rejects {
 fn checked_string_primitives_cover_shared_grammars() {
     accepts!(NameToken, "mfm.kernel/value_1");
     accepts!(StableAuthorKey, "portfolio/main-wallet");
+    accepts!(EntryPointId, "mfm.a/b@1");
+    accepts!(EntryPointId, "mfm.portfolio/snapshot@18446744073709551615");
+    accepts!(FieldSegment, "total/value-1");
     accepts!(FieldPath, "result.total/value");
-    accepts!(FieldSegment, "total/value");
     accepts!(ResourceNamespace, "mfm.evm_lane");
     accepts!(LocalPublicId, "ethereum-mainnet");
     accepts!(RuntimeEnvName, "MFM_SECRET_1");
@@ -30,6 +32,14 @@ fn checked_string_primitives_cover_shared_grammars() {
 
     rejects!(NameToken, "_name");
     rejects!(StableAuthorKey, "mfm.reserved");
+    rejects!(EntryPointId, "mfm.portfolio-/snapshot@1");
+    rejects!(EntryPointId, "mfm.portfolio/snapshot_@1");
+    rejects!(EntryPointId, "mfm.portfolio/snapshot@01");
+    rejects!(EntryPointId, "mfm.portfolio/snapshot@0");
+    rejects!(EntryPointId, "mfm.portfolio/snapshot@18446744073709551616");
+    rejects!(FieldSegment, "");
+    rejects!(FieldSegment, "nested.field");
+    rejects!(FieldSegment, "_private");
     rejects!(FieldPath, "result..total");
     rejects!(ResourceNamespace, "single");
     rejects!(LocalPublicId, "bad/slash");

@@ -7,16 +7,16 @@
 //! kernel crates.
 //!
 //! ```
-//! use mfm_ids::{StateKind, StateVersion};
+//! use mfm_ids::{NodeId, SchemaVersion};
 //!
-//! let state_kind = StateKind::parse(
-//!     "state:mfm.portfolio:load:sha256-jcs-v1:\
+//! let node_id = NodeId::parse(
+//!     "node:sha256-jcs-v1:\
 //!      0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 //! )?;
-//! let state_version = StateVersion::new("mfm.state.load.v1")?;
+//! let schema_version = SchemaVersion::new("1")?;
 //!
-//! assert_eq!(state_kind.category(), "state");
-//! assert_eq!(state_version.as_str(), "mfm.state.load.v1");
+//! assert_eq!(node_id.category(), "node");
+//! assert_eq!(schema_version.as_str(), "1");
 //! # Ok::<(), mfm_ids::IdentityError>(())
 //! ```
 //!
@@ -205,9 +205,6 @@ pub enum ScopeIdKind {}
 /// Marker for seed ids.
 pub enum SeedIdKind {}
 
-/// Marker for attempt ids.
-pub enum AttemptIdKind {}
-
 /// Marker for run ids.
 pub enum RunIdKind {}
 
@@ -298,9 +295,6 @@ pub type ScopeId = Identity<ScopeIdKind>;
 /// Typed seed identity.
 pub type SeedId = Identity<SeedIdKind>;
 
-/// Runtime attempt identity.
-pub type AttemptId = Identity<AttemptIdKind>;
-
 /// Typed run identity.
 pub type RunId = Identity<RunIdKind>;
 
@@ -312,6 +306,22 @@ pub type ArtifactId = Identity<ArtifactIdKind>;
 
 /// Generic digest of canonical bytes or artifact bytes.
 pub type ContentDigest = Identity<ContentDigestKind>;
+
+fn validate_scope_id(value: &str, prefix: &str, label: &str) -> Result<()> {
+    let suffix = value
+        .strip_prefix(prefix)
+        .ok_or_else(|| IdentityError::new(format!("{label} prefix mismatch")))?;
+    if suffix.len() != 32
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(IdentityError::new(format!(
+            "{label} must use 32 lowercase hex characters"
+        )));
+    }
+    Ok(())
+}
 
 /// Store-owned deployment scope identifier.
 ///
@@ -326,18 +336,7 @@ impl StoreScopeId {
     /// Creates a store scope id from the stable persisted string shape.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
-        let suffix = value
-            .strip_prefix(Self::PREFIX)
-            .ok_or_else(|| IdentityError::new("store scope id prefix mismatch"))?;
-        if suffix.len() != 32
-            || !suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
-            return Err(IdentityError::new(
-                "store scope id must use 32 lowercase hex characters",
-            ));
-        }
+        validate_scope_id(&value, Self::PREFIX, "store scope id")?;
         Ok(Self(value))
     }
 
@@ -358,6 +357,227 @@ impl FromStr for StoreScopeId {
 
     fn from_str(value: &str) -> Result<Self> {
         Self::new(value)
+    }
+}
+
+impl Serialize for StoreScopeId {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StoreScopeId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Store generation used to fence append writers.
+///
+/// The recoverability-v1 wire form is a canonical decimal `u64` JSON string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoreEpoch(u64);
+
+impl StoreEpoch {
+    /// Creates an epoch from its numeric value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric epoch.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Parses the exact canonical decimal `u64` spelling.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let value = value.as_ref();
+        if value.is_empty()
+            || (value.len() > 1 && value.starts_with('0'))
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(IdentityError::new(
+                "store epoch must use canonical decimal u64 spelling",
+            ));
+        }
+        value
+            .parse::<u64>()
+            .map(Self)
+            .map_err(|_| IdentityError::new("store epoch exceeds u64"))
+    }
+}
+
+impl fmt::Display for StoreEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for StoreEpoch {
+    type Err = IdentityError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::parse(value)
+    }
+}
+
+impl Serialize for StoreEpoch {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for StoreEpoch {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// App-owned non-secret tenant ownership scope.
+///
+/// This scalar is copied into admitted roots and executor deployments. It is not a content
+/// reference, credential, principal, or mutable membership identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TenantScopeId(String);
+
+impl TenantScopeId {
+    /// Stable v1 tenant scope prefix.
+    pub const PREFIX: &'static str = "mfm.tenant_scope.v1:";
+
+    /// Creates a tenant scope id from the stable persisted string shape.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_scope_id(&value, Self::PREFIX, "tenant scope id")?;
+        Ok(Self(value))
+    }
+
+    /// Returns the persisted tenant scope id string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TenantScopeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TenantScopeId {
+    type Err = IdentityError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for TenantScopeId {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TenantScopeId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Lightweight content identity containing only interpretation and exact-byte digest.
+///
+/// This value proves neither retention, producer lineage, run reachability, object evidence, nor
+/// access authority. Journal-retained values use the separate producer-bound `ValueRef` contract.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContentRef {
+    schema_id: SchemaId,
+    content_digest: ContentDigest,
+}
+
+impl ContentRef {
+    /// Constructs a checked raw-content reference.
+    pub fn new(schema_id: SchemaId, content_digest: ContentDigest) -> Result<Self> {
+        if schema_id.algorithm() != DigestAlgorithm::Sha256JcsV1 {
+            return Err(IdentityError::new(
+                "content ref schema id must use sha256-jcs-v1",
+            ));
+        }
+        if content_digest.algorithm() != DigestAlgorithm::Sha256V1 {
+            return Err(IdentityError::new("content ref digest must use sha256-v1"));
+        }
+        Ok(Self {
+            schema_id,
+            content_digest,
+        })
+    }
+
+    /// Returns the schema identity selecting interpretation.
+    pub const fn schema_id(&self) -> &SchemaId {
+        &self.schema_id
+    }
+
+    /// Returns the exact-byte content digest.
+    pub const fn content_digest(&self) -> &ContentDigest {
+        &self.content_digest
+    }
+}
+
+impl Serialize for ContentRef {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            content_digest: &'a str,
+            schema_id: &'a str,
+        }
+
+        Wire {
+            content_digest: self.content_digest.as_str(),
+            schema_id: self.schema_id.as_str(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema_id: String,
+            content_digest: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let schema_id = SchemaId::parse(wire.schema_id).map_err(serde::de::Error::custom)?;
+        let content_digest =
+            ContentDigest::parse(wire.content_digest).map_err(serde::de::Error::custom)?;
+        Self::new(schema_id, content_digest).map_err(serde::de::Error::custom)
     }
 }
 
@@ -392,6 +612,11 @@ fn parse_identity<K>(value: &str) -> Result<Identity<K>>
 where
     K: private::IdentityCategory,
 {
+    if value.len() > 512 {
+        return Err(IdentityError::new(
+            "identity exceeds the 512-byte grammar bound",
+        ));
+    }
     let parts: Vec<&str> = value.split(':').collect();
     if parts.first() != Some(&K::PREFIX) {
         return Err(IdentityError::new(format!(
@@ -407,11 +632,11 @@ where
             validate_token("name", parts[2])?;
             validate_token("version", parts[3])?;
             let algorithm = parts[4].parse()?;
+            validate_identity_algorithm::<K>(algorithm)?;
             let digest = parts[5].parse()?;
             Ok(Identity {
                 raw: value.to_owned(),
                 canonical_name: Some(format!("{}/{}", parts[1], parts[2])),
-                version: Some(parts[3].to_owned()),
                 algorithm,
                 digest,
                 _kind: PhantomData,
@@ -421,12 +646,17 @@ where
             require_part_count(K::PREFIX, &parts, 5)?;
             validate_token("name", parts[1])?;
             validate_token("version", parts[2])?;
+            if K::REQUIRED_VERSION.is_some_and(|version| version != parts[2]) {
+                return Err(IdentityError::new(
+                    "identity version is not admitted for this category",
+                ));
+            }
             let algorithm = parts[3].parse()?;
+            validate_identity_algorithm::<K>(algorithm)?;
             let digest = parts[4].parse()?;
             Ok(Identity {
                 raw: value.to_owned(),
                 canonical_name: Some(parts[1].to_owned()),
-                version: Some(parts[2].to_owned()),
                 algorithm,
                 digest,
                 _kind: PhantomData,
@@ -437,11 +667,11 @@ where
             validate_token("namespace", parts[1])?;
             validate_token("name", parts[2])?;
             let algorithm = parts[3].parse()?;
+            validate_identity_algorithm::<K>(algorithm)?;
             let digest = parts[4].parse()?;
             Ok(Identity {
                 raw: value.to_owned(),
                 canonical_name: Some(format!("{}/{}", parts[1], parts[2])),
-                version: None,
                 algorithm,
                 digest,
                 _kind: PhantomData,
@@ -450,17 +680,29 @@ where
         private::IdentityLayout::DigestOnly => {
             require_part_count(K::PREFIX, &parts, 3)?;
             let algorithm = parts[1].parse()?;
+            validate_identity_algorithm::<K>(algorithm)?;
             let digest = parts[2].parse()?;
             Ok(Identity {
                 raw: value.to_owned(),
                 canonical_name: None,
-                version: None,
                 algorithm,
                 digest,
                 _kind: PhantomData,
             })
         }
     }
+}
+
+fn validate_identity_algorithm<K>(algorithm: DigestAlgorithm) -> Result<()>
+where
+    K: private::IdentityCategory,
+{
+    if K::ALGORITHM.is_some_and(|expected| expected != algorithm) {
+        return Err(IdentityError::new(
+            "digest algorithm is not admitted for this identity category",
+        ));
+    }
+    Ok(())
 }
 
 fn require_part_count(prefix: &str, parts: &[&str], expected: usize) -> Result<()> {
@@ -552,6 +794,138 @@ fn validate_stable_author_key(grammar: &'static str, value: &str) -> CheckedStri
                 CheckedStringErrorReason::InvalidCharacter {
                     ch,
                     index: offset + 1,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_stable_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_len(value, grammar, 512)?;
+    if !value.bytes().next().is_some_and(is_lower_or_digit_byte) {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidStart,
+        ));
+    }
+    for (index, byte) in value.bytes().enumerate().skip(1) {
+        if is_lower_or_digit_byte(byte) || matches!(byte, b'.' | b'_' | b'/' | b'-') {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter {
+                ch: byte as char,
+                index,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_entry_point_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_len(value, grammar, 512)?;
+    let Some(body) = value.strip_prefix("mfm.") else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidStart,
+        ));
+    };
+    let Some((qualified_name, version)) = body.rsplit_once('@') else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::MissingSeparator { separator: '@' },
+        ));
+    };
+    let mut components = qualified_name.split('/');
+    let Some(domain) = components.next() else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::EmptySegment,
+        ));
+    };
+    let Some(name) = components.next() else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::MissingSeparator { separator: '/' },
+        ));
+    };
+    if components.next().is_some() || domain.is_empty() || name.is_empty() {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::EmptySegment,
+        ));
+    }
+    for component in [domain, name] {
+        let first = component.as_bytes().first();
+        let last = component.as_bytes().last();
+        if !first.is_some_and(|byte| is_lower_or_digit_byte(*byte)) {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidStart,
+            ));
+        }
+        if !last.is_some_and(|byte| is_lower_or_digit_byte(*byte)) {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidEnd,
+            ));
+        }
+        for (index, byte) in component.bytes().enumerate() {
+            if is_lower_or_digit_byte(byte) || matches!(byte, b'.' | b'_' | b'-') {
+                continue;
+            }
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidCharacter {
+                    ch: byte as char,
+                    index,
+                },
+            ));
+        }
+    }
+    if version.is_empty()
+        || version.starts_with('0')
+        || !version.bytes().all(|byte| byte.is_ascii_digit())
+        || version
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .is_none()
+    {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidEnd,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_invocation_identity(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    if value.len() != 36 {
+        return Err(CheckedStringError::new(
+            grammar,
+            if value.is_empty() {
+                CheckedStringErrorReason::Empty
+            } else {
+                CheckedStringErrorReason::InvalidEnd
+            },
+        ));
+    }
+    for (index, byte) in value.bytes().enumerate() {
+        let accepted = match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            14 => byte == b'4',
+            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
+            _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
+        };
+        if !accepted {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidCharacter {
+                    ch: byte as char,
+                    index,
                 },
             ));
         }
@@ -847,9 +1221,13 @@ fn is_lower_or_digit_byte(byte: u8) -> bool {
 }
 
 mod private {
+    use super::DigestAlgorithm;
+
     pub trait IdentityCategory {
         const PREFIX: &'static str;
         const LAYOUT: IdentityLayout;
+        const ALGORITHM: Option<DigestAlgorithm>;
+        const REQUIRED_VERSION: Option<&'static str>;
     }
 
     pub trait DigestOnlyCategory: IdentityCategory {}
@@ -872,6 +1250,8 @@ macro_rules! impl_identity_category {
         impl private::IdentityCategory for $marker {
             const PREFIX: &'static str = $prefix;
             const LAYOUT: private::IdentityLayout = private::IdentityLayout::$layout;
+            const ALGORITHM: Option<DigestAlgorithm> = Some(DigestAlgorithm::Sha256JcsV1);
+            const REQUIRED_VERSION: Option<&'static str> = None;
         }
     };
 }
@@ -883,8 +1263,25 @@ macro_rules! impl_digest_only_category {
     };
 }
 
+macro_rules! impl_unrestricted_digest_only_category {
+    ($marker:ty, $prefix:literal) => {
+        impl private::IdentityCategory for $marker {
+            const PREFIX: &'static str = $prefix;
+            const LAYOUT: private::IdentityLayout = private::IdentityLayout::DigestOnly;
+            const ALGORITHM: Option<DigestAlgorithm> = None;
+            const REQUIRED_VERSION: Option<&'static str> = None;
+        }
+        impl private::DigestOnlyCategory for $marker {}
+    };
+}
+
 impl_identity_category!(SemanticTypeKind, "semantic", NamespaceNameVersionDigest);
-impl_identity_category!(SchemaKind, "schema", NameVersionDigest);
+impl private::IdentityCategory for SchemaKind {
+    const PREFIX: &'static str = "schema";
+    const LAYOUT: private::IdentityLayout = private::IdentityLayout::NameVersionDigest;
+    const ALGORITHM: Option<DigestAlgorithm> = Some(DigestAlgorithm::Sha256JcsV1);
+    const REQUIRED_VERSION: Option<&'static str> = Some("1");
+}
 impl_identity_category!(StateKindKind, "state", NamespaceNameDigest);
 impl_identity_category!(EffectKindKind, "effect", NamespaceNameDigest);
 impl_identity_category!(CapabilityKindKind, "capability", NamespaceNameDigest);
@@ -901,11 +1298,10 @@ impl_digest_only_category!(NodeIdKind, "node");
 impl_digest_only_category!(CellIdKind, "cell");
 impl_digest_only_category!(ScopeIdKind, "scope");
 impl_digest_only_category!(SeedIdKind, "seed");
-impl_digest_only_category!(AttemptIdKind, "attempt");
 impl_digest_only_category!(RunIdKind, "run");
 impl_digest_only_category!(EventIdKind, "event");
 impl_digest_only_category!(ArtifactIdKind, "artifact");
-impl_digest_only_category!(ContentDigestKind, "content");
+impl_unrestricted_digest_only_category!(ContentDigestKind, "content");
 
 macro_rules! impl_version_category {
     ($marker:ty, $field:literal) => {

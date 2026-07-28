@@ -22,10 +22,7 @@ async fn store_rejects_fact_without_started_attempt() {
                 events::FactRecorded {
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
                     node_id: node.node_id.clone(),
-                    attempt_id: AttemptId::from_digest(
-                        DigestAlgorithm::Sha256JcsV1,
-                        DigestBytes::from_array([0xd3; 32]),
-                    ),
+                    attempt_id: AttemptId::from_digest(DigestBytes::from_array([0xd3; 32])),
                     claim: test_fact_claim(210, &fact_evidence),
                 },
             )],

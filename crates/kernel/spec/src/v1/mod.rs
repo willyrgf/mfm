@@ -474,7 +474,7 @@ pub enum SagaPolicySpec {
     /// Failure after mutation blocks for typed operator evidence.
     ManualResolution {
         /// Required typed manual evidence.
-        manual: ManualResolutionEvidenceSpec,
+        manual: Box<ManualResolutionEvidenceSpec>,
     },
     /// Failure after confirmed forward side effects compensates linked remediations.
     CompensateCompleted {

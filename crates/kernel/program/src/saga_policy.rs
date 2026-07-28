@@ -17,7 +17,7 @@ pub enum SagaPolicy {
     /// Failure after mutation blocks for typed operator evidence.
     ManualResolution {
         /// Required typed manual evidence.
-        manual: ManualResolutionPolicyDraft,
+        manual: Box<ManualResolutionPolicyDraft>,
     },
     /// Failure after confirmed forward side effects compensates linked remediations.
     CompensateCompleted {
@@ -34,7 +34,7 @@ pub enum SideEffectSagaPolicy {
     /// Failure after mutation blocks for typed operator evidence.
     ManualResolution {
         /// Required typed manual evidence.
-        manual: ManualResolutionPolicyDraft,
+        manual: Box<ManualResolutionPolicyDraft>,
     },
     /// Failure after confirmed forward side effects compensates linked remediations.
     CompensateCompleted {

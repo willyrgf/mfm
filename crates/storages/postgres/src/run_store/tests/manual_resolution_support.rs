@@ -69,10 +69,10 @@ pub(super) fn manual_resolution_prepared_artifact_bytes(
 
 pub(super) fn manual_saga_policy(byte: u8) -> SagaPolicySpec {
     SagaPolicySpec::ManualResolution {
-        manual: ManualResolutionEvidenceSpec {
+        manual: Box::new(ManualResolutionEvidenceSpec {
             evidence_schema: schema_id("mfm.test.manual_evidence", byte + 1),
             authorization: manual_authorization(byte),
-        },
+        }),
     }
 }
 
@@ -123,7 +123,7 @@ pub(super) fn verified_manual_resolution_for_seq(
         content_digest(byte + 3),
         ManualResolutionBlockReason::PolicyManualResolution,
         content_digest(byte + 4),
-        manual.clone(),
+        manual.as_ref().clone(),
     )
     .expect("manual prefix authority");
     let evidence = ManualResolutionEvidenceRef {

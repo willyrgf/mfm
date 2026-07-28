@@ -27,7 +27,7 @@ fn artifact_id(byte: u8) -> ArtifactId {
 }
 
 fn attempt_id(byte: u8) -> AttemptId {
-    AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+    AttemptId::from_digest(digest_bytes(byte))
 }
 
 fn node_id(byte: u8) -> NodeId {

@@ -175,10 +175,7 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
         .cell(&fixture.cell_a)
         .expect("cell a")
         .clone();
-    let forged_attempt = AttemptId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0xfa; 32]),
-    );
+    let forged_attempt = AttemptId::from_digest(DigestBytes::from_array([0xfa; 32]));
     let artifact_id = artifact(0xfa);
     let artifact_digest = content(0xfb);
     let forged_artifact = store::ArtifactEvidenceRef {
