@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +13,49 @@ use super::*;
 const BLOCK_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const OTHER_HASH: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const ACCOUNT: Address = address!("1111111111111111111111111111111111111111");
+const FIXTURE_ENDPOINT_PATH: &str = "fixture-private-path-letmein";
+const FIXTURE_BEARER: &str = "Bearer fixture-token-123456";
+const FIXTURE_PROVIDER_BODY: &str = "fixture-raw-provider-payload";
+const FIXTURE_PROVIDER_URL: &str =
+    "https://fixture-user:fixture-password@provider.invalid/private?access_token=123456";
+const FIXTURE_LOW_ENTROPY: &str = "letmein";
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PrototypeRoutingGenerationRef(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrototypeRouteResolution {
+    Resolved(String),
+    DidNotEnter,
+}
+
+#[derive(Default)]
+struct PrototypeRouteResolver {
+    current: Option<PrototypeRoutingGenerationRef>,
+    routes: BTreeMap<PrototypeRoutingGenerationRef, String>,
+}
+
+impl PrototypeRouteResolver {
+    fn install_current(&mut self, generation: PrototypeRoutingGenerationRef, endpoint: String) {
+        self.routes.insert(generation.clone(), endpoint);
+        self.current = Some(generation);
+    }
+
+    fn remove(&mut self, generation: &PrototypeRoutingGenerationRef) {
+        self.routes.remove(generation);
+    }
+
+    fn resolve_exact(
+        &self,
+        generation: &PrototypeRoutingGenerationRef,
+    ) -> PrototypeRouteResolution {
+        self.routes
+            .get(generation)
+            .cloned()
+            .map(PrototypeRouteResolution::Resolved)
+            .unwrap_or(PrototypeRouteResolution::DidNotEnter)
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -32,11 +76,13 @@ enum Mode {
     SubmitHttpFailure,
     HostileCallResult,
     HostileCodeResult,
+    AdversarialMalformed,
 }
 
 struct TestServer {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    raw_requests: Arc<Mutex<Vec<String>>>,
     max_active: Arc<AtomicUsize>,
 }
 
@@ -46,6 +92,8 @@ impl TestServer {
         let address = listener.local_addr().expect("address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
+        let raw_requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_raw = Arc::clone(&raw_requests);
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
         let observed_active = Arc::clone(&active);
@@ -56,6 +104,7 @@ impl TestServer {
                     return;
                 };
                 let captured = Arc::clone(&captured);
+                let captured_raw = Arc::clone(&captured_raw);
                 let active = Arc::clone(&observed_active);
                 let max_active = Arc::clone(&observed_max);
                 tokio::spawn(async move {
@@ -71,6 +120,10 @@ impl TestServer {
                             break;
                         }
                     }
+                    captured_raw
+                        .lock()
+                        .expect("raw requests")
+                        .push(String::from_utf8_lossy(&bytes[..read]).into_owned());
                     let request: Value =
                         serde_json::from_slice(request_body(&bytes[..read])).expect("request JSON");
                     captured.lock().expect("requests").push(request.clone());
@@ -94,12 +147,26 @@ impl TestServer {
         Self {
             url: format!("http://{address}"),
             requests,
+            raw_requests,
             max_active,
         }
     }
 
     fn requests(&self) -> Vec<Value> {
         self.requests.lock().expect("requests").clone()
+    }
+
+    fn raw_requests(&self) -> Vec<String> {
+        self.raw_requests.lock().expect("raw requests").clone()
+    }
+}
+
+fn assert_synthetic_material_absent(rendered: &str, material: &[&str]) {
+    for value in material {
+        assert!(!rendered.contains(value));
+        let digest = mfm_canonical::sha256_digest_bytes(value.as_bytes());
+        let fingerprint = hex::encode(digest.as_bytes());
+        assert!(!rendered.contains(&fingerprint));
     }
 }
 
@@ -208,6 +275,121 @@ async fn bind_probes_once_and_every_method_uses_the_same_session() {
             "accessList": [],
         }, {"blockHash": BLOCK_HASH, "requireCanonical": true}])
     );
+}
+
+#[tokio::test]
+async fn recoverability_prototype_assigns_one_exchange_to_each_read_operation() {
+    let server = TestServer::spawn(Mode::Valid).await;
+    let session = session(&server).await;
+    let exact = EvmBlockSelector::ExactHash(BLOCK_HASH.parse().expect("hash"));
+    let token = Address::from([2; 20]);
+
+    EvmReadSession::read_block(&session, &EvmBlockSelector::Latest)
+        .await
+        .expect("latest anchor");
+    EvmReadSession::call(
+        &session,
+        &EvmCall::new(
+            Address::ZERO,
+            token,
+            U256::ZERO,
+            Bytes::copy_from_slice(&[0x31, 0x3c, 0xe5, 0x67]),
+            U256::from(100_000),
+            Default::default(),
+            exact.clone(),
+            32,
+        )
+        .expect("metadata request"),
+    )
+    .await
+    .expect("metadata");
+    EvmReadSession::read_balance(&session, ACCOUNT, &exact)
+        .await
+        .expect("native balance");
+    let mut balance_of = vec![0x70, 0xa0, 0x82, 0x31];
+    balance_of.extend_from_slice(&[0_u8; 12]);
+    balance_of.extend_from_slice(ACCOUNT.as_slice());
+    EvmReadSession::call(
+        &session,
+        &EvmCall::new(
+            Address::ZERO,
+            token,
+            U256::ZERO,
+            Bytes::from(balance_of),
+            U256::from(100_000),
+            Default::default(),
+            exact,
+            32,
+        )
+        .expect("token balance request"),
+    )
+    .await
+    .expect("token balance");
+    EvmReadSession::read_block(&session, &EvmBlockSelector::Number(U256::from(42)))
+        .await
+        .expect("anchor confirmation");
+
+    let methods = server
+        .requests()
+        .iter()
+        .map(|request| request["method"].as_str().expect("method").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods,
+        [
+            "eth_chainId",
+            "eth_getBlockByNumber",
+            "eth_call",
+            "eth_getBalance",
+            "eth_call",
+            "eth_getBlockByNumber",
+        ],
+        "each target state invocation must own exactly one JSON-RPC exchange"
+    );
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| method.as_str() == "eth_chainId")
+            .count(),
+        1,
+        "downstream reads must not silently re-bootstrap"
+    );
+}
+
+#[tokio::test]
+async fn recoverability_prototype_resolves_only_the_admitted_routing_generation() {
+    let first = TestServer::spawn(Mode::Valid).await;
+    let current = TestServer::spawn(Mode::Valid).await;
+    let first_generation = PrototypeRoutingGenerationRef("sha256:generation-a".to_owned());
+    let current_generation = PrototypeRoutingGenerationRef("sha256:generation-b".to_owned());
+    let mut resolver = PrototypeRouteResolver::default();
+    resolver.install_current(first_generation.clone(), first.url.clone());
+    let admitted = resolver.current.clone().expect("admitted generation");
+    resolver.install_current(current_generation, current.url.clone());
+
+    let PrototypeRouteResolution::Resolved(resumed_endpoint) = resolver.resolve_exact(&admitted)
+    else {
+        panic!("admitted routing generation must remain resolvable");
+    };
+    transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            endpoint(&resumed_endpoint),
+            None,
+        )
+        .await
+        .expect("resume binds exact admitted generation");
+    assert_eq!(first.requests().len(), 1);
+    assert!(current.requests().is_empty());
+
+    resolver.remove(&admitted);
+    assert_eq!(
+        resolver.resolve_exact(&admitted),
+        PrototypeRouteResolution::DidNotEnter,
+        "a missing admitted generation must not fall back to current routing"
+    );
+    assert!(current.requests().is_empty());
 }
 
 #[tokio::test]
@@ -647,24 +829,138 @@ async fn http_and_json_rpc_diagnostics_exclude_bodies() {
     for (mode, code) in [
         (Mode::HttpFailure, ProviderDiagnosticCode::RpcHttpStatus),
         (Mode::JsonError, ProviderDiagnosticCode::RpcJsonError),
+        (
+            Mode::AdversarialMalformed,
+            ProviderDiagnosticCode::ResponseInvalid,
+        ),
+        (
+            Mode::OversizedChunked,
+            ProviderDiagnosticCode::ResponseInvalid,
+        ),
     ] {
         let server = TestServer::spawn(mode).await;
+        let endpoint_url = format!("{}/{FIXTURE_ENDPOINT_PATH}", server.url);
         let error = transport()
             .bind(
                 binding(1),
                 LocalPublicId::new("primary").expect("source"),
-                endpoint(&server.url),
-                Some(authorization("Bearer top-secret")),
+                endpoint(&endpoint_url),
+                Some(authorization(FIXTURE_BEARER)),
             )
             .await
             .expect_err("bind failure");
+        let error_rendered = format!("{error:?} {error}");
         let diagnostic = error.into_provider_diagnostic();
-        let rendered = format!("{diagnostic:?} {diagnostic}");
+        let retained_json = serde_json::to_string(&diagnostic).expect("typed diagnostic JSON");
+        let rendered = format!("{error_rendered} {diagnostic:?} {diagnostic} {retained_json}");
         assert_eq!(diagnostic.code(), code);
-        assert!(!rendered.contains("secret provider message"));
-        assert!(!rendered.contains("top-secret"));
-        assert!(!rendered.contains(&server.url));
+        assert_synthetic_material_absent(
+            &rendered,
+            &[
+                &server.url,
+                &endpoint_url,
+                FIXTURE_ENDPOINT_PATH,
+                FIXTURE_BEARER,
+                FIXTURE_PROVIDER_BODY,
+                FIXTURE_PROVIDER_URL,
+                FIXTURE_LOW_ENTROPY,
+                "123456",
+            ],
+        );
+        let raw = server.raw_requests().join("\n");
+        assert!(raw.contains(FIXTURE_ENDPOINT_PATH));
+        assert!(raw
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: {}", FIXTURE_BEARER).to_ascii_lowercase()));
     }
+}
+
+#[tokio::test]
+async fn retained_session_evidence_excludes_endpoint_and_authorization_material() {
+    let server = TestServer::spawn(Mode::Valid).await;
+    let endpoint_url = format!("{}/{FIXTURE_ENDPOINT_PATH}", server.url);
+    let session = transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            endpoint(&endpoint_url),
+            Some(authorization(FIXTURE_BEARER)),
+        )
+        .await
+        .expect("checked session");
+    let evidence =
+        serde_json::to_string(EvmReadSession::evidence(&session)).expect("retained evidence");
+    let rendered = format!("{session:?} {evidence}");
+    assert_synthetic_material_absent(
+        &rendered,
+        &[
+            &server.url,
+            &endpoint_url,
+            FIXTURE_ENDPOINT_PATH,
+            FIXTURE_BEARER,
+            FIXTURE_LOW_ENTROPY,
+            "123456",
+        ],
+    );
+    let raw = server.raw_requests().join("\n");
+    assert!(raw.contains(FIXTURE_ENDPOINT_PATH));
+    assert!(raw
+        .to_ascii_lowercase()
+        .contains(&format!("authorization: {}", FIXTURE_BEARER).to_ascii_lowercase()));
+}
+
+#[test]
+fn endpoint_rejection_does_not_retain_userinfo_query_fragment_or_low_entropy_tokens() {
+    for rejected in [
+        format!("http://fixture-user:fixture-password@127.0.0.1/{FIXTURE_LOW_ENTROPY}"),
+        "http://127.0.0.1/?access_token=123456".to_owned(),
+        format!("http://127.0.0.1/#{FIXTURE_LOW_ENTROPY}"),
+    ] {
+        let error = EvmRpcEndpoint::new(&rejected).expect_err("unsafe endpoint");
+        let rendered = format!("{error:?} {error}");
+        assert_synthetic_material_absent(
+            &rendered,
+            &[
+                &rejected,
+                "fixture-user",
+                "fixture-password",
+                FIXTURE_LOW_ENTROPY,
+                "123456",
+            ],
+        );
+    }
+}
+
+#[tokio::test]
+async fn transport_failure_discards_the_internal_endpoint_error() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve port");
+    let address = listener.local_addr().expect("reserved address");
+    drop(listener);
+    let endpoint_url = format!("http://{address}/{FIXTURE_ENDPOINT_PATH}");
+    let error = transport()
+        .bind(
+            binding(1),
+            LocalPublicId::new("primary").expect("source"),
+            endpoint(&endpoint_url),
+            Some(authorization(FIXTURE_BEARER)),
+        )
+        .await
+        .expect_err("connection must fail");
+    let diagnostic = error.into_provider_diagnostic();
+    let rendered = format!("{diagnostic:?} {diagnostic}");
+    assert_eq!(diagnostic.code(), ProviderDiagnosticCode::TransportFailed);
+    assert_synthetic_material_absent(
+        &rendered,
+        &[
+            &endpoint_url,
+            FIXTURE_ENDPOINT_PATH,
+            FIXTURE_BEARER,
+            FIXTURE_LOW_ENTROPY,
+            "123456",
+        ],
+    );
 }
 
 #[test]
@@ -692,7 +988,13 @@ fn private_codecs_reject_noncanonical_quantities_and_data() {
 
 fn response(mode: Mode, request: &Value) -> String {
     if matches!(mode, Mode::HttpFailure) {
-        return "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n".to_owned();
+        let body = format!(
+            "{FIXTURE_PROVIDER_BODY} {FIXTURE_PROVIDER_URL} {FIXTURE_BEARER} {FIXTURE_LOW_ENTROPY}"
+        );
+        return format!(
+            "HTTP/1.1 500 Internal Server Error\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
     }
     if matches!(mode, Mode::SubmitHttpFailure) && request["method"] == "eth_sendRawTransaction" {
         return "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n".to_owned();
@@ -704,11 +1006,21 @@ fn response(mode: Mode, request: &Value) -> String {
         );
     }
     if matches!(mode, Mode::OversizedChunked) {
-        let body = "x".repeat(MAX_RESPONSE_BYTES + 1);
+        let marker = format!("{FIXTURE_PROVIDER_BODY}{FIXTURE_LOW_ENTROPY}");
+        let body = marker.repeat(MAX_RESPONSE_BYTES / marker.len() + 1);
         return format!(
             "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
             body.len(),
             body
+        );
+    }
+    if matches!(mode, Mode::AdversarialMalformed) {
+        let body = format!(
+            "{FIXTURE_PROVIDER_BODY} {FIXTURE_PROVIDER_URL} {FIXTURE_BEARER} {FIXTURE_LOW_ENTROPY}"
+        );
+        return format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
         );
     }
     let method = request["method"].as_str().expect("method");
@@ -716,7 +1028,16 @@ fn response(mode: Mode, request: &Value) -> String {
         json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "error": {"code": -32601, "message": "secret provider message"},
+            "error": {
+                "code": -32601,
+                "message": format!(
+                    "{FIXTURE_PROVIDER_BODY} {FIXTURE_PROVIDER_URL} {FIXTURE_LOW_ENTROPY}"
+                ),
+                "data": {
+                    "authorization": FIXTURE_BEARER,
+                    "nested": {"token": "123456"},
+                },
+            },
         })
     } else {
         let result = rpc_result(mode, request, method);

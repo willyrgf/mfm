@@ -1,0 +1,9 @@
+[package]
+name = "mfm-program-authority-prototype"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "mfm_program_authority_prototype"
+path = "src/lib.rs"

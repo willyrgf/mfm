@@ -170,8 +170,8 @@ nix develop -c cargo clean --target-dir target/verification
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled Nixfied model without running project tasks. |
 | `nix run .#check` | Run formatting, Clippy, architecture/Cargo metadata contracts, and offline SQLx checking. |
-| `nix run .#test` | Run workspace Nextest and doctests without managed external services. |
-| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx schema metadata, and run PostgreSQL parity tests. |
+| `nix run .#test` | Run main-workspace Nextest and doctests, including the pinned OS-isolation prototype, plus the locked nested authority-prototype tests and Clippy, without managed external services. |
+| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx schema metadata, and run PostgreSQL parity plus recoverability executor/HA prototype tests. |
 | `nix run .#ci` | Run the complete graph, including the component gates and feature-gated parity coverage. |
 
 The definitions in `nixfied.nix` are authoritative when individual tests or

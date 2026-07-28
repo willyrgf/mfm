@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "live-adapter",
+    "program",
+    "runtime",
+    "store",
+]
+resolver = "2"

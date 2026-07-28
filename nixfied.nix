@@ -19,6 +19,10 @@ let
     pkgs.pkg-config
   ]
   ++ [ "cc" ]
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+    pkgs.bubblewrap
+    "ldd"
+  ]
   ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
   sqlxCli =
     assert pkgs.sqlx-cli.version == "0.9.0";
@@ -220,6 +224,11 @@ in
     executable = "bin/cc";
     effects = [ "process" ];
   };
+  nixfied.closures.ldd = lib.mkIf pkgs.stdenv.hostPlatform.isLinux {
+    package = pkgs.glibc.bin;
+    executable = "bin/ldd";
+    effects = [ "process" ];
+  };
   nixfied.closures.bitcoin-core-node = {
     package = bitcoinNode;
     executable = "bin/nixfied-bitcoind";
@@ -330,6 +339,19 @@ in
         "--workspace"
         "--features"
         "mfm-app/test-support"
+        "--filter-expr"
+        "not binary(=historical_executable_isolation)"
+      ];
+    };
+    historical-executable-isolation = cargoLeaf {
+      run = [
+        "cargo"
+        "nextest"
+        "run"
+        "-p"
+        "mfm-replay"
+        "--test"
+        "historical_executable_isolation"
       ];
     };
     doc-tests = cargoLeaf {
@@ -338,6 +360,30 @@ in
         "test"
         "--workspace"
         "--doc"
+      ];
+    };
+    authority-vertical-prototype-clippy = cargoLeaf {
+      run = [
+        "cargo"
+        "clippy"
+        "--manifest-path"
+        "crates/kernel/runtime/tests/authority_vertical_prototype/Cargo.toml"
+        "--workspace"
+        "--all-targets"
+        "--locked"
+        "--"
+        "-D"
+        "warnings"
+      ];
+    };
+    authority-vertical-prototype-tests = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "--manifest-path"
+        "crates/kernel/runtime/tests/authority_vertical_prototype/Cargo.toml"
+        "--workspace"
+        "--locked"
       ];
     };
     parity-cli-keystore = cargoLeaf {
@@ -473,6 +519,39 @@ in
         "mfm-storage-postgres"
         "--features"
         "parity-tests"
+        "--lib"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    prototype-postgres-ha-writer-fence = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-storage-postgres"
+        "--features"
+        "parity-tests"
+        "--test"
+        "recoverability_postgres_ha_writer_fence_prototype"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    prototype-postgres-executor = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-storage-postgres"
+        "--features"
+        "parity-tests"
+        "--test"
+        "recoverability_postgres_executor_prototype"
         "--"
         "--nocapture"
       ];
@@ -520,14 +599,22 @@ in
         "HEAD^{commit}"
       ];
     };
-    # Keep workspace tests and doctests as explicit leaves so each command has
-    # its own evidence. The workspace run enables app test support in-place to
-    # avoid executing the app's default tests a second time.
+    # Keep workspace, OS-isolation, and doctest commands as explicit leaves so
+    # each has its own evidence. The workspace run enables app test support
+    # in-place and excludes the separately qualified isolation binary.
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
         "nextest-run"
+        "historical-executable-isolation"
         "doc-tests"
+      ];
+    };
+    authority-vertical-prototype = {
+      kind = "composite";
+      steps = nixfiedLib.seq [
+        "authority-vertical-prototype-clippy"
+        "authority-vertical-prototype-tests"
       ];
     };
 
@@ -543,7 +630,10 @@ in
 
     test = {
       kind = "composite";
-      steps.workspace-tests.task = "workspace-tests";
+      steps = {
+        workspace-tests.task = "workspace-tests";
+        authority-vertical-prototype.task = "authority-vertical-prototype";
+      };
     };
 
     test-db = {
@@ -556,6 +646,14 @@ in
         };
         parity-postgres-state-events = {
           task = "parity-postgres-state-events";
+          dependsOn = [ "postgres-sqlx-check" ];
+        };
+        prototype-postgres-ha-writer-fence = {
+          task = "prototype-postgres-ha-writer-fence";
+          dependsOn = [ "postgres-sqlx-check" ];
+        };
+        prototype-postgres-executor = {
+          task = "prototype-postgres-executor";
           dependsOn = [ "postgres-sqlx-check" ];
         };
         parity-cli-setup = {

@@ -22,6 +22,9 @@ mod lifecycle_support;
 #[path = "tests/behavior.rs"]
 mod behavior;
 
+#[path = "tests/composite_planner_prototype.rs"]
+mod composite_planner_prototype;
+
 fn certify_untrusted_typed_spec(
     typed: spec::TypedExecutionSpec,
     registry: &CertificationRegistry,

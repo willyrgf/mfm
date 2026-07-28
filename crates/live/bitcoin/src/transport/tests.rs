@@ -1,15 +1,20 @@
 //! Behavioral contract tests for the public Bitcoin transport.
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bitcoin::hashes::{sha256, Hash as _};
 use mfm_bitcoin::{
-    BitcoinAddress, BitcoinBalanceCollectionRequest, BitcoinBalanceSession, BitcoinCapabilityError,
-    BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceIdentity,
+    BitcoinAddress, BitcoinBalanceCollectionEvidence, BitcoinBalanceCollectionRequest,
+    BitcoinBalanceSession, BitcoinCapabilityError, BitcoinNetworkId, BitcoinNetworkTag,
+    BitcoinSourceIdentity, BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT,
 };
 use mfm_capabilities::ProviderDiagnosticCode;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::{oneshot, Semaphore};
 
 use super::*;
 
@@ -19,6 +24,277 @@ const ANCHOR_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221
 const OTHER_HASH: &str = "00000000000000000002b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
 const TXID_ONE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const TXID_TWO: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+const FIXTURE_ENDPOINT_PATH: &str = "fixture-private-path-letmein";
+const FIXTURE_BASIC_USER: &str = "fixture-user";
+const FIXTURE_BASIC_PASSWORD: &str = "fixture-password-123456";
+const FIXTURE_PROVIDER_BODY: &str = "fixture-raw-provider-payload";
+const FIXTURE_PROVIDER_URL: &str =
+    "https://fixture-user:fixture-password@provider.invalid/private?access_token=123456";
+const FIXTURE_LOW_ENTROPY: &str = "letmein";
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PrototypeRoutingGenerationRef(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrototypeRouteResolution {
+    Resolved(String),
+    DidNotEnter,
+}
+
+#[derive(Default)]
+struct PrototypeRouteResolver {
+    current: Option<PrototypeRoutingGenerationRef>,
+    routes: BTreeMap<PrototypeRoutingGenerationRef, String>,
+}
+
+impl PrototypeRouteResolver {
+    fn install_current(&mut self, generation: PrototypeRoutingGenerationRef, endpoint: String) {
+        self.routes.insert(generation.clone(), endpoint);
+        self.current = Some(generation);
+    }
+
+    fn remove(&mut self, generation: &PrototypeRoutingGenerationRef) {
+        self.routes.remove(generation);
+    }
+
+    fn resolve_exact(
+        &self,
+        generation: &PrototypeRoutingGenerationRef,
+    ) -> PrototypeRouteResolution {
+        self.routes
+            .get(generation)
+            .cloned()
+            .map(PrototypeRouteResolution::Resolved)
+            .unwrap_or(PrototypeRouteResolution::DidNotEnter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeScanObservation {
+    Returned,
+    DidNotEnter,
+    Indeterminate,
+}
+
+#[derive(Default)]
+struct PrototypeScanAuditLedger {
+    next_authorization: usize,
+    authorizations: Vec<usize>,
+    observations: Vec<(usize, PrototypeScanObservation)>,
+}
+
+impl PrototypeScanAuditLedger {
+    fn authorize(ledger: &Arc<Mutex<Self>>) -> usize {
+        let mut state = ledger.lock().expect("scan audit ledger");
+        let authorization = state.next_authorization;
+        state.next_authorization += 1;
+        state.authorizations.push(authorization);
+        authorization
+    }
+
+    fn observe(
+        ledger: &Arc<Mutex<Self>>,
+        authorization: usize,
+        observation: PrototypeScanObservation,
+    ) {
+        let mut state = ledger.lock().expect("scan audit ledger");
+        assert!(
+            state
+                .observations
+                .iter()
+                .all(|(candidate, _)| *candidate != authorization),
+            "one authorization permits one observation"
+        );
+        state.observations.push((authorization, observation));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrototypeScanResult {
+    height: u64,
+    best_block: &'static str,
+}
+
+struct PrototypeRemoteScan {
+    response: Option<oneshot::Receiver<PrototypeScanResult>>,
+}
+
+struct PrototypeScanProvider {
+    busy: Arc<AtomicBool>,
+    protocol_calls: Arc<AtomicUsize>,
+    full_scan_starts: Arc<AtomicUsize>,
+    drop_next_response: Arc<AtomicBool>,
+    releases: Arc<Semaphore>,
+    methods: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Default for PrototypeScanProvider {
+    fn default() -> Self {
+        Self {
+            busy: Arc::new(AtomicBool::new(false)),
+            protocol_calls: Arc::new(AtomicUsize::new(0)),
+            full_scan_starts: Arc::new(AtomicUsize::new(0)),
+            drop_next_response: Arc::new(AtomicBool::new(false)),
+            releases: Arc::new(Semaphore::new(0)),
+            methods: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl PrototypeScanProvider {
+    fn begin(&self) -> Result<PrototypeRemoteScan, ()> {
+        self.protocol_calls.fetch_add(1, Ordering::SeqCst);
+        self.methods
+            .lock()
+            .expect("scan methods")
+            .push("scantxoutset:start");
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(());
+        }
+        self.full_scan_starts.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = oneshot::channel();
+        let busy = Arc::clone(&self.busy);
+        let releases = Arc::clone(&self.releases);
+        let drop_response = self.drop_next_response.swap(false, Ordering::SeqCst);
+        tokio::spawn(async move {
+            let permit = releases
+                .acquire_owned()
+                .await
+                .expect("scan release semaphore");
+            permit.forget();
+            busy.store(false, Ordering::SeqCst);
+            if !drop_response {
+                let _ = sender.send(PrototypeScanResult {
+                    height: 850_000,
+                    best_block: ANCHOR_HASH,
+                });
+            }
+        });
+        Ok(PrototypeRemoteScan {
+            response: Some(receiver),
+        })
+    }
+
+    fn release_one(&self) {
+        self.releases.add_permits(1);
+    }
+}
+
+struct PrototypeAuditedScan {
+    authorization: usize,
+    ledger: Arc<Mutex<PrototypeScanAuditLedger>>,
+    remote: PrototypeRemoteScan,
+    observed: bool,
+}
+
+impl PrototypeAuditedScan {
+    async fn finish(mut self) -> Option<PrototypeScanResult> {
+        let result = self
+            .remote
+            .response
+            .take()
+            .expect("one remote response")
+            .await;
+        let (observation, result) = match result {
+            Ok(result) => (PrototypeScanObservation::Returned, Some(result)),
+            Err(_) => (PrototypeScanObservation::Indeterminate, None),
+        };
+        PrototypeScanAuditLedger::observe(&self.ledger, self.authorization, observation);
+        self.observed = true;
+        result
+    }
+}
+
+impl Drop for PrototypeAuditedScan {
+    fn drop(&mut self) {
+        if !self.observed {
+            PrototypeScanAuditLedger::observe(
+                &self.ledger,
+                self.authorization,
+                PrototypeScanObservation::Indeterminate,
+            );
+            self.observed = true;
+        }
+    }
+}
+
+enum PrototypeScanStart {
+    Entered(PrototypeAuditedScan),
+    DidNotEnter(usize),
+}
+
+fn begin_audited_scan(
+    provider: &PrototypeScanProvider,
+    ledger: &Arc<Mutex<PrototypeScanAuditLedger>>,
+) -> PrototypeScanStart {
+    let authorization = PrototypeScanAuditLedger::authorize(ledger);
+    match provider.begin() {
+        Ok(remote) => PrototypeScanStart::Entered(PrototypeAuditedScan {
+            authorization,
+            ledger: Arc::clone(ledger),
+            remote,
+            observed: false,
+        }),
+        Err(()) => {
+            PrototypeScanAuditLedger::observe(
+                ledger,
+                authorization,
+                PrototypeScanObservation::DidNotEnter,
+            );
+            PrototypeScanStart::DidNotEnter(authorization)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeScanQualificationGap {
+    BoundedProviderWork,
+    RepeatedCostAndSharedConcurrencyAcceptance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrototypeBitcoinRegistrationDisposition {
+    Registered,
+    Unregistered(Vec<PrototypeScanQualificationGap>),
+}
+
+struct PrototypeScanQualification {
+    no_durable_domain_mutation: bool,
+    indivisible_snapshot: bool,
+    bounded_descriptors: bool,
+    bounded_retained_result: bool,
+    start_only: bool,
+    no_hidden_retry_or_control_call: bool,
+    bounded_provider_work: bool,
+    repeated_cost_and_shared_concurrency_accepted: bool,
+}
+
+impl PrototypeScanQualification {
+    fn disposition(&self) -> PrototypeBitcoinRegistrationDisposition {
+        assert!(self.no_durable_domain_mutation);
+        assert!(self.indivisible_snapshot);
+        assert!(self.bounded_descriptors);
+        assert!(self.bounded_retained_result);
+        assert!(self.start_only);
+        assert!(self.no_hidden_retry_or_control_call);
+        let mut gaps = Vec::new();
+        if !self.bounded_provider_work {
+            gaps.push(PrototypeScanQualificationGap::BoundedProviderWork);
+        }
+        if !self.repeated_cost_and_shared_concurrency_accepted {
+            gaps.push(PrototypeScanQualificationGap::RepeatedCostAndSharedConcurrencyAcceptance);
+        }
+        if gaps.is_empty() {
+            PrototypeBitcoinRegistrationDisposition::Registered
+        } else {
+            PrototypeBitcoinRegistrationDisposition::Unregistered(gaps)
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -41,11 +317,13 @@ enum Mode {
     Redirect,
     OversizedLength,
     OversizedChunked,
+    AdversarialMalformed,
 }
 
 struct TestServer {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    raw_requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl TestServer {
@@ -54,14 +332,21 @@ impl TestServer {
         let address = listener.local_addr().expect("address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
+        let raw_requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_raw = Arc::clone(&raw_requests);
         tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
                 let captured = Arc::clone(&captured);
+                let captured_raw = Arc::clone(&captured_raw);
                 tokio::spawn(async move {
                     let bytes = read_http_request(&mut stream).await;
+                    captured_raw
+                        .lock()
+                        .expect("raw requests")
+                        .push(String::from_utf8_lossy(&bytes).into_owned());
                     let request: Value =
                         serde_json::from_slice(request_body(&bytes)).expect("request JSON");
                     captured.lock().expect("requests").push(request.clone());
@@ -79,11 +364,24 @@ impl TestServer {
         Self {
             url: format!("http://{address}"),
             requests,
+            raw_requests,
         }
     }
 
     fn requests(&self) -> Vec<Value> {
         self.requests.lock().expect("requests").clone()
+    }
+
+    fn raw_requests(&self) -> Vec<String> {
+        self.raw_requests.lock().expect("raw requests").clone()
+    }
+}
+
+fn assert_synthetic_material_absent(rendered: &str, material: &[&str]) {
+    for value in material {
+        assert!(!rendered.contains(value));
+        let fingerprint = sha256::Hash::hash(value.as_bytes()).to_string();
+        assert!(!rendered.contains(&fingerprint));
     }
 }
 
@@ -111,6 +409,66 @@ fn session(server: &TestServer) -> BitcoinRpcSession {
         Duration::from_secs(1),
     )
     .expect("session")
+}
+
+fn authenticated_fixture_session(server: &TestServer) -> BitcoinRpcSession {
+    BitcoinRpcSession::new(
+        BitcoinRpcEndpoint::new(format!("{}/{FIXTURE_ENDPOINT_PATH}", server.url))
+            .expect("endpoint"),
+        Some(
+            BitcoinRpcAuthentication::new(
+                FIXTURE_BASIC_USER.to_owned(),
+                zeroize::Zeroizing::new(FIXTURE_BASIC_PASSWORD.to_owned()),
+            )
+            .expect("authentication"),
+        ),
+        binding(),
+        Duration::from_secs(1),
+    )
+    .expect("session")
+}
+
+async fn prototype_blockchain_info(
+    session: &BitcoinRpcSession,
+) -> Result<BlockchainInfo, BitcoinRpcError> {
+    session
+        .rpc(
+            "getblockchaininfo",
+            serde_json::json!([]),
+            ORDINARY_REQUEST_TIMEOUT,
+        )
+        .await
+}
+
+async fn prototype_scan(
+    session: &BitcoinRpcSession,
+    request: &BitcoinBalanceCollectionRequest,
+) -> Result<ScanTxOutSetResult, BitcoinRpcError> {
+    let descriptors = request
+        .addresses()
+        .iter()
+        .map(BitcoinAddress::scan_descriptor)
+        .collect::<Vec<_>>();
+    session
+        .rpc(
+            "scantxoutset",
+            serde_json::json!(["start", descriptors]),
+            session.scan_timeout,
+        )
+        .await
+}
+
+async fn prototype_block_hash(
+    session: &BitcoinRpcSession,
+    height: u64,
+) -> Result<String, BitcoinRpcError> {
+    session
+        .rpc(
+            "getblockhash",
+            serde_json::json!([height]),
+            ORDINARY_REQUEST_TIMEOUT,
+        )
+        .await
 }
 
 #[tokio::test]
@@ -151,6 +509,83 @@ async fn aggregate_collection_is_exactly_one_sorted_scan_between_anchor_checks()
     );
     assert_eq!(requests[2]["params"], json!([850_000]));
     assert!(requests.iter().all(|request| request["jsonrpc"] == "2.0"));
+}
+
+#[tokio::test]
+async fn recoverability_prototype_gives_each_bitcoin_method_one_exchange() {
+    let server = TestServer::spawn(Mode::Valid).await;
+    let session = session(&server);
+    let request = request();
+
+    let info = prototype_blockchain_info(&session)
+        .await
+        .expect("blockchain-info bootstrap");
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(info.chain, "main");
+    assert!(!info.initial_block_download);
+
+    let scan = prototype_scan(&session, &request)
+        .await
+        .expect("one scan operation");
+    assert_eq!(server.requests().len(), 2);
+    let reduced = reduce_scan(&request, scan).expect("checked scan");
+
+    let final_hash = prototype_block_hash(&session, reduced.height)
+        .await
+        .expect("one block-hash confirmation");
+    assert_eq!(server.requests().len(), 3);
+    assert_eq!(final_hash, ANCHOR_HASH);
+    assert_eq!(reduced.anchor_hash.to_string(), final_hash);
+
+    let requests = server.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        ["getblockchaininfo", "scantxoutset", "getblockhash"]
+    );
+    assert_eq!(
+        requests[1]["params"][0], "start",
+        "the scan wrapper must not issue status or abort"
+    );
+}
+
+#[tokio::test]
+async fn recoverability_prototype_resolves_only_the_admitted_routing_generation() {
+    let first = TestServer::spawn(Mode::Valid).await;
+    let current = TestServer::spawn(Mode::Valid).await;
+    let first_generation = PrototypeRoutingGenerationRef("sha256:generation-a".to_owned());
+    let current_generation = PrototypeRoutingGenerationRef("sha256:generation-b".to_owned());
+    let mut resolver = PrototypeRouteResolver::default();
+    resolver.install_current(first_generation.clone(), first.url.clone());
+    let admitted = resolver.current.clone().expect("admitted generation");
+    resolver.install_current(current_generation, current.url.clone());
+
+    let PrototypeRouteResolution::Resolved(resumed_endpoint) = resolver.resolve_exact(&admitted)
+    else {
+        panic!("admitted routing generation must remain resolvable");
+    };
+    let resumed = BitcoinRpcSession::new(
+        BitcoinRpcEndpoint::new(&resumed_endpoint).expect("endpoint"),
+        None,
+        binding(),
+        Duration::from_secs(1),
+    )
+    .expect("resume session");
+    prototype_blockchain_info(&resumed)
+        .await
+        .expect("bootstrap uses exact admitted generation");
+    assert_eq!(first.requests().len(), 1);
+    assert!(current.requests().is_empty());
+
+    resolver.remove(&admitted);
+    assert_eq!(
+        resolver.resolve_exact(&admitted),
+        PrototypeRouteResolution::DidNotEnter,
+        "a missing admitted generation must not fall back to current routing"
+    );
+    assert!(current.requests().is_empty());
 }
 
 #[tokio::test]
@@ -267,6 +702,133 @@ async fn cancellation_drops_the_request_without_status_or_abort() {
 }
 
 #[tokio::test]
+async fn recoverability_prototype_preserves_scan_ambiguity_and_delayed_reissue() {
+    let provider = PrototypeScanProvider::default();
+    let ledger = Arc::new(Mutex::new(PrototypeScanAuditLedger::default()));
+    let PrototypeScanStart::Entered(first) = begin_audited_scan(&provider, &ledger) else {
+        panic!("first scan must enter");
+    };
+    let first_authorization = first.authorization;
+    let first_task = tokio::spawn(first.finish());
+    assert!(provider.busy.load(Ordering::SeqCst));
+    assert_eq!(provider.full_scan_starts.load(Ordering::SeqCst), 1);
+
+    let PrototypeScanStart::DidNotEnter(second_authorization) =
+        begin_audited_scan(&provider, &ledger)
+    else {
+        panic!("concurrent scan must report busy");
+    };
+    assert_ne!(first_authorization, second_authorization);
+    assert_eq!(
+        provider.full_scan_starts.load(Ordering::SeqCst),
+        1,
+        "scan-busy must not synthesize or start another full scan"
+    );
+
+    first_task.abort();
+    assert!(first_task
+        .await
+        .expect_err("cancelled wrapper")
+        .is_cancelled());
+    assert!(
+        provider.busy.load(Ordering::SeqCst),
+        "cancelling MFM's wrapper must not pretend remote work stopped"
+    );
+    provider.release_one();
+    for _ in 0..100 {
+        if !provider.busy.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(!provider.busy.load(Ordering::SeqCst));
+
+    let PrototypeScanStart::Entered(third) = begin_audited_scan(&provider, &ledger) else {
+        panic!("delayed reissue must be a new full scan");
+    };
+    let third_authorization = third.authorization;
+    assert_ne!(third_authorization, first_authorization);
+    assert_ne!(third_authorization, second_authorization);
+    provider.release_one();
+    let returned = third.finish().await.expect("delayed scan result");
+    assert_eq!(returned.height, 850_000);
+    assert_eq!(returned.best_block, ANCHOR_HASH);
+
+    let state = ledger.lock().expect("scan audit ledger");
+    assert_eq!(
+        state.observations,
+        [
+            (second_authorization, PrototypeScanObservation::DidNotEnter,),
+            (first_authorization, PrototypeScanObservation::Indeterminate,),
+            (third_authorization, PrototypeScanObservation::Returned,),
+        ]
+    );
+    assert_eq!(provider.protocol_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.full_scan_starts.load(Ordering::SeqCst), 2);
+    assert!(provider
+        .methods
+        .lock()
+        .expect("scan methods")
+        .iter()
+        .all(|method| *method == "scantxoutset:start"));
+}
+
+#[tokio::test]
+async fn recoverability_prototype_lost_scan_response_is_indeterminate() {
+    let provider = PrototypeScanProvider::default();
+    provider.drop_next_response.store(true, Ordering::SeqCst);
+    let ledger = Arc::new(Mutex::new(PrototypeScanAuditLedger::default()));
+    let PrototypeScanStart::Entered(first) = begin_audited_scan(&provider, &ledger) else {
+        panic!("first scan must enter");
+    };
+    let first_authorization = first.authorization;
+    provider.release_one();
+    assert_eq!(first.finish().await, None);
+
+    let PrototypeScanStart::Entered(reissued) = begin_audited_scan(&provider, &ledger) else {
+        panic!("lost response reissue starts a fresh scan");
+    };
+    let reissued_authorization = reissued.authorization;
+    provider.release_one();
+    assert!(reissued.finish().await.is_some());
+
+    assert_ne!(first_authorization, reissued_authorization);
+    assert_eq!(provider.full_scan_starts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        ledger.lock().expect("scan audit ledger").observations,
+        [
+            (first_authorization, PrototypeScanObservation::Indeterminate,),
+            (reissued_authorization, PrototypeScanObservation::Returned,),
+        ]
+    );
+}
+
+#[test]
+fn recoverability_prototype_keeps_bitcoin_production_unregistered() {
+    assert!(request().addresses().len() <= BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT);
+    assert_eq!(MAX_BITCOIN_JSON_RPC_BODY_BYTES, 16 * 1024 * 1024);
+    let qualification = PrototypeScanQualification {
+        no_durable_domain_mutation: true,
+        indivisible_snapshot: true,
+        bounded_descriptors: true,
+        bounded_retained_result: true,
+        start_only: true,
+        no_hidden_retry_or_control_call: true,
+        bounded_provider_work: false,
+        repeated_cost_and_shared_concurrency_accepted: false,
+    };
+
+    assert_eq!(
+        qualification.disposition(),
+        PrototypeBitcoinRegistrationDisposition::Unregistered(vec![
+            PrototypeScanQualificationGap::BoundedProviderWork,
+            PrototypeScanQualificationGap::RepeatedCostAndSharedConcurrencyAcceptance,
+        ]),
+        "client timeout and body bounds do not bound Bitcoin Core work or accept repeated cost"
+    );
+}
+
+#[tokio::test]
 async fn protocol_and_http_failures_are_closed_and_redacted() {
     for mode in [
         Mode::BadVersion,
@@ -315,6 +877,156 @@ async fn protocol_and_http_failures_are_closed_and_redacted() {
         .expect_err("redirect");
     assert_provider(&error, ProviderDiagnosticCode::RpcHttpStatus, false);
     assert_eq!(server.requests().len(), 1, "redirects must not be followed");
+}
+
+#[tokio::test]
+async fn adversarial_provider_material_cannot_reach_retained_failure_surfaces() {
+    for (mode, expected_code) in [
+        (Mode::HttpFailure, ProviderDiagnosticCode::RpcHttpStatus),
+        (
+            Mode::ResultAndError,
+            ProviderDiagnosticCode::ResponseInvalid,
+        ),
+        (
+            Mode::AdversarialMalformed,
+            ProviderDiagnosticCode::ResponseInvalid,
+        ),
+        (
+            Mode::OversizedChunked,
+            ProviderDiagnosticCode::ResponseInvalid,
+        ),
+        (Mode::ScanBusy, ProviderDiagnosticCode::RpcJsonError),
+    ] {
+        let server = TestServer::spawn(mode).await;
+        let session = authenticated_fixture_session(&server);
+        let error = session
+            .collect_balances(&request())
+            .await
+            .expect_err("adversarial response");
+        let BitcoinCapabilityError::Provider { diagnostic, .. } = &error else {
+            panic!("provider failure");
+        };
+        assert_eq!(diagnostic.code(), expected_code);
+
+        let raw = server.raw_requests().join("\n");
+        assert!(raw.contains(FIXTURE_ENDPOINT_PATH));
+        let authorization_header = raw
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("authorization: basic ")
+            })
+            .expect("server observed Basic authorization");
+        let authorization_encoding = authorization_header
+            .split_once(':')
+            .expect("authorization header")
+            .1
+            .trim();
+        let retained_json = serde_json::to_string(diagnostic).expect("typed diagnostic JSON");
+        let rendered = format!("{error:?} {error} {diagnostic:?} {diagnostic} {retained_json}");
+        let endpoint_url = format!("{}/{FIXTURE_ENDPOINT_PATH}", server.url);
+        assert_synthetic_material_absent(
+            &rendered,
+            &[
+                &server.url,
+                &endpoint_url,
+                FIXTURE_ENDPOINT_PATH,
+                FIXTURE_BASIC_USER,
+                FIXTURE_BASIC_PASSWORD,
+                authorization_header,
+                authorization_encoding,
+                FIXTURE_PROVIDER_BODY,
+                FIXTURE_PROVIDER_URL,
+                FIXTURE_LOW_ENTROPY,
+                "123456",
+            ],
+        );
+    }
+}
+
+#[tokio::test]
+async fn retained_bitcoin_evidence_excludes_endpoint_and_basic_authentication() {
+    let server = TestServer::spawn(Mode::Valid).await;
+    let session = authenticated_fixture_session(&server);
+    let response = session
+        .collect_balances(&request())
+        .await
+        .expect("checked response");
+    let evidence = BitcoinBalanceCollectionEvidence::from_response(&response);
+    let retained_json = serde_json::to_string(&evidence).expect("retained evidence");
+
+    let raw = server.raw_requests().join("\n");
+    let authorization_header = raw
+        .lines()
+        .find(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("authorization: basic ")
+        })
+        .expect("server observed Basic authorization");
+    let authorization_encoding = authorization_header
+        .split_once(':')
+        .expect("authorization header")
+        .1
+        .trim();
+    let endpoint_url = format!("{}/{FIXTURE_ENDPOINT_PATH}", server.url);
+    let rendered = format!("{session:?} {evidence:?} {retained_json}");
+    assert_synthetic_material_absent(
+        &rendered,
+        &[
+            &server.url,
+            &endpoint_url,
+            FIXTURE_ENDPOINT_PATH,
+            FIXTURE_BASIC_USER,
+            FIXTURE_BASIC_PASSWORD,
+            authorization_header,
+            authorization_encoding,
+            FIXTURE_LOW_ENTROPY,
+            "123456",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn transport_failure_discards_the_internal_bitcoin_endpoint_error() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve port");
+    let address = listener.local_addr().expect("reserved address");
+    drop(listener);
+    let endpoint_url = format!("http://{address}/{FIXTURE_ENDPOINT_PATH}");
+    let session = BitcoinRpcSession::new(
+        BitcoinRpcEndpoint::new(&endpoint_url).expect("endpoint"),
+        Some(
+            BitcoinRpcAuthentication::new(
+                FIXTURE_BASIC_USER.to_owned(),
+                zeroize::Zeroizing::new(FIXTURE_BASIC_PASSWORD.to_owned()),
+            )
+            .expect("authentication"),
+        ),
+        binding(),
+        Duration::from_secs(1),
+    )
+    .expect("session");
+    let error = session
+        .collect_balances(&request())
+        .await
+        .expect_err("connection must fail");
+    let BitcoinCapabilityError::Provider { diagnostic, .. } = &error else {
+        panic!("provider failure");
+    };
+    let rendered = format!("{error:?} {error} {diagnostic:?} {diagnostic}");
+    assert_eq!(diagnostic.code(), ProviderDiagnosticCode::TransportFailed);
+    assert_synthetic_material_absent(
+        &rendered,
+        &[
+            &endpoint_url,
+            FIXTURE_ENDPOINT_PATH,
+            FIXTURE_BASIC_USER,
+            FIXTURE_BASIC_PASSWORD,
+            FIXTURE_LOW_ENTROPY,
+            "123456",
+        ],
+    );
 }
 
 #[test]
@@ -589,7 +1301,9 @@ fn response(mode: Mode, request: &Value) -> String {
     if matches!(mode, Mode::HttpFailure) {
         return http_response(
             "500 Internal Server Error",
-            r#"{"provider":"provider-secret"}"#,
+            &format!(
+                r#"{{"body":"{FIXTURE_PROVIDER_BODY}","url":"{FIXTURE_PROVIDER_URL}","credential":"{FIXTURE_BASIC_PASSWORD}","pin":"{FIXTURE_LOW_ENTROPY}"}}"#
+            ),
         );
     }
     if matches!(mode, Mode::Redirect) {
@@ -611,12 +1325,19 @@ fn response(mode: Mode, request: &Value) -> String {
         );
     }
     if matches!(mode, Mode::OversizedChunked) {
-        let body = "x".repeat(MAX_BITCOIN_JSON_RPC_BODY_BYTES + 1);
+        let marker = format!("{FIXTURE_PROVIDER_BODY}{FIXTURE_LOW_ENTROPY}");
+        let body = marker.repeat(MAX_BITCOIN_JSON_RPC_BODY_BYTES / marker.len() + 1);
         return format!(
             "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
             body.len(),
             body
         );
+    }
+    if matches!(mode, Mode::AdversarialMalformed) {
+        let body = format!(
+            "{FIXTURE_PROVIDER_BODY} {FIXTURE_PROVIDER_URL} {FIXTURE_BASIC_PASSWORD} {FIXTURE_LOW_ENTROPY}"
+        );
+        return http_response("200 OK", &body);
     }
 
     let id = request["id"].as_u64().expect("request ID");
@@ -636,7 +1357,7 @@ fn response(mode: Mode, request: &Value) -> String {
     }
     if matches!(mode, Mode::ResultAndError) {
         let body = format!(
-            r#"{{"jsonrpc":"2.0","id":{id},"result":{{}},"error":{{"code":-1,"message":"provider-secret"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":{id},"result":{{}},"error":{{"code":-1,"message":"{FIXTURE_PROVIDER_BODY} {FIXTURE_PROVIDER_URL} {FIXTURE_LOW_ENTROPY}","data":{{"credential":"{FIXTURE_BASIC_PASSWORD}","token":"123456"}}}}}}"#
         );
         return http_response("200 OK", &body);
     }
@@ -653,7 +1374,7 @@ fn response(mode: Mode, request: &Value) -> String {
             "scan already in progress"
         };
         let body = format!(
-            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-8,"message":"{message}","data":"provider-secret"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-8,"message":"{message}","data":{{"body":"{FIXTURE_PROVIDER_BODY}","url":"{FIXTURE_PROVIDER_URL}","credential":"{FIXTURE_BASIC_PASSWORD}","pin":"{FIXTURE_LOW_ENTROPY}"}}}}}}"#
         );
         return http_response("200 OK", &body);
     }

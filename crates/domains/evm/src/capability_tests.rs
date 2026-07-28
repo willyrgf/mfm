@@ -4,6 +4,245 @@ fn binding() -> EvmNetworkBinding {
     EvmNetworkBinding::new(LocalPublicId::new("mainnet").expect("network"), 1).expect("binding")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeReadObservation {
+    DidNotEnter,
+    Indeterminate,
+    ReturnedSemanticFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeEvmStableFailureCode {
+    RoutingGenerationUnavailable,
+    ConfigurationInvalid,
+    RequestInvalid,
+    AccessCancelled,
+    TransportFailed,
+    HttpStatus,
+    JsonRpcError,
+    ResponseInvalid,
+    ResponseMissingResult,
+    ResponseTooLarge,
+    UnclassifiedFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeFailureClass {
+    Authorization,
+    Configuration,
+    Request,
+    Cancellation,
+    Transport,
+    Destination,
+    UnrepresentableResponse,
+    Integrity,
+    ResourceConflict,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeBoundaryStage {
+    BeforeBoundaryEntry,
+    BoundaryEntry,
+    BoundaryObservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeCoarseSizeClass {
+    Zero,
+    UpTo16Kib,
+    UpTo1Mib,
+    Over1Mib,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeEvmDiagnostic {
+    HttpStatus { status: u16 },
+    JsonRpcError { code: i64 },
+    ResponseInvalid { kind: PrototypeResponseFailureKind },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeResponseFailureKind {
+    MalformedEnvelope,
+    MissingResult,
+    InvalidResult,
+    TooLarge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrototypeReadClassification {
+    observation: PrototypeReadObservation,
+    stable_code: Option<PrototypeEvmStableFailureCode>,
+    failure_class: Option<PrototypeFailureClass>,
+    boundary_stage: Option<PrototypeBoundaryStage>,
+    coarse_size_class: Option<PrototypeCoarseSizeClass>,
+    diagnostic: Option<PrototypeEvmDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PrototypeEvmReadFailure {
+    RoutingGenerationUnavailable,
+    ConfigurationInvalid,
+    RequestInvalid,
+    CancelBeforeEntry,
+    CancelAfterEntry,
+    TransportBeforeEntry,
+    TransportAfterPossibleEntry,
+    HttpStatus(u16),
+    JsonRpcError(i64),
+    UnrepresentableResponse {
+        kind: PrototypeResponseFailureKind,
+        bytes: usize,
+    },
+    UnsafeUnknown,
+    SourceMismatch,
+    AnchorChanged,
+}
+
+fn prototype_size_class(bytes: usize) -> PrototypeCoarseSizeClass {
+    match bytes {
+        0 => PrototypeCoarseSizeClass::Zero,
+        1..=16_384 => PrototypeCoarseSizeClass::UpTo16Kib,
+        16_385..=1_048_576 => PrototypeCoarseSizeClass::UpTo1Mib,
+        _ => PrototypeCoarseSizeClass::Over1Mib,
+    }
+}
+
+fn prototype_evm_failure(failure: PrototypeEvmReadFailure) -> PrototypeReadClassification {
+    use PrototypeBoundaryStage::{BeforeBoundaryEntry, BoundaryEntry, BoundaryObservation};
+    use PrototypeEvmStableFailureCode::{
+        AccessCancelled, ConfigurationInvalid, HttpStatus, JsonRpcError, RequestInvalid,
+        ResponseInvalid, ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable,
+        TransportFailed, UnclassifiedFailure,
+    };
+    use PrototypeFailureClass::{
+        Authorization, Cancellation, Configuration, Destination, Request, Transport, Unclassified,
+        UnrepresentableResponse as UnrepresentableClass,
+    };
+    use PrototypeReadObservation::{DidNotEnter, Indeterminate, ReturnedSemanticFailure};
+
+    let safe =
+        |observation, stable_code, failure_class, boundary_stage, coarse_size_class, diagnostic| {
+            PrototypeReadClassification {
+                observation,
+                stable_code: Some(stable_code),
+                failure_class: Some(failure_class),
+                boundary_stage: Some(boundary_stage),
+                coarse_size_class,
+                diagnostic,
+            }
+        };
+    match failure {
+        PrototypeEvmReadFailure::RoutingGenerationUnavailable => safe(
+            DidNotEnter,
+            RoutingGenerationUnavailable,
+            Authorization,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::ConfigurationInvalid => safe(
+            DidNotEnter,
+            ConfigurationInvalid,
+            Configuration,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::RequestInvalid => safe(
+            DidNotEnter,
+            RequestInvalid,
+            Request,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::CancelBeforeEntry => safe(
+            DidNotEnter,
+            AccessCancelled,
+            Cancellation,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::CancelAfterEntry => safe(
+            Indeterminate,
+            AccessCancelled,
+            Cancellation,
+            BoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::TransportBeforeEntry => safe(
+            DidNotEnter,
+            TransportFailed,
+            Transport,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::TransportAfterPossibleEntry => safe(
+            Indeterminate,
+            TransportFailed,
+            Transport,
+            BoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::HttpStatus(status) => safe(
+            Indeterminate,
+            HttpStatus,
+            Destination,
+            BoundaryObservation,
+            None,
+            Some(PrototypeEvmDiagnostic::HttpStatus { status }),
+        ),
+        PrototypeEvmReadFailure::JsonRpcError(code) => safe(
+            Indeterminate,
+            JsonRpcError,
+            Destination,
+            BoundaryObservation,
+            None,
+            Some(PrototypeEvmDiagnostic::JsonRpcError { code }),
+        ),
+        PrototypeEvmReadFailure::UnrepresentableResponse { kind, bytes } => {
+            let stable_code = match kind {
+                PrototypeResponseFailureKind::MalformedEnvelope
+                | PrototypeResponseFailureKind::InvalidResult => ResponseInvalid,
+                PrototypeResponseFailureKind::MissingResult => ResponseMissingResult,
+                PrototypeResponseFailureKind::TooLarge => ResponseTooLarge,
+            };
+            safe(
+                Indeterminate,
+                stable_code,
+                UnrepresentableClass,
+                BoundaryObservation,
+                Some(prototype_size_class(bytes)),
+                Some(PrototypeEvmDiagnostic::ResponseInvalid { kind }),
+            )
+        }
+        PrototypeEvmReadFailure::UnsafeUnknown => safe(
+            Indeterminate,
+            UnclassifiedFailure,
+            Unclassified,
+            BoundaryObservation,
+            None,
+            None,
+        ),
+        PrototypeEvmReadFailure::SourceMismatch | PrototypeEvmReadFailure::AnchorChanged => {
+            PrototypeReadClassification {
+                observation: ReturnedSemanticFailure,
+                stable_code: None,
+                failure_class: None,
+                boundary_stage: None,
+                coarse_size_class: None,
+                diagnostic: None,
+            }
+        }
+    }
+}
+
 #[test]
 fn network_binding_rejects_zero_chain_id() {
     let error = EvmNetworkBinding::new(LocalPublicId::new("mainnet").expect("network"), 0)
@@ -208,6 +447,205 @@ fn source_mismatch_diagnostic_is_closed_and_redacted() {
     assert!(diagnostic.summary().contains("observed_chain_id=2"));
     for forbidden in ["http://", "Bearer", "password"] {
         assert!(!rendered.contains(forbidden));
+    }
+}
+
+#[test]
+fn recoverability_safe_failure_prototype_classifies_evm_reads_exhaustively() {
+    use PrototypeBoundaryStage::{BeforeBoundaryEntry, BoundaryEntry, BoundaryObservation};
+    use PrototypeEvmStableFailureCode::{
+        AccessCancelled, ConfigurationInvalid, HttpStatus, JsonRpcError, RequestInvalid,
+        ResponseInvalid, ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable,
+        TransportFailed, UnclassifiedFailure,
+    };
+    use PrototypeFailureClass::{
+        Authorization, Cancellation, Configuration, Destination, Integrity, Request,
+        ResourceConflict, Transport, Unclassified, UnrepresentableResponse,
+    };
+    use PrototypeReadObservation::{DidNotEnter, Indeterminate, ReturnedSemanticFailure};
+    use PrototypeResponseFailureKind::{InvalidResult, MalformedEnvelope, MissingResult, TooLarge};
+
+    let compact = |observation, code, class, stage, size, diagnostic| PrototypeReadClassification {
+        observation,
+        stable_code: code,
+        failure_class: class,
+        boundary_stage: stage,
+        coarse_size_class: size,
+        diagnostic,
+    };
+
+    let universal_failure_classes = [
+        Authorization,
+        Configuration,
+        Request,
+        Cancellation,
+        Transport,
+        Destination,
+        UnrepresentableResponse,
+        Integrity,
+        ResourceConflict,
+        Unclassified,
+    ];
+    assert_eq!(universal_failure_classes.len(), 10);
+
+    for (failure, expected) in [
+        (
+            PrototypeEvmReadFailure::RoutingGenerationUnavailable,
+            compact(
+                DidNotEnter,
+                Some(RoutingGenerationUnavailable),
+                Some(Authorization),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeEvmReadFailure::ConfigurationInvalid,
+            compact(
+                DidNotEnter,
+                Some(ConfigurationInvalid),
+                Some(Configuration),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeEvmReadFailure::RequestInvalid,
+            compact(
+                DidNotEnter,
+                Some(RequestInvalid),
+                Some(Request),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeEvmReadFailure::CancelBeforeEntry,
+            compact(
+                DidNotEnter,
+                Some(AccessCancelled),
+                Some(Cancellation),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeEvmReadFailure::CancelAfterEntry,
+            compact(
+                Indeterminate,
+                Some(AccessCancelled),
+                Some(Cancellation),
+                Some(BoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeEvmReadFailure::TransportBeforeEntry,
+            compact(
+                DidNotEnter,
+                Some(TransportFailed),
+                Some(Transport),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeEvmReadFailure::TransportAfterPossibleEntry,
+            compact(
+                Indeterminate,
+                Some(TransportFailed),
+                Some(Transport),
+                Some(BoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeEvmReadFailure::UnsafeUnknown,
+            compact(
+                Indeterminate,
+                Some(UnclassifiedFailure),
+                Some(Unclassified),
+                Some(BoundaryObservation),
+                None,
+                None,
+            ),
+        ),
+    ] {
+        assert_eq!(prototype_evm_failure(failure), expected);
+    }
+
+    for status in [400, 401, 403, 408, 425, 429, 500, 502, 503, 504, 507] {
+        let classification = prototype_evm_failure(PrototypeEvmReadFailure::HttpStatus(status));
+        assert_eq!(classification.stable_code, Some(HttpStatus));
+        assert_eq!(classification.failure_class, Some(Destination));
+        assert_eq!(classification.boundary_stage, Some(BoundaryObservation));
+        assert_eq!(
+            classification.diagnostic,
+            Some(PrototypeEvmDiagnostic::HttpStatus { status })
+        );
+    }
+    for code in [-32_603, -32_001, -32_002, -32_005, -32_600, -32_601, -8, 3] {
+        let classification = prototype_evm_failure(PrototypeEvmReadFailure::JsonRpcError(code));
+        assert_eq!(classification.stable_code, Some(JsonRpcError));
+        assert_eq!(classification.failure_class, Some(Destination));
+        assert_eq!(
+            classification.diagnostic,
+            Some(PrototypeEvmDiagnostic::JsonRpcError { code })
+        );
+    }
+
+    for (kind, stable_code) in [
+        (MalformedEnvelope, ResponseInvalid),
+        (MissingResult, ResponseMissingResult),
+        (InvalidResult, ResponseInvalid),
+        (TooLarge, ResponseTooLarge),
+    ] {
+        let classification =
+            prototype_evm_failure(PrototypeEvmReadFailure::UnrepresentableResponse {
+                kind,
+                bytes: 42,
+            });
+        assert_eq!(classification.stable_code, Some(stable_code));
+        assert_eq!(classification.failure_class, Some(UnrepresentableResponse));
+        assert_eq!(classification.boundary_stage, Some(BoundaryObservation));
+        assert_eq!(
+            classification.diagnostic,
+            Some(PrototypeEvmDiagnostic::ResponseInvalid { kind })
+        );
+    }
+
+    for (bytes, size) in [
+        (0, PrototypeCoarseSizeClass::Zero),
+        (1, PrototypeCoarseSizeClass::UpTo16Kib),
+        (16_384, PrototypeCoarseSizeClass::UpTo16Kib),
+        (16_385, PrototypeCoarseSizeClass::UpTo1Mib),
+        (1_048_576, PrototypeCoarseSizeClass::UpTo1Mib),
+        (1_048_577, PrototypeCoarseSizeClass::Over1Mib),
+    ] {
+        assert_eq!(
+            prototype_evm_failure(PrototypeEvmReadFailure::UnrepresentableResponse {
+                kind: TooLarge,
+                bytes,
+            })
+            .coarse_size_class,
+            Some(size)
+        );
+    }
+    for semantic in [
+        PrototypeEvmReadFailure::SourceMismatch,
+        PrototypeEvmReadFailure::AnchorChanged,
+    ] {
+        assert_eq!(
+            prototype_evm_failure(semantic),
+            compact(ReturnedSemanticFailure, None, None, None, None, None)
+        );
     }
 }
 
