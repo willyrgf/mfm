@@ -1,98 +1,140 @@
-# Typed Bitcoin Runtime Config
+# Bitcoin Collection Qualification Target
 
-Status: typed transport runbook for Bitcoin-backed portfolio workflows.
+Status: unregistered capability contract
 
-Bitcoin RPC endpoints, Basic-auth values, and scan deadlines are process-local live inputs. They
-are not semantic run authority and must not be persisted in specs, events, artifacts, public
-outputs, fixtures, or replay inputs.
+Bitcoin collection is not registered in the production state/capability catalog. No current app,
+CLI, or REST run can execute Bitcoin collection, and no aggregate-reader fallback exists. This
+document fixes the graph and qualification evidence required by a future registration change.
 
-Normative architecture references:
+Bitcoin RPC endpoints, Basic-auth values, deadlines, and local source resolution remain
+process/deployment resources. They must never appear in specs, journal records, retained objects,
+facts, public outputs, portable exports, fixtures, or diagnostics.
 
-- `docs/design.md`
-- `docs/architecture.md`
-- `docs/persisted-public-surfaces.md`
+## Required Graph
 
-## Runtime Config File
+A qualified Bitcoin operation must expand exactly this authority shape:
 
-Live CLI start accepts `--runtime-config <PATH>`. A resume needs it only while verified history has
-a pending Bitcoin live-source node. The REST server accepts the same explicit flag. There is no
-environment-selected config path. Read-only commands, replay, and REST startup do not load this
-file.
-
-Example TOML:
-
-```toml
-[bitcoin.routes.public-bitcoin-core]
-scan_timeout_seconds = 30
-rpc_url = { env = "MFM_BITCOIN_RPC_URL" }
-rpc_user = { env = "MFM_BITCOIN_RPC_USER" }
-rpc_password = { env = "MFM_BITCOIN_RPC_PASSWORD" }
+```text
+BootstrapBitcoinSource
+  -> ScanBitcoinUtxos
+  -> ConfirmBitcoinScanAnchor
+  -> AggregateBitcoinBalances
 ```
 
-The route key is the semantic `BitcoinSourceIdentity`, not an endpoint name, URL, credential id, or
-routing policy. `scan_timeout_seconds` is required and must be in `1..=86_400`. Basic-auth user and
-password are either both absent or both present.
+### Bootstrap
 
-Each value source is exactly one of `{ direct = "..." }`, `{ env = "NAME" }`,
-`{ file = "/path" }`, or `{ file_env = "NAME" }`. Passwords cannot use `direct`; their source must
-be indirect even in an unselected route.
+Admission binds one immutable non-secret `routing_generation_ref`, expected semantic source, and
+Bitcoin network. It performs no live source validation.
 
-## Source-Bound Aggregate Reads
+The bootstrap state later performs one audited `getblockchaininfo` operation through the exact
+admitted generation. It requires the expected chain and `initialblockdownload == false`. A returned
+network mismatch is the typed terminal `source_mismatch` result. Resolution failure is a reviewed
+safe failure and cannot trigger route fallback.
 
-Every start or resume creates one private routed session set. It resolves each required certified
-semantic source identity once, constructs an endpoint-bound `BitcoinRpcSession`, validates its exact
-`BitcoinSourceBinding` without network IO, and registers that routed set once for
-`BitcoinBalanceCollectionReadCapability`. The selected endpoint, authentication, and timeout remain
-fixed for that dispatch; a later call creates a new set and re-resolves current routing.
+### Scan
 
-`rust-bitcoin` is the primitive authority for canonical address parsing, network compatibility,
-script derivation, block/transaction hashes, outpoints, and amounts. Supported Bitcoin Core chain
-tags are `main`, `test`, `testnet4`, `signet`, and `regtest`. Test-family address encodings may be
-shared; the checked `getblockchaininfo.chain` value establishes the actual chain.
+The scan request contains one bounded, strictly ordered, non-empty set of canonical
+`addr(address)` descriptors. The capability performs exactly one:
 
-Each `BitcoinBalanceCollectionRequest` carries one exact semantic binding and between 1 and 1,024
-canonical addresses in strict UTF-8 order. A successful attempt performs exactly:
+```text
+scantxoutset "start"
+```
 
-1. `getblockchaininfo`, requiring the configured chain and `initialblockdownload == false`;
-2. one `scantxoutset start` containing every `addr(address)` descriptor; and
-3. `getblockhash(scan.height)`, requiring the hash to equal the scan anchor.
+That collection-valued request is one indivisible application-protocol operation. The capability
+must not issue hidden `status`, `abort`, retry, source-reselection, or recovery calls.
 
-Tip advancement is valid. A changed hash at the scan height is a reorganization and fails the
-attempt. MFM issues no additional RPC or scan-control requests; it has no process-local scan
-coordinator and no hidden transport retry.
+The checked result retains the complete bounded UTXO material needed for pure reduction, including
+the scan height/hash. `success = false` is the typed terminal `scan_incomplete` result.
 
-The selected deadline is the overall `scantxoutset start` timeout. Timeout or cancellation drops
-MFM's HTTP request but does not abort Bitcoin Core's global scan. A later full-attempt retry may
-receive the exact retriable scan-busy error until Core finishes.
+### Anchor confirmation
 
-## Strict Reduction
+The confirmation state derives its request from the returned scan height and performs one audited
+`getblockhash(height)`. The hash must equal the scan anchor. A mismatch is the typed terminal
+`anchor_changed` result.
 
-The transport accepts the forward-additive Bitcoin Core 28 response shape but strictly validates
-every consumed field. It requires JSON-RPC 2.0, exact request ids, exactly one result/error arm,
-bounded bodies, unique object members at every nesting level, mandatory scan fields, checked hashes
-and outpoints, bounded scripts/descriptors, known scriptPubKeys, and UTXO heights no greater than
-the scan height.
+### Pure aggregation
 
-Raw JSON amount tokens are converted directly to satoshis with at most eight fractional digits and
-no sign, exponent, float intermediary, overflow, or value above Bitcoin `MAX_MONEY`. Address
-balances and the total are checked sums; `total_amount` must equal the observed sum. Addresses with
-no UTXO remain explicit zero balances. Provider bodies/messages, endpoints, and credentials are
-discarded at the transport boundary.
+The aggregator performs no IO. It validates exact source/network binding, descriptor coverage,
+canonical addresses, hashes, outpoints, scripts, heights, and amounts. JSON amount tokens convert
+directly to satoshis with at most eight fractional digits and no sign, exponent, float
+intermediary, overflow, or value above `MAX_MONEY`. Address balances and total use checked sums;
+zero-balance addresses remain explicit.
 
-`CollectBitcoinBalancesState` reduces that one source-bound observation to an ordered non-empty
-`bitcoin.balance_snapshot` fact batch and a minimal `BitcoinBalanceCollectionReceipt`. Runtime
-settles the facts, receipt, retained evidence, and attempt completion in one atomic append.
+The state may then produce ordered typed balances and transition facts. Same-run portfolio
+consumption must use graph edges.
 
-## Ingress And Replay
+## Why Registration Is Blocked
 
-No runtime file, no Bitcoin family, or no selected semantic route yields `RuntimeConfigRequired`
-with a closed missing/route diagnostic. An unreadable, malformed, or semantically invalid supplied
-file yields `RuntimeConfigInvalid`; it is never presented as a missing route. Admission aggregates
-and deduplicates missing Bitcoin and EVM routes before `RunAdmitted`. Resume repeats that check only
-for nonterminal live-source nodes.
+`scantxoutset "start"` can continue provider work after a client timeout or cancellation and shares
+Bitcoin Core's global scan resource. Treating it as a read requires qualification that proves:
 
-Replay loads the store-verified committed journal and its exact retained objects under one
-snapshot, verifies the stored spec and certificate, and binds that exact certified authority into
-the non-cloneable `VerifiedRunView`. While borrowing that view, it reruns the same reducer and
-verifies the exact ordered fact batch and receipt. It must not rebuild authority from raw records
-or projections, open an RPC connection, consult runtime config, or repeat live IO.
+- it creates no durable domain mutation;
+- one invocation has one indivisible snapshot outcome;
+- maximum request, response, provider work, and wall-clock bounds are reviewed;
+- response loss, cancellation, and delayed reissue are safe;
+- concurrent scans and provider cost are explicitly accepted;
+- an indeterminate call is never treated as no entry;
+- a later invocation receives a fresh MFM authorization and may repeat the full work;
+- `scan_busy` proves only that this invocation did not start another scan; and
+- no hidden status/abort/retry or source fallback exists.
+
+Until production tests establish all of those properties against the supported Bitcoin Core
+behavior, the capability remains absent. If repeat-work safety cannot be established, a separately
+designed keyed work executor and audited status-read protocol is required; the generic runtime does
+not gain a Bitcoin-specific recovery mode.
+
+## Safe-Failure Contract
+
+Bitcoin uses the EVM read codes plus:
+
+```text
+scan_busy
+```
+
+Only the exact reviewed Bitcoin Core scan-busy condition—JSON-RPC code `-8` plus the exact-message
+classifier—maps to:
+
+```text
+Indeterminate
+destination
+boundary_observation
+ScanBusy
+```
+
+A near match remains an ordinary `json_rpc_error`. `scan_busy` yields
+`InsufficientEvidence`; it does not recover or borrow the result of an earlier authorization.
+
+The retryable HTTP set is `408`, `425`, `429`, `500`, `502`, `503`, `504`, and `507`. Other
+numeric destination rejections may become typed `destination_rejected`. Cancellation, transport
+failure, and unclassified failure yield `InsufficientEvidence`; malformed, missing, oversized, or
+otherwise unrepresentable responses yield `InvalidEvidence`.
+
+Provider messages, bodies, URLs, credentials, and paths are discarded. The only retained
+diagnostics are reviewed HTTP status, JSON-RPC numeric code, closed response-invalid kind, or
+`ScanBusy`.
+
+## Required Qualification Tests
+
+Registration requires production-path tests covering:
+
+- exact routing-generation resolution across process restart;
+- bootstrap source/network mismatch;
+- maximum descriptor fan-in and bounded result material;
+- lost response before and after possible boundary entry;
+- cancellation at every transport boundary;
+- exact scan-busy and adversarial near-match classification;
+- simultaneous scans from independent processes;
+- delayed reissue after timeout and after process loss;
+- no status, abort, hidden retry, or provider reselection;
+- scan-height hash change;
+- malformed, duplicate, overflowing, and noncanonical response material;
+- runtime exact-head CAS loss after authorization or observation;
+- replay with zero live IO; and
+- absence from the product catalog when any qualification fails.
+
+## Future Routing
+
+A future qualified deployment may configure immutable Bitcoin routing generations. Admission may
+select only the non-secret generation reference. Endpoint/authentication resolution and
+`getblockchaininfo` validation remain post-admission audited work. Evidence-only reads never resolve
+the generation.

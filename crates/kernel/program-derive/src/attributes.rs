@@ -12,6 +12,7 @@ pub(super) struct ContainerAttrs {
     pub(super) validate: Option<Path>,
     pub(super) transparent_string: bool,
     pub(super) transparent_map: bool,
+    pub(super) serde_transparent: bool,
 }
 
 impl ContainerAttrs {
@@ -28,6 +29,7 @@ impl ContainerAttrs {
             validate: None,
             transparent_string: false,
             transparent_map: false,
+            serde_transparent: false,
         };
 
         for attr in attrs {
@@ -82,9 +84,10 @@ impl ContainerAttrs {
                     } else if meta.path.is_ident("try_from") || meta.path.is_ident("into") {
                         let _ = meta.value()?.parse::<LitStr>()?;
                         Ok(())
-                    } else if meta.path.is_ident("transparent")
-                        || meta.path.is_ident("deny_unknown_fields")
-                    {
+                    } else if meta.path.is_ident("transparent") {
+                        output.serde_transparent = true;
+                        Ok(())
+                    } else if meta.path.is_ident("deny_unknown_fields") {
                         Ok(())
                     } else if meta.path.is_ident("untagged") {
                         Err(meta.error("serde(untagged) is not supported by MFM derives"))

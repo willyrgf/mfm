@@ -1,40 +1,87 @@
 use std::fs::File;
 use std::io::Read;
 
-use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
-use mfm_ids::{ContentDigest, DigestBytes};
-use mfm_runtime::ExecutableIdentityTemplate;
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1};
+use mfm_ids::{ContentRef, DigestBytes};
 
 use crate::{ErrorClass, PublicError};
 
-const EXECUTABLE_IDENTITY_CONTRACT: &str = "mfm.executable-bytes.v1";
+const EXECUTABLE_DESCRIPTOR_CONTRACT: &str = "mfm.executable-bytes-descriptor.v1";
+const EXECUTABLE_BYTES_CONTRACT: &str = "mfm.executable-bytes.v1";
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
-pub(super) async fn current_executable_identity_template(
-) -> Result<ExecutableIdentityTemplate, PublicError> {
-    resolve_executable_identity_with(read_current_executable_identity).await
+/// Self-attested identity and exact retained descriptor of the serving executable.
+pub(super) struct CurrentExecutableIdentity {
+    descriptor: ValidatedCanonicalValueV1,
+    content_ref: ContentRef,
+}
+
+impl std::fmt::Debug for CurrentExecutableIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CurrentExecutableIdentity")
+            .field("content_ref", &self.content_ref)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CurrentExecutableIdentity {
+    pub(super) const fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
+
+    pub(super) fn descriptor_bytes(&self) -> &[u8] {
+        self.descriptor.as_bytes()
+    }
+}
+
+pub(super) async fn current_executable_identity() -> Result<CurrentExecutableIdentity, PublicError>
+{
+    resolve_executable_identity_with(read_current_executable_sha256).await
 }
 
 async fn resolve_executable_identity_with<F>(
     read: F,
-) -> Result<ExecutableIdentityTemplate, PublicError>
+) -> Result<CurrentExecutableIdentity, PublicError>
 where
-    F: FnOnce() -> Result<ContentDigest, ()> + Send + 'static,
+    F: FnOnce() -> Result<DigestBytes, ()> + Send + 'static,
 {
-    let digest = tokio::task::spawn_blocking(read)
+    let raw_sha256 = tokio::task::spawn_blocking(read)
         .await
         .map_err(|_| executable_identity_unavailable())?
         .map_err(|_| executable_identity_unavailable())?;
-    Ok(ExecutableIdentityTemplate::new(digest))
+    executable_identity(&raw_sha256)
 }
 
-fn read_current_executable_identity() -> Result<ContentDigest, ()> {
-    let raw_sha256 = read_stable_current_executable_sha256()?;
-    executable_identity_digest(&raw_sha256)
+fn executable_identity(raw_sha256: &DigestBytes) -> Result<CurrentExecutableIdentity, PublicError> {
+    let value = CanonicalValue::object([
+        (
+            "contract",
+            CanonicalValue::String(EXECUTABLE_BYTES_CONTRACT.to_owned()),
+        ),
+        ("sha256", CanonicalValue::String(raw_sha256.to_string())),
+    ])
+    .map_err(|_| executable_identity_unavailable())?;
+    let contract =
+        RecoverabilityContractV1::embedded().map_err(|_| executable_identity_unavailable())?;
+    let descriptor = contract
+        .encode(EXECUTABLE_DESCRIPTOR_CONTRACT, &value)
+        .map_err(|_| executable_identity_unavailable())?;
+    let content_ref = contract
+        .content_ref(&descriptor)
+        .map_err(|_| executable_identity_unavailable())?;
+    Ok(CurrentExecutableIdentity {
+        descriptor,
+        content_ref,
+    })
+}
+
+fn read_current_executable_sha256() -> Result<DigestBytes, ()> {
+    read_stable_current_executable_sha256()
 }
 
 #[cfg(target_os = "linux")]
-fn read_stable_current_executable_sha256() -> Result<String, ()> {
+fn read_stable_current_executable_sha256() -> Result<DigestBytes, ()> {
     let mut file = File::open("/proc/self/exe").map_err(|_| ())?;
     let before = file_identity(&file.metadata().map_err(|_| ())?);
     let digest = streaming_sha256(&mut file)?;
@@ -42,11 +89,11 @@ fn read_stable_current_executable_sha256() -> Result<String, ()> {
     if before != after {
         return Err(());
     }
-    Ok(digest.to_string())
+    Ok(digest)
 }
 
 #[cfg(target_os = "macos")]
-fn read_stable_current_executable_sha256() -> Result<String, ()> {
+fn read_stable_current_executable_sha256() -> Result<DigestBytes, ()> {
     let path = std::env::current_exe().map_err(|_| ())?;
     let mut file = File::open(&path).map_err(|_| ())?;
     let file_before = file_identity(&file.metadata().map_err(|_| ())?);
@@ -60,11 +107,11 @@ fn read_stable_current_executable_sha256() -> Result<String, ()> {
     if file_before != file_after || file_before != path_after {
         return Err(());
     }
-    Ok(digest.to_string())
+    Ok(digest)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn read_stable_current_executable_sha256() -> Result<String, ()> {
+fn read_stable_current_executable_sha256() -> Result<DigestBytes, ()> {
     Err(())
 }
 
@@ -88,18 +135,6 @@ fn streaming_sha256(reader: &mut dyn Read) -> Result<DigestBytes, ()> {
     let mut bytes = [0_u8; 32];
     bytes.copy_from_slice(digest.as_ref());
     Ok(DigestBytes::from_array(bytes))
-}
-
-fn executable_identity_digest(raw_sha256: &str) -> Result<ContentDigest, ()> {
-    let identity = CanonicalValue::object([
-        (
-            "contract",
-            CanonicalValue::String(EXECUTABLE_IDENTITY_CONTRACT.to_owned()),
-        ),
-        ("sha256", CanonicalValue::String(raw_sha256.to_owned())),
-    ])
-    .map_err(|_| ())?;
-    Ok(CanonicalJsonBytes::from_value(&identity).content_digest())
 }
 
 pub(super) fn executable_identity_unavailable() -> PublicError {
@@ -130,30 +165,30 @@ mod tests {
     }
 
     #[test]
-    fn executable_identity_uses_the_exact_canonical_object() {
-        let raw_sha256 = "00".repeat(32);
-        let expected_json =
-            format!(r#"{{"contract":"mfm.executable-bytes.v1","sha256":"{raw_sha256}"}}"#);
-        let expected = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&expected_json)
-            .expect("canonical fixture")
-            .content_digest();
+    fn executable_identity_uses_the_frozen_annex_descriptor() {
+        let raw_sha256 = DigestBytes::from_array([0_u8; 32]);
+        let identity = executable_identity(&raw_sha256).expect("identity");
         assert_eq!(
-            executable_identity_digest(&raw_sha256).expect("identity"),
-            expected
+            identity.descriptor_bytes(),
+            br#"{"contract":"mfm.executable-bytes.v1","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#
+        );
+        assert_eq!(
+            identity.content_ref().schema_id().as_str(),
+            "schema:mfm.executable-bytes-descriptor:1:sha256-jcs-v1:40bca04a66ae22de3349f76e1e60822429609a7aad400ecbf65489836478ce66"
         );
     }
 
     #[tokio::test]
-    async fn current_template_binds_the_running_test_executable_bytes() {
-        let template = current_executable_identity_template()
+    async fn current_identity_binds_the_running_test_executable_bytes() {
+        let identity = current_executable_identity()
             .await
             .expect("current executable identity");
         let bytes = std::fs::read(std::env::current_exe().expect("current executable"))
             .expect("read current executable");
-        let expected =
-            executable_identity_digest(&mfm_canonical::sha256_digest_bytes(&bytes).to_string())
-                .expect("canonical executable identity");
-        assert_eq!(template.binary_digest(), &expected);
+        let expected = executable_identity(&mfm_canonical::sha256_digest_bytes(&bytes))
+            .expect("canonical executable identity");
+        assert_eq!(identity.content_ref(), expected.content_ref());
+        assert_eq!(identity.descriptor_bytes(), expected.descriptor_bytes());
     }
 
     #[tokio::test]

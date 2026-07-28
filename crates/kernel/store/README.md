@@ -1,65 +1,59 @@
 # mfm-store
 
-Typed kernel crate for certified run event commit contracts.
+`mfm-store` owns the recoverability-v1 run-journal boundary.
 
-`docs/design.md` is the normative typed-core authority contract.
-This crate is framework-owned and must remain domain-free.
+Its public surface has one current model:
 
-Production run mutation is `append_prepared_commit_bundle(PreparedCommitBundle)`. Bundles contain a
-purpose-specific `PreparedCommit<Purpose>` plan plus the artifact bytes or explicit existing
-artifact admissions that must become run authority atomically with the event batch. Store
-implementations own sequence, ordinal, event id, logical-key, precondition, artifact bytes,
-artifact evidence, and projection validation.
+- `CommittedRunJournal` is the immutable physical journal and exact retained-object closure
+  accepted by the store verifier.
+- `VerifiedRunView` is the opaque callback-free semantic fold used by drive, replay, export, and
+  the store's private public/audit/trace projection paths.
+- `VerifiedPublicRunView` is the owned annex-validated status and certified-public-output response.
+  It grants no journal or object authority.
+- `AdmitRun`, `CommitTransition`, `AuthorizeExternalAccess`, and
+  `ObserveExternalAccess` are the only prepared append variants.
+- `RunJournalStore` is the purpose-authorized application surface.
+- `RunJournalBackend` is the durable adapter seam. It receives store-created verifiers and has no
+  raw append operation.
 
-For temporary explicit fact, live-adapter, and cross-run boundaries, `mfm-store` derives exact
-`EventArtifactRequirement` values from event reference facts and exposes
-`RetainedArtifactReadProvider`. It returns `VerifiedRetainedArtifactBytes` only after checking the
-bytes and every typed evidence and producer binding field. Per-run history does not use that
-provider; the journal/view boundary below owns its retained-object authority.
+Backends must publish the complete assigned commit, its object admissions and bindings, and its
+tenant fact coordinate atomically. They revalidate every non-admission successor against the
+current `VerifiedRunView` inside the same serialization boundary before assignment.
 
-Per-run reads cross one boundary: `RunJournalStore::load_committed_journal` loads committed batches,
-typed records, and every required retained object under one backend snapshot. It returns an opaque,
-non-cloneable `CommittedRunJournal` only after checking record identity and order, atomic batch
-grouping, the store-private physical fold, and exact event-required object evidence. This physical
-load does not verify manual-resolution signatures, resolve operators, consult signers or keystores,
-or decide external truth.
+Only `Drive`, `Replay`, and `Export` authorities satisfy the sealed
+`CommittedJournalLoadGrant` bound for a complete journal load. `ReadPublic`, `InspectAudit`, and
+`InspectTrace` authorities use dedicated store methods instead. A public read performs one backend
+load, verifies the complete history, projects the reviewed active fields and certified output
+subtrees, and returns only `VerifiedPublicRunView`. Audit returns a bounded head-fixed
+`VerifiedAccessAuditPage`. Trace uses a two-phase source-requirements token and returns a bounded
+`VerifiedTransitionTracePage` after each disclosed source has its own inspection decision.
 
-The journal exposes its admitted spec and certificate objects only for certification bootstrap.
-`CommittedRunJournal::verify` consumes the journal with the exact `CertifiedTypedSpec` and builds
-the sole semantic fold in `mfm-store`. For every historical manual resolution, that fold invokes
-the deterministic `mfm-manual-auth` verifier against the verifier identity, operator authority
-snapshot, signing scheme, quorum, exact prefix claim, and retained proof bytes carried by certified
-replay authority. It performs no live operator, signer, keystore, or policy-registry lookup and
-makes no external-truth decision. Only successful semantic validation produces the opaque,
-non-cloneable `VerifiedRunView`; that view is fully authorization-verified and is shared by
-runtime, replay, status, and public-output reads. Those consumers trust its derived fold and do not
-reconstruct or reverify historical manual proofs.
+Reserved prior-run fact selection uses a fresh affine permit to scan the authoritative writer's
+dense publication prefix through its frozen tenant barrier. Each final selected publication is
+reduced to an exact publication-prefix typed closure before the completed scan can leave the
+private builder. `ContentRef` transport authorities are retained as graph material but excluded
+from semantic object references; typed `ValueRef` authorities remain semantic and recursively
+close their payload and evidence dependencies. A `ContentRef` target whose schema is exactly
+`mfm.value-ref.v1` remains a transport-only wrapper and stops traversal because the incoming
+content reference is already the semantic edge.
 
-Durable adapters implement the doc-hidden `RunJournalBackend` SPI. Its load receives one
-non-cloneable `JournalLoadVerifier` bound to the requested run and must consume that verifier after
-loading records and objects consistently. The blanket `RunJournalStore` implementation is the
-sealed permanent append/load API; there is no generic public raw-record journal minter. Store
-wrappers implement `RunJournalBackend`, not `RunJournalStore`, and consume the verifier with
-`accept_verified` after delegating a load. The blanket boundary rechecks the returned journal's run
-id after every backend future resolves.
+The generic observation append atomically persists the returned response, its source-closure
+attestation, all exact object bindings, and one private attestation-routing row. Live reducer entry
+after compatible evidence selection and replay completeness load that row against an exact verified
+view and share the backend completeness predicate. `CompletedFactScan` consumes itself into that
+generic material and derives its sealed authorization reference internally.
 
-Neither raw record vectors, projection snapshots, standalone retained-object maps, nor independently
-rebuilt consumer projections can construct that view. `current_run_sequence` is a current persisted
-observation only; it is not a fabricated recoverability head token. The temporary
-`current_lifecycle` borrowed readers exist only to complete the current lifecycle cutover without
-copying journal authority into consumer-owned maps. They are deleted when the complete audited
-lifecycle replaces the current event algebra.
+`RunAccessAuthority<G>` values are bound to one exact store instance and purpose. The paired
+`RunAccessAuthorityIssuer` is non-cloneable. Only a directly observed newly appended external
+authorization returns `NewlyAppendedAuthorization`; idempotent, stale, rejected, and ambiguous
+outcomes never recreate live-operation authority.
 
-A refresh consumes the old view and a newly loaded journal through
-`VerifiedRunView::verify_successor`. It carries the already verified certified-spec authority
-forward only when the new journal is a strict extension with the same exact committed prefix and
-all previously retained objects unchanged. Equal, truncated, divergent, reordered, or
-old-object-replaced candidates fail closed; a refresh does not invoke certification again.
-Semantic extension applies only suffix records while resolving their exact dependencies against
-the complete successor journal, including deterministic authorization verification for any new
-manual-resolution record. It neither refolds the prefix nor synthesizes a suffix object map.
+Portable replay may call `verify_offline_recorded_history` with decoded immutable rows and their
+complete exact object closure. That function runs the same physical verifier and semantic reducer
+as an authorized backend load and creates no live store or mutation authority.
 
-Synthetic direct mutation helpers are non-execution tooling only. They may be used by explicitly
-named storage contract, corruption, migration, or repair fixtures, but app, CLI, REST, transport,
-runtime scheduling, replay, public-output, and positive conformance paths must enter through
-prepared typed commits.
+With the `test-support` feature, `AsyncInMemoryRunStore::new(StoreIdentity)` returns the store and
+its sole issuer as a pair. The in-memory backend stages changes in a scratch copy and swaps once,
+preserving the same all-or-nothing and compare-and-swap contract required of durable backends.
+
+[`docs/design.md`](../../../docs/design.md) is the authoritative semantic contract.

@@ -670,6 +670,3 @@ macro_rules! impl_kind_identity_constructor {
 
 impl_kind_identity_constructor!(EffectKindKind, "effect");
 impl_kind_identity_constructor!(CapabilityKindKind, "capability");
-impl_kind_identity_constructor!(StateKindKind, "state");
-impl_kind_identity_constructor!(AdapterKindKind, "adapter");
-impl_kind_identity_constructor!(OperationKindKind, "operation");

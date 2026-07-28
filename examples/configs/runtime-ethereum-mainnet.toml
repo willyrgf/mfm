@@ -3,4 +3,6 @@
 
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
+chain_id = 1
+generation_id = "ethereum-mainnet-primary-v1"
 rpc_url = { env = "MFM_ETHEREUM_MAINNET_RPC_URL" }

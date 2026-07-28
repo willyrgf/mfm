@@ -7,9 +7,10 @@ edition = "2021"
 layer = "test"
 
 [features]
-parity-tests = []
+parity-tests = ["mfm-storage-postgres/parity-tests"]
 
 [dependencies]
+async-trait = { workspace = true }
 axum = "0.7"
 serde_json = { workspace = true }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
@@ -17,7 +18,7 @@ uuid = { version = "1.0", features = ["v4"] }
 tempfile = "3.0"
 tokio = { workspace = true }
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
-mfm-events = { path = "../../crates/kernel/events" }
+mfm-journal = { path = "../../crates/kernel/journal" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-facts = { path = "../../crates/kernel/facts" }
@@ -29,7 +30,9 @@ mfm-values = { path = "../../crates/kernel/values" }
 mfm-evm = { path = "../../crates/domains/evm" }
 mfm-evm-live = { path = "../../crates/live/evm" }
 mfm-portfolio = { path = "../../crates/domains/portfolio" }
+mfm-replay = { path = "../../crates/kernel/replay" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
+mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]

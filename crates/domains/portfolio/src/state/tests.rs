@@ -1,220 +1,323 @@
+use alloy_primitives::{B256, U256};
+use mfm_evm::{
+    EvmAnchoredSource, EvmBalanceAsset, EvmBalanceCollection, EvmBlockAnchor, EvmCheckedSource,
+    EvmRoutingGenerationRef,
+};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId};
+use mfm_program::State;
+use serde_json::json;
+
 use super::*;
+use crate::decode_portfolio_config;
 
-use std::collections::BTreeMap;
-
-use crate::PublicMetadata;
-use crate::{
-    ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioReport,
-    PortfolioSnapshot,
-};
-use crate::{
-    HoldingSourceConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolValuationConfig,
-};
-use crate::{WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind};
-use alloy_primitives::U256;
-use mfm_bitcoin::BitcoinBalanceSnapshotFact;
-use mfm_evm::{EvmBalanceSnapshotFact, EvmBlockAnchor};
-use mfm_facts::MfmFactType;
-
-const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
-const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
+const ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
 const TOKEN: &str = "0x0000000000000000000000000000000000000001";
 
-fn test_network(network_id: &str, chain_id: u64) -> NetworkConfig {
-    NetworkConfig::new(
-        network_id.to_owned(),
-        NetworkFamilyConfig::Evm,
-        Some(chain_id),
-        Some(18),
-        None,
-        None,
-        BTreeMap::new(),
+fn generation(seed: &[u8]) -> EvmRoutingGenerationRef {
+    let schema = SchemaId::new(
+        "mfm.test.evm-routing",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"routing schema"),
     )
-    .expect("valid network config")
-}
-
-fn test_wallet(network_id: &str) -> WalletConfig {
-    WalletConfig {
-        wallet_id: "wallet_main".parse().expect("valid wallet id"),
-        subject: WalletSubject::new(EVM_ACCOUNT, WalletSubjectKind::EvmAddress)
-            .expect("valid wallet subject"),
-        network_id: network_id.parse().expect("valid network id"),
-        implementation: WalletImplementationConfig::AddressOnly {},
-        symbol_ids: vec!["eth.native.ethereum-mainnet"
-            .parse()
-            .expect("valid symbol id")],
-        metadata: PublicMetadata::default(),
-    }
-}
-
-fn test_symbol(network_id: &str) -> SymbolConfig {
-    SymbolConfig {
-        symbol_id: "eth.native.ethereum-mainnet"
-            .parse()
-            .expect("valid symbol id"),
-        display_symbol: Some("ETH".to_owned()),
-        network_id: network_id.parse().expect("valid network id"),
-        source: HoldingSourceConfig::Native,
-        valuation: SymbolValuationConfig {
-            quotes: vec![QuoteValuationConfig {
-                quote: QuoteCode::Usd,
-                priced_symbol_id: "eth.native.ethereum-mainnet"
-                    .parse()
-                    .expect("valid priced symbol id"),
-                unit_price_dec: "2.5".parse().expect("valid unit price"),
-            }],
-        },
-        metadata: PublicMetadata::default(),
-    }
-}
-
-fn sample_portfolio() -> PortfolioConfig {
-    PortfolioConfig {
-        portfolio_id: "portfolio_main".parse().expect("valid portfolio id"),
-        quote_codes: vec![QuoteCode::Usd],
-        networks: vec![test_network("ethereum-mainnet", 1)],
-        wallets: vec![test_wallet("ethereum-mainnet")],
-        symbol_configs: vec![test_symbol("ethereum-mainnet")],
-        metadata: PublicMetadata::default(),
-    }
-}
-
-fn selected_native(raw_units: &str) -> SelectedHoldings {
-    SelectedHoldings {
-        observations: vec![Observation {
-            wallet_id: "wallet_main".to_owned(),
-            symbol_id: "eth.native.ethereum-mainnet".to_owned(),
-            display_symbol: Some("ETH".to_owned()),
-            network_id: "ethereum-mainnet".to_owned(),
-            quantity: ObservationQuantity {
-                raw_dec: raw_units.to_owned(),
-                decimals: 18,
-                amount_dec: "1".to_owned(),
-            },
-            values: Vec::new(),
-            source: AnchoredHoldingSource {
-                holding: HoldingSourceConfig::Native,
-                anchor: ExecutionAnchor::Evm {
-                    chain_id: std::num::NonZeroU64::new(1).expect("non-zero chain"),
-                    block: EvmBlockAnchor::new(
-                        U256::from(10),
-                        EVM_HASH.parse().expect("anchor hash"),
-                    ),
-                },
-            },
-            metadata: PublicMetadata::default(),
-        }],
-    }
-}
-
-#[test]
-fn unknown_portfolio_config_fields_are_rejected_on_decode() {
-    assert_unknown_field_rejected::<PortfolioConfig>(
-        r#"{"unexpected_field":1}"#,
-        "portfolio config",
-    );
-}
-
-#[test]
-fn output_projection_configs_carry_no_version_policy() {
-    let mut snapshot_config =
-        serde_json::to_value(AssembleSnapshotConfig::new(sample_portfolio()).expect("config"))
-            .expect("snapshot config serializes");
-    assert!(snapshot_config.get("snapshot_version").is_none());
-    snapshot_config["snapshot_version"] = serde_json::json!("unsupported");
-    assert!(serde_json::from_value::<AssembleSnapshotConfig>(snapshot_config).is_err());
-
-    let mut report_config =
-        serde_json::to_value(ProjectReportConfig::default()).expect("report config serializes");
-    assert_eq!(report_config, serde_json::json!({}));
-    report_config["report_version"] = serde_json::json!("unsupported");
-    assert!(serde_json::from_value::<ProjectReportConfig>(report_config).is_err());
-}
-
-fn assert_unknown_field_rejected<T>(input: &str, label: &str)
-where
-    T: serde::de::DeserializeOwned,
-{
-    let error = match serde_json::from_str::<T>(input) {
-        Ok(_) => panic!("{label} accepted unknown field"),
-        Err(error) => error,
-    };
-    assert!(
-        error.to_string().contains("unknown field"),
-        "{label}: {error}"
-    );
-}
-
-#[test]
-fn selection_config_carries_both_family_descriptors() {
-    let config = SelectHoldingsConfig::new(
-        sample_portfolio(),
-        SelectHoldingsFactDescriptors::new(
-            &BitcoinBalanceSnapshotFact::descriptor().expect("Bitcoin descriptor"),
-            &EvmBalanceSnapshotFact::descriptor().expect("EVM descriptor"),
+    .expect("schema");
+    EvmRoutingGenerationRef::from_content_ref(
+        ContentRef::new(
+            schema,
+            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(seed)),
         )
-        .expect("holding descriptors"),
+        .expect("content ref"),
     )
-    .expect("config");
-    assert_eq!(
-        config.selection_policy_id(),
-        PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID
-    );
-    let mut value = serde_json::to_value(config).expect("config value");
-    value["candidate_scan_limit"] = serde_json::json!(11);
-    assert_unknown_field_rejected::<SelectHoldingsConfig>(
-        &serde_json::to_string(&value).expect("config JSON"),
-        "select holdings config",
-    );
+    .expect("generation")
 }
 
-#[test]
-fn store_selected_evm_holding_assembles_totals_and_exact_network_pin() {
-    let snapshot = assemble_snapshot(
-        &AssembleSnapshotConfig::new(sample_portfolio()).expect("assemble config"),
-        AssembleSnapshotInput {
-            holdings: selected_native("1000000000000000000"),
-        },
-    )
-    .expect("snapshot");
-    assert_eq!(snapshot.schema_version, PortfolioSnapshot::SCHEMA_VERSION);
-    assert_eq!(snapshot.network_pins.len(), 1);
-    assert_eq!(snapshot.network_pins[0].network_id, "ethereum-mainnet");
-    let mut unsupported_snapshot = snapshot.clone();
-    unsupported_snapshot.schema_version = u64::MAX;
-    assert!(project_report_from_snapshot(unsupported_snapshot).is_err());
-
-    let report = project_report_from_snapshot(snapshot).expect("report");
-    assert_eq!(report.schema_version, PortfolioReport::SCHEMA_VERSION);
-    assert_eq!(report.totals_by_quote[0].total_value_dec, "2.5");
-    assert_eq!(
-        report.wallet_summaries[0].totals_by_quote[0].total_value_dec,
-        "2.5"
-    );
+fn evm_portfolio() -> PortfolioConfig {
+    decode_portfolio_config(&json!({
+        "portfolio_id": "portfolio-main",
+        "quote_codes": ["USD"],
+        "networks": [{
+            "family": "evm",
+            "network_id": "ethereum-mainnet",
+            "chain_id": 1,
+            "native_decimals": 18,
+            "metadata": {}
+        }],
+        "wallets": [{
+            "wallet_id": "wallet-main",
+            "subject": {"kind": "evm_address", "address": ACCOUNT},
+            "network_id": "ethereum-mainnet",
+            "implementation": {"kind": "address_only"},
+            "symbol_ids": ["eth-native", "usdc-token"],
+            "metadata": {}
+        }],
+        "symbol_configs": [
+            {
+                "symbol_id": "eth-native",
+                "display_symbol": "ETH",
+                "network_id": "ethereum-mainnet",
+                "source": {"kind": "native"},
+                "valuation": {"quotes": [{
+                    "quote": "USD",
+                    "priced_symbol_id": "eth-native",
+                    "unit_price_dec": "2000"
+                }]},
+                "metadata": {}
+            },
+            {
+                "symbol_id": "usdc-token",
+                "display_symbol": "USDC",
+                "network_id": "ethereum-mainnet",
+                "source": {
+                    "kind": "erc20",
+                    "contract_address": TOKEN
+                },
+                "valuation": {"quotes": [{
+                    "quote": "USD",
+                    "priced_symbol_id": "usdc-token",
+                    "unit_price_dec": "1"
+                }]},
+                "metadata": {}
+            }
+        ],
+        "metadata": {}
+    }))
+    .expect("portfolio")
 }
 
-#[test]
-fn snapshot_assembly_rejects_missing_duplicate_and_tampered_selected_holdings() {
-    let config = AssembleSnapshotConfig::new(sample_portfolio()).expect("assemble config");
-    let input = |holdings| AssembleSnapshotInput { holdings };
+fn selection_input() -> PortfolioSnapshotSelectionInput {
+    PortfolioSnapshotSelectionInput::new(
+        PortfolioSnapshotSelector::new(crate::PortfolioId::new("portfolio-main").expect("target")),
+        evm_portfolio(),
+        PortfolioRoutingManifest::new(vec![EvmRoutingBinding::new(
+            "ethereum-mainnet",
+            generation(b"generation-a"),
+        )
+        .expect("binding")])
+        .expect("routing manifest"),
+    )
+}
 
-    assert!(assemble_snapshot(
-        &config,
-        input(SelectedHoldings {
-            observations: Vec::new()
+fn selection() -> ValidatedPortfolioSnapshotSelection {
+    validate_snapshot_selection(&selection_input()).expect("selection")
+}
+
+fn collection(selection: &ValidatedPortfolioSnapshotSelection) -> EvmBalanceCollection {
+    let config = selection.positions()[0]
+        .collection_config()
+        .expect("collection");
+    let checked = EvmCheckedSource::new(
+        config.binding().clone(),
+        "mfm.evm.json-rpc",
+        "mfm.evm.json-rpc.v1",
+    )
+    .expect("checked source");
+    let anchored = EvmAnchoredSource::new(
+        checked,
+        EvmBlockAnchor::new(U256::from(42), B256::from([0x11; 32])),
+    )
+    .expect("anchor");
+    let balances = config
+        .sources()
+        .iter()
+        .map(|source| {
+            let (raw_units, decimals) = match source.asset() {
+                EvmBalanceAsset::Native => ("2000000000000000000", 18),
+                EvmBalanceAsset::Erc20 { .. } => ("3500000", 6),
+            };
+            json!({
+                "source": source,
+                "raw_units": raw_units,
+                "decimals": decimals,
+            })
         })
-    )
-    .is_err());
-    let selected = selected_native("1000000000000000000");
-    let mut duplicate = selected.clone();
-    duplicate
-        .observations
-        .push(selected.observations[0].clone());
-    assert!(assemble_snapshot(&config, input(duplicate)).is_err());
+        .collect::<Vec<_>>();
+    serde_json::from_value(json!({
+        "source": anchored,
+        "balances": balances,
+    }))
+    .expect("collection")
+}
 
-    let mut tampered = selected;
-    tampered.observations[0].source.holding = HoldingSourceConfig::Erc20 {
-        contract_address: TOKEN.parse().expect("token address"),
-    };
-    assert!(assemble_snapshot(&config, input(tampered)).is_err());
+#[test]
+fn validator_requires_exact_demanded_generation_set() {
+    let mut missing = selection_input();
+    missing.routing_manifest.evm_routing_bindings.clear();
+    assert!(validate_snapshot_selection(&missing).is_err());
+
+    let mut duplicate = selection_input();
+    duplicate
+        .routing_manifest
+        .evm_routing_bindings
+        .push(EvmRoutingBinding::new("ethereum-mainnet", generation(b"other")).expect("binding"));
+    assert!(validate_snapshot_selection(&duplicate).is_err());
+
+    let mut unrelated = selection_input();
+    unrelated.routing_manifest.evm_routing_bindings[0] =
+        EvmRoutingBinding::new("unused-network", generation(b"unused")).expect("binding");
+    assert!(validate_snapshot_selection(&unrelated).is_err());
+}
+
+#[test]
+fn validator_emits_exact_ordered_collection_positions() {
+    let selection = validate_snapshot_selection(&selection_input()).expect("valid selection");
+    assert_eq!(
+        selection.version(),
+        VALIDATED_PORTFOLIO_SNAPSHOT_SELECTION_VERSION
+    );
+    assert_eq!(selection.target().as_str(), "portfolio-main");
+    assert_eq!(selection.portfolio(), &evm_portfolio());
+    assert_eq!(selection.positions().len(), 1);
+    let position = &selection.positions()[0];
+    assert_eq!(position.position_ordinal(), 0);
+    assert_eq!(position.binding().network_id(), "ethereum-mainnet");
+    assert_eq!(position.native_decimals(), 18);
+    assert_eq!(position.sources().len(), 2);
+    assert_eq!(position.token_contracts(), &[TOKEN.to_owned()]);
+    assert_eq!(
+        position
+            .collection_config()
+            .expect("collection projection")
+            .sources(),
+        position.sources()
+    );
+}
+
+#[test]
+fn validator_rejects_target_route_and_order_disagreement() {
+    let mut wrong_target = selection_input();
+    wrong_target.selector =
+        PortfolioSnapshotSelector::new(crate::PortfolioId::new("portfolio-other").expect("target"));
+    assert!(validate_snapshot_selection(&wrong_target).is_err());
+
+    let mut wrong_generation = selection_input();
+    wrong_generation.routing_manifest.evm_routing_bindings[0].routing_generation_ref =
+        generation(b"other-generation");
+    let selection =
+        validate_snapshot_selection(&wrong_generation).expect("generation remains exact input");
+    assert_eq!(
+        selection.positions()[0].binding().routing_generation_ref(),
+        &generation(b"other-generation")
+    );
+
+    let extra = EvmRoutingBinding::new("unused-network", generation(b"unused")).expect("binding");
+    let mut extra_route = selection_input();
+    extra_route
+        .routing_manifest
+        .evm_routing_bindings
+        .push(extra);
+    assert!(validate_snapshot_selection(&extra_route).is_err());
+
+    let mut invalid_version = selection_input();
+    invalid_version.routing_manifest.version = "mfm.portfolio.routing-manifest.v2".to_owned();
+    assert!(validate_snapshot_selection(&invalid_version).is_err());
+}
+
+#[test]
+fn bitcoin_demand_is_rejected_before_authoring() {
+    let portfolio = decode_portfolio_config(&json!({
+        "portfolio_id": "portfolio-bitcoin",
+        "quote_codes": ["USD"],
+        "networks": [{
+            "family": "bitcoin",
+            "network_id": "bitcoin-mainnet",
+            "bitcoin_network": "main",
+            "source_identity": "bitcoin-core-main",
+            "metadata": {}
+        }],
+        "wallets": [{
+            "wallet_id": "wallet-bitcoin",
+            "subject": {
+                "kind": "bitcoin_address",
+                "address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+            },
+            "network_id": "bitcoin-mainnet",
+            "implementation": {"kind": "address_only"},
+            "symbol_ids": ["btc-native"],
+            "metadata": {}
+        }],
+        "symbol_configs": [{
+            "symbol_id": "btc-native",
+            "display_symbol": "BTC",
+            "network_id": "bitcoin-mainnet",
+            "source": {"kind": "native"},
+            "valuation": {"quotes": [{
+                "quote": "USD",
+                "priced_symbol_id": "btc-native",
+                "unit_price_dec": "60000"
+            }]},
+            "metadata": {}
+        }],
+        "metadata": {}
+    }))
+    .expect("model-valid Bitcoin portfolio");
+    let input = PortfolioSnapshotSelectionInput::new(
+        PortfolioSnapshotSelector::new(
+            crate::PortfolioId::new("portfolio-bitcoin").expect("target"),
+        ),
+        portfolio,
+        PortfolioRoutingManifest::new(Vec::new()).expect("empty manifest"),
+    );
+    assert!(validate_snapshot_selection(&input).is_err());
+}
+
+#[test]
+fn validated_selection_and_same_run_collections_build_snapshot_and_report() {
+    let selection = selection();
+    let collection = collection(&selection);
+    let snapshot =
+        assemble_snapshot(&selection, std::slice::from_ref(&collection)).expect("snapshot");
+    assert_eq!(snapshot.network_pins.len(), 1);
+    assert_eq!(snapshot.wallets.len(), 1);
+    assert_eq!(snapshot.wallets[0].observations.len(), 2);
+    let eth = snapshot.wallets[0]
+        .observations
+        .iter()
+        .find(|observation| observation.symbol_id == "eth-native")
+        .expect("ETH observation");
+    assert_eq!(eth.quantity.amount_dec, "2.000000000000000000");
+    assert_eq!(eth.values[0].value_dec, "4000.000000000000000000");
+
+    let report = project_report(&snapshot).expect("report");
+    assert_eq!(report.wallet_summaries.len(), 1);
+    assert_eq!(report.totals_by_quote[0].total_value_dec, "4003.5");
+
+    let mut substituted: serde_json::Value =
+        serde_json::to_value(collection).expect("collection JSON");
+    substituted["source"]["source"]["binding"]["chain_id"] = json!(10);
+    let substituted = serde_json::from_value(substituted).expect("typed substituted collection");
+    assert!(assemble_snapshot(&selection, &[substituted]).is_err());
+}
+
+#[test]
+fn portfolio_states_are_pure_and_have_distinct_contracts() {
+    let validate =
+        ValidatePortfolioSnapshotSelectionState::state_contract_ref().expect("validate contract");
+    let assemble = AssemblePortfolioSnapshotState::state_contract_ref().expect("assemble contract");
+    let report = ProjectPortfolioReportState::state_contract_ref().expect("report contract");
+    assert_ne!(validate, assemble);
+    assert_ne!(assemble, report);
+    assert!(matches!(validation_execution(), StateExecution::Pure(_)));
+    assert!(matches!(
+        snapshot_assembly_execution(),
+        StateExecution::Pure(_)
+    ));
+    assert!(matches!(
+        report_projection_execution(),
+        StateExecution::Pure(_)
+    ));
+}
+
+#[test]
+fn compiled_sources_exactly_match_native_and_token_demand() {
+    let config = selection().positions()[0]
+        .collection_config()
+        .expect("compiled collection");
+    assert_eq!(config.sources().len(), 2);
+    assert!(config.sources().iter().any(|source| {
+        matches!(source.asset(), EvmBalanceAsset::Native) && source.account() == ACCOUNT
+    }));
+    assert!(config
+        .sources()
+        .iter()
+        .any(|source| { source.asset().contract_address() == Some(TOKEN) }));
 }

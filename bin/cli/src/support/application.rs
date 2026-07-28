@@ -1,23 +1,39 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 use crate::commands::result::PublicError;
 use clap::Args;
-use mfm_ids::{RunId, SchemaId};
+use mfm_ids::RunId;
+
+/// Shared production application connection inputs.
+#[derive(Args)]
+pub(crate) struct ApplicationConnectionArgs {
+    /// Production database connection.
+    #[command(flatten)]
+    database: DatabaseArgs,
+
+    /// Explicit runtime configuration for live drive capabilities.
+    #[arg(long, value_name = "PATH")]
+    runtime_config: Option<PathBuf>,
+}
 
 /// Shared production database connection arguments.
-#[derive(Args, Debug, Clone)]
-pub(crate) struct DatabaseArgs {
+#[derive(Args)]
+struct DatabaseArgs {
     /// PostgreSQL connection string (default: $DATABASE_URL).
     #[arg(long)]
-    pub(crate) database_url: Option<String>,
+    database_url: Option<String>,
 }
 
 /// Builds one opaque application facade over the production database.
 pub(crate) async fn connect_application(
-    args: &DatabaseArgs,
-    runtime_config_path: Option<&Path>,
+    args: &ApplicationConnectionArgs,
 ) -> Result<mfm_app::Application, PublicError> {
-    mfm_app::connect_production_application(args.database_url.as_deref(), runtime_config_path).await
+    let _connection_inputs = (&args.database.database_url, &args.runtime_config);
+    Err(PublicError::new(
+        mfm_app::ErrorClass::ServiceUnavailable,
+        "AuthoritativeWriterFenceUnavailable",
+        "A deployment-owned authoritative-writer fence is required",
+    ))
 }
 
 /// Parses a typed run id from the persisted typed-kernel identity grammar.
@@ -26,16 +42,6 @@ pub(crate) fn parse_run_id(value: &str) -> Result<RunId, PublicError> {
         PublicError::bad_request(
             "InvalidRunId",
             "Run id must use the typed run identity format `run:<algorithm>:<digest>`",
-        )
-    })
-}
-
-/// Parses a typed public output schema id.
-pub(crate) fn parse_schema_id(value: &str) -> Result<SchemaId, PublicError> {
-    SchemaId::parse(value).map_err(|_| {
-        PublicError::bad_request(
-            "InvalidSchemaId",
-            "Schema id must use the typed schema identity format",
         )
     })
 }

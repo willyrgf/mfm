@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `mfm_store::v1::backend::committed_run_journal_from_persisted_records`
- --> tests/ui/fail/raw_journal_backend_minter_absent.rs:1:5
-  |
-1 | use mfm_store::v1::backend::committed_run_journal_from_persisted_records;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `committed_run_journal_from_persisted_records` in `v1::backend`

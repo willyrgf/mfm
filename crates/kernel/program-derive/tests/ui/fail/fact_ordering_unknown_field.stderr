@@ -1,7 +1,0 @@
-error: MfmFactType ordering "result.height.desc" references unknown fact field "result.height"
-  --> tests/ui/fail/fact_ordering_unknown_field.rs:26:51
-   |
-26 | #[derive(Clone, Serialize, Deserialize, MfmValue, MfmFactType)]
-   |                                                   ^^^^^^^^^^^
-   |
-   = note: this error originates in the derive macro `MfmFactType` (in Nightly builds, run with -Z macro-backtrace for more info)

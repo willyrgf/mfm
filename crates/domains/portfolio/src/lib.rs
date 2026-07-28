@@ -1,10 +1,11 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Pure portfolio model, state, and operation contracts.
+//! Pure portfolio model, same-run state, and EVM-only graph contracts.
 //!
-//! Internal role modules are private and flow in one direction: model, state, then operation.
-//! Live fact selection and runtime binding belong outside this crate.
+//! The sole production operation consumes decomposed EVM collection outputs
+//! through typed graph edges. Store-backed holding selection, aggregate live
+//! readers, Bitcoin execution, and replay helpers are intentionally absent.
 //!
 //! ```rust
 //! use mfm_portfolio::{decode_portfolio_config, PortfolioConfig, QuoteCode};
@@ -24,6 +25,8 @@
 
 mod model;
 mod operation;
+mod product;
+mod qualification;
 mod state;
 
 pub use model::ids::{
@@ -48,18 +51,27 @@ pub use model::wallet::{
     WalletSubjectKind,
 };
 pub use operation::{
-    portfolio_snapshot_authoring_catalog, portfolio_snapshot_operation_registry,
-    portfolio_snapshot_program_draft, portfolio_snapshot_program_launch_plan,
-    portfolio_snapshot_public_output_schema_id, portfolio_snapshot_state_registry,
-    register_portfolio_snapshot_certification_descriptors, PortfolioReportOperation,
-    PortfolioReportOperationOutputs, PortfolioSnapshotOperation, PortfolioSnapshotOperationOutputs,
+    portfolio_snapshot_entry_point_contract, portfolio_snapshot_planning_profile,
+    PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID, PORTFOLIO_SNAPSHOT_OPERATION_ID,
+};
+pub use product::{
+    portfolio_snapshot_entry_point_registration, portfolio_snapshot_routing_manifest_member_path,
+    portfolio_snapshot_unit_config_member_path, PortfolioSnapshotEntryPointArtifacts,
+    PORTFOLIO_SNAPSHOT_ROUTING_MANIFEST_MEMBER_PATH, PORTFOLIO_SNAPSHOT_UNIT_CONFIG_MEMBER_PATH,
+};
+pub use qualification::{
+    portfolio_snapshot_callback_surfaces, portfolio_snapshot_value_contracts,
+    qualify_portfolio_snapshot_states, PortfolioSnapshotCallbackSurfaces,
+    PortfolioSnapshotStateArtifacts, PortfolioSnapshotStateImplementations,
+    PortfolioSnapshotValueContracts, PortfolioStateCallbackSurface,
+    QualifiedPortfolioSnapshotStates, PORTFOLIO_STATE_CALLBACK_SURFACE_VERSION,
 };
 pub use state::{
-    portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
-    AssembleSnapshotInput, AssembleSnapshotInputHandles, AssembleSnapshotState,
-    PortfolioHoldingErrorCode, PortfolioHoldingFactEvidence, PortfolioHoldingSelectionError,
-    PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInput, ProjectReportInputHandles,
-    ProjectReportState, SelectHoldingsConfig, SelectHoldingsFactDescriptors, SelectHoldingsInput,
-    SelectHoldingsInputHandles, SelectHoldingsReadEvidence, SelectHoldingsReadPlan,
-    SelectHoldingsState, SelectedHoldings,
+    portfolio_snapshot_public_output_schema_id, AssemblePortfolioSnapshotState, EvmRoutingBinding,
+    InvalidPortfolioSnapshotSelection, PortfolioPublicOutputs, PortfolioReportProjectionInput,
+    PortfolioRoutingManifest, PortfolioSnapshotAssemblyInput, PortfolioSnapshotFailure,
+    PortfolioSnapshotSelectionInput, ProjectPortfolioReportState,
+    ValidatePortfolioSnapshotSelectionState, ValidatedEvmCollectionPosition,
+    ValidatedPortfolioSnapshotSelection, PORTFOLIO_ROUTING_MANIFEST_VERSION,
+    VALIDATED_PORTFOLIO_SNAPSHOT_SELECTION_VERSION,
 };

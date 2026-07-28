@@ -1,41 +1,60 @@
 # mfm-replay
 
-Typed kernel crate for certified replay evidence brokers and verifier contracts.
+Callback-free recorded-history inspection and portable export for MFM.
 
-`docs/design.md` is the normative typed-core authority contract.
-This crate answers replay requests only from one store-owned `VerifiedRunView` and explicit
-source-run evidence. It must not construct live capabilities or live transports.
+`docs/design.md` is the normative authority contract. Every store-backed operation accepts the
+exact store-owned purpose authority for replay, transition trace, access audit, or export and loads
+one fresh head-bound `CommittedRunJournal`. The store consumes that journal into one opaque,
+non-cloneable `VerifiedRunView`; raw records, object bytes, cursors, and prior views cannot
+substitute for a grant.
 
-The store loads committed batches, typed records, and exact retained objects under one snapshot,
-validates their physical/current-format structure, and returns `CommittedRunJournal`. Physical
-loading verifies no manual-resolution signatures. Binding that journal to the exact
-`CertifiedTypedSpec` runs the sole store-owned semantic certified-history fold, including
-deterministic `mfm-manual-auth` verification of every historical manual proof against certified
-replay authority. That pass performs no live operator, signer, keystore, or policy-registry lookup
-and makes no external-truth decision.
+This crate traverses the verified view without a runtime catalog or historical callback. It owns:
 
-`ReplayBroker` borrows the resulting non-cloneable, fully authorization-verified
-`VerifiedRunView`. Replay trusts its derived fold: it does not reconstruct or reverify historical
-manual proofs, copy records, projection snapshots, artifacts, facts, side-effect ledgers, or
-manual-resolution maps, and owns no duplicate historical validator. Raw status DTOs, journal JSON,
-hash-only specs, rendered public output, standalone artifact bytes, or a consumer-rebuilt
-projection cannot construct replay authority.
+- canonical recorded-history replay results;
+- exact transition-trace and safe access-audit derivation;
+- deterministic semantic and audit export canonicalization;
+- complete source/object closure traversal; and
+- callback-free offline verification of portable bundles.
 
-`ReplayReadAuthority<'view>` owns only explicit cross-run source-fact records and additional
-`VerifiedRetainedArtifactBytes`; the primary journal, certified spec, lifecycle fold, and retained
-objects remain owned by the borrowed view.
+It owns no append path, scheduler, live capability, provider, executor, transport, signer,
+filesystem-domain reader, or replay broker. Exact reproduction gives an isolated historical
+executable resolver only canonical plan bytes. Candidate comparison instead resolves the
+capability-free authoring, certification, and state callbacks sealed by one qualified current
+program registry. Recorded verification returns one affine session that privately owns the sole
+authoritative verified view. Verification mode renders that session directly; non-verification
+modes consume it while strictly binding caller-held semantic export bytes and their expected
+`ContentRef` to the same store, tenant, run, semantic head, and closure. Replay never exposes the
+view, loads history twice, mints an export grant, or generates a fallback export. Candidate plans
+bind all six executable/planner/state/capability references, and replay derives the candidate
+identity, plan, and per-transition verdicts itself from the verified history. The recorded stable
+entry-point operation selects the current candidate across versioned entry-point ids; callers
+cannot supply an operation, entry point, candidate identity, or label. Incompatible candidate
+contract metadata produces `NotComparable` without consuming recorded evidence. Exact plans bind
+the semantic head and transition prefix, so later authorization or observation audit-tail commits
+do not change historical execution input.
 
-Current replay verifiers temporarily query purpose-specific borrowed readers from
-`mfm_store::v1::current_lifecycle`. Those readers are a scoped migration seam, not a second replay
-fold or durable API, and are deleted by the complete audited lifecycle cutover.
+Same-store fact completeness is positive only when the authoritative store rechecks the immutable
+private scan attestation and its complete dense writer prefix. Portable/offline verification always
+returns `UnverifiedPortableBundle`, because included portable bytes cannot prove tenant-wide
+omission completeness.
 
-Long-lived replay work may refresh only by consuming its old view with a newly loaded journal
-through the store's strict-successor check. Equal, truncated, divergent, reordered, or
-old-object-replaced histories cannot inherit the already certified authority. The store
-semantically verifies the suffix, including any new historical authorization, and replay never
-merges histories or repeats that verification.
+Transition trace paging accepts only the application-decoded optional fixed head, start index, and
+limit, then returns the next scalar index; the application alone owns opaque transport cursors.
+Cross-run inputs require independent source-run `InspectTrace` authorities on every page; a denied
+or authorized-but-missing source emits the same digest-only redacted lineage, while an extra
+supplied source authority is rejected.
 
-The generic pure-state verifier reconstructs certified config, arbitrary input trees, and typed
-context from retained evidence, invokes the same `PureState` behavior, and compares exact canonical
-output bytes. Replay does not resolve current configuration, read the current executable, mint live
-execution identity, or call a provider.
+Access-audit paging likewise fixes one physical journal head. Its public entries are replay-owned
+DTOs derived from the store's verified authorization, observation, and ensure-result relationships;
+they are not persisted journal entries. The journal retains only `delivery_audit_ref`, while the
+public projection annotates a verified returned ensure as pending or terminal without decoding
+retained values in the application. Replay accepts only the store seam's decoded head, start index,
+and limit and returns the next scalar index; the application alone owns opaque transport cursors.
+
+Portable members use fixed coordinate-derived paths, with the root at `runs.r0000` and dependency
+runs sorted by canonical run identity. The manifest contains no self or bundle digest. The sole
+transport integrity value is raw SHA-256 over the exact final canonical bundle bytes and is returned
+outside those bytes. Export recursively follows the complete source closure fixed by each run's
+admission and requires the exact transitive `Export` authority set. A missing source authority is a
+denial; after that exact authority is supplied, an absent or corrupt append-only source is export
+integrity failure rather than another policy denial.

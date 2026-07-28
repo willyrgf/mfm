@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use mfm_bitcoin::BitcoinSourceIdentity;
-use mfm_ids::LocalPublicId;
+use mfm_ids::{LocalPublicId, StableId};
 use mfm_signing::SignerRef;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -47,8 +46,7 @@ pub(crate) enum RuntimeConfigErrorKind {
     IndirectionRead,
     ResolvedValueTooLarge,
     EmptyResolvedValue,
-    InvalidScanTimeout,
-    IncompleteBasicAuth,
+    InvalidChainId,
     UnsupportedSignerProvider,
     InvalidEntryId,
 }
@@ -67,48 +65,35 @@ impl RuntimeConfigError {
     pub(crate) const fn kind(self) -> RuntimeConfigErrorKind {
         self.kind
     }
-
-    pub(crate) const fn is_missing_selection(self) -> bool {
-        matches!(
-            self.kind,
-            RuntimeConfigErrorKind::MissingSection | RuntimeConfigErrorKind::MissingEntry
-        )
-    }
 }
 
 pub(crate) struct ResolvedEvmRoute {
+    network_id: LocalPublicId,
     source_ref: LocalPublicId,
+    chain_id: u64,
+    generation_id: StableId,
     rpc_url: ResolvedValue,
     auth_header: Option<ResolvedValue>,
 }
 
 impl ResolvedEvmRoute {
-    pub(crate) fn into_parts(self) -> (LocalPublicId, ResolvedValue, Option<ResolvedValue>) {
-        (self.source_ref, self.rpc_url, self.auth_header)
-    }
-}
-
-pub(crate) struct ResolvedBitcoinRoute {
-    rpc_url: ResolvedValue,
-    rpc_user: Option<ResolvedValue>,
-    rpc_password: Option<ResolvedValue>,
-    scan_timeout_seconds: u64,
-}
-
-impl ResolvedBitcoinRoute {
     pub(crate) fn into_parts(
         self,
     ) -> (
+        LocalPublicId,
+        LocalPublicId,
+        u64,
+        StableId,
         ResolvedValue,
         Option<ResolvedValue>,
-        Option<ResolvedValue>,
-        u64,
     ) {
         (
+            self.network_id,
+            self.source_ref,
+            self.chain_id,
+            self.generation_id,
             self.rpc_url,
-            self.rpc_user,
-            self.rpc_password,
-            self.scan_timeout_seconds,
+            self.auth_header,
         )
     }
 }
@@ -146,20 +131,11 @@ struct RawRoutesSection {
 #[serde(deny_unknown_fields)]
 struct RawEvmRoute {
     source_ref: String,
+    chain_id: u64,
+    generation_id: String,
     rpc_url: ValueSource,
     #[serde(default)]
     auth_header: Option<ValueSource>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawBitcoinRoute {
-    rpc_url: ValueSource,
-    #[serde(default)]
-    rpc_user: Option<ValueSource>,
-    #[serde(default)]
-    rpc_password: Option<ValueSource>,
-    scan_timeout_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -177,47 +153,43 @@ struct RawSignerBinding {
     entry_id: String,
 }
 
-pub(crate) fn load_evm_route(path: &Path, network_id: &LocalPublicId) -> Result<ResolvedEvmRoute> {
+pub(crate) fn load_evm_routes(path: &Path) -> Result<Vec<ResolvedEvmRoute>> {
     let document = RuntimeDocument::load(path)?;
-    let raw: RawEvmRoute = decode_selected(take_route(document, "evm", network_id.as_str())?)?;
-    let source_ref = LocalPublicId::new(&raw.source_ref)
-        .map_err(|_| RuntimeConfigError::new(RuntimeConfigErrorKind::InvalidIdentifier))?;
-    Ok(ResolvedEvmRoute {
-        source_ref,
-        rpc_url: raw.rpc_url.resolve_public()?,
-        auth_header: raw
-            .auth_header
-            .map(ValueSource::resolve_secret)
-            .transpose()?,
-    })
-}
-
-pub(crate) fn load_bitcoin_route(
-    path: &Path,
-    source_identity: &BitcoinSourceIdentity,
-) -> Result<ResolvedBitcoinRoute> {
-    let document = RuntimeDocument::load(path)?;
-    let raw: RawBitcoinRoute =
-        decode_selected(take_route(document, "bitcoin", source_identity.as_str())?)?;
-    if !(1..=86_400).contains(&raw.scan_timeout_seconds) {
+    let section: RawRoutesSection = decode_selected(document.take_section("evm")?)?;
+    if section.routes.is_empty() {
         return Err(RuntimeConfigError::new(
-            RuntimeConfigErrorKind::InvalidScanTimeout,
+            RuntimeConfigErrorKind::MissingEntry,
         ));
     }
-    if raw.rpc_user.is_some() != raw.rpc_password.is_some() {
-        return Err(RuntimeConfigError::new(
-            RuntimeConfigErrorKind::IncompleteBasicAuth,
-        ));
-    }
-    Ok(ResolvedBitcoinRoute {
-        rpc_url: raw.rpc_url.resolve_public()?,
-        rpc_user: raw.rpc_user.map(ValueSource::resolve_public).transpose()?,
-        rpc_password: raw
-            .rpc_password
-            .map(ValueSource::resolve_secret)
-            .transpose()?,
-        scan_timeout_seconds: raw.scan_timeout_seconds,
-    })
+    section
+        .routes
+        .into_iter()
+        .map(|(network_id, value)| {
+            let network_id = LocalPublicId::new(network_id)
+                .map_err(|_| RuntimeConfigError::new(RuntimeConfigErrorKind::InvalidIdentifier))?;
+            let raw: RawEvmRoute = decode_selected(value)?;
+            if raw.chain_id == 0 {
+                return Err(RuntimeConfigError::new(
+                    RuntimeConfigErrorKind::InvalidChainId,
+                ));
+            }
+            let source_ref = LocalPublicId::new(&raw.source_ref)
+                .map_err(|_| RuntimeConfigError::new(RuntimeConfigErrorKind::InvalidIdentifier))?;
+            let generation_id = StableId::new(&raw.generation_id)
+                .map_err(|_| RuntimeConfigError::new(RuntimeConfigErrorKind::InvalidIdentifier))?;
+            Ok(ResolvedEvmRoute {
+                network_id,
+                source_ref,
+                chain_id: raw.chain_id,
+                generation_id,
+                rpc_url: raw.rpc_url.resolve_public()?,
+                auth_header: raw
+                    .auth_header
+                    .map(ValueSource::resolve_secret)
+                    .transpose()?,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn load_keystore_profile(
@@ -278,15 +250,6 @@ pub(crate) fn load_signer_binding(
         entry_id,
         keystore: resolve_keystore(keystore)?,
     })
-}
-
-fn take_route(document: RuntimeDocument, family: &'static str, key: &str) -> Result<Value> {
-    let section: RawRoutesSection = decode_selected(document.take_section(family)?)?;
-    section
-        .routes
-        .into_iter()
-        .find_map(|(candidate, value)| (candidate == key).then_some(value))
-        .ok_or_else(|| RuntimeConfigError::new(RuntimeConfigErrorKind::MissingEntry))
 }
 
 fn take_entry(mut document: RuntimeDocument, section: &'static str, key: &str) -> Result<Value> {

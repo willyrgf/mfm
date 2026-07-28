@@ -17,8 +17,10 @@ name = "mfm_spec"
 path = "src/lib.rs"
 
 [dependencies]
-mfm-capabilities = { path = "../capabilities" }
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
+mfm-journal = { path = "../journal" }
+mfm-values = { path = "../values" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

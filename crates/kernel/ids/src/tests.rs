@@ -20,15 +20,8 @@ fn checked_string_primitives_cover_shared_grammars() {
     accepts!(EntryPointId, "mfm.portfolio/snapshot@18446744073709551615");
     accepts!(FieldSegment, "total/value-1");
     accepts!(FieldPath, "result.total/value");
-    accepts!(ResourceNamespace, "mfm.evm_lane");
     accepts!(LocalPublicId, "ethereum-mainnet");
     accepts!(RuntimeEnvName, "MFM_SECRET_1");
-    accepts!(RuntimeBindingId, "mfm.portfolio/runtime:v1");
-    accepts!(RuntimeToken, "admission_waiter:0123456789abcdef");
-    accepts!(VisibleAscii256, "text/html");
-    accepts!(VisibleAscii512, "commit-key");
-    accepts!(PrintableAscii512, "redacted message");
-    accepts!(PrintableAscii1024, "manual resolution note");
 
     rejects!(NameToken, "_name");
     rejects!(StableAuthorKey, "mfm.reserved");
@@ -41,14 +34,8 @@ fn checked_string_primitives_cover_shared_grammars() {
     rejects!(FieldSegment, "nested.field");
     rejects!(FieldSegment, "_private");
     rejects!(FieldPath, "result..total");
-    rejects!(ResourceNamespace, "single");
     rejects!(LocalPublicId, "bad/slash");
     rejects!(RuntimeEnvName, "mfm_secret");
-    rejects!(RuntimeBindingId, "bad space");
-    rejects!(RuntimeToken, "bad\nline");
-    rejects!(VisibleAscii256, "has space");
-    rejects!(PrintableAscii512, "line\nbreak");
-    rejects!(PrintableAscii1024, "line\nbreak");
 }
 
 #[test]

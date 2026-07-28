@@ -1,24 +1,8 @@
 #![warn(missing_docs)]
-//! Live Bitcoin integration with a reusable public transport and a private runtime adapter.
+//! Unregistered Bitcoin Core transport qualification primitives.
 //!
-//! The adapter is intentionally unavailable as a module; consumers use only the narrow root
-//! registration functions.
-//!
-//! ```compile_fail
-//! use mfm_bitcoin_live::adapter;
-//! ```
-//!
-//! The checked transport does not expose an arbitrary JSON-RPC call surface.
-//!
-//! ```compile_fail
-//! use mfm_bitcoin_live::transport::BitcoinRpcSession;
-//!
-//! fn bypass(session: &BitcoinRpcSession) {
-//!     let _ = session.rpc_call("getblockchaininfo", serde_json::json!([]));
-//! }
-//! ```
+//! This crate intentionally exports no MFM capability, state, runner, replay helper, or catalog
+//! registration. Its public transport methods each perform exactly one application-protocol
+//! operation.
 
-mod adapter;
 pub mod transport;
-
-pub use adapter::{register_bitcoin_jsonrpc_runners, verify_bitcoin_jsonrpc_replay};

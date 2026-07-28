@@ -1,105 +1,195 @@
 # Persisted And Public Surfaces
 
-This inventory is the review checklist for data that is persisted by MFM or returned by CLI/REST.
-Every entry records whether the surface may contain secrets and what authority role it has.
+This is the review inventory for every value MFM persists or returns through app, CLI, or REST.
+`docs/design.md` owns semantic authority; the frozen annex owns exact recoverability encodings.
 
-This data inventory does not create application ingress. The sole public entry point and its
-composed runtime shape are recorded in
-[`docs/architecture.md`](architecture.md#core-runtime-shape).
+No surface in this document may contain a password, mnemonic, private key, credential,
+authorization header, unlock material, raw signature, signed bearer payload, secret-bearing path,
+RPC URL, provider response body, provider message, or unreviewed diagnostic text.
 
-Authority roles:
+## Authority Classes
 
-- `strict authority`: durable data that strict resume, replay, status, rendering, or retention proof
-  may trust only after validating canonical bytes, hashes, identities, and bindings.
-- `observation`: derived facts for list/watch or operator display. They can guide users, but cannot
-  mint execution, replay, retention, artifact, or lane authority.
-- `rebuildable cache`: data that is recomputable from strict authority rows and must be treated as
-  stale or corrupt until reverified against those rows.
-- `operational coordination`: mutable store-owned rows used to coordinate admission or process
-  behavior. They are not replay, resume, side-effect, lane ownership, or public-output authority.
-- `operational telemetry`: runtime metadata used for paging, readiness, diagnostics, or process
-  operation. It is not semantic run authority.
-- `audit provenance`: non-secret persisted context that explains which process-local resource served
-  a recorded action. It must not mint replay, retry, consistency, public-output, or side-effect
-  authority.
-- `public output`: data intentionally returned to users by CLI/REST. It must not contain secrets and
-  is not a substitute for strict authority unless the command explicitly verifies strict rows first.
+- **strict journal authority** — trusted only after canonical, identity, predecessor, object,
+  certificate, and fold verification against the exact run.
+- **strict executor authority** — trusted only inside the exact executor tenant/deployment/resource
+  binding and its independently durable ledger.
+- **pre-admission authority** — mutable current configuration that can influence only a future
+  root; selected values become immutable root material at admission.
+- **audit provenance** — reviewed non-secret information explaining an authorized access; it grants
+  no replay, retry, source selection, or object access.
+- **operational telemetry** — best-effort health/log/metric data with no semantic effect.
+- **public representation** — deliberately disclosed DTO or export data derived under an exact
+  purpose grant; it is not bearer authority.
 
-## Executor Qualification Surfaces
+## Journal And PostgreSQL
 
-| Surface | Location | Secret Boundary | Authority Role | Notes |
-| --- | --- | --- | --- | --- |
-| Executor delivery and typed-resource checkpoints | `MemoryLedgerCheckpoint`, `MemoryDestinationCheckpoint`, and immutable snapshots in `mfm-storage-executor-file` | No secrets allowed. Retained values are exact canonical request/result, content identities, safe failure tuples, policy/configuration refs, resource allocation values, attempts, observations, and tombstones. Credentials, provider messages/bodies, endpoints, paths, signed bearer bytes, and arbitrary debug strings are forbidden. | qualification authority only | Checksums, bounded hostile decode, strict refold, generation matching, cumulative evidence bounds, and exact policy-pair revalidation qualify the kernel contract. The file backend rejects symlink/non-regular targets and greatest-snapshot corruption without ancestor fallback. These bytes have no production freshness, anti-rollback, or split-brain authority. |
-| Executor terminal claim objects | `ExecutorTerminalClaim` returned by the reference executor | No secrets allowed. Contains the exact effect identity, complete delivery audit, tombstone and ref, exact-attempt terminal proof, safe canonical result, assurance-policy ref, and non-collapsed proof provenance. | evidence only | Verification binds the claim to the exact tenant/binding, committed request, reference contract, bounds, result schema, observation, tombstone, and evidence authority. It is a pre-journal object bundle: it contains no producer-bound `ValueRef` and cannot append a run event. The admitting journal creates and binds retained object references. |
-| Reference safe failures | Executor delivery observations and request-conflict result objects | No secrets allowed. Contains one closed stable code/class/boundary-stage tuple, an optional reviewed coarse-size class, and only a reviewed diagnostic identity when its selected typed contract permits one. | strict executor evidence | Provider text, URLs, paths, bodies, credentials, and unreviewed diagnostics are discarded below the target boundary. The selected safe-failure contract validates the complete tuple before retention. |
+| Surface | Physical location | Secret boundary | Authority and validation |
+| --- | --- | --- | --- |
+| Store identity | `store_identity` | Non-secret store scope and epoch only. | Immutable strict store authority. A reset uses a never-reused scope and fresh epoch. |
+| Schema contract | `store_schema_metadata` | Non-secret version/contract data. | Store-open authority checked before any read or append. |
+| Native run commits | `journal_commits` | No secrets. Contains run/tenant, sequence, predecessor, candidate/commit digests, append id, batch purpose, tagged fact coordinate, count, and coarse operational commit time. | Strict journal authority. Exact predecessor and commit digest form the run head. |
+| Native run records | `journal_records` | No secrets. Contains one of the five canonical payloads plus identities, logical key, ordinal, schema/spec binding, and fact-routing fields. | Strict journal authority only as part of its verified containing commit. |
+| Immutable object bytes | `artifact_blobs` | Typed non-secret bytes only. | Raw content address is SHA-256 of exact bytes; bytes alone grant no run access. |
+| Object admission evidence | `artifact_admissions` | Non-secret schema, semantic type, digest, length, media type, role, and evidence identity. | Strict object evidence after exact byte verification. |
+| Journal-to-object reachability | `commit_artifact_bindings` | Non-secret `ValueRef` material and field path. | Strict authority tying every required object to one exact producing or consuming commit. |
+| Tenant fact frontier | `tenant_fact_order_heads` and tagged commit coordinates | Tenant id and dense unsigned order only. | Strict same-store fact completeness. Publication increments once; a selection barrier snapshots without incrementing. Direct arbitrary writes are forbidden. |
+| Current configured values | `configured_values` | Canonical non-secret semantic config only. | Pre-admission authority keyed by stable target. A run never rereads it after root admission. |
 
-## Postgres Storage
+Every authority-bearing read and write uses one qualified fenced authoritative PostgreSQL writer.
+The application role may insert/select through the store contract but cannot update, delete,
+truncate, or directly manipulate immutable rows, store identity, or tenant fact heads. A replica,
+backup clone, cursor, or apparent applied position cannot mint v1 store-backed authority.
 
-| Surface | Location | Secret Boundary | Authority Role | Notes |
-| --- | --- | --- | --- | --- |
-| Committed per-run journal read authority | One consistent load across `commits`, `run_events`, `run_artifact_admissions`, `artifact_admissions`, and `artifact_blobs`, represented in memory by `CommittedRunJournal` and `VerifiedRunView` | No secrets allowed. It contains typed records and exact retained objects already admitted as non-secret journal authority. | strict authority | The backend loads records and objects once under one snapshot. Store-private `CommittedRunJournal` construction checks record identity/order, atomic batches, the compact physical/current-format fold, and required object evidence; this physical phase verifies no manual-resolution signatures. Consuming the journal with the exact `CertifiedTypedSpec` builds the sole semantic certified-history fold, invokes deterministic `mfm-manual-auth` verification against certified replay authority, and produces the opaque, non-cloneable, fully authorization-verified `VerifiedRunView`. The semantic pass performs no live operator, signer, keystore, or policy-registry lookup and makes no external-truth decision. Runtime, replay, status, and public-output reads trust the view's fold and do not reconstruct or reverify historical proof. Refresh consumes the old view and accepts only a strict extension with an exact old record/batch prefix and byte/evidence-identical old objects; it rejects equal, truncated, divergent, reordered, and old-object-replaced candidates without recertifying, and semantically verifies any new manual-resolution suffix. Raw rows, projections, standalone object maps, and consumer folds cannot mint the view. `current_run_sequence` is only a current-format observation; temporary `current_lifecycle` readers are deleted with the audited lifecycle cutover. |
-| Artifact bytes | `artifact_blobs.bytes` | No secrets allowed. Secret-like bytes must stay below artifacts. | strict authority | Trusted only with matching `artifact_admissions` evidence, digest, byte length, role, and proof-bearing read request. |
-| Manual-resolution authorization evidence | `ManualResolutionRecorded` plus exact retained `ManualResolutionEvidence` and `ManualResolutionAuthorization` objects | No secrets allowed. Contains the canonical prefix-bound claim, public operator identities and signatures, selected outcome, and typed evidence/object refs; it contains no private keys, passwords, keystore paths, or runtime signer sources. | strict authorization evidence | Artifact admission and physical journal loading prove object identity and integrity but do not verify signatures. During `CommittedRunJournal`-to-`VerifiedRunView` semantic validation, `mfm-store` invokes deterministic `mfm-manual-auth` verification against the certified verifier identity, operator authority snapshot, signing scheme, and quorum. The resulting view proves that an authorized decision was recorded; it does not prove external domain truth, and consumers do not reverify it. |
-| Fact descriptor artifacts | `artifact_blobs.bytes` with `ArtifactRole::FactDescriptor` | No secrets allowed. Descriptors contain fact kind, schema ids, field definitions, ordering, operators, units/scales, and exposure policy only. | strict authority | Durable descriptor authority. Append, query, rebuild, and replay verify descriptor bytes by hash; public discovery exposes only descriptor-approved summaries through the facts service. |
-| Fact response artifacts | `artifact_blobs.bytes` with `ArtifactRole::FactResponse` | No secrets allowed. Contains one typed response payload for v1. | strict authority | Binds `FactRecorded` claims to retained response evidence. Because artifacts are content addressed, distinct append-coordinate claims may reference the same byte-identical artifact/evidence pair; the claim ids remain distinct. Response artifacts are not public output; CLI/REST may return only descriptor-approved `Returnable` field summaries. |
-| EVM balance snapshot facts | `FactRecorded` claims with kind `evm.balance_snapshot` and their typed response artifacts | No secrets allowed. Subject contains only `network_id`, `chain_id`, a canonical account, and the `EvmBalanceAsset` native/ERC-20 algebra. Result contains the shared EVM block anchor (`number` as canonical U256 decimal plus `hash`), canonical uint256 `raw_units`, and `decimals`. | strict authority | One fact is recorded for every exact generic `EvmBalanceSource`. The complete typed subject, including the token contract when present, is fact identity. All facts and the checked receipt are emitted by the same external-read reducer and share one atomic settlement commit. No portfolio/wallet/symbol ids, valuation, endpoint, credential, coverage/status tag, or presentation metadata is retained. |
-| Generic external-read evidence | One `ArtifactReferenced` artifact with role `ExternalReadEvidence` per completed `ReadExternal` attempt | No secrets allowed. Contains exactly one value under the evidence schema and semantic identity hash-bound into the certified state descriptor. | strict authority | Runtime obtains it by executing the state-authored plan and records it before output admission. Replay counts all same-attempt external-read references before schema selection, rejects missing/duplicate/wrong-schema evidence, reconstructs arbitrary certified input/context, and invokes the same state reducer. Fact-query receipts remain separate `FactQueryEvidence` artifacts. |
-| EVM balance collection evidence | One `ExternalReadEvidence` artifact produced by `CollectEvmBalancesState` | No secrets allowed. Contains the canonical checked `EvmSessionEvidence`, one shared capability-owned `EvmBlockAnchor`, deduplicated token-decimal observations, every exact-hash generic `EvmBalanceSource` observation in certified order, and the final shared block anchor. | strict authority | Every balance and call uses the anchor hash with EIP-1898 `requireCanonical: true`; token metadata is read once per distinct contract. U256 block numbers are never narrowed to u64. The EVM-state reducer rejects missing, duplicate, reordered, malformed, wrong-session, wrong-network/chain, noncanonical quantity, or reorged evidence. EVM-adapter replay uses the same reducer without a route or runtime config. Endpoint URLs, headers, provider messages, credentials, request bodies, and runtime paths are forbidden. |
-| EVM balance collection receipt | `CollectEvmBalancesState` state-output artifact and its same-attempt `FactRecorded` batch | No secrets allowed. Contains semantic network/chain, exact number/hash anchor, sorted account/asset sources, and parallel verified `FactContentIdentityEvidence` values. It contains no balance responses. | strict authority | The external-read settlement records the complete fact batch and checked receipt in one atomic append. `PortfolioReportOperation` passes the typed receipt edges unchanged to selection, making them the downstream completion barrier. Selection rereads candidate facts, rederives descriptor/subject/response identity, and admits only the exact receipt content. EVM replay reruns the reducer and verifies the exact ordered batch and receipt. |
-| EVM exact-anchor contract-validation evidence | One `ExternalReadEvidence` artifact produced by `ValidateEvmContractState` | No secrets allowed. Contains bounded raw runtime code, ordered plan indexes/request digests and return bytes, the final number-to-hash anchor observation, and one redacted session identity. Config admission reserves the full code allowance, bounds aggregate returns and authored call material, and keeps worst-case canonical config, plan, and evidence values below artifact admission. | strict authority | Code and calls use one exact EIP-1898 hash selector with canonicality required. A consuming live builder admits code before calls and releases each bounded raw response before issuing the next request. The state reducer independently rejects empty or oversized code, expected/observed hash drift, call omission/reorder/request/result drift, budget overflow, session mismatch, extra evidence, and a changed final anchor. The compact `VerifiedEvmContract` output does not duplicate raw evidence. Replay uses no live network, route, signer, or runtime config. |
-| EVM transaction intent and lane evidence | `SideEffectIntentPersisted`, its retained `SideEffectIntent` artifact, and `ResourceLaneClaimed` | No secrets allowed. Intent contains semantic network/chain, sender, signer ref/profile, one `Create` or `Call`, bounded canonical bytes/value, access list, and fixed gas/fee policy. Lane key is exactly `(network_id, chain_id, expected_sender)` under `mfm.evm.sender_nonce`. | strict authority | The full intent is also the kernel idempotency input. It contains no nonce, route/source, endpoint, signature, raw transaction, or keystore material. The lane serializes MFM attempts only and cannot exclude external nonce writers. |
-| EVM prepared transaction authority | `SideEffectInvocationPrepared` and its retained `PreparedInvocation` artifact | No secrets allowed. Contains the authored intent, pending nonce, fee inputs, gas estimate, canonical unsigned EIP-1559 envelope, signing digest, expected transaction hash, optional derived direct-CREATE address, and redacted preparation-session evidence. | strict authority | This is the immutable invocation identity after preparation. Replay recomputes the unsigned envelope, fee policy, signing digest, and CREATE address. It deliberately cannot prove an omitted signature offline. It never stores signature scalars, signed bytes, endpoints, provider bodies, credentials, or paths. |
-| EVM transaction uncertainty and ambiguity evidence | `SideEffectSubmissionUnknown` or `SideEffectAmbiguous` plus its retained typed evidence artifact | No secrets allowed. Contains only the immutable prepared transaction hash and redacted checked-session identity. EVM ambiguity uses the closed `mfm.evm.transaction_mismatch` code. | strict blocking authority | Missing/unavailable exact-hash lookup after an inconclusive submit call remains unknown. A wrong submit hash or mismatched exact-hash transaction becomes ambiguous. Recovery is lookup-only and cannot sign, resubmit, or choose another nonce. Replay decodes and validates the evidence against prepared authority. Neither state retains provider text/body, signature, signed bytes, endpoint, credential, or path. |
-| EVM transaction submission, receipt, and confirmation evidence | `SideEffectSubmissionObserved`, `SideEffectReceiptObserved`, `SideEffectConfirmationObserved`, and their retained typed artifacts | No secrets allowed. Submission contains exact public transaction fields without signature scalars/raw bytes. Receipt contains strict status, address fields, gas quantities, session provenance, and losslessly readable complete coherent logs for successful execution. Confirmation contains a fresh same receipt, its exact canonical block, checked head/depth, and redacted session evidence. | strict authority | An exact provider acknowledgement must equal the locally computed prepared hash and produces submission evidence directly. A lookup observation must also equal every unsigned prepared field. Only successful direct creation carries the sender/nonce-derived contract address. Reverted receipts contain no logs and remain terminal effects. Finality rechecks receipt placement, block hash, and depth. No nonce scan can become `NotSubmittedProven`. Replay uses artifacts only. |
-| Internal Bitcoin collection receipts | `CollectBitcoinBalancesState` output evidence in the certified run journal | No secrets allowed. Contains only semantic source/network binding, one shared height/hash anchor, ordered address keys, and aligned checked `FactContentIdentityEvidence` values. | strict authority | One aggregate external-read reducer emits the receipt and one `bitcoin.balance_snapshot` fact per address in the same atomic settlement. Replay reruns that reducer from retained evidence without live capability or runtime-config access. Portfolio selection consumes this typed vector directly beside the typed EVM receipt vector; there is no generic portfolio receipt wrapper. |
-| Fact query evidence artifacts | `artifact_blobs.bytes` with `ArtifactRole::FactQueryEvidence` | No secrets allowed. May contain internal Bitcoin/EVM fact refs, returned summaries, deterministic receipt fields, one shared store frontier, a v1 plan with optional opaque fact-content-identity narrowing evidence, and selection evidence. | strict authority | Private replay evidence referenced by `ArtifactReferenced`. Replay verifies exact typed family receipts and retained source fact authority; these artifacts are never returned through public fact APIs. Every demanded holding, including all-EVM portfolios, has one receipt-pinned query/evidence entry. The query filters exact content identity before its one-row limit, then selection hydrates and rederives that identity; arbitrary byte-identical claim occurrences therefore remain valid without unbounded hydration. |
-| Current portfolio configuration | `configured_values` row keyed by target with schema `mfm.portfolio.config` | No secrets allowed. Contains direct native or ERC-20 holding sources, exact wallet-symbol demand, and public valuation strings. | strict authority before admission | `target` is the sole primary key; each import atomically creates, updates, or leaves the current canonical row unchanged. There is no configuration history, revision, digest lookup, or cursor. Aggregate validation owns family joins, normalized source identity, non-empty demand, and limits for networks, wallets, symbols, wallet-symbol relations, and distinct EVM sources per network. `NetworkConfig::Evm` is the sole authored EVM native-scale authority; output totals are quote plus canonical decimal total only. |
-| Portfolio snapshot admission evidence | `RunAdmitted.entry_point` for `mfm.portfolio/snapshot@1` | No secrets allowed. Contains the exact entry-point id and one resolved `(target, schema_id, digest)` source for `PortfolioConfig`. | strict authority | Start selects `target: "acme/primary"`. App verifies the current target row, including schema, canonical bytes/digest, and matching embedded `portfolio_id`, before admission and certifies concrete normalized config artifacts. The target evidence is audit evidence only after admission; resume, replay, status, stream, and output rendering never reread current configuration. |
-| Run executable and capability binding evidence | `RunAdmitted.runner_executables`, `adapter_executables`, `capability_implementations`, and `admitted_binding_digest` | No secrets allowed. Capability entries contain only certified kind/version and a checked non-secret provider implementation id. | strict authority | Admission sorts and deduplicates concrete capability implementation identities and hashes them with runner and adapter executable identities. Resume requires an exact match with the newly bound runtime context. |
-| Provider runtime source provenance and diagnostics | Typed Bitcoin/EVM evidence fields in run events, facts, artifacts, public errors, and retained attempt-diagnostic artifacts | No secrets allowed. The one canonical `RedactedProviderDiagnostic` JSON shape contains `provider_family`, a closed `code`, nullable reviewed `operation`, and a map whose values are checked public identifiers, integers, or booleans. It may include semantic `network_id`, EVM `expected_chain_id`, Bitcoin `source_identity` and `bitcoin_network`, selected `source_ref`, and reviewed numeric status/error codes. It must not include RPC URLs, auth headers, credentials, file paths, request/response bodies, provider messages, signer material, or signed raw transactions. | audit provenance | Public failures use reviewed codes such as `RuntimeConfigRequired` and `RuntimeConfigInvalid` plus zero or more canonical provider diagnostics. Attempt-diagnostic schema version 1 stores the diagnostics directly. Diagnostics are deterministically sorted and deduplicated. Source refs are audit provenance only; replay verifies recorded evidence against the certified session binding and operation request and must not resolve them against current runtime config. Retry, consistency, public-output, and side-effect authority must not depend on them. |
-| Artifact evidence | `artifact_admissions`, `evidence_canonical_json`, `evidence_hash` | No secrets allowed. Producer and schema ids are non-secret identities. | strict authority | Binds artifact id, digest, byte length, media type, role, schema/semantic ids, and producer identity. |
-| Commit artifact bindings | `commit_artifact_evidence`, `run_artifact_admissions` | No secrets allowed. | strict authority | Binds required/admitted artifact evidence to one commit and one run. |
-| Commit authority bytes | `commits.idempotency_canonical_json`, `prepared_authority_canonical_json`, `commit_batch_canonical_json` | No secrets allowed. | strict authority | Strict load revalidates canonicalizer identity, hash-domain version, commit id, idempotency hash, prepared authority hash, and final batch hash. |
-| Event canonical bytes | `run_events.payload_canonical_json`, `payload_hash`, event identity columns | No secrets allowed. | strict authority | Strict load reconstructs typed envelopes and cross-checks run id, seq, ordinal, commit key, event id, schema id, spec hash, logical key, payload hash, and canonical payload bytes. |
-| `FactRecorded` normalized event fields | `run_events.payload_canonical_json` for `FactRecorded` | No secrets allowed. Subject material and response evidence must be non-secret. | strict authority | Carries the fact kind, descriptor hash, subject namespace/material hashes, `FactKey`, and response artifact evidence, bound to the producing node and attempt. V1 subject material retains the complete canonical typed subject object; its namespace binds fact kind plus subject schema. Descriptor scalar paths validate and project query terms but never remove unindexed subject fields from identity. The event is the authoritative claim; fact projection rows copy or derive from it. |
-| Fact descriptor catalog projection | `fact_descriptor_catalog` | No secrets allowed. Contains descriptor hashes, schema ids, fact kind, subject namespace hash, and descriptor artifact ids/evidence hashes. | rebuildable cache | Store-wide searchable descriptor catalog derived from descriptor artifacts. It is not semantic authority; rebuild and replay verify against retained descriptor artifacts. |
-| Run fact descriptor admission projection | `run_fact_descriptor_admissions` | No secrets allowed. Contains run ids, descriptor hashes, descriptor artifact ids/evidence hashes, source run coordinates, and commit ids. | rebuildable cache | Per-run link proving which descriptor artifacts each `RunAdmitted` event admitted. Fact recording must reference a descriptor admitted by the producing run and present in the store-wide descriptor catalog. |
-| Fact query projection | `fact_query_projection`, `fact_query_terms` | No secrets allowed. The parent contains internal refs, source run/event coordinates, producer node and attempt ids, commit/store order, recorded time, hashes, and response artifact ids/evidence hashes. Subordinate normalized rows contain descriptor-derived scalar subject, result, and metadata terms only. | rebuildable cache | The store exposes and compares one complete `FactQueryProjection` per committed claim; query terms have no independent public projection authority. Portfolio receipt-pinned selection queries Bitcoin and EVM through one certified shared-snapshot batch; production reconstructs authoritative fact history once per batch. Exact content narrowing precedes ordering/limiting, then selection rehydrates every returned artifact and rederives identity against typed receipt evidence. Public APIs rebuild and verify returned rows from committed `FactRecorded` events and exact retained descriptor/response artifacts before returning descriptor-approved values; they do not expose raw internal refs, artifact ids, hashes, or run/event coordinates. Terms accelerate queries but cannot establish fact identity, discard unindexed subject structure, select a holding, or replace receipt authority. |
-| Fact projection metadata | `fact_query_metadata` | No secrets. Projection generation is store-private metadata. | operational telemetry | Names the current fact projection generation for store-private ops/debug only. It is not semantic fact authority. |
-| Resource lane authority rows | `resource_lane_claim_events`, `resource_lane_release_events`, `resource_lane_transitions` | No secrets allowed. Lane keys and ledger keys are non-secret coordination identities. | strict authority | Strict load validates lane id derivation, source event bindings, transition hash chains, fencing token monotonicity, active-holder fold, and release legality. |
-| Admission lane coordination rows | `admission_lane`, `admission_waiter` | No secrets allowed. Stores lane class, derived lane ids, execution holder run ids for execution claims, admission mode, optional operational holder token, waiter token, deterministic waiter ids, tickets, status, and lease timestamps. | operational coordination | Mutable Postgres-only coordination state. Execution claims are `nowait_skip` leases keyed by base work identity (`certified_spec_hash` + `store_scope_id`) with the holder `run_id` stored separately. Resource admission uses `wait_fifo` rows for one exclusive side-effect lane. These rows can block or wake attempts, but they never grant run authority or resource ownership; durable authority remains in `RunAdmitted` and `ResourceLaneClaimed`/`ResourceLaneReleased`/`resource_lane_transitions`. Expired resource retries get fresh lane-local tickets; expired execution claims require explicit holder-and-token-matched reaping before another holder can acquire. |
-| Run observations | Derived from `commits` and `run_events` | No secrets allowed. | observation | List/watch materializes rows from strict authority at read time. Corruption cannot affect strict status/resume/replay/public-output reads. |
-| Cursor metadata | `run_observation_cursors` | No secrets. Contains the internal store commit coordinate, store epoch, and cursor version; these must not be exposed. | operational telemetry | Server-issued opaque tokens are epoch-bound and no-TTL in v1. Unknown, missing, or unsupported-format rows are invalid; epoch mismatch expires. |
-| Store metadata | `store_metadata` | No secrets. Fields are internal non-secret metadata. `store_scope_id` is non-secret deployment identity material. | operational telemetry | Defines store epoch, store-owned scope, and schema contract version. Runtime credentials must not mutate this table. |
-| SQLx metadata | `crates/storages/postgres/.sqlx/*.json` | No secrets. | operational telemetry | Compile-time query metadata only; checked in and validated by Nix workflows. |
+The in-memory store has the same logical surfaces. It validates one complete candidate in scratch
+state and performs one infallible swap only after every check succeeds.
 
-## CLI And REST
+## Five Journal Records
 
-| Surface | Location | Secret Boundary | Authority Role | Notes |
-| --- | --- | --- | --- | --- |
-| Run list/watch output | `mfm_cli run list`, `GET /v1/runs` | No secrets. | public output, observation | Returns observed run rows and opaque cursors only. It may lag strict authority and cannot be used as replay/resume authority. |
-| Portfolio snapshot start input and output | `mfm_cli run start mfm.portfolio/snapshot@1 acme/primary`, `POST /v1/runs/start` | No secrets. Input contains one portfolio target. Output contains only version-1 `PortfolioPublicOutputs.snapshot` and `.report` projections. | public output | Input accepts only the exact entry-point id and target; it accepts no catalog selector, collection topology, child config, or runtime route. Output contains no receipt entry, source/requirement key, fact identity/ref, evidence, scan bound, credential, or output-version selector. Snapshot/report network pins are derived from selected Bitcoin/EVM fact material whose exact anchors and content were authorized by the same-run typed family receipts. |
-| Run status output | `mfm_cli run status`, REST status surfaces | No secrets. | public output | Run-local status is rendered while borrowing the fully authorization-verified `VerifiedRunView`; status trusts its derived fold and does not reconstruct or reverify historical manual proof. Any temporary cross-run resource-lane overlay is not per-run authority. JSON output follows the current public contract and is not durable authority. |
-| Sanitized run-event observation output | `mfm_cli run stream` and equivalent API surfaces | No secrets. | public output | Exposes sanitized event envelopes for inspection only. Raw `run_events` are physical inputs; per-run read authority exists only in the store-verified `CommittedRunJournal`/`VerifiedRunView`. |
-| Public-output rendering | CLI/REST public output commands/routes | No secrets. | public output | Reads strict authority rows and proof-bearing artifact requests before rendering. Rendered JSON is not resume or replay authority. |
-| CLI facts JSON output | `mfm_cli facts kinds/describe/explain/query/latest/history/top/show` | No secrets. Returns kind/descriptor summaries, opaque public refs, store-recorded time, and descriptor-approved `Returnable` field values only. | public output | Reads through evidence-only app fact services backed by the same store that owns retained artifacts. Must not expose internal refs, artifact ids/evidence hashes, subject material or hashes, response artifacts, response hashes, raw run/event coordinates, or capability routing details. |
-| REST facts responses | `/v1/facts/kinds`, `/v1/facts/kinds/:kind`, `/v1/facts/:kind`, `/v1/facts/:kind/latest`, `/v1/facts/ref/:public_ref` | No secrets. Returns public fact DTOs and the current redacted error envelopes only. | public output | Uses the same app/facts query boundary as CLI. Unknown refs and refs that resolve only to non-public facts must return the same redacted not-found class; descriptor discovery and ambiguity errors must not disclose non-public facts. |
-| Manual-resolution evidence input/output | CLI manual resolution commands and REST request/response bodies | No secrets. | public output | Evidence bytes are artifacts only after digest/evidence verification and commit admission. A persisted decision becomes historical read authority only through the store-owned journal-to-view semantic verification above; CLI, REST, runtime, replay, and status do not reconstruct or reverify it. CLI/REST error details must stay redacted. |
-| Keystore list output | `mfm_cli keystore list` | Public addresses and labels only; no private keys, mnemonics, passwords, decrypted bytes, or raw transactions. | public output | Keystore secrets remain below CLI output and typed semantic surfaces. |
-| Explicit transaction-signing output | `mfm_cli keystore tx-sign` JSON/text plus user-selected `--out` file | CLI JSON/text contains only `from`, `to`, canonical decimal `nonce`/`chain_id`, `signing_digest`, and `transaction_hash`. It excludes signatures, raw bytes, keystore/runtime paths, entry ids, and credentials. The mode-0600 `--out` file contains raw EIP-2718 transaction hex and is bearer material. | public metadata; explicit local bearer output | The command calls the canonical app/library signing service and never persists the bearer in run events, artifacts, facts, setup, databases, diagnostics, or rendered output. `signing_digest` and `transaction_hash` are distinct identities. Existing files require `--overwrite`; symlinks and unsafe paths fail closed. |
-| REST health/readiness | `/v1/health`, `/v1/ready` | No secrets. | operational telemetry | Liveness/readiness only. |
-| Live runtime config | Process-local runtime config file path, indirection paths, resolved RPC URLs/auth, signer paths, and signer unlock files | Secret-bearing; forbidden in CLI/REST output, run events, artifacts, fixtures, replay authority, and public-output rendering. | none | Evidence-only status, stream inspection, list/watch, replay, and public-output paths must not parse or validate live runtime config. Live start validates it for every live node; resume validates it only for nonterminal live nodes that may still execute. |
+| Record | Retained data | Authority role |
+| --- | --- | --- |
+| `RunAdmitted` | Run/store/tenant identity, canonical invocation identity, entry point, planning profile, authored/expanded graph, certificate, config/seeds, cross-run source manifest, routing-generation refs, executable and implementation manifests, genesis digest. | Establishes the immutable root. Admission performs no semantic live IO. |
+| `StateTransitionCommitted` | Node occurrence, transition kind, before/after state, exact input lineage, request/selected observation where applicable, result, outputs, facts, evidence, typed failure or blocking sources, binding delta. | The only semantic state change. |
+| `ExternalAccessAuthorized` | Exact read or ensure scope, immutable request identity/value, capability/operation binding, and optional effect/executor binding. | Authorizes zero or one application-protocol operation and changes no semantic state. |
+| `ExternalAccessObserved` | Exact authorization reference and one `Returned`, `DidNotEnter`, or `Indeterminate` typed outcome. | Audit evidence only; state changes only if a later transition consumes it. |
+| `RunClosed` | Final transition reference and terminal semantic-state digest. | Structurally fixes closure in the same commit as the final transition. |
 
-## Review Rules
+`JournalHead` advances for every commit. `SemanticHead` advances only for admission or a semantic
+transition. A legal late observation after closure advances only the journal head.
 
-- Adding or renaming a persisted table, artifact/evidence row, event canonical byte field,
-  observation fact, cursor field, CLI JSON field, or REST response field must update this inventory
-  in the same change.
-- Secret-bearing values must stay out of typed configs, events, artifacts, facts, public outputs,
-  diagnostics, fixtures, and snapshots.
-- List/watch output is an observation surface. Strict resume, replay, status, retention proof,
-  artifact reads, public-output rendering, and side-effect recovery must use strict authority rows;
-  per-run consumers trust only a fully authorization-verified `VerifiedRunView` and must not
-  reconstruct or reverify historical manual proof.
-- Cursor internals are storage-private. Public `change_id` and `next_cursor` values must remain
-  opaque and must not expose commit ids, store commit coordinates, cursor versions, or store epochs.
+## Retained Typed Values
+
+| Surface | Secret boundary | Authority role |
+| --- | --- | --- |
+| `mfm_ids::ContentRef` | Schema id and raw-byte digest only. | Lightweight content identity; never journal reachability or access authority. |
+| `mfm_journal::ValueRef` | Full reviewed producer binding, role, schema/semantic type, digest/evidence, length, and media type. | Exact retained journal identity when reachable through a verified commit binding. |
+| Config and seed objects | Canonical typed non-secret values. | Root authority after admission binding. |
+| State request objects | Canonical typed non-secret requests. | Immutable state intent. A read request becomes committed by authorization; an effect request by `EffectRequested`. |
+| Observation objects | Reviewed typed result or closed `SafeFailure`. | Audit evidence selected by an exact authorization. |
+| Output and fact objects | Canonical typed non-secret values. | Semantic result only through a verified transition binding. |
+| Typed failure objects | Closed domain failure values without provider diagnostics. | Committed domain truth for one terminal state. |
+| Public-output objects | Only fields approved by the certified public schema. | Strict source for `read_public_run`; rendered JSON is a representation. |
+
+Objects referenced by committed authority are retained indefinitely in v1. Garbage collection is
+not a semantic workflow and cannot delete a reachable object.
+
+## Facts
+
+A fact exists only as a typed emission inside `StateTransitionCommitted`. It contains complete
+canonical subject material, response value, descriptor/logical/content identities, and producer
+binding. Query terms are deterministic searchable projections of the retained subject; they do not
+replace identity.
+
+Same-run state data uses graph bindings. A prior-run selection records:
+
+1. `ExternalAccessAuthorized` for `mfm.journal.fact-selection.v1` at one tenant barrier;
+2. `ExternalAccessObserved` containing the complete typed `FactSelectionResponse`; and
+3. `ReadSettled` consuming that exact observation.
+
+Private scan state, pagination, scratch material, and index rows are not persisted or public
+authority. Only exact coverage through the authorization barrier produces
+`FactSelectionCompleteness`.
+
+There is no ordinary public fact DTO. Facts can appear only through separately authorized trace,
+replay, audit, or export closure when that surface's disclosure contract permits them.
+
+## External-Access Evidence
+
+The generic `SafeFailure` envelope retains:
+
+- selected safe-failure contract reference;
+- closed stable code;
+- closed failure class;
+- `before_boundary_entry | boundary_entry | boundary_observation`;
+- optional reviewed coarse size class; and
+- optional canonical typed diagnostic reference, bounded to 16 KiB.
+
+It never retains provider-controlled strings or arbitrary maps.
+
+EVM read audit records may retain exact reviewed HTTP status, JSON-RPC numeric code, or closed
+response-invalid discriminator through the EVM diagnostic union. Semantic source mismatch and
+anchor change are typed returned values interpreted by the state, not provider diagnostics.
+
+Production EVM portfolio reads retain separate authorization/observation pairs for:
+
+- routing-generation/source/chain bootstrap;
+- the initial anchor;
+- each independently meaningful token metadata, native balance, or token balance call;
+- final anchor confirmation.
+
+Pure aggregation consumes the typed graph outputs and may emit final facts and portfolio values.
+There is no aggregate multi-call observation that hides sibling calls.
+
+Bitcoin collection produces no current product records because its capability is unregistered.
+Its prospective audited surfaces are described in `docs/btc-rpc-routing.md`.
+
+## Executor Surfaces
+
+| Surface | Secret boundary | Authority role |
+| --- | --- | --- |
+| Committed executor request | Exact canonical safe request identity; no credential or bearer material. | Identity only; cannot enter a target. |
+| Delivery authorization | Tenant/deployment/effect/attempt and exact request digest. | Strict executor authority that precedes one target call. |
+| Target receipt and observation | Closed returned/did-not-enter/indeterminate outcome with reviewed safe result/failure refs. | Exact evidence for the committed delivery authorization. |
+| Delivery frontier and tombstone | Bounded predecessor-linked audit, exact terminal proof, assurance-policy ref. | Strict executor terminal evidence. |
+| Typed resource stream | Resource ownership/key, policy/config refs, immutable allocation state. | Executor-private resource authority. |
+| Memory/file checkpoints | Checksummed bounded encodings. | Qualification only; no production freshness or non-rollback authority. |
+
+Executor delivery attempt identifiers remain valid inside this ledger only. They do not represent a
+state transition or run phase.
+
+The MFM journal retains executor evidence only after ordinary object admission through an audited
+ensure observation. An executor terminal claim contains `ContentRef` values and cannot create
+producer-bound journal references or append a run.
+
+## Configuration And Routing
+
+Deployment-provisioned current configuration contains domain intent and non-secret references.
+Admission resolves one exact tenant-, entry-point-, and target-scoped canonical value, records its
+complete producer-bound authority and bytes in the root, and never consults current configuration
+again for that run. Runtime app and transport surfaces cannot publish, list, or export configured
+values.
+
+Runtime routing may contain RPC endpoints, authorization sources, signer refs, keystore paths, or
+other process-local resources. Those values never enter a typed semantic surface. Admission binds
+only an immutable non-secret routing-generation reference. Bootstrap resolution and source
+validation occur after admission through audited access; resume resolves the exact admitted
+generation without fallback.
+
+## Public App, CLI, And REST DTOs
+
+| Surface | Disclosure |
+| --- | --- |
+| Entry-point discovery | Exact entry-point/profile/input/output contract; no tenant or run data. |
+| Admit response | Run id, admission result, entry-point identities, invocation identity, planning-profile ref. |
+| Drive response | `advanced`, `waiting`, or `closed` plus only the frozen head/closure fields. |
+| Public run view | `active`, `succeeded`, or `failed`; reviewed active fields; certified public outputs. |
+| Replay response | Frozen verified, reproduced, or candidate-comparison result. Reproduction `unavailable` has no reason field. |
+| Transition trace | Separately authorized exact transition lineage and retained values; cross-run denial uses redacted lineage. |
+| Access audit | Separately authorized safe authorization/observation chronology. |
+| Portable export | Canonical `PortableRunExport` bundle: version, media type, manifest, members. |
+
+`PortableRunExport` contains no self-digest. REST serializes that canonical bundle directly and
+returns SHA-256 of the exact final bytes only as external `Mfm-Content-Digest` metadata. CLI writes
+the same bytes to the explicit output path.
+
+The public transport surface is limited to entry-point discovery and exact-run admit, drive, show,
+replay, trace, audit, and export operations. A run id, record ref, value ref, digest, cursor, or
+export manifest is not bearer authority.
+
+## Operational Surfaces
+
+Health, readiness, logs, metrics, spans, wake hints, internal queues, and advisory cursors are
+operational telemetry. They may be lost, duplicated, rebuilt, or stale without changing semantic
+truth. They cannot schedule, authorize, settle, skip, close, prove completeness, or grant object
+access.
+
+## Review Checklist
+
+For every persisted or returned field:
+
+1. Identify its exact owner and authority class.
+2. Prove its schema is closed, canonical, float-free, and bounded.
+3. Prove its producer binding and reachability.
+4. Reject all secret classes and provider-controlled diagnostic text.
+5. Verify tenant, store, run, and purpose authority before dereference.
+6. Ensure no representation or routing/index row substitutes for the journal/executor source.
+7. Add positive and adversarial redaction, tamper, and wrong-authority tests.

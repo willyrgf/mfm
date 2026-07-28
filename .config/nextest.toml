@@ -12,12 +12,8 @@ trybuild-ui = { max-threads = 1 }
 # unrelated tests continue to run in parallel.
 filter = '''
 binary(=capability_ui)
-| binary(=certify_authority_ui)
 | binary(=derive_ui)
 | binary(=signing_ui)
-| binary(=program_ui)
-| binary(=public_output_authority_ui)
-| binary(=replay_authority_ui)
-| binary(=runtime_authority_ui)
+| binary(=application_privacy_ui)
 '''
 test-group = "trybuild-ui"

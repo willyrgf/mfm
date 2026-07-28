@@ -22,17 +22,12 @@
 use std::collections::BTreeMap;
 
 use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
-use mfm_ids::{
-    ContextRef, ContextResourceKind, ContextStage, DigestAlgorithm, NameToken, SchemaId,
-    SchemaVersion, SemanticTypeId,
-};
+use mfm_ids::{DigestAlgorithm, NameToken, SchemaId, SchemaVersion, SemanticTypeId};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 mod generic_values;
-pub use self::generic_values::{
-    ArtifactRef, ContextRefValue, MaybeValue, NonEmpty, SkipCode, SkipReason,
-};
+pub use self::generic_values::{ArtifactRef, MaybeValue, NonEmpty, SkipCode, SkipReason};
 mod retained;
 pub use self::retained::{
     component_object_evidence_contract_canonical, component_object_evidence_contract_ref,
@@ -189,18 +184,6 @@ pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 }
 
-/// Typed state output that carries certified context-resource metadata.
-pub trait ContextBoundOutput: MfmValue {
-    /// Returns the context ref embedded in the output value.
-    fn context_ref(&self) -> &ContextRef;
-
-    /// Returns the context resource kind embedded in the output value.
-    fn context_resource_kind(&self) -> &ContextResourceKind;
-
-    /// Returns the context resource stage embedded in the output value.
-    fn context_stage(&self) -> &ContextStage;
-}
-
 /// Deterministic planning config that is safe to persist in manifests/specs.
 pub trait MfmConfig: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Returns the schema descriptor for this planning config type.
@@ -274,74 +257,10 @@ pub trait StateInput: Send + Sync + 'static {
     fn input_schema_id() -> Result<SchemaId> {
         Self::input_schema_descriptor()?.schema_id()
     }
-}
 
-impl StateInput for () {
-    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
-        framework_input_descriptor("mfm.kernel.state_input.unit", SchemaShape::Unit, "()")
-    }
+    /// Returns canonical named input destinations in ordinal order.
+    fn input_destination_paths() -> Result<Vec<mfm_ids::FieldPath>>;
 }
-
-impl<T: MfmValue> StateInput for T {
-    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
-        framework_input_descriptor(
-            "mfm.kernel.state_input.value",
-            SchemaShape::ValueRef {
-                schema_id: T::schema_id()?,
-                semantic_type_id: T::semantic_id()?,
-            },
-            "mfm_values::MfmValue",
-        )
-    }
-}
-
-impl<T: MfmValue> StateInput for Vec<T> {
-    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
-        framework_input_descriptor(
-            "mfm.kernel.state_input.vec",
-            SchemaShape::Vec(Box::new(SchemaShape::ValueRef {
-                schema_id: T::schema_id()?,
-                semantic_type_id: T::semantic_id()?,
-            })),
-            "alloc::vec::Vec",
-        )
-    }
-}
-
-macro_rules! impl_tuple_state_input {
-    ($($name:ident),+ $(,)?) => {
-        impl<$($name),+> StateInput for ($($name,)+)
-        where
-            $($name: MfmValue,)+
-        {
-            fn input_schema_descriptor() -> Result<SchemaDescriptor> {
-                framework_input_descriptor(
-                    "mfm.kernel.state_input.tuple",
-                    SchemaShape::Tuple(vec![
-                        $(SchemaShape::ValueRef {
-                            schema_id: $name::schema_id()?,
-                            semantic_type_id: $name::semantic_id()?,
-                        },)+
-                    ]),
-                    "tuple",
-                )
-            }
-        }
-    };
-}
-
-impl_tuple_state_input!(A);
-impl_tuple_state_input!(A, B);
-impl_tuple_state_input!(A, B, C);
-impl_tuple_state_input!(A, B, C, D);
-impl_tuple_state_input!(A, B, C, D, E);
-impl_tuple_state_input!(A, B, C, D, E, F);
-impl_tuple_state_input!(A, B, C, D, E, F, G);
-impl_tuple_state_input!(A, B, C, D, E, F, G, H);
-impl_tuple_state_input!(A, B, C, D, E, F, G, H, I);
-impl_tuple_state_input!(A, B, C, D, E, F, G, H, I, J);
-impl_tuple_state_input!(A, B, C, D, E, F, G, H, I, J, K);
-impl_tuple_state_input!(A, B, C, D, E, F, G, H, I, J, K, L);
 
 /// Descriptor contract for operation output structs.
 pub trait OperationOutput: Send + Sync + 'static {
@@ -1073,23 +992,6 @@ pub fn framework_value_descriptor(
         SchemaIdentity::new(
             SchemaKind::Value,
             Some(semantic_type_id),
-            schema_name,
-            schema_version("1")?,
-            shape,
-        )?,
-        SchemaAudit::framework("mfm-values", rust_type_path),
-    )
-}
-
-fn framework_input_descriptor(
-    schema_name: &str,
-    shape: SchemaShape,
-    rust_type_path: &str,
-) -> Result<SchemaDescriptor> {
-    SchemaDescriptor::new(
-        SchemaIdentity::new(
-            SchemaKind::StateInput,
-            None,
             schema_name,
             schema_version("1")?,
             shape,

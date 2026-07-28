@@ -3,8 +3,6 @@ use std::io::{self, Cursor, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mfm_bitcoin::BitcoinSourceIdentity;
-use mfm_ids::LocalPublicId;
 use mfm_signing::SignerRef;
 use static_assertions::assert_not_impl_any;
 
@@ -18,7 +16,7 @@ assert_not_impl_any!(ResolvedValue: serde::de::DeserializeOwned);
 assert_not_impl_any!(ResolvedValue: AsRef<str>, std::borrow::Borrow<str>);
 
 #[test]
-fn toml_and_json_select_the_identical_evm_route() {
+fn toml_and_json_load_the_identical_qualified_evm_route() {
     let directory = tempfile::tempdir().expect("tempdir");
     let toml = directory.path().join("runtime.toml");
     let json = directory.path().join("runtime.json");
@@ -27,6 +25,8 @@ fn toml_and_json_select_the_identical_evm_route() {
         r#"
 [evm.routes.ethereum-mainnet]
 source_ref = "primary"
+chain_id = 1
+generation_id = "ethereum-mainnet-primary-v1"
 rpc_url = { direct = "https://rpc.example.invalid" }
 auth_header = { env = "MFM_TEST_AUTH" }
 "#,
@@ -37,6 +37,8 @@ auth_header = { env = "MFM_TEST_AUTH" }
         r#"{
   "evm": {"routes": {"ethereum-mainnet": {
     "source_ref": "primary",
+    "chain_id": 1,
+    "generation_id": "ethereum-mainnet-primary-v1",
     "rpc_url": {"direct": "https://rpc.example.invalid"},
     "auth_header": {"env": "MFM_TEST_AUTH"}
   }}}
@@ -45,13 +47,15 @@ auth_header = { env = "MFM_TEST_AUTH" }
     .expect("JSON");
     let _env = locked_env("MFM_TEST_AUTH", "Bearer protected");
     for path in [&toml, &json] {
-        let route = load_evm_route(
-            path,
-            &LocalPublicId::new("ethereum-mainnet").expect("network"),
-        )
-        .expect("selected route");
-        let (source, endpoint, authorization) = route.into_parts();
+        let [route]: [ResolvedEvmRoute; 1] = load_evm_routes(path)
+            .expect("qualified routes")
+            .try_into()
+            .unwrap_or_else(|_| panic!("one route"));
+        let (network, source, chain_id, generation, endpoint, authorization) = route.into_parts();
+        assert_eq!(network.as_str(), "ethereum-mainnet");
         assert_eq!(source.as_str(), "primary");
+        assert_eq!(chain_id, 1);
+        assert_eq!(generation.as_str(), "ethereum-mainnet-primary-v1");
         assert_eq!(endpoint.into_string(), "https://rpc.example.invalid");
         assert_eq!(
             authorization
@@ -61,6 +65,36 @@ auth_header = { env = "MFM_TEST_AUTH" }
             "Bearer protected"
         );
     }
+}
+
+#[test]
+fn evm_routes_have_canonical_network_order() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("runtime.toml");
+    std::fs::write(
+        &path,
+        r#"
+[evm.routes.zeta]
+source_ref = "zeta-source"
+chain_id = 2
+generation_id = "zeta-primary-v1"
+rpc_url = { direct = "https://zeta.example.invalid" }
+
+[evm.routes.alpha]
+source_ref = "alpha-source"
+chain_id = 1
+generation_id = "alpha-primary-v1"
+rpc_url = { direct = "https://alpha.example.invalid" }
+"#,
+    )
+    .expect("config");
+
+    let networks = load_evm_routes(&path)
+        .expect("routes")
+        .into_iter()
+        .map(|route| route.into_parts().0.into_string())
+        .collect::<Vec<_>>();
+    assert_eq!(networks, ["alpha", "zeta"]);
 }
 
 #[test]
@@ -83,15 +117,13 @@ fn json_duplicate_keys_fail_at_every_nesting_level() {
     ] {
         let path = directory.path().join(format!("{name}.json"));
         std::fs::write(&path, raw).expect("JSON fixture");
-        let error = load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
-            .err()
-            .expect(name);
+        let error = load_evm_routes(&path).err().expect(name);
         assert_eq!(error.kind(), RuntimeConfigErrorKind::DuplicateJsonKey);
     }
 }
 
 #[test]
-fn selected_entries_are_strict_while_unselected_entries_are_isolated() {
+fn every_evm_route_is_strict_while_other_sections_remain_isolated() {
     let directory = tempfile::tempdir().expect("tempdir");
     let valid = directory.path().join("selective.toml");
     std::fs::write(
@@ -99,10 +131,9 @@ fn selected_entries_are_strict_while_unselected_entries_are_isolated() {
         r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[evm.routes.unused]
-malformed = [1, 2, 3]
 
 [bitcoin.routes.unused]
 unknown = true
@@ -115,29 +146,90 @@ malformed = true
 "#,
     )
     .expect("config");
-    load_evm_route(&valid, &LocalPublicId::new("dev").expect("network"))
-        .expect("unselected entries are isolated");
+    assert_eq!(
+        load_evm_routes(&valid)
+            .expect("other sections are isolated")
+            .len(),
+        1
+    );
 
-    let selected_unknown = directory.path().join("selected-unknown.toml");
+    let invalid_route = directory.path().join("invalid-route.toml");
     std::fs::write(
-        &selected_unknown,
+        &invalid_route,
         r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = { direct = "http://127.0.0.1:8545" }
+
+[evm.routes.unused]
 extra = true
 "#,
     )
     .expect("config");
     assert_eq!(
-        load_evm_route(
-            &selected_unknown,
-            &LocalPublicId::new("dev").expect("network")
-        )
-        .err()
-        .expect("selected unknown field")
-        .kind(),
+        load_evm_routes(&invalid_route)
+            .err()
+            .expect("every EVM route is strict")
+            .kind(),
         RuntimeConfigErrorKind::UnknownSelectedField
+    );
+}
+
+#[test]
+fn evm_route_qualification_fields_fail_closed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    for (name, body, expected) in [
+        (
+            "zero-chain",
+            "source_ref = \"primary\"\nchain_id = 0\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
+            RuntimeConfigErrorKind::InvalidChainId,
+        ),
+        (
+            "missing-chain",
+            "source_ref = \"primary\"\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
+            RuntimeConfigErrorKind::MissingRequiredField,
+        ),
+        (
+            "missing-generation",
+            "source_ref = \"primary\"\nchain_id = 31337\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
+            RuntimeConfigErrorKind::MissingRequiredField,
+        ),
+        (
+            "invalid-generation",
+            "source_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"INVALID\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
+            RuntimeConfigErrorKind::InvalidIdentifier,
+        ),
+    ] {
+        let path = directory.path().join(format!("{name}.toml"));
+        std::fs::write(&path, format!("[evm.routes.dev]\n{body}\n")).expect("config");
+        assert_eq!(
+            load_evm_routes(&path).err().expect(name).kind(),
+            expected,
+            "{name}"
+        );
+    }
+
+    let invalid_network = directory.path().join("invalid-network.toml");
+    std::fs::write(
+        &invalid_network,
+        "[evm.routes.\"Bad Network\"]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }\n",
+    )
+    .expect("config");
+    assert_eq!(
+        load_evm_routes(&invalid_network)
+            .err()
+            .expect("invalid network")
+            .kind(),
+        RuntimeConfigErrorKind::InvalidIdentifier
+    );
+
+    let empty = directory.path().join("empty.toml");
+    std::fs::write(&empty, "[evm.routes]\n").expect("config");
+    assert_eq!(
+        load_evm_routes(&empty).err().expect("empty catalog").kind(),
+        RuntimeConfigErrorKind::MissingEntry
     );
 }
 
@@ -167,6 +259,8 @@ fn global_secret_field_policy_applies_to_unselected_entries() {
             r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = {{ direct = "http://127.0.0.1:8545" }}
 
 [evm.routes.unused]
@@ -175,10 +269,7 @@ unsafe_{marker}_field = "must-not-be-admitted"
         );
         std::fs::write(&path, raw).expect("config");
         assert_eq!(
-            load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
-                .err()
-                .expect(marker)
-                .kind(),
+            load_evm_routes(&path).err().expect(marker).kind(),
             RuntimeConfigErrorKind::ForbiddenSecretField,
             "{marker}"
         );
@@ -198,22 +289,19 @@ unsafe_{marker}_field = "must-not-be-admitted"
         std::fs::write(
             &path,
             format!(
-                "[evm.routes.dev]\nsource_ref = \"primary\"\nrpc_url = {{ direct = \"http://127.0.0.1:8545\" }}\n\n{field}\n"
+                "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = {{ direct = \"http://127.0.0.1:8545\" }}\n\n{field}\n"
             ),
         )
         .expect("config");
         assert_eq!(
-            load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
-                .err()
-                .expect(name)
-                .kind(),
+            load_evm_routes(&path).err().expect(name).kind(),
             RuntimeConfigErrorKind::DirectSecretValue
         );
     }
 }
 
 #[test]
-fn reviewed_secret_slots_reject_bypass_shapes_in_unselected_routes() {
+fn reviewed_secret_slots_reject_bypass_shapes_globally() {
     let directory = tempfile::tempdir().expect("tempdir");
     let cases = [
         (
@@ -222,6 +310,8 @@ fn reviewed_secret_slots_reject_bypass_shapes_in_unselected_routes() {
             r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = { direct = "http://127.0.0.1:8545" }
 
 [evm.routes.unused]
@@ -234,6 +324,8 @@ auth_header = "Bearer plaintext"
             r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = { direct = "http://127.0.0.1:8545" }
 
 [bitcoin.routes.unused]
@@ -246,6 +338,8 @@ rpc_password = [{ direct = "plaintext" }]
             r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = { direct = "http://127.0.0.1:8545" }
 
 [evm.routes.unused]
@@ -257,7 +351,12 @@ auth_header = { nested = { direct = "Bearer plaintext" } }
             "json",
             r#"{
   "evm": {"routes": {
-    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}}
+    "dev": {
+      "source_ref": "primary",
+      "chain_id": 31337,
+      "generation_id": "dev-primary-v1",
+      "rpc_url": {"direct": "http://127.0.0.1:8545"}
+    }
   }},
   "bitcoin": {"routes": {"unused": {"rpc_password": "plaintext"}}}
 }"#,
@@ -267,7 +366,12 @@ auth_header = { nested = { direct = "Bearer plaintext" } }
             "json",
             r#"{
   "evm": {"routes": {
-    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}},
+    "dev": {
+      "source_ref": "primary",
+      "chain_id": 31337,
+      "generation_id": "dev-primary-v1",
+      "rpc_url": {"direct": "http://127.0.0.1:8545"}
+    },
     "unused": {"auth_header": [{"direct": "Bearer plaintext"}]}
   }}
 }"#,
@@ -277,7 +381,12 @@ auth_header = { nested = { direct = "Bearer plaintext" } }
             "json",
             r#"{
   "evm": {"routes": {
-    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}},
+    "dev": {
+      "source_ref": "primary",
+      "chain_id": 31337,
+      "generation_id": "dev-primary-v1",
+      "rpc_url": {"direct": "http://127.0.0.1:8545"}
+    },
     "unused": {"auth_header": {"env": ["MFM_AUTH"]}}
   }}
 }"#,
@@ -287,7 +396,12 @@ auth_header = { nested = { direct = "Bearer plaintext" } }
             "json",
             r#"{
   "evm": {"routes": {
-    "dev": {"source_ref": "primary", "rpc_url": {"direct": "http://127.0.0.1:8545"}},
+    "dev": {
+      "source_ref": "primary",
+      "chain_id": 31337,
+      "generation_id": "dev-primary-v1",
+      "rpc_url": {"direct": "http://127.0.0.1:8545"}
+    },
     "unused": {"auth-header": {"DiReCt": "Bearer plaintext"}}
   }}
 }"#,
@@ -298,10 +412,7 @@ auth_header = { nested = { direct = "Bearer plaintext" } }
         let path = directory.path().join(format!("{name}.{extension}"));
         std::fs::write(&path, raw).expect("config");
         assert_eq!(
-            load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
-                .err()
-                .expect(name)
-                .kind(),
+            load_evm_routes(&path).err().expect(name).kind(),
             RuntimeConfigErrorKind::DirectSecretValue,
             "{name}"
         );
@@ -309,17 +420,24 @@ auth_header = { nested = { direct = "Bearer plaintext" } }
 }
 
 #[test]
-fn reviewed_secret_slots_allow_only_indirect_shapes_in_unselected_routes() {
+fn reviewed_secret_slots_allow_only_indirect_shapes_across_the_document() {
     let directory = tempfile::tempdir().expect("tempdir");
+    let _env = locked_env("MFM_UNUSED_AUTH", "Bearer protected");
     let path = directory.path().join("indirect-unselected.toml");
     std::fs::write(
         &path,
         r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = { direct = "http://127.0.0.1:8545" }
 
 [evm.routes.unused]
+source_ref = "secondary"
+chain_id = 31338
+generation_id = "unused-secondary-v1"
+rpc_url = { direct = "http://127.0.0.1:8546" }
 auth_header = { env = "MFM_UNUSED_AUTH" }
 
 [bitcoin.routes.file]
@@ -331,8 +449,10 @@ rpc_password = { file_env = "MFM_UNUSED_PATH" }
     )
     .expect("config");
 
-    load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
-        .expect("indirect unselected secret slots");
+    assert_eq!(
+        load_evm_routes(&path).expect("indirect secret slots").len(),
+        2
+    );
 }
 
 #[test]
@@ -344,6 +464,8 @@ fn expected_chain_id_and_unknown_top_level_sections_fail_globally() {
         r#"
 [evm.routes.dev]
 source_ref = "primary"
+chain_id = 31337
+generation_id = "dev-primary-v1"
 rpc_url = { direct = "http://127.0.0.1:8545" }
 
 [evm.routes.unused.nested]
@@ -352,20 +474,17 @@ expected-chain-id = 1
     )
     .expect("config");
     assert_eq!(
-        load_evm_route(
-            &expected_chain,
-            &LocalPublicId::new("dev").expect("network")
-        )
-        .err()
-        .expect("expected chain id")
-        .kind(),
+        load_evm_routes(&expected_chain)
+            .err()
+            .expect("expected chain id")
+            .kind(),
         RuntimeConfigErrorKind::ForbiddenExpectedChainId
     );
 
     let unknown = directory.path().join("unknown.toml");
     std::fs::write(&unknown, "[btc.routes.legacy]\nvalue = true\n").expect("config");
     assert_eq!(
-        load_evm_route(&unknown, &LocalPublicId::new("dev").expect("network"))
+        load_evm_routes(&unknown)
             .err()
             .expect("legacy top level")
             .kind(),
@@ -392,16 +511,12 @@ fn value_sources_require_exactly_one_known_key() {
         let path = directory.path().join(format!("{name}.toml"));
         std::fs::write(
             &path,
-            format!("[evm.routes.dev]\nsource_ref = \"primary\"\nrpc_url = {source}\n"),
+            format!(
+                "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = {source}\n"
+            ),
         )
         .expect("config");
-        assert_eq!(
-            load_evm_route(&path, &LocalPublicId::new("dev").expect("network"))
-                .err()
-                .expect(name)
-                .kind(),
-            expected
-        );
+        assert_eq!(load_evm_routes(&path).err().expect(name).kind(), expected);
     }
 }
 
@@ -495,60 +610,15 @@ fn environment_names_values_and_paths_fail_closed() {
 }
 
 #[test]
-fn bitcoin_selection_enforces_timeout_and_complete_basic_auth() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    for timeout in [0, 86_401] {
-        let path = directory.path().join(format!("timeout-{timeout}.toml"));
-        std::fs::write(
-            &path,
-            format!(
-                "[bitcoin.routes.primary]\nrpc_url = {{ direct = \"http://127.0.0.1:8332\" }}\nscan_timeout_seconds = {timeout}\n"
-            ),
-        )
-        .expect("config");
-        assert_eq!(
-            load_bitcoin_route(
-                &path,
-                &BitcoinSourceIdentity::new("primary").expect("source")
-            )
-            .err()
-            .expect("invalid timeout")
-            .kind(),
-            RuntimeConfigErrorKind::InvalidScanTimeout
-        );
-    }
-
-    let incomplete = directory.path().join("incomplete.toml");
-    std::fs::write(
-        &incomplete,
-        "[bitcoin.routes.primary]\nrpc_url = { direct = \"http://127.0.0.1:8332\" }\nrpc_user = { direct = \"user\" }\nscan_timeout_seconds = 30\n",
-    )
-    .expect("config");
-    assert_eq!(
-        load_bitcoin_route(
-            &incomplete,
-            &BitcoinSourceIdentity::new("primary").expect("source")
-        )
-        .err()
-        .expect("incomplete auth")
-        .kind(),
-        RuntimeConfigErrorKind::IncompleteBasicAuth
-    );
-}
-
-#[test]
-fn document_and_selected_value_limits_use_limit_plus_one() {
+fn document_and_resolved_value_limits_use_limit_plus_one() {
     let directory = tempfile::tempdir().expect("tempdir");
     let oversized_document = directory.path().join("oversized.toml");
     std::fs::write(&oversized_document, vec![b' '; 1024 * 1024 + 1]).expect("document");
     assert_eq!(
-        load_evm_route(
-            &oversized_document,
-            &LocalPublicId::new("dev").expect("network")
-        )
-        .err()
-        .expect("oversized document")
-        .kind(),
+        load_evm_routes(&oversized_document)
+            .err()
+            .expect("oversized document")
+            .kind(),
         RuntimeConfigErrorKind::DocumentTooLarge
     );
 
@@ -573,13 +643,18 @@ fn document_and_selected_value_limits_use_limit_plus_one() {
     std::fs::write(
         &isolated,
         format!(
-            "[evm.routes.dev]\nsource_ref = \"primary\"\nrpc_url = {{ direct = \"http://127.0.0.1:8545\" }}\n\n[evm.routes.unused]\nrpc_url = {{ direct = {} }}\n",
+            "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = {{ direct = \"http://127.0.0.1:8545\" }}\n\n[evm.routes.unused]\nsource_ref = \"secondary\"\nchain_id = 31338\ngeneration_id = \"unused-secondary-v1\"\nrpc_url = {{ direct = {} }}\n",
             toml_string(&"x".repeat(70_000))
         ),
     )
     .expect("config");
-    load_evm_route(&isolated, &LocalPublicId::new("dev").expect("network"))
-        .expect("unselected direct value uses only document bound");
+    assert_eq!(
+        load_evm_routes(&isolated)
+            .err()
+            .expect("every EVM route is resolved")
+            .kind(),
+        RuntimeConfigErrorKind::ResolvedValueTooLarge
+    );
 }
 
 #[test]
@@ -690,7 +765,7 @@ fn paths_formats_and_errors_are_closed_and_redacted() {
     let directory = tempfile::tempdir().expect("tempdir");
     let upper = directory.path().join("private-runtime.TOML");
     std::fs::write(&upper, "").expect("config");
-    let error = load_evm_route(&upper, &LocalPublicId::new("dev").expect("network"))
+    let error = load_evm_routes(&upper)
         .err()
         .expect("case-sensitive extension");
     assert_eq!(error.kind(), RuntimeConfigErrorKind::UnsupportedFormat);
@@ -698,10 +773,10 @@ fn paths_formats_and_errors_are_closed_and_redacted() {
     let secret_path = directory.path().join("private-runtime.toml");
     std::fs::write(
         &secret_path,
-        "[evm.routes.dev]\nsource_ref = \"primary\"\nrpc_url = { env = \"MFM_PRIVATE_ENV_NAME\" }\n",
+        "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { env = \"MFM_PRIVATE_ENV_NAME\" }\n",
     )
     .expect("config");
-    let error = load_evm_route(&secret_path, &LocalPublicId::new("dev").expect("network"))
+    let error = load_evm_routes(&secret_path)
         .err()
         .expect("missing environment value");
     let rendered = format!("{error:?} {error}");

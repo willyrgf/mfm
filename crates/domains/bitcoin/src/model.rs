@@ -1,18 +1,18 @@
-//! Checked Bitcoin balance-collection model contracts.
+//! Runtime-independent Bitcoin Core read qualification models.
 //!
-//! This module owns semantic source bindings, rust-bitcoin-backed address identity, and aggregate
-//! request/response values. Protocol clients and runtime registration live outside this crate.
+//! This module deliberately contains no MFM state, capability registration, aggregate reader, or
+//! replay contract. It retains only checked source/address values and the bounded values returned
+//! by the three independently meaningful Bitcoin Core operations used by qualification tests.
 
 use std::fmt;
 use std::str::FromStr;
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, BlockHash, Network, ScriptBuf};
-use mfm_capabilities::{ProviderDiagnosticCode, RedactedProviderDiagnostic};
-use mfm_ids::LocalPublicId;
+use mfm_ids::{ContentRef, LocalPublicId};
 
-/// Maximum addresses admitted by one aggregate Bitcoin balance read.
-pub const BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT: usize = 1_024;
+/// Maximum addresses admitted by one independently audited `scantxoutset "start"` request.
+pub const BITCOIN_SCAN_ADDRESS_LIMIT: usize = 1_024;
 
 macro_rules! checked_public_id {
     ($(#[$meta:meta])* $name:ident, $reason:ident) => {
@@ -22,12 +22,10 @@ macro_rules! checked_public_id {
 
         impl $name {
             /// Creates a checked public identifier.
-            pub fn new(
-                value: impl AsRef<str>,
-            ) -> std::result::Result<Self, BitcoinCapabilityError> {
+            pub fn new(value: impl AsRef<str>) -> Result<Self, BitcoinModelError> {
                 LocalPublicId::new(value)
                     .map(Self)
-                    .map_err(|_| BitcoinCapabilityError::InvalidRequest {
+                    .map_err(|_| BitcoinModelError::InvalidRequest {
                         reason: BitcoinInvalidRequest::$reason,
                     })
             }
@@ -45,9 +43,9 @@ macro_rules! checked_public_id {
         }
 
         impl FromStr for $name {
-            type Err = BitcoinCapabilityError;
+            type Err = BitcoinModelError;
 
-            fn from_str(value: &str) -> std::result::Result<Self, BitcoinCapabilityError> {
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
                 Self::new(value)
             }
         }
@@ -82,14 +80,14 @@ pub enum BitcoinNetworkTag {
 
 impl BitcoinNetworkTag {
     /// Parses a supported Bitcoin Core chain tag.
-    pub fn new(value: impl AsRef<str>) -> std::result::Result<Self, BitcoinCapabilityError> {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, BitcoinModelError> {
         match value.as_ref() {
             "main" => Ok(Self::Main),
             "test" => Ok(Self::Test),
             "testnet4" => Ok(Self::Testnet4),
             "signet" => Ok(Self::Signet),
             "regtest" => Ok(Self::Regtest),
-            _ => Err(BitcoinCapabilityError::InvalidRequest {
+            _ => Err(BitcoinModelError::InvalidRequest {
                 reason: BitcoinInvalidRequest::InvalidBitcoinNetwork,
             }),
         }
@@ -125,14 +123,14 @@ impl fmt::Display for BitcoinNetworkTag {
 }
 
 impl FromStr for BitcoinNetworkTag {
-    type Err = BitcoinCapabilityError;
+    type Err = BitcoinModelError;
 
-    fn from_str(value: &str) -> std::result::Result<Self, BitcoinCapabilityError> {
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-/// Checked semantic source binding for one aggregate read.
+/// Checked semantic Bitcoin source binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitcoinSourceBinding {
     network_id: BitcoinNetworkId,
@@ -170,6 +168,22 @@ impl BitcoinSourceBinding {
     }
 }
 
+/// Immutable non-secret routing generation selected before admission.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BitcoinRoutingGenerationRef(ContentRef);
+
+impl BitcoinRoutingGenerationRef {
+    /// Wraps a reviewed exact routing-generation content reference.
+    pub const fn from_reviewed(content_ref: ContentRef) -> Self {
+        Self(content_ref)
+    }
+
+    /// Returns the exact routing-generation content reference.
+    pub const fn as_content_ref(&self) -> &ContentRef {
+        &self.0
+    }
+}
+
 /// A canonical rust-bitcoin-checked address and its script identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitcoinAddress {
@@ -179,16 +193,16 @@ pub struct BitcoinAddress {
 
 impl BitcoinAddress {
     /// Parses a canonical address without claiming a concrete test-family chain.
-    pub fn parse_any(value: &str) -> std::result::Result<Self, BitcoinCapabilityError> {
+    pub fn parse_any(value: &str) -> Result<Self, BitcoinModelError> {
         let unchecked = value.parse::<Address<NetworkUnchecked>>().map_err(|_| {
-            BitcoinCapabilityError::InvalidRequest {
+            BitcoinModelError::InvalidRequest {
                 reason: BitcoinInvalidRequest::InvalidAddress,
             }
         })?;
         let checked = unchecked.assume_checked();
         let canonical = checked.to_string();
         if canonical != value {
-            return Err(BitcoinCapabilityError::InvalidRequest {
+            return Err(BitcoinModelError::InvalidRequest {
                 reason: BitcoinInvalidRequest::NonCanonicalAddress,
             });
         }
@@ -199,23 +213,20 @@ impl BitcoinAddress {
     }
 
     /// Parses an address, checks network compatibility, and requires canonical rendering.
-    pub fn parse(
-        value: &str,
-        network: BitcoinNetworkTag,
-    ) -> std::result::Result<Self, BitcoinCapabilityError> {
+    pub fn parse(value: &str, network: BitcoinNetworkTag) -> Result<Self, BitcoinModelError> {
         let unchecked = value.parse::<Address<NetworkUnchecked>>().map_err(|_| {
-            BitcoinCapabilityError::InvalidRequest {
+            BitcoinModelError::InvalidRequest {
                 reason: BitcoinInvalidRequest::InvalidAddress,
             }
         })?;
         let checked = unchecked.require_network(network.network()).map_err(|_| {
-            BitcoinCapabilityError::InvalidRequest {
+            BitcoinModelError::InvalidRequest {
                 reason: BitcoinInvalidRequest::AddressNetworkMismatch,
             }
         })?;
         let canonical = checked.to_string();
         if canonical != value {
-            return Err(BitcoinCapabilityError::InvalidRequest {
+            return Err(BitcoinModelError::InvalidRequest {
                 reason: BitcoinInvalidRequest::NonCanonicalAddress,
             });
         }
@@ -241,29 +252,25 @@ impl BitcoinAddress {
     }
 
     /// Checks whether this canonical address encoding is compatible with a configured network.
-    pub fn require_network(
-        self,
-        network: BitcoinNetworkTag,
-    ) -> std::result::Result<Self, BitcoinCapabilityError> {
+    pub fn require_network(self, network: BitcoinNetworkTag) -> Result<Self, BitcoinModelError> {
         Self::parse(&self.canonical, network)
     }
 }
 
-/// Checked request for one complete aggregate Bitcoin read.
+/// Checked input for one indivisible `scantxoutset "start"` protocol operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BitcoinBalanceCollectionRequest {
-    binding: BitcoinSourceBinding,
+pub struct BitcoinScanRequest {
     addresses: Vec<BitcoinAddress>,
 }
 
-impl BitcoinBalanceCollectionRequest {
-    /// Creates a bounded request and enforces canonical address and script ordering/uniqueness.
+impl BitcoinScanRequest {
+    /// Creates a bounded request with canonical address and script ordering/uniqueness.
     pub fn new(
-        binding: BitcoinSourceBinding,
+        network: BitcoinNetworkTag,
         addresses: Vec<String>,
-    ) -> std::result::Result<Self, BitcoinCapabilityError> {
-        if addresses.is_empty() || addresses.len() > BITCOIN_BALANCE_COLLECTION_ADDRESS_LIMIT {
-            return Err(BitcoinCapabilityError::InvalidRequest {
+    ) -> Result<Self, BitcoinModelError> {
+        if addresses.is_empty() || addresses.len() > BITCOIN_SCAN_ADDRESS_LIMIT {
+            return Err(BitcoinModelError::InvalidRequest {
                 reason: BitcoinInvalidRequest::AddressCount,
             });
         }
@@ -272,28 +279,20 @@ impl BitcoinBalanceCollectionRequest {
         let mut scripts = std::collections::BTreeSet::new();
         for value in &addresses {
             if previous.is_some_and(|prior| prior.as_bytes() >= value.as_bytes()) {
-                return Err(BitcoinCapabilityError::InvalidRequest {
+                return Err(BitcoinModelError::InvalidRequest {
                     reason: BitcoinInvalidRequest::AddressOrder,
                 });
             }
-            let address = BitcoinAddress::parse(value, binding.bitcoin_network())?;
+            let address = BitcoinAddress::parse(value, network)?;
             if !scripts.insert(address.script_pubkey().as_bytes().to_vec()) {
-                return Err(BitcoinCapabilityError::InvalidRequest {
+                return Err(BitcoinModelError::InvalidRequest {
                     reason: BitcoinInvalidRequest::DuplicateScript,
                 });
             }
             checked.push(address);
             previous = Some(value);
         }
-        Ok(Self {
-            binding,
-            addresses: checked,
-        })
-    }
-
-    /// Returns the exact semantic source binding.
-    pub const fn binding(&self) -> &BitcoinSourceBinding {
-        &self.binding
+        Ok(Self { addresses: checked })
     }
 
     /// Returns the checked addresses in canonical UTF-8 order.
@@ -302,14 +301,41 @@ impl BitcoinBalanceCollectionRequest {
     }
 }
 
-/// One address/satoshi observation returned by a checked session.
+/// Bounded result of one `getblockchaininfo` operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BitcoinAddressBalance {
+pub struct BitcoinBlockchainInfo {
+    chain: String,
+    initial_block_download: bool,
+}
+
+impl BitcoinBlockchainInfo {
+    /// Creates one strictly decoded blockchain-info result.
+    pub fn new(chain: String, initial_block_download: bool) -> Self {
+        Self {
+            chain,
+            initial_block_download,
+        }
+    }
+
+    /// Returns the Bitcoin Core chain tag.
+    pub fn chain(&self) -> &str {
+        &self.chain
+    }
+
+    /// Returns whether Bitcoin Core reports initial block download.
+    pub const fn initial_block_download(&self) -> bool {
+        self.initial_block_download
+    }
+}
+
+/// One address/satoshi observation from a completed scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitcoinScannedBalance {
     address: String,
     balance_sats: u64,
 }
 
-impl BitcoinAddressBalance {
+impl BitcoinScannedBalance {
     /// Creates one checked balance observation.
     pub fn new(address: String, balance_sats: u64) -> Self {
         Self {
@@ -329,69 +355,53 @@ impl BitcoinAddressBalance {
     }
 }
 
-/// Checked result of one three-call aggregate Bitcoin read.
+/// Strictly decoded result of one `scantxoutset "start"` operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BitcoinBalanceCollectionResponse {
-    binding: BitcoinSourceBinding,
-    implementation_id: &'static str,
-    anchor_height: u64,
+pub struct BitcoinScanResult {
+    success: bool,
+    height: u64,
     anchor_hash: BlockHash,
-    balances: Vec<BitcoinAddressBalance>,
-    final_canonical_hash: BlockHash,
+    balances: Vec<BitcoinScannedBalance>,
 }
 
-impl BitcoinBalanceCollectionResponse {
-    /// Creates source-bound aggregate evidence from a checked protocol reduction.
-    pub fn new(
-        binding: BitcoinSourceBinding,
-        implementation_id: &'static str,
-        anchor_height: u64,
+impl BitcoinScanResult {
+    /// Creates one bounded scan result.
+    pub const fn new(
+        success: bool,
+        height: u64,
         anchor_hash: BlockHash,
-        balances: Vec<BitcoinAddressBalance>,
-        final_canonical_hash: BlockHash,
+        balances: Vec<BitcoinScannedBalance>,
     ) -> Self {
         Self {
-            binding,
-            implementation_id,
-            anchor_height,
+            success,
+            height,
             anchor_hash,
             balances,
-            final_canonical_hash,
         }
     }
 
-    /// Returns the checked source binding.
-    pub const fn binding(&self) -> &BitcoinSourceBinding {
-        &self.binding
+    /// Returns whether the provider reported completed scan semantics.
+    pub const fn success(&self) -> bool {
+        self.success
     }
 
-    /// Returns the session implementation identity.
-    pub const fn implementation_id(&self) -> &'static str {
-        self.implementation_id
+    /// Returns the scan height.
+    pub const fn height(&self) -> u64 {
+        self.height
     }
 
-    /// Returns the shared scan height.
-    pub const fn anchor_height(&self) -> u64 {
-        self.anchor_height
-    }
-
-    /// Returns the shared scan block hash.
+    /// Returns the scan anchor hash.
     pub const fn anchor_hash(&self) -> BlockHash {
         self.anchor_hash
     }
 
     /// Returns balances in exact request order.
-    pub fn balances(&self) -> &[BitcoinAddressBalance] {
+    pub fn balances(&self) -> &[BitcoinScannedBalance] {
         &self.balances
-    }
-
-    /// Returns the final canonical hash observed at the scan height.
-    pub const fn final_canonical_hash(&self) -> BlockHash {
-        self.final_canonical_hash
     }
 }
 
-/// Closed invalid-request reason.
+/// Closed invalid-request reason for retained Bitcoin model primitives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitcoinInvalidRequest {
     /// Semantic network identifier was invalid.
@@ -414,55 +424,15 @@ pub enum BitcoinInvalidRequest {
     DuplicateScript,
 }
 
-/// Redaction-safe Bitcoin capability failure.
+/// Redaction-safe error for retained Bitcoin model primitives.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum BitcoinCapabilityError {
-    /// Certified request material was invalid.
-    #[error("Bitcoin balance collection request was invalid")]
+pub enum BitcoinModelError {
+    /// Checked request material was invalid.
+    #[error("Bitcoin qualification model request was invalid")]
     InvalidRequest {
         /// Closed reason available to trusted callers and tests.
         reason: BitcoinInvalidRequest,
     },
-    /// Selected source did not match the request binding.
-    #[error("Bitcoin balance collection source did not match")]
-    SourceMismatch,
-    /// Provider failed with a redacted diagnostic.
-    #[error("Bitcoin balance collection provider failed: {diagnostic}")]
-    Provider {
-        /// Redaction-safe provider diagnostic.
-        diagnostic: RedactedProviderDiagnostic,
-        /// Whether a runtime retry may repeat the complete read.
-        retryable: bool,
-    },
-}
-
-impl BitcoinCapabilityError {
-    /// Creates a provider failure without accepting raw provider text.
-    pub fn provider(
-        code: ProviderDiagnosticCode,
-        operation: &'static str,
-        retryable: bool,
-    ) -> Self {
-        let provider_family =
-            LocalPublicId::new("bitcoin_core").expect("static Bitcoin provider family is valid");
-        let operation = LocalPublicId::new(operation).expect("static Bitcoin operation is valid");
-        Self::Provider {
-            diagnostic: RedactedProviderDiagnostic::new(provider_family, code)
-                .with_operation(operation),
-            retryable,
-        }
-    }
-
-    /// Returns whether this failure permits a complete runtime retry.
-    pub const fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Provider {
-                retryable: true,
-                ..
-            }
-        )
-    }
 }
 
 #[cfg(test)]

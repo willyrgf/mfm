@@ -11,20 +11,12 @@ use syn::parse_macro_input;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed, FieldsUnnamed,
-    GenericArgument, GenericParam, Ident, LitStr, Path, PathArguments, Type, TypePath, Variant,
+    GenericArgument, Ident, LitStr, Path, PathArguments, Type, TypePath, Variant,
 };
 
 #[path = "attributes.rs"]
 mod attributes;
-#[path = "fact.rs"]
-mod fact;
 use self::attributes::{ContainerAttrs, FieldAttrs, VariantAttrs};
-#[path = "program.rs"]
-mod program;
-use self::program::{
-    expand_program_operation_output_derive_result, expand_program_public_outputs_derive_result,
-    generated_state_input_handles_tokens,
-};
 #[path = "shape.rs"]
 mod shape;
 use self::shape::{schema_shape_tokens, DeriveKind};
@@ -71,12 +63,6 @@ pub fn derive_public_outputs(input: TokenStream) -> TokenStream {
     .into()
 }
 
-#[proc_macro_derive(MfmFactType, attributes(mfm_fact, mfm, serde))]
-/// Derives `mfm_facts::MfmFactType` for a fact wrapper struct.
-pub fn derive_mfm_fact_type(input: TokenStream) -> TokenStream {
-    fact::derive(input)
-}
-
 fn expand_schema_derive(input: DeriveInput, kind: DeriveKind) -> proc_macro2::TokenStream {
     match expand_schema_derive_result(input, kind) {
         Ok(tokens) => tokens,
@@ -88,13 +74,6 @@ fn expand_schema_derive_result(
     input: DeriveInput,
     kind: DeriveKind,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if kind == DeriveKind::PublicOutputs && !input.generics.params.is_empty() {
-        return expand_program_public_outputs_derive_result(input);
-    }
-    if kind == DeriveKind::OperationOutput && !input.generics.params.is_empty() {
-        return expand_program_operation_output_derive_result(input);
-    }
-
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             input.generics,
@@ -103,13 +82,15 @@ fn expand_schema_derive_result(
     }
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
-    let shape_output = schema_shape_tokens(&input.data, attrs.rename_all.as_deref(), kind, &attrs)?;
-    let state_input_handles = if kind == DeriveKind::StateInput {
-        let fields = named_struct_fields(&input.data)?;
-        generated_state_input_handles_tokens(&input.ident, fields, attrs.rename_all.as_deref())?
+    let input_destinations = if kind == DeriveKind::StateInput {
+        Some(state_input_destinations(
+            &input.data,
+            attrs.rename_all.as_deref(),
+        )?)
     } else {
-        quote! {}
+        None
     };
+    let shape_output = schema_shape_tokens(&input.data, attrs.rename_all.as_deref(), kind, &attrs)?;
     let shape = shape_output.shape;
     let default_bounds = shape_output.default_bounds;
     let ident = &input.ident;
@@ -182,6 +163,7 @@ fn expand_schema_derive_result(
         } else {
             quote! {}
         };
+    let input_destination_names = input_destinations.unwrap_or_default();
 
     let impl_block = match kind {
         DeriveKind::Value => quote! {
@@ -207,6 +189,21 @@ fn expand_schema_derive_result(
                 fn #schema_method() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
+
+                fn input_destination_paths(
+                ) -> ::mfm_values::Result<Vec<::mfm_ids::FieldPath>> {
+                    let mut paths = vec![
+                        #(
+                            ::mfm_ids::FieldPath::new(#input_destination_names)
+                                .map_err(|error| {
+                                    ::mfm_values::ValueError::Identity(error.to_string())
+                                })?
+                        ),*
+                    ];
+                    paths.sort();
+                    paths.dedup();
+                    Ok(paths)
+                }
             }
         },
         DeriveKind::OperationOutput => quote! {
@@ -227,33 +224,52 @@ fn expand_schema_derive_result(
         },
     };
 
-    Ok(quote! {
-            #impl_block
-            #state_input_handles
-    })
+    Ok(impl_block)
 }
 
-fn named_struct_fields(
-    data: &Data,
-) -> syn::Result<&syn::punctuated::Punctuated<syn::Field, syn::Token![,]>> {
-    match data {
-        Data::Struct(DataStruct {
-            fields: Fields::Named(fields),
-            ..
-        }) => Ok(&fields.named),
-        Data::Struct(other) => Err(syn::Error::new(
-            other.fields.span(),
-            "MFM derives support named structs only in v1",
-        )),
-        Data::Enum(data) => Err(syn::Error::new(
-            data.enum_token.span,
-            "MFM derives support named structs only in v1; enum descriptors are not derive-generated yet",
-        )),
-        Data::Union(data) => Err(syn::Error::new(
-            data.union_token.span,
-            "MFM derives do not support unions",
-        )),
+fn state_input_destinations(data: &Data, rename_all: Option<&str>) -> syn::Result<Vec<String>> {
+    let Data::Struct(DataStruct {
+        fields: Fields::Named(fields),
+        ..
+    }) = data
+    else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "StateInput derive supports named structs only in v1",
+        ));
+    };
+    let mut destinations = Vec::with_capacity(fields.named.len());
+    for field in &fields.named {
+        let ident = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(field.span(), "StateInput fields must be named"))?;
+        let attrs = FieldAttrs::parse(&field.attrs)?;
+        if attrs.default {
+            return Err(syn::Error::new(
+                field.span(),
+                "StateInput fields cannot use serde(default)",
+            ));
+        }
+        let wire_name = attrs
+            .rename
+            .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
+        mfm_ids::FieldSegment::new(&wire_name).map_err(|error| {
+            syn::Error::new(
+                ident.span(),
+                format!("StateInput field has an illegal wire name: {error}"),
+            )
+        })?;
+        destinations.push(wire_name);
     }
+    destinations.sort();
+    if destinations.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(syn::Error::new(
+            fields.span(),
+            "StateInput destinations must be unique after serde renaming",
+        ));
+    }
+    Ok(destinations)
 }
 
 fn one_generic_type<'a>(segment: &'a syn::PathSegment, label: &str) -> syn::Result<&'a Type> {

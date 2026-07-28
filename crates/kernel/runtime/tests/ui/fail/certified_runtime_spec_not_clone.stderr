@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `CertifiedRuntimeSpec` in the current scope
- --> tests/ui/fail/certified_runtime_spec_not_clone.rs:9:32
-  |
-9 |     let _duplicate = authority.clone();
-  |                                ^^^^^ method not found in `CertifiedRuntimeSpec`

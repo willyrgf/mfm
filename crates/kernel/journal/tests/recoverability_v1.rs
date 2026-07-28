@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use mfm_canonical::CanonicalValue;
-use mfm_ids::JournalRecordHash;
+use mfm_facts::FactSelectionRequest;
+use mfm_ids::{FactQueryDigest, JournalRecordHash};
 use mfm_journal::v1::*;
 use serde_json::Value;
 
@@ -962,7 +963,43 @@ fn typed_references_and_object_relations_round_trip_without_identity_substitutio
 }
 
 #[test]
-fn selected_fact_and_access_audit_relations_are_explicitly_checked() {
+fn fact_response_and_access_audit_relations_are_explicitly_checked() {
+    let request =
+        FactSelectionRequest::from_canonical_json(&schema_golden("mfm.fact-selection-request.v1"))
+            .expect("fact request golden");
+    let request_digest = request.request_digest().expect("request digest");
+    let frontier = TenantFactFrontier::strict_decode(&schema_golden("mfm.tenant-fact-frontier.v1"))
+        .expect("frontier golden");
+    let result = FactSelectionResult::new(0, &[]).expect("explicit empty result");
+    let response = FactSelectionResponse::new(&request_digest, &frontier, &[result])
+        .expect("complete response");
+    response
+        .validate_request(&request)
+        .expect("request digest and ordinal coverage");
+
+    let wrong_digest =
+        FactQueryDigest::parse(format!("sha256-jcs-v1:{}", "1".repeat(64))).expect("test digest");
+    let wrong_response = FactSelectionResponse::new(
+        &wrong_digest,
+        &frontier,
+        &[FactSelectionResult::new(0, &[]).expect("result")],
+    )
+    .expect("structurally valid wrong response");
+    assert!(matches!(
+        wrong_response.validate_request(&request),
+        Err(JournalError::FactSelectionCoverage)
+    ));
+    let wrong_ordinal = FactSelectionResponse::new(
+        &request_digest,
+        &frontier,
+        &[FactSelectionResult::new(1, &[]).expect("result")],
+    )
+    .expect("structurally valid ordinal mismatch");
+    assert!(matches!(
+        wrong_ordinal.validate_request(&request),
+        Err(JournalError::FactSelectionCoverage)
+    ));
+
     let selected = SelectedFact::strict_decode(&schema_golden("mfm.selected-fact.v1"))
         .expect("selected fact golden");
     selected

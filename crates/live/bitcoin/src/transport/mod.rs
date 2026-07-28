@@ -1,5 +1,8 @@
 #![warn(missing_docs)]
-//! Strict bounded Bitcoin Core 28+ JSON-RPC session for aggregate balance collection.
+//! Strict bounded Bitcoin Core 28+ one-operation JSON-RPC primitives.
+//!
+//! The session is fixed to one immutable routing generation. It exposes no aggregate collection
+//! method, retry, failover, provider reselection, current-route alias, or arbitrary RPC surface.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -9,11 +12,9 @@ use std::time::Duration;
 
 use bitcoin::{Amount, BlockHash, Txid};
 use mfm_bitcoin::{
-    BitcoinAddressBalance, BitcoinBalanceCollectionRequest, BitcoinBalanceCollectionResponse,
-    BitcoinBalanceSession, BitcoinCapabilityError, BitcoinSessionFuture, BitcoinSourceBinding,
-    BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
+    BitcoinBlockchainInfo, BitcoinRoutingGenerationRef, BitcoinScanRequest, BitcoinScanResult,
+    BitcoinScannedBalance, BitcoinSourceBinding,
 };
-use mfm_capabilities::ProviderDiagnosticCode;
 use reqwest::header::CONTENT_TYPE;
 use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -27,6 +28,7 @@ const MAX_JSON_RPC_ERROR_MESSAGE_BYTES: usize = 1_024;
 const MAX_DESCRIPTOR_BYTES: usize = 4_096;
 const MAX_SCRIPT_BYTES: usize = 10_000;
 const MAX_BITCOIN_JSON_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
+const EXACT_SCAN_BUSY_MESSAGE: &str = "Scan already in progress: use status to check";
 
 /// Checked resolved endpoint for one Bitcoin Core JSON-RPC source.
 #[derive(Clone)]
@@ -80,6 +82,7 @@ pub struct BitcoinRpcSession {
     endpoint: reqwest::Url,
     authentication: Option<BitcoinRpcAuthentication>,
     binding: BitcoinSourceBinding,
+    routing_generation: BitcoinRoutingGenerationRef,
     scan_timeout: Duration,
     client: reqwest::Client,
     next_request_id: AtomicU64,
@@ -91,6 +94,7 @@ impl BitcoinRpcSession {
         endpoint: BitcoinRpcEndpoint,
         authentication: Option<BitcoinRpcAuthentication>,
         binding: BitcoinSourceBinding,
+        routing_generation: BitcoinRoutingGenerationRef,
         scan_timeout: Duration,
     ) -> Result<Self, BitcoinRpcError> {
         if !(MIN_SCAN_TIMEOUT..=MAX_SCAN_TIMEOUT).contains(&scan_timeout) {
@@ -107,6 +111,7 @@ impl BitcoinRpcSession {
             endpoint: endpoint.url,
             authentication,
             binding,
+            routing_generation,
             scan_timeout,
             client,
             next_request_id: AtomicU64::new(1),
@@ -118,14 +123,13 @@ impl BitcoinRpcSession {
         &self.binding
     }
 
-    async fn execute_collection(
-        &self,
-        request: &BitcoinBalanceCollectionRequest,
-    ) -> Result<BitcoinBalanceCollectionResponse, BitcoinRpcError> {
-        if request.binding() != &self.binding {
-            return Err(BitcoinRpcError::SourceMismatch);
-        }
+    /// Returns the immutable admitted routing generation resolved for this session.
+    pub const fn routing_generation(&self) -> &BitcoinRoutingGenerationRef {
+        &self.routing_generation
+    }
 
+    /// Performs exactly one `getblockchaininfo` operation.
+    pub async fn get_blockchain_info(&self) -> Result<BitcoinBlockchainInfo, BitcoinRpcError> {
         let info: BlockchainInfo = self
             .rpc(
                 "getblockchaininfo",
@@ -133,10 +137,17 @@ impl BitcoinRpcSession {
                 ORDINARY_REQUEST_TIMEOUT,
             )
             .await?;
-        if info.chain != self.binding.bitcoin_network().as_str() || info.initial_block_download {
-            return Err(BitcoinRpcError::SourceMismatch);
-        }
+        Ok(BitcoinBlockchainInfo::new(
+            info.chain,
+            info.initial_block_download,
+        ))
+    }
 
+    /// Performs exactly one indivisible `scantxoutset "start"` operation.
+    pub async fn scan_tx_out_set_start(
+        &self,
+        request: &BitcoinScanRequest,
+    ) -> Result<BitcoinScanResult, BitcoinRpcError> {
         let descriptors = request
             .addresses()
             .iter()
@@ -149,29 +160,19 @@ impl BitcoinRpcSession {
                 self.scan_timeout,
             )
             .await?;
-        let reduced = reduce_scan(request, scan)?;
+        reduce_scan(request, scan)
+    }
 
-        let final_hash: String = self
+    /// Performs exactly one `getblockhash` operation.
+    pub async fn get_block_hash(&self, height: u64) -> Result<BlockHash, BitcoinRpcError> {
+        let hash: String = self
             .rpc(
                 "getblockhash",
-                serde_json::json!([reduced.height]),
+                serde_json::json!([height]),
                 ORDINARY_REQUEST_TIMEOUT,
             )
             .await?;
-        let final_hash =
-            BlockHash::from_str(&final_hash).map_err(|_| BitcoinRpcError::ResponseInvalid)?;
-        if final_hash != reduced.anchor_hash {
-            return Err(BitcoinRpcError::Reorganization);
-        }
-
-        Ok(BitcoinBalanceCollectionResponse::new(
-            self.binding.clone(),
-            BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID,
-            reduced.height,
-            reduced.anchor_hash,
-            reduced.balances,
-            final_hash,
-        ))
+        BlockHash::from_str(&hash).map_err(|_| BitcoinRpcError::ResponseInvalid)
     }
 
     async fn rpc<T>(
@@ -233,7 +234,7 @@ impl BitcoinRpcSession {
             (None, Some(error)) => {
                 let scan_busy = method == "scantxoutset"
                     && error.code == -8
-                    && error.message.starts_with("Scan already in progress");
+                    && error.message == EXACT_SCAN_BUSY_MESSAGE;
                 Err(BitcoinRpcError::Rpc {
                     code: error.code,
                     scan_busy,
@@ -254,38 +255,9 @@ impl fmt::Debug for BitcoinRpcSession {
                 &self.authentication.as_ref().map(|_| "<redacted>"),
             )
             .field("binding", &self.binding)
+            .field("routing_generation", &self.routing_generation)
             .field("scan_timeout", &self.scan_timeout)
             .finish_non_exhaustive()
-    }
-}
-
-impl BitcoinBalanceSession for BitcoinRpcSession {
-    fn implementation_id(&self) -> &'static str {
-        BITCOIN_JSONRPC_BALANCE_COLLECTION_IMPLEMENTATION_ID
-    }
-
-    fn validate_binding<'a>(
-        &'a self,
-        binding: &'a BitcoinSourceBinding,
-    ) -> BitcoinSessionFuture<'a, ()> {
-        Box::pin(async move {
-            if binding == &self.binding {
-                Ok(())
-            } else {
-                Err(BitcoinCapabilityError::SourceMismatch)
-            }
-        })
-    }
-
-    fn collect_balances<'a>(
-        &'a self,
-        request: &'a BitcoinBalanceCollectionRequest,
-    ) -> BitcoinSessionFuture<'a, BitcoinBalanceCollectionResponse> {
-        Box::pin(async move {
-            self.execute_collection(request)
-                .await
-                .map_err(capability_error)
-        })
     }
 }
 
@@ -651,19 +623,10 @@ impl<'de> Deserialize<'de> for ScanUnspent {
     }
 }
 
-struct ReducedScan {
-    height: u64,
-    anchor_hash: BlockHash,
-    balances: Vec<BitcoinAddressBalance>,
-}
-
 fn reduce_scan(
-    request: &BitcoinBalanceCollectionRequest,
+    request: &BitcoinScanRequest,
     scan: ScanTxOutSetResult,
-) -> Result<ReducedScan, BitcoinRpcError> {
-    if !scan.success {
-        return Err(BitcoinRpcError::OperationIncomplete);
-    }
+) -> Result<BitcoinScanResult, BitcoinRpcError> {
     let _validated_txouts = scan.txouts;
     let anchor_hash =
         BlockHash::from_str(&scan.best_block).map_err(|_| BitcoinRpcError::ResponseInvalid)?;
@@ -710,13 +673,14 @@ fn reduce_scan(
         .addresses()
         .iter()
         .zip(balances)
-        .map(|(address, sats)| BitcoinAddressBalance::new(address.as_str().to_owned(), sats))
+        .map(|(address, sats)| BitcoinScannedBalance::new(address.as_str().to_owned(), sats))
         .collect();
-    Ok(ReducedScan {
-        height: scan.height,
+    Ok(BitcoinScanResult::new(
+        scan.success,
+        scan.height,
         anchor_hash,
         balances,
-    })
+    ))
 }
 
 fn decode_script(value: &str) -> Result<Vec<u8>, BitcoinRpcError> {
@@ -793,61 +757,12 @@ fn classify_reqwest_error(error: reqwest::Error) -> BitcoinRpcError {
     }
 }
 
-fn capability_error(error: BitcoinRpcError) -> BitcoinCapabilityError {
-    match error {
-        BitcoinRpcError::SourceMismatch => BitcoinCapabilityError::SourceMismatch,
-        BitcoinRpcError::Timeout | BitcoinRpcError::Transport => BitcoinCapabilityError::provider(
-            ProviderDiagnosticCode::TransportFailed,
-            "aggregate_read",
-            true,
-        ),
-        BitcoinRpcError::HttpStatus(status) => BitcoinCapabilityError::provider(
-            ProviderDiagnosticCode::RpcHttpStatus,
-            "aggregate_read",
-            status >= 500,
-        ),
-        BitcoinRpcError::Rpc {
-            scan_busy: true, ..
-        } => BitcoinCapabilityError::provider(
-            ProviderDiagnosticCode::RpcJsonError,
-            "scantxoutset",
-            true,
-        ),
-        BitcoinRpcError::Rpc { .. } => BitcoinCapabilityError::provider(
-            ProviderDiagnosticCode::RpcJsonError,
-            "aggregate_read",
-            false,
-        ),
-        BitcoinRpcError::OperationIncomplete => BitcoinCapabilityError::provider(
-            ProviderDiagnosticCode::OperationIncomplete,
-            "scantxoutset",
-            false,
-        ),
-        BitcoinRpcError::InvalidConfiguration => BitcoinCapabilityError::provider(
-            ProviderDiagnosticCode::ProviderConfigurationInvalid,
-            "session",
-            false,
-        ),
-        BitcoinRpcError::BodyTooLarge
-        | BitcoinRpcError::ProtocolViolation
-        | BitcoinRpcError::ResponseInvalid
-        | BitcoinRpcError::Reorganization => BitcoinCapabilityError::provider(
-            ProviderDiagnosticCode::ResponseInvalid,
-            "aggregate_read",
-            false,
-        ),
-    }
-}
-
 /// Redacted transport failure. No variant stores URLs, credentials, bodies, or provider messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BitcoinRpcError {
     /// Resolved endpoint/authentication/timeout input was invalid.
     #[error("Bitcoin RPC configuration was invalid")]
     InvalidConfiguration,
-    /// Selected session binding did not match the request.
-    #[error("Bitcoin RPC source binding did not match")]
-    SourceMismatch,
     /// HTTP request failed before a response was available.
     #[error("Bitcoin RPC transport failed")]
     Transport,
@@ -874,12 +789,6 @@ pub enum BitcoinRpcError {
     /// Typed result failed strict semantic validation.
     #[error("Bitcoin RPC response was invalid")]
     ResponseInvalid,
-    /// Scan did not report successful completion.
-    #[error("Bitcoin RPC scan did not complete")]
-    OperationIncomplete,
-    /// Scan anchor was no longer canonical.
-    #[error("Bitcoin RPC scan anchor reorganized")]
-    Reorganization,
 }
 
 #[cfg(test)]

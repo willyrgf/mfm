@@ -17,18 +17,11 @@ name = "mfm_certify"
 path = "src/lib.rs"
 
 [dependencies]
-thiserror = { workspace = true }
-mfm-capabilities = { path = "../capabilities" }
 mfm-canonical = { path = "../canonical" }
-mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
+mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
-mfm-values = { path = "../values" }
-serde_json = { workspace = true }
-
-[dev-dependencies]
-mfm-facts = { path = "../facts" }
-mfm-program-derive = { path = "../program-derive" }
 serde = { workspace = true }
-trybuild = "1.0"
+serde_json = { workspace = true }
+thiserror = { workspace = true }

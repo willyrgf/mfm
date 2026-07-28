@@ -5,8 +5,8 @@ Contract id: `mfm.request-author-totality-audit.v1`
 This is retained pre-cutover evidence for the
 [`mfm.portfolio/snapshot@1`](recoverability-cutover-gates-v1.md#published-entry-points-and-planning-profiles)
 schema-freeze gate closed by the commit-2 annex and corpus. It does not change the current runtime,
-registry, admission API, or authoritative design. The eventual vertical cutover must delete the
-aggregate readers and carry forward only the qualified frozen shapes recorded here.
+registry, admission API, or authoritative design. The atomic vertical cutover deletes the
+aggregate readers and carries forward only the qualified frozen shapes recorded here.
 
 ## Closed production-state inventory
 
@@ -95,9 +95,9 @@ again, independently reruns the private profile-aware composite graph encoding, 
 byte-identical expanded bytes plus a certificate bound to their hash. Unknown entry-point ids,
 changed profiles, omitted policy lists, cross-substituted identities, raw library drafts, and raw
 library certificates cannot mint the private admission authority. This fixture remains
-conformance-only: the schema freeze now defines the production `PlanningProfile`, retained
-authored-program artifact, certificate fields, and sealed app admission boundary, but the current
-runtime does not adopt that authority until the atomic cutover.
+conformance-only: the schema freeze defines the production `PlanningProfile`, retained
+authored-program artifact, certificate fields, and sealed app admission boundary. The current
+runtime and app implement that authority; the prototype fixture cannot mint it.
 
 Every retained prototype reference and hash derives only as
 `SHA256(JCS({"domain": <prototype-local domain>, "value": <typed value>}))`. Raw-value, bare-prefix,

@@ -46,6 +46,14 @@ pub(super) fn schema_shape_tokens(
     kind: DeriveKind,
     attrs: &ContainerAttrs,
 ) -> syn::Result<SchemaShapeOutput> {
+    if kind == DeriveKind::StateInput
+        && (attrs.transparent_string || attrs.transparent_map || attrs.serde_transparent)
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "StateInput derive supports ordinary named structs only",
+        ));
+    }
     if attrs.transparent_string {
         return transparent_string_shape_tokens(data);
     }
@@ -282,6 +290,12 @@ fn field_descriptor_tokens(
             .as_ref()
             .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
         let attrs = FieldAttrs::parse(&field.attrs)?;
+        if kind == DeriveKind::StateInput && attrs.default {
+            return Err(syn::Error::new(
+                field.span(),
+                "StateInput fields cannot use serde(default)",
+            ));
+        }
         let wire_name = attrs
             .rename
             .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));

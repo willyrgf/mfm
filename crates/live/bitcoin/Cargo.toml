@@ -2,7 +2,7 @@
 name = "mfm-bitcoin-live"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable Bitcoin transport and runtime binding for MFM"
+description = "Unregistered one-RPC Bitcoin Core transport qualification primitives for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -23,14 +23,9 @@ thiserror = { workspace = true }
 zeroize = "1.7"
 
 mfm-bitcoin = { path = "../../domains/bitcoin" }
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-events = { path = "../../kernel/events" }
-mfm-ids = { path = "../../kernel/ids" }
-mfm-replay = { path = "../../kernel/replay" }
-mfm-runtime = { path = "../../kernel/runtime" }
-mfm-store = { path = "../../kernel/store" }
 
 [dev-dependencies]
+mfm-ids = { path = "../../kernel/ids" }
 static_assertions = "1"
 tokio = { workspace = true }
 

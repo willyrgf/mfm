@@ -9,26 +9,23 @@ layer = "storage"
 
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
-mfm-events = { path = "../../kernel/events" }
-mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-spec = { path = "../../kernel/spec" }
+mfm-journal = { path = "../../kernel/journal" }
 mfm-store = { path = "../../kernel/store" }
-serde_json = { workspace = true }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "migrate", "json"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "migrate"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-certify = { path = "../../kernel/certify" }
-mfm-manual-auth = { path = "../../kernel/manual-auth" }
-mfm-program = { path = "../../kernel/program" }
-mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
+mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
-mfm-values = { path = "../../kernel/values" }
-serde = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 parity-tests = []
+
+[[test]]
+name = "recoverability-v1"
+path = "tests/recoverability_v1.rs"
+required-features = ["parity-tests"]

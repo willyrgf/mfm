@@ -1,20 +1,24 @@
 # mfm-evm
 
-Pure EVM model, capability, signing, state, and operation contracts with no portfolio, app,
-runtime, transport, storage, keystore, or concrete signer-provider dependency.
+Pure EVM protocol, audited-read state, graph, and signing contracts. The crate
+has no portfolio, app, runtime, transport, storage, keystore, or concrete
+signer-provider dependency.
 
-The crate owns exactly three state kinds:
+Balance collection authors a certified graph with these audit units:
 
-```text
-CollectEvmBalancesState
-SubmitEvmTransactionState
-ValidateEvmContractState
-```
+1. bootstrap one exact admitted routing generation and verify its chain;
+2. read an initial latest-block anchor;
+3. fan out one token-decimals read per distinct token and one anchored balance
+   read per holding;
+4. confirm the initial anchor after every fan-out read; and
+5. aggregate the retained same-run values with pure state logic.
 
-Balance collection uses one bounded, sorted `EvmBalanceCollectionConfig`, one checked read session,
-and one exact block anchor. Its reducer returns an ordered non-empty `evm.balance_snapshot` fact
-batch and `EvmBalanceCollectionReceipt`; runtime settles both atomically with the read evidence and
-completion. The fact and receipt contain generic EVM source identity only.
+Each read state selects exactly one protocol operation. A collection admits at
+most 1,024 holdings and 1,024 distinct tokens, producing at most 2,052 graph
+nodes. The source, chain, routing generation, fan-out coverage, and final
+anchor are checked again during pure aggregation.
 
-State reducers are deterministic and replayable from retained evidence. The balance operation
-expands directly to `CollectEvmBalancesState`; live execution bindings belong outside this crate.
+Production aggregate-reader, transaction/effect lifecycle, ingress-validation,
+and replay-helper surfaces are absent. Recoverability-neutral transaction
+models and EIP-1559 signing remain reusable protocol primitives for a future
+qualified executor.

@@ -1,38 +1,25 @@
 #![warn(missing_docs)]
-//! Postgres-backed run store.
+//! PostgreSQL representation of the recoverability-v1 committed journal.
 //!
-//! This crate exposes the certified Postgres run-store implementation for typed runs.
-//!
-//! # Examples
-//!
-//! ```no_run
-//! # async fn example() -> Result<(), mfm_storage_postgres::PostgresStoreError> {
-//! mfm_storage_postgres::PostgresSchema::migrate(
-//!     "postgres://postgres:postgres@localhost/mfm",
-//! )
-//! .await?;
-//! let _authority = mfm_storage_postgres::PostgresSchema::validate(
-//!     "postgres://postgres:postgres@localhost/mfm",
-//! )
-//! .await?;
-//! let _store = mfm_storage_postgres::PostgresStore::connect(
-//!     "postgres://postgres:postgres@localhost/mfm",
-//! )
-//! .await?;
-//! # Ok(())
-//! # }
-//! ```
+//! Authority-bearing use starts only through [`open_authoritative`]. Schema migration uses the
+//! separate owner path exposed by [`PostgresSchema`].
 
 mod configured_values;
-mod run_store;
+mod error;
+mod journal_store;
+mod qualification;
 mod schema;
+mod store;
 
-pub use configured_values::{
-    ConfiguredValuePublication, ConfiguredValuePublicationStatus, ConfiguredValueRow,
-    MAX_CONFIGURED_VALUE_BYTES, MAX_CONFIGURED_VALUE_SCHEMA_ID_BYTES,
-};
-pub use run_store::{
-    PostgresFactQueryResult, PostgresFactQueryRow, PostgresStore, PostgresStoreAuthority,
-    PostgresStoreAuthorityError, PostgresStoreError,
+pub use error::{PostgresStoreError, Result};
+#[cfg(any(test, feature = "parity-tests"))]
+pub use qualification::TestAuthoritativeWriterFence;
+pub use qualification::{
+    open_authoritative, AuthoritativeWriterContext, AuthoritativeWriterFence,
+    AuthoritativeWriterFenceFuture,
 };
 pub use schema::PostgresSchema;
+pub use store::QualifiedPostgresStore;
+
+#[cfg(all(test, feature = "parity-tests"))]
+mod tests;

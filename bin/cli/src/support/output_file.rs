@@ -25,6 +25,36 @@ pub(crate) fn create_new_atomic(path: &Path, bytes: &[u8]) -> Result<(), CreateN
     publish_atomic_with(path, false, |file| file.write_all(bytes))
 }
 
+/// Publishes one export and its ContentRef sidecar without replacing either target.
+///
+/// Both paths are validated before either complete file is installed. Each file is published
+/// atomically in its own directory.
+pub(crate) fn create_new_atomic_pair(
+    first_path: &Path,
+    first_bytes: &[u8],
+    second_path: &Path,
+    second_bytes: &[u8],
+) -> Result<(), CreateNewFileError> {
+    let first_parent = validated_parent(first_path)?;
+    let second_parent = validated_parent(second_path)?;
+    if resolved_target_identity(first_path, &first_parent)?
+        == resolved_target_identity(second_path, &second_parent)?
+    {
+        return Err(CreateNewFileError::InvalidPath);
+    }
+    validate_target(first_path, false)?;
+    validate_target(second_path, false)?;
+    create_new_atomic(first_path, first_bytes)?;
+    create_new_atomic(second_path, second_bytes)
+}
+
+fn resolved_target_identity(path: &Path, parent: &Path) -> Result<PathBuf, CreateNewFileError> {
+    let file_name = path.file_name().ok_or(CreateNewFileError::InvalidPath)?;
+    fs::canonicalize(parent)
+        .map(|resolved_parent| resolved_parent.join(file_name))
+        .map_err(|_| CreateNewFileError::InvalidPath)
+}
+
 /// Atomically publishes bearer bytes, optionally replacing an existing regular file.
 pub(crate) fn publish_bearer_atomic(
     path: &Path,
@@ -140,7 +170,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        create_new_atomic, publish_atomic_with, publish_bearer_atomic, CreateNewFileError,
+        create_new_atomic, create_new_atomic_pair, publish_atomic_with, publish_bearer_atomic,
+        CreateNewFileError,
     };
 
     #[test]
@@ -201,5 +232,38 @@ mod tests {
             1,
             "successful publication must not retain a temporary file"
         );
+    }
+
+    #[test]
+    fn paired_output_preflights_both_non_overwriting_targets() {
+        let directory = TempDir::new().expect("temporary output directory");
+        let export = directory.path().join("run.export");
+        let content_ref = directory.path().join("run.export.ref");
+        create_new_atomic(&content_ref, b"existing").expect("existing sidecar");
+
+        assert_eq!(
+            create_new_atomic_pair(&export, b"bundle", &content_ref, b"ref"),
+            Err(CreateNewFileError::TargetExists)
+        );
+        assert!(!export.exists());
+        assert_eq!(
+            std::fs::read(&content_ref).expect("read existing sidecar"),
+            b"existing"
+        );
+
+        let other_export = directory.path().join("other.export");
+        let other_ref = directory.path().join("other.export.ref");
+        create_new_atomic_pair(&other_export, b"bundle", &other_ref, b"ref")
+            .expect("paired publication");
+        assert_eq!(std::fs::read(other_export).expect("bundle"), b"bundle");
+        assert_eq!(std::fs::read(other_ref).expect("ref"), b"ref");
+
+        let aliased = directory.path().join(".").join("aliased.export");
+        let direct = directory.path().join("aliased.export");
+        assert_eq!(
+            create_new_atomic_pair(&aliased, b"bundle", &direct, b"ref"),
+            Err(CreateNewFileError::InvalidPath)
+        );
+        assert!(!direct.exists());
     }
 }

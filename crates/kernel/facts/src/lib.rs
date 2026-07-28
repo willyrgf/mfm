@@ -1,195 +1,75 @@
 #![warn(missing_docs)]
-//! Fact descriptor and query evidence contracts for the MFM typed kernel.
+//! Pure fact authoring and selection semantics for the MFM typed kernel.
 //!
-//! This crate owns the domain-free facts kernel surface: descriptor identity,
-//! field extraction contracts, fact keys, claim identity,
-//! internal refs, and canonical query evidence. See `docs/design.md` for the
-//! typed-core authority contract and the portfolio section of `docs/design.md`
-//! for portfolio fact-backed reporting. The crate stays behind the kernel
-//! dependency boundary without mixing domain logic into event, runtime, store,
-//! app, or collector code.
+//! Facts are transition outputs. Same-run consumers use certified graph edges;
+//! deliberate cross-run selection uses one annex-backed
+//! [`FactSelectionRequest`]. This crate owns only journal-independent value
+//! semantics. Journal references, tenant coordinates, scan authority,
+//! responses, completeness proofs, and retained-object authority live in
+//! `mfm-journal` and the store.
 //!
 //! ```
-//! use mfm_facts::{FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, FACTS_KERNEL_CONTRACT_VERSION};
+//! use mfm_canonical::CanonicalValue;
+//! use mfm_facts::{CanonicalFactPredicate, FactSelectionLimit, FactSet};
 //!
-//! assert_eq!(FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");
-//! assert_eq!(FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, "mfm.fact.content-identity.v1");
+//! let predicate = CanonicalFactPredicate::from_canonical_value(
+//!     CanonicalValue::object([("wallet", CanonicalValue::String("alice".into()))])
+//!         .expect("canonical predicate"),
+//! )?;
+//! assert_eq!(predicate.canonical_json(), br#"{"wallet":"alice"}"#);
+//! assert_eq!(FactSelectionLimit::new(128)?.get(), 128);
+//! assert!(FactSet::empty().as_slice().is_empty());
+//! # Ok::<(), mfm_facts::FactError>(())
 //! ```
 
-macro_rules! impl_fact_tag {
-    ($ty:ty, $error_label:literal, $as_str_vis:vis, $as_str_doc:literal, {
-        $($variant:path => $tag:literal),+ $(,)?
-    }) => {
-        impl $ty {
-            #[doc = $as_str_doc]
-            $as_str_vis const fn as_str(self) -> &'static str {
-                match self {
-                    $($variant => $tag),+
-                }
-            }
-
-        }
-
-        impl ::std::fmt::Display for $ty {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl ::std::str::FromStr for $ty {
-            type Err = crate::FactError;
-
-            fn from_str(value: &str) -> crate::Result<Self> {
-                match value {
-                    $($tag => Ok($variant),)+
-                    _ => Err(crate::FactError::descriptor(format!(
-                        "unknown {} {value:?}",
-                        $error_label
-                    ))),
-                }
-            }
-        }
-    };
-}
-
-mod claim;
 mod codec;
-mod content_identity;
 mod descriptor;
-mod extraction;
-mod ids;
-mod query;
-mod receipt;
-mod scalar;
-mod serde_helpers;
-mod subject;
-mod tags;
+mod emission;
+mod selection;
+mod value;
 
-use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{CapabilityError, CapabilitySpec, ReadExternalRole};
-use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm};
-use mfm_values::MfmValue;
+pub use descriptor::{FactDescriptor, FactKind};
+pub use emission::{FactProposal, FactSet, ProposedFactValue};
+pub use selection::{
+    FactCandidate, FactOrdering, FactProducerScope, FactSelectionLimit, FactSelectionQuery,
+    FactSelectionRequest, FactTieBreak, FactTopK,
+};
+pub use value::{CanonicalFactPredicate, FactScalar, FactSubject};
 
-/// Certified authority to execute canonical fact queries against the run's store.
-pub struct FactQueryReadCapability;
+/// Result type for pure fact construction and validation.
+pub type Result<T> = std::result::Result<T, FactError>;
 
-impl CapabilitySpec for FactQueryReadCapability {
-    type Role = ReadExternalRole;
-
-    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
-        CapabilityKind::new(
-            "mfm.fact",
-            "query.read",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.fact.capability:query.read"),
-        )
-        .map_err(|error| CapabilityError::Identity(error.to_string()))
-    }
-
-    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
-        CapabilityVersion::new("mfm.fact.query.read.v1")
-            .map_err(|error| CapabilityError::Identity(error.to_string()))
-    }
-
-    fn name() -> &'static str {
-        "mfm.fact.query.read"
-    }
+/// Redaction-safe fact contract failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FactError {
+    /// The frozen recoverability codec rejected the value.
+    #[error(transparent)]
+    Recoverability(#[from] mfm_canonical::RecoverabilityError),
+    /// A canonical value could not be built or projected.
+    #[error("canonical fact value is invalid")]
+    Canonical,
+    /// A checked identity could not be projected from validated material.
+    #[error("fact identity is invalid")]
+    Identity,
+    /// A fact descriptor violates the closed authoring contract.
+    #[error("fact descriptor is invalid: {0}")]
+    Descriptor(&'static str),
+    /// A fact selection violates an owner-local invariant.
+    #[error("fact selection is invalid: {0}")]
+    Selection(&'static str),
+    /// A same-run fact emission violates its bounded deterministic contract.
+    #[error("fact emission is invalid: {0}")]
+    Emission(&'static str),
 }
 
-/// Authoring contract for a typed fact and its canonical subject/response values.
-///
-/// Implementations are normally generated by `MfmFactType`. Fact publication authority remains
-/// with the certified read-state settlement and store admission contracts.
-pub trait MfmFactType: MfmValue {
-    /// Typed subject value used to derive fact identity.
-    type Subject: MfmValue;
+/// Maximum number of queries in one fact-selection request.
+pub const MAX_FACT_SELECTION_QUERIES: usize = 128;
 
-    /// Typed response value retained as fact response evidence.
-    type Response: MfmValue;
+/// Maximum selected facts returned for one query.
+pub const MAX_FACT_SELECTION_LIMIT: u32 = 128;
 
-    /// Returns the canonical descriptor for this fact type.
-    fn descriptor() -> Result<FactDescriptor>;
-
-    /// Returns this fact's subject value.
-    fn subject(&self) -> &Self::Subject;
-
-    /// Returns this fact's response value.
-    fn response(&self) -> &Self::Response;
-}
-
-pub use claim::{
-    FactClaim, FactClaimId, FactClaimParts, FactResponseEvidence, FactSubjectEvidence,
-    FactSubjectRef, InternalFactRef, InternalFactRefParts,
-};
-pub use codec::{
-    canonical_fact_claim_id_bytes, canonical_fact_descriptor_bytes,
-    canonical_fact_query_evidence_bytes, canonical_fact_query_plan_bytes,
-    canonical_fact_subject_material_bytes, compile_fact_query_plan, derive_fact_claim_id,
-    derive_fact_key, extract_subject_material, extract_terms, extract_terms_from_material,
-    fact_descriptor_hash, fact_descriptor_schema_id, fact_query_evidence_hash,
-    fact_query_evidence_schema_id, fact_query_plan_hash, fact_query_result_set_digest,
-    fact_subject_evidence, fact_subject_evidence_from_material, fact_subject_namespace_hash,
-    parse_canonical_fact_descriptor_bytes, parse_canonical_fact_query_evidence_bytes,
-    parse_canonical_fact_query_shape, parse_canonical_fact_response_bytes,
-    parse_canonical_fact_subject_material_bytes, selected_returned_field_summaries_digest,
-    subject_material_hash, typed_fact_subject_evidence, typed_fact_subject_value,
-    validate_descriptor, validate_fact_query_evidence,
-};
-pub use content_identity::{
-    canonical_fact_content_identity_bytes, derive_fact_content_identity,
-    derive_fact_content_identity_from_typed_values, fact_content_identity_digest,
-    verify_fact_claim_content_identity, verify_internal_fact_ref_content_identity,
-    verify_serialized_fact_content_identity_from_typed_values, FactContentIdentity,
-    FactContentIdentityEvidence, FACT_CONTENT_IDENTITY_DIGEST_DOMAIN,
-};
-pub use descriptor::{
-    FactDescriptor, FactFieldDescriptor, FactFieldPolicy, FactOrderingPolicy, FactOrderingTerm,
-};
-pub use extraction::{FactExtractionMetadata, FactQueryTerm};
-pub use ids::{
-    CanonicalValuePath, FactCanonicalizerVersion, FactError, FactFieldId, FactKind,
-    FactOrderingName, FactQueryCompilerVersion, FactUnit, Result,
-};
-pub use query::{
-    CanonicalFactQueryPlan, CompiledFactQueryShape, FactQueryInput, FactQueryPredicate,
-};
-pub use receipt::{
-    fact_query_result_rows_from_receipt, validate_fact_query_result_rows, FactQueryEvidence,
-    FactQueryReceipt, FactQueryResult, FactQueryResultMismatch, FactQueryResultRow,
-    FactSelectionEvidence, QueryResultCardinality, ReturnedFactFieldSummary,
-    ReturnedFieldSummaries, StoreCommitOrder, StoreReadFrontier,
-};
-pub use scalar::FactCanonicalScalar;
-pub use subject::{FactFieldValue, FactKey, FactSubjectMaterial};
-pub use tags::{
-    FactFieldExposure, FactFieldExtraction, FactFieldSource, FactFieldValueType, FactMetadataField,
-    FactQueryOperator, FactScale, NullOrdering, SortDirection,
-};
-
-#[cfg(test)]
-pub(crate) use codec::parse_canonical_scalar_value;
-#[cfg(test)]
-pub(crate) use extraction::json_to_typed_fact_scalar;
-
-/// Stable facts-kernel contract version for the initial collectors RFC surface.
-pub const FACTS_KERNEL_CONTRACT_VERSION: &str = "mfm.facts.v1";
-
-/// V1 fact-query evidence wire contract with deterministic unsigned receipt metadata.
-pub const FACT_QUERY_EVIDENCE_CONTRACT_VERSION: &str = "mfm.fact-query-evidence.v1";
-
-/// V1 fact query compiler version recorded in canonical query plans.
-pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v1";
-
-pub(crate) const FACT_QUERY_VERSION: &str = "mfm.fact-query.v1";
-pub(crate) const FACT_QUERY_PLAN_VERSION: &str = "mfm.fact-query-plan.v1";
-pub(crate) const FACT_QUERY_RECEIPT_VERSION: &str = "mfm.fact-query-receipt.v1";
-pub(crate) const FACT_QUERY_RESULT_SET_VERSION: &str = "mfm.fact-query-result-set.v1";
-
-/// V1 canonicalizer version recorded in canonical query plans.
-pub const FACT_QUERY_CANONICALIZER_VERSION: &str = "mfm.canonical.v1";
-
-/// Maximum UTF-8 byte length accepted for an extracted scalar in v1.
-pub const MAX_FACT_SCALAR_BYTES: usize = 4096;
+/// Maximum facts emitted by one successful transition settlement.
+pub const MAX_FACT_EMISSIONS: usize = 4096;
 
 #[cfg(test)]
 mod tests;

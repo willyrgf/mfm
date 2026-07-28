@@ -1,38 +1,17 @@
 #![warn(missing_docs)]
-//! Live EVM integration with a reusable public transport and a private runtime adapter.
+//! Exact-generation EVM JSON-RPC transport and audited read bindings.
 //!
-//! The adapter is intentionally unavailable as a module; consumers use only the narrow root
-//! registration and replay functions.
-//!
-//! ```compile_fail
-//! use mfm_evm_live::adapter;
-//! ```
-//!
-//! Adapter assembly remains private; registration accepts only reusable capability boundaries.
-//!
-//! ```compile_fail
-//! use mfm_evm_live::{
-//!     EvmMutationValidationFuture, EvmReadRunnerCapabilities,
-//!     EvmTransactionRunnerCapabilities,
-//! };
-//! ```
-//!
-//! The checked transport does not expose an arbitrary JSON-RPC call surface.
-//!
-//! ```compile_fail
-//! use mfm_evm_live::transport::EvmJsonRpcSession;
-//!
-//! async fn bypass(session: &EvmJsonRpcSession) {
-//!     let _ = session.rpc_call("eth_chainId", serde_json::json!([])).await;
-//! }
-//! ```
+//! Mutation, replay, reducer, ingress-validation, and aggregate-reader
+//! registration surfaces are intentionally absent.
 
 mod adapter;
 pub mod transport;
 
 pub use adapter::{
-    is_evm_transaction_replay_intent, register_evm_balance_runners,
-    register_evm_transaction_runner, register_evm_validation_runner,
-    verify_evm_balance_collection_replay, verify_evm_transaction_replay,
-    verify_evm_validation_replay,
+    evm_adapter_callback_surface_canonical, evm_adapter_callback_surface_ref,
+    evm_adapter_callback_surface_support_contract, evm_safe_classifier_canonical,
+    evm_safe_classifier_contract_ref, evm_safe_classifier_support_contract,
+    qualify_evm_read_entries, EvmReadAdapter, EvmReadQualificationArtifacts,
+    QualifiedEvmReadEntries, EVM_ADAPTER_CALLBACK_SURFACE_VERSION,
+    EVM_SAFE_CLASSIFIER_DESCRIPTOR_VERSION,
 };

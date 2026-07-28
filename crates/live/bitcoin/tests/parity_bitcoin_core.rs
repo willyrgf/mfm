@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use bitcoin::{Address, Network, ScriptBuf};
 use mfm_bitcoin::{
-    BitcoinBalanceCollectionRequest, BitcoinBalanceSession, BitcoinCapabilityError,
-    BitcoinNetworkId, BitcoinNetworkTag, BitcoinSourceBinding, BitcoinSourceIdentity,
+    BitcoinNetworkId, BitcoinNetworkTag, BitcoinRoutingGenerationRef, BitcoinScanRequest,
+    BitcoinSourceBinding, BitcoinSourceIdentity,
 };
 use mfm_bitcoin_live::transport::{
-    BitcoinRpcAuthentication, BitcoinRpcEndpoint, BitcoinRpcSession,
+    BitcoinRpcAuthentication, BitcoinRpcEndpoint, BitcoinRpcError, BitcoinRpcSession,
 };
-use mfm_capabilities::ProviderDiagnosticCode;
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 
 const EXPECTED_BITCOIN_CORE_VERSION: &str = "31.0";
 const EXPECTED_BITCOIN_CLI_VERSION: &str = "Bitcoin Core RPC client version v31.0.0";
@@ -110,6 +110,23 @@ fn regtest_binding() -> BitcoinSourceBinding {
     )
 }
 
+fn routing_generation() -> BitcoinRoutingGenerationRef {
+    let schema = SchemaId::new(
+        "mfm.bitcoin.routing-generation",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x41; 32]),
+    )
+    .expect("schema");
+    let digest = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        DigestBytes::from_array([0x42; 32]),
+    );
+    BitcoinRoutingGenerationRef::from_reviewed(
+        ContentRef::new(schema, digest).expect("routing generation"),
+    )
+}
+
 #[test]
 fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
     let config = ParityConfig::from_env();
@@ -162,8 +179,8 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
 
     let mut addresses = vec![funded_address.clone(), zero_address.clone()];
     addresses.sort();
-    let request = BitcoinBalanceCollectionRequest::new(regtest_binding(), addresses)
-        .expect("deterministic aggregate request");
+    let request =
+        BitcoinScanRequest::new(BitcoinNetworkTag::Regtest, addresses).expect("scan request");
     let (username, password) = config.credentials();
     let authentication =
         BitcoinRpcAuthentication::new(username.clone(), zeroize::Zeroizing::new(password.clone()))
@@ -172,6 +189,7 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
         BitcoinRpcEndpoint::new(config.endpoint()).expect("endpoint"),
         Some(authentication),
         regtest_binding(),
+        routing_generation(),
         Duration::from_secs(30),
     )
     .expect("checked parity session");
@@ -179,12 +197,20 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
         .enable_all()
         .build()
         .expect("parity runtime");
+    let info = runtime
+        .block_on(session.get_blockchain_info())
+        .expect("blockchain info");
+    assert_eq!(info.chain(), "regtest");
+    assert!(!info.initial_block_download());
     let response = runtime
-        .block_on(session.collect_balances(&request))
-        .expect("live aggregate balance collection");
+        .block_on(session.scan_tx_out_set_start(&request))
+        .expect("live scan");
+    let confirmation = runtime
+        .block_on(session.get_block_hash(response.height()))
+        .expect("block hash");
 
-    assert_eq!(response.anchor_height(), EXPECTED_ANCHOR_HEIGHT);
-    assert_eq!(response.anchor_hash(), response.final_canonical_hash());
+    assert_eq!(response.height(), EXPECTED_ANCHOR_HEIGHT);
+    assert_eq!(response.anchor_hash(), confirmation);
     let balances = response
         .balances()
         .iter()
@@ -201,8 +227,8 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
         BitcoinNetworkTag::Main,
         BitcoinSourceIdentity::new("nixfied-bitcoin-core").expect("source identity"),
     );
-    let mainnet_request = BitcoinBalanceCollectionRequest::new(
-        mainnet_binding.clone(),
+    let _mainnet_request = BitcoinScanRequest::new(
+        BitcoinNetworkTag::Main,
         vec![MAINNET_PROBE_ADDRESS.to_owned()],
     )
     .expect("mainnet probe request");
@@ -216,13 +242,14 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
             .expect("resolved fixture authentication"),
         ),
         mainnet_binding,
+        routing_generation(),
         Duration::from_secs(30),
     )
     .expect("wrong-chain probe session");
-    assert_eq!(
-        runtime.block_on(mainnet_session.collect_balances(&mainnet_request)),
-        Err(BitcoinCapabilityError::SourceMismatch)
-    );
+    let mismatched = runtime
+        .block_on(mainnet_session.get_blockchain_info())
+        .expect("representable source response");
+    assert_eq!(mismatched.chain(), "regtest");
 
     let rejected_credential = "mfm-parity-rejected-public-fixture";
     let rejected_session = BitcoinRpcSession::new(
@@ -235,21 +262,14 @@ fn pinned_bitcoin_core_matches_the_checked_batch_transport() {
             .expect("rejected fixture authentication"),
         ),
         regtest_binding(),
+        routing_generation(),
         Duration::from_secs(30),
     )
     .expect("rejected-authentication session");
     let error = runtime
-        .block_on(rejected_session.collect_balances(&request))
+        .block_on(rejected_session.get_blockchain_info())
         .expect_err("Bitcoin Core must reject the wrong fixture credential");
-    let BitcoinCapabilityError::Provider {
-        diagnostic,
-        retryable,
-    } = &error
-    else {
-        panic!("authentication rejection must be a provider error")
-    };
-    assert_eq!(diagnostic.code(), ProviderDiagnosticCode::RpcHttpStatus);
-    assert!(!retryable);
+    assert!(matches!(error, BitcoinRpcError::HttpStatus(401 | 403)));
     let rendered = format!("{error:?} {error}");
     for sensitive in [
         config.endpoint(),

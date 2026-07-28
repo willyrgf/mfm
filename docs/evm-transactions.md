@@ -1,166 +1,163 @@
 # EVM Transactions
 
-MFM has one reusable EVM mutation state: `SubmitEvmTransactionState`. It is EIP-1559-only and one
-state node always means one signed chain transaction. Its adapter registration and replay verifier
-are available to explicit library consumers and tests, but production app certification, runner,
-and replay assembly omits them. There is no standalone transaction operation, setup kind, CLI
-route, or REST route.
+Status: unavailable product capability; qualification target for commit 6
 
-## Actions and composition
+The core product has no registered EVM mutation state, executor binding, entry point, CLI command,
+or REST route. Portfolio assembly is read-only. Current app admission cannot certify or execute an
+EVM write, and runtime has no EVM-specific mutation path.
 
-`EvmTransactionAction` is closed:
+Reusable EVM model, encoding, transport, and signing primitives may remain library foundations.
+They grant no product admission, target-entry, or journal authority.
 
-- `Create { init_code, value }` is direct EOA contract creation.
-- `Call { to, calldata, value }` is every ordinary invocation. Empty calldata is a native transfer.
+## Generic Effect Seam
 
-A deployment followed by configuration is `Create -> Call -> Call`. Each arrow is a typed graph
-dependency and each node has its own side-effect ledger. A contract-side multicall, smart-wallet
-batch, factory deployment, CREATE2 deployment, swap, or flash-loan executor is one `Call` when it is
-one atomic chain transaction. Operation crates own byte encoding and typed interpretation of logs;
-the generic state owns no ABI JSON, function lookup, or multi-transaction workflow topology.
+The complete MFM effect protocol is domain-free:
 
-An ordinary call to a smart wallet remains `Call`. ERC-4337 user operations or another
-account-abstraction submission protocol require a separate mutation authority; they are not another
-transaction-action variant and must not be routed through the EVM transaction session merely because
-their eventual execution reaches the EVM.
+```text
+pure state request authorship
+  -> StateTransitionCommitted(EffectRequested)
+  -> ExternalAccessAuthorized(EnsureEffect)
+  -> one affine call to a qualified keyed executor
+  -> ExternalAccessObserved(executor frontier or terminal evidence)
+  -> state terminal-evidence callback
+  -> StateTransitionCommitted(EffectSettled)
+```
 
-Exact validation composes independently at the receipt anchor. Both `Create -> Validate` and
-`Create -> Call -> Call -> Validate` are covered end to end, including evidence-only replay; no
-fixed deployment lifecycle or validation-only mutation path exists.
+`EffectRequested` fixes the original `StateFrame`, immutable typed request, request digest,
+idempotency/effect identity, and exact executor binding. It is the MFM outbox and survives every
+process.
 
-Validation proves only the declared code and call checks at the exact anchor. It does not prove
-general contract correctness, upgrade safety, business invariants, or that MFM submitted a
-transaction; submission authority comes only from the transaction side-effect ledger and its typed
-evidence.
+The MFM journal owns no mutation delivery phases, nonce allocator, signer workflow, resource
+ownership, rebroadcast policy, receipt poller, or destination recovery rule. Repeated
+`drive_once` calls invoke the same keyed executor `ensure` contract. The executor either returns a
+stronger bounded frontier/terminal proof or a reviewed pending/safe-failure result. Only the state
+callback can interpret certified terminal evidence and settle the node.
 
-## Authored authority
+## Executor Qualification Required
 
-`EvmTransactionConfig` fixes the semantic network and chain, expected sender, signer reference,
-deterministic RFC 6979 recoverable low-s profile, access list, and the only admitted policies:
+An EVM transaction can be registered only when one durable wallet or relayer implementation
+qualifies all of:
 
-- fee: `base_fee * 2 + priority_fee`, with checked U256 arithmetic;
-- gas: the exact checked `eth_estimateGas` result.
+- immutable request/effect identity;
+- exact tenant and executor-deployment generation binding;
+- non-rollback delivery ledger;
+- permanent stale/sibling-writer exclusion;
+- destination convergence after request, response, process, host, and database ambiguity;
+- typed sender/nonce resource ownership across every writer that can use that wallet;
+- deterministic transaction construction and signing ownership;
+- safe rebroadcast or exact-hash observation semantics;
+- restart, backup, restore, failover, and reorganization behavior;
+- bounded cumulative delivery evidence and terminal tombstone;
+- exact-attempt target receipt linkage; and
+- complete no-secret retained evidence.
 
-The action supplies bounded canonical init code/calldata and canonical decimal U256 value. The full
-`EvmTransactionIntent` is also the kernel idempotency input. It intentionally excludes pending
-nonce, fee observations, gas estimate, RPC source, and all signer output.
+PostgreSQL persistence alone is insufficient. The MFM journal writer fence protects journal
+lineage, not wallet ownership, nonce exclusivity, signer/envelope custody, destination convergence,
+or executor generation.
 
-When init code or calldata originates in a content-addressed contract artifact, an upstream typed
-materialization node must produce the exact bounded bytes before this state is authored. Transaction
-preparation and replay never resolve mutable artifact references or perform ambient filesystem IO.
+Memory and file executor backends are conformance surfaces only and cannot enable product
+mutation.
 
-Every caller must plan the side effect with `evm_sender_lane_resource_claim()`. The runner resolves
-the typed lane `(network_id, chain_id, expected_sender)` before preparation. This prevents two MFM
-runs using the same store lane concurrently; it does not reserve the nonce against a browser wallet,
-another MFM deployment, an operator, or any other process.
+## Candidate EVM Request Contract
 
-## Preparation and signing
+Commit 6 may introduce one immutable EIP-1559 request whose semantic identity includes:
 
-After the lane claim commits, one source-bound `EvmTransactionSession` reads the pending nonce,
-then the checked fee inputs. Intent and those observations are admitted once as the complete
-pre-gas type-2 transaction description: chain id, nonce, sender, destination/create kind, value,
-input, access list, maximum fee, and priority fee. Nonce and fee widths are checked against Alloy's
-exact EIP-1559 representation before `eth_estimateGas` is called. The transport sends that full
-object with type `0x2` against the `pending` block context. Adding the exact returned gas limit to
-the same admitted description produces the unsigned envelope; no transaction field is reconstructed
-from intent for signing. The adapter then binds the exact configured signer, signs once, verifies
-the profile and recovered sender, and computes the expected hash from the exact signed EIP-2718
-bytes.
+- semantic network and non-zero chain id;
+- expected sender;
+- signer/executor binding references;
+- deterministic signing profile;
+- one closed direct `Create` or ordinary `Call` action;
+- value, calldata/init code, and access list;
+- checked fee and gas policy; and
+- any exact prerequisite value refs.
 
-The binding accepts `DeterministicSigningProvider`, not the unconstrained signing-provider trait.
-The identity-bearing binder owns implementation `mfm.signing.keystore.rfc6979.v1`; transaction
-capability registration derives its implementation identity from that binder rather than accepting
-an unrelated label. A bound provider must report the same implementation id before any signature
-request and must report the certified `secp256k1.rfc6979.recoverable.low_s.v1` profile before it can
-sign. A remote, hardware, or other provider cannot bind to this transaction path merely because it
-can return a valid secp256k1 signature; it must satisfy the byte-identical reconstruction contract
-or use a different durable bearer-material design.
+The request must exclude mutable routing, endpoint, credential, pending nonce observation,
+signature, raw signed envelope, provider body, keystore path, unlock path, password, private key,
+and mnemonic.
 
-`EvmPreparedTransaction` retains:
+Any future transaction construction must use one canonical Alloy path for the type-2 signing
+digest, signed encoding, and transaction hash. Width conversions to Alloy's chain-id/nonce/gas and
+fee representations must fail closed without truncation or fallback. A deterministic recoverable
+low-s signing profile and expected sender must be verified before target entry.
 
-- immutable authored intent;
-- pending nonce, base/priority/maximum fee observations, and gas estimate;
-- the exact unsigned EIP-1559 envelope and Alloy signing digest;
-- the expected signed transaction hash;
-- the sender/nonce-derived address for direct creation; and
-- the canonical redacted network/chain/source/implementation `EvmSessionEvidence`.
+These are qualification constraints, not current product behavior.
 
-It never retains signature scalars, a signed envelope, raw transaction bytes, endpoint, auth header,
-provider body, keystore path, unlock path, password, private key, or mnemonic.
+## Candidate Resource Contract
 
-The ordinary path reserves bounded process-local cache capacity before nonce, fee, gas, or signer
-access. Preparation captures that reservation and the signed bearer in a non-cloneable output
-settlement. Only a durable `SideEffectInvocationPrepared` append promotes it to a fresh cache entry;
-idempotent, admission-blocked, stale, failed, or dropped outputs destroy it. Saturation blocks the
-attempt without evicting or deduplicating an active envelope. Submission leases those exact bytes
-and marks them uncertain before the submission call. An uncertain lease is never submitted again:
-the adapter performs exact-hash lookup and either records observation/ambiguity or retains only
-uncertainty. Absence of the fresh lease after the durable invocation-started boundary is uncertainty,
-not authority to reconstruct a signature or broadcast again. Once durable `SubmissionUnknown`
-exists, recovery discards any remaining transient envelope and is lookup-only. Runtime route reads,
-keystore reads, unlock/KDF work, and signer validation execute on a blocking worker rather than an
-async runtime worker.
+The executor—not MFM runtime—must own a typed resource stream for sender/nonce allocation. Its
+allocation record binds:
 
-## Submission and recovery
+- exact resource ownership;
+- resource key;
+- policy reference;
+- policy-configuration reference; and
+- immutable typed allocation state.
 
-`eth_sendRawTransaction` is accepted only when its returned hash equals the local prepared hash.
-That acknowledgement and immutable prepared authority produce the persisted public submission
-evidence directly; no immediate visibility lookup is required. If the call returns an error, the
-adapter performs exact-hash lookup. A matching transaction must agree on chain id, nonce, sender,
-destination/creation kind, value, input, gas, fees, and access list. A mismatched transaction or
-wrong submit hash becomes ambiguous. Missing or unavailable lookup after the call becomes
-`SubmissionUnknown`, never a terminal pre-submission failure.
+Restart refolds and revalidates the stream under the same policy/configuration pair before another
+authorization. A local process mutex, MFM worker identity, database session lock, or journal row
+cannot reserve a nonce against another wallet, relayer, operator, deployment, or process.
 
-Recovery of `SubmissionUnknown` performs exact-hash lookup only. Matching observation completes the
-submission boundary, mismatch becomes ambiguity, missing remains unknown, and provider failure
-blocks. Recovery never signs, submits, chooses another nonce, or treats unavailable lookup as
-absence evidence. Standard JSON-RPC cannot prove that a transaction was never submitted, so this
-path never emits `NotSubmittedProven`.
+## Target Entry And Observation
 
-`SubmissionUnknown` retains only the prepared transaction hash and redacted checked-session
-identity. A wrong provider submit hash or an exact-hash lookup whose public fields differ from the
-prepared envelope records `SideEffectAmbiguous` with the closed
-`mfm.evm.transaction_mismatch` code and the same redacted evidence. Replay validates both evidence
-forms against prepared authority; neither contains a provider message, response body, signed
-envelope, signature, endpoint, or credential.
+The executor must commit one delivery authorization before returning affine
+`TargetEntryAuthority`. The destination adapter consumes it exactly once and returns an affine
+`TargetOperationReceipt`. Only that receipt can append the matching executor observation.
 
-## Receipt and finality
+An inconclusive submit exchange never authorizes a different transaction. Recovery must converge
+on the immutable request through the qualified wallet/relayer contract. Exact-hash observation,
+rebroadcast, replacement, nonce reuse, and reorganization policy must be part of that executor's
+certified equivalence and resource contract rather than runtime heuristics.
 
-Receipts require explicit success or revert status. Every successful-receipt log retains address,
-ordered topics, data, block number/hash, transaction hash/index, log index, and `removed`; removed or
-identity-incoherent logs fail closed. Operations inspect every field through immutable typed
-accessors and can identify/decode events with Alloy without serializing or reparsing the receipt.
-Receipt transaction index, sender, destination, gas quantities, and session provenance are exposed
-through the same read-only surface. A reverted top-level transaction cannot emit durable logs, so a
-reverted receipt containing any log is rejected at live capability conversion and independently by
-persisted/replay validation; logs are never stripped or normalized away.
+The executor terminal claim must identify one exact returned observation and terminal tombstone.
+The MFM store admits its canonical objects through a later audited ensure observation and creates
+the producer-bound `ValueRef` values. The executor cannot append `EffectSettled`.
 
-Only successful direct `Create` may carry `contract_address`, and it must equal the address derived
-from fixed sender and nonce. Successful or reverted `Call`, plus reverted `Create`, must carry none.
-A reverted receipt with no logs is a terminal external effect that consumed nonce and gas; the
-outcome reports `Reverted(Create | Call)` and never exposes a created-contract handle.
+## Receipt And Finality Requirements
 
-For `Finalized { depth }`, verification fetches a fresh unchanged receipt, reads its block by number
-and requires the exact retained hash, then reads a fresh head and checks `head - receipt + 1 >= depth`.
-A disappeared or moved receipt, wrong canonical block, or shallow head remains pending. Confirmation
-evidence retains the fresh receipt, canonical block, head, checked depth, and redacted session.
-Transaction, validation, collection, and portfolio evidence use the same capability-owned
-`EvmBlockAnchor`, which persists the full U256 block number as canonical decimal and never narrows
-it to u64.
+If commit 6 admits receipt/finality evidence, its typed contract must validate:
 
-Provider unavailability while reading the receipt, canonical block, or head is also an operational
-block. Resume re-observes from the durable submission phase and never executes the submit node or
-broadcast again. Malformed retained evidence, a transient signed-hash mismatch, or a certified
-authority violation remains terminal validation failure.
+- exact transaction hash and immutable public transaction fields;
+- explicit success or revert status;
+- coherent block, transaction, and log identities;
+- no logs for a reverted top-level transaction;
+- direct-create address derivation where applicable;
+- exact canonical block placement;
+- certified confirmation depth; and
+- behavior under receipt disappearance, movement, and reorganization.
 
-## Replay and secret boundary
+Finality level is state/executor contract data fixed before admission. A launch-time default,
+provider claim, or runtime policy cannot change it.
 
-The EVM transaction replay verifier reconstructs the submit state from certified config, input, and
-context. It reauthors the intent, runtime idempotency key, and sender-lane resource key, then decodes
-the retained prepared invocation, transaction, receipt, and confirmation artifacts and invokes the
-same state output reducer used live. It also recomputes the unsigned plan, fee relation, signing
-digest, CREATE address, lookup equality, receipt/log coherence, canonical block equality, and
-confirmation depth. Replay never loads current runtime config, opens a route, calls JSON-RPC,
-constructs a signer, or opens a keystore. Since signature material is deliberately absent, replay
-verifies the retained expected-hash authority and its downstream relations; it does not claim an
-offline proof of an omitted signature.
+## Secret Boundary
+
+Signatures and raw signed transactions are bearer mutation material. They remain transient inside
+the qualified wallet/relayer target boundary and are never:
+
+- typed state values;
+- executor request/result objects;
+- journal records or retained objects;
+- facts or public outputs;
+- replay inputs;
+- portable export members;
+- diagnostics; or
+- logs and fixtures.
+
+Only reviewed public identities, immutable unsigned intent, exact hashes, typed receipts, and
+closed safe failures may cross into retained evidence.
+
+## Replay
+
+Recorded-history verification checks the generic effect request, authorization/observation links,
+executor frontier chain, terminal proof, and `EffectSettled` relationship without calling an
+executor or EVM provider.
+
+Exact reproduction may recompute pure request and settlement relations from retained public
+evidence, but it never reconstructs a signature, opens a keystore, resolves a route, submits,
+polls, or appends. Candidate comparison is equally capability-free.
+
+## Registration Change
+
+Commit 6 must add registration and tests as one reviewed vertical change only after every executor,
+destination, resource, signing, restart, and reorganization gate passes. Failure leaves EVM
+mutation unavailable. It must not restore a special runtime phase model, add a compatibility
+submission path, or weaken the generic effect seam.

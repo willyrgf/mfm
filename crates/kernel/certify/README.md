@@ -1,29 +1,17 @@
 # mfm-certify
 
-Typed kernel crate for certification of typed program drafts and execution specs.
+The sole deterministic composite planner and offline certifier for recoverability-v1 graphs.
 
-This crate mints `CertifiedTypedSpec`, the non-forgeable affine in-memory authority returned only by
-registry-backed certification or persisted spec/certificate verification. It is borrowable,
-movable, and non-cloneable. Parsed typed spec JSON, `mfm_spec::v1::HashedSpecEnvelope`, persisted
-`CertifiedSpecCertificate` bytes, and persisted spec/certificate byte pairs are not runtime
-authority. The public API exposes borrowed inspection and persisted evidence conversion only; it
-does not expose an owned snapshot or decomposition surface.
+The private composite planner expands child composition first, framework policy outside the
+protected state, and executor support inside it. Final canonical paths are complete before node ids
+are derived. Every dependency, effective output, public output, and terminal rule is retained in
+the expanded spec.
 
-Persisted spec bytes and certificate bytes are hostile data until
-`verify_persisted_spec_certificate` validates the spec hash, certificate hash, certifier identity,
-registry digest, descriptor
-identities and digests, lowering and canonicalizer identity, public-output schema id, audit
-metadata, and the typed spec itself against the registry. Hash match alone is not certification.
-
-`CertificationRegistry` is explicit certification authority. Registry assembly may register trusted
-already-lowered descriptor identities, but persisted spec descriptors are not trusted registry input
-until the certifier verifier has accepted the spec/certificate pair.
-
-Transition-context metadata is certified here, not in domain crates or runtime routing. The
-certifier checks context table content addressing, node context requirements, context-bound
-input/output resource kind and stage contracts, approved producer descriptors, seed producer
-authorization, same-value bridge preservation, side-effect verify preservation, and no-context
-framework receipt outputs.
+`CompositeCertificationFactory` is zero-state. Registry assembly invokes it exactly once with the
+sole shared immutable program definition; the resulting private certifier derives manifests from
+that same definition and returns complete `CertifiedAdmissionArtifacts`. Candidate certification
+uses the same callback followed by registry-owned output and proof-closure validation. Runtime
+does not repair or expand certified graphs.
 
 `docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
 must remain domain-free.

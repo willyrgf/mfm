@@ -92,6 +92,12 @@ fn parses_and_rejects_base64url_bytes() {
 }
 
 #[test]
+fn canonical_bytes_can_transfer_decoded_ownership_without_changing_bytes() {
+    let bytes = CanonicalBytes::from_base64url_no_pad("AAE-_w").expect("base64url no padding");
+    assert_eq!(bytes.into_bytes(), vec![0, 1, 62, 255]);
+}
+
+#[test]
 fn sorts_object_keys_by_utf16_code_units() {
     let value = CanonicalValue::object([
         ("🦀", CanonicalValue::Unsigned(1)),
