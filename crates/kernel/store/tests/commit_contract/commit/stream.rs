@@ -51,7 +51,7 @@ fn commit_key_replay_classification_precedes_stale_expected_next_seq() {
 }
 
 #[test]
-fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
+fn async_in_memory_store_exposes_append_and_status_contract() {
     let store = AsyncInMemoryRunStore::new();
     let resource_run = run_id(43);
     let status_run = run_id(44);
@@ -91,15 +91,18 @@ fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
         .seed_artifact_evidence_for_test(status_plan.admitted_artifacts())
         .expect("seed status artifact authority");
     let status_bundle = test_bundle_from_plan(status_plan).expect("bundle status run start");
-    poll_ready_store_future(store.append_prepared_commit_bundle(status_bundle))
-        .expect("append status run start");
-
-    let stream =
-        poll_ready_store_future(store.load_run_stream(&status_run)).expect("load status stream");
-    assert_eq!(stream.len(), 1);
-    assert_eq!(stream[0].run_id(), &status_run);
+    let status_outcome =
+        poll_ready_store_future(store.append_prepared_commit_bundle(status_bundle))
+            .expect("append status run start");
+    let CommitOutcome::Appended(status_batch) = status_outcome else {
+        panic!("status run start should append");
+    };
+    assert_eq!(status_batch.events().len(), 1);
+    assert_eq!(status_batch.events()[0].run_id(), &status_run);
     assert_eq!(
-        poll_ready_store_future(store.expected_next_seq(&status_run)).expect("status next seq"),
+        store
+            .expected_next_sequence_for_test(&status_run)
+            .expect("status next seq"),
         StreamSeq::new(2).expect("next seq")
     );
 

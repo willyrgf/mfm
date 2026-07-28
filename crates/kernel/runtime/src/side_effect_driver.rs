@@ -14,11 +14,12 @@ use crate::runner_kit::{
     RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding,
 };
 use crate::side_effect_lifecycle::SideEffectAttemptView;
+use crate::spec_authority::CurrentSpecRead;
 use crate::{
-    canonical_json, CertifiedRuntimeSpec, ErasedRunCtx, ErasedRunnerOutput, MaterializedInputs,
-    PreInvocationRunCtx, Result, RunnerArtifactBuilder, RunnerCapabilityBinding,
-    RunnerEventPayload, RunnerJsonArtifact, RunnerOutputBuilder, RunnerOutputSettlement,
-    RunnerPayloadBuilder, RuntimeError, StagedArtifact, StagedRetentionRefs,
+    canonical_json, ErasedRunCtx, ErasedRunnerOutput, MaterializedInputs, PreInvocationRunCtx,
+    Result, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerEventPayload, RunnerJsonArtifact,
+    RunnerOutputBuilder, RunnerOutputSettlement, RunnerPayloadBuilder, RuntimeError,
+    StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by side-effect driver callbacks.
@@ -540,7 +541,7 @@ pub trait SideEffectAdapter {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_node: &'a spec::NodeSpec,
-        prepared: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation>;
 
     /// Submits exact prepared authority; implementations must be restart-safe.
@@ -565,8 +566,8 @@ pub trait SideEffectAdapter {
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_node: &'a spec::NodeSpec,
         submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>>;
 
     /// Builds confirmation evidence from a stored receipt.
@@ -575,9 +576,9 @@ pub trait SideEffectAdapter {
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_node: &'a spec::NodeSpec,
         submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
-        receipt: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>>;
 
     /// Maps stored receipt evidence to the verified state output.
@@ -585,9 +586,9 @@ pub trait SideEffectAdapter {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
-        receipt: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::Output>;
 
     /// Maps stored confirmation evidence to the verified state output.
@@ -595,10 +596,10 @@ pub trait SideEffectAdapter {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
-        receipt: &'a store::SideEffectArtifactProjection,
-        confirmation: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        confirmation: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::Output>;
 }
 
@@ -623,52 +624,53 @@ fn side_effect_binding(
     view: &SideEffectAttemptView<'_>,
     invocation_epoch: u32,
 ) -> Result<RunnerSideEffectBinding> {
-    let projection = view
-        .projection()
-        .ok_or_else(|| missing_driver_projection("side-effect projection"))?;
+    let ledger = view
+        .ledger()
+        .ok_or_else(|| missing_driver_projection("side-effect ledger"))?;
     Ok(RunnerSideEffectBinding {
-        ledger_key: projection.ledger_key.clone(),
-        ledger_purpose: projection.ledger_purpose.clone(),
-        pair_id: projection.pair_id.clone(),
+        ledger_key: ledger.ledger_key().clone(),
+        ledger_purpose: ledger.ledger_purpose().clone(),
+        pair_id: ledger.pair_id().clone(),
         invocation_epoch,
     })
 }
 
 fn runtime_side_effect_binding(ctx: &ErasedRunCtx<'_>) -> Result<RunnerSideEffectBinding> {
-    let linked_forward_pair = match SideEffectAttemptView::from_erased_context(ctx)?.projection() {
-        Some(projection) => match &projection.ledger_purpose {
+    let linked_forward_pair = match SideEffectAttemptView::from_erased_context(ctx)?.ledger() {
+        Some(ledger) => match ledger.ledger_purpose() {
             events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
                 Some(forward_pair_id.clone())
             }
             _ => terminal_forward_pair_for_remediation(
-                ctx.runtime_spec(),
-                ctx.projections(),
+                &ctx.runtime_spec(),
+                ctx.lifecycle(),
                 ctx.node(),
             )?,
         },
-        None => terminal_forward_pair_for_remediation(
-            ctx.runtime_spec(),
-            ctx.projections(),
-            ctx.node(),
-        )?,
+        None => {
+            terminal_forward_pair_for_remediation(&ctx.runtime_spec(), ctx.lifecycle(), ctx.node())?
+        }
     };
     let ledger_purpose = linked_forward_pair
         .map(|forward_pair_id| events::SideEffectLedgerPurpose::Remediation { forward_pair_id })
         .unwrap_or(events::SideEffectLedgerPurpose::Forward);
     side_effect_binding_for(
         ctx.run_id(),
-        ctx.runtime_spec(),
+        &ctx.runtime_spec(),
         &ctx.node().node_id,
         ledger_purpose,
     )
 }
 
-fn side_effect_binding_for(
+fn side_effect_binding_for<S>(
     run_id: &RunId,
-    runtime_spec: &CertifiedRuntimeSpec,
+    runtime_spec: &S,
     node_id: &NodeId,
     ledger_purpose: events::SideEffectLedgerPurpose,
-) -> Result<RunnerSideEffectBinding> {
+) -> Result<RunnerSideEffectBinding>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let pair_id = runtime_spec
         .side_effect_pair_for_submit_node(node_id)
         .cloned()
@@ -694,15 +696,15 @@ fn pre_invocation_lane_claim(
     match view.phase() {
         None => {
             let ledger_purpose = terminal_forward_pair_for_remediation(
-                ctx.runtime_spec(),
-                ctx.projections(),
+                &ctx.runtime_spec(),
+                ctx.lifecycle(),
                 ctx.node(),
             )?
             .map(|forward_pair_id| events::SideEffectLedgerPurpose::Remediation { forward_pair_id })
             .unwrap_or(events::SideEffectLedgerPurpose::Forward);
             let side_effect = side_effect_binding_for(
                 ctx.run_id(),
-                ctx.runtime_spec(),
+                &ctx.runtime_spec(),
                 &ctx.node().node_id,
                 ledger_purpose,
             )?;
@@ -731,29 +733,47 @@ fn pre_invocation_lane_claim(
     }
 }
 
-fn terminal_forward_pair_for_remediation(
-    runtime_spec: &CertifiedRuntimeSpec,
-    projections: &store::ProjectionSnapshot,
+fn terminal_forward_pair_for_remediation<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
-) -> Result<Option<SideEffectPairId>> {
+) -> Result<Option<SideEffectPairId>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let Some(forward_node_id) = runtime_spec.forward_node_for_remediation(&node.node_id) else {
         return Ok(None);
     };
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
-    for (_, projection) in projections.side_effects() {
-        if projection.intent.node_id == *forward_node_id
-            && matches!(
-                &projection.ledger_purpose,
+    let mut found = None;
+    let mut policy_error = None;
+    let _ = lifecycle.visit_side_effects(|ledger| {
+        let intent = ledger.intent();
+        if intent.node_id() != forward_node_id
+            || !matches!(
+                ledger.ledger_purpose(),
                 events::SideEffectLedgerPurpose::Forward
             )
-            && terminal_policies
-                .require(&projection.pair_id)?
-                .is_terminal_phase(&projection.phase)
         {
-            return Ok(Some(projection.pair_id.clone()));
+            return std::ops::ControlFlow::Continue(());
         }
+        let policy = match terminal_policies.require(ledger.pair_id()) {
+            Ok(policy) => policy,
+            Err(error) => {
+                policy_error = Some(error);
+                return std::ops::ControlFlow::Break(());
+            }
+        };
+        if policy.is_terminal_phase(ledger.phase()) {
+            found = Some(ledger.pair_id().clone());
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    if let Some(error) = policy_error {
+        return Err(error.into());
     }
-    Ok(None)
+    Ok(found)
 }
 
 fn side_effect_ledger_key(

@@ -18,7 +18,7 @@ async fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
     .expect("run start");
     let request = mfm_store::v1::CommitRequest::from_payloads(
         run.clone(),
-        store.expected_next_seq(&run).await.expect("next seq"),
+        expected_next_sequence(&store, &run).await,
         CommitKey::new("prepared-fingerprint").expect("commit key"),
         vec![retention_refs_appended(
             run.clone(),
@@ -121,7 +121,7 @@ async fn strict_load_rejects_corrupt_commit_fingerprint() {
     .expect("corrupt commit fingerprint");
 
     let error = store
-        .load_run_stream(&run)
+        .load_committed_journal(&run)
         .await
         .expect_err("strict load rejects corrupt commit fingerprint");
     assert_corruption(error, "commit id does not match persisted fingerprint");
@@ -156,7 +156,7 @@ async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
         .expect("forge commit batch authority");
 
     let error = store
-        .load_run_stream(&run)
+        .load_committed_journal(&run)
         .await
         .expect_err("strict load rejects batch authority that no longer matches rows");
     assert_corruption(
@@ -379,6 +379,7 @@ async fn observation_cursor_uses_durable_metadata_across_store_restarts() {
     let restarted = PostgresStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
+        committed_journal_load_test_barrier: None,
     };
     let page = restarted
         .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 0))

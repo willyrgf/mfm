@@ -1,11 +1,14 @@
 use super::*;
 
-pub(super) fn apply_fact_recorded(
+pub(super) fn apply_fact_recorded<R>(
     projections: &mut ProjectionSnapshot,
     envelope: &KernelEventEnvelope,
     payload: &events::FactRecorded,
-    artifact_bytes: &ArtifactByteAuthorityMap,
-) -> Result<()> {
+    objects: &R,
+) -> Result<()>
+where
+    R: ExactRetainedObjectResolver + ?Sized,
+{
     let claim = &payload.claim;
     let claim_id = mfm_facts::derive_fact_claim_id(
         envelope.run_id().clone(),
@@ -22,7 +25,7 @@ pub(super) fn apply_fact_recorded(
             key: format!("fact_descriptor:{}", claim.fact_descriptor_hash()),
             message: "fact descriptor must be admitted before recording a fact".to_owned(),
         })?;
-    let descriptor = load_projected_fact_descriptor(&descriptor_projection, artifact_bytes)?;
+    let descriptor = load_projected_fact_descriptor(&descriptor_projection, objects)?;
     validate_fact_claim_against_descriptor(claim, &descriptor_projection)?;
     let subject_material = mfm_facts::parse_canonical_fact_subject_material_bytes(
         claim.subject().subject_material().as_bytes(),
@@ -31,7 +34,7 @@ pub(super) fn apply_fact_recorded(
 
     let response = claim.response();
     let (response_bytes, response_evidence) = require_artifact_bytes_by_key(
-        artifact_bytes,
+        objects,
         response.artifact_id(),
         response.artifact_evidence_hash(),
     )?;
@@ -90,11 +93,14 @@ fn require_started_fact_attempt(
     }
 }
 
-pub(super) fn apply_fact_descriptor_artifact(
+pub(super) fn apply_fact_descriptor_artifact<R>(
     projections: &mut ProjectionSnapshot,
     artifact: &events::RunArtifactEvidenceRef,
-    artifact_bytes: &ArtifactByteAuthorityMap,
-) -> Result<()> {
+    objects: &R,
+) -> Result<()>
+where
+    R: ExactRetainedObjectResolver + ?Sized,
+{
     let expected_schema = mfm_facts::fact_descriptor_schema_id()
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     let evidence = ArtifactEvidenceRef::from_run_artifact(artifact);
@@ -106,7 +112,7 @@ pub(super) fn apply_fact_descriptor_artifact(
             field: "fact_descriptor",
         });
     }
-    let bytes = require_artifact_bytes_exact(artifact_bytes, &evidence)?;
+    let bytes = require_artifact_bytes_exact(objects, &evidence)?;
     let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(bytes)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     let descriptor_hash = mfm_facts::fact_descriptor_hash(&descriptor)
@@ -163,42 +169,49 @@ fn equivalent_fact_descriptor_projection(
         && left.fact_subject_namespace_hash == right.fact_subject_namespace_hash
 }
 
-fn load_projected_fact_descriptor(
+fn load_projected_fact_descriptor<R>(
     projection: &FactDescriptorProjection,
-    artifact_bytes: &ArtifactByteAuthorityMap,
-) -> Result<mfm_facts::FactDescriptor> {
+    objects: &R,
+) -> Result<mfm_facts::FactDescriptor>
+where
+    R: ExactRetainedObjectResolver + ?Sized,
+{
     let expected_schema = mfm_facts::fact_descriptor_schema_id()
         .map_err(|error| StoreError::Identity(error.to_string()))?;
-    for ((artifact_id, _), (bytes, evidence)) in artifact_bytes {
-        if artifact_id != &projection.descriptor_artifact_id {
-            continue;
-        }
-        if evidence.digest != projection.descriptor_hash {
-            continue;
-        }
-        if evidence.artifact_role != ArtifactRole::FactDescriptor
-            || evidence.schema_id.as_ref() != Some(&expected_schema)
-        {
-            return Err(StoreError::ArtifactEvidenceMismatch {
-                artifact_id: evidence.artifact_id.clone(),
-                field: "fact_descriptor",
-            });
-        }
-        let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(bytes)
-            .map_err(|error| StoreError::Identity(error.to_string()))?;
-        let descriptor_hash = mfm_facts::fact_descriptor_hash(&descriptor)
-            .map_err(|error| StoreError::Identity(error.to_string()))?;
-        if descriptor_hash != projection.descriptor_hash {
-            return Err(StoreError::ArtifactEvidenceMismatch {
-                artifact_id: evidence.artifact_id.clone(),
-                field: "digest",
-            });
-        }
-        return Ok(descriptor);
+    let projected_evidence = &projection.descriptor_artifact_evidence;
+    if projected_evidence.artifact_id != projection.descriptor_artifact_id
+        || projected_evidence.digest != projection.descriptor_hash
+        || projected_evidence.artifact_role != ArtifactRole::FactDescriptor
+        || projected_evidence.schema_id.as_ref() != Some(&expected_schema)
+        || projected_evidence.semantic_type_id.is_some()
+        || projected_evidence.producer_node_id.is_some()
+        || projected_evidence.producer_seed_id.is_some()
+    {
+        return Err(StoreError::ArtifactEvidenceMismatch {
+            artifact_id: projection.descriptor_artifact_id.clone(),
+            field: "fact_descriptor",
+        });
     }
-    Err(StoreError::MissingArtifact {
-        artifact_id: projection.descriptor_artifact_id.clone(),
-    })
+    let bytes = require_artifact_bytes_exact(objects, projected_evidence)?;
+    let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(bytes)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let descriptor_hash = mfm_facts::fact_descriptor_hash(&descriptor)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let subject_namespace_hash = mfm_facts::fact_subject_namespace_hash(&descriptor)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    if descriptor_hash != projection.descriptor_hash
+        || descriptor.fact_kind() != &projection.fact_kind
+        || descriptor.descriptor_schema_id() != &projection.descriptor_schema_id
+        || descriptor.subject_schema_id() != &projection.subject_schema_id
+        || descriptor.response_schema_id() != &projection.response_schema_id
+        || subject_namespace_hash != projection.fact_subject_namespace_hash
+    {
+        return Err(StoreError::ArtifactEvidenceMismatch {
+            artifact_id: projection.descriptor_artifact_id.clone(),
+            field: "fact_descriptor",
+        });
+    }
+    Ok(descriptor)
 }
 
 fn validate_fact_claim_against_descriptor(
@@ -236,14 +249,16 @@ fn validate_fact_response_evidence(
     Ok(())
 }
 
-fn require_artifact_bytes_exact<'a>(
-    artifact_bytes: &'a ArtifactByteAuthorityMap,
+fn require_artifact_bytes_exact<'a, R>(
+    objects: &'a R,
     evidence: &ArtifactEvidenceRef,
-) -> Result<&'a [u8]> {
+) -> Result<&'a [u8]>
+where
+    R: ExactRetainedObjectResolver + ?Sized,
+{
     let evidence_hash = evidence.evidence_hash()?;
-    let Some((bytes, stored_evidence)) =
-        artifact_bytes.get(&(evidence.artifact_id.clone(), evidence_hash))
-    else {
+    let key = (evidence.artifact_id.clone(), evidence_hash);
+    let Some((bytes, stored_evidence)) = objects.resolve_exact(&key) else {
         return Err(StoreError::MissingArtifact {
             artifact_id: evidence.artifact_id.clone(),
         });
@@ -254,23 +269,26 @@ fn require_artifact_bytes_exact<'a>(
             field: "artifact",
         });
     }
-    super::super::verify_retained_artifact_bytes(bytes, evidence)?;
-    Ok(bytes.as_slice())
+    super::super::verify_retained_artifact_bytes(bytes, stored_evidence)?;
+    Ok(bytes)
 }
 
-fn require_artifact_bytes_by_key<'a>(
-    artifact_bytes: &'a ArtifactByteAuthorityMap,
+fn require_artifact_bytes_by_key<'a, R>(
+    objects: &'a R,
     artifact_id: &ArtifactId,
     evidence_hash: &ContentDigest,
-) -> Result<(&'a [u8], &'a ArtifactEvidenceRef)> {
-    let Some((bytes, evidence)) = artifact_bytes.get(&(artifact_id.clone(), evidence_hash.clone()))
-    else {
+) -> Result<(&'a [u8], &'a ArtifactEvidenceRef)>
+where
+    R: ExactRetainedObjectResolver + ?Sized,
+{
+    let key = (artifact_id.clone(), evidence_hash.clone());
+    let Some((bytes, evidence)) = objects.resolve_exact(&key) else {
         return Err(StoreError::MissingArtifact {
             artifact_id: artifact_id.clone(),
         });
     };
     super::super::verify_retained_artifact_bytes(bytes, evidence)?;
-    Ok((bytes.as_slice(), evidence))
+    Ok((bytes, evidence))
 }
 
 fn fact_recorded_at(_envelope: &KernelEventEnvelope) -> String {

@@ -94,9 +94,16 @@ mod event_codec;
 mod event_codec_decode;
 #[cfg(any(test, feature = "test-support"))]
 mod fact_query;
+mod journal;
+mod manual_resolution_authority;
 mod staging;
-mod stream;
 mod validation;
+
+/// Temporary borrowed readers for the current persisted lifecycle algebra.
+///
+/// These wrappers are not recoverability Package A and are removed with the current event
+/// lifecycle in the next cutover.
+pub mod current_lifecycle;
 
 #[path = "commit_models.rs"]
 mod commit_models;
@@ -131,13 +138,15 @@ pub use self::staging::{
     StagedCommitOutcome,
 };
 
-pub use self::stream::{
-    committed_run_stream_canonical_json, committed_run_stream_from_canonical_json_slice,
-    CommittedRunStream, CommittedRunStreamCommit, RetainedArtifactReadFuture,
-    RetainedArtifactReadProvider, VerifiedRetainedArtifactBytes, VerifiedRunArtifactStore,
+#[cfg(any(test, feature = "test-support"))]
+use self::journal::required_artifact_byte_authority;
+use self::journal::{committed_journal_commits, validate_journal_record_order};
+pub use self::journal::{
+    CommittedRunJournal, JournalLoadVerifier, RetainedArtifactReadFuture,
+    RetainedArtifactReadProvider, VerifiedRetainedArtifactBytes, VerifiedRunView,
 };
-use self::stream::{committed_run_stream_commits, validate_run_stream_order};
 
+use self::event_codec::store_artifact_json;
 pub use self::event_codec::{
     error_info_json, event_artifact_json, manual_resolution_note_json,
     manual_resolution_outcome_str, payload_canonical_json, prepared_commit_plan_fingerprint,
@@ -145,10 +154,6 @@ pub use self::event_codec::{
     run_completion_outcome_json, run_completion_outcome_str, side_effect_ledger_purpose_json,
     skip_reason_json,
 };
-use self::event_codec::{
-    kernel_event_envelope_json, parse_kernel_event_envelope, store_artifact_json,
-};
-use self::event_codec_decode::parse_vec;
 pub use self::event_codec_decode::{
     parse_error_category, parse_error_info, parse_event_artifact, parse_failure_phase,
     parse_manual_resolution_note, parse_manual_resolution_outcome, parse_resource_key_evidence,
@@ -771,12 +776,10 @@ pub trait RunObservationStore {
     ) -> AsyncStoreFuture<'a, RunObservationPage, Self::Error>;
 }
 
-/// Async run event store commit contract for durable stores.
+/// Async committed-journal contract for durable stores.
 ///
-/// Runtime execution code must derive run-local read views from the authoritative stream
-/// returned by [`Self::load_run_stream`]. App status rendering may additionally request
-/// store-owned cross-run projection authority through [`Self::status_projection_snapshot`].
-pub trait RunEventStore {
+/// [`Self::load_committed_journal`] is the sole per-run history load path.
+pub trait RunJournalStore: private::RunJournalStoreSealed {
     /// Store-specific error type.
     type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
 
@@ -786,29 +789,73 @@ pub trait RunEventStore {
         bundle: PreparedCommitBundle,
     ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error>;
 
-    /// Loads the authoritative run stream.
-    fn load_run_stream<'a>(
+    /// Loads one structurally verified journal and its exact retained objects consistently.
+    fn load_committed_journal<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error>;
+    ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error>;
+}
 
-    /// Loads the authoritative committed run stream with retained artifact projection authority.
-    fn load_committed_run_stream<'a>(
+/// Durable-backend SPI for the permanent committed-journal boundary.
+///
+/// Application code uses [`RunJournalStore`]. A backend receives an affine
+/// [`JournalLoadVerifier`] from the blanket implementation and cannot mint journal authority
+/// through a generic raw-record constructor.
+#[doc(hidden)]
+pub trait RunJournalBackend: Send + Sync {
+    /// Store-specific error type.
+    type Error: StoreErrorInspection + From<StoreError> + fmt::Display + Send + Sync + 'static;
+
+    /// Backend implementation of one atomic prepared append.
+    fn backend_append<'a>(
+        &'a self,
+        bundle: PreparedCommitBundle,
+    ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error>;
+
+    /// Loads `verifier.run_id()` as its only target and consumes the verifier under one snapshot.
+    fn backend_load<'a>(
+        &'a self,
+        verifier: JournalLoadVerifier,
+    ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error>;
+}
+
+impl<T> private::RunJournalStoreSealed for T where T: RunJournalBackend + ?Sized {}
+
+impl<T> RunJournalStore for T
+where
+    T: RunJournalBackend + ?Sized,
+{
+    type Error = T::Error;
+
+    fn append_prepared_commit_bundle<'a>(
+        &'a self,
+        bundle: PreparedCommitBundle,
+    ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
+        self.backend_append(bundle)
+    }
+
+    fn load_committed_journal<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, CommittedRunStream, Self::Error>;
+    ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error> {
+        let requested_run_id = run_id.clone();
+        let verifier = JournalLoadVerifier::new(requested_run_id.clone());
+        Box::pin(async move {
+            let journal = self.backend_load(verifier).await?;
+            journal::accept_journal_for_run(&requested_run_id, journal).map_err(T::Error::from)
+        })
+    }
+}
 
-    /// Returns the next store-owned stream sequence for a run.
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error>;
-
-    /// Returns store-owned projection authority for public run status.
+/// Temporary projection capability for current fact APIs and resource-lane status.
+///
+/// This is not part of recoverability Package A. Its projections cannot construct or augment a
+/// [`VerifiedRunView`], and the capability is deleted with the current lifecycle cutover.
+pub trait CurrentProjectionStore: RunJournalStore {
+    /// Returns only the temporary cross-run resource-lane overlay for public run status.
     ///
-    /// Implementations that maintain cross-run projection families should include those
-    /// families here. Callers still rebuild the queried run's local projection from its
-    /// authoritative stream before rendering status.
+    /// Run-local status authority comes exclusively from [`VerifiedRunView`] through
+    /// [`current_lifecycle`]. This projection must not construct or augment a verified run view.
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -903,12 +950,35 @@ pub type ArtifactAuthorityMap = BTreeMap<ArtifactAuthorityKey, ArtifactEvidenceR
 /// Artifact bytes indexed by exact `(artifact_id, evidence_hash)` authority.
 pub type ArtifactByteAuthorityMap = BTreeMap<ArtifactAuthorityKey, (Vec<u8>, ArtifactEvidenceRef)>;
 
+/// Private exact retained-object lookup shared by projection rebuild and suffix extension.
+///
+/// Implementations return only the object stored under the complete
+/// `(artifact_id, evidence_hash)` authority key. Callers validate the returned evidence and bytes;
+/// implementations must not search for substitutes.
+trait ExactRetainedObjectResolver {
+    fn resolve_exact<'a>(
+        &'a self,
+        key: &ArtifactAuthorityKey,
+    ) -> Option<(&'a [u8], &'a ArtifactEvidenceRef)>;
+}
+
+impl ExactRetainedObjectResolver for ArtifactByteAuthorityMap {
+    fn resolve_exact<'a>(
+        &'a self,
+        key: &ArtifactAuthorityKey,
+    ) -> Option<(&'a [u8], &'a ArtifactEvidenceRef)> {
+        self.get(key)
+            .map(|(bytes, evidence)| (bytes.as_slice(), evidence))
+    }
+}
+
 use self::admission::require_admission_preconditions;
 
 mod admission;
 
 mod private {
     pub trait Sealed {}
+    pub trait RunJournalStoreSealed {}
 }
 
 mod event_artifacts;

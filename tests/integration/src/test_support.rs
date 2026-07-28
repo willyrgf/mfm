@@ -9,7 +9,6 @@ use axum::body::Body;
 use axum::http::Request;
 use mfm_events::v1::{ArtifactRole, KernelEventPayload};
 use mfm_store::v1 as store;
-use mfm_store::v1::RetainedArtifactReadProvider;
 use sqlx::{AssertSqlSafe, PgPool};
 
 #[path = "run_control_support.rs"]
@@ -55,7 +54,7 @@ impl InjectedStaleExpectedNextSeqError for mfm_storage_postgres::PostgresStoreEr
 
 /// Decorates a store by committing one fact-producing settlement and reporting its result as stale.
 ///
-/// The runtime must reload the committed stream after this injected uncertain result instead of
+/// The runtime must reload the committed journal after this injected uncertain result instead of
 /// repeating the external read that produced the fact batch.
 #[derive(Clone)]
 pub struct UncertainFactSettlementStore<S> {
@@ -78,14 +77,14 @@ impl<S> UncertainFactSettlementStore<S> {
     }
 }
 
-impl<S> store::RunEventStore for UncertainFactSettlementStore<S>
+impl<S> store::RunJournalBackend for UncertainFactSettlementStore<S>
 where
-    S: store::RunEventStore + Sync,
-    S::Error: InjectedStaleExpectedNextSeqError,
+    S: store::RunJournalStore + Send + Sync,
+    S::Error: InjectedStaleExpectedNextSeqError + From<store::StoreError>,
 {
     type Error = S::Error;
 
-    fn append_prepared_commit_bundle<'a>(
+    fn backend_append<'a>(
         &'a self,
         bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
@@ -95,17 +94,27 @@ where
             .iter()
             .any(|payload| matches!(payload, KernelEventPayload::FactRecorded(_)));
         let expected = bundle.request().expected_next_seq();
-        let run_id = bundle.request().run_id().clone();
         Box::pin(async move {
             let outcome = self.inner.append_prepared_commit_bundle(bundle).await?;
             let inject = is_fact_settlement
-                && matches!(outcome, store::CommitOutcome::Appended(_))
+                && matches!(&outcome, store::CommitOutcome::Appended(_))
                 && self
                     .injected
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok();
             if inject {
-                let actual = self.inner.expected_next_seq(&run_id).await?;
+                let appended = match &outcome {
+                    store::CommitOutcome::Appended(batch) => batch,
+                    _ => unreachable!("injection is limited to newly appended fact settlements"),
+                };
+                let actual = store::StreamSeq::new(
+                    appended
+                        .seq()
+                        .as_u64()
+                        .checked_add(1)
+                        .expect("an appended test batch has a successor sequence"),
+                )
+                .expect("an appended test batch has a valid successor sequence");
                 return Err(Self::Error::injected_stale_expected_next_seq(
                     expected, actual,
                 ));
@@ -114,27 +123,23 @@ where
         })
     }
 
-    fn load_run_stream<'a>(
+    fn backend_load<'a>(
         &'a self,
-        run_id: &'a mfm_ids::RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        self.inner.load_run_stream(run_id)
+        verifier: store::JournalLoadVerifier,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunJournal, Self::Error> {
+        let run_id = verifier.run_id().clone();
+        Box::pin(async move {
+            let journal = self.inner.load_committed_journal(&run_id).await?;
+            verifier.accept_verified(journal).map_err(Self::Error::from)
+        })
     }
+}
 
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a mfm_ids::RunId,
-    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        self.inner.load_committed_run_stream(run_id)
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a mfm_ids::RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        self.inner.expected_next_seq(run_id)
-    }
-
+impl<S> store::CurrentProjectionStore for UncertainFactSettlementStore<S>
+where
+    S: store::CurrentProjectionStore + Send + Sync,
+    S::Error: InjectedStaleExpectedNextSeqError + From<store::StoreError>,
+{
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a mfm_ids::RunId,
@@ -329,6 +334,30 @@ pub async fn connect_postgres_with_retry(
     );
 }
 
+/// Loads and certifies one store-owned committed journal for integration assertions.
+pub async fn verified_run_view<S>(
+    store: &S,
+    registry: &mfm_certify::CertificationRegistry,
+    run_id: &mfm_ids::RunId,
+) -> store::VerifiedRunView
+where
+    S: store::RunJournalStore + ?Sized,
+{
+    let journal = store
+        .load_committed_journal(run_id)
+        .await
+        .unwrap_or_else(|error| panic!("load committed journal for {run_id}: {error}"));
+    let (_, spec_bytes) = journal.certified_spec_object();
+    let (_, certificate_bytes) = journal.certificate_object();
+    let certified = mfm_certify::verify_persisted_spec_certificate_with_trusted_registry(
+        spec_bytes,
+        certificate_bytes,
+        registry,
+    )
+    .expect("certify stored run spec");
+    journal.verify(certified).expect("verify committed journal")
+}
+
 /// Builds in-memory REST app state.
 pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     let store = store::AsyncInMemoryRunStore::default();
@@ -338,32 +367,34 @@ pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     )
 }
 
-/// Loads all retained fact-query evidence artifacts referenced by `stream`.
-pub async fn fact_query_evidences(
-    store: &store::AsyncInMemoryRunStore,
-    stream: &[store::KernelEventEnvelope],
-) -> Vec<mfm_facts::FactQueryEvidence> {
+/// Loads all fact-query evidence objects referenced by one verified run view.
+pub fn fact_query_evidences(view: &store::VerifiedRunView) -> Vec<mfm_facts::FactQueryEvidence> {
+    let lifecycle = store::current_lifecycle::read(view);
     let mut evidences = Vec::new();
-    for event in stream {
-        let KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
-            continue;
+    let _ = lifecycle.visit_records(|record| {
+        let store::current_lifecycle::CurrentRecordKindRef::ArtifactReferenced(payload) =
+            record.kind()
+        else {
+            return std::ops::ControlFlow::<()>::Continue(());
         };
         if payload.artifact_ref.role != ArtifactRole::FactQueryEvidence {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
-        let requirement = store::event_artifact_requirements(event.payload())
-            .into_iter()
-            .next()
-            .expect("query evidence artifact requirement");
-        let artifact = store
-            .read_retained_artifact(&requirement)
-            .await
-            .expect("query evidence artifact");
+        let mut requirement = None;
+        let _ = record.visit_artifact_requirements(|candidate| {
+            requirement = Some(candidate.clone());
+            std::ops::ControlFlow::<()>::Break(())
+        });
+        let requirement = requirement.expect("query evidence artifact requirement");
+        let artifact = lifecycle
+            .object_for_requirement(&requirement)
+            .expect("query evidence object");
         evidences.push(
             mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
                 .expect("query evidence bytes"),
         );
-    }
+        std::ops::ControlFlow::Continue(())
+    });
     evidences
 }
 

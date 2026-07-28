@@ -50,38 +50,67 @@ pub(super) fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
 }
 
 pub(super) fn forward_ledger_for_node(
-    projections: &store::ProjectionSnapshot,
+    current: &VerifiedCurrentRun,
     node_id: &NodeId,
 ) -> events::SideEffectLedgerKey {
     let mut found = None;
-    for (_, projection) in projections.side_effects() {
-        if projection.intent.node_id == *node_id
+    let _ = current.lifecycle().visit_side_effects::<()>(|side_effect| {
+        if side_effect.intent().node_id() == node_id
             && matches!(
-                projection.ledger_purpose,
+                side_effect.ledger_purpose(),
                 events::SideEffectLedgerPurpose::Forward
             )
         {
             assert!(
-                found.replace(projection.ledger_key.clone()).is_none(),
+                found.replace(side_effect.ledger_key().clone()).is_none(),
                 "node {node_id} has multiple forward ledgers"
             );
         }
-    }
+        std::ops::ControlFlow::Continue(())
+    });
     found.expect("forward ledger for node")
 }
 
-pub(super) fn side_effect_projection_for_run_node<
-    P: std::borrow::Borrow<store::ProjectionSnapshot>,
->(
-    projections: P,
-    run_id: &RunId,
+pub(super) fn side_effect_for_node<'view>(
+    current: &'view VerifiedCurrentRun,
     node_id: &NodeId,
-) -> Option<store::SideEffectProjection> {
-    let projections = projections.borrow();
-    projections.side_effects().find_map(|(_, projection)| {
-        (projection.run_id == *run_id && projection.intent.node_id == *node_id)
-            .then(|| projection.clone())
-    })
+) -> Option<store::current_lifecycle::CurrentSideEffectRef<'view>> {
+    let mut found = None;
+    let _ = current.lifecycle().visit_side_effects::<()>(|side_effect| {
+        if side_effect.intent().node_id() == node_id {
+            assert!(
+                found.replace(side_effect).is_none(),
+                "node {node_id} has multiple side-effect ledgers"
+            );
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    found
+}
+
+pub(super) fn verified_current_for_store(
+    store: &TestTypedRunStore,
+    fixture: &Fixture,
+) -> VerifiedCurrentRun {
+    let journal = block_on_ready(store.load_committed_journal(&fixture.run_id))
+        .expect("load committed fixture journal");
+    verify_current_run(journal, recertified_runtime_spec(&fixture.runtime_spec))
+        .expect("verify fixture current run")
+}
+
+pub(super) fn with_fixture_saga<T>(
+    current: &VerifiedCurrentRun,
+    fixture: &Fixture,
+    read: impl FnOnce(store::current_lifecycle::CurrentSagaRef<'_>) -> T,
+) -> T {
+    current
+        .lifecycle()
+        .with_saga(
+            &fixture.runtime_spec.spec().saga,
+            &fixture_terminal_policies(fixture),
+            read,
+        )
+        .expect("derive fixture saga")
 }
 
 pub(super) async fn drive_until_side_effect_confirmation_without_output(
@@ -92,24 +121,23 @@ pub(super) async fn drive_until_side_effect_confirmation_without_output(
     output_cell: &CellId,
     context: &str,
 ) {
+    let mut current = load_fixture_current(scheduler, &*store, fixture)
+        .await
+        .expect("load current run");
     for _ in 0..8 {
-        assert_eq!(
-            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect(context),
-            SchedulerStatus::Advanced
-        );
-        let projection_snapshot = store.projection_snapshot();
-        if side_effect_projection_for_run_node(&projection_snapshot, &fixture.run_id, &node.node_id)
-            .is_some_and(|projection| {
-                matches!(
-                    projection.phase,
-                    store::SideEffectPhase::ConfirmationObserved { .. }
-                ) && projection_snapshot.cell_terminal(output_cell).is_none()
-            })
-        {
+        if side_effect_for_node(&current, &node.node_id).is_some_and(|side_effect| {
+            matches!(
+                side_effect.phase(),
+                store::SideEffectPhase::ConfirmationObserved { .. }
+            ) && current.lifecycle().cell(output_cell).is_none()
+        }) {
             return;
         }
+        let result = drive_current_once_with_claim(scheduler, &*store, current)
+            .await
+            .expect(context);
+        assert_eq!(result.status(), SchedulerStatus::Advanced);
+        current = result.into_current_run();
     }
     panic!("{context} was not reached");
 }
@@ -121,19 +149,21 @@ pub(super) async fn drive_until_cells_terminal(
     cells: &[CellId],
     context: &str,
 ) {
+    let mut current = load_fixture_current(scheduler, &*store, fixture)
+        .await
+        .expect("load current run");
     for _ in 0..24 {
         if cells
             .iter()
-            .all(|cell| store.projection_snapshot().cell_terminal(cell).is_some())
+            .all(|cell| current.lifecycle().cell(cell).is_some())
         {
             return;
         }
-        assert_eq!(
-            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect(context),
-            SchedulerStatus::Advanced
-        );
+        let result = drive_current_once_with_claim(scheduler, &*store, current)
+            .await
+            .expect(context);
+        assert_eq!(result.status(), SchedulerStatus::Advanced);
+        current = result.into_current_run();
     }
     panic!("{context} did not become terminal");
 }
@@ -147,26 +177,26 @@ pub(super) async fn drive_until_side_effect_attempt_phase(
     mut phase_matches: impl FnMut(&store::SideEffectPhase) -> bool,
     context: &str,
 ) {
+    let mut current = load_fixture_current(scheduler, &*store, fixture)
+        .await
+        .expect("load current run");
     for _ in 0..24 {
-        let projection_snapshot = store.projection_snapshot();
-        if side_effect_projection_for_attempt(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &projection_snapshot,
+        if side_effect_for_attempt(
+            &current.runtime_spec(),
+            &current.lifecycle(),
             node,
             attempt_id,
         )
         .expect(context)
-        .is_some_and(|projection| phase_matches(&projection.phase))
+        .is_some_and(|side_effect| phase_matches(side_effect.phase()))
         {
             return;
         }
-        assert_eq!(
-            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect(context),
-            SchedulerStatus::Advanced
-        );
+        let result = drive_current_once_with_claim(scheduler, &*store, current)
+            .await
+            .expect(context);
+        assert_eq!(result.status(), SchedulerStatus::Advanced);
+        current = result.into_current_run();
     }
     panic!("{context} was not reached");
 }
@@ -185,32 +215,33 @@ pub(super) async fn drive_until_remediation_phase(
     checkpoint: RemediationPhaseCheckpoint,
     context: &str,
 ) {
+    let mut current = load_fixture_current(scheduler, &*store, fixture)
+        .await
+        .expect("load current run");
     for _ in 0..8 {
-        assert_eq!(
-            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect(context),
-            SchedulerStatus::Advanced
-        );
-        let projection_snapshot = store.projection_snapshot();
-        if remediation_projection_for_forward_pair(&projection_snapshot, forward_pair_id)
-            .is_some_and(|projection| match checkpoint {
+        if remediation_side_effect_for_forward_pair(&current, forward_pair_id).is_some_and(
+            |side_effect| match checkpoint {
                 RemediationPhaseCheckpoint::SubmissionObserved => {
                     matches!(
-                        projection.phase,
+                        side_effect.phase(),
                         store::SideEffectPhase::SubmissionObserved { .. }
                     )
                 }
                 RemediationPhaseCheckpoint::ConfirmationObserved => {
                     matches!(
-                        projection.phase,
+                        side_effect.phase(),
                         store::SideEffectPhase::ConfirmationObserved { .. }
                     )
                 }
-            })
-        {
+            },
+        ) {
             return;
         }
+        let result = drive_current_once_with_claim(scheduler, &*store, current)
+            .await
+            .expect(context);
+        assert_eq!(result.status(), SchedulerStatus::Advanced);
+        current = result.into_current_run();
     }
     panic!("{context} was not reached");
 }
@@ -220,71 +251,90 @@ pub(super) async fn drive_until_compensated_before_terminal(
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
 ) {
+    let mut current = load_fixture_current(scheduler, &*store, fixture)
+        .await
+        .expect("load current run");
+    let terminal_policies = fixture_terminal_policies(fixture);
     for _ in 0..24 {
-        let saga = derive_fixture_saga(fixture, store.projection_snapshot());
-        if saga.run_mode == store::RunMode::Compensated
-            && store.projection_snapshot().run_state(&fixture.run_id) != store::RunState::Completed
+        let run_mode = current
+            .lifecycle()
+            .with_saga(
+                &fixture.runtime_spec.spec().saga,
+                &terminal_policies,
+                |saga| saga.run_mode(),
+            )
+            .expect("derive saga");
+        if run_mode == store::RunMode::Compensated
+            && current.lifecycle().run_state() != store::RunState::Completed
         {
             return;
         }
-        assert_eq!(
-            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive until compensated before terminal"),
-            SchedulerStatus::Advanced
-        );
+        let result = drive_current_once_with_claim(scheduler, &*store, current)
+            .await
+            .expect("drive until compensated before terminal");
+        assert_eq!(result.status(), SchedulerStatus::Advanced);
+        current = result.into_current_run();
     }
     panic!("compensated pre-terminal boundary was not reached");
 }
 
 pub(super) fn remediation_intent_forward_links(
     store: &TestTypedRunStore,
-    run_id: &RunId,
+    fixture: &Fixture,
 ) -> Vec<SideEffectPairId> {
-    store
-        .load_run_stream(run_id)
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                match &payload.ledger_purpose {
-                    events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
-                        Some(forward_pair_id.clone())
-                    }
-                    events::SideEffectLedgerPurpose::Forward => None,
+    let current = verified_current_for_store(store, fixture);
+    let mut links = Vec::new();
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        if let store::current_lifecycle::CurrentRecordKindRef::SideEffectIntentPersisted(payload) =
+            record.kind()
+        {
+            match &payload.ledger_purpose {
+                events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
+                    links.push(forward_pair_id.clone());
                 }
+                events::SideEffectLedgerPurpose::Forward => {}
             }
-            _ => None,
-        })
-        .collect()
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    links
 }
 
-pub(super) fn remediation_projection_for_forward_pair<
-    P: std::borrow::Borrow<store::ProjectionSnapshot>,
->(
-    projections: P,
+pub(super) fn remediation_side_effect_for_forward_pair<'view>(
+    current: &'view VerifiedCurrentRun,
     forward_pair_id: &SideEffectPairId,
-) -> Option<store::SideEffectProjection> {
-    let projections = projections.borrow();
-    projections.side_effects().find_map(|(_, projection)| {
-        matches!(
-            &projection.ledger_purpose,
+) -> Option<store::current_lifecycle::CurrentSideEffectRef<'view>> {
+    let mut found = None;
+    let _ = current.lifecycle().visit_side_effects::<()>(|side_effect| {
+        if matches!(
+            side_effect.ledger_purpose(),
             events::SideEffectLedgerPurpose::Remediation {
                 forward_pair_id: linked,
             } if linked == forward_pair_id
-        )
-        .then(|| projection.clone())
-    })
+        ) {
+            assert!(
+                found.replace(side_effect).is_none(),
+                "forward pair {forward_pair_id} has multiple remediation ledgers"
+            );
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    found
 }
 
 pub(super) fn assert_no_duplicate_side_effect_submissions(
     store: &TestTypedRunStore,
-    run_id: &RunId,
+    fixture: &Fixture,
 ) {
+    let current = verified_current_for_store(store, fixture);
     let mut by_ledger = BTreeMap::<events::SideEffectLedgerKey, usize>::new();
     let mut forward_by_node = BTreeMap::<NodeId, usize>::new();
     let mut remediation_by_forward = BTreeMap::<SideEffectPairId, usize>::new();
-    for event in store.load_run_stream(run_id) {
-        if let events::KernelEventPayload::SideEffectSubmissionObserved(payload) = event.payload() {
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        if let store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionObserved(
+            payload,
+        ) = record.kind()
+        {
             *by_ledger.entry(payload.ledger_key.clone()).or_default() += 1;
             match &payload.ledger_purpose {
                 events::SideEffectLedgerPurpose::Forward => {
@@ -297,7 +347,8 @@ pub(super) fn assert_no_duplicate_side_effect_submissions(
                 }
             }
         }
-    }
+        std::ops::ControlFlow::Continue(())
+    });
     for (ledger, count) in by_ledger {
         assert_eq!(count, 1, "duplicate submission for ledger {ledger}");
     }
@@ -314,52 +365,47 @@ pub(super) fn assert_no_duplicate_side_effect_submissions(
 
 pub(super) fn side_effect_submission_count_for_ledger(
     store: &TestTypedRunStore,
-    run_id: &RunId,
+    fixture: &Fixture,
     ledger_key: &events::SideEffectLedgerKey,
 ) -> usize {
-    store
-        .load_run_stream(run_id)
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::SideEffectSubmissionObserved(payload)
-                    if &payload.ledger_key == ledger_key
-            )
-        })
-        .count()
+    let current = verified_current_for_store(store, fixture);
+    let mut count = 0;
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        if matches!(
+            record.kind(),
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionObserved(payload)
+                if &payload.ledger_key == ledger_key
+        ) {
+            count += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    count
 }
 
 pub(super) fn remediation_submission_count_for_forward_pair(
     store: &TestTypedRunStore,
-    run_id: &RunId,
+    fixture: &Fixture,
     forward_pair_id: &SideEffectPairId,
 ) -> usize {
-    store
-        .load_run_stream(run_id)
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::SideEffectSubmissionObserved(payload)
-                    if matches!(
-                        &payload.ledger_purpose,
-                        events::SideEffectLedgerPurpose::Remediation {
-                            forward_pair_id: linked,
-                        } if linked == forward_pair_id
-                    )
-            )
-        })
-        .count()
-}
-
-pub(super) fn side_effect_fixture_digest(ctx: &ErasedRunCtx<'_>, role: &str) -> ContentDigest {
-    content_digest_json(serde_json::json!({
-        "attempt": ctx.attempt_id().as_str(),
-        "node": ctx.node().node_id.as_str(),
-        "role": role,
-    }))
-    .expect("side-effect fixture digest")
+    let current = verified_current_for_store(store, fixture);
+    let mut count = 0;
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        if matches!(
+            record.kind(),
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionObserved(payload)
+                if matches!(
+                    &payload.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Remediation {
+                        forward_pair_id: linked,
+                    } if linked == forward_pair_id
+                )
+        ) {
+            count += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    count
 }
 
 pub(super) struct SideEffectFixtureIntentOutput {
@@ -380,22 +426,16 @@ pub(super) fn side_effect_fixture_intent_output(
         fixture_side_effect_evidence(21, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());
     let idempotency =
         fixture_side_effect_evidence(34, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());
-    let intent_hash =
-        content_digest_json(serde_json::to_value(&intent).expect("side-effect intent value"))
-            .expect("side-effect intent digest");
-    let intent_artifact_id =
-        ArtifactId::from_digest(intent_hash.algorithm(), *intent_hash.digest());
-    let intent_evidence = side_effect_artifact(
-        ctx,
-        intent_artifact_id.clone(),
-        intent_hash.clone(),
-        events::ArtifactRole::SideEffectIntent,
-    );
+    let artifact_builder = RunnerArtifactBuilder::new(ctx);
+    let intent_artifact = artifact_builder.side_effect_intent(&intent)?;
+    let intent_evidence = intent_artifact.evidence();
+    let intent_hash = intent_evidence.digest.clone();
+    let intent_artifact_id = intent_evidence.artifact_id.clone();
     let intent_artifact_evidence_hash = intent_evidence.evidence_hash().map_err(|error| {
         RuntimeError::InvalidRunnerOutput(format!("intent evidence hash: {error}"))
     })?;
     let staged_artifact =
-        staged_side_effect_artifact(ctx, intent_evidence, ledger.clone(), invocation_epoch)?;
+        artifact_builder.staged_side_effect(&intent_artifact, ledger.clone(), invocation_epoch)?;
     let adapter_binding = ctx
         .node()
         .adapter_bindings
@@ -438,17 +478,6 @@ pub(super) fn side_effect_fixture_intent_output(
     })
 }
 
-pub(super) fn side_effect_fixture_artifact_pair(
-    ctx: &ErasedRunCtx<'_>,
-    role: &str,
-) -> (ArtifactId, ContentDigest) {
-    let digest = side_effect_fixture_digest(ctx, role);
-    (
-        ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-    )
-}
-
 pub(super) fn side_effect_ledger_key_for_ctx(
     ctx: &ErasedRunCtx<'_>,
 ) -> events::SideEffectLedgerKey {
@@ -479,31 +508,35 @@ pub(super) fn side_effect_ledger_purpose_for_ctx(
 }
 
 pub(super) fn forward_pair_for_ledger(
-    projections: &store::ProjectionSnapshot,
+    current: &VerifiedCurrentRun,
     forward_ledger_key: &events::SideEffectLedgerKey,
 ) -> SideEffectPairId {
-    projections
-        .side_effects()
-        .find_map(|(_, projection)| {
-            (projection.ledger_key == *forward_ledger_key).then(|| projection.pair_id.clone())
-        })
-        .expect("forward pair projection")
+    let mut pair_id = None;
+    let _ = current.lifecycle().visit_side_effects::<()>(|side_effect| {
+        if side_effect.ledger_key() == forward_ledger_key {
+            assert!(
+                pair_id.replace(side_effect.pair_id().clone()).is_none(),
+                "ledger {forward_ledger_key} has multiple side-effect pairs"
+            );
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    pair_id.expect("forward side-effect pair")
 }
 
 pub(super) fn linked_forward_pair_for_remediation(
     ctx: &ErasedRunCtx<'_>,
 ) -> Option<SideEffectPairId> {
-    if let Some(projection) = side_effect_projection_for_attempt(
-        ctx.runtime_spec(),
-        ctx.run_id(),
-        ctx.projections(),
+    if let Some(side_effect) = side_effect_for_attempt(
+        &ctx.runtime_spec(),
+        ctx.lifecycle(),
         ctx.node(),
         ctx.attempt_id(),
     )
-    .expect("remediation projection lookup")
+    .expect("remediation side-effect lookup")
     {
         if let events::SideEffectLedgerPurpose::Remediation { forward_pair_id } =
-            &projection.ledger_purpose
+            side_effect.ledger_purpose()
         {
             return Some(forward_pair_id.clone());
         }
@@ -511,20 +544,24 @@ pub(super) fn linked_forward_pair_for_remediation(
     let forward_node_id = ctx
         .runtime_spec()
         .forward_node_for_remediation(&ctx.node().node_id)?;
-    ctx.projections()
-        .side_effects()
-        .find_map(|(_, projection)| {
-            (projection.intent.node_id == *forward_node_id
-                && matches!(
-                    &projection.ledger_purpose,
-                    events::SideEffectLedgerPurpose::Forward
-                )
-                && matches!(
-                    projection.phase,
-                    store::SideEffectPhase::ConfirmationObserved { .. }
-                ))
-            .then(|| projection.pair_id.clone())
-        })
+    let mut pair_id = None;
+    let _ = ctx.lifecycle().visit_side_effects::<()>(|side_effect| {
+        if side_effect.intent().node_id() == forward_node_id
+            && matches!(
+                side_effect.ledger_purpose(),
+                events::SideEffectLedgerPurpose::Forward
+            )
+            && matches!(
+                side_effect.phase(),
+                store::SideEffectPhase::ConfirmationObserved { .. }
+            )
+        {
+            pair_id = Some(side_effect.pair_id().clone());
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    pair_id
 }
 
 pub(super) fn side_effect_claim_owner(
@@ -541,28 +578,6 @@ pub(super) fn side_effect_fencing_token(
 ) -> events::side_effect::ClaimFencingToken {
     events::side_effect::ClaimFencingToken::new(format!("token-{attempt_no}-{generation}"))
         .expect("fencing token")
-}
-
-pub(super) fn side_effect_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact_id: ArtifactId,
-    digest: ContentDigest,
-    role: events::ArtifactRole,
-) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id,
-        digest,
-        byte_len: 19,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(
-            <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
-                .expect("side-effect evidence schema"),
-        ),
-        semantic_type_id: None,
-        producer_node_id: Some(ctx.node().node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: role,
-    }
 }
 
 pub(super) fn runner_side_effect_binding_for_ctx(
@@ -615,15 +630,12 @@ pub(super) fn side_effect_prepared_output(
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> Result<SideEffectFixturePreparedOutput> {
-    let (artifact_id, digest) = side_effect_fixture_artifact_pair(ctx, "prepared");
-    let evidence = side_effect_artifact(
-        ctx,
-        artifact_id,
-        digest,
-        events::ArtifactRole::PreparedInvocation,
-    );
+    let prepared = fixture_side_effect_evidence_for_ctx(ctx, 35);
+    let artifact_builder = RunnerArtifactBuilder::new(ctx);
+    let artifact = artifact_builder.prepared_invocation(&prepared)?;
+    let evidence = artifact.evidence().clone();
     let staged_artifact =
-        staged_side_effect_artifact(ctx, evidence.clone(), ledger.clone(), invocation_epoch)?;
+        artifact_builder.staged_side_effect(&artifact, ledger.clone(), invocation_epoch)?;
     let claim = runner_claim_binding_for_ctx(ctx, claim_generation);
     let binding = runner_side_effect_binding_for_ctx(ctx, ledger, invocation_epoch);
     let payload =

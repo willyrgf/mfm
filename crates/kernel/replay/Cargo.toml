@@ -19,13 +19,10 @@ path = "src/lib.rs"
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
-mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
-mfm-manual-auth = { path = "../manual-auth" }
 mfm-program = { path = "../program" }
-mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 mfm-values = { path = "../values" }
@@ -34,5 +31,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-certify = { path = "../certify" }
+mfm-program-derive = { path = "../program-derive" }
 mfm-store = { path = "../store", features = ["test-support"] }
 trybuild = "1.0"

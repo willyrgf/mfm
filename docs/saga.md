@@ -19,17 +19,18 @@ typed evidence. Core saga v1 records no AC/DC-equivalence proof; `Compensated` a
 
 ## Core Claim
 
-A certified saga run is one append-only typed run whose certified spec, stream, artifacts, and
-certificate prove one of these outcomes:
+A certified saga run is one append-only typed run whose store-verified committed journal and exact
+retained objects are bound to the verified certified spec to produce one non-cloneable
+`VerifiedRunView`. That view proves one of these outcomes:
 
 - forward execution completed with certified public-output evidence;
 - confirmed forward side effects were remediated by linked remediation ledgers;
 - an authorized manual decision resolved the run;
 - the run failed without a compensation or AC/DC-equivalence claim under certified policy.
 
-All saga decisions are derived from the certified spec plus append-only stream facts. Directive
-selection, obligation state, run mode, and manual-block state are projections, not appendable
-control events.
+All saga decisions are derived by the store-owned certified-history fold held in that view.
+Directive selection, obligation state, run mode, and manual-block state are fold results, not
+appendable control events or consumer-rebuilt projections.
 
 The kernel encodes saga authority in proof objects instead of repeated validators:
 
@@ -46,9 +47,10 @@ The kernel encodes saga authority in proof objects instead of repeated validator
 - `SagaTerminalProof` is required to commit completed, compensated, manually resolved, and
   failed-without-claim terminal saga outcomes.
 
-Manual-resolution terminalization rebuilds and re-verifies proof authority from the current
-certified prefix plus retained evidence and authorization artifacts. Scheduler-local proof caches
-must not authorize terminal saga commits.
+`VerifiedManualResolutionForPrefix` authorizes a new manual-resolution commit. Once that event is
+historical, terminal saga planning trusts only the authorization-verified fold in
+`VerifiedRunView`; it does not rebuild or reverify the persisted proof. Scheduler-local proof
+caches must not authorize terminal saga commits.
 
 ## Certified Policy
 
@@ -72,7 +74,7 @@ to the forward side-effect node they compensate. Remediation reuses the side-eff
 
 ## Engagement And Quiescence
 
-Saga handling engages at the first stream event that proves one of these facts:
+Saga handling engages at the first committed journal event that proves one of these facts:
 
 - a non-retryable attempt or side-effect failure was recorded;
 - a forward side-effect ledger became ambiguous.
@@ -81,11 +83,12 @@ After engagement, no new forward side-effect boundary crossings may be admitted.
 terminal evidence for already past-boundary forward ledgers may still arrive. Before classifying
 obligations, runtime drives every past-boundary forward ledger to a quiescent phase such as
 confirmation, not-submitted proof, failure, or ambiguity.
-The store is the source of truth for this forward fence. Runtime can reject impossible scheduling
-choices early, but every stream reader relies on store admission and projection rules.
+The store-owned journal fold is the source of truth for this forward fence. Runtime can reject
+impossible scheduling choices early, but every consumer borrows the same verified view rather than
+rebuilding the fence from records or projections.
 
-Obligation classification is over the full current stream, not the engagement event prefix. With the
-forward fence, all readers of the same stream derive the same obligation set and run mode.
+Obligation classification is over the full current verified view, not the engagement event prefix.
+With the forward fence, all borrowers of that view observe the same obligation set and run mode.
 
 ## Run Modes
 
@@ -128,8 +131,17 @@ Certification uses the live registry as authority for:
 - operator authority snapshots and their digests;
 - supported signing scheme and quorum shape.
 
-The certified spec and certificate carry replay authority. Replay does not call a live signer,
-verifier registry, certification registry, keystore, environment variable, or runtime signer source.
+The certified spec and certificate carry replay authority. Physical `CommittedRunJournal`
+construction validates records, retained objects, and the compact physical fold but does not verify
+manual-resolution signatures. `CommittedRunJournal::verify` binds the exact certified spec and
+invokes the deterministic `mfm-manual-auth` verifier over the exact prefix claim, retained proof
+bytes, certified verifier identity, certified operator authority snapshot, signing scheme, and
+quorum. That semantic pass uses no live operator, signer, verifier registry, certification registry,
+keystore, environment variable, or runtime signer source.
+
+Only after every historical authorization succeeds does `mfm-store` return the fully
+authorization-verified `VerifiedRunView`. Runtime, replay, and status trust its derived fold and do
+not reconstruct or reverify historical proof.
 
 `ManualResolutionRecorded` references exactly two artifacts:
 
@@ -194,19 +206,28 @@ saga handling; standalone ambiguity evidence is rejected.
 
 ## Layer Authority
 
-`mfm-store` remains append-only and structural. It owns envelopes, sequence numbers, ordinals,
-logical keys, artifact evidence admission, stream-derived preconditions, and projections. It does
-not certify schemas, verify signatures, resolve operators, or decide domain truth.
+`mfm-store` owns append admission, envelopes, sequence numbers, ordinals, logical keys, artifact
+evidence admission, stream-derived preconditions, projections, the committed-journal physical
+fold, and the sole certified-history fold. Durable adapters implement the doc-hidden
+`RunJournalBackend` SPI; consumers use the sealed `RunJournalStore` append/load surface. A load
+returns an opaque `CommittedRunJournal` only after validating committed records and exact retained
+objects under one backend snapshot. That physical load does not verify signatures. When the journal
+consumes the exact `CertifiedTypedSpec`, the store-owned semantic fold performs deterministic
+`mfm-manual-auth` verification against certified replay authority. It resolves no live operator,
+signer, or keystore and does not decide external truth.
 
-`mfm-runtime` owns spec-aware saga advancement. It rebuilds verified history from the run stream,
-derives engagement, quiescence, obligations, remediation order, and manual-block state, then
-constructs guarded commits from certified runtime authority.
+`mfm-runtime` owns spec-aware saga advancement. It borrows the one `VerifiedRunView` produced when
+the committed journal completes that semantic pass, reads store-derived engagement, quiescence,
+obligations, remediation order, manual-block state, and historical authorization, then constructs
+guarded commits from that certified authority. It does not rebuild history, retain a parallel
+projection, or reverify historical proof.
 
-`mfm-replay` verifies from the certified spec, certificate, stream, retained artifact evidence, and
-retained proof bytes only. A historical manual resolution is rejected unless the prefix derives
-`ManualBlocked`, artifacts match the event and certified roles, the proof claim exactly matches the
-event and prefix, signatures verify, the signers are in the certified authority snapshot, and quorum
-is satisfied.
+`mfm-replay` bootstraps the exact certified spec and certificate from the committed journal, binds
+that verified spec back into the journal, and borrows the resulting fully
+authorization-verified `VerifiedRunView`. The store has already rejected any historical manual
+resolution whose verified prefix is not `ManualBlocked`, whose objects or claim do not match, or
+whose signatures, certified operators, or quorum fail. Replay trusts that fold and does not repeat
+the verification.
 
 `mfm-app`, CLI, and REST expose status and assembly surfaces only. Public status may show required
 manual evidence schema, signing scheme, authority id, allowed operator public identities or a safe

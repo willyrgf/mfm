@@ -3,6 +3,12 @@ use super::*;
 /// Error returned by typed store contract validation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
+    /// No committed journal exists for the requested run.
+    #[error("committed journal not found for run {run_id}")]
+    RunNotFound {
+        /// Requested run id.
+        run_id: RunId,
+    },
     /// A commit contained no payloads.
     #[error("typed commit cannot be empty")]
     EmptyCommit,

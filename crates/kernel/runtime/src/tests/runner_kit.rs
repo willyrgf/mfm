@@ -1,239 +1,115 @@
 use super::*;
 
-#[test]
-fn runner_kit_artifact_lookup_uses_exact_evidence_identity() {
-    let fixture = fixture();
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let bytes = br#"{"amount":4}"#;
-    let matching = runner_kit_value_artifact(
-        bytes,
-        events::ArtifactRole::StateOutput,
-        Some(node.node_id.clone()),
-        None,
-    );
-    let other_producer = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, D8);
-    let mismatched_producer = runner_kit_value_artifact(
-        bytes,
-        events::ArtifactRole::StateOutput,
-        Some(other_producer),
-        None,
-    );
-    assert_eq!(matching.artifact_id, mismatched_producer.artifact_id);
-    let matching_hash = matching.evidence_hash().expect("matching evidence hash");
-    let mismatched_hash = mismatched_producer
-        .evidence_hash()
-        .expect("mismatched evidence hash");
-    assert_ne!(matching_hash, mismatched_hash);
-
-    let artifacts = RunnerKitArtifactProvider::new(vec![(bytes.to_vec(), matching.clone())]);
-    let hit = test_event_artifact_requirement(&matching, matching_hash);
-    block_on_ready(artifacts.read_retained_artifact(&hit)).expect("exact evidence hit");
-
-    let miss = test_event_artifact_requirement(&matching, mismatched_hash);
-    let error =
-        block_on_ready(artifacts.read_retained_artifact(&miss)).expect_err("wrong evidence");
-    assert!(matches!(error, store::StoreError::MissingArtifact { .. }));
-}
-
-fn test_event_artifact_requirement(
-    evidence: &store::ArtifactEvidenceRef,
-    evidence_hash: ContentDigest,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: evidence.artifact_id.clone(),
-        evidence_hash,
-        digest: Some(evidence.digest.clone()),
-        byte_len: Some(evidence.byte_len),
-        media_type: Some(evidence.media_type.clone()),
-        schema_id: evidence.schema_id.clone(),
-        semantic_type_id: evidence.semantic_type_id.clone(),
-        producer_node_id: evidence.producer_node_id.clone(),
-        producer_seed_id: evidence.producer_seed_id.clone(),
-        artifact_role: Some(evidence.artifact_role),
-    }
+fn started_current(fixture: &Fixture) -> VerifiedCurrentRun {
+    let scheduler = test_scheduler(registered_fixture_runners(fixture));
+    let mut store = TestTypedRunStore::new();
+    block_on_ready(started_fixture_current(
+        &scheduler,
+        &mut store,
+        fixture,
+        vec![fixture.seed_ref.clone()],
+    ))
+    .expect("started fixture current run")
 }
 
 #[test]
-fn runner_kit_loads_config_and_materialized_inputs() {
+fn exact_object_lookup_rejects_same_content_with_wrong_evidence_hash() {
+    let fixture = fixture();
+    let current = started_current(&fixture);
+    let lifecycle = current.lifecycle();
+    let mut requirement = store::seed_cell_artifact_requirement(&fixture.seed_ref);
+    assert!(
+        lifecycle.object_for_requirement(&requirement).is_some(),
+        "the exact admitted seed requirement resolves"
+    );
+
+    requirement.evidence_hash = content(0xee);
+    assert!(
+        lifecycle.object_for_requirement(&requirement).is_none(),
+        "the same artifact id and content must not authorize a different evidence identity"
+    );
+}
+
+#[test]
+fn exact_object_lookup_rejects_object_absent_from_the_exact_event_requirement() {
+    let fixture = fixture();
+    let current = started_current(&fixture);
+    let lifecycle = current.lifecycle();
+    let admitted = store::seed_cell_artifact_requirement(&fixture.seed_ref);
+    let mut unrelated = admitted.clone();
+    unrelated.source = store::EventArtifactReferenceSource::ArtifactReferenced;
+
+    assert!(lifecycle.object_for_requirement(&admitted).is_some());
+    assert!(
+        lifecycle.object_for_requirement(&unrelated).is_none(),
+        "object presence alone must not mint event-requirement authority"
+    );
+}
+
+#[test]
+fn admitted_seed_input_resolves_its_full_run_admitted_requirement() {
+    let fixture = fixture();
+    let current = started_current(&fixture);
+    let requirement = store::seed_cell_artifact_requirement(&fixture.seed_ref);
+    let object = current
+        .lifecycle()
+        .object_for_requirement(&requirement)
+        .expect("full RunAdmitted seed requirement");
+
+    assert_eq!(object.bytes(), CERTIFIER_SEED_BYTES);
+    assert_eq!(
+        object.evidence().artifact_id,
+        fixture.seed_ref.seed_artifact.artifact_id
+    );
+    assert_eq!(
+        object.evidence().evidence_hash().expect("evidence hash"),
+        requirement.evidence_hash
+    );
+}
+
+#[test]
+fn runner_kit_loads_certified_config_and_materialized_seed_input() {
     let fixture = fixture();
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let left_bytes = br#"{"amount":4}"#;
-    let right_a_bytes = br#"{"amount":7}"#;
-    let right_b_bytes = br#"{"amount":9}"#;
+    with_runner_erased_ctx_for_node(&fixture, node, |ctx| {
+        let config =
+            load_runner_config_for_node::<CertifierConfig>(&ctx, ctx.node()).expect("config");
+        assert_eq!(config.into_inner(), CertifierConfig { multiplier: 3 });
+        let input = load_materialized_input::<CertifierValue>(&ctx).expect("seed input");
+        assert_eq!(input, CertifierValue { amount: 2 });
+    });
+}
 
-    let config_evidence = runner_kit_config_artifact(node, TEST_CONFIG_BYTES);
-    let left_evidence = runner_kit_value_artifact(
-        left_bytes,
-        events::ArtifactRole::StateOutput,
-        Some(node.node_id.clone()),
-        None,
-    );
-    let right_a_evidence = runner_kit_value_artifact(
-        right_a_bytes,
-        events::ArtifactRole::SeedInput,
-        None,
-        Some(fixture.seed_ref.seed_id.clone()),
-    );
-    let right_b_evidence = runner_kit_value_artifact(
-        right_b_bytes,
-        events::ArtifactRole::StateOutput,
-        Some(node.node_id.clone()),
-        None,
-    );
-    let artifacts = RunnerKitArtifactProvider::new(vec![
-        (TEST_CONFIG_BYTES.to_vec(), config_evidence),
-        (left_bytes.to_vec(), left_evidence.clone()),
-        (right_a_bytes.to_vec(), right_a_evidence.clone()),
-        (right_b_bytes.to_vec(), right_b_evidence.clone()),
-    ]);
-
-    let config = block_on_ready(load_runner_config_for_node::<RunnerKitEmptyConfig>(
-        node, &artifacts,
-    ))
-    .expect("runner config");
-    assert_eq!(config.into_inner(), RunnerKitEmptyConfig {});
-
-    let left_node = runner_kit_input_cell(
-        &left_evidence,
-        MaterializedCellTerminal::Produced {
-            producer_node_id: node.node_id.clone(),
-            artifact_id: left_evidence.artifact_id.clone(),
-            content_digest: left_evidence.digest.clone(),
-            evidence_hash: left_evidence.evidence_hash().expect("left evidence hash"),
-        },
-    );
-    let right_a_node = runner_kit_input_cell(
-        &right_a_evidence,
-        MaterializedCellTerminal::Seed {
-            seed_id: fixture.seed_ref.seed_id.clone(),
-            artifact_id: right_a_evidence.artifact_id.clone(),
-            content_digest: right_a_evidence.digest.clone(),
-            evidence_hash: right_a_evidence
-                .evidence_hash()
-                .expect("right_a evidence hash"),
-        },
-    );
-    let right_b_node = runner_kit_input_cell(
-        &right_b_evidence,
-        MaterializedCellTerminal::Produced {
-            producer_node_id: node.node_id.clone(),
-            artifact_id: right_b_evidence.artifact_id.clone(),
-            content_digest: right_b_evidence.digest.clone(),
-            evidence_hash: right_b_evidence
-                .evidence_hash()
-                .expect("right_b evidence hash"),
-        },
-    );
-    let inputs = MaterializedInputs {
-        input_schema_id: fixture_value_schema_id(),
-        root: MaterializedInputNode::Struct(vec![
-            NamedMaterializedInput {
-                field_path: spec::PublicFieldPath::new("left").expect("field path"),
-                node: left_node.clone(),
-            },
-            NamedMaterializedInput {
-                field_path: spec::PublicFieldPath::new("right").expect("field path"),
-                node: MaterializedInputNode::Vec(vec![right_a_node.clone(), right_b_node.clone()]),
-            },
-        ]),
-    };
-
-    let decoded = block_on_ready(load_materialized_struct_input::<RunnerKitStructInput>(
-        &inputs, &artifacts,
-    ))
-    .expect("struct input");
-    assert_eq!(decoded.left, CertifierValue { amount: 4 });
-    assert_eq!(
-        decoded.right,
-        vec![CertifierValue { amount: 7 }, CertifierValue { amount: 9 }]
-    );
-
-    let left = block_on_ready(load_materialized_struct_field_value::<CertifierValue>(
-        &inputs, "left", &artifacts,
-    ))
-    .expect("struct field");
-    assert_eq!(left, CertifierValue { amount: 4 });
-
-    let non_empty_inputs = MaterializedInputs {
-        input_schema_id: fixture_value_schema_id(),
-        root: MaterializedInputNode::NonEmptyVec(vec![right_a_node, right_b_node]),
-    };
-    let values = block_on_ready(load_non_empty_materialized_input::<CertifierValue>(
-        &non_empty_inputs,
-        &artifacts,
-    ))
-    .expect("non-empty input");
-    assert_eq!(
-        values.values(),
-        &[CertifierValue { amount: 7 }, CertifierValue { amount: 9 }]
-    );
+#[test]
+fn runner_kit_rejects_non_certified_node_config_load() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    with_runner_erased_ctx_for_node(&fixture, node, |ctx| {
+        let mut non_certified = ctx.node().clone();
+        non_certified.config_ref = node_by_output(&fixture, &fixture.cell_b).config_ref.clone();
+        let error = load_runner_config_for_node::<CertifierConfig>(&ctx, &non_certified)
+            .expect_err("a non-certified NodeSpec must not load configuration");
+        assert!(matches!(
+            error,
+            RuntimeError::InvalidRunnerOutput(message)
+                if message.contains("not part of the certified runtime spec")
+        ));
+    });
 }
 
 #[test]
 fn runner_kit_rejects_skipped_materialized_input_cell() {
-    let artifacts = RunnerKitArtifactProvider::default();
-    let error = block_on_ready(load_materialized_node_value::<CertifierValue>(
-        &runner_kit_skipped_cell(),
-        &artifacts,
-    ))
-    .expect_err("skipped cells cannot be loaded");
-
-    assert!(matches!(
-        error,
-        RuntimeError::InvalidRunnerOutput(message) if message.contains("skipped")
-    ));
-}
-
-#[test]
-fn runner_kit_rejects_malformed_certified_config_and_input_values() {
     let fixture = fixture();
-    let mut node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let malformed_config = b"42";
-    let config_digest = digest_for_bytes(malformed_config);
-    node.config_ref.artifact_id =
-        ArtifactId::from_digest(config_digest.algorithm(), *config_digest.digest());
-    node.config_ref.digest = config_digest;
-    node.config_ref.byte_len = malformed_config.len() as u64;
-    let config_evidence = runner_kit_config_artifact(&node, malformed_config);
-    let config_artifacts =
-        RunnerKitArtifactProvider::new(vec![(malformed_config.to_vec(), config_evidence)]);
-    let config_error = block_on_ready(load_runner_config_for_node::<RunnerKitEmptyConfig>(
-        &node,
-        &config_artifacts,
-    ))
-    .expect_err("malformed typed config must reject");
-    assert!(matches!(config_error, RuntimeError::InvalidRunnerOutput(_)));
-
-    let malformed_input = br#"{"amount":"not-an-integer"}"#;
-    let input_evidence = runner_kit_value_artifact(
-        malformed_input,
-        events::ArtifactRole::StateOutput,
-        Some(node.node_id.clone()),
-        None,
-    );
-    let input_artifacts =
-        RunnerKitArtifactProvider::new(vec![(malformed_input.to_vec(), input_evidence.clone())]);
-    let input_node = runner_kit_input_cell(
-        &input_evidence,
-        MaterializedCellTerminal::Produced {
-            producer_node_id: node.node_id.clone(),
-            artifact_id: input_evidence.artifact_id.clone(),
-            content_digest: input_evidence.digest.clone(),
-            evidence_hash: input_evidence.evidence_hash().expect("input evidence hash"),
-        },
-    );
-    let inputs = MaterializedInputs {
-        input_schema_id: <CertifierValue as mfm_values::StateInput>::input_schema_id()
-            .expect("certifier input schema"),
-        root: input_node,
-    };
-    let input_error = block_on_ready(load_materialized_input::<CertifierValue>(
-        &inputs,
-        &input_artifacts,
-    ))
-    .expect_err("malformed typed input must reject");
-    assert!(matches!(input_error, RuntimeError::InvalidRunnerOutput(_)));
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    with_runner_erased_ctx_for_node(&fixture, node, |ctx| {
+        let error =
+            load_materialized_node_value::<CertifierValue>(&ctx, &runner_kit_skipped_cell())
+                .expect_err("skipped cells cannot be loaded");
+        assert!(matches!(
+            error,
+            RuntimeError::InvalidRunnerOutput(message) if message.contains("skipped")
+        ));
+    });
 }
 
 #[test]
@@ -330,8 +206,7 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
         assert!(matches!(
             role_mismatch,
             RuntimeError::InvalidRunnerOutput(message)
-                if message.contains("fact_response")
-                    && message.contains("state_output")
+                if message.contains("fact_response") && message.contains("state_output")
         ));
 
         let mut state_output = RunnerOutputBuilder::new(&ctx);
@@ -394,13 +269,10 @@ async fn external_read_runner_awaits_pending_async_ingress_validation() {
     let launch = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let runner = ExternalReadRunner::<RuntimeReadState, _>::new(
-        Arc::new(RunnerKitArtifactProvider::default()),
-        PendingIngressExecutor {
-            started: Mutex::new(Some(started_tx)),
-            release: Mutex::new(Some(release_rx)),
-        },
-    );
+    let runner = ExternalReadRunner::<RuntimeReadState, _>::new(PendingIngressExecutor {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(Some(release_rx)),
+    });
     let context = RunnerIngressContext::new(&fixture.runtime_spec, node, &launch);
     let mut validation = ErasedNodeRunner::validate_ingress(&runner, context);
 
@@ -410,196 +282,4 @@ async fn external_read_runner_awaits_pending_async_ingress_validation() {
     }
     release_tx.send(()).expect("release pending validator");
     validation.await.expect("async ingress validation");
-}
-
-#[tokio::test]
-async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
-    let fixture = fixture();
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
-    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
-    let projections = store.projection_snapshot().clone();
-    let (fact_ref, descriptor_projection, query_projection) =
-        test_returned_fact_authority(&fixture, node);
-    let projections = projection_snapshot_with_returned_fact_authority(
-        &projections,
-        descriptor_projection.clone(),
-        query_projection.clone(),
-    );
-    let run_stream = store.load_run_stream(&fixture.run_id);
-    let committed =
-        store::CommittedRunStream::from_events(fixture.run_id.clone(), run_stream.clone())
-            .expect("committed stream");
-    let view = RuntimeRunView::from_committed_stream(&fixture.runtime_spec, &committed)
-        .expect("runtime view");
-    let view = RuntimeRunView {
-        projections: projections.clone(),
-        ..view
-    };
-    let descriptor = fixture
-        .runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("state descriptor");
-    let output_cell = fixture
-        .runtime_spec
-        .cell(&node.output_cell)
-        .expect("output cell");
-    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let caps = CertifiedRuntimeCapabilities::for_node(node);
-    let invocation = PreparedRunnerInvocation {
-        runtime_spec: &fixture.runtime_spec,
-        run_id: &fixture.run_id,
-        spec_hash: fixture.runtime_spec.spec_hash(),
-        node,
-        descriptor,
-        output_cell,
-        context: fixture
-            .runtime_spec
-            .invocation_context_for_node(node)
-            .expect("invocation context"),
-        attempt_id: &attempt_id,
-        attempt_no: 1,
-        config_artifact,
-        inputs: MaterializedInputs {
-            input_schema_id: node.input_bindings.input_schema_id.clone(),
-            root: MaterializedInputNode::Unit,
-        },
-        caps,
-        projections: &projections,
-        run_stream: &run_stream,
-        view: &view,
-    };
-    let ctx = ErasedRunCtx::from_prepared(&invocation);
-    let output_bytes = br#"{"amount":11}"#.to_vec();
-    let state_evidence =
-        state_output_artifact_for_bytes(ctx.node(), ctx.descriptor(), &output_bytes);
-    let state_artifact =
-        StagedArtifact::inline_attempt_artifact(&ctx, output_bytes, state_evidence.clone())
-            .expect("stage state output");
-    let query_evidence = test_fact_query_evidence_with_returned_refs(vec![fact_ref.clone()]);
-    let mut query_output = RunnerOutputBuilder::new(&ctx);
-    query_output
-        .record_fact_query_evidence(query_evidence)
-        .expect("record query evidence");
-    let query_output = query_output.finish();
-    let mut staged_artifacts = vec![state_artifact];
-    staged_artifacts.extend(query_output.staged_artifacts().iter().cloned());
-    let mut missing_query_retention_refs = query_output.staged_retention_refs().to_vec();
-    missing_query_retention_refs[0].refs =
-        vec![state_evidence.retention_ref().expect("state retention ref")];
-    let missing_query_output = fact_query_terminal_output(
-        &ctx,
-        &state_evidence,
-        staged_artifacts.clone(),
-        missing_query_retention_refs,
-    );
-    let missing_query_error =
-        match prepare_runner_output_for_invocation(&invocation, missing_query_output) {
-            Ok(_) => panic!("missing query evidence retention authority rejects at commit prep"),
-            Err(error) => error,
-        };
-    assert!(matches!(
-        missing_query_error,
-        RuntimeError::InvalidRunnerOutput(message)
-            if message.contains("missing query evidence artifact")
-    ));
-
-    let mut tampered_retention_refs = query_output.staged_retention_refs().to_vec();
-    tampered_retention_refs[0]
-        .refs
-        .retain(|reference| reference.role != events::ArtifactRole::FactDescriptor);
-    let tampered_output = fact_query_terminal_output(
-        &ctx,
-        &state_evidence,
-        staged_artifacts.clone(),
-        tampered_retention_refs,
-    );
-    let tampered_error = match prepare_runner_output_for_invocation(&invocation, tampered_output) {
-        Ok(_) => panic!("missing descriptor retention authority rejects at commit prep"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        tampered_error,
-        RuntimeError::InvalidRunnerOutput(message)
-            if message.contains("missing descriptor artifact authority")
-    ));
-
-    let output = fact_query_terminal_output(
-        &ctx,
-        &state_evidence,
-        staged_artifacts,
-        query_output.staged_retention_refs().to_vec(),
-    );
-    let prepared = prepare_runner_output_for_invocation(&invocation, output)
-        .expect("prepare runner output with returned fact query refs");
-    let query_reference = prepared
-        .request()
-        .payloads()
-        .iter()
-        .find_map(|payload| match payload {
-            events::KernelEventPayload::ArtifactReferenced(payload)
-                if payload.artifact_ref.role == events::ArtifactRole::FactQueryEvidence =>
-            {
-                Some(payload)
-            }
-            _ => None,
-        })
-        .expect("fact query evidence artifact reference");
-    assert_eq!(
-        query_reference.artifact_ref.schema_id,
-        mfm_facts::fact_query_evidence_schema_id().expect("query evidence schema")
-    );
-    assert!(query_reference.artifact_ref.semantic_type_id.is_none());
-    let retained_refs = prepared
-        .request()
-        .payloads()
-        .iter()
-        .find_map(|payload| match payload {
-            events::KernelEventPayload::RetentionRefsAppended(payload)
-                if payload.reason == events::RetentionReason::RuntimeEvidence =>
-            {
-                Some(payload.refs.as_slice())
-            }
-            _ => None,
-        })
-        .expect("runtime evidence retention refs");
-
-    assert!(retained_refs.contains(&events::RetentionRef {
-        artifact_id: query_reference.artifact_ref.artifact_id.clone(),
-        role: events::ArtifactRole::FactQueryEvidence,
-        evidence_hash: prepared
-            .request()
-            .required_artifacts()
-            .iter()
-            .find(|evidence| {
-                evidence.artifact_id == query_reference.artifact_ref.artifact_id
-                    && evidence.digest == query_reference.artifact_ref.content_digest
-            })
-            .expect("query evidence admission")
-            .evidence_hash()
-            .expect("query evidence hash"),
-        content_digest: query_reference.artifact_ref.content_digest.clone(),
-    }));
-    assert!(retained_refs.contains(&events::RetentionRef {
-        artifact_id: descriptor_projection.descriptor_artifact_id.clone(),
-        role: events::ArtifactRole::FactDescriptor,
-        evidence_hash: descriptor_projection
-            .descriptor_artifact_evidence
-            .evidence_hash()
-            .expect("descriptor evidence hash"),
-        content_digest: descriptor_projection.descriptor_hash.clone(),
-    }));
-    assert!(retained_refs.contains(&events::RetentionRef {
-        artifact_id: query_projection.artifact_id().clone(),
-        role: events::ArtifactRole::FactResponse,
-        evidence_hash: query_projection.artifact_evidence_hash().clone(),
-        content_digest: query_projection.response_hash().clone(),
-    }));
-    assert_eq!(retained_refs.len(), 3);
-    assert!(!prepared
-        .request()
-        .payloads()
-        .iter()
-        .any(|payload| matches!(payload, events::KernelEventPayload::FactRecorded(_))));
 }

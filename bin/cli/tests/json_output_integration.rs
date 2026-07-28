@@ -64,7 +64,7 @@ fn json_cli_error_without_database(args: &[&str]) -> (Option<i32>, ErrorResponse
 }
 
 #[test]
-fn run_stream_command_filters_range_after_authoritative_run_stream_validation() {
+fn run_stream_command_filters_range_after_verified_view_loading() {
     let source = include_str!("../src/commands/run/stream.rs");
     let range_validation = source
         .find("if args.from_seq == 0")
@@ -76,7 +76,7 @@ fn run_stream_command_filters_range_after_authoritative_run_stream_validation() 
 
     assert!(
         !source.contains(".load_run_stream("),
-        "run stream command must delegate to app-level full stream validation"
+        "run stream command must delegate to app-level verified-view loading"
     );
     assert!(range_validation < authoritative_read);
     assert!(authoritative_read < range_filter);

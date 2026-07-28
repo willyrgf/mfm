@@ -8,8 +8,9 @@ use mfm_program::{CertifiedContext, StateContext};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::history::{committed_config_artifact, materialize_inputs, RuntimeRunView};
-use crate::{CertifiedRuntimeSpec, Result};
+use crate::history::{committed_config_artifact, materialize_inputs};
+use crate::spec_authority::{CurrentRuntimeSpecRef, CurrentSpecRead};
+use crate::Result;
 
 /// Certified transition context authority for one runner invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,10 +19,10 @@ pub struct CertifiedInvocationContext {
 }
 
 impl CertifiedInvocationContext {
-    pub(crate) fn for_node(
-        runtime_spec: &CertifiedRuntimeSpec,
-        node: &spec::NodeSpec,
-    ) -> Result<Self> {
+    pub(crate) fn for_node<S>(runtime_spec: &S, node: &spec::NodeSpec) -> Result<Self>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         match &node.context {
             spec::NodeContextSpec::NoContext => Ok(Self { spec: None }),
             spec::NodeContextSpec::Required { context_ref } => {
@@ -55,7 +56,7 @@ impl CertifiedInvocationContext {
 /// capability descriptors, and recovery facts into the runner without exposing a public
 /// constructor.
 pub struct PreparedRunnerInvocation<'a> {
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) runtime_spec: CurrentRuntimeSpecRef<'a>,
     pub(crate) run_id: &'a RunId,
     pub(crate) spec_hash: &'a SpecHash,
     pub(crate) node: &'a spec::NodeSpec,
@@ -67,9 +68,7 @@ pub struct PreparedRunnerInvocation<'a> {
     pub(crate) config_artifact: store::ArtifactEvidenceRef,
     pub(crate) inputs: MaterializedInputs,
     pub(crate) caps: CertifiedRuntimeCapabilities,
-    pub(crate) projections: &'a store::ProjectionSnapshot,
-    pub(crate) run_stream: &'a [store::KernelEventEnvelope],
-    pub(crate) view: &'a RuntimeRunView,
+    pub(crate) lifecycle: store::current_lifecycle::CurrentLifecycleReader<'a>,
 }
 
 impl<'a> PreparedRunnerInvocation<'a> {
@@ -128,40 +127,31 @@ impl<'a> PreparedRunnerInvocation<'a> {
         &self.caps
     }
 
-    /// Store-owned projection snapshot observed before the runner invocation.
-    pub fn projections(&self) -> &store::ProjectionSnapshot {
-        self.projections
+    pub(crate) fn runtime_spec(&self) -> CurrentRuntimeSpecRef<'_> {
+        self.runtime_spec.current_spec_ref()
     }
 
-    pub(crate) fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {
-        self.runtime_spec
-    }
-
-    pub(crate) fn run_stream(&self) -> &'a [store::KernelEventEnvelope] {
-        self.run_stream
-    }
-
-    pub(crate) fn artifact_byte_authority(&self) -> &'a store::ArtifactByteAuthorityMap {
-        &self.view.artifact_byte_authority
+    pub(crate) fn lifecycle(&self) -> &store::current_lifecycle::CurrentLifecycleReader<'a> {
+        &self.lifecycle
     }
 }
 
 /// Builder for sealed runner invocation authority.
 pub(crate) struct InvocationBuilder<'a> {
-    runtime_spec: &'a CertifiedRuntimeSpec,
+    runtime_spec: CurrentRuntimeSpecRef<'a>,
     run_id: &'a RunId,
     node: &'a spec::NodeSpec,
     descriptor: &'a spec::StateDescriptorIdentity,
     output_cell: &'a spec::CellSpec,
     attempt_id: &'a AttemptId,
     attempt_no: u32,
-    view: &'a RuntimeRunView,
+    lifecycle: store::current_lifecycle::CurrentLifecycleReader<'a>,
 }
 
 /// Certified inputs needed to construct a sealed runner invocation.
 pub(crate) struct InvocationBuilderInput<'a> {
     /// Runtime authority wrapper for the certified spec.
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) runtime_spec: CurrentRuntimeSpecRef<'a>,
     /// Run id being executed.
     pub(crate) run_id: &'a RunId,
     /// Certified node being invoked.
@@ -174,8 +164,8 @@ pub(crate) struct InvocationBuilderInput<'a> {
     pub(crate) attempt_id: &'a AttemptId,
     /// Attempt number for this node.
     pub(crate) attempt_no: u32,
-    /// Verified latest run view used for materialization.
-    pub(crate) view: &'a RuntimeRunView,
+    /// Borrowed verified current lifecycle used for materialization.
+    pub(crate) lifecycle: store::current_lifecycle::CurrentLifecycleReader<'a>,
 }
 
 struct InvocationMaterial {
@@ -196,7 +186,7 @@ impl<'a> InvocationBuilder<'a> {
             output_cell,
             attempt_id,
             attempt_no,
-            view,
+            lifecycle,
         } = input;
         Self {
             runtime_spec,
@@ -206,15 +196,15 @@ impl<'a> InvocationBuilder<'a> {
             output_cell,
             attempt_id,
             attempt_no,
-            view,
+            lifecycle,
         }
     }
 
     fn materialize(&self) -> Result<InvocationMaterial> {
-        let config_artifact = committed_config_artifact(self.node, self.view)?;
-        let inputs = materialize_inputs(self.runtime_spec, self.node, self.view)?;
+        let config_artifact = committed_config_artifact(self.node, &self.lifecycle)?;
+        let inputs = materialize_inputs(&self.runtime_spec, self.node, &self.lifecycle)?;
         let caps = CertifiedRuntimeCapabilities::for_node(self.node);
-        let context = self.runtime_spec.invocation_context_for_node(self.node)?;
+        let context = CertifiedInvocationContext::for_node(&self.runtime_spec, self.node)?;
         Ok(InvocationMaterial {
             config_artifact,
             inputs,
@@ -227,9 +217,9 @@ impl<'a> InvocationBuilder<'a> {
     pub(crate) fn build(self) -> Result<PreparedRunnerInvocation<'a>> {
         let material = self.materialize()?;
         Ok(PreparedRunnerInvocation {
+            spec_hash: self.runtime_spec.spec_hash(),
             runtime_spec: self.runtime_spec,
             run_id: self.run_id,
-            spec_hash: self.runtime_spec.spec_hash(),
             node: self.node,
             descriptor: self.descriptor,
             output_cell: self.output_cell,
@@ -239,9 +229,7 @@ impl<'a> InvocationBuilder<'a> {
             config_artifact: material.config_artifact,
             inputs: material.inputs,
             caps: material.caps,
-            projections: &self.view.projections,
-            run_stream: &self.view.stream,
-            view: self.view,
+            lifecycle: self.lifecycle,
         })
     }
 
@@ -249,9 +237,9 @@ impl<'a> InvocationBuilder<'a> {
     pub(crate) fn build_pre_invocation(self) -> Result<PreInvocationRunCtx<'a>> {
         let material = self.materialize()?;
         Ok(PreInvocationRunCtx {
+            spec_hash: self.runtime_spec.spec_hash(),
             runtime_spec: self.runtime_spec,
             run_id: self.run_id,
-            spec_hash: self.runtime_spec.spec_hash(),
             node: self.node,
             descriptor: self.descriptor,
             output_cell: self.output_cell,
@@ -261,7 +249,7 @@ impl<'a> InvocationBuilder<'a> {
             config_artifact: material.config_artifact,
             inputs: material.inputs,
             caps: material.caps,
-            projections: &self.view.projections,
+            lifecycle: self.lifecycle,
         })
     }
 }
@@ -272,7 +260,7 @@ impl<'a> InvocationBuilder<'a> {
 /// exposes certified config/input/fact evidence needed to resolve lane authority, but it is not a
 /// live invocation boundary and must not be used for transport, signing, clock, or other ambient IO.
 pub struct PreInvocationRunCtx<'a> {
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) runtime_spec: CurrentRuntimeSpecRef<'a>,
     pub(crate) run_id: &'a RunId,
     pub(crate) spec_hash: &'a SpecHash,
     pub(crate) node: &'a spec::NodeSpec,
@@ -284,7 +272,7 @@ pub struct PreInvocationRunCtx<'a> {
     pub(crate) config_artifact: store::ArtifactEvidenceRef,
     pub(crate) inputs: MaterializedInputs,
     pub(crate) caps: CertifiedRuntimeCapabilities,
-    pub(crate) projections: &'a store::ProjectionSnapshot,
+    pub(crate) lifecycle: store::current_lifecycle::CurrentLifecycleReader<'a>,
 }
 
 impl<'a> PreInvocationRunCtx<'a> {
@@ -343,13 +331,12 @@ impl<'a> PreInvocationRunCtx<'a> {
         &self.caps
     }
 
-    /// Store-owned projection snapshot observed before invocation construction.
-    pub fn projections(&self) -> &store::ProjectionSnapshot {
-        self.projections
+    pub(crate) fn runtime_spec(&self) -> CurrentRuntimeSpecRef<'_> {
+        self.runtime_spec.current_spec_ref()
     }
 
-    pub(crate) fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {
-        self.runtime_spec
+    pub(crate) fn lifecycle(&self) -> &store::current_lifecycle::CurrentLifecycleReader<'a> {
+        &self.lifecycle
     }
 }
 
@@ -384,7 +371,7 @@ impl<'a> ErasedRunCtx<'a> {
     }
 
     /// Returns another certified node from the same runtime spec.
-    pub fn certified_node(&self, node_id: &NodeId) -> Option<&'a spec::NodeSpec> {
+    pub fn certified_node(&self, node_id: &NodeId) -> Option<&spec::NodeSpec> {
         self.invocation.runtime_spec().node(node_id)
     }
 
@@ -393,9 +380,7 @@ impl<'a> ErasedRunCtx<'a> {
         &self,
         node: &spec::NodeSpec,
     ) -> Result<CertifiedInvocationContext> {
-        self.invocation
-            .runtime_spec()
-            .invocation_context_for_node(node)
+        CertifiedInvocationContext::for_node(&self.invocation.runtime_spec(), node)
     }
 
     /// Certified state descriptor identity for the node.
@@ -446,26 +431,21 @@ impl<'a> ErasedRunCtx<'a> {
         self.invocation.caps()
     }
 
-    /// Store-owned projection snapshot observed before the runner invocation.
-    pub fn projections(&self) -> &store::ProjectionSnapshot {
-        self.invocation.projections()
-    }
-
     /// Materializes certified inputs for another node against the same verified run stream.
     pub fn materialize_node_inputs(&self, node: &spec::NodeSpec) -> Result<MaterializedInputs> {
-        materialize_inputs(self.invocation.runtime_spec(), node, self.invocation.view)
+        materialize_inputs(
+            &self.invocation.runtime_spec(),
+            node,
+            self.invocation.lifecycle(),
+        )
     }
 
-    pub(crate) fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {
+    pub(crate) fn runtime_spec(&self) -> CurrentRuntimeSpecRef<'_> {
         self.invocation.runtime_spec()
     }
 
-    pub(crate) fn run_stream(&self) -> &'a [store::KernelEventEnvelope] {
-        self.invocation.run_stream()
-    }
-
-    pub(crate) fn artifact_byte_authority(&self) -> &'a store::ArtifactByteAuthorityMap {
-        self.invocation.artifact_byte_authority()
+    pub(crate) fn lifecycle(&self) -> &store::current_lifecycle::CurrentLifecycleReader<'a> {
+        self.invocation.lifecycle()
     }
 }
 

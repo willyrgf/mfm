@@ -183,11 +183,12 @@ selection, and byte-identical independent expansion.
 ### Legacy histories, export, and schema rejection
 
 The current store has no portable run export. Its internal
-`CommittedRunStream`/`VerifiedRunArtifactStore` codec does not by itself carry cross-run source
-closure, deployment metadata, or historical executable bytes. The current PostgreSQL v1 authority
-is concentrated in `crates/storages/postgres/migrations/0001_store.sql`: commits/events,
-artifact blobs/admissions/bindings, fact descriptor/query projections, operational lanes/cursors,
-and current configured values.
+`CommittedRunJournal`/`VerifiedRunView` authority is deliberately non-serializable and does not by
+itself carry cross-run source closure, deployment metadata, or historical executable bytes. The
+current PostgreSQL v1 authority is concentrated in
+`crates/storages/postgres/migrations/0001_store.sql`: commits/events, artifact
+blobs/admissions/bindings, fact descriptor/query projections, operational lanes/cursors, and
+current configured values.
 
 Before resetting a deployment, its owner must record exactly one disposition:
 

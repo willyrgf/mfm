@@ -10,10 +10,12 @@ construct runtime authority from a parsed `TypedExecutionSpec`, a hash-only
 `mfm_spec::v1::HashedSpecEnvelope`, or parsed persisted spec/certificate data. Persisted
 spec/certificate bytes must pass through the certifier verifier before they can reach this crate.
 
-`CertifiedRuntimeSpec` indexes certified semantics, including transition contexts, and derives
-erased runner plans for execution. The runner plan is not authority by itself. Runtime-only checks
-remain runtime-owned: runner availability, capability availability, seed/config evidence, stream
-drift, context materialization, and execution contract validation.
+Before admission, `CertifiedRuntimeSpec` owns the one `CertifiedTypedSpec` plus disposable
+position-and-ID indexes. It is non-cloneable. Once the admission journal is loaded,
+`verify_current_run` consumes that owner: the certified authority moves into the store
+`VerifiedRunView`, while `VerifiedCurrentRun` retains only the non-authoritative indexes beside the
+view. Post-admission code obtains a borrowed `CurrentRuntimeSpecRef` from that pair; it never keeps a
+second envelope, certificate, graph, node, cell, or descriptor authority.
 
 External reads use one generic runner contract. Before admission, runtime awaits the adapter's
 asynchronous process-local ingress validation; adapters must move blocking resource discovery off
@@ -37,7 +39,7 @@ label-derived executable identity.
 The visible runtime model is:
 
 ```text
-certified spec + verified run history
+certified spec + store-owned VerifiedRunView
   -> bound runtime context
   -> deterministic frontier scheduler decision
   -> attempt lifecycle
@@ -45,16 +47,37 @@ certified spec + verified run history
   -> guarded commit
 ```
 
-The certified spec is the static certified transition graph. The verified run history is rebuilt
-from the append-only run stream authority before the scheduler decides whether the run is blocked,
-completed, or ready to execute one certified node. The bound runtime context proves runner binding
-availability and executable identity for every certified executable node before run admission or
-resume dispatch, and rejects context-bound output nodes whose runners do not expose a context-output
-extractor. Runner invocation is sealed by runtime-owned input and certified-context
-materialization, runner identity checks, and capability scoping. The commit planner verifies typed
-payloads, side-effect protocol rules, staged artifacts, context-bound output evidence, references,
-retention bindings, and commit preconditions before building purpose-specific
-`PreparedCommit<Purpose>` values and submitting them through `PreparedCommitPlan`.
+The certified spec is the static certified transition graph. The store loads one committed journal
+with its exact retained objects and validates its physical/current-format structure. That physical
+load does not verify historical manual-resolution signatures. Consuming the journal with the exact
+`CertifiedTypedSpec` runs the sole store-owned semantic certified-history fold, including
+deterministic `mfm-manual-auth` verification against certified replay authority, and mints a fully
+authorization-verified `VerifiedRunView`. That semantic pass performs no live operator, signer, or
+keystore lookup and does not decide external truth.
+
+Runtime borrows the non-cloneable view and trusts its derived fold. It does not reconstruct or
+reverify historical manual proofs and does not own a copied stream, projection snapshot,
+retained-object map, duplicate historical validator, or second history fold. After an append,
+successor verification consumes the old view and the newly loaded journal, checks exact prefix
+extension, semantically verifies the suffix, and moves the same certified authority forward. The
+bound runtime context proves runner binding availability and executable identity for every
+certified executable node before run admission or resume dispatch, and rejects context-bound output
+nodes whose runners do not expose a context-output extractor. Runner invocation is sealed by
+runtime-owned input and certified-context materialization, runner identity checks, and capability
+scoping. The commit planner verifies typed payloads, side-effect protocol rules, staged artifacts,
+context-bound output evidence, references, retention bindings, and commit preconditions before
+building purpose-specific `PreparedCommit<Purpose>` values and submitting them through
+`PreparedCommitPlan`.
+
+Current lifecycle algorithms temporarily consume purpose-specific borrowed readers from
+`mfm_store::v1::current_lifecycle`. Those readers do not expose raw journal authority and must not be
+stored, cloned, serialized, or promoted into a runtime projection. The complete audited lifecycle
+cutover deletes this temporary reader module.
+
+When runtime refreshes history, it consumes the old view with a newly loaded committed journal.
+The store carries certified authority forward only after proving a strict extension with an exact
+unchanged prefix and unchanged old objects and fully validating the semantic suffix; runtime does
+not recertify, reverify historical authorization, or merge two histories.
 
 Launch is a pre-FSM admission lifecycle, not a scheduler-dispatched state attempt.
 `RunAdmissionLifecycle` verifies the certified spec, launch artifacts, seeds, configs, executable
@@ -68,10 +91,10 @@ saga terminal path resolves compensation, manual resolution, or failure without 
 
 Module roles:
 
-- `spec_authority`: runtime authority wrapper over `CertifiedTypedSpec` and certified contexts
+- `spec_authority`: pre-admission certified owner and disposable positional runtime indexes
 - `binding`: bound runner identity and executable availability for a certified runtime spec
 - `admission`: pre-FSM run-start admission lifecycle
-- `history`: spec-aware verified history and context-aware input materialization
+- `history`: borrowed algorithms over `VerifiedRunView` and context-aware input materialization
 - `frontier`: pure scheduler decision and attempt planning
 - `transition`: closed transition decisions over certified spec and verified history
 - `attempt`: ordinary attempt lifecycle from selection through terminal commit

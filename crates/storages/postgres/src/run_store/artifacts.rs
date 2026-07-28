@@ -213,7 +213,18 @@ pub(super) async fn read_retained_artifact_from_pool(
 pub(super) async fn load_run_artifact_bytes_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
+    records: &[KernelEventEnvelope],
 ) -> Result<ArtifactByteAuthorityMap> {
+    let required_keys = records
+        .iter()
+        .flat_map(|record| event_artifact_requirements(record.payload()))
+        .map(|requirement| {
+            (
+                requirement.artifact_id.as_str().to_owned(),
+                requirement.evidence_hash.as_str().to_owned(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
     let rows = sqlx::query(
         "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, \
          a.schema_id, a.semantic_type_id, a.producer_node_id, a.producer_seed_id, \
@@ -234,6 +245,16 @@ pub(super) async fn load_run_artifact_bytes_tx(
 
     let mut artifact_bytes = ArtifactByteAuthorityMap::new();
     for row in rows {
+        let persisted_key = (
+            row.try_get::<String, _>("artifact_id")
+                .map_err(|error| database_error("failed to decode run artifact id", error))?,
+            row.try_get::<String, _>("evidence_hash").map_err(|error| {
+                database_error("failed to decode run artifact evidence hash", error)
+            })?,
+        );
+        if !required_keys.contains(&persisted_key) {
+            continue;
+        }
         let record = artifact_record_from_row(row)?;
         let evidence_hash = record.evidence.evidence_hash()?;
         if evidence_hash != record.evidence_hash {

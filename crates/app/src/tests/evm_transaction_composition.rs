@@ -7,7 +7,6 @@ use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B2
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
 use mfm_certify::CertificationRegistry;
-use mfm_events::v1 as events;
 use mfm_evm::{
     evm_diagnostic, evm_sender_lane_resource_claim, EvmBlockAnchor, EvmBlockSelector, EvmCall,
     EvmCapabilityError, EvmCode, EvmContractCallCheck, EvmContractValidationConfig,
@@ -248,7 +247,6 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
     let certification = composition_certification_registry();
     let launch_services = make_run_services(
         composition_runners(
-            &store,
             Arc::clone(&world),
             Arc::clone(&signing_key),
             Arc::clone(&live_validation_reads),
@@ -280,27 +278,65 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
         vec![EvmReceiptStatus::Success, EvmReceiptStatus::Reverted]
     );
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 0);
-    let stream = store.load_run_stream(&run_id).await.expect("run stream");
-    assert_eq!(
-        stream
-            .iter()
-            .filter(|event| matches!(
-                event.payload(),
-                events::KernelEventPayload::SideEffectReceiptObserved(_)
-            ))
-            .count(),
-        2
+    let view = load_verified_run_view(&store, &certification, &run_id)
+        .await
+        .expect("verified reverted composition");
+    let lifecycle = store::current_lifecycle::read(&view);
+    let mut receipt_count = 0;
+    let mut submission_count = 0;
+    let mut diagnostic_ref = None;
+    let mut diagnostic_requirement = None;
+    let _ = lifecycle.visit_records(|record| {
+        match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectReceiptObserved(_) => {
+                receipt_count += 1;
+            }
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionObserved(_) => {
+                submission_count += 1;
+            }
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptFailed(payload) => {
+                if let Some(reference) = &payload.error.diagnostic_ref {
+                    diagnostic_ref = Some(reference.clone());
+                    let _ = record.visit_artifact_requirements(|candidate| {
+                        if candidate.source
+                            == store::EventArtifactReferenceSource::StateAttemptFailureDiagnostic
+                        {
+                            diagnostic_requirement = Some(candidate.clone());
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    assert_eq!(receipt_count, 2);
+    assert_eq!(submission_count, 2);
+    let diagnostic_ref = diagnostic_ref.expect("reverted call diagnostic reference");
+    let diagnostic_requirement =
+        diagnostic_requirement.expect("exact reverted call diagnostic requirement");
+    assert!(diagnostic_requirement.producer_node_id.is_some());
+    assert!(lifecycle
+        .object_for_requirement(&diagnostic_requirement)
+        .is_some());
+
+    let producer_agnostic_requirement = store::diagnostic_artifact_requirement(&diagnostic_ref);
+    assert_ne!(producer_agnostic_requirement, diagnostic_requirement);
+    assert!(lifecycle
+        .object_for_requirement(&producer_agnostic_requirement)
+        .is_none());
+
+    let mut wrong_evidence_requirement = diagnostic_requirement.clone();
+    wrong_evidence_requirement.evidence_hash = mfm_ids::ContentDigest::from_digest(
+        mfm_ids::DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(b"wrong diagnostic evidence"),
     );
-    assert_eq!(
-        stream
-            .iter()
-            .filter(|event| matches!(
-                event.payload(),
-                events::KernelEventPayload::SideEffectSubmissionObserved(_)
-            ))
-            .count(),
-        2
-    );
+    assert!(lifecycle
+        .object_for_requirement(&wrong_evidence_requirement)
+        .is_none());
     drop(launch_services);
     drop(signing_key);
 
@@ -310,15 +346,16 @@ async fn reverted_call_preserves_earlier_receipts_and_prevents_later_calls() {
         .await
         .expect("evidence-only failed composition replay");
     assert_eq!(replay.run_mode, RunModeStatus::FailedWithoutAcdcClaim);
-    let broker = replay_services
-        .replay_broker_for_test(&run_id)
+    replay_services
+        .inspect_replay_broker_for_test(&run_id, |broker| {
+            mfm_evm_live::verify_evm_transaction_replay(broker)?;
+            mfm_evm_live::verify_evm_validation_replay(broker)?;
+            verify_composition_pure_states(broker);
+            Ok::<(), mfm_replay::v1::ReplayError>(())
+        })
         .await
-        .expect("failed composition replay broker");
-    mfm_evm_live::verify_evm_transaction_replay(&broker)
-        .expect("explicit transaction foundation replay verifier");
-    mfm_evm_live::verify_evm_validation_replay(&broker)
-        .expect("explicit validation foundation replay verifier");
-    verify_composition_pure_states(&broker);
+        .expect("failed composition replay broker")
+        .expect("explicit composition replay verifiers");
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 0);
 }
 
@@ -340,7 +377,6 @@ async fn assert_composition_replays(
     let certification = composition_certification_registry();
     let launch_services = make_run_services(
         composition_runners(
-            &store,
             Arc::clone(&world),
             Arc::clone(&signing_key),
             Arc::clone(&live_validation_reads),
@@ -386,19 +422,20 @@ async fn assert_composition_replays(
         .await
         .expect("evidence-only transaction composition replay");
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
-    let broker = replay_services
-        .replay_broker_for_test(&run_id)
+    replay_services
+        .inspect_replay_broker_for_test(&run_id, |broker| {
+            mfm_evm_live::verify_evm_transaction_replay(broker)?;
+            mfm_evm_live::verify_evm_validation_replay(broker)?;
+            verify_composition_pure_states(broker);
+            Ok::<(), mfm_replay::v1::ReplayError>(())
+        })
         .await
-        .expect("composition replay broker");
-    mfm_evm_live::verify_evm_transaction_replay(&broker)
-        .expect("explicit transaction foundation replay verifier");
-    mfm_evm_live::verify_evm_validation_replay(&broker)
-        .expect("explicit validation foundation replay verifier");
-    verify_composition_pure_states(&broker);
+        .expect("composition replay broker")
+        .expect("explicit composition replay verifiers");
     assert_eq!(live_validation_reads.load(Ordering::SeqCst), 3);
 }
 
-fn verify_composition_pure_states(broker: &mfm_replay::v1::ReplayBroker) {
+fn verify_composition_pure_states(broker: &mfm_replay::v1::ReplayBroker<'_>) {
     mfm_replay::v1::verify_pure_state::<FirstCallActionState>(broker)
         .expect("first-call projection replay");
     mfm_replay::v1::verify_pure_state::<SecondCallActionState>(broker)
@@ -667,7 +704,6 @@ fn composition_certification_registry() -> CertificationRegistry {
 }
 
 fn composition_runners(
-    store: &store::AsyncInMemoryRunStore,
     world: Arc<TransactionCompositionWorld>,
     signing_key: Arc<SigningKey>,
     live_validation_reads: Arc<AtomicUsize>,
@@ -677,8 +713,7 @@ fn composition_runners(
     let read_factory = test_factory_binding(&runners, "read_external");
     let side_effect_factory = test_factory_binding(&runners, "apply_side_effect");
     let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
-    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = Arc::new(store.clone());
-    register_projection_runners(&mut runners, &pure_factory, Arc::clone(&artifacts));
+    register_projection_runners(&mut runners, &pure_factory);
 
     let sender = world.sender;
     let transaction_session = Arc::new(CompositionTransactionSession::new(Arc::clone(&world)));
@@ -703,7 +738,6 @@ fn composition_runners(
     .expect("signer binder");
     register_evm_transaction_runner(
         &mut runners,
-        Arc::clone(&artifacts),
         signer_binder,
         move |binding, signer_ref| {
             Box::pin(async move {
@@ -730,7 +764,6 @@ fn composition_runners(
 
     register_evm_validation_runner(
         &mut runners,
-        artifacts,
         Arc::new(CompositionReadSessions {
             world,
             reads: live_validation_reads,
@@ -745,37 +778,16 @@ fn composition_runners(
 fn register_projection_runners(
     registry: &mut ErasedRunnerRegistry,
     pure_factory: &mfm_runtime::RunnerFactoryBinding,
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 ) {
     let mut registrations = RunnerRegistrationBuilder::new(registry);
-    register_pure_state::<FirstCallActionState>(
-        &mut registrations,
-        pure_factory,
-        Arc::clone(&artifacts),
-        None,
-    )
-    .expect("register first-call projection runner");
-    register_pure_state::<SecondCallActionState>(
-        &mut registrations,
-        pure_factory,
-        Arc::clone(&artifacts),
-        None,
-    )
-    .expect("register second-call projection runner");
-    register_pure_state::<ValidationTargetState>(
-        &mut registrations,
-        pure_factory,
-        Arc::clone(&artifacts),
-        None,
-    )
-    .expect("register validation-target projection runner");
-    register_pure_state::<DirectValidationTargetState>(
-        &mut registrations,
-        pure_factory,
-        artifacts,
-        None,
-    )
-    .expect("register direct validation-target projection runner");
+    register_pure_state::<FirstCallActionState>(&mut registrations, pure_factory, None)
+        .expect("register first-call projection runner");
+    register_pure_state::<SecondCallActionState>(&mut registrations, pure_factory, None)
+        .expect("register second-call projection runner");
+    register_pure_state::<ValidationTargetState>(&mut registrations, pure_factory, None)
+        .expect("register validation-target projection runner");
+    register_pure_state::<DirectValidationTargetState>(&mut registrations, pure_factory, None)
+        .expect("register direct validation-target projection runner");
 }
 
 fn validate_composition_binding(binding: &EvmNetworkBinding) -> mfm_evm::EvmCapabilityResult<()> {

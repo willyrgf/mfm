@@ -84,9 +84,9 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
         let node_id = submit_node.node_id.as_str().to_owned();
         let attempt_id = match &ctx.node().framework {
             Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => ctx
-                .projections()
-                .side_effect_for_pair(ctx.run_id(), &verify.pair_id)
-                .map(|projection| projection.intent.attempt_id.as_str().to_owned())
+                .lifecycle()
+                .side_effect(&verify.pair_id)
+                .map(|side_effect| side_effect.intent().attempt_id().as_str().to_owned())
                 .unwrap_or_else(|| ctx.attempt_id().as_str().to_owned()),
             _ => ctx.attempt_id().as_str().to_owned(),
         };
@@ -120,9 +120,9 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
         _submit_node: &'a spec::NodeSpec,
-        prepared: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
-        let prepared_artifact_id = prepared.artifact_id.clone();
+        let prepared_artifact_id = prepared.artifact_id().clone();
         Box::pin(async move {
             Ok(fixture_side_effect_evidence(
                 35,
@@ -206,8 +206,8 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
         ctx: &'a ErasedRunCtx<'ctx>,
         _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        _prepared: &'a store::SideEffectArtifactProjection,
-        _submission: &'a store::SideEffectArtifactProjection,
+        _prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
         let evidence = fixture_side_effect_evidence_for_ctx(ctx, 89);
         Box::pin(async move {
@@ -223,9 +223,9 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
         ctx: &'a ErasedRunCtx<'ctx>,
         _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        _prepared: &'a store::SideEffectArtifactProjection,
-        _submission: &'a store::SideEffectArtifactProjection,
-        _receipt: &'a store::SideEffectArtifactProjection,
+        _prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         let evidence = fixture_side_effect_evidence_for_ctx(ctx, 144);
         Box::pin(async move {
@@ -240,9 +240,9 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         _submit_inputs: &'a MaterializedInputs,
-        _prepared: &'a store::SideEffectArtifactProjection,
-        _submission: &'a store::SideEffectArtifactProjection,
-        _receipt: &'a store::SideEffectArtifactProjection,
+        _prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         let output =
             fixture_output_value(233, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());
@@ -253,10 +253,10 @@ impl SideEffectAdapter for TestSideEffectDriverCallbacks {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         _submit_inputs: &'a MaterializedInputs,
-        _prepared: &'a store::SideEffectArtifactProjection,
-        _submission: &'a store::SideEffectArtifactProjection,
-        _receipt: &'a store::SideEffectArtifactProjection,
-        _confirmation: &'a store::SideEffectArtifactProjection,
+        _prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        _confirmation: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         let output =
             fixture_output_value(233, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());

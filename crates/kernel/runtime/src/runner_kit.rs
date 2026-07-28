@@ -20,8 +20,8 @@ use crate::{
     artifacts::fact_query_returned_ref_retention_refs, AdapterExecutableBinding,
     ContextOutputExtractor, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
-    MaterializedInputNode, MaterializedInputs, Result, RunnerEventPayload, RunnerIngressContext,
-    RuntimeError, SideEffectAdapter, StagedArtifact, StagedRetentionRefs,
+    MaterializedInputNode, MaterializedInputs, PreInvocationRunCtx, Result, RunnerEventPayload,
+    RunnerIngressContext, RuntimeError, SideEffectAdapter, StagedArtifact, StagedRetentionRefs,
 };
 
 #[path = "runner_kit/registration.rs"]
@@ -41,13 +41,7 @@ mod artifacts;
 pub use artifacts::*;
 #[path = "runner_kit/builders.rs"]
 mod builders;
-#[cfg(test)]
-pub(crate) use builders::fact_query_evidence_retention_refs;
 pub use builders::*;
 pub(crate) use builders::{
     RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding,
 };
-
-#[cfg(test)]
-#[path = "runner_kit_tests.rs"]
-mod tests;

@@ -1,14 +1,29 @@
 use super::*;
 
 #[test]
-fn certified_runtime_spec_rejects_hash_mismatch() {
-    let fixture = fixture();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    envelope.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
-    assert!(matches!(
-        CertifiedRuntimeSpec::from_verified_envelope(envelope),
-        Err(RuntimeError::SpecHash(_))
-    ));
+fn persisted_certification_rejects_hash_mismatch() {
+    let (certified, registry) = certifier_backed_runtime_authority();
+    let persisted = certified
+        .to_persisted_parts()
+        .expect("persisted certification parts");
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(persisted.spec_bytes()).expect("persisted spec JSON");
+    envelope["spec_hash"] = serde_json::Value::String(
+        SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, D9).to_string(),
+    );
+    let serialized = serde_json::to_string(&envelope).expect("tampered persisted spec JSON");
+    let tampered = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&serialized)
+        .expect("canonical tampered persisted spec");
+
+    assert!(
+        mfm_certify::verify_persisted_spec_certificate(
+            tampered.as_bytes(),
+            persisted.certificate_bytes(),
+            &registry,
+        )
+        .is_err(),
+        "persisted hash mismatch must not mint certified authority"
+    );
 }
 
 #[test]
@@ -33,9 +48,18 @@ fn certified_runtime_spec_accepts_certifier_and_verified_persisted_authority() {
 }
 
 #[tokio::test]
-async fn replay_rejects_run_completed_without_public_output_evidence() {
+async fn journal_load_rejects_run_completed_without_public_output_evidence() {
     let fixture = fixture();
-    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    let current = started_fixture_current(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start fixture");
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
@@ -69,11 +93,10 @@ async fn replay_rejects_run_completed_without_public_output_evidence() {
             },
         })
         .expect("append forged completion");
-
+    drop(current);
     assert!(matches!(
-        drive_fixture_once(&scheduler, &mut store, &fixture)
-            .await,
-        Err(RuntimeError::InvalidRunStream(message))
+        load_fixture_current(&scheduler, &store, &fixture).await,
+        Err(RuntimeError::Store(message))
             if message.contains("RunCompleted appeared before PublicOutputProduced")
     ));
 }
@@ -179,18 +202,28 @@ async fn runner_rejects_invalid_artifact_outputs() {
                 output_digest: content(0xa2),
             },
         );
-        let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-
+        let scheduler = fixture_scheduler(registry, &fixture);
+        let mut store = TestTypedRunStore::new();
+        let current = started_fixture_current(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start invalid-artifact fixture");
+        let result = drive_current_once_with_claim(&scheduler, &store, current)
+            .await
+            .unwrap_or_else(|_| panic!("{}", kind.label()));
         assert_eq!(
-            drive_fixture_once(&scheduler, &mut store, &fixture)
-                .await
-                .unwrap_or_else(|_| panic!("{}", kind.label())),
+            result.status(),
             SchedulerStatus::Advanced,
             "{}",
             kind.label()
         );
+        let current = result.into_current_run();
         let node = node_by_output(&fixture, &fixture.cell_a);
-        assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+        assert_node_failed_with_code(&current, &node.node_id, "runner_output_invalid");
     }
 }
 
@@ -229,17 +262,29 @@ async fn runner_can_commit_inline_state_output_artifact() {
         ArtifactId::from_digest(output_digest.algorithm(), *output_digest.digest());
     let registry =
         fixture_registry_with_first_runner(&fixture, "pure", InlineArtifactRunner { output_bytes });
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-
-    assert_drive!(scheduler, store, fixture, Advanced, "drive inline output");
-    assert!(matches!(
-        store.projection_snapshot().cell_terminal(&fixture.cell_a),
-        Some(store::CellTerminalProjection::Produced {
-            artifact_id,
-            content_digest,
-            ..
-        }) if artifact_id == &output_artifact && content_digest == &output_digest
-    ));
+    let scheduler = fixture_scheduler(registry, &fixture);
+    let mut store = TestTypedRunStore::new();
+    let current = started_fixture_current(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start inline-artifact fixture");
+    let result = drive_current_once_with_claim(&scheduler, &store, current)
+        .await
+        .expect("drive inline output");
+    assert_eq!(result.status(), SchedulerStatus::Advanced);
+    let current = result.into_current_run();
+    let produced = current
+        .lifecycle()
+        .cell(&fixture.cell_a)
+        .expect("inline output cell")
+        .produced()
+        .expect("produced inline output");
+    assert_eq!(produced.artifact_id(), &output_artifact);
+    assert_eq!(produced.content_digest(), &output_digest);
 }
 
 #[tokio::test]
@@ -291,22 +336,34 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
                 reason,
             },
         );
-        let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-        let stream_before = store.load_run_stream(&fixture.run_id);
-
-        assert_drive!(
-            scheduler,
-            store,
-            fixture,
-            Advanced,
-            "terminalize reserved retention reason"
-        );
-        store.assert_run_stream_len(&fixture.run_id, stream_before.len() + 4);
-        assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
-        assert!(store
-            .projection_snapshot()
-            .cell_terminal(&fixture.cell_a)
-            .is_none());
+        let scheduler = fixture_scheduler(registry, &fixture);
+        let mut store = TestTypedRunStore::new();
+        let current = started_fixture_current(
+            &scheduler,
+            &mut store,
+            &fixture,
+            vec![fixture.seed_ref.clone()],
+        )
+        .await
+        .expect("start reserved-retention fixture");
+        let mut records_before = 0;
+        let _ = current.lifecycle().visit_records(|_| {
+            records_before += 1;
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+        let result = drive_current_once_with_claim(&scheduler, &store, current)
+            .await
+            .expect("terminalize reserved retention reason");
+        assert_eq!(result.status(), SchedulerStatus::Advanced);
+        let current = result.into_current_run();
+        let mut records_after = 0;
+        let _ = current.lifecycle().visit_records(|_| {
+            records_after += 1;
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+        assert_eq!(records_after, records_before + 4);
+        assert_node_failed_with_code(&current, &node.node_id, "runner_output_invalid");
+        assert!(current.lifecycle().cell(&fixture.cell_a).is_none());
     }
 }
 
@@ -360,7 +417,16 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
             payload_digest,
         },
     );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let scheduler = fixture_scheduler(registry, &fixture);
+    let mut store = TestTypedRunStore::new();
+    let current = started_fixture_current(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start staged-mismatch fixture");
     let attempt_id = attempt_id(
         &fixture.run_id,
         fixture.runtime_spec.spec_hash(),
@@ -369,14 +435,12 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
     )
     .expect("attempt id");
 
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "terminalize staged payload mismatch"
-    );
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+    let result = drive_current_once_with_claim(&scheduler, &store, current)
+        .await
+        .expect("terminalize staged payload mismatch");
+    assert_eq!(result.status(), SchedulerStatus::Advanced);
+    let current = result.into_current_run();
+    assert_node_failed_with_code(&current, &node.node_id, "runner_output_invalid");
 
     let descriptor = fixture
         .runtime_spec

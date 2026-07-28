@@ -3,12 +3,28 @@
 PostgreSQL run-store implementation. This crate is the only owner of the MFM
 run-store PostgreSQL schema.
 
-`PostgresStore` is the certified submit/resume surface for durable run
-streams. It persists append-only commits, canonical event payload bytes,
-artifact blobs/evidence, resource-lane transition authority, and observation
-cursor rows through `mfm-store`.
+`PostgresStore` implements the doc-hidden `RunJournalBackend` SPI from
+`mfm-store`.
+The blanket implementation exposes the sealed permanent `RunJournalStore`
+surface, which is exactly one prepared-commit append and one committed-journal
+load. Application, runtime, replay, status, and public-output callers use that
+surface; they cannot mint journal authority from PostgreSQL rows or implement a
+parallel history loader.
+
+The store persists append-only commits, canonical event payload bytes, artifact
+blobs/evidence, resource-lane transition authority, and observation cursor rows
+through `mfm-store`.
 It owns the PostgreSQL migrations, crate-local SQLx query metadata, and runtime
 schema contract checks for that store.
+
+One committed-journal load uses one read-only `REPEATABLE READ` transaction for
+both the committed records and every exact retained object required by those
+records. It then consumes the backend-supplied `JournalLoadVerifier` to produce
+the opaque `CommittedRunJournal` before committing that read transaction. A
+concurrent append cannot split the record and object reads across snapshots.
+Only exact certified-spec binding can consume that journal to produce the
+non-cloneable `VerifiedRunView`; PostgreSQL rows and the separate temporary
+`CurrentProjectionStore` projections are not per-run read authority.
 
 ## Runtime Contract
 

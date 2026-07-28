@@ -1,0 +1,14 @@
+error[E0624]: associated function `from_persisted_records` is private
+ --> tests/ui/fail/committed_run_journal_raw_constructor_private.rs:4:49
+  |
+4 |       let _raw_constructor = CommittedRunJournal::from_persisted_records;
+  |                                                   ^^^^^^^^^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/v1/journal.rs
+  |
+  | /     fn from_persisted_records(
+  | |         run_id: RunId,
+  | |         records: Vec<KernelEventEnvelope>,
+  | |         artifact_bytes: ArtifactByteAuthorityMap,
+  | |     ) -> Result<Self> {
+  | |_____________________- private associated function defined here

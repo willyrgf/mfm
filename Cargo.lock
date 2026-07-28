@@ -2330,6 +2330,7 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-keystore",
+ "mfm-manual-auth",
  "mfm-portfolio",
  "mfm-portfolio-live",
  "mfm-program",
@@ -2574,6 +2575,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-journal"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-ids",
+ "mfm-values",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-keystore"
 version = "0.1.30"
 dependencies = [
@@ -2695,9 +2708,8 @@ dependencies = [
  "mfm-events",
  "mfm-facts",
  "mfm-ids",
- "mfm-manual-auth",
  "mfm-program",
- "mfm-runtime",
+ "mfm-program-derive",
  "mfm-spec",
  "mfm-store",
  "mfm-values",
@@ -2811,8 +2823,12 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-manual-auth",
+ "mfm-program",
+ "mfm-program-derive",
  "mfm-spec",
  "mfm-store",
+ "mfm-values",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror",
@@ -2831,9 +2847,14 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-manual-auth",
+ "mfm-program",
+ "mfm-program-derive",
  "mfm-spec",
+ "mfm-values",
+ "serde",
  "serde_json",
  "thiserror",
+ "trybuild",
 ]
 
 [[package]]

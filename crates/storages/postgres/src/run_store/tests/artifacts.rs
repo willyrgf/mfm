@@ -27,7 +27,7 @@ async fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
 
     let first_request = mfm_store::v1::CommitRequest::from_payloads(
         run.clone(),
-        store.expected_next_seq(&run).await.expect("next seq"),
+        expected_next_sequence(&store, &run).await,
         CommitKey::new("same-id-first-evidence").expect("commit key"),
         vec![retention_refs_appended(
             run.clone(),
@@ -48,7 +48,7 @@ async fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
 
     let second_request = mfm_store::v1::CommitRequest::from_payloads(
         run.clone(),
-        store.expected_next_seq(&run).await.expect("next seq"),
+        expected_next_sequence(&store, &run).await,
         CommitKey::new("same-id-second-evidence").expect("commit key"),
         vec![retention_refs_appended_for_evidence(
             run.clone(),

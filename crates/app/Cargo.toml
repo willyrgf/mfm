@@ -50,6 +50,7 @@ url = { workspace = true }
 [dev-dependencies]
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
+mfm-manual-auth = { path = "../kernel/manual-auth" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
 tempfile = "3.0"

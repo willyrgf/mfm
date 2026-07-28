@@ -8,30 +8,7 @@ pub fn load_node_config<T>(broker: &ReplayBroker, node: &spec::NodeSpec) -> Resu
 where
     T: MfmConfig + DeserializeOwned,
 {
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: node.config_ref.artifact_id.clone(),
-        digest: node.config_ref.digest.clone(),
-        byte_len: node.config_ref.byte_len,
-        media_type: node.config_ref.media_type.clone(),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    let requirement = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::RunConfig,
-        artifact_id: node.config_ref.artifact_id.clone(),
-        evidence_hash: evidence.evidence_hash()?,
-        digest: Some(node.config_ref.digest.clone()),
-        byte_len: Some(node.config_ref.byte_len),
-        media_type: Some(node.config_ref.media_type.clone()),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    };
+    let requirement = store::config_ref_artifact_requirement(&node.config_ref)?;
     let artifact = broker.retained_artifact(&requirement)?;
     let config = serde_json::from_slice(&artifact.artifact_bytes).map_err(json_error)?;
     ValidatedConfig::new(config)
@@ -54,10 +31,10 @@ pub fn single_state_output_frame(
             "replay requires exactly one {label} output"
         )));
     }
-    Ok(frames
+    frames
         .into_iter()
         .next()
-        .expect("one replay frame was checked"))
+        .ok_or_else(|| mismatch(format!("replay requires exactly one {label} output")))
 }
 
 /// Returns produced frames for every input cell with one value schema and semantic identity.
@@ -84,7 +61,9 @@ pub fn produced_input_frames(
                 "certified replay input did not have exactly one produced value",
             ));
         }
-        let frame = matches.into_iter().next().expect("one replay input frame");
+        let frame = matches.into_iter().next().ok_or_else(|| {
+            mismatch("certified replay input did not have exactly one produced value")
+        })?;
         if frame.cell.semantic_type_id != input_cell.semantic_type_id
             || frame.cell.schema_id != input_cell.schema_id
             || frame.cell.value_lineage != input_cell.value_lineage
@@ -116,18 +95,12 @@ where
 {
     let schema_id = T::schema_id().map_err(|error| mismatch(error.to_string()))?;
     let references = broker
-        .events()
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::ArtifactReferenced(reference)
-                if reference.node_id.as_ref() == Some(&frame.produced.node_id)
-                    && reference.attempt_id.as_ref() == Some(&frame.produced.attempt_id)
-                    && reference.artifact_ref.role
-                        == events::ArtifactRole::ExternalReadEvidence =>
-            {
-                Some(reference)
-            }
-            _ => None,
+        .artifact_references()?
+        .into_iter()
+        .filter(|reference| {
+            reference.node_id.as_ref() == Some(&frame.produced.node_id)
+                && reference.attempt_id.as_ref() == Some(&frame.produced.attempt_id)
+                && reference.artifact_ref.role == events::ArtifactRole::ExternalReadEvidence
         })
         .collect::<Vec<_>>();
     if references.len() != 1 {
@@ -141,19 +114,7 @@ where
             "replay external read evidence schema did not match the state contract",
         ));
     }
-    let requirement = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: reference.artifact_ref.artifact_id.clone(),
-        evidence_hash: reference.artifact_ref.evidence_hash.clone(),
-        digest: Some(reference.artifact_ref.content_digest.clone()),
-        byte_len: Some(reference.artifact_ref.byte_len),
-        media_type: Some(reference.artifact_ref.media_type.clone()),
-        schema_id: Some(reference.artifact_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(frame.produced.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::ExternalReadEvidence),
-    };
+    let requirement = store::artifact_referenced_artifact_requirement(reference);
     let artifact = broker.retained_artifact(&requirement)?;
     serde_json::from_slice(&artifact.artifact_bytes).map_err(json_error)
 }
@@ -290,13 +251,9 @@ trait CompareReadFactBatch {
 
 impl CompareReadFactBatch for () {
     fn compare(&self, broker: &ReplayBroker, frame: &ProducedCellReplayFrame) -> Result<()> {
-        if broker.events().iter().any(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::FactRecorded(payload)
-                    if payload.node_id == frame.produced.node_id
-                        && payload.attempt_id == frame.produced.attempt_id
-            )
+        if broker.fact_records()?.into_iter().any(|record| {
+            record.payload.node_id == frame.produced.node_id
+                && record.payload.attempt_id == frame.produced.attempt_id
         }) {
             return Err(mismatch(
                 "fact-free read replay found unexpected recorded facts",
@@ -380,24 +337,11 @@ fn replay_input_cell_json(
     match &certified.producer {
         spec::CellProducer::Seed(seed_id) => {
             let seed = broker
-                .run_admitted()
-                .seed_cells
-                .iter()
+                .admission()?
+                .seed_cells()
                 .find(|seed| &seed.seed_id == seed_id && seed.cell_id == input.cell_id)
                 .ok_or_else(|| mismatch("replay seed input evidence was missing"))?;
-            let requirement = store::EventArtifactRequirement {
-                source: store::EventArtifactReferenceSource::SeedCell,
-                artifact_id: seed.seed_artifact.artifact_id.clone(),
-                evidence_hash: seed.seed_artifact.evidence_hash.clone(),
-                digest: Some(seed.digest.clone()),
-                byte_len: Some(seed.seed_artifact.byte_len),
-                media_type: Some(seed.seed_artifact.media_type.clone()),
-                schema_id: Some(seed.schema_id.clone()),
-                semantic_type_id: Some(seed.semantic_type_id.clone()),
-                producer_node_id: None,
-                producer_seed_id: Some(seed.seed_id.clone()),
-                artifact_role: Some(events::ArtifactRole::SeedInput),
-            };
+            let requirement = store::seed_cell_artifact_requirement(seed);
             let artifact = broker.retained_artifact(&requirement)?;
             serde_json::from_slice(&artifact.artifact_bytes).map_err(json_error)
         }
@@ -410,7 +354,9 @@ fn replay_input_cell_json(
                     "replay input cell did not have exactly one produced value",
                 ));
             }
-            let frame = frames.into_iter().next().expect("one frame was checked");
+            let frame = frames.into_iter().next().ok_or_else(|| {
+                mismatch("replay input cell did not have exactly one produced value")
+            })?;
             serde_json::from_slice(&frame.artifact_bytes).map_err(json_error)
         }
     }
@@ -452,34 +398,14 @@ pub fn fact_query_evidence_for_attempt(
     attempt_id: &AttemptId,
 ) -> Result<Vec<mfm_facts::FactQueryEvidence>> {
     let mut evidence = Vec::new();
-    for event in broker.events() {
-        let events::KernelEventPayload::ArtifactReferenced(reference) = event.payload() else {
-            continue;
-        };
+    for reference in broker.artifact_references()? {
         if reference.artifact_ref.role != events::ArtifactRole::FactQueryEvidence
             || reference.node_id.as_ref() != Some(node_id)
             || reference.attempt_id.as_ref() != Some(attempt_id)
         {
             continue;
         }
-        let requirement = store::EventArtifactRequirement {
-            source: store::EventArtifactReferenceSource::ArtifactReferenced,
-            artifact_id: reference.artifact_ref.artifact_id.clone(),
-            evidence_hash: reference.artifact_ref.evidence_hash.clone(),
-            digest: Some(reference.artifact_ref.content_digest.clone()),
-            byte_len: Some(reference.artifact_ref.byte_len),
-            media_type: Some(reference.artifact_ref.media_type.clone()),
-            schema_id: Some(reference.artifact_ref.schema_id.clone()),
-            semantic_type_id: reference.artifact_ref.semantic_type_id.clone(),
-            producer_node_id: reference.node_id.clone(),
-            producer_seed_id: None,
-            artifact_role: Some(events::ArtifactRole::FactQueryEvidence),
-        };
-        let artifact = broker.retained_artifact(&requirement)?;
-        evidence.push(
-            mfm_facts::parse_canonical_fact_query_evidence_bytes(&artifact.artifact_bytes)
-                .map_err(|error| mismatch(error.to_string()))?,
-        );
+        evidence.push(broker.verify_fact_query_evidence_reference(reference)?);
     }
     Ok(evidence)
 }
@@ -497,16 +423,11 @@ where
     R: Serialize,
 {
     let records = broker
-        .events()
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::FactRecorded(payload)
-                if payload.node_id == frame.produced.node_id
-                    && payload.attempt_id == frame.produced.attempt_id =>
-            {
-                Some(payload)
-            }
-            _ => None,
+        .fact_records()?
+        .into_iter()
+        .filter(|record| {
+            record.payload.node_id == frame.produced.node_id
+                && record.payload.attempt_id == frame.produced.attempt_id
         })
         .collect::<Vec<_>>();
     if records.len() != 1 {
@@ -518,7 +439,7 @@ where
         broker,
         frame,
         descriptor,
-        &records[0].claim,
+        &records[0].payload.claim,
         subject,
         response_value,
     )
@@ -534,16 +455,12 @@ where
     F: mfm_facts::MfmFactType,
 {
     let output_events = broker
-        .events()
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::CellProduced(payload)
-                    if payload.node_id == frame.produced.node_id
-                        && payload.attempt_id == frame.produced.attempt_id
-                        && payload.cell_id == frame.produced.cell_id
-            )
+        .produced_cell_records()?
+        .into_iter()
+        .filter(|record| {
+            record.payload.node_id == frame.produced.node_id
+                && record.payload.attempt_id == frame.produced.attempt_id
+                && record.payload.cell_id == frame.produced.cell_id
         })
         .collect::<Vec<_>>();
     if output_events.len() != 1 {
@@ -551,18 +468,13 @@ where
             "replay fact batch did not have exactly one matching CellProduced event",
         ));
     }
-    let output_event = output_events[0];
+    let output_event = &output_events[0];
     let records = broker
-        .events()
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::FactRecorded(payload)
-                if payload.node_id == frame.produced.node_id
-                    && payload.attempt_id == frame.produced.attempt_id =>
-            {
-                Some((event, payload))
-            }
-            _ => None,
+        .fact_records()?
+        .into_iter()
+        .filter(|record| {
+            record.payload.node_id == frame.produced.node_id
+                && record.payload.attempt_id == frame.produced.attempt_id
         })
         .collect::<Vec<_>>();
     if records.len() != facts.len() {
@@ -573,12 +485,12 @@ where
     let descriptor = F::descriptor().map_err(|error| mismatch(error.to_string()))?;
     let descriptor_hash = mfm_facts::fact_descriptor_hash(&descriptor)
         .map_err(|error| mismatch(error.to_string()))?;
-    for (fact, (record_event, record)) in facts.iter().zip(records.iter()) {
+    for (fact, record) in facts.iter().zip(records.iter()) {
         let subject_json = serde_json::to_value(fact.subject()).map_err(json_error)?;
         let expected_subject = mfm_facts::typed_fact_subject_evidence(&descriptor, &subject_json)
             .map_err(|error| mismatch(error.to_string()))?;
         let expected_response = canonical_value_bytes(fact.response())?;
-        let claim = &record.claim;
+        let claim = &record.payload.claim;
         if claim.fact_descriptor_hash() != &descriptor_hash
             || claim.fact_kind() != descriptor.fact_kind()
             || claim.subject() != &expected_subject
@@ -589,8 +501,7 @@ where
                 "replay fact batch order or identity differed from reducer output",
             ));
         }
-        if record_event.commit_key() != output_event.commit_key()
-            || record_event.store_commit_order() != output_event.store_commit_order()
+        if record.commit_key != output_event.commit_key || record.sequence != output_event.sequence
         {
             return Err(mismatch(
                 "replay fact batch and state output were not recorded atomically",
@@ -600,7 +511,7 @@ where
             broker,
             frame,
             &descriptor,
-            &record.claim,
+            &record.payload.claim,
             fact.subject(),
             fact.response(),
         )?;
@@ -651,10 +562,7 @@ where
         artifact_id: response.artifact_id().clone(),
         evidence_hash: response.artifact_evidence_hash().clone(),
         digest: Some(response.response_hash().clone()),
-        byte_len: Some(
-            u64::try_from(expected_bytes.as_bytes().len())
-                .map_err(|_| mismatch("replay fact response length overflowed u64"))?,
-        ),
+        byte_len: None,
         media_type: None,
         schema_id: Some(response.response_schema_id().clone()),
         semantic_type_id: None,

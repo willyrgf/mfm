@@ -419,9 +419,7 @@ fn store_owned_requirement_constructors_preserve_exact_bindings() {
     };
     let public_requirements = event_artifact_requirements(&public_payload);
     let cell_requirement = public_output_cell_artifact_requirement(&public_output.cells[0]);
-    let mut event_cell_requirement = public_requirements[0].clone();
-    event_cell_requirement.artifact_role = Some(ArtifactRole::StateOutput);
-    assert_eq!(cell_requirement, event_cell_requirement);
+    assert_eq!(cell_requirement, public_requirements[0]);
     let rendered_requirement = public_output_rendered_artifact_requirement(
         public_output,
         public_output
@@ -525,8 +523,8 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
     .expect("append fact attempt start");
     append_fact_recorded_commit(&mut store, &run_id, "fact-baseline-recorded")
         .expect("append fact recorded");
-    let stream = store.load_run_stream(&run_id);
-    assert!(ProjectionSnapshot::rebuild_from_run_stream(&stream).is_err());
+    let records = store.committed_records_for_projection_test(&run_id);
+    assert!(ProjectionSnapshot::rebuild_from_run_stream(&records).is_err());
     let projection = store
         .projection_snapshot()
         .fact_query_entries()
@@ -543,125 +541,6 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
     assert_eq!(projection.response_hash(), &response.digest);
     assert_eq!(projection.artifact_id(), &response.artifact_id);
     assert_eq!(projection.response_artifact_evidence(), Some(&response));
-}
-
-#[test]
-fn committed_run_stream_exposes_store_owned_authority() {
-    let run_id = run_id(141);
-    let mut store = admitted_store(&run_id, "committed-stream-run-start");
-    append_side_effect_prepare(&mut store, &run_id);
-
-    let stream = store.load_run_stream(&run_id);
-    let committed =
-        CommittedRunStream::from_events(run_id.clone(), stream.clone()).expect("committed stream");
-
-    assert_eq!(committed.run_id(), &run_id);
-    assert_eq!(committed.events(), stream.as_slice());
-    assert_eq!(committed.next_seq(), store.expected_next_seq(&run_id));
-    assert_eq!(committed.commits().len(), 3);
-    assert_eq!(committed.commits()[0].seq(), StreamSeq::FIRST);
-    assert_eq!(committed.commits()[0].events().len(), 1);
-    assert_eq!(committed.commits()[1].events().len(), 1);
-    assert_eq!(committed.commits()[2].events().len(), 3);
-    assert_eq!(
-        committed.commits()[2].commit_key().as_str(),
-        "sidefx-prepare"
-    );
-    assert_eq!(committed.projection().run_state(&run_id), RunState::Started);
-    assert!(committed.projection().saga_engagement(&run_id).is_none());
-    assert_eq!(
-        committed
-            .projection()
-            .side_effect_for_pair(&run_id, &side_effect_pair_id())
-            .expect("side-effect projection")
-            .phase,
-        SideEffectPhase::InvocationPrepared {
-            invocation_epoch: 1,
-            claim_generation: 1,
-            claim_fencing_token: side_effect::ClaimFencingToken::new("token-1").expect("token"),
-        }
-    );
-    assert!(committed.artifact_requirements().iter().any(|requirement| {
-        requirement.source == EventArtifactReferenceSource::RunSpec
-            && requirement.artifact_role == Some(ArtifactRole::TypedExecutionSpec)
-    }));
-    assert!(committed.artifact_requirements().iter().any(|requirement| {
-        requirement.source == EventArtifactReferenceSource::SideEffectIntent
-            && requirement.artifact_role == Some(ArtifactRole::SideEffectIntent)
-    }));
-}
-
-#[test]
-fn committed_run_stream_canonical_json_roundtrips_store_authority() {
-    let run_id = run_id(144);
-    let mut store = admitted_store(&run_id, "committed-stream-json-run-start");
-    append_side_effect_prepare(&mut store, &run_id);
-    let committed = CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(&run_id))
-        .expect("committed stream");
-
-    let encoded = committed_run_stream_canonical_json(&committed).expect("committed stream json");
-    let decoded = committed_run_stream_from_canonical_json_slice(
-        &run_id,
-        encoded.as_bytes(),
-        &ArtifactByteAuthorityMap::new(),
-    )
-    .expect("decode committed stream json");
-
-    assert_eq!(decoded.run_id(), committed.run_id());
-    assert_eq!(decoded.events(), committed.events());
-    assert_eq!(decoded.commits(), committed.commits());
-    assert_eq!(decoded.projection(), committed.projection());
-    assert_eq!(decoded.next_seq(), committed.next_seq());
-}
-
-#[test]
-fn committed_run_stream_canonical_json_rejects_tampered_event_authority() {
-    let run_id = run_id(145);
-    let mut store = admitted_store(&run_id, "committed-stream-json-tamper-run-start");
-    append_side_effect_prepare(&mut store, &run_id);
-    let committed = CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(&run_id))
-        .expect("committed stream");
-    let encoded = committed_run_stream_canonical_json(&committed).expect("committed stream json");
-    let mut json: serde_json::Value =
-        serde_json::from_slice(encoded.as_bytes()).expect("committed stream value");
-    json["events"][0]["payload_hash"] = serde_json::Value::String(content_digest(146).to_string());
-    let tampered = PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&json).expect("tampered json"),
-    )
-    .expect("tampered canonical json");
-
-    let error = committed_run_stream_from_canonical_json_slice(
-        &run_id,
-        tampered.as_bytes(),
-        &ArtifactByteAuthorityMap::new(),
-    )
-    .expect_err("tampered envelope rejects");
-
-    assert!(matches!(
-        error,
-        StoreError::PersistedEventMismatch {
-            field: "payload_hash",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn committed_run_stream_rejects_events_for_a_different_run() {
-    let requested_run_id = run_id(142);
-    let other_run_id = run_id(143);
-    let store = admitted_store(&requested_run_id, "committed-stream-wrong-run-start");
-
-    let error =
-        CommittedRunStream::from_events(other_run_id, store.load_run_stream(&requested_run_id))
-            .expect_err("wrong run id rejects");
-    assert!(matches!(
-        error,
-        StoreError::PersistedEventMismatch {
-            field: "run_id",
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -784,29 +663,6 @@ fn event_payload_codec_rejects_unknown_and_deleted_fact_fields() {
             "deleted fact field {deleted_field} must be rejected"
         );
     }
-}
-
-#[test]
-fn committed_stream_codec_rejects_unknown_envelope_fields() {
-    let run_id = run_id(113);
-    let store = admitted_store(&run_id, "committed-stream-unknown-field");
-    let committed = CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(&run_id))
-        .expect("committed stream");
-    let encoded = committed_run_stream_canonical_json(&committed).expect("committed stream json");
-    let mut json: serde_json::Value =
-        serde_json::from_slice(encoded.as_bytes()).expect("committed stream value");
-    json["events"][0]["unexpected"] = serde_json::json!(true);
-    let unknown = PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::to_string(&json).expect("unknown-field json"),
-    )
-    .expect("unknown-field canonical json");
-
-    assert!(committed_run_stream_from_canonical_json_slice(
-        &run_id,
-        unknown.as_bytes(),
-        &ArtifactByteAuthorityMap::new(),
-    )
-    .is_err());
 }
 
 #[test]

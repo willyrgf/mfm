@@ -15,18 +15,6 @@ use mfm_evm::{
 };
 use mfm_program::{StateSpec, ValidatedConfig};
 
-struct MissingArtifacts;
-
-impl store::RetainedArtifactReadProvider for MissingArtifacts {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        let artifact_id = requirement.artifact_id.clone();
-        Box::pin(async move { Err(store::StoreError::MissingArtifact { artifact_id }) })
-    }
-}
-
 struct CountingReadSession {
     evidence: EvmSessionEvidence,
     uses: AtomicUsize,
@@ -107,7 +95,7 @@ async fn wrong_session_binding_fails_before_using_validation_authority() {
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
     );
-    let capabilities = EvmReadRunnerCapabilities::new(Arc::new(MissingArtifacts), sessions);
+    let capabilities = EvmReadRunnerCapabilities::new(sessions);
 
     let error = match capabilities.bind(requested).await {
         Ok(_) => panic!("wrong session binding must fail"),
@@ -136,7 +124,7 @@ async fn both_evm_read_families_share_async_route_validation_before_binding_or_r
         Arc::clone(&route_validations),
         Arc::clone(&session_binds),
     );
-    let capabilities = EvmReadRunnerCapabilities::new(Arc::new(MissingArtifacts), sessions);
+    let capabilities = EvmReadRunnerCapabilities::new(sessions);
     let validation_state = <ValidateEvmContractState as StateSpec>::new(
         ValidatedConfig::new(
             EvmContractValidationConfig::new(

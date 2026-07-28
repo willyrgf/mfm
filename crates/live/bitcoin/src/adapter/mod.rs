@@ -15,7 +15,6 @@ use mfm_runtime::{
     ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
     RunnerFactoryBinding, RunnerIngressContext, RunnerRegistrationBuilder,
 };
-use mfm_store::v1 as store;
 
 const READ_FACTORY: &str = "read_external";
 const ADAPTER_FACTORY: &str = "bitcoin_jsonrpc_adapter";
@@ -23,7 +22,6 @@ const ADAPTER_FACTORY: &str = "bitcoin_jsonrpc_adapter";
 /// Registers the one aggregate Bitcoin read runner against one supplied session object.
 pub fn register_bitcoin_jsonrpc_runners(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     session: Arc<dyn BitcoinBalanceSession>,
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
@@ -43,7 +41,6 @@ pub fn register_bitcoin_jsonrpc_runners(
     registrations.register_state_runner_with_factory::<CollectBitcoinBalancesState>(
         read_factory,
         Arc::new(ExternalReadRunner::<CollectBitcoinBalancesState, _>::new(
-            artifacts,
             CollectBitcoinBalancesExecutor { session },
         )),
     )?;

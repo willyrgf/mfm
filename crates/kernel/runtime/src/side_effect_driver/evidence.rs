@@ -38,12 +38,21 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
             prepared_artifact.evidence().artifact_id.clone(),
             prepared_artifact.evidence().evidence_hash()?,
         );
-        if !self
-            .ctx
-            .projections()
-            .retention(self.ctx.run_id())
-            .is_some_and(|retention| retention.refs.contains_key(&prepared_key))
-        {
+        let retained = self.ctx.lifecycle().retention().is_some_and(|retention| {
+            matches!(
+                retention.visit_references(|reference| {
+                    if reference.artifact_id == prepared_key.0
+                        && reference.evidence_hash == prepared_key.1
+                    {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                }),
+                std::ops::ControlFlow::Break(())
+            )
+        });
+        if !retained {
             output.retain_runtime_evidence(&prepared_artifact)?;
         }
         output.payload(payloads.side_effect_invocation_prepared(
@@ -303,21 +312,21 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         side_effect: RunnerSideEffectBinding,
         release_reason: &'static str,
     ) -> Result<Option<crate::RunnerEventPayload>> {
-        let holder = store::SideEffectPairLedgerRef::new(
-            self.ctx.run_id().clone(),
-            side_effect.pair_id.clone(),
-        );
-        let Some((_, lane)) = self
-            .ctx
-            .projections()
-            .resource_lanes()
-            .find(|(_, projection)| projection.holder == holder)
-        else {
+        let mut lane = None;
+        let _ = self.ctx.lifecycle().visit_resource_lanes(|candidate| {
+            let holder = candidate.holder();
+            if holder.run_id() == self.ctx.run_id() && holder.pair_id() == &side_effect.pair_id {
+                lane = Some(candidate);
+                return std::ops::ControlFlow::Break(());
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        let Some(lane) = lane else {
             return Ok(None);
         };
-        if lane.holder.pair_id != side_effect.pair_id
-            || lane.ledger_purpose != side_effect.ledger_purpose
-            || lane.invocation_epoch != side_effect.invocation_epoch
+        if lane.holder().pair_id() != &side_effect.pair_id
+            || lane.ledger_purpose() != &side_effect.ledger_purpose
+            || lane.invocation_epoch() != side_effect.invocation_epoch
         {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "active resource lane for ledger {} does not match side-effect terminal context",
@@ -328,7 +337,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         let payloads = RunnerPayloadBuilder::new(self.ctx);
         Ok(Some(payloads.resource_lane_release_intent(
             side_effect,
-            lane.claim_id.clone(),
+            lane.claim_id().clone(),
             release_reason,
         )))
     }

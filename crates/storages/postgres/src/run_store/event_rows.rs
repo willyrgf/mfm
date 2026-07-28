@@ -1,20 +1,5 @@
 use super::*;
 
-pub(super) async fn load_run_stream_client(
-    pool: &PgPool,
-    run_id: &RunId,
-) -> Result<Vec<KernelEventEnvelope>> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| database_error("failed to start read transaction", error))?;
-    let events = load_run_stream_tx(&mut tx, run_id).await?;
-    tx.commit()
-        .await
-        .map_err(|error| database_error("failed to commit read transaction", error))?;
-    Ok(events)
-}
-
 pub(super) async fn load_run_stream_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,

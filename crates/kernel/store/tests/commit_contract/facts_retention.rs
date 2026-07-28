@@ -715,8 +715,9 @@ fn retention_refs_are_projected_from_authoritative_stream() {
     )
     .expect("append retention refs");
 
-    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&store.load_run_stream(&run_id))
-        .expect("retention snapshot");
+    let records = store.committed_records_for_projection_test(&run_id);
+    let snapshot =
+        ProjectionSnapshot::rebuild_from_run_stream(&records).expect("retention snapshot");
     let retention = snapshot.retention(&run_id).expect("retention projection");
     let evidence_hash = evidence.evidence_hash().expect("retention evidence hash");
     assert_eq!(
@@ -1012,8 +1013,8 @@ fn projections_rebuild_from_authoritative_run_stream() {
     )
     .expect("append retention manifest");
 
-    let stream = store.load_run_stream(&run_id);
-    let summary = projection_differential_summary(&store, &run_id, &stream);
+    let records = store.committed_records_for_projection_test(&run_id);
+    let summary = projection_differential_summary(&store, &run_id, &records);
     let expected_summary = [
         "committed run_state=Started commits=6 events=12 next_seq=7".to_owned(),
         format!(
@@ -1035,7 +1036,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
     assert_eq!(summary, expected_summary);
 
     let rebuilt =
-        ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild projections");
+        ProjectionSnapshot::rebuild_from_run_stream(&records).expect("rebuild projections");
     assert_eq!(rebuilt.side_effects().count(), 1);
     assert_eq!(rebuilt.resource_lanes().count(), 1);
     assert_eq!(rebuilt.public_outputs().count(), 1);

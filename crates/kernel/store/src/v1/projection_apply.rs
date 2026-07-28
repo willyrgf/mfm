@@ -10,18 +10,21 @@ pub(crate) fn fact_claim_projection_key(prefix: &str, claim_id: &mfm_facts::Fact
     )
 }
 
-pub(crate) fn apply_projection(
+pub(crate) fn apply_projection<R>(
     projections: &mut ProjectionSnapshot,
     envelope: &KernelEventEnvelope,
-    artifact_bytes: &ArtifactByteAuthorityMap,
-) -> Result<()> {
+    objects: &R,
+) -> Result<()>
+where
+    R: ExactRetainedObjectResolver + ?Sized,
+{
     match envelope.payload() {
         KernelEventPayload::RunAdmitted(payload) => apply_run_admitted(
             projections,
             envelope.run_id(),
             &envelope.event_id,
             payload,
-            artifact_bytes,
+            objects,
         )?,
         KernelEventPayload::RunCompleted(payload) => {
             apply_run_completed(projections, &envelope.event_id, payload)?;
@@ -119,7 +122,7 @@ pub(crate) fn apply_projection(
             apply_retention_manifest_projected(projections, payload)?;
         }
         KernelEventPayload::FactRecorded(payload) => {
-            apply_fact_recorded(projections, envelope, payload, artifact_bytes)?;
+            apply_fact_recorded(projections, envelope, payload, objects)?;
         }
         KernelEventPayload::ArtifactReferenced(_) => {}
     }
@@ -140,16 +143,19 @@ pub(crate) fn apply_projection_for_external_fact_queries(
     Ok(())
 }
 
-fn apply_run_admitted(
+fn apply_run_admitted<R>(
     projections: &mut ProjectionSnapshot,
     run_id: &RunId,
     event_id: &EventId,
     payload: &events::RunAdmitted,
-    artifact_bytes: &ArtifactByteAuthorityMap,
-) -> Result<()> {
+    objects: &R,
+) -> Result<()>
+where
+    R: ExactRetainedObjectResolver + ?Sized,
+{
     apply_run_admitted_base(projections, run_id, event_id, payload)?;
     for artifact in &payload.fact_descriptor_artifacts {
-        apply_fact_descriptor_artifact(projections, artifact, artifact_bytes)?;
+        apply_fact_descriptor_artifact(projections, artifact, objects)?;
     }
     Ok(())
 }

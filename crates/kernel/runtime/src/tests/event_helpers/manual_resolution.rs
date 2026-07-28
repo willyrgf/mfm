@@ -1,16 +1,64 @@
 use super::*;
 
-pub(in crate::tests::support) async fn append_manual_resolution(
+pub(in crate::tests::support) async fn append_manual_resolution<S>(
     scheduler: &SerialTypedScheduler,
-    store: &mut TestTypedRunStore,
-    fixture: &Fixture,
+    store: &S,
+    current: VerifiedCurrentRun,
     outcome: events::ManualResolutionOutcome,
-) {
-    let manual = match &fixture.runtime_spec.spec().saga {
-        spec::SagaPolicySpec::ManualResolution { manual } => manual,
+) -> VerifiedCurrentRun
+where
+    S: store::RunJournalStore + ?Sized,
+{
+    let expected_next_sequence = current
+        .lifecycle()
+        .next_sequence()
+        .expect("manual prefix next sequence");
+    let mut prefix_record_count = 0;
+    let _ = current.lifecycle().visit_records(|_| {
+        prefix_record_count += 1;
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    let request = manual_resolution_request_for_current(&current, outcome);
+    let current = scheduler
+        .record_manual_resolution(store, current, request)
+        .await
+        .expect("append manual resolution");
+    let lifecycle = current.lifecycle();
+    let mut manual_sequence = None;
+    let mut manual_position = None;
+    let _ = lifecycle.visit_records(|record| {
+        if matches!(
+            record.kind(),
+            store::current_lifecycle::CurrentRecordKindRef::ManualResolutionRecorded(_)
+        ) {
+            manual_sequence = Some(record.sequence());
+            manual_position = Some(record.position());
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    assert_eq!(
+        manual_sequence,
+        Some(expected_next_sequence),
+        "manual resolution must remain adjacent to its authorized prefix"
+    );
+    assert_eq!(
+        manual_position,
+        Some(prefix_record_count),
+        "manual resolution record must immediately follow its authorized prefix"
+    );
+    current
+}
+
+pub(in crate::tests::support) fn manual_resolution_request_for_current(
+    current: &VerifiedCurrentRun,
+    outcome: events::ManualResolutionOutcome,
+) -> ManualResolutionRequest {
+    let manual = match &current.runtime_spec().spec().saga {
+        spec::SagaPolicySpec::ManualResolution { manual } => manual.as_ref().clone(),
         spec::SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
-        } => manual,
+        } => manual.as_ref().clone(),
         _ => panic!("fixture does not carry manual resolution schemas"),
     };
     let evidence_bytes = br#"{"operator_note":"reviewed"}"#.to_vec();
@@ -25,13 +73,18 @@ pub(in crate::tests::support) async fn append_manual_resolution(
         content_hash: evidence_hash,
         artifact_id: evidence_artifact_id,
     };
-    let prefix = build_manual_resolution_prefix_authority_for_tests(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        store,
-        manual.as_ref().clone(),
-    )
-    .expect("manual prefix authority");
+    let prefix = current
+        .lifecycle()
+        .manual_resolution_prefix_authority()
+        .expect("manual prefix authority");
+    assert_eq!(
+        prefix.expected_next_seq(),
+        current
+            .lifecycle()
+            .next_sequence()
+            .expect("manual prefix next sequence")
+            .as_u64()
+    );
     let claim = prefix
         .authorization_claim(outcome, evidence)
         .expect("manual claim");
@@ -55,23 +108,15 @@ pub(in crate::tests::support) async fn append_manual_resolution(
         .canonical_json()
         .expect("canonical manual proof")
         .to_vec();
-    record_manual_resolution(
-        scheduler,
-        store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        ManualResolutionRequest {
-            outcome,
-            evidence_artifact: ManualResolutionEvidenceArtifact {
-                bytes: evidence_bytes,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-            },
-            proof_bytes,
-            note: None,
+    ManualResolutionRequest {
+        outcome,
+        evidence_artifact: ManualResolutionEvidenceArtifact {
+            bytes: evidence_bytes,
+            media_type: spec::MediaType::new("application/json").expect("media"),
         },
-    )
-    .await
-    .expect("append manual resolution");
+        proof_bytes,
+        note: None,
+    }
 }
 
 pub(in crate::tests::support) fn test_manual_signing_key() -> k256::ecdsa::SigningKey {

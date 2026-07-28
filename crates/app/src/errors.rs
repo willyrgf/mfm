@@ -88,6 +88,11 @@ impl From<mfm_runtime::RuntimeError> for PublicError {
                 "LaunchRunnerUnavailable",
                 "A required typed runner is unavailable",
             ),
+            mfm_runtime::RuntimeError::ManualResolutionRequestStale { .. } => Self::backend(
+                ErrorClass::Conflict,
+                "ManualResolutionRequestStale",
+                "Manual resolution request is stale; reload the run and submit a fresh request",
+            ),
             mfm_runtime::RuntimeError::Failure(failure) => {
                 let class = match failure.code().as_str() {
                     "RuntimeConfigRequired" | "RuntimeConfigInvalid" => {
@@ -168,6 +173,9 @@ fn joined_public_names(names: &[&str]) -> String {
 impl From<store::StoreError> for PublicError {
     fn from(error: store::StoreError) -> Self {
         match error {
+            store::StoreError::RunNotFound { .. } => {
+                Self::not_found("RunNotFound", "typed run was not found")
+            }
             store::StoreError::MissingArtifact { artifact_id } => Self::not_found(
                 "ArtifactNotFound",
                 format!("typed artifact {artifact_id} was not found"),
@@ -336,6 +344,23 @@ mod tests {
             assert!(!rendered.contains("migration"));
             assert!(!rendered.contains("checksum"));
         }
+    }
+
+    #[test]
+    fn stale_manual_resolution_hides_the_expected_sequence() {
+        let error = PublicError::from(mfm_runtime::RuntimeError::ManualResolutionRequestStale {
+            expected_sequence: store::StreamSeq::new(37).expect("stream sequence"),
+        });
+
+        assert_eq!(error.class, ErrorClass::Conflict);
+        assert_eq!(error.code, "ManualResolutionRequestStale");
+        assert_eq!(
+            error.message,
+            "Manual resolution request is stale; reload the run and submit a fresh request"
+        );
+        assert!(!serde_json::to_string(&error)
+            .expect("serialize public error")
+            .contains("37"));
     }
 
     #[test]

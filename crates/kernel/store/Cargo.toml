@@ -22,6 +22,7 @@ test-support = []
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
+mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
@@ -32,10 +33,14 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
+mfm-program = { path = "../program" }
+mfm-program-derive = { path = "../program-derive" }
 mfm-spec = { path = "../spec" }
+mfm-values = { path = "../values" }
+serde = { workspace = true }
+trybuild = "1.0"
 
 [[test]]
 name = "commit_contract"

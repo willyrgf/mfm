@@ -30,7 +30,6 @@ fn required_artifact_precondition_is_atomic_with_append() {
         .append_test_commit_plan(commit.into())
         .expect_err("missing artifact rejects commit");
     assert!(matches!(error, StoreError::MissingArtifact { .. }));
-    assert_eq!(store.load_run_stream(&run_id).len(), 1);
     assert_eq!(store.expected_next_seq(&run_id).as_u64(), 2);
 }
 
@@ -58,7 +57,7 @@ fn prepared_commit_rejects_unreferenced_admitted_artifact_without_persisting_it(
         error,
         StoreError::UnreferencedArtifactEvidence { .. }
     ));
-    assert_eq!(store.load_run_stream(&run_id).len(), 1);
+    assert_eq!(store.expected_next_seq(&run_id).as_u64(), 2);
 
     let missing_evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     let error = store
@@ -288,7 +287,7 @@ fn admitted_artifacts_are_rolled_back_when_commit_validation_fails() {
         ))
         .expect_err("projection failure rejects commit after artifact validation");
     assert!(matches!(error, StoreError::ProjectionConflict { .. }));
-    assert_eq!(store.load_run_stream(&run_id).len(), 1);
+    assert_eq!(store.expected_next_seq(&run_id).as_u64(), 2);
 
     let missing_evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     let error = store
@@ -396,6 +395,10 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
             .append_prepared_commit_with_artifacts(request, vec![stored_evidence])
             .expect_err("artifact evidence mismatch rejects commit");
         assert_invalid_prepared_commit_contains(error, expected_field);
-        assert!(store.load_run_stream(&run_id).is_empty(), "{case:?}");
+        assert_eq!(
+            store.expected_next_seq(&run_id),
+            StreamSeq::FIRST,
+            "{case:?}"
+        );
     }
 }

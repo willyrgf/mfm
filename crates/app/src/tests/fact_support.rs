@@ -260,7 +260,6 @@ pub(super) fn app_launch_fact_query_request() -> PublicFactQueryRequest {
 
 pub(super) fn app_fact_runner_registry(
     runtime_spec: &CertifiedRuntimeSpec,
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 ) -> ErasedRunnerRegistry {
     let node = runtime_spec
         .spec()
@@ -284,7 +283,6 @@ pub(super) fn app_fact_runner_registry(
             runner_factory.factory_id(),
             runner_factory.executable(),
             Arc::new(mfm_runtime::ExternalReadRunner::<AppFactState, _>::new(
-                artifacts,
                 AppFactReadExecutor,
             )),
         )
@@ -364,20 +362,18 @@ pub(super) async fn launch_app_fact_run_in_store_with_state_key(
     let request =
         prepare_app_fact_launch_with_invocation_key_and_state_key(invocation_key_digest, state_key)
             .expect("prepared app fact launch");
-    let runtime_spec =
-        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
-    let runners = app_fact_runner_registry(&runtime_spec, Arc::new(store.clone()));
+    let runners = app_fact_runner_registry(&request.runtime_spec);
     let registry = app_fact_certification_registry();
     let run_id = request.run_id.clone();
     let execution_scope =
         store::ExecutionClaimScope::from_run_identity_material(&request.identity_material);
-    let scheduler = SerialTypedScheduler::new(runners, Arc::new(store.clone()));
+    let scheduler = SerialTypedScheduler::new(runners);
     let launch = scheduler
         .prepare_run_launch(
-            &runtime_spec,
+            &request.runtime_spec,
             request.identity_material,
             request.evidence,
-            store.expected_next_seq(&run_id).await.expect("next seq"),
+            store::StreamSeq::FIRST,
         )
         .await
         .expect("prepare fact run launch");
@@ -385,6 +381,10 @@ pub(super) async fn launch_app_fact_run_in_store_with_state_key(
         .start_run(&store, launch)
         .await
         .expect("start fact run");
+    let mut current = scheduler
+        .load_admitted_run(&store, request.runtime_spec, &run_id)
+        .await
+        .expect("load admitted fact run");
     let token = store::AdmissionToken::new("mfm.app.test.fact-runner-claim")
         .expect("execution claim token");
     match store
@@ -397,101 +397,91 @@ pub(super) async fn launch_app_fact_run_in_store_with_state_key(
     }
 
     for _ in 0..16 {
-        let committed = store
-            .load_committed_run_stream(&run_id)
-            .await
-            .expect("committed stream");
-        if committed.projection().run_state(&run_id) == store::RunState::Completed {
+        let (completed, fact_recorded) = {
+            let lifecycle = store::current_lifecycle::read(current.view());
+            let mut fact_recorded = false;
+            let _ = lifecycle.visit_records(|record| {
+                fact_recorded |= matches!(
+                    record.kind(),
+                    store::current_lifecycle::CurrentRecordKindRef::FactRecorded(_)
+                );
+                std::ops::ControlFlow::<()>::Continue(())
+            });
+            (lifecycle.completion().is_some(), fact_recorded)
+        };
+        if completed {
             break;
         }
-        if !require_completion
-            && committed
-                .projection()
-                .fact_query_entries()
-                .any(|(_claim_id, fact)| fact.source_run_id() == &run_id)
-        {
+        if !require_completion && fact_recorded {
             break;
         }
         match scheduler
-            .drive_once(
-                &store,
-                &runtime_spec,
-                &run_id,
-                &execution_scope,
-                token.clone(),
-            )
+            .drive_once(&store, current, &execution_scope, token.clone())
             .await
         {
-            Ok(_) => {}
+            Ok(result) => current = result.into_current_run(),
             Err(error) => {
-                let stream = store.load_run_stream(&run_id).await.unwrap_or_default();
-                let event_variants = stream
-                    .iter()
-                    .map(|event| match event.payload() {
-                        events::KernelEventPayload::RunAdmitted(_) => "RunAdmitted".to_owned(),
-                        events::KernelEventPayload::StateAttemptStarted(_) => {
-                            "StateAttemptStarted".to_owned()
-                        }
-                        events::KernelEventPayload::StateAttemptFailed(payload) => format!(
-                            "StateAttemptFailed:{}:{}",
-                            payload.error.code, payload.error.safe_message
-                        ),
-                        events::KernelEventPayload::CellProduced(_) => "CellProduced".to_owned(),
-                        events::KernelEventPayload::FactRecorded(_) => "FactRecorded".to_owned(),
-                        events::KernelEventPayload::ArtifactReferenced(_) => {
-                            "ArtifactReferenced".to_owned()
-                        }
-                        events::KernelEventPayload::RetentionRefsAppended(_) => {
-                            "RetentionRefsAppended".to_owned()
-                        }
-                        events::KernelEventPayload::RunCompleted(_) => "RunCompleted".to_owned(),
-                        _ => "Other".to_owned(),
-                    })
-                    .collect::<Vec<_>>();
+                let view = load_verified_run_view(&store, &registry, &run_id)
+                    .await
+                    .expect("verified failed fact run");
+                let event_variants = app_fact_record_variants(&view);
                 panic!("drive fact run failed: {error:?}; events: {event_variants:?}");
             }
         }
     }
-    let committed = store
-        .load_committed_run_stream(&run_id)
-        .await
-        .expect("fact committed stream");
+    let lifecycle = store::current_lifecycle::read(current.view());
     if require_completion {
-        assert_eq!(
-            committed.projection().run_state(&run_id),
-            store::RunState::Completed
-        );
+        assert!(lifecycle.completion().is_some());
     }
-    let event_variants = committed
-        .events()
-        .iter()
-        .map(|event| match event.payload() {
-            events::KernelEventPayload::RunAdmitted(_) => "RunAdmitted".to_owned(),
-            events::KernelEventPayload::StateAttemptStarted(_) => "StateAttemptStarted".to_owned(),
-            events::KernelEventPayload::StateAttemptFailed(payload) => format!(
+    let event_variants = app_fact_record_variants(current.view());
+    let mut fact_recorded = false;
+    let _ = lifecycle.visit_records(|record| {
+        fact_recorded |= matches!(
+            record.kind(),
+            store::current_lifecycle::CurrentRecordKindRef::FactRecorded(_)
+        );
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    assert!(fact_recorded, "events: {event_variants:?}");
+
+    (run_id, store, registry)
+}
+
+fn app_fact_record_variants(view: &store::VerifiedRunView) -> Vec<String> {
+    let lifecycle = store::current_lifecycle::read(view);
+    let mut variants = Vec::new();
+    let _ = lifecycle.visit_records(|record| {
+        let variant = match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::RunAdmitted(_) => "RunAdmitted".into(),
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptStarted(_) => {
+                "StateAttemptStarted".into()
+            }
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptFailed(payload) => format!(
                 "StateAttemptFailed:{}:{}",
                 payload.error.code, payload.error.safe_message
             ),
-            events::KernelEventPayload::CellProduced(_) => "CellProduced".to_owned(),
-            events::KernelEventPayload::FactRecorded(_) => "FactRecorded".to_owned(),
-            events::KernelEventPayload::ArtifactReferenced(_) => "ArtifactReferenced".to_owned(),
-            events::KernelEventPayload::RetentionRefsAppended(_) => {
-                "RetentionRefsAppended".to_owned()
+            store::current_lifecycle::CurrentRecordKindRef::CellProduced(_) => {
+                "CellProduced".into()
             }
-            events::KernelEventPayload::PublicOutputProduced(_) => {
-                "PublicOutputProduced".to_owned()
+            store::current_lifecycle::CurrentRecordKindRef::FactRecorded(_) => {
+                "FactRecorded".into()
             }
-            events::KernelEventPayload::RunCompleted(_) => "RunCompleted".to_owned(),
-            _ => "Other".to_owned(),
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        committed
-            .events()
-            .iter()
-            .any(|event| matches!(event.payload(), events::KernelEventPayload::FactRecorded(_))),
-        "events: {event_variants:?}"
-    );
-
-    (run_id, store, registry)
+            store::current_lifecycle::CurrentRecordKindRef::ArtifactReferenced(_) => {
+                "ArtifactReferenced".into()
+            }
+            store::current_lifecycle::CurrentRecordKindRef::RetentionRefsAppended(_) => {
+                "RetentionRefsAppended".into()
+            }
+            store::current_lifecycle::CurrentRecordKindRef::PublicOutputProduced(_) => {
+                "PublicOutputProduced".into()
+            }
+            store::current_lifecycle::CurrentRecordKindRef::RunCompleted(_) => {
+                "RunCompleted".into()
+            }
+            _ => "Other".into(),
+        };
+        variants.push(variant);
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    variants
 }

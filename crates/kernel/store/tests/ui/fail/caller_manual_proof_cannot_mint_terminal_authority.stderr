@@ -1,0 +1,16 @@
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+ --> tests/ui/fail/caller_manual_proof_cannot_mint_terminal_authority.rs:5:20
+  |
+5 |     let _ = reader.saga_terminal_proof(StreamSeq::new(1).unwrap(), Some(proof));
+  |                    ^^^^^^^^^^^^^^^^^^^                             ----------- unexpected argument #2 of type `Option<VerifiedManualResolutionForPrefix>`
+  |
+note: method defined here
+ --> src/v1/current_lifecycle.rs
+  |
+  |     pub fn saga_terminal_proof(&self, prefix_next_seq: StreamSeq) -> Result<SagaTerminalProof> {
+  |            ^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+5 -     let _ = reader.saga_terminal_proof(StreamSeq::new(1).unwrap(), Some(proof));
+5 +     let _ = reader.saga_terminal_proof(StreamSeq::new(1).unwrap());
+  |

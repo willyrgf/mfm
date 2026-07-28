@@ -1,0 +1,9 @@
+error[E0119]: conflicting implementations of trait `RunJournalStore` for type `Backend`
+  --> tests/ui/fail/run_journal_backend_cannot_override_contract.rs:26:1
+   |
+26 | impl RunJournalStore for Backend {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in crate `mfm_store`:
+           - impl<T> RunJournalStore for T
+             where T: mfm_store::v1::RunJournalBackend, T: ?Sized;

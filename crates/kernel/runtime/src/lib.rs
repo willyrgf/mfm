@@ -40,7 +40,6 @@ mod side_effects;
 mod spec_authority;
 mod transition;
 
-pub use admission::RunAdmissionAuthority;
 pub use artifacts::{StagedArtifact, StagedRetentionRefs};
 pub use binding::{
     BoundCapabilityAuthority, BoundFrameworkHandlerAuthority, BoundFrameworkHandlerKind,
@@ -51,25 +50,23 @@ pub use error::{
     attempt_failure_diagnostics_from_artifact_json, RuntimeError, RuntimeFailure,
     REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
 };
-pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistoryView};
+pub use history::{verify_current_run, VerifiedCurrentRun};
 pub use invocation::{
     CertifiedInvocationContext, CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell,
     MaterializedCellTerminal, MaterializedInputNode, MaterializedInputs, NamedMaterializedInput,
     PreInvocationRunCtx, PreparedRunnerInvocation,
 };
-pub use manual_resolution::{
-    manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
-    unresolved_manual_obligations_digest, ManualResolutionEvidenceArtifact,
-};
+pub use manual_resolution::ManualResolutionEvidenceArtifact;
 pub use runner_kit::{
     load_launch_config_for_node, load_materialized_input, load_materialized_node_value,
     load_materialized_struct_field_value, load_materialized_struct_input,
-    load_non_empty_materialized_input, load_runner_config_for_node, load_side_effect_artifact,
-    materialized_input_node_json, register_pure_state, ExecutableIdentityTemplate,
-    ExternalReadExecution, ExternalReadExecutionFuture, ExternalReadPlanExecutor,
-    ExternalReadRunner, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerFactoryBinding,
-    RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
-    TypedContextOutputExtractor,
+    load_non_empty_materialized_input, load_pre_invocation_materialized_struct_input,
+    load_pre_invocation_runner_config_for_node, load_runner_config_for_node,
+    load_side_effect_artifact, materialized_input_node_json, register_pure_state,
+    ExecutableIdentityTemplate, ExternalReadExecution, ExternalReadExecutionFuture,
+    ExternalReadPlanExecutor, ExternalReadRunner, RunnerArtifactBuilder, RunnerCapabilityBinding,
+    RunnerFactoryBinding, RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder,
+    RunnerRegistrationBuilder, TypedContextOutputExtractor,
 };
 pub use runners::{
     AdapterExecutableBinding, CapabilityImplementationBinding, CapabilityImplementationId,
@@ -77,19 +74,19 @@ pub use runners::{
     ErasedRunnerOutput, ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload,
     RunnerIngressContext, RunnerIngressFuture, RunnerOutputSettlement,
 };
-pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
+pub use scheduler::{
+    ManualResolutionRequest, SchedulerDriveResult, SchedulerStatus, SerialTypedScheduler,
+};
 pub use side_effect_driver::{
     preclaim_side_effect_resource_lane, side_effect_idempotency_key, SideEffectAdapter,
     SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence,
     SideEffectPreparedInvocation, SideEffectReplayEvidence, SideEffectSubmissionDecision,
     SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
-pub use spec_authority::CertifiedRuntimeSpec;
+pub use spec_authority::{CertifiedRuntimeSpec, CurrentRuntimeSpecRef};
 
 #[cfg(test)]
-use artifacts::{
-    staged_artifact_binding_kind, staged_side_effect_artifact_phase, StagedArtifactBindingKind,
-};
+use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase};
 
 #[cfg(test)]
 use commit::{retention_manifest_payloads, runner_payloads_with_derived_lifecycle};
@@ -99,11 +96,9 @@ use framework::{
     certified_retention_manifest_node,
 };
 #[cfg(test)]
-use history::RuntimeRunView;
-#[cfg(test)]
 use runner_kit::{RunnerClaimBinding, RunnerSideEffectBinding};
 #[cfg(test)]
-use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemptView};
+use side_effect_lifecycle::{side_effect_for_attempt, SideEffectAttemptView};
 
 /// Result type for typed runtime operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -117,11 +112,14 @@ pub fn framework_authoring_catalog(
     mfm_certify::__framework_authoring_catalog(public_output_schema_id)
 }
 
-fn validate_public_output(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn validate_public_output<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
     payload: &events::PublicOutputProduced,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: spec_authority::CurrentSpecRead + ?Sized,
+{
     validate_public_output_render_node(
         runtime_spec,
         node,
@@ -161,12 +159,15 @@ fn validate_public_output(
     Ok(())
 }
 
-fn validate_public_output_render_node(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn validate_public_output_render_node<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
     public_schema_id: SchemaId,
     renderer_descriptor_id: &DescriptorId,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: spec_authority::CurrentSpecRead + ?Sized,
+{
     let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &node.framework else {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "node {} is not certified as a public-output render node",

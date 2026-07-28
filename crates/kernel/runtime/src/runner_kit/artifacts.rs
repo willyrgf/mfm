@@ -138,16 +138,53 @@ impl RunnerFactoryBinding {
 }
 
 /// Loads and validates the certified config artifact for a specific certified node.
-pub async fn load_runner_config_for_node<T>(
+pub fn load_runner_config_for_node<T>(
+    ctx: &ErasedRunCtx<'_>,
     node: &spec::NodeSpec,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<ValidatedConfig<T>>
 where
     T: MfmConfig + DeserializeOwned,
 {
-    let requirement = certified_config_requirement(node)?;
-    let verified = read_retained_artifact(artifacts, &requirement).await?;
-    let config = decode_verified_json::<T>(&verified)?;
+    ensure_certified_node(ctx.certified_node(&node.node_id), node)?;
+    load_config_for_node(ctx.lifecycle(), node)
+}
+
+/// Loads and validates the certified config artifact for a pre-invocation state.
+pub fn load_pre_invocation_runner_config_for_node<T>(
+    ctx: &PreInvocationRunCtx<'_>,
+    node: &spec::NodeSpec,
+) -> Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    ensure_certified_node(ctx.runtime_spec().node(&node.node_id), node)?;
+    load_config_for_node(ctx.lifecycle(), node)
+}
+
+fn ensure_certified_node(
+    certified: Option<&spec::NodeSpec>,
+    requested: &spec::NodeSpec,
+) -> Result<()> {
+    if certified == Some(requested) {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} is not part of the certified runtime spec",
+            requested.node_id
+        )))
+    }
+}
+
+fn load_config_for_node<T>(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+    node: &spec::NodeSpec,
+) -> Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let requirement = store::config_ref_artifact_requirement(&node.config_ref)?;
+    let artifact = committed_object_for_requirement(lifecycle, &requirement)?;
+    let config = decode_json_bytes::<T>(artifact.bytes())?;
     ValidatedConfig::new(config)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
@@ -170,44 +207,46 @@ where
     ValidatedConfig::new(config).map_err(|error| RuntimeError::RunnerBinding(error.to_string()))
 }
 
-/// Loads one materialized input node as a typed value from a state-output or seed cell.
-pub async fn load_materialized_node_value<T>(
+/// Loads one materialized input node as a typed value from the verified run journal.
+pub fn load_materialized_node_value<T>(
+    ctx: &ErasedRunCtx<'_>,
     node: &MaterializedInputNode,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: MfmValue + DeserializeOwned,
 {
-    let MaterializedInputNode::Cell(cell) = node else {
-        return Err(RuntimeError::InvalidRunnerOutput(
-            "materialized input node was not a cell".to_owned(),
-        ));
-    };
-    let verified = load_materialized_cell_artifact(cell, artifacts).await?;
-    decode_verified_json(&verified)
+    load_materialized_node_value_from_lifecycle(node, ctx.lifecycle())
 }
 
 /// Loads the root materialized input as a struct-like value.
-pub async fn load_materialized_struct_input<T>(
+pub fn load_materialized_struct_input<T>(
+    ctx: &ErasedRunCtx<'_>,
     inputs: &MaterializedInputs,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    let value = materialized_input_node_json(&inputs.root, artifacts).await?;
+    let value = materialized_input_node_json_from_lifecycle(&inputs.root, ctx.lifecycle())?;
+    serde_json::from_value(value)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
+/// Loads the root materialized pre-invocation input as a struct-like value.
+pub fn load_pre_invocation_materialized_struct_input<T>(ctx: &PreInvocationRunCtx<'_>) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let value = materialized_input_node_json_from_lifecycle(&ctx.inputs().root, ctx.lifecycle())?;
     serde_json::from_value(value)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 /// Loads the complete materialized input tree as its certified state-input type.
-pub async fn load_materialized_input<T>(
-    inputs: &MaterializedInputs,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<T>
+pub fn load_materialized_input<T>(ctx: &ErasedRunCtx<'_>) -> Result<T>
 where
     T: StateInput + DeserializeOwned,
 {
+    let inputs = ctx.inputs();
     let expected_schema = T::input_schema_id()
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     if inputs.input_schema_id != expected_schema {
@@ -216,16 +255,16 @@ where
             inputs.input_schema_id, expected_schema
         )));
     }
-    let value = materialized_input_node_json(&inputs.root, artifacts).await?;
+    let value = materialized_input_node_json_from_lifecycle(&inputs.root, ctx.lifecycle())?;
     serde_json::from_value(value)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 /// Loads one field from a struct-shaped materialized input as a typed value.
-pub async fn load_materialized_struct_field_value<T>(
+pub fn load_materialized_struct_field_value<T>(
+    ctx: &ErasedRunCtx<'_>,
     inputs: &MaterializedInputs,
     field_path: &str,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -243,13 +282,13 @@ where
                 "materialized input missing {field_path} field"
             ))
         })?;
-    load_materialized_node_value(&field.node, artifacts).await
+    load_materialized_node_value_from_lifecycle(&field.node, ctx.lifecycle())
 }
 
 /// Loads a non-empty vector materialized input from cell-backed elements.
-pub async fn load_non_empty_materialized_input<T>(
+pub fn load_non_empty_materialized_input<T>(
+    ctx: &ErasedRunCtx<'_>,
     inputs: &MaterializedInputs,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<NonEmpty<T>>
 where
     T: MfmValue + DeserializeOwned,
@@ -261,43 +300,55 @@ where
     };
     let mut values = Vec::with_capacity(elements.len());
     for element in elements {
-        values.push(load_materialized_node_value(element, artifacts).await?);
+        values.push(load_materialized_node_value_from_lifecycle(
+            element,
+            ctx.lifecycle(),
+        )?);
     }
     NonEmpty::try_from_vec(values)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-/// Loads a side-effect artifact using the producer identity retained by the verified projection.
-pub async fn load_side_effect_artifact<T>(
-    artifact: &store::SideEffectArtifactProjection,
+/// Loads a side-effect artifact using exact evidence from the verified run journal.
+pub fn load_side_effect_artifact<T>(
+    ctx: &ErasedRunCtx<'_>,
+    artifact: &store::current_lifecycle::CurrentArtifactProjectionRef<'_>,
     role: events::ArtifactRole,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<(T, store::ArtifactEvidenceRef)>
 where
     T: MfmValue + DeserializeOwned,
 {
     let requirement = side_effect_artifact_requirement(artifact, role)?;
-    let verified = read_retained_artifact(artifacts, &requirement).await?;
-    let evidence = verified.evidence().clone();
-    let value = decode_verified_json(&verified)?;
+    let object = committed_object_for_requirement(ctx.lifecycle(), &requirement)?;
+    let evidence = object.evidence().clone();
+    let value = decode_json_bytes(object.bytes())?;
     Ok((value, evidence))
 }
 
-/// Materializes an input node tree into JSON, loading cell bytes where needed.
-pub async fn materialized_input_node_json(
+/// Materializes an input node tree into JSON from exact verified-journal objects.
+pub fn materialized_input_node_json(
+    ctx: &ErasedRunCtx<'_>,
     node: &MaterializedInputNode,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> Result<serde_json::Value> {
+    materialized_input_node_json_from_lifecycle(node, ctx.lifecycle())
+}
+
+fn materialized_input_node_json_from_lifecycle(
+    node: &MaterializedInputNode,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
 ) -> Result<serde_json::Value> {
     match node {
         MaterializedInputNode::Unit => Ok(serde_json::Value::Null),
         MaterializedInputNode::Cell(cell) => {
-            let verified = load_materialized_cell_artifact(cell, artifacts).await?;
-            decode_verified_json(&verified)
+            let object = load_materialized_cell_artifact(cell, lifecycle)?;
+            decode_json_bytes(object.bytes())
         }
         MaterializedInputNode::Tuple(elements) => {
             let mut values = Vec::with_capacity(elements.len());
             for element in elements {
-                values.push(Box::pin(materialized_input_node_json(element, artifacts)).await?);
+                values.push(materialized_input_node_json_from_lifecycle(
+                    element, lifecycle,
+                )?);
             }
             Ok(serde_json::Value::Array(values))
         }
@@ -306,7 +357,7 @@ pub async fn materialized_input_node_json(
             for field in fields {
                 object.insert(
                     field.field_path.as_str().to_owned(),
-                    Box::pin(materialized_input_node_json(&field.node, artifacts)).await?,
+                    materialized_input_node_json_from_lifecycle(&field.node, lifecycle)?,
                 );
             }
             Ok(serde_json::Value::Object(object))
@@ -314,17 +365,35 @@ pub async fn materialized_input_node_json(
         MaterializedInputNode::Vec(elements) | MaterializedInputNode::NonEmptyVec(elements) => {
             let mut values = Vec::with_capacity(elements.len());
             for element in elements {
-                values.push(Box::pin(materialized_input_node_json(element, artifacts)).await?);
+                values.push(materialized_input_node_json_from_lifecycle(
+                    element, lifecycle,
+                )?);
             }
             Ok(serde_json::Value::Array(values))
         }
     }
 }
 
-async fn load_materialized_cell_artifact(
+fn load_materialized_node_value_from_lifecycle<T>(
+    node: &MaterializedInputNode,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let MaterializedInputNode::Cell(cell) = node else {
+        return Err(RuntimeError::InvalidRunnerOutput(
+            "materialized input node was not a cell".to_owned(),
+        ));
+    };
+    let object = load_materialized_cell_artifact(cell, lifecycle)?;
+    decode_json_bytes(object.bytes())
+}
+
+fn load_materialized_cell_artifact<'view>(
     cell: &MaterializedCell,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<store::VerifiedRetainedArtifactBytes> {
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'view>,
+) -> Result<store::current_lifecycle::CurrentObjectRef<'view>> {
     let requirement = match &cell.terminal {
         MaterializedCellTerminal::Produced {
             producer_node_id,
@@ -349,43 +418,66 @@ async fn load_materialized_cell_artifact(
             artifact_id,
             content_digest,
             evidence_hash,
-        } => store::EventArtifactRequirement {
-            source: store::EventArtifactReferenceSource::SeedCell,
-            artifact_id: artifact_id.clone(),
-            evidence_hash: evidence_hash.clone(),
-            digest: Some(content_digest.clone()),
-            byte_len: None,
-            media_type: None,
-            schema_id: Some(cell.schema_id.clone()),
-            semantic_type_id: Some(cell.semantic_type_id.clone()),
-            producer_node_id: None,
-            producer_seed_id: Some(seed_id.clone()),
-            artifact_role: Some(events::ArtifactRole::SeedInput),
-        },
+        } => {
+            let admitted = lifecycle.seed(&cell.cell_id)?.ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(format!(
+                    "materialized seed cell {} is not committed in the run journal",
+                    cell.cell_id
+                ))
+            })?;
+            let admitted = admitted.evidence();
+            if &admitted.seed_id != seed_id
+                || &admitted.seed_artifact.artifact_id != artifact_id
+                || &admitted.seed_artifact.content_digest != content_digest
+                || &admitted.seed_artifact.evidence_hash != evidence_hash
+                || admitted.schema_id != cell.schema_id
+                || admitted.semantic_type_id != cell.semantic_type_id
+            {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "materialized seed cell {} does not match admitted evidence",
+                    cell.cell_id
+                )));
+            }
+            store::seed_cell_artifact_requirement(admitted)
+        }
         MaterializedCellTerminal::Skipped { .. } => {
             return Err(RuntimeError::InvalidRunnerOutput(
                 "materialized input cell was skipped".to_owned(),
             ));
         }
     };
-    read_retained_artifact(artifacts, &requirement).await
+    committed_object_for_requirement(lifecycle, &requirement)
 }
 
-async fn read_retained_artifact(
-    artifacts: &dyn store::RetainedArtifactReadProvider,
+fn committed_object_for_requirement<'view>(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'view>,
     requirement: &store::EventArtifactRequirement,
-) -> Result<store::VerifiedRetainedArtifactBytes> {
-    artifacts
-        .read_retained_artifact(requirement)
-        .await
-        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-fn decode_verified_json<T>(artifact: &store::VerifiedRetainedArtifactBytes) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    decode_json_bytes(artifact.bytes())
+) -> Result<store::current_lifecycle::CurrentObjectRef<'view>> {
+    let mut committed_requirement = None;
+    let _ = lifecycle.visit_records(|record| {
+        record.visit_artifact_requirements(|candidate| {
+            if candidate == requirement {
+                committed_requirement = Some(candidate.clone());
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        })
+    });
+    let committed_requirement = committed_requirement.ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "artifact {} does not have exact committed requirement authority",
+            requirement.artifact_id
+        ))
+    })?;
+    lifecycle
+        .object_for_requirement(&committed_requirement)
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "artifact {} lacks exact retained-object authority",
+                requirement.artifact_id
+            ))
+        })
 }
 
 fn decode_json_bytes<T>(bytes: &[u8]) -> Result<T>
@@ -396,47 +488,20 @@ where
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-fn certified_config_requirement(node: &spec::NodeSpec) -> Result<store::EventArtifactRequirement> {
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: node.config_ref.artifact_id.clone(),
-        digest: node.config_ref.digest.clone(),
-        byte_len: node.config_ref.byte_len,
-        media_type: node.config_ref.media_type.clone(),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    Ok(store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::RunConfig,
-        artifact_id: node.config_ref.artifact_id.clone(),
-        evidence_hash: evidence.evidence_hash()?,
-        digest: Some(node.config_ref.digest.clone()),
-        byte_len: Some(node.config_ref.byte_len),
-        media_type: Some(node.config_ref.media_type.clone()),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    })
-}
-
 fn side_effect_artifact_requirement(
-    artifact: &store::SideEffectArtifactProjection,
+    artifact: &store::current_lifecycle::CurrentArtifactProjectionRef<'_>,
     role: events::ArtifactRole,
 ) -> Result<store::EventArtifactRequirement> {
     Ok(store::EventArtifactRequirement {
         source: side_effect_artifact_source(role)?,
-        artifact_id: artifact.artifact_id.clone(),
-        evidence_hash: artifact.evidence_hash.clone(),
-        digest: Some(artifact.content_digest.clone()),
+        artifact_id: artifact.artifact_id().clone(),
+        evidence_hash: artifact.evidence_hash().clone(),
+        digest: Some(artifact.content_digest().clone()),
         byte_len: None,
         media_type: None,
-        schema_id: artifact.schema_id.clone(),
+        schema_id: artifact.schema_id().cloned(),
         semantic_type_id: None,
-        producer_node_id: Some(artifact.producer_node_id.clone()),
+        producer_node_id: Some(artifact.producer_node_id().clone()),
         producer_seed_id: None,
         artifact_role: Some(role),
     })

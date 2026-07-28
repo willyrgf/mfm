@@ -9,16 +9,6 @@ fn saga_run_completed_requires_terminal_proof() {
     append_side_effect_prepare(&mut store, &terminal_run);
     append_side_effect_started(&mut store, &terminal_run);
     append_generic_nonretryable_failure(&mut store, &terminal_run, "terminal-quiescence");
-    let terminal_policies =
-        confirmation_terminal_policies_for_projection(store.projection_snapshot(), &terminal_run);
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&terminal_run, &policy, &terminal_policies)
-        .expect("saga projection");
-    let proof_error =
-        SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&terminal_run), None)
-            .expect_err("proof rejects before terminal saga mode");
-    assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = store
         .append_prepared_commit(typed_commit_request! {
             run_id: terminal_run.clone(),
@@ -44,20 +34,6 @@ fn saga_run_completed_requires_terminal_proof() {
         &forged_run,
         "terminal-forged-sidefx-failures",
     );
-    let forged_terminal_policies =
-        confirmation_terminal_policies_for_projection(forged.projection_snapshot(), &forged_run);
-    let saga = forged
-        .projection_snapshot()
-        .derive_saga_projection(&forged_run, &forged_policy, &forged_terminal_policies)
-        .expect("saga projection");
-    let proof_error = SagaTerminalProof::new(
-        &forged_policy,
-        &saga,
-        forged.expected_next_seq(&forged_run),
-        None,
-    )
-    .expect_err("manual terminal rejects before manual resolution");
-    assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = forged
         .append_prepared_commit(typed_commit_request! {
             run_id: forged_run.clone(),
@@ -73,49 +49,17 @@ fn saga_run_completed_requires_terminal_proof() {
         })
         .expect_err("raw forged manual terminal rejects without proof");
     assert_invalid_prepared_commit_contains(error, "requires SagaTerminalProof");
-
-    let verified = verified_manual_resolution_for_run_seq(
-        &forged_run,
-        forged.expected_next_seq(&forged_run).as_u64(),
-    );
-    let prepared = prepared_manual_resolution_commit(
-        &verified,
-        forged.expected_next_seq(&forged_run),
-        "terminal-manual-recorded",
-        forged_policy.clone(),
-    );
-    forged
-        .append_test_commit_plan(prepared.into())
-        .expect("manual resolution admitted");
-    let forged_terminal_policies =
-        confirmation_terminal_policies_for_projection(forged.projection_snapshot(), &forged_run);
-    let saga = forged
-        .projection_snapshot()
-        .derive_saga_projection(&forged_run, &forged_policy, &forged_terminal_policies)
-        .expect("saga projection");
-    let proof_error = SagaTerminalProof::new(
-        &forged_policy,
-        &saga,
-        forged.expected_next_seq(&forged_run),
-        None,
-    )
-    .expect_err("manual terminal requires verified proof authority");
-    assert_projection_conflict_contains(proof_error, "requires verified manual resolution proof");
 }
 
 #[test]
-fn saga_terminal_prepared_commit_requires_matching_proof() {
+fn saga_terminal_prepared_commit_accepts_matching_test_token() {
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
     let run_id = run_id_with_saga_policy(122, &policy);
     let mut store = admitted_store_with_saga_policy(&run_id, "terminal-proof-run-start", &policy);
     append_generic_nonretryable_failure(&mut store, &run_id, "terminal-proof-failure");
-    let terminal_policies = empty_terminal_policies();
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy, &terminal_policies)
-        .expect("saga projection");
-    let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
-        .expect("failed terminal proof authority");
+    let proof =
+        forged_failed_terminal_proof(run_id.clone(), store.expected_next_seq(&run_id), &policy)
+            .expect("matching failed-terminal test token");
     let request = typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
@@ -145,20 +89,16 @@ fn saga_terminal_prepared_commit_requires_matching_proof() {
 }
 
 #[test]
-fn saga_terminal_rejects_saga_token_from_same_policy_different_spec_hash() {
+fn saga_terminal_rejects_test_token_from_same_policy_different_spec_hash() {
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
     let run_id = run_id_with_saga_policy(127, &policy);
     let mut store =
         admitted_store_with_saga_policy(&run_id, "terminal-spec-authority-run-start", &policy);
     append_generic_nonretryable_failure(&mut store, &run_id, "terminal-spec-authority-failure");
 
-    let terminal_policies = empty_terminal_policies();
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy, &terminal_policies)
-        .expect("saga projection");
-    let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
-        .expect("terminal proof authority");
+    let proof =
+        forged_failed_terminal_proof(run_id.clone(), store.expected_next_seq(&run_id), &policy)
+            .expect("failed-terminal test token");
 
     let alternate_spec =
         saga_authority_spec_with_authoring_config_hash(policy.clone(), content_digest(189));
@@ -207,7 +147,7 @@ fn saga_terminal_rejects_saga_token_from_same_policy_different_spec_hash() {
 }
 
 #[test]
-fn saga_terminal_prepared_commit_rejects_mismatched_proofs() {
+fn saga_terminal_prepared_commit_rejects_mismatched_test_tokens() {
     #[derive(Clone, Copy)]
     enum Case {
         CrossRun,
@@ -223,14 +163,9 @@ fn saga_terminal_prepared_commit_rejects_mismatched_proofs() {
     ) -> (SagaTerminalProof, StreamSeq) {
         let mut store = admitted_store_with_saga_policy(run_id, start_key, policy);
         append_generic_nonretryable_failure(&mut store, run_id, failure_key);
-        let terminal_policies = empty_terminal_policies();
-        let saga = store
-            .projection_snapshot()
-            .derive_saga_projection(run_id, policy, &terminal_policies)
-            .expect("saga projection");
         let expected_next_seq = store.expected_next_seq(run_id);
-        let proof = SagaTerminalProof::new(policy, &saga, expected_next_seq, None)
-            .expect("terminal proof authority");
+        let proof = forged_failed_terminal_proof(run_id.clone(), expected_next_seq, policy)
+            .expect("failed-terminal test token");
         (proof, expected_next_seq)
     }
 

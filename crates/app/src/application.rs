@@ -304,12 +304,13 @@ where
 }
 
 trait ApplicationStore:
-    store::RunEventStore
+    store::RunJournalStore
+    + store::CurrentProjectionStore
     + store::StoreScopeStore
     + store::ExecutionClaimStore
     + store::RetainedArtifactReadProvider
     + store::FactQueryStore
-    + store::RunObservationStore<Error = <Self as store::RunEventStore>::Error>
+    + store::RunObservationStore<Error = <Self as store::RunJournalStore>::Error>
     + Send
     + Sync
     + 'static
@@ -317,12 +318,13 @@ trait ApplicationStore:
 }
 
 impl<S> ApplicationStore for S where
-    S: store::RunEventStore
+    S: store::RunJournalStore
+        + store::CurrentProjectionStore
         + store::StoreScopeStore
         + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + store::FactQueryStore
-        + store::RunObservationStore<Error = <S as store::RunEventStore>::Error>
+        + store::RunObservationStore<Error = <S as store::RunJournalStore>::Error>
         + Send
         + Sync
         + 'static

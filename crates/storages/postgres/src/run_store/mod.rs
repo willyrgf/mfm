@@ -11,18 +11,19 @@ use mfm_ids::{
 use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::parse_identity;
 use mfm_store::v1::{
-    payload_from_json_value, prepared_commit_plan_fingerprint, stage_prepared_commit_plan,
-    AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactAuthorityMap,
-    ArtifactByteAuthorityMap, ArtifactEvidenceRef, AsyncStoreFuture, CodecError, CommitBase,
-    CommitFingerprint, CommitKey, CommitOrdinal, CommitOutcome, CommittedBatch, CommittedRunStream,
-    EventArtifactRequirement, ExecutionClaimScope, ExecutionClaimStatus, ExecutionClaimStore,
-    ExpiredExecutionClaim, KernelEventEnvelope, LogicalEventKey, NowaitSkipAdmissionResult,
+    event_artifact_requirements, payload_from_json_value, prepared_commit_plan_fingerprint,
+    stage_prepared_commit_plan, AdmissionLease, AdmissionToken, AdmissionWaiter,
+    ArtifactAuthorityMap, ArtifactByteAuthorityMap, ArtifactEvidenceRef, AsyncStoreFuture,
+    CodecError, CommitBase, CommitFingerprint, CommitKey, CommitOrdinal, CommitOutcome,
+    CommittedBatch, CommittedRunJournal, CurrentProjectionStore, EventArtifactRequirement,
+    ExecutionClaimScope, ExecutionClaimStatus, ExecutionClaimStore, ExpiredExecutionClaim,
+    JournalLoadVerifier, KernelEventEnvelope, LogicalEventKey, NowaitSkipAdmissionResult,
     ObservedRunStatus, PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle,
     ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey,
     ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
-    RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
-    RunState, StagedCommitOutcome, StoreCommitOrder, StoreError, StoreErrorInspection,
-    StoreScopeId, StoreScopeStore, StreamSeq, VerifiedRetainedArtifactBytes,
+    RunJournalBackend, RunObservation, RunObservationPage, RunObservationQuery,
+    RunObservationStore, RunState, StagedCommitOutcome, StoreCommitOrder, StoreError,
+    StoreErrorInspection, StoreScopeId, StoreScopeStore, StreamSeq, VerifiedRetainedArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
@@ -162,6 +163,17 @@ use self::{
 pub struct PostgresStore {
     pub(crate) pool: PgPool,
     authority: PostgresStoreAuthority,
+    #[cfg(all(test, feature = "parity-tests"))]
+    committed_journal_load_test_barrier: Option<CommittedJournalLoadTestBarrier>,
+}
+
+#[cfg(all(test, feature = "parity-tests"))]
+#[derive(Clone)]
+struct CommittedJournalLoadTestBarrier {
+    run_id: RunId,
+    records_loaded: std::sync::Arc<tokio::sync::Barrier>,
+    release_load: std::sync::Arc<tokio::sync::Barrier>,
+    observed_head: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PostgresStore {
@@ -171,7 +183,12 @@ impl PostgresStore {
             .await
             .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
         let authority = validate_pool(&pool).await?;
-        Ok(Self { pool, authority })
+        Ok(Self {
+            pool,
+            authority,
+            #[cfg(all(test, feature = "parity-tests"))]
+            committed_journal_load_test_barrier: None,
+        })
     }
 
     /// Returns the store authority validated during construction.
@@ -180,56 +197,66 @@ impl PostgresStore {
     }
 }
 
-impl RunEventStore for PostgresStore {
+impl RunJournalBackend for PostgresStore {
     type Error = PostgresStoreError;
 
-    fn append_prepared_commit_bundle<'a>(
+    fn backend_append<'a>(
         &'a self,
         bundle: PreparedCommitBundle,
     ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
         Box::pin(async move { PostgresStore::append_prepared_commit_bundle(self, bundle).await })
     }
 
-    fn load_run_stream<'a>(
+    fn backend_load<'a>(
         &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
-        Box::pin(async move { load_run_stream_client(&self.pool, run_id).await })
-    }
-
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, CommittedRunStream, Self::Error> {
+        verifier: JournalLoadVerifier,
+    ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error> {
         Box::pin(async move {
             let mut tx =
                 self.pool.begin().await.map_err(|error| {
-                    database_error("failed to begin committed stream load", error)
+                    database_error("failed to begin committed journal load", error)
                 })?;
-            let stream = load_run_stream_tx(&mut tx, run_id).await?;
-            let artifact_bytes = load_run_artifact_bytes_tx(&mut tx, run_id).await?;
-            let committed = CommittedRunStream::from_events_with_artifact_bytes(
-                run_id.clone(),
-                stream,
-                &artifact_bytes,
-            )?;
-            tx.commit()
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *tx)
                 .await
-                .map_err(|error| database_error("failed to commit committed stream load", error))?;
-            Ok(committed)
+                .map_err(|error| {
+                    database_error("failed to set committed journal read mode", error)
+                })?;
+            let records = load_run_stream_tx(&mut tx, verifier.run_id()).await?;
+            #[cfg(all(test, feature = "parity-tests"))]
+            if let Some(barrier) = self
+                .committed_journal_load_test_barrier
+                .as_ref()
+                .filter(|barrier| &barrier.run_id == verifier.run_id())
+            {
+                barrier.records_loaded.wait().await;
+                barrier.release_load.wait().await;
+                let observed_head: Option<i64> =
+                    sqlx::query_scalar("SELECT MAX(seq) FROM commits WHERE run_id = $1")
+                        .bind(verifier.run_id().as_str())
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(|error| {
+                            database_error("failed to observe committed journal test head", error)
+                        })?;
+                let observed_head = observed_head
+                    .map_or(Ok(0), |head| i64_to_nonnegative_u64(head, "commits.seq"))?;
+                barrier
+                    .observed_head
+                    .store(observed_head, std::sync::atomic::Ordering::SeqCst);
+            }
+            let artifact_bytes =
+                load_run_artifact_bytes_tx(&mut tx, verifier.run_id(), &records).await?;
+            let journal = verifier.verify(records, artifact_bytes)?;
+            tx.commit().await.map_err(|error| {
+                database_error("failed to commit committed journal load", error)
+            })?;
+            Ok(journal)
         })
     }
+}
 
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
-        Box::pin(async move {
-            let head = read_head(&self.pool, run_id).await?;
-            next_seq_from_head(head)
-        })
-    }
-
+impl CurrentProjectionStore for PostgresStore {
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,

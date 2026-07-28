@@ -319,10 +319,6 @@ impl ValidatedTypedExecutionSpec {
     pub fn spec_hash(&self) -> &SpecHash {
         &self.envelope.spec_hash
     }
-
-    fn into_parts(self) -> (spec::HashedSpecEnvelope, CertifiedSpecGraph) {
-        (self.envelope, self.graph)
-    }
 }
 
 /// Registry-backed descriptor authority for a certified typed spec.
@@ -664,8 +660,10 @@ impl TypedSpecCertificationInput {
 
 /// Non-forgeable certified typed spec ready to become runtime authority.
 ///
-/// The fields are private so only this crate's certifier and verifier can mint the authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The fields are private so only this crate's certifier and verifier can mint the authority. The
+/// authority is intentionally non-cloneable: consumers borrow it for inspection and move it when
+/// transferring ownership across admission or verified-run boundaries.
+#[derive(Debug, PartialEq, Eq)]
 pub struct CertifiedTypedSpec {
     validated: ValidatedTypedExecutionSpec,
     certificate: CertifiedSpecCertificate,
@@ -708,34 +706,10 @@ impl CertifiedTypedSpec {
         &self.framework_lifecycle
     }
 
-    /// Consumes the authority and returns runtime construction parts.
-    pub fn into_parts(self) -> CertifiedTypedSpecParts {
-        let (envelope, graph) = self.validated.into_parts();
-        CertifiedTypedSpecParts {
-            envelope,
-            graph,
-            certificate: self.certificate,
-            framework_lifecycle: self.framework_lifecycle,
-        }
-    }
-
     /// Builds canonical persisted spec and certificate bytes for storage.
     pub fn to_persisted_parts(&self) -> Result<PersistedSpecCertificateParts> {
         PersistedSpecCertificateParts::from_certified(self)
     }
-}
-
-/// Runtime construction parts carried by a certified typed spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CertifiedTypedSpecParts {
-    /// Hash-only typed spec envelope covered by the certificate.
-    pub envelope: spec::HashedSpecEnvelope,
-    /// Certified graph and index authority for the typed spec.
-    pub graph: CertifiedSpecGraph,
-    /// Verified certificate evidence for the typed spec.
-    pub certificate: CertifiedSpecCertificate,
-    /// Certified static framework lifecycle authority for the typed spec.
-    pub framework_lifecycle: CertifiedFrameworkLifecycle,
 }
 
 fn config_validator_for<C: MfmConfig>() -> Result<ConfigValidator> {

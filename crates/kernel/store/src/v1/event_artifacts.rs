@@ -203,21 +203,7 @@ pub fn event_artifact_requirements(payload: &KernelEventPayload) -> Vec<EventArt
         }
         KernelEventPayload::PublicOutputProduced(payload) => {
             for cell in &payload.cells {
-                let (producer_node_id, producer_seed_id) =
-                    cell_producer_artifact_owner(&cell.producer);
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::PublicOutputCell,
-                    artifact_id: cell.artifact_id.clone(),
-                    evidence_hash: cell.evidence_hash.clone(),
-                    digest: Some(cell.content_digest.clone()),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(cell.schema_id.clone()),
-                    semantic_type_id: Some(cell.semantic_type_id.clone()),
-                    producer_node_id,
-                    producer_seed_id,
-                    artifact_role: None,
-                });
+                requirements.push(public_output_cell_artifact_requirement(cell));
             }
             if let (Some(artifact_id), Some(evidence_hash)) = (
                 &payload.rendered_artifact_id,
@@ -537,13 +523,6 @@ fn push_resource_touched_set_requirement(
         producer_seed_id: None,
         artifact_role: None,
     });
-}
-
-fn cell_producer_artifact_owner(producer: &CellProducer) -> (Option<NodeId>, Option<SeedId>) {
-    match producer {
-        CellProducer::Node(node_id) => (Some(node_id.clone()), None),
-        CellProducer::Seed(seed_id) => (None, Some(seed_id.clone())),
-    }
 }
 
 /// Builds an exact requirement for a run-admission artifact reference.

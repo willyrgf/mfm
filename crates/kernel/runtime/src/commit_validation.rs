@@ -1,13 +1,16 @@
 use super::*;
 use std::collections::BTreeSet;
 
-pub(crate) fn runner_payloads_with_derived_lifecycle(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(crate) fn runner_payloads_with_derived_lifecycle<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     read_facts: Vec<events::FactRecorded>,
     runner_payloads: Vec<RunnerEventPayload>,
-) -> Result<Vec<events::KernelEventPayload>> {
+) -> Result<Vec<events::KernelEventPayload>>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     let mut payloads = read_facts
         .into_iter()
         .map(events::KernelEventPayload::FactRecorded)
@@ -100,12 +103,12 @@ fn side_effect_ambiguity_error(
 }
 
 pub(super) struct RunnerOutputValidation<'a> {
-    pub(super) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(super) runtime_spec: &'a crate::spec_authority::CurrentRuntimeSpecRef<'a>,
     pub(super) run_id: &'a RunId,
     pub(super) node: &'a spec::NodeSpec,
     pub(super) attempt_id: &'a AttemptId,
     pub(super) caps: &'a CertifiedRuntimeCapabilities,
-    pub(super) projections: &'a store::ProjectionSnapshot,
+    pub(super) lifecycle: &'a store::current_lifecycle::CurrentLifecycleReader<'a>,
     pub(super) payloads: &'a [events::KernelEventPayload],
 }
 
@@ -116,7 +119,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
         node,
         attempt_id,
         caps,
-        projections,
+        lifecycle,
         payloads,
     } = input;
     if payloads.is_empty() {
@@ -303,7 +306,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
                     node,
                     attempt_id,
                     caps,
-                    projections,
+                    lifecycle,
                     payload,
                 )?;
                 side_effect_payload = true;
@@ -344,9 +347,8 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
     if side_effect_verify_spec(node).is_some() {
         return validate_side_effect_verify_runner_output(SideEffectVerifyRunnerOutputValidation {
             runtime_spec,
-            run_id,
             node,
-            projections,
+            lifecycle,
             completed,
             failed,
             terminal_cell,
@@ -361,14 +363,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
     }
 
     if node.side_effect.is_some() {
-        validate_resume_output(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-            payloads,
-        )?;
+        validate_resume_output(runtime_spec, lifecycle, node, attempt_id, payloads)?;
         if failed {
             if !side_effect_terminal_failure {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -416,8 +411,7 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
             .any(|payload| matches!(payload, events::KernelEventPayload::CellSkipped(_)));
         validate_terminal_batch_evidence(
             runtime_spec,
-            run_id,
-            projections,
+            lifecycle,
             node,
             attempt_id,
             terminal_skipped,
@@ -459,10 +453,9 @@ pub(super) fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Resul
 }
 
 struct SideEffectVerifyRunnerOutputValidation<'a> {
-    runtime_spec: &'a CertifiedRuntimeSpec,
-    run_id: &'a RunId,
+    runtime_spec: &'a crate::spec_authority::CurrentRuntimeSpecRef<'a>,
     node: &'a spec::NodeSpec,
-    projections: &'a store::ProjectionSnapshot,
+    lifecycle: &'a store::current_lifecycle::CurrentLifecycleReader<'a>,
     completed: bool,
     failed: bool,
     terminal_cell: bool,
@@ -480,9 +473,8 @@ fn validate_side_effect_verify_runner_output(
 ) -> Result<()> {
     let SideEffectVerifyRunnerOutputValidation {
         runtime_spec,
-        run_id,
         node,
-        projections,
+        lifecycle,
         completed,
         failed,
         terminal_cell,
@@ -565,27 +557,24 @@ fn validate_side_effect_verify_runner_output(
             node.node_id
         )));
     }
-    validate_side_effect_verify_terminal_evidence(runtime_spec, run_id, node, projections)
+    validate_side_effect_verify_terminal_evidence(runtime_spec, node, lifecycle)
 }
 
 fn validate_side_effect_verify_terminal_evidence(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
+    runtime_spec: &crate::spec_authority::CurrentRuntimeSpecRef<'_>,
     node: &spec::NodeSpec,
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
 ) -> Result<()> {
     let Some(verify) = side_effect_verify_spec(node) else {
         return Ok(());
     };
-    let projection = projections
-        .side_effect_for_pair(run_id, &verify.pair_id)
-        .ok_or_else(|| {
-            RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect verify node {} has no ledger projection for pair {}",
-                node.node_id, verify.pair_id
-            ))
-        })?;
-    let state = projection
+    let ledger = lifecycle.side_effect(&verify.pair_id).ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} has no ledger projection for pair {}",
+            node.node_id, verify.pair_id
+        ))
+    })?;
+    let state = ledger
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let required = side_effect_verify_terminal_required_state(runtime_spec, verify)?;

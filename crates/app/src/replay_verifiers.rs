@@ -6,7 +6,7 @@ use mfm_ids::{StateKind, StateVersion};
 use mfm_program::StateSpec;
 use mfm_replay::v1::{ReplayBroker, Result};
 
-type ReplayVerifier = fn(&ReplayBroker, &CertificationRegistry) -> Result<()>;
+type ReplayVerifier = fn(&ReplayBroker<'_>, &CertificationRegistry) -> Result<()>;
 type ReplayStateKeyFactory = fn() -> Result<ReplayStateKey>;
 type ReplayIntentMatcher = fn(&events::side_effect::IntentPersisted) -> Result<bool>;
 
@@ -63,7 +63,7 @@ impl ReplayVerifierRegistry {
 
     pub(crate) fn verify(
         &self,
-        broker: &ReplayBroker,
+        broker: &ReplayBroker<'_>,
         certification_registry: &CertificationRegistry,
     ) -> Result<()> {
         for registration in self.registrations {
@@ -139,7 +139,7 @@ impl ReplayVerifierRegistry {
 }
 
 impl ReplayVerifierRegistration {
-    fn applies(&self, broker: &ReplayBroker) -> Result<bool> {
+    fn applies(&self, broker: &ReplayBroker<'_>) -> Result<bool> {
         for state_key_factory in self.state_keys {
             let expected = state_key_factory()?;
             let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
@@ -172,18 +172,18 @@ fn replay_registration_error(error: impl std::fmt::Display) -> mfm_replay::v1::R
     )
 }
 
-fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
+fn verify_portfolio(broker: &ReplayBroker<'_>, _registry: &CertificationRegistry) -> Result<()> {
     mfm_replay::v1::verify_external_read_state::<mfm_portfolio::SelectHoldingsState>(broker)?;
     mfm_replay::v1::verify_pure_state::<mfm_portfolio::AssembleSnapshotState>(broker)?;
     mfm_replay::v1::verify_pure_state::<mfm_portfolio::ProjectReportState>(broker)
 }
 
-fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
+fn verify_btc(broker: &ReplayBroker<'_>, _registry: &CertificationRegistry) -> Result<()> {
     mfm_bitcoin_live::verify_bitcoin_jsonrpc_replay(broker)
 }
 
 fn verify_evm_balance_collection(
-    broker: &ReplayBroker,
+    broker: &ReplayBroker<'_>,
     _registry: &CertificationRegistry,
 ) -> Result<()> {
     mfm_evm_live::verify_evm_balance_collection_replay(broker)

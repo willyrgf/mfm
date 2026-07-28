@@ -411,43 +411,43 @@ pub struct RunStartReport {
 
 /// Non-forgeable authority to render one typed public output.
 ///
-/// This is minted only after the app verifies certified runtime authority, validates the
-/// authoritative run stream, and rebuilds public-output projection from that stream. Rendered JSON
-/// artifacts are caches only and cannot construct this authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublicOutputReadAuthority {
-    pub(super) run_id: RunId,
-    pub(super) public_schema_id: SchemaId,
-    pub(super) event_id: EventId,
-    pub(super) rendered_digest: ContentDigest,
-    pub(super) rendered_artifact_id: Option<ArtifactId>,
-    pub(super) payload: events::PublicOutputProduced,
+/// This is minted only while borrowing the store-owned verified run view after the app validates
+/// its current public-output evidence. Rendered JSON artifacts are caches only and cannot construct
+/// this authority.
+#[derive(Debug)]
+pub struct PublicOutputReadAuthority<'view> {
+    pub(super) run_id: &'view RunId,
+    pub(super) public_schema_id: &'view SchemaId,
+    pub(super) event_id: &'view EventId,
+    pub(super) rendered_digest: &'view ContentDigest,
+    pub(super) rendered_artifact_id: Option<&'view ArtifactId>,
+    pub(super) payload: &'view events::PublicOutputProduced,
 }
 
-impl PublicOutputReadAuthority {
+impl PublicOutputReadAuthority<'_> {
     /// Returns the run id bound to this read authority.
     pub fn run_id(&self) -> &RunId {
-        &self.run_id
+        self.run_id
     }
 
     /// Returns the public-output schema id bound to this read authority.
     pub fn public_schema_id(&self) -> &SchemaId {
-        &self.public_schema_id
+        self.public_schema_id
     }
 
     /// Returns the store-owned event id that produced this public output.
     pub fn event_id(&self) -> &EventId {
-        &self.event_id
+        self.event_id
     }
 
     /// Returns the canonical digest of the rendered public output.
     pub fn rendered_digest(&self) -> &ContentDigest {
-        &self.rendered_digest
+        self.rendered_digest
     }
 
     /// Returns the persisted rendered artifact id, when the renderer wrote one.
     pub fn rendered_artifact_id(&self) -> Option<&ArtifactId> {
-        self.rendered_artifact_id.as_ref()
+        self.rendered_artifact_id
     }
 }
 
@@ -524,24 +524,43 @@ impl fmt::Display for ReplayResponse {
     }
 }
 
-pub(super) async fn verify_replay_diagnostics_from_recorded_artifacts(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
+pub(super) fn verify_replay_diagnostics_from_recorded_artifacts(
+    view: &store::VerifiedRunView,
 ) -> Result<(), PublicError> {
-    let _ = run_admitted_payload(run_id, stream)?;
-    for event in stream {
-        let events::KernelEventPayload::StateAttemptFailed(payload) = event.payload() else {
-            continue;
-        };
+    let lifecycle = store::current_lifecycle::read(view);
+    let mut failures = Vec::new();
+    let _ = lifecycle.visit_records(|record| {
+        if let store::current_lifecycle::CurrentRecordKindRef::StateAttemptFailed(payload) =
+            record.kind()
+        {
+            let mut requirement = None;
+            let _ = record.visit_artifact_requirements(|candidate| {
+                if candidate.source
+                    == store::EventArtifactReferenceSource::StateAttemptFailureDiagnostic
+                {
+                    requirement = Some(candidate.clone());
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            });
+            failures.push((payload, requirement));
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    for (payload, requirement) in failures {
         let Some(diagnostic_ref) = &payload.error.diagnostic_ref else {
             continue;
         };
-        let requirement = store::diagnostic_artifact_requirement(diagnostic_ref);
-        let artifact = artifacts
-            .read_retained_artifact(&requirement)
-            .await
-            .map_err(async_app_store_error)?;
+        let requirement = requirement.ok_or_else(replay_diagnostic_error)?;
+        if requirement.artifact_id != diagnostic_ref.artifact_id
+            || requirement.evidence_hash != diagnostic_ref.evidence_hash
+        {
+            return Err(replay_diagnostic_error());
+        }
+        let artifact = lifecycle
+            .object_for_requirement(&requirement)
+            .ok_or_else(replay_diagnostic_error)?;
         let diagnostic_artifact = serde_json::from_slice::<serde_json::Value>(artifact.bytes())
             .map_err(|_| replay_diagnostic_error())?;
         let diagnostics =

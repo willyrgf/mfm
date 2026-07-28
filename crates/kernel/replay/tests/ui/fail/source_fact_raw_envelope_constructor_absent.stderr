@@ -1,0 +1,15 @@
+error[E0599]: no associated function or constant named `new` found for struct `RetainedSourceFactReplayEvent` in the current scope
+ --> tests/ui/fail/source_fact_raw_envelope_constructor_absent.rs:6:60
+  |
+6 |     let _ = mfm_replay::v1::RetainedSourceFactReplayEvent::new(value(), value());
+  |                                                            ^^^ associated function or constant not found in `RetainedSourceFactReplayEvent`
+  |
+note: if you're trying to build a new `RetainedSourceFactReplayEvent`, consider using `RetainedSourceFactReplayEvent::from_current_record` which returns `Result<RetainedSourceFactReplayEvent, ReplayError>`
+ --> src/v1/evidence.rs
+  |
+  | /     pub fn from_current_record(
+  | |         record: store::current_lifecycle::CurrentRecordRef<'_>,
+  | |     ) -> Result<Self> {
+  | |_____________________^
+help: there is a method `ne` with a similar name, but with different arguments
+ --> $RUST/core/src/cmp.rs

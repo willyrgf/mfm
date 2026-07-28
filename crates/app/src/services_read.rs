@@ -9,12 +9,7 @@ pub struct RunReadServices<S> {
 
 impl<S> RunReadServices<S>
 where
-    S: store::RunEventStore
-        + store::StoreScopeStore
-        + store::RetainedArtifactReadProvider
-        + Send
-        + Sync
-        + 'static,
+    S: store::RunJournalStore + store::StoreScopeStore + Send + Sync + 'static,
 {
     /// Creates evidence-only app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
@@ -25,11 +20,6 @@ where
             store,
             certification_registry,
         }
-    }
-
-    /// Returns the typed artifact store.
-    pub fn artifacts(&self) -> &S {
-        self.store.as_ref()
     }
 
     /// Returns the async typed run store.
@@ -47,12 +37,15 @@ where
         self.trusted_run_reader().load_store_scope_id().await
     }
 
-    /// Returns typed run status by rebuilding projection from the authoritative run stream.
-    pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, PublicError> {
+    /// Returns typed run status from the store-owned verified run view.
+    pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, PublicError>
+    where
+        S: store::CurrentProjectionStore,
+    {
         self.trusted_run_reader().run_status(run_id).await
     }
 
-    /// Returns the authoritative typed run stream.
+    /// Returns store-owned references for the verified committed journal.
     pub async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, PublicError> {
         self.trusted_run_reader().run_stream(run_id).await
     }
@@ -70,7 +63,7 @@ where
         self.trusted_run_reader().read_run_observations(query).await
     }
 
-    /// Verifies replay authority for a run using retained typed artifact evidence only.
+    /// Verifies replay by borrowing the store-owned verified run view.
     pub async fn verify_replay_for_run(
         &self,
         run_id: &RunId,
@@ -79,22 +72,23 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) async fn replay_broker_for_test(
+    pub(crate) async fn inspect_replay_broker_for_test<T>(
         &self,
         run_id: &RunId,
-    ) -> Result<ReplayBroker, PublicError> {
+        inspect: impl FnOnce(&ReplayBroker<'_>) -> T,
+    ) -> Result<T, PublicError> {
         let context = self.trusted_run_reader().load_run_context(run_id).await?;
         let authority = replay_read_authority_for_run_with_retained_source_facts(
             self.store.as_ref(),
-            self.store.as_ref(),
-            context.runtime_spec(),
+            &self.certification_registry,
             context.view(),
         )
         .await?;
-        Ok(ReplayBroker::from_read_authority(authority)?)
+        let broker = ReplayBroker::from_read_authority(authority)?;
+        Ok(inspect(&broker))
     }
 
-    /// Renders typed public output from store-owned projection and typed artifact bytes.
+    /// Renders typed public output from the verified view's exact retained objects.
     pub async fn public_output(
         &self,
         run_id: &RunId,
@@ -105,6 +99,21 @@ where
             .await
     }
 
+    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S> {
+        TrustedRunReader::new(self.store.as_ref(), &self.certification_registry)
+    }
+}
+
+impl<S> RunReadServices<S>
+where
+    S: store::RunJournalStore
+        + store::CurrentProjectionStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + Send
+        + Sync
+        + 'static,
+{
     /// Lists public fact kinds from retained descriptor artifacts and store-scoped fact projection authority.
     pub async fn fact_kinds(&self) -> Result<Vec<PublicFactKindSummary>, PublicError> {
         Ok(self.public_fact_catalog().await?.list_kinds())
@@ -151,15 +160,12 @@ where
             .await
             .map_err(async_app_store_error)
     }
-
-    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S> {
-        TrustedRunReader::new(self.store.as_ref(), &self.certification_registry)
-    }
 }
 
 impl<S> RunReadServices<S>
 where
-    S: store::RunEventStore
+    S: store::RunJournalStore
+        + store::CurrentProjectionStore
         + store::StoreScopeStore
         + store::RetainedArtifactReadProvider
         + store::FactQueryStore
@@ -184,53 +190,42 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct VerifiedRunReadContext {
-    runtime_spec: CertifiedRuntimeSpec,
-    view: VerifiedRunHistoryView,
+    run: VerifiedCurrentRun,
 }
 
 impl VerifiedRunReadContext {
-    pub(crate) fn runtime_spec(&self) -> &CertifiedRuntimeSpec {
-        &self.runtime_spec
+    pub(crate) fn run(&self) -> &VerifiedCurrentRun {
+        &self.run
     }
 
-    pub(crate) fn view(&self) -> &VerifiedRunHistoryView {
-        &self.view
+    pub(crate) fn into_run(self) -> VerifiedCurrentRun {
+        self.run
     }
 
-    pub(crate) fn events(&self) -> &[store::KernelEventEnvelope] {
-        self.view.events()
+    pub(crate) fn view(&self) -> &store::VerifiedRunView {
+        self.run.view()
     }
 
-    fn status_projection_with_resource_lanes(
-        &self,
-        global_projection: &store::ProjectionSnapshot,
-    ) -> Result<store::ProjectionSnapshot, PublicError> {
-        Ok(status_projection_from_verified_view_with_resource_lanes(
-            &self.view,
-            global_projection,
-        )?)
+    pub(crate) fn lifecycle(&self) -> store::current_lifecycle::CurrentLifecycleReader<'_> {
+        store::current_lifecycle::read(self.run.view())
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct VerifiedStatusReadContext {
-    pub(super) read: VerifiedRunReadContext,
-    projection: store::ProjectionSnapshot,
+    read: VerifiedRunReadContext,
+    resource_lane_projection: store::ProjectionSnapshot,
 }
 
 impl VerifiedStatusReadContext {
-    pub(super) fn runtime_spec(&self) -> &CertifiedRuntimeSpec {
-        self.read.runtime_spec()
+    pub(crate) fn run(&self) -> &VerifiedCurrentRun {
+        self.read.run()
     }
 
-    pub(super) fn events(&self) -> &[store::KernelEventEnvelope] {
-        self.read.events()
-    }
-
-    pub(super) fn projection(&self) -> &store::ProjectionSnapshot {
-        &self.projection
+    pub(crate) fn resource_lane_projection(&self) -> &store::ProjectionSnapshot {
+        &self.resource_lane_projection
     }
 }
 
@@ -247,11 +242,7 @@ impl<'a, S> TrustedRunReader<'a, S> {
 
 impl<S> TrustedRunReader<'_, S>
 where
-    S: store::RunEventStore
-        + store::StoreScopeStore
-        + store::RetainedArtifactReadProvider
-        + Send
-        + Sync,
+    S: store::RunJournalStore + store::StoreScopeStore + Send + Sync,
 {
     pub(super) async fn load_store_scope_id(&self) -> Result<StoreScopeId, PublicError> {
         self.store
@@ -277,34 +268,33 @@ where
     ) -> Result<VerifiedRunReadContext, PublicError> {
         let context =
             load_async_verified_run_read_context(self.store, self.registry, run_id).await?;
-        self.validate_identity_material_store_scope(
-            &context.view().run_admitted().identity_material,
-        )
-        .await?;
+        let admission = context.lifecycle().admission()?;
+        self.validate_identity_material_store_scope(admission.identity_material())
+            .await?;
         Ok(context)
     }
 
     pub(super) async fn load_status_context(
         &self,
         run_id: &RunId,
-    ) -> Result<VerifiedStatusReadContext, PublicError> {
+    ) -> Result<VerifiedStatusReadContext, PublicError>
+    where
+        S: store::CurrentProjectionStore,
+    {
         let context =
             load_async_verified_status_read_context(self.store, self.registry, run_id).await?;
-        self.validate_identity_material_store_scope(
-            &context.read.view().run_admitted().identity_material,
-        )
-        .await?;
+        let admission = context.read.lifecycle().admission()?;
+        self.validate_identity_material_store_scope(admission.identity_material())
+            .await?;
         Ok(context)
     }
 
-    pub(super) async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, PublicError> {
+    pub(super) async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, PublicError>
+    where
+        S: store::CurrentProjectionStore,
+    {
         let context = self.load_status_context(run_id).await?;
-        run_status_from_projection(
-            run_id,
-            context.runtime_spec(),
-            context.events(),
-            context.projection(),
-        )
+        run_response_from_verified_status(&context, "observed")
     }
 
     pub(super) async fn run_stream(
@@ -335,39 +325,35 @@ where
         run_id: &RunId,
     ) -> Result<ReplayResponse, PublicError> {
         let context = self.load_run_context(run_id).await?;
-        verify_replay_diagnostics_from_recorded_artifacts(self.store, run_id, context.events())
-            .await?;
+        verify_replay_diagnostics_from_recorded_artifacts(context.view())?;
         let authority = replay_read_authority_for_run_with_retained_source_facts(
             self.store,
-            self.store,
-            context.runtime_spec(),
+            self.registry,
             context.view(),
         )
         .await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
-        let stream = context.events();
         replay_verifiers::ReplayVerifierRegistry::production().verify(&broker, self.registry)?;
-        let projection = broker.projection_snapshot();
-        let terminal_policies =
-            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
-        let saga = projection.derive_saga_projection(
-            run_id,
-            &context.runtime_spec().spec().saga,
-            &terminal_policies,
-        )?;
-        let retained_artifacts = projection
-            .retention(run_id)
-            .map(|retention| retention.refs.len())
+        let lifecycle = context.lifecycle();
+        let certified_spec = lifecycle.certified_spec().validated_spec().spec();
+        let terminal_policies = store::SideEffectTerminalPolicies::from_spec(certified_spec)?;
+        let retained_artifacts = lifecycle
+            .retention()
+            .map(|retention| retention.reference_count())
             .unwrap_or_default();
-        Ok(ReplayResponse {
-            run_id: run_id.as_str().to_owned(),
-            spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
-            run_mode: run_mode_status(saga.run_mode),
-            saga: saga_status_with_resources(context.runtime_spec().spec(), projection, &saga),
-            attempt_dispositions: attempt_dispositions(projection),
-            head_seq: stream_head(stream),
-            retained_artifacts,
-        })
+        lifecycle
+            .with_saga(&certified_spec.saga, &terminal_policies, |saga| {
+                ReplayResponse {
+                    run_id: run_id.as_str().to_owned(),
+                    spec_hash: context.view().spec_hash().as_str().to_owned(),
+                    run_mode: run_mode_status(saga.run_mode()),
+                    saga: saga_status_with_resources(certified_spec, &lifecycle, None, &saga),
+                    attempt_dispositions: attempt_dispositions(&lifecycle),
+                    head_seq: context.view().current_run_sequence().unwrap_or_default(),
+                    retained_artifacts,
+                }
+            })
+            .map_err(PublicError::from)
     }
 
     pub(super) async fn public_output(
@@ -376,14 +362,8 @@ where
         public_schema_id: &SchemaId,
     ) -> Result<PublicOutputResponse, PublicError> {
         let context = self.load_run_context(run_id).await?;
-        let authority = public_output_read_authority_for_run(
-            self.store,
-            context.runtime_spec(),
-            context.view(),
-            public_schema_id,
-        )
-        .await?;
-        render_public_output(self.store, &authority).await
+        let authority = public_output_read_authority_for_run(context.view(), public_schema_id)?;
+        render_public_output(context.view(), &authority)
     }
 }
 
@@ -393,13 +373,13 @@ async fn load_async_verified_run_read_context<S>(
     run_id: &RunId,
 ) -> Result<VerifiedRunReadContext, PublicError>
 where
-    S: store::RunEventStore + store::RetainedArtifactReadProvider + Send + Sync,
+    S: store::RunJournalStore + Send + Sync,
 {
-    let committed = store
-        .load_committed_run_stream(run_id)
+    let journal = store
+        .load_committed_journal(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_run_read_context_from_committed_stream(store, registry, committed).await
+    verified_run_read_context_from_committed_journal(registry, journal)
 }
 
 async fn load_async_verified_status_read_context<S>(
@@ -408,52 +388,29 @@ async fn load_async_verified_status_read_context<S>(
     run_id: &RunId,
 ) -> Result<VerifiedStatusReadContext, PublicError>
 where
-    S: store::RunEventStore + store::RetainedArtifactReadProvider + Send + Sync,
+    S: store::CurrentProjectionStore + Send + Sync,
 {
-    let committed = store
-        .load_committed_run_stream(run_id)
+    let journal = store
+        .load_committed_journal(run_id)
         .await
         .map_err(async_app_store_error)?;
-    let projection = store
+    let resource_lane_projection = store
         .status_projection_snapshot(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_status_read_context_from_committed_stream(store, registry, committed, &projection)
-        .await
+    let read = verified_run_read_context_from_committed_journal(registry, journal)?;
+    Ok(VerifiedStatusReadContext {
+        read,
+        resource_lane_projection,
+    })
 }
 
-async fn verified_status_read_context_from_committed_stream(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+fn verified_run_read_context_from_committed_journal(
     registry: &CertificationRegistry,
-    committed: store::CommittedRunStream,
-    global_projection: &store::ProjectionSnapshot,
-) -> Result<VerifiedStatusReadContext, PublicError> {
-    let read =
-        verified_run_read_context_from_committed_stream(artifacts, registry, committed).await?;
-    let projection = read.status_projection_with_resource_lanes(global_projection)?;
-    Ok(VerifiedStatusReadContext { read, projection })
-}
-
-async fn verified_run_read_context_from_committed_stream(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    registry: &CertificationRegistry,
-    committed: store::CommittedRunStream,
+    journal: store::CommittedRunJournal,
 ) -> Result<VerifiedRunReadContext, PublicError> {
-    let run_id = committed.run_id().clone();
-    let stream = committed.events();
-    if stream.is_empty() {
-        return Err(PublicError::not_found(
-            "RunNotFound",
-            "typed run stream was not found",
-        ));
-    }
-    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, &run_id, stream).await?;
-    let retained_artifacts =
-        store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts).await?;
-    let view = VerifiedRunHistoryView::from_committed_stream(
-        &runtime_spec,
-        committed,
-        retained_artifacts,
-    )?;
-    Ok(VerifiedRunReadContext { runtime_spec, view })
+    let certified = certified_spec_from_committed_journal(&journal, registry)?;
+    let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
+    let run = mfm_runtime::verify_current_run(journal, runtime_spec)?;
+    Ok(VerifiedRunReadContext { run })
 }

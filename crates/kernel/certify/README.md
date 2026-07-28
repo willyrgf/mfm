@@ -2,10 +2,12 @@
 
 Typed kernel crate for certification of typed program drafts and execution specs.
 
-This crate mints `CertifiedTypedSpec`, the non-forgeable in-memory authority returned only by
-registry-backed certification or persisted spec/certificate verification. Parsed typed spec JSON,
-`mfm_spec::v1::HashedSpecEnvelope`, persisted `CertifiedSpecCertificate` bytes, and persisted
-spec/certificate byte pairs are not runtime authority.
+This crate mints `CertifiedTypedSpec`, the non-forgeable affine in-memory authority returned only by
+registry-backed certification or persisted spec/certificate verification. It is borrowable,
+movable, and non-cloneable. Parsed typed spec JSON, `mfm_spec::v1::HashedSpecEnvelope`, persisted
+`CertifiedSpecCertificate` bytes, and persisted spec/certificate byte pairs are not runtime
+authority. The public API exposes borrowed inspection and persisted evidence conversion only; it
+does not expose an owned snapshot or decomposition surface.
 
 Persisted spec bytes and certificate bytes are hostile data until
 `verify_persisted_spec_certificate` validates the spec hash, certificate hash, certifier identity,

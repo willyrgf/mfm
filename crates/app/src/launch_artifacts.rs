@@ -1,26 +1,46 @@
 use super::*;
 
-pub(super) async fn retained_source_fact_events_from_query_evidence<S, A>(
+pub(super) async fn retained_source_fact_events_from_query_evidence<S>(
     store: &S,
-    artifacts: &A,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<Vec<RetainedSourceFactReplayEvent>, PublicError>
+    registry: &CertificationRegistry,
+    view: &store::VerifiedRunView,
+) -> Result<
+    (
+        Vec<RetainedSourceFactReplayEvent>,
+        Vec<store::VerifiedRetainedArtifactBytes>,
+    ),
+    PublicError,
+>
 where
-    S: store::RunEventStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + ?Sized,
+    S: store::RunJournalStore + Send + Sync,
 {
-    let mut source_events = BTreeMap::new();
-    for event in stream {
-        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
-            continue;
-        };
-        if payload.artifact_ref.role != events::ArtifactRole::FactQueryEvidence {
-            continue;
+    let lifecycle = store::current_lifecycle::read(view);
+    let mut query_evidence_requirements = Vec::new();
+    let _ = lifecycle.visit_records(|record| {
+        if let store::current_lifecycle::CurrentRecordKindRef::ArtifactReferenced(payload) =
+            record.kind()
+        {
+            if payload.artifact_ref.role == events::ArtifactRole::FactQueryEvidence {
+                query_evidence_requirements
+                    .push(store::artifact_referenced_artifact_requirement(payload));
+            }
         }
-        let artifact = artifacts
-            .read_retained_artifact(&store::artifact_referenced_artifact_requirement(payload))
-            .await
-            .map_err(async_app_store_error)?;
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+
+    let mut source_events = BTreeMap::new();
+    let mut source_artifacts = Vec::new();
+    let mut source_views = BTreeMap::new();
+    for requirement in query_evidence_requirements {
+        let artifact = lifecycle
+            .object_for_requirement(&requirement)
+            .ok_or_else(|| {
+                PublicError::backend(
+                    ErrorClass::Internal,
+                    "FactQueryEvidenceInvalid",
+                    "Fact query evidence artifact is invalid",
+                )
+            })?;
         let evidence = mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
             .map_err(|_| {
                 PublicError::backend(
@@ -34,28 +54,82 @@ where
             if source_events.contains_key(&fact_claim_id) {
                 continue;
             }
-            let source_stream = store
-                .load_run_stream(fact_claim_id.source_run_id())
-                .await
-                .map_err(async_app_store_error)?;
-            let envelope = source_stream
-                .into_iter()
-                .find(|candidate| {
-                    candidate.seq().as_u64() == fact_claim_id.source_seq()
-                        && candidate.ordinal().as_u32() == fact_claim_id.source_ordinal()
-                })
-                .ok_or_else(|| {
-                    PublicError::backend(
-                        ErrorClass::Internal,
-                        "FactQuerySourceFactMissing",
-                        "Fact query evidence source fact event is missing",
-                    )
-                })?;
-            let source_event = RetainedSourceFactReplayEvent::new(fact_claim_id.clone(), envelope)?;
+            if !source_views.contains_key(fact_claim_id.source_run_id()) {
+                let source_view =
+                    load_verified_run_view(store, registry, fact_claim_id.source_run_id()).await?;
+                source_views.insert(fact_claim_id.source_run_id().clone(), source_view);
+            }
+            let source_view = source_views
+                .get(fact_claim_id.source_run_id())
+                .ok_or_else(source_fact_missing)?;
+            let source_lifecycle = store::current_lifecycle::read(source_view);
+            let (source_event, response_requirement) =
+                match source_lifecycle.visit_records(|record| {
+                    if record.sequence().as_u64() == fact_claim_id.source_seq()
+                        && record.ordinal().as_u32() == fact_claim_id.source_ordinal()
+                    {
+                        let mut response_requirement = None;
+                        let mut duplicate_response_requirement = false;
+                        let _ = record.visit_artifact_requirements(|requirement| {
+                            if requirement.artifact_role == Some(events::ArtifactRole::FactResponse)
+                                && response_requirement.replace(requirement.clone()).is_some()
+                            {
+                                duplicate_response_requirement = true;
+                            }
+                            std::ops::ControlFlow::<()>::Continue(())
+                        });
+                        std::ops::ControlFlow::Break((
+                            RetainedSourceFactReplayEvent::from_current_record(record),
+                            response_requirement,
+                            duplicate_response_requirement,
+                        ))
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                }) {
+                    std::ops::ControlFlow::Break((
+                        source_event,
+                        Some(response_requirement),
+                        false,
+                    )) => (source_event?, response_requirement),
+                    std::ops::ControlFlow::Break(_) => {
+                        return Err(source_fact_artifact_invalid());
+                    }
+                    std::ops::ControlFlow::Continue(()) => {
+                        return Err(source_fact_missing());
+                    }
+                };
+            if source_event.fact_claim_id() != &fact_claim_id {
+                return Err(source_fact_missing());
+            }
+            let response_object = source_lifecycle
+                .object_for_requirement(&response_requirement)
+                .ok_or_else(source_fact_artifact_invalid)?;
+            source_artifacts.push(store::VerifiedRetainedArtifactBytes::new(
+                response_object.bytes().to_vec(),
+                response_object.evidence().clone(),
+                &response_requirement,
+            )?);
             source_events.insert(fact_claim_id, source_event);
         }
     }
-    Ok(source_events.into_values().collect())
+    Ok((source_events.into_values().collect(), source_artifacts))
+}
+
+fn source_fact_missing() -> PublicError {
+    PublicError::backend(
+        ErrorClass::Internal,
+        "FactQuerySourceFactMissing",
+        "Fact query evidence source fact event is missing",
+    )
+}
+
+fn source_fact_artifact_invalid() -> PublicError {
+    PublicError::backend(
+        ErrorClass::Internal,
+        "FactQuerySourceArtifactInvalid",
+        "Fact query evidence source fact artifact is invalid",
+    )
 }
 
 pub(super) fn certified_spec_launch_artifact(

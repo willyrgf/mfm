@@ -26,12 +26,14 @@ entry-point id plus target
   -> operation crate builds a concrete typed program draft
   -> mfm-certify lowers, validates, and emits certified typed execution spec
   -> app verifies persisted spec/certificate evidence and assembles launch material
-  -> runtime rebuilds verified history from the append-only run stream
+  -> store physically loads one committed journal, then semantically binds it to the exact
+     certified spec, including deterministic historical authorization verification
+  -> runtime borrows the resulting opaque verified run view
   -> deterministic frontier scheduler selects one certified node or terminal decision
   -> sealed runner invocation produces typed intent, staged artifacts, or sealed handles
   -> runtime commit planner builds purpose-specific PreparedCommitPlan
   -> store atomically admits artifact evidence and appends typed events
-  -> replay/resume/public-output read from certified spec plus run stream
+  -> replay/resume/status/public-output borrow that same verified run view
 ```
 
 The certified typed execution spec is the runtime contract. Runner plans, route names, command
@@ -153,11 +155,13 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `ValidatedTypedExecutionSpec` is certifier-private validated authority used to mint certificates
 - `HashedSpecEnvelope` is a hash-only envelope only
 - persisted `CertifiedSpecCertificate` bytes are evidence only until verified
-- `CertifiedTypedSpec` is the non-forgeable authority returned by `mfm-certify`
+- `CertifiedTypedSpec` is the non-forgeable affine authority returned by `mfm-certify`; it is
+  borrowable, movable, and non-cloneable
 - `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are certified spec authority views
 - `CertifiedContextSpec` and `ContextRef` are hash-defining spec data until certifier/runtime
   authority validates them with node, cell, and input context constraints
-- `CertifiedRuntimeSpec` is runtime authority derived only from `CertifiedTypedSpec`
+- `CertifiedRuntimeSpec` is the non-cloneable pre-admission runtime owner of one
+  `CertifiedTypedSpec` plus disposable position-and-ID indexes
 - `PreparedCommit<Purpose>` and `PreparedCommitPlan` are store mutation authority built by runtime
 - `CertifiedRunStoreAuthority` is minted from the certified typed spec and is the store admission authority for
   policy-bound run-start and saga commits, including side-effect terminal policy derivation; store
@@ -175,16 +179,20 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - executor memory and file checkpoints are conformance bytes, not production recovery authority
 - `SideEffectLedgerState` is the typed store view for legal side-effect ledger transitions
 - `SagaTerminalProof` is required authority for terminal saga outcomes
-- `CommittedRunStream` is store-owned append-only stream authority
-- `VerifiedRunArtifactStore` is retained-artifact authority tied to a committed stream
-- `VerifiedRunHistoryView` is runtime/replay read authority over a committed stream plus verified
-  retained artifact evidence
+- `CommittedRunJournal` is store-owned authority over one run's committed batches, typed records,
+  exact retained objects, and compact private physical/current-format fold; physical construction
+  does not verify manual-resolution signatures
+- `VerifiedRunView` is the opaque, non-cloneable runtime/replay/read authority minted only by
+  consuming a `CommittedRunJournal` with the exact `CertifiedTypedSpec` and building the sole
+  store-owned semantic certified-history fold, including deterministic `mfm-manual-auth`
+  verification against certified replay authority
 - erased runner plans are implementation artifacts
 - rendered public-output JSON is an output/cache surface only
 
 Start, resume, replay, and public-output rendering must verify stored spec/certificate artifacts
-against the compiled certification registry and compare stream evidence before constructing runtime,
-replay, or render authority.
+against the compiled certification registry, then consume the committed journal with that exact
+certified authority to produce `VerifiedRunView` before constructing runtime, replay, or render
+authority.
 
 Admission, drive, verify, resume, and replay must not resolve outcome-affecting policy from mutable
 registries, worker-local defaults, or external oracles. Such policy belongs in typed config and
@@ -240,7 +248,7 @@ The semantic configuration path has one ownership split:
 Target resolution ends before certification and `RunAdmitted`. Launch evidence records the exact
 entry-point id plus target/schema/digest so a run can be verified without consulting mutable
 current configuration. Resume, status, stream, public-output, and replay paths use retained
-certified artifacts and the append-only run stream only.
+certified artifacts through the store-owned committed journal and its bound `VerifiedRunView` only.
 
 Two current decisions are deliberate:
 
@@ -747,6 +755,10 @@ new commit purposes must add a purpose marker and validator before stores will a
 
 Stores own:
 
+- the one per-run committed journal loaded under one backend snapshot
+- the compact private physical/current-format journal fold
+- the sole per-run semantic certified-history fold, created only in `VerifiedRunView`
+- deterministic historical manual-authorization verification against certified replay authority
 - event envelopes
 - event-to-retained-artifact requirement derivation
 - run-local sequence numbers
@@ -756,11 +768,52 @@ Stores own:
 - logical keys
 - commit preconditions
 - retained artifact bytes and typed evidence
-- the retained-artifact read provider and verified-byte contract
-- projections
+- the temporary retained-artifact provider for explicit non-view boundaries
+- rebuildable cross-run projections
 
-Projection data is derived from the run stream and is never the sole authority for semantic resume,
-replay, retention, public output, or side-effect status.
+`RunJournalStore::load_committed_journal` is the only per-run history load. It returns a
+`CommittedRunJournal` only after checking record identity and order, atomic batch grouping, the
+compact physical/current-format fold, and every required object's exact evidence under one
+consistent backend snapshot. Certification bootstrap may borrow only the admitted spec and
+certificate objects. This physical load verifies no manual-resolution signatures, performs no live
+operator, signer, or keystore lookup, and makes no external-truth decision.
+
+The journal is then consumed with the exact `CertifiedTypedSpec` to build and validate the sole
+semantic certified-history fold in `mfm-store`. That fold invokes the deterministic
+`mfm-manual-auth` verifier for every historical manual resolution against the certified verifier
+identity, operator authority snapshot, signing scheme, quorum, exact prefix claim, and retained
+proof bytes. It consults no live policy registry or secret-bearing service. Only a complete
+successful semantic pass mints the fully authorization-verified `VerifiedRunView`.
+
+Durable adapters implement the doc-hidden `RunJournalBackend` SPI. Its load receives an affine
+`JournalLoadVerifier` whose private state binds the one requested run; consuming that verifier is
+the only raw-row-to-journal minting path. A blanket implementation exposes the permanent
+sealed two-method `RunJournalStore` append/load boundary and rechecks the requested run after every
+backend future resolves. Wrappers implement `RunJournalBackend`, delegate by consuming
+`JournalLoadVerifier::accept_verified`, and cannot implement `RunJournalStore` directly. Temporary
+status/fact projections remain on the separate `CurrentProjectionStore` capability and are not
+part of Package A.
+
+The journal and view have private fields and are non-cloneable. Runtime, replay, status, and
+public-output reads borrow the same view and cannot replace it with raw records, an owned projection,
+or an artifact map. They trust the view's derived fold and do not reconstruct or reverify
+historical manual proof. Purpose-specific borrowed visitation may expose only the evidence needed
+for one algorithm and may not become a serializable or cloneable authority surface. The
+`current_lifecycle` readers are a temporary cutover seam and are deleted with the complete audited
+lifecycle. `current_run_sequence` remains a current-format observation, not a synthetic
+recoverability head token.
+
+Refreshing a view is consuming, not cloning or merging.
+`VerifiedRunView::verify_successor` accepts a newly loaded journal only when it is a strict
+extension of the same run with an exact committed prefix and byte/evidence-identical old objects.
+It carries the existing certified spec forward without another certification call. Equal,
+truncated, divergent, reordered, or old-object-replaced candidates fail closed. Semantic extension
+applies only suffix records while resolving their exact dependencies against the complete
+successor journal, including deterministic authorization verification for any new historical
+manual-resolution record. It neither refolds the prefix nor synthesizes a suffix object map.
+
+Projection data is derived from journal authority and is never the sole authority for semantic
+resume, replay, retention, public output, or side-effect status.
 
 `FactQueryProjection` is the one backend-facing projection for a recorded fact and owns its
 descriptor-derived query terms. Storage implementations may normalize the parent and terms into
@@ -856,17 +909,22 @@ Before merging a change, verify:
   with no unconstrained or fallback signer binding
 - certified saga and side-effect verification policy are hash-defining spec data, not policy
   resolved by a registry at admission, and compensation/manual outcomes are derived from certified
-  policy plus stream evidence
+  policy plus the store-verified journal fold
 - process topology remains operational: run identity, execution lanes, and resource lanes keep
   separate responsibilities, and process-local resources do not become durable authority
-- manual resolution uses certified schema roles, certified verifier identity, certified operator
-  authority snapshot, canonical proof bytes, signature verification, and quorum
+- physical journal loading does not verify manual-resolution signatures; the store-owned semantic
+  journal-to-view fold invokes deterministic `mfm-manual-auth` verification against certified
+  replay authority, including certified verifier identity, operator authority snapshot, signing
+  scheme, canonical proof bytes, and quorum
+- `VerifiedRunView` is fully authorization-verified; runtime, replay, and status trust its derived
+  fold and do not reconstruct or reverify historical proof
 - replay paths cannot construct live capabilities
-- replay paths cannot call live signers, verifier registries, certification registries, keystores,
-  or runtime signer sources
+- historical authorization verification cannot call live operators, signers, verifier registries,
+  certification registries, keystores, or runtime signer sources and cannot decide external truth
 - admission, drive, verify, and resume paths cannot call mutable policy registries or external
   oracles for outcome-affecting decisions after certification
-- resume validates stored stream evidence against the certified spec
+- resume trusts only stored journal evidence validated into `VerifiedRunView` against the exact
+  certified spec
 - states declare capabilities but do not instantiate live transports or signer providers
 - transports implement capability contracts but do not define state-owned domain semantics
 - app/bin changes do not embed planner or state behavior

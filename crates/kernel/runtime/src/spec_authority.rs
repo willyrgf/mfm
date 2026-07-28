@@ -1,198 +1,159 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use mfm_certify::{
-    CertifiedDescriptorSet, CertifiedSpecCertificate, CertifiedSpecGraph, CertifiedTypedSpec,
-};
-#[cfg(test)]
-use mfm_ids::DigestAlgorithm;
-use mfm_ids::{
-    CellId, ContentDigest, ContextRef, DescriptorId, NodeId, SideEffectPairId, SpecHash,
-};
+use mfm_certify::{CertifiedSpecCertificate, CertifiedTypedSpec};
+use mfm_ids::{CellId, ContentDigest, ContextRef, NodeId, SideEffectPairId, SpecHash};
 use mfm_spec::v1 as spec;
 
 use crate::{Result, RuntimeError};
 
-/// Certified executable runtime spec with indexes used by the serial scheduler.
-#[derive(Debug, Clone)]
+/// Non-cloneable pre-admission runtime owner for one certified typed spec.
+///
+/// The authority moves into the store's verified run view at admission; only the disposable
+/// position-and-ID index remains beside that view for post-admission runtime reads.
+#[derive(Debug)]
 pub struct CertifiedRuntimeSpec {
-    envelope: spec::HashedSpecEnvelope,
-    certificate: CertifiedSpecCertificate,
-    state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
-    contexts: BTreeMap<ContextRef, spec::CertifiedContextSpec>,
-    nodes: BTreeMap<NodeId, spec::NodeSpec>,
-    remediations: BTreeMap<NodeId, spec::NodeSpec>,
-    cells: BTreeMap<CellId, spec::CellSpec>,
+    certified: CertifiedTypedSpec,
+    index: CurrentRuntimeIndex,
+}
+
+/// Position-only runtime indexes derived from one certified typed spec.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CurrentRuntimeIndex {
+    context_positions: BTreeMap<ContextRef, usize>,
     topological_order: Vec<NodeId>,
 }
 
-impl CertifiedRuntimeSpec {
-    /// Builds deterministic runtime indexes from certifier-backed typed-spec authority.
-    pub fn new(certified: CertifiedTypedSpec) -> Result<Self> {
-        let parts = certified.into_parts();
-        let state_descriptors = certified_state_descriptors(parts.graph.descriptors());
-        Self::from_certified_graph(
-            parts.envelope,
-            parts.certificate,
-            state_descriptors,
-            parts.graph,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_verified_envelope(envelope: spec::HashedSpecEnvelope) -> Result<Self> {
-        let certificate = mfm_certify::CertifiedSpecCertificate::from_evidence(
-            mfm_certify::CertifiedSpecCertificateEvidence {
-                certificate_version: mfm_certify::CERTIFICATE_VERSION.to_owned(),
-                media_type: mfm_certify::CERTIFICATE_MEDIA_TYPE.to_owned(),
-                certifier_algorithm: mfm_certify::CERTIFIER_ALGORITHM.to_owned(),
-                spec_hash: envelope.spec_hash.clone(),
-                registry_digest: ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256JcsV1,
-                    mfm_ids::DigestBytes::from_array([0; 32]),
-                ),
-                descriptor_identities: Vec::new(),
-                schema_role_grants: Vec::new(),
-                manual_authorization_verifiers: Vec::new(),
-                operator_authority_snapshots: Vec::new(),
-            },
-        )
-        .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
-        let state_descriptors = raw_state_descriptors(&envelope.spec)?;
-        Self::from_verified_parts(envelope, certificate, state_descriptors)
-    }
-
-    #[cfg(test)]
-    fn from_verified_parts(
-        envelope: spec::HashedSpecEnvelope,
-        certificate: CertifiedSpecCertificate,
-        state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
-    ) -> Result<Self> {
-        let mut cells = BTreeMap::new();
-        for cell in &envelope.spec.cells {
-            if cells.insert(cell.cell_id.clone(), cell.clone()).is_some() {
+impl CurrentRuntimeIndex {
+    fn new(certified: &CertifiedTypedSpec) -> Result<Self> {
+        let mut context_positions = BTreeMap::new();
+        for (position, context) in certified
+            .validated_spec()
+            .spec()
+            .contexts
+            .iter()
+            .enumerate()
+        {
+            if context_positions
+                .insert(context.context_ref.clone(), position)
+                .is_some()
+            {
                 return Err(RuntimeError::InvalidSpec(format!(
-                    "duplicate cell {}",
-                    cell.cell_id
+                    "duplicate certified context {}",
+                    context.context_ref
                 )));
             }
         }
 
-        let mut nodes = BTreeMap::new();
-        for node in &envelope.spec.nodes {
-            if nodes.insert(node.node_id.clone(), node.clone()).is_some() {
-                return Err(RuntimeError::InvalidSpec(format!(
-                    "duplicate node {}",
-                    node.node_id
-                )));
-            }
-        }
-        let remediations = envelope.spec.remediations.clone();
-        let contexts = certified_contexts(&envelope.spec)?;
-
-        Self::from_verified_indexes(
-            envelope,
-            certificate,
-            state_descriptors,
-            contexts,
-            nodes,
-            remediations,
-            cells,
-        )
-    }
-
-    fn from_certified_graph(
-        envelope: spec::HashedSpecEnvelope,
-        certificate: CertifiedSpecCertificate,
-        state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
-        graph: CertifiedSpecGraph,
-    ) -> Result<Self> {
-        let cells = graph
-            .cells()
-            .map(|(cell_id, cell)| (cell_id.clone(), cell.clone()))
-            .collect();
-        let nodes = graph
-            .forward_nodes()
-            .map(|node| (node.node_id.clone(), node.clone()))
-            .collect();
-        let remediations = graph
-            .remediations()
-            .map(|(forward_node_id, node)| (forward_node_id.clone(), node.clone()))
-            .collect();
-        let contexts = certified_contexts(&envelope.spec)?;
-
-        Self::from_verified_indexes(
-            envelope,
-            certificate,
-            state_descriptors,
-            contexts,
-            nodes,
-            remediations,
-            cells,
-        )
-    }
-
-    fn from_verified_indexes(
-        envelope: spec::HashedSpecEnvelope,
-        certificate: CertifiedSpecCertificate,
-        state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
-        contexts: BTreeMap<ContextRef, spec::CertifiedContextSpec>,
-        nodes: BTreeMap<NodeId, spec::NodeSpec>,
-        remediations: BTreeMap<NodeId, spec::NodeSpec>,
-        cells: BTreeMap<CellId, spec::CellSpec>,
-    ) -> Result<Self> {
-        envelope.verify_hash()?;
-
-        let runtime = Self {
-            envelope,
-            certificate,
-            state_descriptors,
-            contexts,
-            nodes,
-            remediations,
-            cells,
-            topological_order: Vec::new(),
-        };
-        let topological_order = runtime.compute_topological_order()?;
         Ok(Self {
-            topological_order,
-            ..runtime
+            context_positions,
+            topological_order: compute_topological_order(certified)?,
         })
     }
 
+    /// Checks that these positions and ids were derived from `certified`.
+    pub(crate) fn validate_against(&self, certified: &CertifiedTypedSpec) -> Result<()> {
+        if *self != Self::new(certified)? {
+            return Err(RuntimeError::InvalidSpec(
+                "current runtime index does not match the certified typed spec".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Borrows runtime access to the certified authority this index was checked against.
+    pub(crate) fn runtime_spec<'a>(
+        &'a self,
+        certified: &'a CertifiedTypedSpec,
+    ) -> CurrentRuntimeSpecRef<'a> {
+        CurrentRuntimeSpecRef {
+            certified,
+            index: self,
+        }
+    }
+}
+
+/// Borrowed runtime access to one certified typed spec and its current indexes.
+#[derive(Debug)]
+pub struct CurrentRuntimeSpecRef<'a> {
+    certified: &'a CertifiedTypedSpec,
+    index: &'a CurrentRuntimeIndex,
+}
+
+impl<'a> CurrentRuntimeSpecRef<'a> {
     /// Returns the hash-only spec envelope.
-    pub fn envelope(&self) -> &spec::HashedSpecEnvelope {
-        &self.envelope
+    pub fn envelope(&self) -> &'a spec::HashedSpecEnvelope {
+        self.certified.envelope()
     }
 
     /// Returns the certified spec hash.
-    pub fn spec_hash(&self) -> &SpecHash {
-        &self.envelope.spec_hash
+    pub fn spec_hash(&self) -> &'a SpecHash {
+        self.certified.spec_hash()
     }
 
     /// Returns the verified certificate evidence used to mint this runtime spec.
-    pub fn certificate(&self) -> &CertifiedSpecCertificate {
-        &self.certificate
+    pub fn certificate(&self) -> &'a CertifiedSpecCertificate {
+        self.certified.certificate()
     }
 
     /// Returns the hash-defining typed execution spec.
-    pub fn spec(&self) -> &spec::TypedExecutionSpec {
-        &self.envelope.spec
+    pub fn spec(&self) -> &'a spec::TypedExecutionSpec {
+        self.certified.validated_spec().spec()
     }
 
     /// Returns deterministic topological node ids.
-    pub fn topological_order(&self) -> &[NodeId] {
-        &self.topological_order
+    pub fn topological_order(&self) -> &'a [NodeId] {
+        &self.index.topological_order
     }
 
-    /// Iterates forward nodes in topological order followed by remediation nodes.
-    pub(crate) fn executable_nodes(&self) -> impl Iterator<Item = &spec::NodeSpec> + '_ {
-        self.topological_order
+    /// Returns a certified node by id.
+    pub fn node(&self, node_id: &NodeId) -> Option<&'a spec::NodeSpec> {
+        let graph = self.certified.validated_spec().graph();
+        graph.forward_node(node_id).or_else(|| {
+            graph.remediations().find_map(|(_, remediation)| {
+                (remediation.node_id == *node_id).then_some(remediation)
+            })
+        })
+    }
+
+    /// Returns a certified cell by id.
+    pub fn cell(&self, cell_id: &CellId) -> Option<&'a spec::CellSpec> {
+        self.certified.validated_spec().graph().cell(cell_id)
+    }
+
+    /// Returns the certified state descriptor for a node.
+    pub fn state_descriptor_for_node(
+        &self,
+        node: &spec::NodeSpec,
+    ) -> Result<&'a spec::StateDescriptorIdentity> {
+        self.certified
+            .descriptor_set()
+            .state(&node.descriptor_id)
+            .ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "node {} references missing state descriptor {}",
+                    node.node_id, node.descriptor_id
+                ))
+            })
+    }
+
+    pub(crate) fn executable_nodes(&self) -> Result<Vec<&'a spec::NodeSpec>> {
+        let graph = self.certified.validated_spec().graph();
+        let mut nodes = self
+            .index
+            .topological_order
             .iter()
-            .map(|node_id| self.node(node_id).expect("topological node exists"))
-            .chain(self.remediations.values())
+            .map(|node_id| {
+                graph.forward_node(node_id).ok_or_else(|| {
+                    RuntimeError::InvalidSpec(format!(
+                        "certified topological order references missing node {node_id}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        nodes.extend(graph.remediations().map(|(_, remediation)| remediation));
+        Ok(nodes)
     }
 
-    /// Returns certified fact descriptor hashes required by any executable node.
     pub(crate) fn fact_descriptor_hashes(&self) -> BTreeSet<ContentDigest> {
         self.spec()
             .nodes
@@ -206,76 +167,47 @@ impl CertifiedRuntimeSpec {
             .collect()
     }
 
-    /// Returns a certified node by id.
-    pub fn node(&self, node_id: &NodeId) -> Option<&spec::NodeSpec> {
-        self.nodes.get(node_id).or_else(|| {
-            self.remediations
-                .values()
-                .find(|node| node.node_id == *node_id)
-        })
-    }
-
-    /// Returns the remediation node linked to a forward side-effect node.
     pub(crate) fn remediation_for_forward_node(
         &self,
         forward_node_id: &NodeId,
-    ) -> Option<&spec::NodeSpec> {
-        self.remediations.get(forward_node_id)
+    ) -> Option<&'a spec::NodeSpec> {
+        self.certified
+            .validated_spec()
+            .graph()
+            .remediation_for_forward_node(forward_node_id)
     }
 
-    /// Returns the forward node id linked to a remediation node.
     pub(crate) fn forward_node_for_remediation(
         &self,
         remediation_node_id: &NodeId,
-    ) -> Option<&NodeId> {
-        self.remediations
-            .iter()
+    ) -> Option<&'a NodeId> {
+        self.certified
+            .validated_spec()
+            .graph()
+            .remediations()
             .find_map(|(forward_node_id, remediation)| {
                 (remediation.node_id == *remediation_node_id).then_some(forward_node_id)
             })
     }
 
-    /// Returns the certified side-effect pair id for a submit node.
     pub(crate) fn side_effect_pair_for_submit_node(
         &self,
         submit_node_id: &NodeId,
-    ) -> Option<&SideEffectPairId> {
+    ) -> Option<&'a SideEffectPairId> {
         self.spec()
             .side_effect_verify_pair_for_submit_node(submit_node_id)
             .ok()
             .map(|pair| pair.pair_id)
     }
 
-    /// Returns a certified cell by id.
-    pub fn cell(&self, cell_id: &CellId) -> Option<&spec::CellSpec> {
-        self.cells.get(cell_id)
-    }
-
-    pub(crate) fn context(&self, context_ref: &ContextRef) -> Option<&spec::CertifiedContextSpec> {
-        self.contexts.get(context_ref)
-    }
-
-    /// Returns the certified invocation context required by a node.
-    pub fn invocation_context_for_node(
+    pub(crate) fn context(
         &self,
-        node: &spec::NodeSpec,
-    ) -> Result<crate::CertifiedInvocationContext> {
-        crate::CertifiedInvocationContext::for_node(self, node)
-    }
-
-    /// Returns the certified state descriptor for a node.
-    pub fn state_descriptor_for_node(
-        &self,
-        node: &spec::NodeSpec,
-    ) -> Result<&spec::StateDescriptorIdentity> {
-        self.state_descriptors
-            .get(&node.descriptor_id)
-            .ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "node {} references missing state descriptor {}",
-                    node.node_id, node.descriptor_id
-                ))
-            })
+        context_ref: &ContextRef,
+    ) -> Option<&'a spec::CertifiedContextSpec> {
+        self.index
+            .context_positions
+            .get(context_ref)
+            .and_then(|position| self.spec().contexts.get(*position))
     }
 
     pub(crate) fn validate_input_binding(
@@ -295,7 +227,7 @@ impl CertifiedRuntimeSpec {
         match input {
             spec::InputBindingNodeSpec::Unit => {}
             spec::InputBindingNodeSpec::Cell(cell) => {
-                let certified = self.cells.get(&cell.cell_id).ok_or_else(|| {
+                let certified = self.cell(&cell.cell_id).ok_or_else(|| {
                     RuntimeError::InvalidSpec(format!(
                         "input binding references missing cell {}",
                         cell.cell_id
@@ -331,101 +263,253 @@ impl CertifiedRuntimeSpec {
         }
         Ok(())
     }
+}
 
-    fn compute_topological_order(&self) -> Result<Vec<NodeId>> {
-        let mut indegree = BTreeMap::<NodeId, usize>::new();
-        let mut successors = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
-        for node_id in self.nodes.keys() {
-            indegree.insert(node_id.clone(), 0);
-            successors.insert(node_id.clone(), BTreeSet::new());
-        }
-        for node in self.nodes.values() {
-            for predecessor in &node.deterministic_predecessors {
-                if !self.nodes.contains_key(predecessor) {
-                    return Err(RuntimeError::InvalidSpec(format!(
-                        "node {} references missing predecessor {}",
-                        node.node_id, predecessor
-                    )));
-                }
-                successors
-                    .get_mut(predecessor)
-                    .expect("predecessor exists")
-                    .insert(node.node_id.clone());
-                *indegree.get_mut(&node.node_id).expect("node exists") += 1;
-            }
-        }
+mod sealed {
+    pub trait Sealed {}
+}
 
-        let mut ready = indegree
-            .iter()
-            .filter_map(|(node_id, count)| (*count == 0).then_some(node_id.clone()))
-            .collect::<VecDeque<_>>();
-        let mut order = Vec::with_capacity(self.nodes.len());
-        while let Some(node_id) = ready.pop_front() {
-            order.push(node_id.clone());
-            for successor in successors.get(&node_id).expect("successors exist") {
-                let count = indegree.get_mut(successor).expect("successor exists");
-                *count -= 1;
-                if *count == 0 {
-                    let index = ready
-                        .iter()
-                        .position(|queued| successor < queued)
-                        .unwrap_or(ready.len());
-                    ready.insert(index, successor.clone());
-                }
-            }
-        }
-        if order.len() != self.nodes.len() {
-            return Err(RuntimeError::InvalidSpec(
-                "certified node graph contains a cycle".to_owned(),
-            ));
-        }
-        Ok(order)
+/// Internal read contract shared by pre-admission and verified current-run spec authority.
+pub(crate) trait CurrentSpecRead: sealed::Sealed {
+    fn current_spec_ref(&self) -> CurrentRuntimeSpecRef<'_>;
+
+    fn envelope(&self) -> &spec::HashedSpecEnvelope {
+        self.current_spec_ref().envelope()
+    }
+
+    fn spec_hash(&self) -> &SpecHash {
+        self.current_spec_ref().spec_hash()
+    }
+
+    fn certificate(&self) -> &CertifiedSpecCertificate {
+        self.current_spec_ref().certificate()
+    }
+
+    fn spec(&self) -> &spec::TypedExecutionSpec {
+        self.current_spec_ref().spec()
+    }
+
+    fn topological_order(&self) -> &[NodeId] {
+        self.current_spec_ref().topological_order()
+    }
+
+    fn executable_nodes(&self) -> Result<Vec<&spec::NodeSpec>> {
+        self.current_spec_ref().executable_nodes()
+    }
+
+    fn fact_descriptor_hashes(&self) -> BTreeSet<ContentDigest> {
+        self.current_spec_ref().fact_descriptor_hashes()
+    }
+
+    fn node(&self, node_id: &NodeId) -> Option<&spec::NodeSpec> {
+        self.current_spec_ref().node(node_id)
+    }
+
+    fn remediation_for_forward_node(&self, forward_node_id: &NodeId) -> Option<&spec::NodeSpec> {
+        self.current_spec_ref()
+            .remediation_for_forward_node(forward_node_id)
+    }
+
+    fn forward_node_for_remediation(&self, remediation_node_id: &NodeId) -> Option<&NodeId> {
+        self.current_spec_ref()
+            .forward_node_for_remediation(remediation_node_id)
+    }
+
+    fn side_effect_pair_for_submit_node(
+        &self,
+        submit_node_id: &NodeId,
+    ) -> Option<&SideEffectPairId> {
+        self.current_spec_ref()
+            .side_effect_pair_for_submit_node(submit_node_id)
+    }
+
+    fn cell(&self, cell_id: &CellId) -> Option<&spec::CellSpec> {
+        self.current_spec_ref().cell(cell_id)
+    }
+
+    fn context(&self, context_ref: &ContextRef) -> Option<&spec::CertifiedContextSpec> {
+        self.current_spec_ref().context(context_ref)
+    }
+
+    fn state_descriptor_for_node(
+        &self,
+        node: &spec::NodeSpec,
+    ) -> Result<&spec::StateDescriptorIdentity> {
+        self.current_spec_ref().state_descriptor_for_node(node)
+    }
+
+    fn validate_input_binding(&self, input: &spec::InputBindingNodeSpec) -> Result<Vec<CellId>> {
+        self.current_spec_ref().validate_input_binding(input)
     }
 }
 
-fn certified_state_descriptors(
-    descriptors: &CertifiedDescriptorSet,
-) -> BTreeMap<DescriptorId, spec::StateDescriptorIdentity> {
-    descriptors
-        .state_descriptors()
-        .map(|(descriptor_id, descriptor)| (descriptor_id.clone(), descriptor.clone()))
-        .collect()
+impl sealed::Sealed for CertifiedRuntimeSpec {}
+
+impl CurrentSpecRead for CertifiedRuntimeSpec {
+    fn current_spec_ref(&self) -> CurrentRuntimeSpecRef<'_> {
+        self.current()
+    }
 }
 
-fn certified_contexts(
-    spec: &spec::TypedExecutionSpec,
-) -> Result<BTreeMap<ContextRef, spec::CertifiedContextSpec>> {
-    let mut contexts = BTreeMap::new();
-    for context in &spec.contexts {
-        if contexts
-            .insert(context.context_ref.clone(), context.clone())
-            .is_some()
-        {
-            return Err(RuntimeError::InvalidSpec(format!(
-                "duplicate certified context {}",
-                context.context_ref
-            )));
+impl sealed::Sealed for CurrentRuntimeSpecRef<'_> {}
+
+impl CurrentSpecRead for CurrentRuntimeSpecRef<'_> {
+    fn current_spec_ref(&self) -> CurrentRuntimeSpecRef<'_> {
+        CurrentRuntimeSpecRef {
+            certified: self.certified,
+            index: self.index,
         }
     }
-    Ok(contexts)
 }
 
-#[cfg(test)]
-fn raw_state_descriptors(
-    spec: &spec::TypedExecutionSpec,
-) -> Result<BTreeMap<DescriptorId, spec::StateDescriptorIdentity>> {
-    let mut state_descriptors = BTreeMap::new();
-    for descriptor in &spec.descriptor_identities {
-        if let spec::DescriptorIdentity::State(identity) = descriptor {
-            let previous =
-                state_descriptors.insert(identity.descriptor_id.clone(), identity.as_ref().clone());
-            if previous.is_some() {
+impl CertifiedRuntimeSpec {
+    /// Builds deterministic runtime indexes from certifier-backed typed-spec authority.
+    pub fn new(certified: CertifiedTypedSpec) -> Result<Self> {
+        let index = CurrentRuntimeIndex::new(&certified)?;
+        Ok(Self { certified, index })
+    }
+
+    pub(crate) fn into_parts(self) -> (CertifiedTypedSpec, CurrentRuntimeIndex) {
+        (self.certified, self.index)
+    }
+
+    fn current(&self) -> CurrentRuntimeSpecRef<'_> {
+        self.index.runtime_spec(&self.certified)
+    }
+
+    /// Returns the hash-only spec envelope.
+    pub fn envelope(&self) -> &spec::HashedSpecEnvelope {
+        CurrentSpecRead::envelope(self)
+    }
+
+    /// Returns the certified spec hash.
+    pub fn spec_hash(&self) -> &SpecHash {
+        CurrentSpecRead::spec_hash(self)
+    }
+
+    /// Returns the verified certificate evidence used to mint this runtime spec.
+    pub fn certificate(&self) -> &CertifiedSpecCertificate {
+        CurrentSpecRead::certificate(self)
+    }
+
+    /// Returns the hash-defining typed execution spec.
+    pub fn spec(&self) -> &spec::TypedExecutionSpec {
+        CurrentSpecRead::spec(self)
+    }
+
+    /// Returns deterministic topological node ids.
+    pub fn topological_order(&self) -> &[NodeId] {
+        CurrentSpecRead::topological_order(self)
+    }
+
+    /// Returns certified fact descriptor hashes required by any executable node.
+    pub(crate) fn fact_descriptor_hashes(&self) -> BTreeSet<ContentDigest> {
+        CurrentSpecRead::fact_descriptor_hashes(self)
+    }
+
+    /// Returns a certified node by id.
+    pub fn node(&self, node_id: &NodeId) -> Option<&spec::NodeSpec> {
+        CurrentSpecRead::node(self, node_id)
+    }
+
+    /// Returns a certified cell by id.
+    pub fn cell(&self, cell_id: &CellId) -> Option<&spec::CellSpec> {
+        CurrentSpecRead::cell(self, cell_id)
+    }
+
+    /// Returns the certified invocation context required by a node.
+    pub fn invocation_context_for_node(
+        &self,
+        node: &spec::NodeSpec,
+    ) -> Result<crate::CertifiedInvocationContext> {
+        crate::CertifiedInvocationContext::for_node(self, node)
+    }
+
+    /// Returns the certified state descriptor for a node.
+    pub fn state_descriptor_for_node(
+        &self,
+        node: &spec::NodeSpec,
+    ) -> Result<&spec::StateDescriptorIdentity> {
+        CurrentSpecRead::state_descriptor_for_node(self, node)
+    }
+}
+
+fn compute_topological_order(certified: &CertifiedTypedSpec) -> Result<Vec<NodeId>> {
+    let graph = certified.validated_spec().graph();
+    let mut indegree = BTreeMap::<NodeId, usize>::new();
+    let mut successors = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+    for node in graph.forward_nodes() {
+        indegree.insert(node.node_id.clone(), 0);
+        successors.insert(node.node_id.clone(), BTreeSet::new());
+    }
+    for node in graph.forward_nodes() {
+        for predecessor in &node.deterministic_predecessors {
+            if graph.forward_node(predecessor).is_none() {
                 return Err(RuntimeError::InvalidSpec(format!(
-                    "duplicate state descriptor {}",
-                    identity.descriptor_id
+                    "node {} references missing predecessor {}",
+                    node.node_id, predecessor
                 )));
             }
+            successors
+                .get_mut(predecessor)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidSpec(format!(
+                        "node {} references unindexed predecessor {}",
+                        node.node_id, predecessor
+                    ))
+                })?
+                .insert(node.node_id.clone());
+            let node_indegree = indegree.get_mut(&node.node_id).ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "certified graph omitted node {} from its runtime index",
+                    node.node_id
+                ))
+            })?;
+            *node_indegree = node_indegree.checked_add(1).ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "node {} has too many deterministic predecessors",
+                    node.node_id
+                ))
+            })?;
         }
     }
-    Ok(state_descriptors)
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(node_id, count)| (*count == 0).then_some(node_id.clone()))
+        .collect::<VecDeque<_>>();
+    let mut order = Vec::with_capacity(indegree.len());
+    while let Some(node_id) = ready.pop_front() {
+        order.push(node_id.clone());
+        let node_successors = successors.get(&node_id).ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "certified graph omitted node {node_id} from its successor index"
+            ))
+        })?;
+        for successor in node_successors {
+            let count = indegree.get_mut(successor).ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "certified successor index references missing node {successor}"
+                ))
+            })?;
+            *count = count.checked_sub(1).ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "certified successor index underflowed node {successor}"
+                ))
+            })?;
+            if *count == 0 {
+                let index = ready
+                    .iter()
+                    .position(|queued| successor < queued)
+                    .unwrap_or(ready.len());
+                ready.insert(index, successor.clone());
+            }
+        }
+    }
+    if order.len() != indegree.len() {
+        return Err(RuntimeError::InvalidSpec(
+            "certified node graph contains a cycle".to_owned(),
+        ));
+    }
+    Ok(order)
 }

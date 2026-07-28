@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) struct RecordingRunner {
     pub(super) expected_caps: Vec<(CapabilityKind, CapabilityVersion)>,
-    pub(super) output_artifact: ArtifactId,
     pub(super) output_digest: ContentDigest,
 }
 
@@ -27,12 +26,17 @@ impl ErasedNodeRunner for RecordingRunner {
                 cell.terminal,
                 MaterializedCellTerminal::Seed { .. } | MaterializedCellTerminal::Produced { .. }
             ));
-            let certified_cell = ctx.projections().cell_terminal(&output_cell).is_none();
+            let certified_cell = ctx.lifecycle().cell(&output_cell).is_none();
             assert!(certified_cell);
+            let output_bytes = synthetic_artifact_bytes_for_digest(&self.output_digest);
+            let output_artifact = ArtifactId::from_digest(
+                self.output_digest.algorithm(),
+                *self.output_digest.digest(),
+            );
             let artifact = store::ArtifactEvidenceRef {
-                artifact_id: self.output_artifact.clone(),
+                artifact_id: output_artifact.clone(),
                 digest: self.output_digest.clone(),
-                byte_len: 17,
+                byte_len: output_bytes.len() as u64,
                 media_type: spec::MediaType::new("application/json").expect("media"),
                 schema_id: Some(ctx.descriptor().output_schema_id.clone()),
                 semantic_type_id: Some(ctx.descriptor().output_semantic_type_id.clone()),
@@ -43,7 +47,8 @@ impl ErasedNodeRunner for RecordingRunner {
             let evidence_hash = artifact
                 .evidence_hash()
                 .expect("recording runner state output evidence hash");
-            let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+            let staged_artifact =
+                StagedArtifact::inline_attempt_artifact(&ctx, output_bytes, artifact)?;
             Ok(ErasedRunnerOutput::from_parts(
                 vec![staged_artifact],
                 Vec::new(),
@@ -57,7 +62,7 @@ impl ErasedNodeRunner for RecordingRunner {
                     schema_id: ctx.descriptor().output_schema_id.clone(),
                     value_lineage: ctx.output_cell().value_lineage.clone(),
                     context: ctx.output_cell().context.clone(),
-                    artifact_id: self.output_artifact.clone(),
+                    artifact_id: output_artifact,
                     content_digest: self.output_digest.clone(),
                     evidence_hash,
                     producer_state_kind: Some(ctx.node().state_kind.clone()),
@@ -163,69 +168,6 @@ impl ErasedNodeRunner for ErrorRunner {
     fn run_erased<'a>(&'a self, _ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { Err(self.error.clone()) })
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-pub(super) struct RunnerKitEmptyConfig {}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-pub(super) struct RunnerKitStructInput {
-    pub(super) left: CertifierValue,
-    pub(super) right: Vec<CertifierValue>,
-}
-
-pub(super) fn runner_kit_config_artifact(
-    node: &spec::NodeSpec,
-    bytes: &[u8],
-) -> store::ArtifactEvidenceRef {
-    assert_eq!(node.config_ref.digest, digest_for_bytes(bytes));
-    store::ArtifactEvidenceRef {
-        artifact_id: node.config_ref.artifact_id.clone(),
-        digest: node.config_ref.digest.clone(),
-        byte_len: node.config_ref.byte_len,
-        media_type: node.config_ref.media_type.clone(),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    }
-}
-
-pub(super) fn runner_kit_value_artifact(
-    bytes: &[u8],
-    artifact_role: events::ArtifactRole,
-    producer_node_id: Option<NodeId>,
-    producer_seed_id: Option<SeedId>,
-) -> store::ArtifactEvidenceRef {
-    let digest = digest_for_bytes(bytes);
-    store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.len() as u64,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(fixture_value_schema_id()),
-        semantic_type_id: Some(fixture_value_semantic_id()),
-        producer_node_id,
-        producer_seed_id,
-        artifact_role,
-    }
-}
-
-pub(super) fn runner_kit_input_cell(
-    evidence: &store::ArtifactEvidenceRef,
-    terminal: MaterializedCellTerminal,
-) -> MaterializedInputNode {
-    MaterializedInputNode::Cell(Box::new(MaterializedCell {
-        cell_id: CellId::from_digest(evidence.digest.algorithm(), *evidence.digest.digest()),
-        schema_id: evidence.schema_id.clone().expect("schema id"),
-        semantic_type_id: evidence.semantic_type_id.clone().expect("semantic id"),
-        value_lineage: spec::ValueLineageRef {
-            lineage_digest: evidence.digest.clone(),
-        },
-        context: spec::CellContextSpec::no_context(),
-        terminal,
-    }))
 }
 
 pub(super) fn runner_kit_skipped_cell() -> MaterializedInputNode {

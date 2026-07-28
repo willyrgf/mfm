@@ -158,7 +158,7 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         PostgresStoreError::Store(StoreError::MissingArtifact { .. })
     ));
     assert_eq!(
-        store.expected_next_seq(&run).await.expect("next seq"),
+        expected_next_sequence(&store, &run).await,
         StreamSeq::new(3).expect("seq")
     );
     assert_fact_projection_table_counts(&store, &run, 1, 0, 0).await;

@@ -75,8 +75,8 @@ impl SideEffectDriver {
     {
         let plan = authored_plan(ctx, adapter, ctx.node(), ctx.inputs()).await?;
         verify_authored_plan(
-            view.projection()
-                .ok_or_else(|| missing_driver_projection("side-effect projection"))?,
+            view.ledger()
+                .ok_or_else(|| missing_driver_projection("side-effect ledger"))?,
             &plan,
         )?;
         let side_effect = side_effect_binding(view, invocation_epoch)?;
@@ -93,16 +93,16 @@ impl SideEffectDriver {
             .prepare(ctx, &plan.intent, &plan.idempotency)
             .await?;
         let (prepared, settlement) = prepared.into_parts();
-        let projection = view
-            .projection()
-            .ok_or_else(|| missing_driver_projection("claimed side-effect projection"))?;
+        let ledger = view
+            .ledger()
+            .ok_or_else(|| missing_driver_projection("claimed side-effect ledger"))?;
         let claim = match view.phase() {
             Some(store::SideEffectLedgerPhase::Claimed { claim }) => {
                 RuntimeSideEffectClaimAuthority {
                     claim_owner: claim.claim_owner.clone(),
                     claim_generation: claim.claim_generation,
                     claim_fencing_token: claim.claim_fencing_token.clone(),
-                    resource_key: projection.resource_key.clone(),
+                    resource_key: ledger.resource_key().cloned(),
                 }
             }
             _ => return Err(missing_driver_projection("claimed authority")),
@@ -129,15 +129,15 @@ impl SideEffectDriver {
     {
         let plan = authored_plan(ctx, adapter, ctx.node(), ctx.inputs()).await?;
         verify_authored_plan(
-            view.projection()
-                .ok_or_else(|| missing_driver_projection("side-effect projection"))?,
+            view.ledger()
+                .ok_or_else(|| missing_driver_projection("side-effect ledger"))?,
             &plan,
         )?;
         let prepared = view
-            .projection()
-            .and_then(|projection| projection.prepared_invocation.as_ref())
+            .ledger()
+            .and_then(|ledger| ledger.prepared_invocation())
             .ok_or_else(|| missing_driver_projection("prepared invocation"))?;
-        let prepared = adapter.load_prepared(ctx, ctx.node(), prepared).await?;
+        let prepared = adapter.load_prepared(ctx, ctx.node(), &prepared).await?;
         let decision = adapter.submit_prepared(ctx, prepared).await?;
         let side_effect = side_effect_binding(view, invocation_epoch)?;
         let builder = SideEffectEvidenceBuilder::new(ctx);
@@ -190,14 +190,14 @@ where
 }
 
 pub(crate) fn verify_authored_plan<Intent, Idempotency>(
-    projection: &store::SideEffectProjection,
+    ledger: &store::current_lifecycle::CurrentSideEffectRef<'_>,
     plan: &AuthoredSideEffect<Intent, Idempotency>,
 ) -> Result<()>
 where
     Intent: MfmValue,
     Idempotency: MfmValue,
 {
-    let intent = &projection.intent;
+    let intent = ledger.intent();
     let intent_schema_id = Intent::schema_id()
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let idempotency_schema_id = Idempotency::schema_id()
@@ -205,19 +205,19 @@ where
     let intent_hash = canonical_mfm_value(&plan.intent)?.content_digest();
     let idempotency_hash = canonical_mfm_value(&plan.idempotency)?.content_digest();
     let binding = &plan.capability_binding;
-    if intent.intent_schema_id != intent_schema_id
-        || intent.intent_hash != intent_hash
-        || intent.idempotency_input_schema_id != idempotency_schema_id
-        || intent.idempotency_input_hash != idempotency_hash
-        || intent.idempotency_key != plan.idempotency_key
-        || intent.capability_kind != binding.capability_kind
-        || intent.capability_version != binding.capability_version
-        || intent.adapter_kind != binding.adapter_kind
-        || intent.adapter_version != binding.adapter_version
+    if intent.intent_schema_id() != &intent_schema_id
+        || intent.intent_hash() != &intent_hash
+        || intent.idempotency_input_schema_id() != &idempotency_schema_id
+        || intent.idempotency_input_hash() != &idempotency_hash
+        || intent.idempotency_key() != &plan.idempotency_key
+        || intent.capability_kind() != &binding.capability_kind
+        || intent.capability_version() != &binding.capability_version
+        || intent.adapter_kind() != &binding.adapter_kind
+        || intent.adapter_version() != &binding.adapter_version
     {
         return Err(RuntimeError::InvalidRunStream(format!(
             "side-effect node {} recomputed authored authority that differs from retained intent",
-            intent.node_id
+            intent.node_id()
         )));
     }
     Ok(())

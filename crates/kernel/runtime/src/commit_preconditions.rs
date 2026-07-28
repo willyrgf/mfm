@@ -1,14 +1,17 @@
 use super::*;
 
-pub(super) fn runner_output_preconditions(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(super) fn runner_output_preconditions<S>(
+    runtime_spec: &S,
     run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     payloads: &[events::KernelEventPayload],
     require_existing_attempt: bool,
-) -> Result<store::CommitPreconditions> {
+) -> Result<store::CommitPreconditions>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     let mut preconditions = store::CommitPreconditions {
         required_run_state: store::RequiredRunState::NotCompleted,
         required_cell_states: vec![store::CellStatePrecondition {
@@ -37,8 +40,8 @@ pub(super) fn runner_output_preconditions(
         &node.framework,
         Some(spec::FrameworkNodeSpec::CompleteRun(_))
     ) {
-        let completion = run_completion_evidence(runtime_spec, run_id, projections)?;
-        let retention_manifest = projected_retention_manifest(run_id, projections)?;
+        let completion = run_completion_evidence(runtime_spec, lifecycle)?;
+        let retention_manifest = current_retention_manifest(lifecycle)?;
         preconditions
             .required_present_logical_keys
             .push(store::LogicalEventKey::new(format!(
@@ -49,7 +52,8 @@ pub(super) fn runner_output_preconditions(
             .required_present_logical_keys
             .push(store::LogicalEventKey::new(format!(
                 "retention:{}:manifest:{}",
-                run_id, retention_manifest.manifest_seq
+                run_id,
+                retention_manifest.sequence()
             ))?);
     }
     if matches!(
@@ -74,8 +78,7 @@ pub(super) fn runner_output_preconditions(
     if let Some(verify) = side_effect_verify_spec(node) {
         add_side_effect_verify_preconditions(
             runtime_spec,
-            run_id,
-            projections,
+            lifecycle,
             node,
             verify,
             payloads,
@@ -147,23 +150,17 @@ pub(super) fn runner_output_preconditions(
     }
 
     if let Some(required) = terminal_side_effect_required_state {
-        let projection = side_effect_projection_for_attempt(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-        )?
-        .ok_or_else(|| {
-            RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect node {} attempted output without ledger evidence",
-                node.node_id
-            ))
-        })?;
+        let ledger = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)?
+            .ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} attempted output without ledger evidence",
+                    node.node_id
+                ))
+            })?;
         preconditions
             .required_side_effect_states
             .push(store::SideEffectStatePrecondition {
-                pair_id: projection.pair_id.clone(),
+                pair_id: ledger.pair_id().clone(),
                 required,
             });
     }
@@ -171,23 +168,23 @@ pub(super) fn runner_output_preconditions(
     Ok(preconditions)
 }
 
-fn add_side_effect_verify_preconditions(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
+fn add_side_effect_verify_preconditions<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     verify: &spec::SideEffectVerifyNodeSpec,
     payloads: &[events::KernelEventPayload],
     preconditions: &mut store::CommitPreconditions,
-) -> Result<()> {
-    let projection = projections
-        .side_effect_for_pair(run_id, &verify.pair_id)
-        .ok_or_else(|| {
-            RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect verify node {} has no ledger projection for pair {}",
-                node.node_id, verify.pair_id
-            ))
-        })?;
+) -> Result<()>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
+    let ledger = lifecycle.side_effect(&verify.pair_id).ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} has no ledger projection for pair {}",
+            node.node_id, verify.pair_id
+        ))
+    })?;
     let terminal_required = side_effect_verify_terminal_required_state(runtime_spec, verify)?;
     for payload in payloads {
         let required = match payload {
@@ -205,16 +202,19 @@ fn add_side_effect_verify_preconditions(
             _ => None,
         };
         if let Some(required) = required {
-            push_side_effect_precondition(preconditions, projection.pair_id.clone(), required);
+            push_side_effect_precondition(preconditions, ledger.pair_id().clone(), required);
         }
     }
     Ok(())
 }
 
-pub(super) fn side_effect_verify_terminal_required_state(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(super) fn side_effect_verify_terminal_required_state<S>(
+    runtime_spec: &S,
     verify: &spec::SideEffectVerifyNodeSpec,
-) -> Result<store::RequiredSideEffectState> {
+) -> Result<store::RequiredSideEffectState>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     let pair = runtime_spec
         .spec()
         .side_effect_verify_pair_for_pair_id(&verify.pair_id)
@@ -229,10 +229,13 @@ pub(super) fn side_effect_verify_terminal_required_state(
     }
 }
 
-pub(super) fn certified_run_authority(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(super) fn certified_run_authority<S>(
+    runtime_spec: &S,
     run_id: &RunId,
-) -> Result<store::CertifiedRunStoreAuthority> {
+) -> Result<store::CertifiedRunStoreAuthority>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     Ok(store::CertifiedRunStoreAuthority::from_spec(
         run_id.clone(),
         runtime_spec.spec(),
@@ -265,11 +268,14 @@ pub(super) fn side_effect_verify_spec(
     }
 }
 
-pub(super) fn attempt_commit_preconditions(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(super) fn attempt_commit_preconditions<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
     existing_attempt: Option<&AttemptId>,
-) -> Result<store::CommitPreconditions> {
+) -> Result<store::CommitPreconditions>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     let mut preconditions = store::CommitPreconditions {
         required_run_state: store::RequiredRunState::NotCompleted,
         required_cell_states: vec![store::CellStatePrecondition {
@@ -292,15 +298,20 @@ pub(super) fn attempt_commit_preconditions(
     Ok(preconditions)
 }
 
-fn node_cell_preconditions(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn node_cell_preconditions<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
-) -> Result<Vec<store::CellStatePrecondition>> {
+) -> Result<Vec<store::CellStatePrecondition>>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     let mut preconditions = Vec::new();
     for cell_id in runtime_spec.validate_input_binding(&node.input_bindings.root)? {
-        let cell = runtime_spec
-            .cell(&cell_id)
-            .expect("validated input binding cell exists");
+        let cell = runtime_spec.cell(&cell_id).ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "validated input binding references missing cell {cell_id}"
+            ))
+        })?;
         if matches!(cell.producer, spec::CellProducer::Node(_)) {
             preconditions.push(store::CellStatePrecondition {
                 cell_id,

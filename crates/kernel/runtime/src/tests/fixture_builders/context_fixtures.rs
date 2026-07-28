@@ -198,28 +198,3 @@ pub(in crate::tests::support) fn runtime_node_by_descriptor_name(
         .cloned()
         .unwrap_or_else(|| panic!("node for descriptor {name}"))
 }
-
-pub(in crate::tests::support) async fn drive_until_public_output_produced(
-    scheduler: &SerialTypedScheduler,
-    store: &mut TestTypedRunStore,
-    fixture: &Fixture,
-) {
-    for _ in 0..8 {
-        drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive until public output");
-        let projections = store.projection_snapshot();
-        if projections.run_state(&fixture.run_id) == store::RunState::Started
-            && matches!(
-                projections.public_output(
-                    &fixture.run_id,
-                    &fixture.runtime_spec.spec().public_outputs.public_schema_id,
-                ),
-                Some(store::PublicOutputProjection::Produced { .. })
-            )
-        {
-            return;
-        }
-    }
-    panic!("public output was not produced");
-}

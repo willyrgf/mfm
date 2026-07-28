@@ -311,13 +311,15 @@ curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/manual-resolution" \
 ```
 
 The manual-resolution route canonicalizes `evidence_json` and `authorization_proof`, then submits
-the resulting bytes to `mfm-app`. Runtime derives the current prefix authority from the stored run
-stream, verifies the proof against the certified manual policy, checks signatures and quorum,
-stages the evidence and authorization artifacts, and appends only through the typed
+the resulting bytes to `mfm-app`. Runtime derives the current prefix authority from the verified
+committed journal, verifies the proof against the certified manual policy, checks signatures and
+quorum, stages the evidence and authorization artifacts, and appends only through the typed
 manual-resolution commit boundary. The route does not accept request-supplied prefix facts, artifact
 ids, hashes, verifier ids, authority ids, quorum values, keystore paths, signer configuration, or
 signature secrets. Proof authoring is outside this REST ingress; submitted proof bytes are always
-untrusted until runtime verifies them.
+untrusted until runtime verifies them. If another commit extends the signed prefix,
+the HTTP `409` error `ManualResolutionRequestStale` tells the client to reload the run and submit a
+fresh request authorized for the new prefix.
 
 Optional fields:
 
@@ -336,12 +338,11 @@ Render typed public output:
 curl -s "http://127.0.0.1:3001/v1/runs/$RUN_ID/public-output/$SCHEMA_ID"
 ```
 
-The status and stream endpoints are typed inspection views over the authoritative typed run stream.
-Stream range filters are applied only after the app service validates the full stored stream.
-Resume, replay, and public-output rendering load the stored spec/certificate artifacts, verify them
-against the compiled certification registry, compare their evidence to `RunAdmitted`, and rebuild
-stream evidence before constructing runtime, replay, or render authority. Rendered public-output JSON
-is an output/cache surface only.
+The status and stream endpoints are typed inspection readers over one store-owned verified run
+view. Stream range filters are applied only after the app service loads and verifies the complete
+committed journal. Resume, replay, and public-output rendering borrow that same view; they do not
+construct another stream, projection, artifact map, or owned primary-history authority. Rendered
+public-output JSON is an output/cache surface only.
 
 Typed run responses expose semantic status through `run_mode`. `run_mode` is one of `forward`,
 `remediating`, `manual_blocked`, `completed`, `compensated`,

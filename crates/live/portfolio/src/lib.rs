@@ -39,7 +39,6 @@ where
     registry.register_capability_spec::<FactQueryReadCapability>(
         CapabilityImplementationId::new(store.fact_query_implementation_id())?,
     )?;
-    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     require_factory(pure_factory, PURE_FACTORY)?;
     require_factory(read_factory, READ_FACTORY)?;
@@ -52,17 +51,11 @@ where
     registrations.register_state_runner_with_factory::<SelectHoldingsState>(
         read_factory,
         Arc::new(ExternalReadRunner::<SelectHoldingsState, _>::new(
-            artifacts.clone(),
             SelectHoldingsExecutor::new(store),
         )),
     )?;
-    register_pure_state::<AssembleSnapshotState>(
-        &mut registrations,
-        pure_factory,
-        artifacts.clone(),
-        None,
-    )?;
-    register_pure_state::<ProjectReportState>(&mut registrations, pure_factory, artifacts, None)?;
+    register_pure_state::<AssembleSnapshotState>(&mut registrations, pure_factory, None)?;
+    register_pure_state::<ProjectReportState>(&mut registrations, pure_factory, None)?;
     Ok(())
 }
 

@@ -1,45 +1,8 @@
-use super::event_codec_decode::payload_from_json_value;
 use super::*;
 
 /// Returns canonical JSON bytes for a typed event payload.
 pub fn payload_canonical_json(payload: &KernelEventPayload) -> Result<PlainCanonicalJsonBytes> {
     canonical_json(payload_json(payload))
-}
-
-pub(super) fn kernel_event_envelope_json(envelope: &KernelEventEnvelope) -> serde_json::Value {
-    serde_json::json!({
-        "commit_key": envelope.commit_key().as_str(),
-        "event_id": envelope.event_id().as_str(),
-        "event_schema_id": envelope.event_schema_id().as_str(),
-        "logical_key": envelope.logical_key().as_str(),
-        "ordinal": envelope.ordinal().as_u32(),
-        "payload": payload_json(envelope.payload()),
-        "payload_hash": envelope.payload_hash().as_str(),
-        "run_id": envelope.run_id().as_str(),
-        "seq": envelope.seq().as_u64(),
-        "store_commit_order": envelope.store_commit_order().as_u64(),
-        "spec_hash": envelope.spec_hash().as_str(),
-    })
-}
-
-pub(super) fn parse_kernel_event_envelope(json: &serde_json::Value) -> Result<KernelEventEnvelope> {
-    let seq = StreamSeq::new(required_u64(json, "seq")?)?;
-    let store_commit_order = StoreCommitOrder::new(required_u64(json, "store_commit_order")?);
-    let ordinal = CommitOrdinal::new(required_u32(json, "ordinal")?);
-    let payload = payload_from_json_value(required_obj(json, "payload")?)?;
-    KernelEventEnvelope::from_persisted_record(PersistedKernelEventRecord {
-        event_id: parse_identity(required_str(json, "event_id")?)?,
-        event_schema_id: parse_identity(required_str(json, "event_schema_id")?)?,
-        run_id: parse_identity(required_str(json, "run_id")?)?,
-        seq,
-        store_commit_order,
-        ordinal,
-        spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
-        commit_key: CommitKey::new(required_str(json, "commit_key")?)?,
-        logical_key: LogicalEventKey::new(required_str(json, "logical_key")?)?,
-        payload_hash: parse_identity(required_str(json, "payload_hash")?)?,
-        payload,
-    })
 }
 
 /// Computes the canonical idempotency fingerprint for a purpose-specific prepared commit plan.

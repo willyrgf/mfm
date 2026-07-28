@@ -3,7 +3,10 @@ use super::*;
 #[tokio::test]
 async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
     let fixture = fixture_with_first_side_effect_state();
-    let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
+    let (scheduler, store) = started_side_effect_fixture_run(&fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     let verify_node = side_effect_verify_node_for_submit(&fixture, node);
@@ -19,82 +22,69 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         assert_drive!(
             scheduler,
             store,
-            fixture,
+            current,
             Advanced,
             "drive side effect phase"
         );
-        let projection_snapshot = store.projection_snapshot();
-        let projection = side_effect_projection_for_attempt(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &projection_snapshot,
+        let side_effect = side_effect_for_attempt(
+            &current.runtime_spec(),
+            &current.lifecycle(),
             node,
             &attempt_id,
         )
-        .expect("projection lookup")
-        .expect("side-effect projection");
+        .expect("side-effect lookup")
+        .expect("current side effect");
         if matches!(
-            projection.phase,
+            side_effect.phase(),
             store::SideEffectPhase::ReceiptObserved { .. }
-        ) && projection_snapshot
-            .cell_terminal(&verify_node.output_cell)
-            .is_none()
+        ) && current.lifecycle().cell(&verify_node.output_cell).is_none()
         {
             receipt_before_output = true;
             break;
         }
     }
     assert!(receipt_before_output);
-    assert!(matches!(
-        store.projection_snapshot().cell_terminal(&fixture.cell_a),
-        Some(store::CellTerminalProjection::Skipped { .. })
-    ));
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&verify_node.output_cell)
-        .is_none());
+    assert!(current
+        .lifecycle()
+        .cell(&fixture.cell_a)
+        .is_some_and(|cell| cell.skipped().is_some()));
+    assert!(current.lifecycle().cell(&verify_node.output_cell).is_none());
 
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Advanced,
         "materialize side-effect output"
     );
 
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&verify_node.output_cell)
-        .is_some());
-    let projection_snapshot = store.projection_snapshot();
-    let projection = side_effect_projection_for_attempt(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &projection_snapshot,
+    assert!(current.lifecycle().cell(&verify_node.output_cell).is_some());
+    let side_effect = side_effect_for_attempt(
+        &current.runtime_spec(),
+        &current.lifecycle(),
         node,
         &attempt_id,
     )
-    .expect("projection lookup")
-    .expect("side-effect projection");
+    .expect("side-effect lookup")
+    .expect("current side effect");
     assert!(matches!(
-        projection.phase,
+        side_effect.phase(),
         store::SideEffectPhase::ReceiptObserved { .. }
     ));
-    assert!(store
-        .load_run_stream(&fixture.run_id)
-        .iter()
-        .any(|event| matches!(
-            event.payload(),
-            events::KernelEventPayload::SideEffectInvocationStarted(_)
-        )));
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &node.node_id),
-        1
-    );
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &verify_node.node_id),
-        1
-    );
+    let mut invocation_started = false;
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        if matches!(
+            record.kind(),
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectInvocationStarted(_)
+        ) {
+            invocation_started = true;
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    assert!(invocation_started);
+    assert_eq!(attempt_started_count(&current, &node.node_id), 1);
+    assert_eq!(attempt_started_count(&current, &verify_node.node_id), 1);
 }
 
 #[tokio::test]
@@ -170,11 +160,14 @@ async fn runtime_rejects_invalid_touched_set_terminal_evidence_cases() {
 async fn side_effect_not_submitted_resume_completes_submit_boundary() {
     let fixture = fixture_with_first_side_effect_state();
     let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
     for _ in 0..2 {
         drive_ok!(
             scheduler,
             store,
-            fixture,
+            current,
             "claim, prepare, and start side effect"
         );
     }
@@ -188,115 +181,75 @@ async fn side_effect_not_submitted_resume_completes_submit_boundary() {
     )
     .expect("attempt id");
     append_not_submitted_proven(&mut store, &fixture, node, &attempt_id, 1);
+    current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("reload current run after not-submitted proof");
 
-    drive_ok!(scheduler, store, fixture, "resume not-submitted");
-    let projection_snapshot = store.projection_snapshot();
-    let projection = side_effect_projection_for_attempt(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &projection_snapshot,
+    drive_ok!(scheduler, store, current, "resume not-submitted");
+    let side_effect = side_effect_for_attempt(
+        &current.runtime_spec(),
+        &current.lifecycle(),
         node,
         &attempt_id,
     )
-    .expect("projection lookup")
-    .expect("side-effect projection");
+    .expect("side-effect lookup")
+    .expect("current side effect");
     assert!(matches!(
-        projection.phase,
+        side_effect.phase(),
         store::SideEffectPhase::NotSubmittedProven { .. }
     ));
-    assert!(matches!(
-        projection_snapshot.cell_terminal(&fixture.cell_a),
-        Some(store::CellTerminalProjection::Skipped { .. })
-    ));
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &node.node_id),
-        1
-    );
+    assert!(current
+        .lifecycle()
+        .cell(&fixture.cell_a)
+        .is_some_and(|cell| cell.skipped().is_some()));
+    assert_eq!(attempt_started_count(&current, &node.node_id), 1);
 }
 
 #[tokio::test]
 async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
-    struct WrongLedgerStagedSideEffectRunner {
-        cap_kind: CapabilityKind,
-        cap_version: CapabilityVersion,
-        adapter_kind: AdapterKind,
-        adapter_version: AdapterVersion,
-    }
+    struct WrongLedgerStagedSideEffectRunner;
 
     impl ErasedNodeRunner for WrongLedgerStagedSideEffectRunner {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
+                if side_effect_for_attempt(
+                    &ctx.runtime_spec(),
+                    ctx.lifecycle(),
+                    ctx.node(),
+                    ctx.attempt_id(),
+                )?
+                .is_none()
+                {
+                    let SideEffectFixtureIntentOutput {
+                        ledger,
+                        staged_artifact,
+                        payload,
+                    } = side_effect_fixture_intent_output(
+                        &ctx,
+                        events::SideEffectLedgerPurpose::Forward,
+                        1,
+                    )?;
+                    let claimed = side_effect_claimed(&ctx, ledger, 1, 1);
+                    return Ok(ErasedRunnerOutput::from_parts(
+                        vec![staged_artifact],
+                        Vec::new(),
+                        vec![payload, claimed],
+                    ));
+                }
+
                 let ledger = side_effect_ledger_key_for_ctx(&ctx);
-                let ledger_purpose = side_effect_ledger_purpose_for_ctx(&ctx);
-                let (pair_id, pair_role) = side_effect_pair_fields_for_ctx(
-                    &ctx,
-                    &ledger_purpose,
-                    events::SideEffectPairRole::Submit,
-                );
+                let prepared = side_effect_prepared_output(&ctx, ledger, 1, 1)?;
+                let prepared_value = fixture_side_effect_evidence_for_ctx(&ctx, 35);
+                let artifact_builder = RunnerArtifactBuilder::new(&ctx);
+                let artifact = artifact_builder.prepared_invocation(&prepared_value)?;
                 let staged_ledger =
                     events::SideEffectLedgerKey::new("wrong-ledger").expect("ledger key");
-                let intent_bytes = br#"{"intent":"wrong-ledger"}"#.to_vec();
-                let intent_hash = digest_for_bytes(&intent_bytes);
-                let intent_artifact_id =
-                    ArtifactId::from_digest(intent_hash.algorithm(), *intent_hash.digest());
-                let evidence = store::ArtifactEvidenceRef {
-                    artifact_id: intent_artifact_id.clone(),
-                    digest: intent_hash.clone(),
-                    byte_len: intent_bytes.len() as u64,
-                    media_type: spec::MediaType::new("application/json").expect("media"),
-                    schema_id: Some(ctx.node().config_ref.schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(ctx.node().node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::SideEffectIntent,
-                };
-                let intent_artifact_evidence_hash = evidence.evidence_hash().map_err(|error| {
-                    RuntimeError::InvalidRunnerOutput(format!("intent evidence hash: {error}"))
-                })?;
-                let staged_artifact = StagedArtifact::inline_side_effect_artifact(
-                    &ctx,
-                    intent_bytes,
-                    evidence,
-                    staged_ledger,
-                    1,
-                )?;
-                let prepared = side_effect_prepared_output(&ctx, ledger.clone(), 1, 1)?;
+                let staged_artifact =
+                    artifact_builder.staged_side_effect(&artifact, staged_ledger, 1)?;
                 Ok(ErasedRunnerOutput::from_parts(
-                    vec![staged_artifact, prepared.staged_artifact],
+                    vec![staged_artifact],
                     Vec::new(),
-                    vec![
-                        RunnerEventPayload::SideEffectIntentPersisted(
-                            events::side_effect::IntentPersisted {
-                                spec_hash: ctx.spec_hash().clone(),
-                                node_id: ctx.node().node_id.clone(),
-                                scope_id: ctx.node().scope_id.clone(),
-                                attempt_id: ctx.attempt_id().clone(),
-                                ledger_key: ledger.clone(),
-                                ledger_purpose,
-                                pair_id,
-                                pair_role,
-                                invocation_epoch: 1,
-                                intent_schema_id: ctx.node().config_ref.schema_id.clone(),
-                                intent_hash,
-                                intent_artifact_id,
-                                intent_artifact_evidence_hash,
-                                idempotency_input_schema_id: ctx
-                                    .node()
-                                    .config_ref
-                                    .schema_id
-                                    .clone(),
-                                idempotency_input_hash: content(0xc3),
-                                idempotency_key: events::IdempotencyKeyRef::new("idem-1")
-                                    .expect("idempotency key"),
-                                capability_kind: self.cap_kind.clone(),
-                                capability_version: self.cap_version.clone(),
-                                adapter_kind: self.adapter_kind.clone(),
-                                adapter_version: self.adapter_version.clone(),
-                            },
-                        ),
-                        side_effect_claimed(&ctx, ledger.clone(), 1, 1),
-                        prepared.payload,
-                    ],
+                    vec![prepared.payload],
                 ))
             })
         }
@@ -308,20 +261,26 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
         .register(binding(
             fixture.descriptor_a.clone(),
             APPLY_SIDE_EFFECT_RUNNER,
-            WrongLedgerStagedSideEffectRunner {
-                cap_kind: side_effect_capability_kind(),
-                cap_version: side_effect_capability_version(),
-                adapter_kind: fixture.adapter_kind.clone(),
-                adapter_version: fixture.adapter_version.clone(),
-            },
+            WrongLedgerStagedSideEffectRunner,
         ))
         .expect("binding a");
     register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let (scheduler, store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
+    assert_drive!(
+        scheduler,
+        store,
+        current,
+        Advanced,
+        "persist staged-artifact side-effect authority"
+    );
     assert_first_node_invalid_after_drive!(
         scheduler,
         store,
+        current,
         fixture,
         "terminalize side-effect artifact binding mismatch"
     );
@@ -334,32 +293,32 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
         &fixture,
         TestSubmissionDecision::Ambiguous,
     );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let (scheduler, store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
     for _ in 0..3 {
-        assert_drive!(scheduler, store, fixture, Advanced, "advance to ambiguity");
+        assert_drive!(scheduler, store, current, Advanced, "advance to ambiguity");
     }
     for _ in 0..4 {
         let status = drive_ok!(
             scheduler,
             store,
-            fixture,
+            current,
             "ambiguous side effect resolves terminal"
         );
         if matches!(status, SchedulerStatus::PublicOutputProjected) {
             break;
         }
     }
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
-        .is_none());
+    assert!(current.lifecycle().cell(&fixture.cell_a).is_none());
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
+        current
+            .lifecycle()
+            .completion()
             .expect("run completion")
-            .outcome,
+            .outcome(),
         events::RunCompletionOutcome::FailedWithoutAcdcClaim
     ));
 }
@@ -374,12 +333,15 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
     let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
     let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
     append_or_get_first_attempt(&mut store, &fixture, &forward_node);
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
     for _ in 0..3 {
-        drive_ok!(scheduler, store, fixture, "advance to ambiguity");
+        drive_ok!(scheduler, store, current, "advance to ambiguity");
     }
     for _ in 0..8 {
-        let status = drive_ok!(scheduler, store, fixture, "ambiguity resolves terminal");
+        let status = drive_ok!(scheduler, store, current, "ambiguity resolves terminal");
         assert!(
             matches!(
                 status,
@@ -387,24 +349,17 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
             ),
             "unexpected ambiguity terminal status: {status:?}"
         );
-        if store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
-            .is_some()
-        {
+        if current.lifecycle().completion().is_some() {
             break;
         }
     }
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&fixture.cell_b)
-        .is_none());
+    assert!(current.lifecycle().cell(&fixture.cell_b).is_none());
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
+        current
+            .lifecycle()
+            .completion()
             .expect("run completion")
-            .outcome,
+            .outcome(),
         events::RunCompletionOutcome::FailedWithoutAcdcClaim
     ));
 }
@@ -424,11 +379,22 @@ async fn side_effect_output_before_terminal_evidence_is_rejected() {
         ))
         .expect("binding a");
     register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let (scheduler, store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
+    assert_drive!(
+        scheduler,
+        store,
+        current,
+        Advanced,
+        "persist premature-output side-effect authority"
+    );
     assert_first_node_invalid_after_drive!(
         scheduler,
         store,
+        current,
         fixture,
         "terminalize premature side-effect output"
     );
@@ -483,11 +449,10 @@ async fn verify_output_after_receipt_follows_terminal_policy() {
         )
         .expect("verify attempt id");
 
-        let snapshot = store.projection_snapshot();
+        let current = verified_current_for_store(&store, &fixture);
         let validation = side_effect_lifecycle::validate_terminal_batch_evidence(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &snapshot,
+            &current.runtime_spec(),
+            &current.lifecycle(),
             verify_node,
             &verify_attempt_id,
             false,
@@ -510,24 +475,28 @@ async fn verify_output_after_receipt_follows_terminal_policy() {
             terminal_artifact,
             terminal_digest,
         );
-        let historical = validate_runtime_stream_for_tests(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &store.load_run_stream(&fixture.run_id),
-        );
+        let journal = block_on_ready(store.load_committed_journal(&fixture.run_id))
+            .expect("load committed terminal-evidence journal");
+        let historical =
+            verify_current_run(journal, recertified_runtime_spec(&fixture.runtime_spec))
+                .map(|_| ());
         match case {
             Case::Receipt => {
                 historical.expect("historical validation permits receipt-terminal verify output");
-                assert!(store
-                    .projection_snapshot()
+                let current = verified_current_for_store(&store, &fixture);
+                assert!(current
+                    .lifecycle()
                     .attempt(&submit_node.node_id, &submit_attempt_id)
                     .is_some());
             }
             Case::Finalized => {
                 let error = historical.expect_err("historical validation requires confirmation");
-                assert!(error
-                    .to_string()
-                    .contains("produced output before certified terminal evidence"));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("produced before terminal evidence"),
+                    "unexpected historical validation error: {error}"
+                );
             }
         }
     }

@@ -374,7 +374,7 @@ pub async fn append_platform_holding_facts_for_test(
         let authority = CertifiedRunStoreAuthority::from_spec(source_run_id.clone(), &source_spec)?;
         let admission_request = CommitRequest::from_payloads(
             source_run_id.clone(),
-            store.expected_next_seq(&source_run_id).await?,
+            test_support::expected_next_sequence_for_test(store, &source_run_id).await,
             CommitKey::new(format!("{}-admission", seed.input.commit_id.as_str()))?,
             vec![run_admitted],
             vec![
@@ -429,7 +429,7 @@ pub async fn append_platform_holding_facts_for_test(
             .ok_or_else(|| StoreError::Event("source fact spec has no node".to_owned()))?;
         let start_request = CommitRequest::from_payloads(
             source_run_id.clone(),
-            store.expected_next_seq(&source_run_id).await?,
+            test_support::expected_next_sequence_for_test(store, &source_run_id).await,
             CommitKey::new(format!("{}-attempt-start", seed.input.commit_id.as_str()))?,
             vec![events::KernelEventPayload::StateAttemptStarted(
                 events::StateAttemptStarted {
@@ -528,7 +528,7 @@ pub async fn append_platform_holding_facts_for_test(
             });
         let fact_request = CommitRequest::from_payloads(
             source_run_id.clone(),
-            store.expected_next_seq(&source_run_id).await?,
+            test_support::expected_next_sequence_for_test(store, &source_run_id).await,
             seed.input.commit_id.clone(),
             vec![fact_payload, cell_payload, completed_payload],
             vec![response_evidence.clone(), output_evidence.clone()],

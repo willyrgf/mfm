@@ -44,17 +44,25 @@ pub(in crate::tests::support) fn fixture_with_first_exact_touched_set_finalized_
 
 pub(in crate::tests::support) fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
     let mut fixture = fixture_with_first_side_effect_state();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    let manual = spec::ManualResolutionEvidenceSpec {
-        evidence_schema: fixture.seed_ref.schema_id.clone(),
-        authorization: manual_authorization(0xe0),
+    let mut typed_spec = fixture.runtime_spec.spec().clone();
+    let evidence_schema = fixture.seed_ref.schema_id.clone();
+    let authorization = manual_authorization(0xe0);
+    typed_spec.saga = spec::SagaPolicySpec::ManualResolution {
+        manual: Box::new(spec::ManualResolutionEvidenceSpec {
+            evidence_schema: evidence_schema.clone(),
+            authorization: authorization.clone(),
+        }),
     };
-    envelope.spec.saga = spec::SagaPolicySpec::ManualResolution {
-        manual: Box::new(manual),
-    };
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    let certified = certify_fixture_spec(&fixture.runtime_spec, typed_spec, |registry| {
+        registry.register_schema_role(
+            evidence_schema,
+            mfm_certify::CertifiedSchemaRole::ManualResolutionEvidence,
+        )?;
+        registry.register_manual_authorization_verifier(authorization.verifier_id.clone())?;
+        registry.register_operator_authority_snapshot(authorization.authority.clone())
+    })
+    .expect("certified manual-resolution runtime spec");
+    fixture.runtime_spec = CertifiedRuntimeSpec::new(certified).expect("runtime spec");
     refresh_fixture_run_id(&mut fixture);
     fixture
 }

@@ -167,6 +167,12 @@ pub enum RuntimeError {
     /// Store contract rejected a typed commit.
     #[error("typed store error: {0}")]
     Store(String),
+    /// A manual-resolution append raced with a different committed successor.
+    #[error("manual resolution request is stale at expected sequence {expected_sequence}")]
+    ManualResolutionRequestStale {
+        /// Sequence at which the exact sealed manual-resolution commit was required.
+        expected_sequence: store::StreamSeq,
+    },
     /// Identity construction failed.
     #[error("identity error: {0}")]
     Identity(String),

@@ -19,6 +19,61 @@ use mfm_spec::v1 as spec;
 mod fact_fixtures;
 pub use self::fact_fixtures::*;
 
+/// Read-only backend fixture that loads one persisted run through the real journal verifier.
+///
+/// This helper is intentionally available only with test support. It lets integration tests
+/// exercise malformed rows and exact retained-object authority while still calling
+/// [`RunJournalStore::load_committed_journal`] instead of minting journal authority directly.
+#[derive(Clone)]
+pub struct StaticRunJournalBackendForTest {
+    run_id: RunId,
+    records: Vec<KernelEventEnvelope>,
+    artifact_bytes: ArtifactByteAuthorityMap,
+}
+
+impl StaticRunJournalBackendForTest {
+    /// Creates a read-only backend fixture for one exact run.
+    pub fn new(
+        run_id: RunId,
+        records: Vec<KernelEventEnvelope>,
+        artifact_bytes: ArtifactByteAuthorityMap,
+    ) -> Self {
+        Self {
+            run_id,
+            records,
+            artifact_bytes,
+        }
+    }
+}
+
+impl RunJournalBackend for StaticRunJournalBackendForTest {
+    type Error = StoreError;
+
+    fn backend_append<'a>(
+        &'a self,
+        _bundle: PreparedCommitBundle,
+    ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
+        Box::pin(std::future::ready(Err(StoreError::Event(
+            "static run journal test backend does not support append".to_owned(),
+        ))))
+    }
+
+    fn backend_load<'a>(
+        &'a self,
+        verifier: JournalLoadVerifier,
+    ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error> {
+        let requested_run_id = verifier.run_id().clone();
+        let result = if requested_run_id == self.run_id {
+            verifier.verify(self.records.clone(), self.artifact_bytes.clone())
+        } else {
+            Err(StoreError::RunNotFound {
+                run_id: requested_run_id,
+            })
+        };
+        Box::pin(std::future::ready(result))
+    }
+}
+
 /// Polls an in-memory store future that is expected to complete immediately.
 pub fn poll_ready_store_future_for_test<T, E>(
     mut future: AsyncStoreFuture<'_, T, E>,
@@ -44,6 +99,27 @@ pub fn prepared_commit_bundle_from_plan(plan: PreparedCommitPlan) -> Result<Prep
         })
         .collect::<Result<Vec<_>>>()?;
     PreparedCommitBundle::new(plan, Vec::new(), existing)
+}
+
+/// Forges a failed-without-ACDC terminal token for prepared-commit contract tests.
+///
+/// This bypasses current-view authority intentionally and therefore must only be used to exercise
+/// the token matching checks at the prepared-commit boundary.
+pub fn forged_failed_without_acdc_saga_terminal_proof_for_test(
+    run_id: RunId,
+    prefix_next_seq: StreamSeq,
+    policy: &spec::SagaPolicySpec,
+) -> Result<SagaTerminalProof> {
+    let saga_policy_digest = policy
+        .saga_policy_digest()
+        .map_err(|error| StoreError::Canonical(error.to_string()))?;
+    Ok(
+        SagaTerminalProof::forged_failed_without_acdc_claim_for_test(
+            run_id,
+            prefix_next_seq,
+            saga_policy_digest,
+        ),
+    )
 }
 
 /// Builds a prepared commit plan for test fixtures from typed payload purpose.
@@ -145,7 +221,7 @@ pub async fn append_started_or_terminal_commit_for_test<S>(
     request: CommitRequest,
 ) -> CommitOutcome
 where
-    S: RunEventStore + ?Sized,
+    S: RunJournalStore + ?Sized,
 {
     let admitted_artifacts = request.required_artifacts().to_vec();
     let artifacts =
@@ -179,14 +255,11 @@ pub async fn append_interrupted_attempt_for_test<S>(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) where
-    S: RunEventStore + ?Sized,
+    S: RunJournalStore + ?Sized,
 {
     let start = CommitRequest::from_payloads(
         run_id.clone(),
-        store
-            .expected_next_seq(run_id)
-            .await
-            .unwrap_or_else(|error| panic!("expected next seq: {error}")),
+        expected_next_sequence_for_test(store, run_id).await,
         CommitKey::new(format!(
             "mfm-test-interrupted-attempt-start-{}",
             attempt_id.as_str()
@@ -217,10 +290,7 @@ pub async fn append_interrupted_attempt_for_test<S>(
 
     let interrupted = CommitRequest::from_payloads(
         run_id.clone(),
-        store
-            .expected_next_seq(run_id)
-            .await
-            .unwrap_or_else(|error| panic!("expected next seq: {error}")),
+        expected_next_sequence_for_test(store, run_id).await,
         CommitKey::new(format!(
             "mfm-test-interrupted-attempt-terminal-{}",
             attempt_id.as_str()
@@ -245,6 +315,29 @@ pub async fn append_interrupted_attempt_for_test<S>(
     )
     .expect("attempt interrupted request");
     append_started_or_terminal_commit_for_test(store, interrupted).await;
+}
+
+/// Returns the next current-format sequence for a test append.
+///
+/// Typed journal absence maps to the first sequence; every other load error fails the fixture.
+pub async fn expected_next_sequence_for_test<S>(store: &S, run_id: &RunId) -> StreamSeq
+where
+    S: RunJournalStore + ?Sized,
+{
+    match store.load_committed_journal(run_id).await {
+        Ok(journal) => {
+            let current = journal
+                .current_run_sequence()
+                .expect("a committed journal has a current sequence");
+            StreamSeq::new(current)
+                .and_then(StreamSeq::checked_next)
+                .expect("test journal sequence remains in range")
+        }
+        Err(error) if matches!(error.as_store_error(), Some(StoreError::RunNotFound { .. })) => {
+            StreamSeq::FIRST
+        }
+        Err(error) => panic!("load committed journal for next sequence: {error}"),
+    }
 }
 
 /// Asserts the shared execution-claim token lifecycle for an [`ExecutionClaimStore`].

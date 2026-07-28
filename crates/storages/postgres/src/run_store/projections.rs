@@ -62,6 +62,10 @@ pub(super) async fn load_projection_snapshot_client(
         .begin()
         .await
         .map_err(|error| database_error("failed to start read transaction", error))?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_error("failed to set status projection read mode", error))?;
     let snapshot = load_stream_authoritative_projection_snapshot_tx(&mut tx, run_id).await?;
     tx.commit()
         .await

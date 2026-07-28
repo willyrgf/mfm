@@ -1,0 +1,13 @@
+error[E0432]: unresolved imports `mfm_store::v1::CommittedRunStream`, `mfm_store::v1::VerifiedRunArtifactStore`
+ --> tests/ui/fail/legacy_run_history_authorities_absent.rs:1:21
+  |
+1 | use mfm_store::v1::{CommittedRunStream, VerifiedRunArtifactStore};
+  |                     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^ no `VerifiedRunArtifactStore` in `v1`
+  |                     |
+  |                     no `CommittedRunStream` in `v1`
+  |
+help: a similar name exists in the module
+  |
+1 - use mfm_store::v1::{CommittedRunStream, VerifiedRunArtifactStore};
+1 + use mfm_store::v1::{CommittedRunJournal, VerifiedRunArtifactStore};
+  |

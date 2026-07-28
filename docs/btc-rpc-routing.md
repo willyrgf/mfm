@@ -91,6 +91,8 @@ file yields `RuntimeConfigInvalid`; it is never presented as a missing route. Ad
 and deduplicates missing Bitcoin and EVM routes before `RunAdmitted`. Resume repeats that check only
 for nonterminal live-source nodes.
 
-Replay uses the certified spec, append-only run stream, and retained typed artifacts. It reruns the
-same reducer and verifies the exact ordered fact batch and receipt. It must not open an RPC
-connection, consult runtime config, or repeat live IO.
+Replay loads the store-verified committed journal and its exact retained objects under one
+snapshot, verifies the stored spec and certificate, and binds that exact certified authority into
+the non-cloneable `VerifiedRunView`. While borrowing that view, it reruns the same reducer and
+verifies the exact ordered fact batch and receipt. It must not rebuild authority from raw records
+or projections, open an RPC connection, consult runtime config, or repeat live IO.

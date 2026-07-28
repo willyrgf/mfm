@@ -14,10 +14,11 @@ use crate::framework::{
     framework_bridge_binding, framework_complete_run_binding, framework_public_output_binding,
     framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
+use crate::spec_authority::{CurrentRuntimeSpecRef, CurrentSpecRead};
 use crate::{
-    CertifiedInvocationContext, CertifiedRuntimeSpec, ErasedRunCtx, ExecutableIdentityTemplate,
-    PreInvocationRunCtx, Result, RunLaunchArtifact, RunLaunchEvidence, RunnerFactoryBinding,
-    RuntimeError, StagedArtifact, StagedRetentionRefs,
+    CertifiedInvocationContext, ErasedRunCtx, ExecutableIdentityTemplate, PreInvocationRunCtx,
+    Result, RunLaunchArtifact, RunLaunchEvidence, RunnerFactoryBinding, RuntimeError,
+    StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by an erased typed runner.
@@ -47,29 +48,31 @@ pub trait ContextOutputExtractor: Send + Sync {
 /// This context contains only certified launch authority and caller-supplied launch artifact bytes.
 /// It exists so a runner can reject missing process-local capability before `RunAdmitted` is
 /// appended, without reading mutable store state or executing the node.
-#[derive(Clone, Copy)]
 pub struct RunnerIngressContext<'a> {
-    runtime_spec: &'a CertifiedRuntimeSpec,
+    runtime_spec: CurrentRuntimeSpecRef<'a>,
     node: &'a spec::NodeSpec,
     launch: &'a RunLaunchEvidence,
 }
 
 impl<'a> RunnerIngressContext<'a> {
-    pub(crate) fn new(
-        runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) fn new<S>(
+        runtime_spec: &'a S,
         node: &'a spec::NodeSpec,
         launch: &'a RunLaunchEvidence,
-    ) -> Self {
+    ) -> Self
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         Self {
-            runtime_spec,
+            runtime_spec: runtime_spec.current_spec_ref(),
             node,
             launch,
         }
     }
 
     /// Returns the certified runtime spec being launched.
-    pub fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {
-        self.runtime_spec
+    pub fn runtime_spec(&self) -> CurrentRuntimeSpecRef<'_> {
+        self.runtime_spec.current_spec_ref()
     }
 
     /// Returns the certified node bound to the runner.
@@ -79,7 +82,7 @@ impl<'a> RunnerIngressContext<'a> {
 
     /// Returns certified transition-context authority for this ingress node.
     pub fn context(&self) -> Result<CertifiedInvocationContext> {
-        self.runtime_spec.invocation_context_for_node(self.node)
+        CertifiedInvocationContext::for_node(&self.runtime_spec, self.node)
     }
 
     /// Returns the launch artifact matching this node's certified config ref.
@@ -814,12 +817,15 @@ impl ErasedRunnerRegistry {
         Ok(())
     }
 
-    pub(crate) fn resolve(
+    pub(crate) fn resolve<S>(
         &self,
-        runtime_spec: &CertifiedRuntimeSpec,
+        runtime_spec: &S,
         node: &spec::NodeSpec,
         descriptor: &spec::StateDescriptorIdentity,
-    ) -> Result<ErasedRunnerBinding> {
+    ) -> Result<ErasedRunnerBinding>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
@@ -981,10 +987,13 @@ impl ErasedRunnerRegistry {
     }
 }
 
-fn side_effect_verify_submit_descriptor_id<'a>(
-    runtime_spec: &'a CertifiedRuntimeSpec,
+fn side_effect_verify_submit_descriptor_id<'a, S>(
+    runtime_spec: &'a S,
     node: &spec::NodeSpec,
-) -> Result<&'a DescriptorId> {
+) -> Result<&'a DescriptorId>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework else {
         return Err(RuntimeError::RunnerBinding(format!(
             "node {} is not a side-effect verify node",

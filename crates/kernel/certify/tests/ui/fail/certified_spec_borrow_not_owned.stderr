@@ -1,0 +1,7 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/certified_spec_borrow_not_owned.rs:10:38
+   |
+10 |     let _owned: CertifiedTypedSpec = borrowed.to_owned();
+   |                 ------------------   ^^^^^^^^^^^^^^^^^^^ expected `CertifiedTypedSpec`, found `&CertifiedTypedSpec`
+   |                 |
+   |                 expected due to this

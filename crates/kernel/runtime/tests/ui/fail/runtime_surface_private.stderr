@@ -69,15 +69,6 @@ error[E0425]: cannot find type `StagedArtifactBindingKind` in crate `mfm_runtime
    |
 49 |     let _ = core::mem::size_of::<mfm_runtime::StagedArtifactBindingKind>();
    |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
-   |
-note: found an item that was configured out
-  --> src/lib.rs
-   |
-   | #[cfg(test)]
-   |       ---- the item is gated here
-   | use artifacts::{
-   |     staged_artifact_binding_kind, staged_side_effect_artifact_phase, StagedArtifactBindingKind,
-   |                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0425]: cannot find type `StagedSideEffectArtifactPhase` in crate `mfm_runtime`
   --> tests/ui/fail/runtime_surface_private.rs:50:47
@@ -101,8 +92,8 @@ note: found an item that was configured out
    |
    | #[cfg(test)]
    |       ---- the item is gated here
-   | use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemptView};
-   |                                                                 ^^^^^^^^^^^^^^^^^^^^^
+   | use side_effect_lifecycle::{side_effect_for_attempt, SideEffectAttemptView};
+   |                                                      ^^^^^^^^^^^^^^^^^^^^^
 help: a trait with a similar name exists
    |
 60 -     let _ = core::mem::size_of::<mfm_runtime::SideEffectAttemptView<'_>>();

@@ -17,7 +17,6 @@ use mfm_runtime::{
     ExternalReadExecutionFuture, ExternalReadPlanExecutor, ExternalReadRunner,
     RunnerFactoryBinding, RunnerIngressContext, RunnerRegistrationBuilder,
 };
-use mfm_store::v1 as store;
 
 mod balance_collection;
 mod transaction;
@@ -33,19 +32,12 @@ const READ_FACTORY: &str = "read_external";
 
 #[derive(Clone)]
 struct EvmReadRunnerCapabilities {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     sessions: Arc<dyn EvmReadSessionSet>,
 }
 
 impl EvmReadRunnerCapabilities {
-    fn new(
-        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-        sessions: Arc<dyn EvmReadSessionSet>,
-    ) -> Self {
-        Self {
-            artifacts,
-            sessions,
-        }
+    fn new(sessions: Arc<dyn EvmReadSessionSet>) -> Self {
+        Self { sessions }
     }
 
     pub(crate) async fn validate_read_route(
@@ -74,19 +66,17 @@ impl EvmReadRunnerCapabilities {
 /// Registers the reusable fact-producing EVM balance collection binding.
 pub fn register_evm_balance_runners(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     sessions: Arc<dyn EvmReadSessionSet>,
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
-    let capabilities = EvmReadRunnerCapabilities::new(artifacts, sessions);
+    let capabilities = EvmReadRunnerCapabilities::new(sessions);
     register_evm_read_foundation(registry, capabilities.sessions.as_ref(), adapter_factory)?;
     require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_state_runner_with_factory::<CollectEvmBalancesState>(
         read_factory,
         Arc::new(ExternalReadRunner::<CollectEvmBalancesState, _>::new(
-            Arc::clone(&capabilities.artifacts),
             balance_collection::CollectEvmBalancesExecutor {
                 capabilities: capabilities.clone(),
             },
@@ -98,19 +88,17 @@ pub fn register_evm_balance_runners(
 /// Registers the reusable exact-anchor EVM contract-validation binding.
 pub fn register_evm_validation_runner(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     sessions: Arc<dyn EvmReadSessionSet>,
     read_factory: &RunnerFactoryBinding,
     adapter_factory: &RunnerFactoryBinding,
 ) -> mfm_runtime::Result<()> {
-    let capabilities = EvmReadRunnerCapabilities::new(artifacts, sessions);
+    let capabilities = EvmReadRunnerCapabilities::new(sessions);
     register_evm_read_foundation(registry, capabilities.sessions.as_ref(), adapter_factory)?;
     require_factory(read_factory, READ_FACTORY)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_state_runner_with_factory::<ValidateEvmContractState>(
         read_factory,
         Arc::new(ExternalReadRunner::<ValidateEvmContractState, _>::new(
-            Arc::clone(&capabilities.artifacts),
             ValidateContractExecutor { capabilities },
         )),
     )?;

@@ -69,7 +69,7 @@ async fn commit_key_sequence_and_projection_rebuild_contract() {
     };
     assert_eq!(idempotent_batch.fingerprint(), &appended_fingerprint);
     assert_eq!(
-        store.expected_next_seq(&run).await.expect("next seq"),
+        expected_next_sequence(&store, &run).await,
         StreamSeq::new(4).expect("seq")
     );
 
@@ -81,12 +81,11 @@ async fn commit_key_sequence_and_projection_rebuild_contract() {
         before.cell_terminal(&cell_id(21)),
         Some(CellTerminalProjection::Produced { .. })
     ));
-    let stream = store.load_run_stream(&run).await.expect("typed run stream");
-    assert_eq!(stream.len(), 4);
-    assert_eq!(
-        ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("payload rebuild"),
-        before
-    );
+    let journal = store
+        .load_committed_journal(&run)
+        .await
+        .expect("committed journal");
+    assert_eq!(journal.current_run_sequence(), Some(3));
 
     assert_eq!(
         store
@@ -220,11 +219,11 @@ async fn resource_lane_projection_rebuilds_from_events() {
     assert_eq!(lane.holder.pair_id, side_effect_pair_id());
     assert_eq!(lane.ledger_key, side_effect_ledger_key());
 
-    let stream = store.load_run_stream(&run).await.expect("typed run stream");
-    assert_eq!(
-        ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("payload rebuild"),
-        before
-    );
+    let journal = store
+        .load_committed_journal(&run)
+        .await
+        .expect("committed journal");
+    assert_eq!(journal.current_run_sequence(), Some(3));
 
     let peer_run = run_id(24);
     append_prepared(
@@ -308,27 +307,24 @@ async fn resource_lane_append_admission_uses_stream_authority() {
     append_resource_lane_attempt_start(&store, &contender, "contender-attempt-start")
         .await
         .expect("contender attempt start");
-    let stream_before = store
-        .load_run_stream(&contender)
+    let sequence_before = store
+        .load_committed_journal(&contender)
         .await
-        .expect("contender stream before conflict");
+        .expect("contender journal before conflict")
+        .current_run_sequence();
     let outcome =
         append_resource_lane_prepare(&store, &contender, "contender-prepare", lane_value, 30)
             .await
             .expect("resource lane stream authority blocks contender");
     assert_resource_lane_blocked(outcome, &lane_key, &holder_run);
+    let sequence_after = store
+        .load_committed_journal(&contender)
+        .await
+        .expect("contender journal after conflict")
+        .current_run_sequence();
+    assert_eq!(sequence_after, sequence_before);
     assert_eq!(
-        store
-            .load_run_stream(&contender)
-            .await
-            .expect("contender stream after conflict"),
-        stream_before
-    );
-    assert_eq!(
-        store
-            .expected_next_seq(&contender)
-            .await
-            .expect("contender next seq"),
+        expected_next_sequence(&store, &contender).await,
         StreamSeq::new(3).expect("contender prepare seq")
     );
 

@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex};
 use alloy_primitives::{
     address, b256, hex, keccak256, Address, PrimitiveSignature, TxKind, B256, U256,
 };
+use k256::ecdsa::SigningKey as ManualSigningKey;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::NoCaps;
 use mfm_certify::CertificationRegistry;
-use mfm_events::v1::KernelEventPayload;
+use mfm_events::v1 as events;
 use mfm_evm::{
     evm_sender_lane_resource_claim, EvmBlockAnchor, EvmBlockSelector, EvmFeeInputs,
     EvmNetworkBinding, EvmObservedTransaction, EvmReceipt, EvmReceiptStatus, EvmSessionEvidence,
@@ -18,14 +19,23 @@ use mfm_evm::{
     SubmitEvmTransactionState, EVM_JSONRPC_SESSION_IMPLEMENTATION_ID,
 };
 use mfm_evm_live::register_evm_transaction_runner;
+use mfm_manual_auth::{
+    manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
+    ManualResolutionAuthorizationClaim, ManualResolutionAuthorizationProof,
+    ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+    MANUAL_RESOLUTION_DIGEST_SIGNATURE_SCHEME,
+};
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, InputBindingNodeRef, NoContext, PublicOutputKey,
-    PureState, RemediationNodeParams, RemediationUnresolved, RootBuilder, ScopeKey, SeedKey,
+    build_root_with_registries, CanonicalSeed, InputBindingNodeRef, ManualAuthorizationDraft,
+    ManualAuthorizationVerifierId, ManualResolutionPolicyDraft, ManualSigningSchemeSpec, NoContext,
+    NonEmptyUniqueOperators, OperatorAuthorityId, OperatorAuthorityMemberSpec,
+    OperatorAuthoritySnapshotDraft, OperatorId, OperatorPublicIdentity, PublicOutputKey, PureState,
+    RemediationNodeParams, RemediationUnresolved, RootBuilder, ScopeKey, SeedKey,
     SideEffectNodeParams, SideEffectSagaPolicy, SideEffectVerificationSpec, StateKey,
-    StateRegistryBuilder, ValidatedConfig,
+    StateRegistryBuilder, ThresholdQuorum, ValidatedConfig,
 };
 use mfm_program_derive::{PublicOutputs, StateInput};
-use mfm_runtime::ErasedRunnerRegistry;
+use mfm_runtime::{register_pure_state, ErasedRunnerRegistry, RunnerRegistrationBuilder};
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
     SigningProvider, SigningRequest, SigningResult, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
@@ -273,7 +283,7 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     let signer_calls = Arc::new(AtomicUsize::new(0));
     let certification = transaction_certification_registry();
     let launch_services = make_run_services(
-        transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
+        transaction_runners(Arc::clone(&session), Arc::clone(&signer_calls)),
         Arc::new(store.clone()),
         certification.clone(),
     );
@@ -287,14 +297,11 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     )
     .expect("transaction launch request");
     let run_id = request.run_id.clone();
-    let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(request.certified_spec.clone())
-        .expect("transaction runtime spec");
     mfm_runtime::BoundRuntimeContextLoader::new(transaction_runners(
-        &store,
         Arc::clone(&session),
         Arc::clone(&signer_calls),
     ))
-    .load(&runtime_spec)
+    .load(&request.runtime_spec)
     .expect("bind transaction runtime");
 
     let launch = launch_services
@@ -305,14 +312,26 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     let launched = launched.expect("admitted transaction run");
     assert_eq!(launched.run_mode, RunModeStatus::Forward);
     assert_eq!(launched.scheduler_status, "blocked");
-    let blocked_stream = store.load_run_stream(&run_id).await.expect("run stream");
-    assert!(blocked_stream.iter().any(|event| matches!(
-        event.payload(),
-        KernelEventPayload::SideEffectSubmissionUnknown(_)
-    )));
-    assert!(!blocked_stream
-        .iter()
-        .any(|event| matches!(event.payload(), KernelEventPayload::StateAttemptFailed(_))));
+    let blocked_view = load_verified_run_view(&store, &certification, &run_id)
+        .await
+        .expect("verified blocked run");
+    let blocked_lifecycle = store::current_lifecycle::read(&blocked_view);
+    let mut submission_unknown = false;
+    let mut attempt_failed = false;
+    let _ = blocked_lifecycle.visit_records(|record| {
+        match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionUnknown(_) => {
+                submission_unknown = true;
+            }
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptFailed(_) => {
+                attempt_failed = true;
+            }
+            _ => {}
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    assert!(submission_unknown);
+    assert!(!attempt_failed);
     assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
     drop(launch_services);
     assert!(store
@@ -323,7 +342,7 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
     // invokes the mutation capability again.
     session.make_transaction_visible();
     let resume_services = make_run_services(
-        transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
+        transaction_runners(Arc::clone(&session), Arc::clone(&signer_calls)),
         Arc::new(store.clone()),
         certification.clone(),
     );
@@ -346,12 +365,102 @@ async fn certified_transaction_recovers_lost_submit_response_without_rebroadcast
         .await
         .expect("evidence-only transaction replay");
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
-    let broker = replay_services
-        .replay_broker_for_test(&run_id)
+    replay_services
+        .inspect_replay_broker_for_test(&run_id, mfm_evm_live::verify_evm_transaction_replay)
         .await
-        .expect("transaction replay broker");
-    mfm_evm_live::verify_evm_transaction_replay(&broker)
+        .expect("transaction replay broker")
         .expect("explicit transaction foundation replay verifier");
+}
+
+#[tokio::test]
+async fn invalid_historical_manual_authorization_cannot_render_manually_resolved_status() {
+    let store = store::AsyncInMemoryRunStore::default();
+    let mut transaction_session = TransactionSession::new();
+    transaction_session.make_visible_on_submit = AtomicBool::new(true);
+    transaction_session.receipt_status = EvmReceiptStatus::Reverted;
+    let transaction_session = Arc::new(transaction_session);
+    let signer_calls = Arc::new(AtomicUsize::new(0));
+    let certification = manual_transaction_certification_registry();
+    let services = make_run_services(
+        transaction_runners(Arc::clone(&transaction_session), Arc::clone(&signer_calls)),
+        Arc::new(store.clone()),
+        certification.clone(),
+    );
+    let (draft, seed_material) = manual_transaction_launch_material();
+    let request = crate::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        services.certification_registry(),
+        store.load_store_scope_id().await.expect("store scope"),
+        None,
+    )
+    .expect("manual transaction launch request");
+    let run_id = request.run_id.clone();
+
+    let launch = services
+        .launch_run(request)
+        .await
+        .expect("launch reverted manual transaction");
+    let (_, launched, _) = launch.into_response_parts();
+    assert_eq!(
+        launched.expect("admitted manual transaction").run_mode,
+        RunModeStatus::ManualBlocked
+    );
+
+    let blocked_view = load_verified_run_view(&store, &certification, &run_id)
+        .await
+        .expect("verified manually blocked run");
+    let prefix = store::current_lifecycle::read(&blocked_view)
+        .manual_resolution_prefix_authority()
+        .expect("manual resolution prefix");
+    let evidence_bytes = br#"{"decision":"reviewed"}"#.to_vec();
+    let evidence = manual_resolution_content_ref(
+        prefix.manual_policy().evidence_schema.clone(),
+        &evidence_bytes,
+    );
+    let claim = prefix
+        .authorization_claim(events::ManualResolutionOutcome::ConfirmRemediated, evidence)
+        .expect("manual authorization claim");
+    let valid_proof = manual_authorization_proof_bytes(
+        &prefix.manual_policy().authorization,
+        claim.clone(),
+        manual_claim_signature(&claim),
+    );
+    drop(blocked_view);
+
+    let resolved = services
+        .record_manual_resolution(ManualResolutionRecordRequest {
+            run_id: run_id.clone(),
+            outcome: ManualResolutionDecision::ConfirmRemediated,
+            evidence_bytes,
+            evidence_media_type: "application/json".to_owned(),
+            authorization_proof_bytes: valid_proof,
+            note: None,
+        })
+        .await
+        .expect("record valid manual resolution");
+    assert_eq!(resolved.run_mode, RunModeStatus::ManuallyResolved);
+    let valid_status = make_run_read_services(Arc::new(store.clone()), certification.clone())
+        .run_status(&run_id)
+        .await
+        .expect("valid historical manual resolution status");
+    assert_eq!(valid_status.run_mode, RunModeStatus::ManuallyResolved);
+
+    let invalid_proof = manual_authorization_proof_bytes(
+        &prefix.manual_policy().authorization,
+        claim,
+        vec![0_u8; 65],
+    );
+    let invalid_store =
+        InvalidManualHistoryStore::new(&store, &run_id, invalid_proof).expect("invalid history");
+    store::RunJournalStore::load_committed_journal(&invalid_store, &run_id)
+        .await
+        .expect("content-addressed invalid authorization journal loads structurally");
+    let error = make_run_read_services(Arc::new(invalid_store), certification)
+        .run_status(&run_id)
+        .await
+        .expect_err("invalid historical authorization must not render status");
+    assert_eq!(error.code, "RunStoreRejected");
 }
 
 #[derive(Clone, Copy)]
@@ -380,7 +489,7 @@ async fn assert_post_submission_outage_resumes(outage: ObservationOutage) {
     let signer_calls = Arc::new(AtomicUsize::new(0));
     let certification = transaction_certification_registry();
     let launch_services = make_run_services(
-        transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
+        transaction_runners(Arc::clone(&session), Arc::clone(&signer_calls)),
         Arc::new(store.clone()),
         certification.clone(),
     );
@@ -405,28 +514,33 @@ async fn assert_post_submission_outage_resumes(outage: ObservationOutage) {
     assert_eq!(launched.scheduler_status, "blocked");
     assert_eq!(session.submitted.lock().expect("submitted bytes").len(), 1);
     assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
-    assert!(store
-        .load_run_stream(&run_id)
+    let blocked_view = load_verified_run_view(&store, &certification, &run_id)
         .await
-        .expect("run stream")
-        .iter()
-        .any(|event| matches!(
-            event.payload(),
-            KernelEventPayload::SideEffectSubmissionObserved(_)
-        )));
-    assert!(!store
-        .load_run_stream(&run_id)
-        .await
-        .expect("run stream")
-        .iter()
-        .any(|event| matches!(event.payload(), KernelEventPayload::StateAttemptFailed(_))));
+        .expect("verified blocked run");
+    let blocked_lifecycle = store::current_lifecycle::read(&blocked_view);
+    let mut submission_observed = false;
+    let mut attempt_failed = false;
+    let _ = blocked_lifecycle.visit_records(|record| {
+        match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionObserved(_) => {
+                submission_observed = true;
+            }
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptFailed(_) => {
+                attempt_failed = true;
+            }
+            _ => {}
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    assert!(submission_observed);
+    assert!(!attempt_failed);
     drop(launch_services);
     assert!(store
         .expire_execution_claim_for_test(&run_id)
         .expect("expire blocked execution claim"));
 
     let resume_services = make_run_services(
-        transaction_runners(&store, Arc::clone(&session), Arc::clone(&signer_calls)),
+        transaction_runners(Arc::clone(&session), Arc::clone(&signer_calls)),
         Arc::new(store.clone()),
         certification,
     );
@@ -482,6 +596,310 @@ fn transaction_launch_material() -> (
     (draft, seed_material)
 }
 
+fn manual_transaction_launch_material() -> (
+    mfm_program::TypedProgramDraft,
+    BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
+) {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<SubmitEvmTransactionState>()
+        .expect("register transaction state");
+    states
+        .register::<SequenceTransactionState>()
+        .expect("register transaction sequence state");
+    let first_action = CanonicalSeed::from_value(
+        &EvmTransactionAction::call(DESTINATION, vector_calldata(), U256::ZERO)
+            .expect("first transaction action"),
+    )
+    .expect("first transaction action seed");
+    let second_action = CanonicalSeed::from_value(
+        &EvmTransactionAction::call(DESTINATION, vector_calldata(), U256::ZERO)
+            .expect("second transaction action"),
+    )
+    .expect("second transaction action seed");
+    let first_bytes = first_action.canonical_json().clone();
+    let second_bytes = second_action.canonical_json().clone();
+    let draft = build_root_with_registries(
+        ScopeKey::new("evm-manual-transaction").expect("scope key"),
+        states.snapshot(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            root.set_saga_policy(manual_transaction_saga_policy())?;
+            let first_action = root.seed(SeedKey::new("first-action")?, first_action.clone())?;
+            let second_action = root.seed(SeedKey::new("second-action")?, second_action.clone())?;
+            let first = root.scope().side_effect::<SubmitEvmTransactionState, _>(
+                StateKey::new("submit-first")?,
+                NoContext,
+                transaction_config(),
+                first_action,
+                evm_sender_lane_resource_claim()?,
+                SideEffectVerificationSpec::Receipt,
+            )?;
+            let next = root.scope().state::<SequenceTransactionState, _>(
+                StateKey::new("require-first-success")?,
+                NoContext,
+                SequenceTransactionConfig {},
+                SequenceTransactionInputHandles {
+                    previous: first.into_handle(),
+                    next: second_action,
+                },
+            )?;
+            let second = root.scope().side_effect::<SubmitEvmTransactionState, _>(
+                StateKey::new("submit-second")?,
+                NoContext,
+                transaction_config(),
+                next,
+                evm_sender_lane_resource_claim()?,
+                SideEffectVerificationSpec::Receipt,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &EvmTransactionPublicOutputs {
+                    outcome: second.into_handle(),
+                },
+            )
+        },
+    )
+    .expect("manual transaction draft");
+    let seed_material = BTreeMap::from([
+        (draft.seeds()[0].seed_id.clone(), first_bytes),
+        (draft.seeds()[1].seed_id.clone(), second_bytes),
+    ]);
+    (draft, seed_material)
+}
+
+fn manual_transaction_saga_policy() -> SideEffectSagaPolicy {
+    SideEffectSagaPolicy::ManualResolution {
+        manual: Box::new(manual_transaction_policy()),
+    }
+}
+
+fn manual_transaction_policy() -> ManualResolutionPolicyDraft {
+    let operator = OperatorAuthorityMemberSpec {
+        operator_id: OperatorId::new("operator.app-status").expect("operator id"),
+        public_identity: OperatorPublicIdentity::new("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf")
+            .expect("operator public identity"),
+    };
+    let authority = OperatorAuthoritySnapshotDraft::new(
+        OperatorAuthorityId::new("mfm.app.test.manual.authority").expect("authority id"),
+        NonEmptyUniqueOperators::new(operator, Vec::new()).expect("operator authority"),
+    );
+    let authorization = ManualAuthorizationDraft::threshold(
+        ManualAuthorizationVerifierId::new("mfm.app.test.manual.verifier")
+            .expect("manual verifier id"),
+        ManualSigningSchemeSpec::new(MANUAL_RESOLUTION_DIGEST_SIGNATURE_SCHEME)
+            .expect("manual signing scheme"),
+        authority,
+        ThresholdQuorum::new(1).expect("manual quorum"),
+    )
+    .expect("manual authorization");
+    let evidence_schema = mfm_ids::SchemaId::new(
+        "mfm.app.test.manual_evidence",
+        "1",
+        mfm_ids::DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.app.test.manual_evidence"),
+    )
+    .expect("manual evidence schema");
+    ManualResolutionPolicyDraft::new(evidence_schema, authorization)
+}
+
+fn manual_resolution_content_ref(
+    schema_id: mfm_ids::SchemaId,
+    bytes: &[u8],
+) -> ManualResolutionEvidenceRef {
+    let content_hash = mfm_ids::ContentDigest::from_digest(
+        mfm_ids::DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(bytes),
+    );
+    ManualResolutionEvidenceRef {
+        schema_id,
+        artifact_id: mfm_ids::ArtifactId::from_digest(
+            content_hash.algorithm(),
+            *content_hash.digest(),
+        ),
+        content_hash,
+    }
+}
+
+fn manual_claim_signature(claim: &ManualResolutionAuthorizationClaim) -> Vec<u8> {
+    let mut key_bytes = [0_u8; 32];
+    key_bytes[31] = 1;
+    let signing_key =
+        ManualSigningKey::from_slice(&key_bytes).expect("manual authorization signing key");
+    let claim_digest = claim.digest().expect("manual claim digest");
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(claim_digest.digest().as_bytes())
+        .expect("manual claim signature");
+    let mut signature_bytes = signature.to_bytes().to_vec();
+    signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+    signature_bytes
+}
+
+fn manual_authorization_proof_bytes(
+    policy: &mfm_spec::v1::ManualResolutionAuthorizationSpec,
+    claim: ManualResolutionAuthorizationClaim,
+    signature: Vec<u8>,
+) -> Vec<u8> {
+    let operator = policy
+        .authority
+        .operators
+        .first()
+        .expect("manual authorization operator");
+    ManualResolutionAuthorizationProof {
+        verifier_id: policy.verifier_id.clone(),
+        signing_scheme: policy.signing_scheme.clone(),
+        claim,
+        signatures: vec![ManualResolutionAuthorizationSignature {
+            operator_id: operator.operator_id.clone(),
+            public_identity: operator.public_identity.clone(),
+            signature: ManualAuthorizationSignatureBytes::new(signature)
+                .expect("manual signature bytes"),
+        }],
+    }
+    .canonical_json()
+    .expect("manual authorization proof")
+    .as_bytes()
+    .to_vec()
+}
+
+fn manual_authorization_artifact(
+    proof_bytes: &[u8],
+) -> (
+    ManualResolutionEvidenceRef,
+    store::ArtifactEvidenceRef,
+    mfm_ids::ContentDigest,
+) {
+    let content_ref = manual_resolution_content_ref(
+        manual_authorization_proof_schema_id().expect("manual authorization schema"),
+        proof_bytes,
+    );
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: content_ref.artifact_id.clone(),
+        digest: content_ref.content_hash.clone(),
+        byte_len: proof_bytes.len() as u64,
+        media_type: mfm_spec::v1::MediaType::new("application/json")
+            .expect("manual authorization media type"),
+        schema_id: Some(content_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::ManualResolutionAuthorization,
+    };
+    let evidence_hash = evidence
+        .evidence_hash()
+        .expect("manual authorization evidence hash");
+    (content_ref, evidence, evidence_hash)
+}
+
+#[derive(Clone)]
+struct InvalidManualHistoryStore {
+    journal: store::test_support::StaticRunJournalBackendForTest,
+    projection_source: store::AsyncInMemoryRunStore,
+}
+
+impl InvalidManualHistoryStore {
+    fn new(
+        source: &store::AsyncInMemoryRunStore,
+        run_id: &mfm_ids::RunId,
+        invalid_proof: Vec<u8>,
+    ) -> Result<Self, store::StoreError> {
+        let mut records = source.committed_records_for_test(run_id)?;
+        let mut objects = source.committed_artifact_byte_authority_for_test(run_id)?;
+        let (authorization, authorization_evidence, authorization_evidence_hash) =
+            manual_authorization_artifact(&invalid_proof);
+        let position = records
+            .iter()
+            .position(|record| {
+                matches!(
+                    record.payload(),
+                    events::KernelEventPayload::ManualResolutionRecorded(_)
+                )
+            })
+            .expect("manual resolution record");
+        let (seq, store_commit_order, ordinal, commit_key, mut payload) = {
+            let record = &records[position];
+            (
+                record.seq().as_u64(),
+                record.store_commit_order().as_u64(),
+                record.ordinal().as_u32(),
+                record.commit_key().clone(),
+                record.payload().clone(),
+            )
+        };
+        let events::KernelEventPayload::ManualResolutionRecorded(manual) = &mut payload else {
+            unreachable!("manual resolution position was selected");
+        };
+        manual.authorization_schema_id = authorization.schema_id.clone();
+        manual.authorization_hash = authorization.content_hash.clone();
+        manual.authorization_artifact_id = authorization.artifact_id.clone();
+        manual.authorization_artifact_evidence_hash = authorization_evidence_hash.clone();
+        records[position] =
+            store::test_support::persisted_kernel_event_envelope_with_ordinal_for_test(
+                run_id,
+                seq,
+                store_commit_order,
+                ordinal,
+                commit_key,
+                payload,
+            );
+        objects.insert(
+            (authorization.artifact_id, authorization_evidence_hash),
+            (invalid_proof, authorization_evidence),
+        );
+        Ok(Self {
+            journal: store::test_support::StaticRunJournalBackendForTest::new(
+                run_id.clone(),
+                records,
+                objects,
+            ),
+            projection_source: source.clone(),
+        })
+    }
+}
+
+impl store::RunJournalBackend for InvalidManualHistoryStore {
+    type Error = store::StoreError;
+
+    fn backend_append<'a>(
+        &'a self,
+        bundle: store::PreparedCommitBundle,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        store::RunJournalBackend::backend_append(&self.journal, bundle)
+    }
+
+    fn backend_load<'a>(
+        &'a self,
+        verifier: store::JournalLoadVerifier,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunJournal, Self::Error> {
+        store::RunJournalBackend::backend_load(&self.journal, verifier)
+    }
+}
+
+impl store::CurrentProjectionStore for InvalidManualHistoryStore {
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        store::CurrentProjectionStore::status_projection_snapshot(&self.projection_source, run_id)
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        store::CurrentProjectionStore::fact_projection_snapshot(&self.projection_source)
+    }
+}
+
+impl store::StoreScopeStore for InvalidManualHistoryStore {
+    type Error = store::StoreError;
+
+    fn load_store_scope_id<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, mfm_ids::StoreScopeId, Self::Error> {
+        store::StoreScopeStore::load_store_scope_id(&self.projection_source)
+    }
+}
+
 fn transaction_config() -> EvmTransactionConfig {
     EvmTransactionConfig::new(
         "ethereum-mainnet",
@@ -501,12 +919,39 @@ fn transaction_certification_registry() -> CertificationRegistry {
     registry
 }
 
+fn manual_transaction_certification_registry() -> CertificationRegistry {
+    let mut registry = transaction_certification_registry();
+    registry
+        .register_state::<SequenceTransactionState>()
+        .expect("certify transaction sequence state");
+    let manual = manual_transaction_policy().to_spec();
+    registry
+        .register_schema_role(
+            manual.evidence_schema.clone(),
+            mfm_certify::CertifiedSchemaRole::ManualResolutionEvidence,
+        )
+        .expect("manual evidence schema role");
+    registry
+        .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
+        .expect("manual authorization verifier");
+    registry
+        .register_operator_authority_snapshot(manual.authorization.authority)
+        .expect("manual operator authority");
+    registry
+}
+
 fn transaction_runners(
-    store: &store::AsyncInMemoryRunStore,
     session: Arc<TransactionSession>,
     signer_calls: Arc<AtomicUsize>,
 ) -> ErasedRunnerRegistry {
     let mut runners = test_runner_registry();
+    let pure_factory = test_factory_binding(&runners, "pure");
+    register_pure_state::<SequenceTransactionState>(
+        &mut RunnerRegistrationBuilder::new(&mut runners),
+        &pure_factory,
+        None,
+    )
+    .expect("register transaction sequence runner");
     let side_effect_factory = test_factory_binding(&runners, "apply_side_effect");
     let verify_factory = test_factory_binding(&runners, "read_external");
     let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
@@ -522,7 +967,6 @@ fn transaction_runners(
     .expect("signer binder");
     register_evm_transaction_runner(
         &mut runners,
-        Arc::new(store.clone()),
         signer_binder,
         |binding, signer_ref| {
             Box::pin(async move {
@@ -549,6 +993,7 @@ fn transaction_runners(
 
 struct TransactionSession {
     evidence: EvmSessionEvidence,
+    receipt_status: EvmReceiptStatus,
     visible: AtomicBool,
     make_visible_on_submit: AtomicBool,
     submit_response_unavailable: AtomicBool,
@@ -592,6 +1037,7 @@ impl TransactionSession {
                 mfm_ids::LocalPublicId::new(EVM_JSONRPC_SESSION_IMPLEMENTATION_ID)
                     .expect("implementation id"),
             ),
+            receipt_status: EvmReceiptStatus::Success,
             visible: AtomicBool::new(false),
             make_visible_on_submit: AtomicBool::new(false),
             submit_response_unavailable: AtomicBool::new(false),
@@ -645,7 +1091,7 @@ impl TransactionSession {
             from: EXPECTED_SENDER,
             to: Some(DESTINATION),
             contract_address: None,
-            status: EvmReceiptStatus::Success,
+            status: self.receipt_status,
             gas_used: U256::from(40_000),
             cumulative_gas_used: U256::from(80_000),
             logs: Vec::new(),

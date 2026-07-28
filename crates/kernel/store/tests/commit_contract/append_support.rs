@@ -44,7 +44,9 @@ pub(super) fn append_async_prepared_commit(
 }
 
 pub(super) fn async_expected_next_seq(store: &AsyncInMemoryRunStore, run_id: &RunId) -> StreamSeq {
-    poll_ready_store_future(store.expected_next_seq(run_id)).expect("async expected next seq")
+    store
+        .expected_next_sequence_for_test(run_id)
+        .expect("async expected next seq")
 }
 
 pub(super) fn run_start_request(run_id: RunId, commit_key: &str) -> CommitRequest {
