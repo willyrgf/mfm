@@ -57,6 +57,10 @@ mfm run audit RUN_ID [--cursor CURSOR] [--limit 1..500]
 mfm run export RUN_ID --kind semantic|audit --output PATH --ref-output PATH
 ```
 
+The qualified catalog contains `mfm.portfolio/snapshot@1` and
+`mfm.evm/submit-transaction@1`; both use the same generic `run admit ... --target TARGET`
+transport shape. There is no transaction-specific CLI submission or signing path.
+
 There is no CLI health/readiness alias. Process readiness is the deployment REST adapter's bounded
 PostgreSQL writable-lineage probe; the CLI does not substitute an EVM, DNS, provider, or semantic
 callback check.
@@ -93,14 +97,15 @@ list` and, after reading the required credential, every `run` operation fail the
 bootstrap with `AuthoritativeWriterFenceUnavailable`.
 
 This is intentional. A deployment uses a separately qualified process transport around a fully
-composed `mfm_app::Application`, supplying both its access policy and real writer fence. The
-repository CLI exposes no authority-bearing constructor, and the fence cannot be enabled by a CLI
-flag.
+composed `mfm_app::Application`, supplying its access policy, run-store writer fence, exact wallet
+deployment, and independent executor writer-generation fence. The repository CLI exposes no
+authority-bearing constructor, and no fence can be enabled by a CLI flag.
 
 ## Retained operational commands
 
-`mfm keystore import|list|delete|tx-sign` remains separate from the run facade. It manages local
-keystore entries and performs explicit local signing.
+`mfm keystore import|list|delete` remains separate from the run facade. It manages local keystore
+entries only. There is no standalone signing command; transaction signing is available solely
+inside the qualified generation-guarded wallet executor.
 
 Keystore secret inputs are captured through protected prompts, stdin, or explicitly selected
 files. Do not place private keys, mnemonics, passphrases, bearer credentials, or provider

@@ -1,13 +1,16 @@
 # EVM Transactions
 
-Status: unavailable product capability; qualification target for commit 6
+Status: qualified registered product capability
 
-The core product has no registered EVM mutation state, executor binding, entry point, CLI command,
-or REST route. Portfolio assembly is read-only. Current app admission cannot certify or execute an
-EVM write, and runtime has no EVM-specific mutation path.
+The product publishes `mfm.evm/submit-transaction@1`. Its one-state graph uses the generic
+recoverable-effect runtime seam, one exact verified executor binding, the separately fenced
+PostgreSQL executor ledger, typed sender/nonce allocation, guarded deterministic signing, and the
+stateless exact-generation EVM transport. It adds no EVM-specific runtime phase, CLI signing
+command, REST mutation shortcut, or second run-state authority.
 
-Reusable EVM model, encoding, transport, and signing primitives may remain library foundations.
-They grant no product admission, target-entry, or journal authority.
+The domain model, encoding, transport, and signing primitives remain reusable libraries. Only the
+qualified product registration and deployment composition grant admission or live executor access;
+the primitives alone grant neither target-entry nor journal authority.
 
 ## Generic Effect Seam
 
@@ -33,10 +36,9 @@ ownership, rebroadcast policy, receipt poller, or destination recovery rule. Rep
 stronger bounded frontier/terminal proof or a reviewed pending/safe-failure result. Only the state
 callback can interpret certified terminal evidence and settle the node.
 
-## Executor Qualification Required
+## Qualified Executor Boundary
 
-An EVM transaction can be registered only when one durable wallet or relayer implementation
-qualifies all of:
+The registered wallet executor qualifies:
 
 - immutable request/effect identity;
 - exact tenant and executor-deployment generation binding;
@@ -51,16 +53,20 @@ qualifies all of:
 - exact-attempt target receipt linkage; and
 - complete no-secret retained evidence.
 
-PostgreSQL persistence alone is insufficient. The MFM journal writer fence protects journal
-lineage, not wallet ownership, nonce exclusivity, signer/envelope custody, destination convergence,
-or executor generation.
+The production backend is `mfm-storage-executor-postgres`, opened only after the complete product
+support graph is admitted and only with an `ExecutorWriterGenerationFence`. That fence is
+independent of the MFM journal writer fence and must prove the exact executor binding, tenant,
+ledger generation, database/schema lineage, and stale/sibling-writer exclusion. PostgreSQL
+persistence alone still proves none of wallet ownership, nonce exclusivity, signer/envelope
+custody, destination convergence, or non-rollback generation.
 
 Memory and file executor backends are conformance surfaces only and cannot enable product
 mutation.
 
-## Candidate EVM Request Contract
+## EVM Request Contract
 
-Commit 6 may introduce one immutable EIP-1559 request whose semantic identity includes:
+The registered entry point resolves one immutable EIP-1559 request whose semantic identity
+includes:
 
 - semantic network and non-zero chain id;
 - expected sender;
@@ -75,14 +81,12 @@ The request must exclude mutable routing, endpoint, credential, pending nonce ob
 signature, raw signed envelope, provider body, keystore path, unlock path, password, private key,
 and mnemonic.
 
-Any future transaction construction must use one canonical Alloy path for the type-2 signing
+Transaction construction uses one canonical Alloy path for the type-2 signing
 digest, signed encoding, and transaction hash. Width conversions to Alloy's chain-id/nonce/gas and
 fee representations must fail closed without truncation or fallback. A deterministic recoverable
 low-s signing profile and expected sender must be verified before target entry.
 
-These are qualification constraints, not current product behavior.
-
-## Candidate Resource Contract
+## Resource Contract
 
 The executor—not MFM runtime—must own a typed resource stream for sender/nonce allocation. Its
 allocation record binds:
@@ -97,6 +101,19 @@ Restart refolds and revalidates the stream under the same policy/configuration p
 authorization. A local process mutex, MFM worker identity, database session lock, or journal row
 cannot reserve a nonce against another wallet, relayer, operator, deployment, or process.
 
+The account-sequence key is stable and non-secret:
+
+```text
+account         = "eip155-" + decimal_chain_id + "-" + lower_hex_sender_without_0x
+resource_domain = "evm-wallet-domain-" + sha256(
+    wallet_domain_ref.schema_id + ":" + wallet_domain_ref.content_digest
+)
+```
+
+The first allocation uses the deployment-attested initial nonce. A sender cannot advance to the
+next permanent allocation until the prior effect has immutable terminal evidence. Allocated
+nonces are never reassigned to unrelated requests.
+
 ## Target Entry And Observation
 
 The executor must commit one delivery authorization before returning affine
@@ -108,13 +125,22 @@ on the immutable request through the qualified wallet/relayer contract. Exact-ha
 rebroadcast, replacement, nonce reuse, and reorganization policy must be part of that executor's
 certified equivalence and resource contract rather than runtime heuristics.
 
+Guarded deterministic signing precedes broadcast authorization and derives one public
+candidate-specific target-entry descriptor. The descriptor commits the exact operation kind,
+unsigned candidate model, and transaction hash in the authorization append, but never the
+signature or raw signed bytes. Recovery resolves that retained descriptor and looks up its hash
+before considering rebroadcast. A policy-permitted rebroadcast re-signs behind the same generation
+guard, verifies the newly derived hash and candidate reference against the committed descriptor,
+and obtains a fresh authorization; signer unavailability is an operational retry without a
+synthetic delivery attempt.
+
 The executor terminal claim must identify one exact returned observation and terminal tombstone.
 The MFM store admits its canonical objects through a later audited ensure observation and creates
 the producer-bound `ValueRef` values. The executor cannot append `EffectSettled`.
 
-## Receipt And Finality Requirements
+## Receipt And Finality Contract
 
-If commit 6 admits receipt/finality evidence, its typed contract must validate:
+The typed receipt/finality contract validates:
 
 - exact transaction hash and immutable public transaction fields;
 - explicit success or revert status;
@@ -155,9 +181,26 @@ Exact reproduction may recompute pure request and settlement relations from reta
 evidence, but it never reconstructs a signature, opens a keystore, resolves a route, submits,
 polls, or appends. Candidate comparison is equally capability-free.
 
-## Registration Change
+## Registration And Deployment
 
-Commit 6 must add registration and tests as one reviewed vertical change only after every executor,
-destination, resource, signing, restart, and reorganization gate passes. Failure leaves EVM
-mutation unavailable. It must not restore a special runtime phase model, add a compatibility
-submission path, or weaken the generic effect seam.
+Commit 6 adds the state, one-state operation, entry-point/profile registration, value and callback
+contracts, executor-required leaf expansion, capability manifest member, qualified live executor,
+and production composition as one vertical change. The app admits an immutable configured request
+only when its embedded tenant equals the authorized tenant and its template target equals the
+public selector.
+
+Deployment must provide:
+
+- the exact executor contract, deployment, resource ownership, and account-sequence binding;
+- a dedicated executor PostgreSQL pool and independent writer-generation fence;
+- the public wallet signer-binding reference and verified keystore signer binding;
+- a signing-generation guard covering the executor generation, destination fence, and direct-sign
+  exclusion; and
+- an exact immutable EVM route generation.
+
+The conformance suite covers same-key/different-request rejection, concurrent ensure, stale-plan
+authorization, restart from durable bytes, response loss and signer-free hash recovery,
+already-known classification, success and revert, pre-resolution reorganization, finite
+rebroadcast/replacement equivalence, terminal retention, PostgreSQL fencing/refold, and
+no-secret/no-bearer persistence. The product deliberately exposes no compatibility submission
+path and no generic not-applied terminal outcome.

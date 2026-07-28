@@ -9,28 +9,26 @@
 //! leave the provider.
 //!
 //! ```rust
-//! use mfm_keystore::KeystoreSignerProvider;
-//! use mfm_signing::SignerRef;
-//! use uuid::Uuid;
+//! use mfm_keystore::{KeystoreSignerProvider, KEYSTORE_SIGNING_IMPLEMENTATION_ID};
 //!
-//! let provider = KeystoreSignerProvider::new(
-//!     SignerRef::new("deployer")?,
-//!     Uuid::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8")?,
-//!     "/run/mfm/wallet.keystore",
-//!     "/run/mfm/wallet.password",
-//! )?;
-//! assert_eq!(provider.signer_ref().as_str(), "deployer");
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! fn verify_provider(provider: &KeystoreSignerProvider) {
+//!     assert_eq!(
+//!         provider.binding().provider_implementation_id().as_str(),
+//!         KEYSTORE_SIGNING_IMPLEMENTATION_ID,
+//!     );
+//! }
 //! ```
 
 use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use mfm_signing::{
-    DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SignerRef, SigningError,
-    SigningFuture, SigningProvider, SigningRequest, SigningResult,
+    GenerationGuardedDeterministicSigningProvider, PublicSigningIdentity, SignatureBytes,
+    SigningError, SigningFuture, SigningGenerationGuard, SigningGenerationGuardError,
+    SigningProviderError, SigningRequest, SigningResult, VerifiedGenerationGuardedSignerBinding,
     SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
 use uuid::Uuid;
@@ -44,41 +42,45 @@ const MAX_UNLOCK_FILE_BYTES: usize = 64 * 1_024;
 /// Runtime implementation identity for the deterministic local-keystore signer.
 pub const KEYSTORE_SIGNING_IMPLEMENTATION_ID: &str = "mfm.signing.keystore.rfc6979.v1";
 
-/// One-binding MFM keystore signing provider.
-#[derive(Clone)]
+/// One-binding, generation-guarded MFM keystore signing provider.
 pub struct KeystoreSignerProvider {
-    signer_ref: SignerRef,
+    binding: VerifiedGenerationGuardedSignerBinding,
     entry_id: Uuid,
     keystore_path: CheckedRuntimePath,
     unlock_file: CheckedRuntimePath,
     keystore_config: KeystoreConfig,
+    generation_guard: Arc<dyn SigningGenerationGuard>,
 }
 
 impl KeystoreSignerProvider {
-    /// Binds one signer using default keystore security settings.
+    /// Binds one qualified wallet signer using default keystore security settings.
     pub fn new(
-        signer_ref: SignerRef,
+        binding: VerifiedGenerationGuardedSignerBinding,
         entry_id: Uuid,
         keystore_path: impl Into<PathBuf>,
         unlock_file: impl Into<PathBuf>,
+        generation_guard: Arc<dyn SigningGenerationGuard>,
     ) -> Result<Self, SigningError> {
         Self::new_with_config(
-            signer_ref,
+            binding,
             entry_id,
             keystore_path,
             unlock_file,
+            generation_guard,
             KeystoreConfig::default(),
         )
     }
 
-    /// Binds one signer using explicit keystore security settings.
+    /// Binds one qualified wallet signer using explicit keystore security settings.
     pub fn new_with_config(
-        signer_ref: SignerRef,
+        binding: VerifiedGenerationGuardedSignerBinding,
         entry_id: Uuid,
         keystore_path: impl Into<PathBuf>,
         unlock_file: impl Into<PathBuf>,
+        generation_guard: Arc<dyn SigningGenerationGuard>,
         keystore_config: KeystoreConfig,
     ) -> Result<Self, SigningError> {
+        validate_provider_binding(&binding)?;
         let keystore_path =
             CheckedRuntimePath::new(keystore_path.into(), RuntimeSourceKind::KeystorePath)
                 .map_err(signing_error_from_provider)?;
@@ -86,39 +88,50 @@ impl KeystoreSignerProvider {
             CheckedRuntimePath::new(unlock_file.into(), RuntimeSourceKind::UnlockFile)
                 .map_err(signing_error_from_provider)?;
         Ok(Self {
-            signer_ref,
+            binding,
             entry_id,
             keystore_path,
             unlock_file,
             keystore_config,
+            generation_guard,
         })
     }
 
-    /// Returns the exact signer reference bound by this provider.
-    pub const fn signer_ref(&self) -> &SignerRef {
-        &self.signer_ref
+    /// Returns the exact public wallet/provider binding.
+    pub const fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding {
+        &self.binding
     }
 
     fn validate_request(&self, request: &SigningRequest) -> Result<(), KeystoreSignerError> {
-        if request.signer_ref() != &self.signer_ref {
-            return Err(KeystoreSignerError::UnknownSigner);
-        }
-        if request.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID {
-            return Err(KeystoreSignerError::UnsupportedAlgorithm);
-        }
-        if request.profile().as_str() != SECP256K1_RFC6979_LOW_S_PROFILE_ID {
-            return Err(KeystoreSignerError::UnsupportedProfile);
-        }
-        if request.expected_identity().is_none() {
-            return Err(KeystoreSignerError::MissingExpectedIdentity);
-        }
-        Ok(())
+        self.binding
+            .verify_request(request)
+            .map_err(KeystoreSignerError::SigningContract)
     }
 
-    fn sign_on_blocking_worker(
-        &self,
-        request: &SigningRequest,
-    ) -> Result<SigningResult, KeystoreSignerError> {
+    fn blocking_signer(&self) -> BlockingKeystoreSigner {
+        BlockingKeystoreSigner {
+            binding: self.binding.clone(),
+            entry_id: self.entry_id,
+            keystore_path: self.keystore_path.clone(),
+            unlock_file: self.unlock_file.clone(),
+            keystore_config: self.keystore_config.clone(),
+        }
+    }
+}
+
+struct BlockingKeystoreSigner {
+    binding: VerifiedGenerationGuardedSignerBinding,
+    entry_id: Uuid,
+    keystore_path: CheckedRuntimePath,
+    unlock_file: CheckedRuntimePath,
+    keystore_config: KeystoreConfig,
+}
+
+impl BlockingKeystoreSigner {
+    fn sign(
+        self,
+        digest: Zeroizing<[u8; 32]>,
+    ) -> Result<(PublicSigningIdentity, SignatureBytes), KeystoreSignerError> {
         let keystore_path = self.keystore_path.as_path();
         if !fs::metadata(keystore_path)
             .map(|metadata| metadata.is_file())
@@ -135,61 +148,92 @@ impl KeystoreSignerProvider {
             .unlock(unlock_secret.as_str())
             .map_err(keystore_unlock_error)?;
         drop(unlock_secret);
+        let expected_account = self
+            .binding
+            .expected_public_identity()
+            .account_id()
+            .ok_or(KeystoreSignerError::BindingMismatch)?;
+        let key_info = keystore
+            .list_keys()
+            .map_err(keystore_key_error)?
+            .into_iter()
+            .find(|key| key.id == self.entry_id)
+            .ok_or(KeystoreSignerError::KeyUnavailable)?;
+        if format!("{:?}", key_info.address) != expected_account {
+            return Err(KeystoreSignerError::BindingMismatch);
+        }
         let secure_key = keystore
             .get_private_key(self.entry_id)
             .map_err(keystore_key_error)?;
         let address = secure_key
             .ethereum_address()
             .map_err(|_| KeystoreSignerError::SigningFailed)?;
+        if format!("{address:?}") != expected_account {
+            return Err(KeystoreSignerError::BindingMismatch);
+        }
         let signature = secure_key
-            .sign_hash_recoverable(request.digest().as_bytes())
+            .sign_hash_recoverable(&digest)
             .map_err(|_| KeystoreSignerError::SigningFailed)?;
         let identity = PublicSigningIdentity::new(
-            request.algorithm().clone(),
+            self.binding.algorithm().clone(),
             None,
             Some(format!("{address:?}")),
         )?;
-        let signature = SignatureBytes::new(signature.as_bytes().to_vec())?;
-        Ok(SigningResult::for_request(request, identity, signature)?)
+        let raw_signature = Zeroizing::new(signature.as_bytes());
+        let signature = SignatureBytes::new(raw_signature.as_slice().to_vec())?;
+        Ok((identity, signature))
     }
 }
 
 impl fmt::Debug for KeystoreSignerProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeystoreSignerProvider")
-            .field("signer_ref", &self.signer_ref)
+            .field("binding", &self.binding)
             .field("entry_id", &self.entry_id)
             .field("keystore_path", &"<redacted>")
             .field("unlock_file", &"<redacted>")
             .field("keystore_config", &"<redacted>")
+            .field("generation_guard", &"<redacted>")
             .finish()
     }
 }
 
-impl SigningProvider for KeystoreSignerProvider {
-    fn sign<'a>(&'a self, request: &'a SigningRequest) -> SigningFuture<'a> {
+impl GenerationGuardedDeterministicSigningProvider for KeystoreSignerProvider {
+    fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding {
+        &self.binding
+    }
+
+    fn sign_guarded<'a>(
+        &'a self,
+        expected_generation_ref: &'a mfm_signing::ContentRef,
+        request: &'a SigningRequest,
+    ) -> SigningFuture<'a> {
+        if expected_generation_ref != self.binding.durable_generation_ref() {
+            return Box::pin(async {
+                Err(SigningError::Provider {
+                    reason: SigningProviderError::GenerationMismatch,
+                })
+            });
+        }
         if let Err(error) = self.validate_request(request) {
             return Box::pin(async move { Err(signing_error_from_provider(error)) });
         }
 
-        let provider = self.clone();
-        let request = request.clone();
+        let blocking_signer = self.blocking_signer();
+        let digest = Zeroizing::new(*request.digest());
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || provider.sign_on_blocking_worker(&request))
+            self.generation_guard
+                .verify_current_and_exclusive(&self.binding)
                 .await
-                .map_err(SigningError::redacted_provider_failure)?
-                .map_err(signing_error_from_provider)
+                .map_err(signing_error_from_generation_guard)?;
+
+            let (identity, signature) =
+                tokio::task::spawn_blocking(move || blocking_signer.sign(digest))
+                    .await
+                    .map_err(SigningError::redacted_provider_failure)?
+                    .map_err(signing_error_from_provider)?;
+            SigningResult::for_request(request, identity, signature)
         })
-    }
-}
-
-impl DeterministicSigningProvider for KeystoreSignerProvider {
-    fn implementation_id(&self) -> &'static str {
-        KEYSTORE_SIGNING_IMPLEMENTATION_ID
-    }
-
-    fn deterministic_profile_id(&self) -> &'static str {
-        SECP256K1_RFC6979_LOW_S_PROFILE_ID
     }
 }
 
@@ -341,6 +385,33 @@ fn strip_one_line_ending(contents: &mut Vec<u8>) {
     }
 }
 
+fn validate_provider_binding(
+    binding: &VerifiedGenerationGuardedSignerBinding,
+) -> Result<(), SigningError> {
+    if binding.provider_implementation_id().as_str() != KEYSTORE_SIGNING_IMPLEMENTATION_ID
+        || binding.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID
+        || binding.profile().as_str() != SECP256K1_RFC6979_LOW_S_PROFILE_ID
+    {
+        return Err(SigningError::Provider {
+            reason: SigningProviderError::BindingMismatch,
+        });
+    }
+    Ok(())
+}
+
+fn signing_error_from_generation_guard(error: SigningGenerationGuardError) -> SigningError {
+    let reason = match error {
+        SigningGenerationGuardError::Unavailable => {
+            SigningProviderError::GenerationGuardUnavailable
+        }
+        SigningGenerationGuardError::Fenced => SigningProviderError::GenerationFenced,
+        SigningGenerationGuardError::DirectSigningOverlap => {
+            SigningProviderError::DirectSigningOverlap
+        }
+    };
+    SigningError::Provider { reason }
+}
+
 fn keystore_open_error(_: KeystoreError) -> KeystoreSignerError {
     KeystoreSignerError::KeystoreUnavailable
 }
@@ -366,6 +437,9 @@ fn keystore_key_error(error: KeystoreError) -> KeystoreSignerError {
 fn signing_error_from_provider(error: KeystoreSignerError) -> SigningError {
     match error {
         KeystoreSignerError::SigningContract(error) => error,
+        KeystoreSignerError::BindingMismatch => SigningError::Provider {
+            reason: SigningProviderError::BindingMismatch,
+        },
         other => SigningError::redacted_provider_failure(other),
     }
 }
@@ -393,14 +467,8 @@ enum RuntimeSourceKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 enum KeystoreSignerError {
-    #[error("keystore signer provider binding did not match request")]
-    UnknownSigner,
-    #[error("keystore signer provider does not support requested algorithm")]
-    UnsupportedAlgorithm,
-    #[error("keystore signer provider does not support requested profile")]
-    UnsupportedProfile,
-    #[error("keystore signer provider requires expected public identity")]
-    MissingExpectedIdentity,
+    #[error("keystore signer provider binding mismatch")]
+    BindingMismatch,
     #[error("keystore signer provider runtime source was missing")]
     MissingRuntimeSource { kind: RuntimeSourceKind },
     #[error("keystore signer provider runtime source could not be read")]

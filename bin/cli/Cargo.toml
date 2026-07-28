@@ -6,9 +6,6 @@ edition = "2021"
 [package.metadata.mfm]
 layer = "binary"
 
-[features]
-parity-tests = ["mfm-app/test-support"]
-
 [dependencies]
 tokio = { workspace = true }
 mfm-app = { path = "../../crates/app" }
@@ -17,15 +14,12 @@ clap = { version = "4.4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
-hex = "0.4"
 regex = "1.0"
 rpassword = "7.0"
 zeroize = "1.7"
 
 [dev-dependencies]
-alloy-primitives = { workspace = true }
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
-mfm-evm = { path = "../../crates/domains/evm" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"

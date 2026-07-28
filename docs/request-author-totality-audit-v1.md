@@ -2,7 +2,7 @@
 
 Contract id: `mfm.request-author-totality-audit.v1`
 
-This is retained pre-cutover evidence for the
+This is retained pre-cutover evidence for the original
 [`mfm.portfolio/snapshot@1`](recoverability-cutover-gates-v1.md#published-entry-points-and-planning-profiles)
 schema-freeze gate closed by the commit-2 annex and corpus. It does not change the current runtime,
 registry, admission API, or authoritative design. The atomic vertical cutover deletes the
@@ -10,9 +10,10 @@ aggregate readers and carries forward only the qualified frozen shapes recorded 
 
 ## Closed production-state inventory
 
-The published snapshot catalog has five reachable production state types and no effect state.
-Branch-union conformance covers Bitcoin-only and EVM-only accepted portfolio configurations, so a
-declared but unreachable catalog entry cannot silently satisfy this inventory.
+At the schema-freeze gate, the published snapshot catalog had five reachable production state
+types and no effect state. Branch-union conformance covered Bitcoin-only and EVM-only accepted
+portfolio configurations, so a declared but unreachable catalog entry could not silently satisfy
+this inventory.
 
 | Current state | Current request shape | Cutover disposition |
 | --- | --- | --- |
@@ -22,9 +23,12 @@ declared but unreachable catalog entry cannot silently satisfy this inventory.
 | `mfm.bitcoin.collect_balances` | One fallible aggregate plan performs bootstrap, `scantxoutset "start"`, and confirmation RPCs. | Delete the aggregate state. Keep Bitcoin collection unregistered until the indivisible scan passes its separate repeat-work and provider-cost qualification. |
 | `mfm.portfolio.select_holdings` | Receipt validation and query construction can fail inside `ReadState::plan`; one accepted plan authors a variable number of fact queries. | Move receipt/config validation and query compilation into upstream pure work that emits one checked frame per fact selection. Each read state then authors exactly one `FactSelectionRequest`; aggregation is pure. |
 
-`ValidateEvmContractState` and `SubmitEvmTransactionState` are exported library types but are not
-in the snapshot authoring catalog and are not reachable from the published entry point. They do
-not enter this gate. EVM mutation remains unregistered in the core cutover.
+The former `ValidateEvmContractState` and the then-unregistered
+`SubmitEvmTransactionState` did not enter the snapshot gate. The final EVM qualification change
+registers a new `SubmitEvmTransactionState` through
+`mfm.evm/submit-transaction@1`; its pure request author consumes the immutable configured request
+and value-only selector, and its conformance tests cover deterministic request identity,
+same-key substitution rejection, and exact terminal-evidence settlement.
 
 ## Totality evidence
 
@@ -69,8 +73,8 @@ RFC and shared corpus; these prototypes test only the domain-owned policy.
 
 ## Exact entry-point/profile fixture
 
-The same portfolio conformance target retains a private prototype catalog with exactly one
-admission mapping:
+The same portfolio conformance target retains its historical private prototype catalog with
+exactly one admission mapping:
 
 ```text
 mfm.portfolio/snapshot@1
@@ -88,11 +92,13 @@ mfm.portfolio/snapshot@1
 
 The entry-point identities match the
 [`mfm.recoverability-app-surface.v1`](recoverability-app-surface-v1.md#published-entry-point-and-planning-profile)
-contract: the versioned start id, stable slash-form operation id, and dot-form Rust operation name
-cannot substitute for one another. The empty ordered framework-policy list and empty canonical
-parameter object are required fields, not defaults. Verification parses the retained authored bytes
-again, independently reruns the private profile-aware composite graph encoding, and requires
-byte-identical expanded bytes plus a certificate bound to their hash. Unknown entry-point ids,
+contract for that mapping: the versioned start id, stable slash-form operation id, and dot-form
+Rust operation name cannot substitute for one another. The current application additionally
+publishes the independently qualified `mfm.evm/submit-transaction@1` mapping described by the same
+app-surface contract. The empty ordered framework-policy list and empty canonical parameter object
+are required fields, not defaults. Verification parses the retained authored bytes again,
+independently reruns the private profile-aware composite graph encoding, and requires byte-identical
+expanded bytes plus a certificate bound to their hash. Unknown entry-point ids,
 changed profiles, omitted policy lists, cross-substituted identities, raw library drafts, and raw
 library certificates cannot mint the private admission authority. This fixture remains
 conformance-only: the schema freeze defines the production `PlanningProfile`, retained

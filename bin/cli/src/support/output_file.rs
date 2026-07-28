@@ -55,15 +55,6 @@ fn resolved_target_identity(path: &Path, parent: &Path) -> Result<PathBuf, Creat
         .map_err(|_| CreateNewFileError::InvalidPath)
 }
 
-/// Atomically publishes bearer bytes, optionally replacing an existing regular file.
-pub(crate) fn publish_bearer_atomic(
-    path: &Path,
-    bytes: &[u8],
-    overwrite: bool,
-) -> Result<(), CreateNewFileError> {
-    publish_atomic_with(path, overwrite, |file| file.write_all(bytes))
-}
-
 fn publish_atomic_with(
     path: &Path,
     overwrite: bool,
@@ -170,8 +161,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        create_new_atomic, create_new_atomic_pair, publish_atomic_with, publish_bearer_atomic,
-        CreateNewFileError,
+        create_new_atomic, create_new_atomic_pair, publish_atomic_with, CreateNewFileError,
     };
 
     #[test]
@@ -192,25 +182,6 @@ mod tests {
                 .count(),
             0,
             "failed publication must remove its temporary file"
-        );
-    }
-
-    #[test]
-    fn bearer_publication_replaces_only_regular_files() {
-        let directory = TempDir::new().expect("temporary output directory");
-        let path = directory.path().join("signed-transaction.txt");
-        create_new_atomic(&path, b"first").expect("first output");
-
-        publish_bearer_atomic(&path, b"second", true).expect("replace output");
-        assert_eq!(std::fs::read(&path).expect("read output"), b"second");
-
-        let symlink = directory.path().join("signed-transaction-link.txt");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&path, &symlink).expect("symlink");
-        #[cfg(unix)]
-        assert_eq!(
-            publish_bearer_atomic(&symlink, b"third", true),
-            Err(CreateNewFileError::InvalidPath)
         );
     }
 

@@ -145,7 +145,8 @@ The repository's standalone server does not possess a deployment-owned
 the bind address and cannot grant writer authority.
 
 A deployment embeds this crate, constructs a qualified `mfm_app::Application` with its real access
-policy and writer fence, wraps it in `AppState::new`, and passes that state to `make_app`.
+policy, run-store writer fence, exact wallet deployment, and independent executor
+writer-generation fence, wraps it in `AppState::new`, and passes that state to `make_app`.
 
 The frozen application and wire contract is
 [`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md).

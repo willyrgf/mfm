@@ -33,11 +33,14 @@ decision, and mints one store-bound, purpose-specific authority. Credentials are
 not cloneable, serializable, or formattable; empty values and values larger than 64 KiB are
 rejected at this boundary.
 
-V1 publishes exactly `mfm.portfolio/snapshot@1`. Admission accepts a caller-generated canonical
-UUIDv4 invocation identity and `{ "target": "..." }`. It resolves current configuration,
-deterministically plans and certifies the graph, self-attests the serving executable, retains the
-root proof objects, and appends only `RunAdmitted`. It performs no semantic capability call and
-does not drive the run.
+V1 publishes exactly `mfm.portfolio/snapshot@1` and
+`mfm.evm/submit-transaction@1`. Admission accepts a caller-generated canonical UUIDv4 invocation
+identity and `{ "target": "..." }`. Portfolio targets resolve a `PortfolioConfig`; transaction
+targets resolve an immutable `EvmSubmitTransactionRequest` whose tenant and target must match the
+authorized admission and selector. Admission deterministically plans and certifies the selected
+graph, self-attests the serving executable, retains the root proof objects, and appends only
+`RunAdmitted`. It performs no semantic capability, signer, executor, or RPC call and does not drive
+the run.
 
 `drive_once` advances at most one transition or audited protocol operation. The sole ordinary read
 is `PublicRunView`: production performs one purpose-authorized `store.read_public_run` call and
@@ -76,8 +79,12 @@ instead fails the request.
 `connect_production_application` requires:
 
 - a deployment-supplied `Arc<dyn RunAccessPolicy>`;
-- a deployment-supplied `AuthoritativeWriterFence`;
+- a deployment-supplied run-journal `AuthoritativeWriterFence`;
 - an authoritative PostgreSQL store;
+- an `EvmWalletDeployment` containing the exact executor contract/deployment/resource owner,
+  account-sequence policy binding, public signer binding, generation guard, and dedicated
+  PostgreSQL executor pool;
+- a separate deployment-supplied `ExecutorWriterGenerationFence`; and
 - exact current executable, planning, state, and capability identities; and
 - explicit runtime configuration for any live EVM routes.
 
@@ -87,14 +94,40 @@ an operator-controlled stable `generation_id`, and `rpc_url`; `auth_header` rema
 indirect-only. Endpoint or credential rotation requires a new generation id. The legacy
 `expected_chain_id` field remains forbidden.
 
-Bootstrap assembles one exact qualified support graph with `52 + N` members, where `N` is the
+The runtime configuration also resolves the one process-local signer selected by the deployment's
+public `SignerRef`. Its keystore and unlock paths remain indirect runtime values. They are never
+support members, configured transaction bytes, retained evidence, or public diagnostics. The
+verified signer binding fixes the keystore implementation, secp256k1 recoverable algorithm,
+RFC6979 low-s profile, expected account, durable executor generation, destination-fence
+attestation, and direct-sign exclusion proof.
+
+For TOML, the selected process-local entries have this strict shape:
+
+```toml
+[signers.wallet]
+provider = "keystore"
+keystore_ref = "primary"
+entry_id = "67e55044-10b1-426f-9247-bb680e5fe0c8"
+
+[keystores.primary]
+keystore_path = { direct = "/run/mfm/wallet.keystore" }
+unlock_file_path = { direct = "/run/mfm/wallet.unlock" }
+```
+
+`signer_binding.signer_ref()` selects `signers.wallet` in this example. Each path supports the
+reviewed runtime value-source forms; the unlock value itself belongs in the referenced protected
+file, never in configuration.
+
+Bootstrap assembles one exact qualified support graph with `61 + N` members, where `N` is the
 configured generation count in `1..=4096`. The fixed closure contains the executable-bound
-12-component qualification; the aggregate catalog, every generation, reviewed source scope,
-failure contract, classifier, and read binding; framework unit configuration and portfolio
-routing; state and capability manifests; and the EVM balance fact descriptor and evidence
-contracts. The graph scope is derived from the complete field-path-ordered member identities and
-contracts, so any executable, route, or support-contract change selects a new scope. The scope
-preimage is not itself retained.
+14-component qualification; the aggregate catalog, every generation, reviewed source scope,
+failure contract, classifier, and read binding; the exact wallet executor contract,
+implementation, deployment, resource ownership, target callback surface, and verified executor
+binding; framework unit configuration and product routing; state and capability manifests; and
+the EVM balance fact descriptor and evidence contracts. The graph scope is derived from the
+complete field-path-ordered member identities and contracts, so any executable, route, executor,
+resource-owner, or support-contract change selects a new scope. The scope preimage is not itself
+retained.
 
 The app admits that graph once and moves the resulting non-cloneable authority into one
 `QualifiedProgramRegistry`. The private application backend and runtime share only the same
@@ -102,19 +135,23 @@ registry `Arc`; neither constructs a second registry or support graph. Endpoint,
 transport, configured portfolio, per-run input, certificate, fact, and output material are not
 support members.
 
-The writer fence is not a boolean or command-line switch. It is a deployment-owned proof that this
-process is the sole authoritative writer for the store lineage. Library callers must pass it
-through unchanged to `mfm-storage-postgres::open_authoritative`.
+Neither writer fence is a boolean or command-line switch. The run-store fence proves that this
+process is the sole authoritative writer for the journal lineage. The executor fence independently
+proves the exact tenant, executor binding, durable ledger generation, database/schema lineage, and
+stale/sibling-writer exclusion required before wallet target entry. Library callers pass them
+unchanged to their respective storage open functions; one can never substitute for the other.
 
-`Application::check_ready` performs only one bounded PostgreSQL writable-lineage probe against
-that already opened authoritative store. It does not resolve DNS, call an EVM/provider endpoint,
-execute a semantic callback, or requalify the process; the sealed bootstrap capability is
-sufficient. The REST adapter maps every probe failure to its one fixed `503 NotReady` response.
+`Application::check_ready` performs bounded writable-lineage probes against the already opened run
+store and executor ledger/fence. It does not open a signer, read an unlock file, resolve DNS, call
+an EVM/provider endpoint, execute a semantic callback, or requalify the process; the sealed
+bootstrap capabilities are sufficient. The REST adapter maps every probe failure to its one fixed
+`503 NotReady` response.
 
-The repository's standalone CLI and REST binaries do not own such a fence and therefore fail
-closed with `AuthoritativeWriterFenceUnavailable` for every application-bound operation,
-including entry-point discovery. A deployment embeds the transport library and injects its
-qualified application composition.
+The repository's standalone CLI and REST binaries do not own the run-store fence or the wallet
+deployment/executor fence and therefore fail closed with
+`AuthoritativeWriterFenceUnavailable` before application composition for every application-bound
+operation, including entry-point discovery. A deployment embeds the transport library and injects
+its qualified application composition.
 
 Configured values are provisioned by deployment/migration ownership outside the runtime app role.
 The application can resolve only the exact tenant, entry-point, and target binding authorized by
@@ -122,11 +159,8 @@ an admission authority; it exposes no target-only publication, listing, or expor
 
 ## Other app services
 
-Keystore import, public metadata/listing, deletion, and the existing standalone transaction
-signing library service remain outside the run facade. No CLI or REST route exposes direct
-signing. EVM mutation stays unregistered until the separate wallet-executor qualification
-commit replaces that library seam with generation-guarded signing after durable effect and
-resource authorization.
-
-Secret key material is consumed through zeroizing inputs and is never persisted in manifests,
-journal records, retained objects, public errors, or transport outputs.
+Keystore import, public metadata/listing, and deletion remain standalone app services. Transaction
+signing is not a standalone service: the qualified wallet executor alone may bind the
+generation-guarded signer after durable effect and resource authorization. Secret key material is
+consumed through zeroizing inputs and is never persisted in manifests, journal records, retained
+objects, public errors, or transport outputs.

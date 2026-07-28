@@ -12,7 +12,11 @@ layer = "signing"
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+zeroize = "1.7"
 
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-ids = { path = "../kernel/ids" }
+
+[dev-dependencies]
+tokio = { workspace = true }

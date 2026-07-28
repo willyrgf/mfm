@@ -177,7 +177,7 @@ nix develop -c cargo clean --target-dir target/verification
 
 The definitions in `nixfied.nix` are authoritative when individual tests or
 task counts evolve. `.#ci` composes `.#check`, `.#test`, and `.#test-db`, then
-adds keystore and Bitcoin Core parity coverage before the closing source revision.
+adds Bitcoin Core parity coverage before the closing source revision.
 Do not run the three component gates immediately before `.#ci` on the same
 revision: that repeats their work in separate Nixfied runs. Run a component
 independently when it is the smallest sufficient boundary gate or when isolating

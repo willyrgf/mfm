@@ -8,8 +8,6 @@ mod delete;
 mod import;
 /// List-keys command implementation.
 mod list;
-/// Transaction signing command implementation.
-mod tx_sign;
 
 /// Subcommands under `mfm keystore`.
 #[derive(Subcommand)]
@@ -32,12 +30,6 @@ pub(crate) enum KeystoreCommand {
         #[command(flatten)]
         args: list::ListArgs,
     },
-    /// Sign an EIP-1559 transaction payload using a keystore-managed key
-    TxSign {
-        /// Parsed arguments for the signing command.
-        #[command(flatten)]
-        args: tx_sign::TxSignArgs,
-    },
 }
 
 impl KeystoreCommand {
@@ -52,9 +44,6 @@ impl KeystoreCommand {
             }
             KeystoreCommand::List { args } => {
                 list::execute(ctx, args).await;
-            }
-            KeystoreCommand::TxSign { args } => {
-                tx_sign::execute(ctx, args).await;
             }
         }
     }

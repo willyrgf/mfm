@@ -2,6 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alloy_primitives::{address, b256, hex, PrimitiveSignature};
+use mfm_ids::DigestBytes;
 use mfm_signing::{
     DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
     SigningProfileId, SigningProvider,
@@ -43,7 +44,7 @@ fn identity(account: Address, algorithm: SigningAlgorithmId) -> PublicSigningIde
 
 struct FixedProvider {
     calls: AtomicUsize,
-    signature: SignatureBytes,
+    signature: Vec<u8>,
     account: Address,
 }
 
@@ -51,7 +52,7 @@ impl FixedProvider {
     fn alloy_vector() -> Self {
         Self {
             calls: AtomicUsize::new(0),
-            signature: alloy_vector_signature(),
+            signature: alloy_vector_signature().as_bytes().to_vec(),
             account: EXPECTED_SENDER,
         }
     }
@@ -63,7 +64,7 @@ impl SigningProvider for FixedProvider {
         let result = SigningResult::for_request(
             request,
             identity(self.account, request.algorithm().clone()),
-            self.signature.clone(),
+            SignatureBytes::new(self.signature.clone()).expect("signature"),
         );
         Box::pin(async move { result })
     }
@@ -293,7 +294,7 @@ fn finalization_rejects_profile_mismatch_before_signature_use() {
         SigningProfileId::new("secp256k1.other.profile.v1").expect("profile"),
         request.domain().clone(),
         request.purpose().clone(),
-        *request.digest(),
+        DigestBytes::from_array(*request.digest()),
     )
     .require_public_identity(
         ExpectedSignerIdentity::account_id(format!("{EXPECTED_SENDER:?}")).expect("identity"),

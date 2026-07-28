@@ -131,6 +131,13 @@ Its prospective audited surfaces are described in `docs/btc-rpc-routing.md`.
 | Target receipt and observation | Closed returned/did-not-enter/indeterminate outcome with reviewed safe result/failure refs. | Exact evidence for the committed delivery authorization. |
 | Delivery frontier and tombstone | Bounded predecessor-linked audit, exact terminal proof, assurance-policy ref. | Strict executor terminal evidence. |
 | Typed resource stream | Resource ownership/key, policy/config refs, immutable allocation state. | Executor-private resource authority. |
+| EVM wallet request | Exact tenant, target, chain, public account, signer binding, policy, and unsigned transaction intent. No secret selector, key material, or signature. | Immutable effect identity and target intent. |
+| EVM wallet candidate | Exact public unsigned transaction fields, fee ordinal, allocated nonce, and signed-transaction hash. No signature or raw signed bytes. | Recoverable public candidate; permits hash lookup and finality recovery without reopening the signer. |
+| EVM wallet attempt evidence | Exact operation, request/result refs, and closed returned/did-not-enter/indeterminate classification. Provider diagnostics and credentials are excluded. | Audited evidence for one authorized target exchange. |
+| EVM wallet terminal evidence | Exact accepted transaction hash, inclusion/finality proof refs, and closure outcome. | Content-addressed terminal proof consumed by the journal only through audited ensure. |
+| PostgreSQL executor binding | One tenant, executor binding, durable generation, evidence authority, and optional resource owner in the dedicated executor schema. | Immutable strict executor authority admitted only after the independent deployment fence succeeds. |
+| PostgreSQL executor records | Immutable effect frontiers, resource records, exact effect/resource links, and content-addressed closure objects. | Raw executor authority accepted only after opaque decoding and shared-engine strict refold. |
+| PostgreSQL executor heads | Derived effect/resource views over immutable records. | Rebuildable acceleration only; never append, retry, target-entry, or recovery authority. |
 | Memory/file checkpoints | Checksummed bounded encodings. | Qualification only; no production freshness or non-rollback authority. |
 
 Executor delivery attempt identifiers remain valid inside this ledger only. They do not represent a
@@ -148,11 +155,13 @@ complete producer-bound authority and bytes in the root, and never consults curr
 again for that run. Runtime app and transport surfaces cannot publish, list, or export configured
 values.
 
-Runtime routing may contain RPC endpoints, authorization sources, signer refs, keystore paths, or
-other process-local resources. Those values never enter a typed semantic surface. Admission binds
-only an immutable non-secret routing-generation reference. Bootstrap resolution and source
-validation occur after admission through audited access; resume resolves the exact admitted
-generation without fallback.
+Runtime routing may contain RPC endpoints, authorization sources, process-local signer selectors,
+keystore paths, unlock-file paths, or other process-local resources. Those values never enter a
+typed semantic surface. Admission binds only immutable non-secret routing-generation and wallet
+signer-binding references. The wallet request also fixes its expected public account, while the
+qualified signer resolves the process-local selector and secret sources only behind the guarded
+target boundary. Bootstrap resolution and source validation occur after admission through audited
+access; resume resolves the exact admitted generation without fallback.
 
 ## Public App, CLI, And REST DTOs
 

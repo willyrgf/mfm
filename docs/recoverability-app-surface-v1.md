@@ -144,14 +144,18 @@ Authentication failures use these public classifications:
 Errors never echo credential bytes, subjects, ACL entries, tenant membership, or backend
 diagnostics.
 
-## Published entry point and planning profile
+## Published entry points and planning profiles
 
-V1 publishes exactly one entry point:
+V1 publishes exactly two entry points:
+
+| Entry point id | Stable operation id | Configured root | Public output |
+| --- | --- | --- | --- |
+| `mfm.portfolio/snapshot@1` | `mfm.portfolio/snapshot` | `PortfolioConfig` selected by `{ target }` | `PortfolioPublicOutputs` |
+| `mfm.evm/submit-transaction@1` | `mfm.evm/submit-transaction` | `EvmSubmitTransactionRequest` selected by `{ target }` | `EvmSubmitTransactionPublicOutputs` |
+
+Each mapping owns one exact profile:
 
 ```text
-entry_point_id           = "mfm.portfolio/snapshot@1"
-entry_point_operation_id = "mfm.portfolio/snapshot"
-
 PlanningProfile {
     version: "mfm.planning-profile.v1",
     planner_contract_ref,
@@ -162,7 +166,6 @@ PlanningProfile {
 
 planning_profile_ref = content address of that exact PlanningProfile
 input                 = { target }
-public_output_schema  = PortfolioPublicOutputs::public_schema_id()
 ```
 
 The versioned `entry_point_id` selects the compiled registration. The stable, unversioned
@@ -171,7 +174,7 @@ The versioned `entry_point_id` selects the compiled registration. The stable, un
 There is no minimum-profile, compatible-profile, or implicit-superset rule.
 
 Generic Rust program-authoring helpers grant no admission authority. All product admission passes
-through this one compiled entry-point/profile registration.
+through one of these compiled entry-point/profile registrations.
 
 Entry-point discovery is unauthenticated because it exposes no run, fact, credential, or tenant
 history. Production bootstrap self-attests the executable, seals the qualified registry, and
@@ -198,8 +201,8 @@ EntryPointContract {
 
 ## Invocation identity and admission
 
-Portfolio admission requires a caller-generated invocation identity in canonical lower-case,
-hyphenated UUIDv4 form:
+Admission requires a caller-generated invocation identity in canonical lower-case, hyphenated
+UUIDv4 form:
 
 ```text
 xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx
@@ -218,7 +221,7 @@ run_id = H(
     {
         store_scope_id,
         tenant_scope_id,
-        entry_point_operation_id: "mfm.portfolio/snapshot",
+        entry_point_operation_id,
         invocation_identity,
     },
 )
@@ -276,10 +279,11 @@ manual-resolution service, runner factory, or arbitrary object reader.
 | Portable export | `POST /v1/runs/{run_id}/exports` | `mfm run export` | `Export` |
 
 Health and readiness remain unauthenticated. Health is process liveness only. Readiness performs
-one bounded PostgreSQL writable-lineage probe against the already opened authoritative store.
-Every probe failure collapses to the fixed `503 NotReady` response. It performs no EVM request,
-DNS lookup, provider check, semantic callback, or run operation; the bootstrap-qualified sealed
-process capability is sufficient without requalification. `GET /v1/runs` does not exist.
+bounded PostgreSQL writable-lineage probes against the already opened run store and independently
+fenced executor ledger. Every probe failure collapses to the fixed `503 NotReady` response. It
+performs no EVM request, DNS lookup, signer or unlock-file access, provider check, semantic
+callback, or run operation; the bootstrap-qualified sealed process capabilities are sufficient
+without requalification. `GET /v1/runs` does not exist.
 The CLI does not carry a second static discovery catalog: `mfm ops list` accepts the same database
 and runtime-configuration connection inputs, performs the same qualified production
 `Application` bootstrap as run commands, and then reads the cached slice. The repository
@@ -1019,6 +1023,8 @@ The current contract tests prove:
 - invocation identity accepts only canonical UUIDv4, exact retry attaches, changed root conflicts,
   and an ambiguous acknowledgement is retried without a new identity;
 - admission performs no live capability call and never drives;
+- EVM transaction admission accepts only the authorized tenant and selected configured target,
+  and its effect can settle only from exact qualified executor terminal evidence;
 - two app processes can alternate `drive_once` calls without process semantic state;
 - one drive performs at most one semantic transition or audited application-protocol operation and
   returns only the fixed outcome variants;
@@ -1049,10 +1055,11 @@ The current contract tests prove:
   tenant scope and supports revocation.
 - Before schema reset, each deployment completes and verifies its selected export-or-destroy
   disposition from the cutover inventory.
-- A mutation executor is registered only after its generic keyed ledger/backend and the separate
-  deployment generation, stale-writer, destination-convergence, and resource fences qualify.
-  PostgreSQL persistence or co-location does not satisfy those external authorities, and the MFM
-  store writer/WAL fence cannot substitute for them.
+- The registered EVM mutation executor is usable only when the deployment supplies its qualified
+  keyed ledger/backend, exact wallet/resource owner, non-rollback generation, stale/sibling-writer
+  exclusion, destination-convergence fence, and guarded signer binding. PostgreSQL persistence or
+  co-location does not satisfy those external authorities, and the MFM store writer/WAL fence
+  cannot substitute for them.
 
 These assumptions affect deployment readiness, not the logical app or transport schema.
 

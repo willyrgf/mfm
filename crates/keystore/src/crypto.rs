@@ -32,10 +32,12 @@ impl std::fmt::Debug for EthereumPrivateKey {
 
 impl EthereumPrivateKey {
     /// Builds a private key from already-decoded secret bytes.
-    pub(crate) fn from_secret_bytes(key_bytes: [u8; 32]) -> Result<Self, EthereumKeyError> {
-        SecretKey::from_slice(&key_bytes).map_err(|_| EthereumKeyError::InvalidPrivateKey)?;
+    pub(crate) fn from_secret_bytes(key_bytes: &[u8; 32]) -> Result<Self, EthereumKeyError> {
+        SecretKey::from_slice(key_bytes).map_err(|_| EthereumKeyError::InvalidPrivateKey)?;
+        let mut protected = Zeroizing::new([0_u8; 32]);
+        protected.copy_from_slice(key_bytes);
         Ok(Self {
-            key_bytes: Zeroizing::new(key_bytes),
+            key_bytes: protected,
         })
     }
 

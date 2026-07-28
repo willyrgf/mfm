@@ -345,20 +345,6 @@ in
         "--doc"
       ];
     };
-    parity-cli-keystore = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm"
-        "--features"
-        "parity-tests"
-        "--test"
-        "parity_keystore_reth_tx_send"
-        "--"
-        "--nocapture"
-      ];
-    };
     postgres-sqlx-check = cargoLeaf {
       tools = sqlxTools;
       run = [
@@ -522,13 +508,9 @@ in
           task = "test";
           dependsOn = [ "check" ];
         };
-        parity-cli-keystore = {
-          task = "parity-cli-keystore";
-          dependsOn = [ "test" ];
-        };
         test-db = {
           task = "test-db";
-          dependsOn = [ "parity-cli-keystore" ];
+          dependsOn = [ "test" ];
         };
         parity-bitcoin-core = {
           task = "parity-bitcoin-core";

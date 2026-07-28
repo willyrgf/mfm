@@ -61,9 +61,10 @@ implementation.
   writer/WAL fence.
 - The ordinary public surface is exact-run status plus certified public output. Public fact
   browsing and cross-run run list/watch are removed rather than carried through the cutover.
-- The core cutover has no registered EVM mutation. EVM writes return only after durable keyed
-  executor qualification. Bitcoin collection remains unregistered unless `scantxoutset "start"`
-  passes its repeat-work-safe read qualification.
+- The core cutover removed the former EVM mutation path. The final sequence step registers one EVM
+  wallet effect only through its qualified durable keyed executor, typed sender/nonce owner,
+  guarded signer, and independent deployment fence. Bitcoin collection remains unregistered unless
+  `scantxoutset "start"` passes its repeat-work-safe read qualification.
 - Schema- and implementation-shaping gates, including one retained historical executable
   reproducing in an OS-enforced capability-free boundary, closed before schema freeze. Deployment
   privacy, capacity, authoritative-writer fencing, the long-term executable retention horizon, and
@@ -111,7 +112,7 @@ Closure evidence:
 | `crates/kernel/runtime/src/runners.rs`, `binding.rs`, and `scheduler.rs` | Generic `validate_ingress` hook at launch and resume. | Delete the hook family. Catalog construction remains pure. |
 | `crates/app/src/live_transports.rs` and `crates/live/evm/src/transport/mod.rs` | Loads an EVM route and performs `eth_chainId` before admission. | Bind `routing_generation_ref` at admission without semantic IO; perform source/chain bootstrap as an ordinary audited read afterward. |
 | `crates/app/src/live_transports.rs` and `crates/live/bitcoin/src/adapter/mod.rs` | Loads and validates a Bitcoin route/session before admission. | Resolve and validate the exact admitted routing generation in the post-admission Bitcoin bootstrap read. |
-| `crates/live/evm/src/adapter/transaction.rs` | Injected mutation route/signer validation. | Remove with current EVM transaction registration; the later executor contract owns qualification. |
+| `crates/live/evm/src/adapter/transaction.rs` | Injected mutation route/signer validation. | Removed with the superseded mutation registration; the qualified wallet executor now owns route, signer, resource, and target binding. |
 
 The bounded current-executable read in `crates/app/src/executable_identity.rs`, current
 configuration lookup for a new root, and store schema/connectivity checks are permitted platform
@@ -153,12 +154,7 @@ contract.
 
 ### Published entry points and planning profiles
 
-The only published product operation is `mfm.portfolio/snapshot@1`, currently selected in
-`crates/app/src/entry_point.rs` and exposed through app, CLI, and REST start surfaces. The
-pre-cutover production implementation publishes no `PlanningProfile`; contract-shaping test
-prototypes do not grant admission authority.
-
-The cutover publishes exactly one mapping:
+The cutover publishes exactly two mappings:
 
 ```text
 mfm.portfolio/snapshot@1
@@ -166,6 +162,14 @@ mfm.portfolio/snapshot@1
   -> one exact content-addressed PlanningProfile
        framework_policy_refs: []
   -> one planner contract and implementation
+  -> one expanded certified spec
+
+mfm.evm/submit-transaction@1
+  -> one canonical one-effect authored program
+  -> one exact content-addressed PlanningProfile
+       framework_policy_refs: []
+  -> one planner contract and implementation
+  -> one executor-required leaf expansion
   -> one expanded certified spec
 ```
 
@@ -177,10 +181,9 @@ expansions remain selected by the exact registered executor contract for each ef
 smuggled into the framework-policy list.
 
 Generic Rust authoring helpers may remain authoring APIs, but they grant no admission authority.
-`RunServices::launch_run`, `RunLaunchRequest`, test-support launch helpers, CLI, and REST must not
-bypass the registered entry-point/profile catalog. Closure requires certificate/admission
-fixtures proving retained authored bytes, the empty ordered policy list, executor-contract
-selection, and byte-identical independent expansion.
+Test-support launch helpers, CLI, and REST cannot bypass the registered entry-point/profile
+catalog. Closure requires certificate/admission fixtures proving retained authored bytes, the
+empty ordered policy list, executor-contract selection, and byte-identical independent expansion.
 
 ### Legacy histories, export, and schema rejection
 
@@ -231,11 +234,11 @@ derived telemetry.
 
 ### Capability qualification disposition
 
-| Capability | Core-cutover disposition | Gate to register |
+| Capability | Final disposition | Registration evidence |
 | --- | --- | --- |
-| EVM balance/metadata reads | Replace aggregate reader with source/chain bootstrap, initial anchor, one state per independently meaningful RPC, final anchor confirmation, and pure aggregation. | Exact-call, routing-generation, exhaustive safe-failure verdict, cancellation, partial-failure, anchor, and fan-out conformance. Leave unregistered if the graph is not qualified. |
-| Bitcoin balance collection | Replace aggregate reader with source bootstrap, one qualified `scantxoutset "start"`, block-hash confirmation, and pure aggregation. | Exact safe-failure verdict, lost response, cancellation, concurrent scans, delayed reissue, bounded result/work, provider cost, and no hidden status/abort/retry. Otherwise leave unregistered pending a keyed work executor design. |
-| EVM mutation | Remove registration in the core cutover. | A durable wallet/relayer must qualify immutable signer/envelope/nonce ownership, keyed convergence, delivery audit, restart/reorg behavior, and no-secret retention before a later registration commit. |
+| EVM balance/metadata reads | Registered as source/chain bootstrap, initial anchor, one state per independently meaningful RPC, final anchor confirmation, and pure aggregation. | Exact-call, routing-generation, exhaustive safe-failure verdict, cancellation, partial-failure, anchor, and fan-out conformance passed. |
+| Bitcoin balance collection | Aggregate reader removed; collection remains unregistered under its closed disposition. | `scantxoutset "start"` did not pass lost-response, cancellation, concurrent-scan, delayed-reissue, bounded-work/result, and provider-cost qualification. |
+| EVM mutation | Registered only as `mfm.evm/submit-transaction@1` through the durable wallet executor. | Immutable request and signer binding, account-sequence ownership, stale-head target exclusion, response-loss/restart, already-known, rebroadcast/replacement, success/revert, finality/reorganization, terminal retention, PostgreSQL fencing/refold, and no-secret retention passed. |
 
 ## Gate classification
 
@@ -275,7 +278,8 @@ derived telemetry.
   `contracts/recoverability/v1/annex.json` and `contracts/recoverability/v1/corpus.json` and indexed
   by `contracts/recoverability/v1/README.md`. Exact artifact hashes and counts are recorded in the
   RFC's `COMMIT2_ARTIFACT_METADATA` ledger.
-- EVM/Bitcoin capability conformance, or explicit absence of the unqualified registration.
+- EVM read and wallet-mutation capability conformance, plus explicit absence of the unqualified
+  Bitcoin registration.
 
 ### Before resetting a deployment
 
