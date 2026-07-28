@@ -1,18 +1,13 @@
 use super::*;
 
-impl ReplayBroker {
+impl ReplayBroker<'_> {
     /// Returns retained side-effect intent evidence from replay records only.
     pub fn side_effect_intent_evidence(
         &self,
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<SideEffectIntentReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let intent = self.intents.get(&request.pair_id).ok_or_else(|| {
-            ReplayError::new(
-                ReplayErrorKind::SideEffectMissing,
-                format!("missing side-effect intent {}", request.pair_id),
-            )
-        })?;
+        let intent = self.side_effect_intent(&request.pair_id)?;
         let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
             artifact_id: &intent.intent_artifact_id,
             evidence_hash: &intent.intent_artifact_evidence_hash,
@@ -28,30 +23,6 @@ impl ReplayBroker {
             artifact_bytes: self.artifact_bytes_for_evidence(&artifact)?.to_vec(),
             artifact,
         })
-    }
-
-    pub(super) fn required_side_effect_record<'a, T>(
-        &'a self,
-        records: &'a BTreeMap<SideEffectKey, T>,
-        request: &SideEffectEvidenceReplayRequest,
-        label: &'static str,
-    ) -> Result<&'a T> {
-        records
-            .get(&(request.pair_id.clone(), request.invocation_epoch))
-            .ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::SideEffectMissing,
-                    format!("missing side-effect {label} {}", request.pair_id),
-                )
-            })
-    }
-
-    pub(super) fn optional_side_effect_record<'a, T>(
-        &'a self,
-        records: &'a BTreeMap<SideEffectKey, T>,
-        request: &SideEffectEvidenceReplayRequest,
-    ) -> Option<&'a T> {
-        records.get(&(request.pair_id.clone(), request.invocation_epoch))
     }
 
     pub(super) fn verify_requested_side_effect_artifact<T>(
@@ -117,7 +88,7 @@ impl ReplayBroker {
         &self,
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<Option<SubmissionReplayEvidence>> {
-        let Some(submission) = self.optional_side_effect_record(&self.submissions, request) else {
+        let Some(submission) = self.side_effect_records_for_request(request)?.submission else {
             return Ok(None);
         };
         let artifact = self.verify_side_effect_artifact(submission)?;
@@ -132,8 +103,7 @@ impl ReplayBroker {
         &self,
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<Option<PreparedInvocationReplayEvidence>> {
-        let Some(prepared) = self.optional_side_effect_record(&self.prepared_invocations, request)
-        else {
+        let Some(prepared) = self.side_effect_records_for_request(request)?.prepared else {
             return Ok(None);
         };
         self.verify_prepared_invocation_artifact(prepared).map(Some)
@@ -143,7 +113,7 @@ impl ReplayBroker {
         &self,
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<Option<ReceiptReplayEvidence>> {
-        let Some(receipt) = self.optional_side_effect_record(&self.receipts, request) else {
+        let Some(receipt) = self.side_effect_records_for_request(request)?.receipt else {
             return Ok(None);
         };
         let artifact = self.verify_side_effect_artifact(receipt)?;
@@ -159,7 +129,7 @@ impl ReplayBroker {
         pair_id: &SideEffectPairId,
     ) -> Result<spec::SideEffectVerificationSpec> {
         let pair = self
-            .certified_spec
+            .certified_spec()
             .spec
             .side_effect_verify_pair_for_pair_id(pair_id)
             .map_err(certified_spec_error)?;
@@ -171,7 +141,7 @@ impl ReplayBroker {
         pair_id: &SideEffectPairId,
     ) -> Result<CertifiedSideEffectContext> {
         let pair = self
-            .certified_spec
+            .certified_spec()
             .spec
             .side_effect_verify_pair_for_pair_id(pair_id)
             .map_err(certified_spec_error)?;
@@ -186,12 +156,7 @@ impl ReplayBroker {
         &self,
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<()> {
-        let intent = self.intents.get(&request.pair_id).ok_or_else(|| {
-            ReplayError::new(
-                ReplayErrorKind::SideEffectMissing,
-                format!("missing side-effect intent {}", request.pair_id),
-            )
-        })?;
+        let intent = self.side_effect_intent(&request.pair_id)?;
         if intent.invocation_epoch != request.invocation_epoch {
             return Err(side_effect_mismatch(
                 "side-effect intent does not match replay request",
@@ -204,124 +169,5 @@ impl ReplayBroker {
             ));
         }
         Ok(())
-    }
-
-    pub(super) fn verify_side_effect_event_against_intent(
-        &self,
-        pair_id: &SideEffectPairId,
-        ledger_key: &events::SideEffectLedgerKey,
-        invocation_epoch: u32,
-        pair_role: events::SideEffectPairRole,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-    ) -> Result<()> {
-        let intent = self.side_effect_intent_for_event(pair_id, ledger_key, invocation_epoch)?;
-        match pair_role {
-            events::SideEffectPairRole::Submit => {
-                verify_side_effect_submit_claim_identity(
-                    intent,
-                    node_id,
-                    attempt_id,
-                    "side-effect event does not match persisted intent",
-                )?;
-            }
-            events::SideEffectPairRole::Verify => {
-                let (verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
-                if verify.submit_node_id != intent.node_id || verify_node.node_id != *node_id {
-                    return Err(side_effect_mismatch(
-                        "side-effect verify event does not match certified pair",
-                    ));
-                }
-                self.node(node_id)?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn verify_side_effect_ambiguity_against_intent(
-        &self,
-        pair_id: &SideEffectPairId,
-        ledger_key: &events::SideEffectLedgerKey,
-        invocation_epoch: u32,
-        pair_role: events::SideEffectPairRole,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-    ) -> Result<()> {
-        self.verify_side_effect_event_against_intent(
-            pair_id,
-            ledger_key,
-            invocation_epoch,
-            pair_role,
-            node_id,
-            attempt_id,
-        )
-    }
-
-    pub(super) fn side_effect_intent_for_event(
-        &self,
-        pair_id: &SideEffectPairId,
-        ledger_key: &events::SideEffectLedgerKey,
-        invocation_epoch: u32,
-    ) -> Result<&side_effect::IntentPersisted> {
-        let intent = self.intents.get(pair_id).ok_or_else(|| {
-            ReplayError::new(
-                ReplayErrorKind::SideEffectMissing,
-                format!("missing side-effect intent {pair_id}"),
-            )
-        })?;
-        if intent.ledger_key != *ledger_key
-            || intent.pair_id != *pair_id
-            || intent.invocation_epoch != invocation_epoch
-        {
-            return Err(side_effect_mismatch(
-                "side-effect event does not match persisted intent",
-            ));
-        }
-        Ok(intent)
-    }
-
-    pub(super) fn side_effect_contract_node_for_pair_event(
-        &self,
-        pair_id: &SideEffectPairId,
-        pair_role: events::SideEffectPairRole,
-        node_id: &NodeId,
-    ) -> Result<&NodeId> {
-        let intent = self.intents.get(pair_id).ok_or_else(|| {
-            ReplayError::new(
-                ReplayErrorKind::SideEffectMissing,
-                format!("missing side-effect intent {pair_id}"),
-            )
-        })?;
-        match pair_role {
-            events::SideEffectPairRole::Submit => {
-                if intent.node_id != *node_id {
-                    return Err(side_effect_mismatch(
-                        "side-effect event does not match persisted intent",
-                    ));
-                }
-                Ok(&intent.node_id)
-            }
-            events::SideEffectPairRole::Verify => {
-                let (verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
-                if verify.submit_node_id != intent.node_id || verify_node.node_id != *node_id {
-                    return Err(side_effect_mismatch(
-                        "side-effect verify event does not match certified pair",
-                    ));
-                }
-                Ok(&intent.node_id)
-            }
-        }
-    }
-
-    pub(super) fn side_effect_verify_node_for_pair(
-        &self,
-        pair_id: &SideEffectPairId,
-    ) -> Result<(&spec::NodeSpec, &spec::SideEffectVerifyNodeSpec)> {
-        let pair = self
-            .certified_spec
-            .spec
-            .side_effect_verify_pair_for_pair_id(pair_id)
-            .map_err(certified_spec_error)?;
-        Ok((pair.verify_node, pair.verify))
     }
 }

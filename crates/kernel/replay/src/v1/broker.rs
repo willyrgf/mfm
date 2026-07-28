@@ -1,533 +1,92 @@
 use super::*;
+use std::ops::ControlFlow;
 
 #[path = "broker/artifacts.rs"]
 mod artifacts;
 #[path = "broker/facts.rs"]
 mod facts;
-#[path = "broker/output.rs"]
-mod output;
 #[path = "broker/queries.rs"]
 mod queries;
 #[path = "broker/side_effects.rs"]
 mod side_effects;
 
-impl ReplayBroker {
-    /// Builds a replay broker from sealed replay read authority.
-    pub fn from_read_authority(authority: ReplayReadAuthority) -> Result<Self> {
-        Self::from_validated_parts(authority)
+pub(super) struct ReplayProducedCellRecordRef<'a> {
+    pub(super) sequence: store::StreamSeq,
+    pub(super) commit_key: &'a store::CommitKey,
+    pub(super) payload: &'a events::CellProduced,
+}
+
+pub(super) struct ReplayFactRecordRef<'a> {
+    pub(super) event_id: &'a mfm_ids::EventId,
+    pub(super) sequence: store::StreamSeq,
+    pub(super) ordinal: store::CommitOrdinal,
+    pub(super) commit_key: &'a store::CommitKey,
+    pub(super) payload: &'a events::FactRecorded,
+}
+
+pub(super) enum ReplayFactEventRef<'a> {
+    Primary(ReplayFactRecordRef<'a>),
+    Source(&'a RetainedSourceFactReplayEvent),
+}
+
+impl ReplayFactEventRef<'_> {
+    pub(super) fn event_id(&self) -> &mfm_ids::EventId {
+        match self {
+            Self::Primary(record) => record.event_id,
+            Self::Source(source) => source.event_id(),
+        }
     }
 
-    fn from_validated_parts(authority: ReplayReadAuthority) -> Result<Self> {
-        let certified_spec = authority.certified_spec.clone();
-        let stream = authority.stream.clone();
-        certified_spec.verify_hash()?;
-        ProjectionSnapshot::validate_run_stream(&stream)?;
-        let retained_artifacts = artifact_map(authority.artifact_evidence.clone())?;
-        let artifact_byte_authority =
-            artifact_byte_authority_map(&retained_artifacts, &authority.artifact_bytes)?;
-        let projection = ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
-            &stream,
-            &artifact_byte_authority,
-        )?;
-        let run_admitted = run_admitted_payload(&stream)?;
-
-        if run_admitted.spec_hash != certified_spec.spec_hash {
-            return Err(ReplayError::new(
-                ReplayErrorKind::SpecHashMismatch,
-                "run-start spec hash does not match certified spec",
-            ));
+    pub(super) fn payload(&self) -> &events::FactRecorded {
+        match self {
+            Self::Primary(record) => record.payload,
+            Self::Source(source) => source.payload(),
         }
-        if stream
-            .iter()
-            .any(|event| event.spec_hash() != &certified_spec.spec_hash)
-        {
-            return Err(ReplayError::new(
-                ReplayErrorKind::SpecHashMismatch,
-                "run stream contains payloads for a different certified spec",
-            ));
-        }
-        verify_run_start_contract(
-            &certified_spec,
-            &run_admitted,
-            &authority,
-            &retained_artifacts,
-        )?;
-        verify_remediation_ledger_links(&certified_spec, &projection)?;
-        verify_resource_lane_release_adjacency(&certified_spec, &stream)?;
+    }
+}
 
-        let mut broker = Self {
-            certified_spec,
-            stream: stream.clone(),
-            run_id: run_admitted,
-            projection,
-            retained_artifacts,
-            artifact_bytes: authority.artifact_bytes.clone(),
-            artifact_byte_authority,
-            artifacts: BTreeMap::new(),
-            facts: BTreeMap::new(),
-            fact_events: BTreeMap::new(),
-            intents: BTreeMap::new(),
-            prepared_invocations: BTreeMap::new(),
-            submissions: BTreeMap::new(),
-            submission_unknown: BTreeMap::new(),
-            not_submitted: BTreeMap::new(),
-            receipts: BTreeMap::new(),
-            confirmations: BTreeMap::new(),
-            ambiguities: BTreeMap::new(),
-            manual_resolutions: BTreeMap::new(),
+#[derive(Default)]
+pub(super) struct ReplaySideEffectRecords<'a> {
+    pub(super) prepared: Option<&'a side_effect::InvocationPrepared>,
+    pub(super) submission: Option<&'a side_effect::SubmissionObserved>,
+    pub(super) submission_unknown: Option<&'a side_effect::SubmissionUnknown>,
+    pub(super) not_submitted: Option<&'a side_effect::NotSubmittedProven>,
+    pub(super) receipt: Option<&'a side_effect::ReceiptObserved>,
+    pub(super) confirmation: Option<&'a side_effect::ConfirmationObserved>,
+    pub(super) ambiguity: Option<&'a side_effect::Ambiguous>,
+}
+
+impl<'view> ReplayBroker<'view> {
+    /// Builds a replay broker from borrowing replay authority.
+    pub fn from_read_authority(authority: ReplayReadAuthority<'view>) -> Result<Self> {
+        validate_additional_artifacts(&authority.additional_artifacts)?;
+        validate_source_fact_events(&authority.source_fact_events)?;
+        let broker = Self {
+            view: authority.view,
+            additional_artifacts: authority.additional_artifacts,
+            source_fact_events: authority.source_fact_events,
         };
-        broker.authorize_certified_spec_artifacts()?;
-        broker.authorize_additional_artifacts(&authority.additional_artifact_evidence)?;
-        broker.index_retained_source_fact_events(&authority.source_fact_events)?;
-        broker.index_stream(&stream)?;
-        broker.verify_terminal_outcome_agreement()?;
-        broker.reject_unauthorized_artifact_evidence()?;
+        broker.validate_recorded_replay_evidence()?;
         Ok(broker)
     }
 
-    fn authorize_certified_spec_artifacts(&mut self) -> Result<()> {
-        let config_refs = self.certified_spec.spec.config_refs.clone();
-        for config in config_refs {
-            let config_evidence = store::ArtifactEvidenceRef {
-                artifact_id: config.artifact_id.clone(),
-                digest: config.digest.clone(),
-                byte_len: config.byte_len,
-                media_type: config.media_type.clone(),
-                schema_id: Some(config.schema_id.clone()),
-                semantic_type_id: None,
-                producer_node_id: None,
-                producer_seed_id: None,
-                artifact_role: ArtifactRole::TypedConfig,
-            };
-            let evidence_hash = config_evidence.evidence_hash().map_err(ReplayError::from)?;
-            self.authorize_artifact(ArtifactEvidenceExpectation {
-                artifact_id: &config.artifact_id,
-                evidence_hash: &evidence_hash,
-                digest: &config.digest,
-                schema_id: Some(&config.schema_id),
-                semantic_type_id: None,
-                role: ArtifactRole::TypedConfig,
-                producer_node_id: None,
-                producer_seed_id: None,
-            })?;
-        }
-        Ok(())
-    }
-
-    fn authorize_additional_artifacts(
-        &mut self,
-        artifacts: &[StoredArtifactEvidenceRef],
-    ) -> Result<()> {
-        for artifact in artifacts {
-            self.insert_authorized_artifact(artifact.clone())?;
-        }
-        Ok(())
-    }
-
-    fn index_stream(&mut self, stream: &[KernelEventEnvelope]) -> Result<()> {
-        let mut resource_keys = BTreeMap::new();
-        for envelope in stream {
-            match envelope.payload() {
-                KernelEventPayload::RunAdmitted(payload) => {
-                    for seed in &payload.seed_cells {
-                        self.verify_seed_against_spec(seed)?;
-                    }
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::StateAttemptStarted(payload) => {
-                    self.verify_state_attempt_started_against_spec(payload)?;
-                }
-                KernelEventPayload::FactRecorded(payload) => {
-                    self.verify_fact_against_spec(payload)?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    self.insert_fact_event(envelope, payload)?;
-                }
-                KernelEventPayload::ArtifactReferenced(payload) => {
-                    if let Some(node_id) = &payload.node_id {
-                        self.node(node_id)?;
-                    }
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    if payload.artifact_ref.role == ArtifactRole::FactQueryEvidence {
-                        self.verify_fact_query_evidence_reference(payload)?;
-                    }
-                }
-                KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                    self.verify_side_effect_intent_against_spec(payload)?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.intents,
-                        payload.pair_id.clone(),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect intent replay event",
-                    )?;
-                }
-                KernelEventPayload::SideEffectClaimed(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                }
-                KernelEventPayload::SideEffectClaimTakenOver(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                }
-                KernelEventPayload::ResourceLaneClaimed(payload) => {
-                    self.verify_resource_lane_claim(payload, &mut resource_keys)?;
-                }
-                KernelEventPayload::ResourceLaneReleased(payload) => {
-                    self.verify_resource_lane_release_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        payload.release_authority,
-                    )?;
-                }
-                KernelEventPayload::ResourceLaneClaimIntent(_)
-                | KernelEventPayload::ResourceLaneReleaseIntent(_) => {
-                    return Err(ReplayError::new(
-                        ReplayErrorKind::InvalidRunStream,
-                        "replay stream contains unmaterialized resource-lane intent",
-                    ));
-                }
-                KernelEventPayload::SideEffectInvocationStarted(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                }
-                KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.submissions,
-                        (payload.pair_id.clone(), payload.invocation_epoch),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect submission replay event",
-                    )?;
-                }
-                KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                    self.verify_resource_touched_set(
-                        &payload.pair_id,
-                        payload.pair_role,
-                        &payload.node_id,
-                        payload.resource_touched_set.as_ref(),
-                    )?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.receipts,
-                        (payload.pair_id.clone(), payload.invocation_epoch),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect receipt replay event",
-                    )?;
-                }
-                KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                    self.verify_resource_touched_set(
-                        &payload.pair_id,
-                        payload.pair_role,
-                        &payload.node_id,
-                        payload.resource_touched_set.as_ref(),
-                    )?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.confirmations,
-                        (payload.pair_id.clone(), payload.invocation_epoch),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect confirmation replay event",
-                    )?;
-                }
-                KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                    self.verify_invocation_prepared_resource_key(payload, &resource_keys)?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.prepared_invocations,
-                        (payload.pair_id.clone(), payload.invocation_epoch),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect prepared invocation replay event",
-                    )?;
-                }
-                KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.not_submitted,
-                        (payload.pair_id.clone(), payload.invocation_epoch),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect not-submitted replay event",
-                    )?;
-                }
-                KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.submission_unknown,
-                        (payload.pair_id.clone(), payload.invocation_epoch),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect submission-unknown replay event",
-                    )?;
-                }
-                KernelEventPayload::SideEffectAmbiguous(payload) => {
-                    self.verify_side_effect_ambiguity_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                    insert_unique(
-                        &mut self.ambiguities,
-                        (payload.pair_id.clone(), payload.invocation_epoch),
-                        payload.clone(),
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate side-effect ambiguity replay event",
-                    )?;
-                }
-                KernelEventPayload::CellProduced(payload) => {
-                    self.verify_cell_produced_against_spec(payload)?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::CellSkipped(payload) => {
-                    self.verify_cell_skipped_against_spec(payload)?;
-                }
-                KernelEventPayload::PublicOutputProduced(payload) => {
-                    self.verify_public_output_against_spec(payload)?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::PublicOutputRenderFailed(payload) => {
-                    self.verify_public_output_render_failure_against_spec(payload)?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::StateAttemptFailed(payload) => {
-                    self.node(&payload.node_id)?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::StateAttemptInterrupted(payload) => {
-                    self.node(&payload.node_id)?;
-                }
-                KernelEventPayload::StateAttemptCompleted(payload) => {
-                    self.verify_state_attempt_completed_against_spec(payload)?;
-                }
-                KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
-                    events::RunCompletionOutcome::Completed(evidence) => {
-                        self.verify_completed_run_public_output(evidence)?;
-                    }
-                    events::RunCompletionOutcome::Compensated
-                    | events::RunCompletionOutcome::ManuallyResolved
-                    | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
-                },
-                KernelEventPayload::ManualResolutionRecorded(payload) => {
-                    let verified = self.verify_manual_resolution_against_spec(envelope, payload)?;
-                    insert_unique(
-                        &mut self.manual_resolutions,
-                        payload.run_id.clone(),
-                        verified,
-                        ReplayErrorKind::InvalidRunStream,
-                        "duplicate manual resolution replay event",
-                    )?;
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::RetentionManifestProjected(_) => {
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::RetentionRefsAppended(_) => {
-                    self.authorize_event_artifacts(envelope.payload())?;
-                }
-                KernelEventPayload::SideEffectFailed(payload) => {
-                    self.verify_side_effect_event_against_intent(
-                        &payload.pair_id,
-                        &payload.ledger_key,
-                        payload.invocation_epoch,
-                        payload.pair_role,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                    )?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn index_retained_source_fact_events(
-        &mut self,
-        source_fact_events: &[RetainedSourceFactReplayEvent],
-    ) -> Result<()> {
-        // Cross-run source facts are external authority for FactQueryEvidence returned-refs.
-        // They may originate from other certified programs (e.g. collectors → report), so
-        // they are NOT re-validated against this consumer program's node graph or
-        // certified_spec_hash. Claim content is bound by verify_fact_query_returned_ref
-        // against the authenticated InternalFactRef in retained query evidence.
-        for source in source_fact_events {
-            let envelope = source.envelope();
-            let KernelEventPayload::FactRecorded(payload) = envelope.payload() else {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::FactMismatch,
-                    "retained source fact event payload is not FactRecorded",
-                ));
-            };
-            self.authorize_event_artifacts(envelope.payload())?;
-            self.insert_fact_event(envelope, payload)?;
-        }
-        Ok(())
-    }
-
-    fn insert_fact_event(
-        &mut self,
-        envelope: &KernelEventEnvelope,
-        payload: &events::FactRecorded,
-    ) -> Result<()> {
-        let fact_claim_id = mfm_facts::derive_fact_claim_id(
-            envelope.run_id().clone(),
-            envelope.seq().as_u64(),
-            envelope.ordinal().as_u32(),
-        )
-        .map_err(|error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()))?;
-        match (
-            self.facts.get(&fact_claim_id),
-            self.fact_events.get(&fact_claim_id),
-        ) {
-            (Some(existing_payload), Some(existing_envelope))
-                if existing_payload == payload && existing_envelope == envelope =>
-            {
-                return Ok(());
-            }
-            (Some(_), _) | (_, Some(_)) => {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::InvalidRunStream,
-                    "duplicate fact replay event",
-                ));
-            }
-            (None, None) => {}
-        }
-        self.facts.insert(fact_claim_id.clone(), payload.clone());
-        self.fact_events.insert(fact_claim_id, envelope.clone());
-        Ok(())
-    }
-
-    fn verify_node_capability(
-        &self,
-        node_id: &NodeId,
-        capability_kind: &CapabilityKind,
-        capability_version: &CapabilityVersion,
-    ) -> Result<()> {
-        let node = self.node(node_id)?;
-        if capability_set_contains(
-            &node.capability_bindings,
-            capability_kind,
-            capability_version,
-        ) {
-            Ok(())
-        } else {
-            Err(ReplayError::new(
-                ReplayErrorKind::UnsupportedCapability,
-                format!("node {node_id} is not certified for capability {capability_kind}"),
-            ))
-        }
-    }
-
-    fn verify_node_adapter(
-        &self,
-        node_id: &NodeId,
-        adapter_kind: &AdapterKind,
-        adapter_version: &AdapterVersion,
-    ) -> Result<()> {
-        let node = self.node(node_id)?;
-        if node.adapter_bindings.iter().any(|binding| {
-            binding.adapter_kind == *adapter_kind && binding.adapter_version == *adapter_version
-        }) {
-            Ok(())
-        } else {
-            Err(ReplayError::new(
-                ReplayErrorKind::UnsupportedAdapter,
-                format!("node {node_id} is not certified for adapter {adapter_kind}"),
-            ))
-        }
-    }
-
-    fn node(&self, node_id: &NodeId) -> Result<&spec::NodeSpec> {
-        self.certified_spec
+    pub(super) fn node(&self, node_id: &NodeId) -> Result<&spec::NodeSpec> {
+        self.certified_spec()
             .spec
             .nodes
             .iter()
-            .chain(self.certified_spec.spec.remediations.values())
+            .chain(self.certified_spec().spec.remediations.values())
             .find(|node| &node.node_id == node_id)
             .ok_or_else(|| {
                 ReplayError::new(
-                    ReplayErrorKind::CertifiedSpec,
-                    format!("node {node_id} is not present in certified spec"),
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    format!("node {node_id} is absent from the certified spec"),
                 )
             })
     }
 
-    fn cell(&self, cell_id: &mfm_ids::CellId) -> Result<&spec::CellSpec> {
-        self.certified_spec
+    pub(super) fn cell(&self, cell_id: &mfm_ids::CellId) -> Result<&spec::CellSpec> {
+        self.certified_spec()
             .spec
             .cells
             .iter()
@@ -535,570 +94,305 @@ impl ReplayBroker {
             .ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::CertifiedEvidenceMismatch,
-                    format!("cell {cell_id} is not present in certified spec"),
+                    format!("cell {cell_id} is absent from the certified spec"),
                 )
             })
     }
 
-    fn is_terminal_lifecycle_receipt_artifact(
+    pub(super) fn side_effect_records_for_request(
         &self,
-        node_id: &NodeId,
-        artifact_id: &ArtifactId,
-        digest: &ContentDigest,
-        evidence_hash: &ContentDigest,
-    ) -> Result<bool> {
-        let node = self.node(node_id)?;
-        if !is_terminal_lifecycle_node(node) {
-            return Ok(false);
-        }
-        Ok(matches!(
-            self.projection
-                .cell_terminal_for_run(&self.run_id.run_id, &node.output_cell),
-            Some(store::CellTerminalProjection::Produced {
-                artifact_id: projected_artifact_id,
-                content_digest,
-                evidence_hash: projected_evidence_hash,
-                ..
-            }) if projected_artifact_id == artifact_id
-                && content_digest == digest
-                && projected_evidence_hash == evidence_hash
-        ))
+        request: &SideEffectEvidenceReplayRequest,
+    ) -> Result<ReplaySideEffectRecords<'_>> {
+        self.side_effect_records_for_pair(&request.pair_id, request.invocation_epoch)
     }
 
-    fn verify_seed_against_spec(&self, seed: &events::SeedCellRef) -> Result<()> {
-        let certified_seed = self
-            .certified_spec
-            .spec
-            .seeds
-            .iter()
-            .find(|certified_seed| certified_seed.seed_id == seed.seed_id)
-            .ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::CertifiedEvidenceMismatch,
-                    format!("seed {} is not present in certified spec", seed.seed_id),
-                )
-            })?;
-        if certified_seed.cell_id != seed.cell_id
-            || certified_seed.scope_id != seed.scope_id
-            || certified_seed.semantic_type_id != seed.semantic_type_id
-            || certified_seed.schema_id != seed.schema_id
-            || certified_seed
-                .required_digest
-                .as_ref()
-                .is_some_and(|digest| digest != &seed.digest)
-        {
-            return Err(certified_evidence_mismatch(
-                "run-start seed cell does not match certified spec",
-            ));
-        }
-        let cell = self.cell(&seed.cell_id)?;
-        if cell.producer != spec::CellProducer::Seed(seed.seed_id.clone())
-            || cell.scope_id != seed.scope_id
-            || cell.semantic_type_id != seed.semantic_type_id
-            || cell.schema_id != seed.schema_id
-        {
-            return Err(certified_evidence_mismatch(
-                "run-start seed cell terminal does not match certified spec",
-            ));
-        }
-        Ok(())
-    }
-
-    fn verify_state_attempt_started_against_spec(
-        &self,
-        payload: &events::StateAttemptStarted,
-    ) -> Result<()> {
-        let node = self.node(&payload.node_id)?;
-        if node.state_kind != payload.state_kind || node.state_version != payload.state_version {
-            return Err(certified_evidence_mismatch(
-                "state attempt start does not match certified node identity",
-            ));
-        }
-        Ok(())
-    }
-
-    fn verify_state_attempt_completed_against_spec(
-        &self,
-        payload: &events::StateAttemptCompleted,
-    ) -> Result<()> {
-        let node = self.node(&payload.node_id)?;
-        if node.output_cell != payload.output_cell_id {
-            return Err(certified_evidence_mismatch(
-                "state attempt completion output cell does not match certified node",
-            ));
-        }
-        Ok(())
-    }
-
-    fn verify_fact_against_spec(&self, payload: &events::FactRecorded) -> Result<()> {
-        let node = self.node(&payload.node_id)?;
-        let state = self
-            .certified_spec
-            .spec
-            .descriptor_identities
-            .iter()
-            .find_map(|descriptor| match descriptor {
-                spec::DescriptorIdentity::State(state)
-                    if state.descriptor_id == node.descriptor_id =>
-                {
-                    Some(state.as_ref())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| {
-                certified_evidence_mismatch(
-                    "fact-producing node is missing its certified state descriptor",
-                )
-            })?;
-        let descriptor_hash = payload.claim.fact_descriptor_hash();
-        if state.effect_class != "read_external"
-            || state.emitted_fact_descriptors.len() != 1
-            || node.fact_descriptor_allowlist.len() != 1
-            || state.emitted_fact_descriptors[0].descriptor_hash != *descriptor_hash
-            || node.fact_descriptor_allowlist[0].descriptor_hash != *descriptor_hash
-        {
-            return Err(ReplayError::new(
-                ReplayErrorKind::CertifiedEvidenceMismatch,
-                format!(
-                    "fact descriptor {descriptor_hash} is not the exact read_external fact contract for producing node {}",
-                    payload.node_id,
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    fn verify_side_effect_intent_against_spec(
-        &self,
-        payload: &side_effect::IntentPersisted,
-    ) -> Result<()> {
-        let node = self.node(&payload.node_id)?;
-        if node.scope_id != payload.scope_id || node.side_effect.is_none() {
-            return Err(certified_evidence_mismatch(
-                "side-effect intent does not match certified side-effect node",
-            ));
-        }
-        let contract =
-            CertifiedSideEffectContract::for_node(&self.certified_spec.spec, &payload.node_id)
-                .map_err(certified_contract_mismatch)?;
-        let forward = match &payload.ledger_purpose {
-            events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
-                let forward = self
-                    .projection
-                    .side_effect_for_pair(&self.run_id.run_id, forward_pair_id);
-                forward
+    fn validate_recorded_replay_evidence(&self) -> Result<()> {
+        for reference in self.artifact_references()? {
+            if reference.artifact_ref.role == ArtifactRole::FactQueryEvidence {
+                self.verify_fact_query_evidence_reference(reference)?;
             }
-            events::SideEffectLedgerPurpose::Forward => None,
-        };
-        let terminal_policies =
-            store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
-                .map_err(store_error)?;
-        contract
-            .validate_remediation_link(CertifiedRemediationLink {
-                remediation_run_id: &self.run_id.run_id,
-                ledger_purpose: &payload.ledger_purpose,
-                forward_run_id: forward.map(|projection| &projection.run_id),
-                forward_node_id: forward.map(|projection| &projection.intent.node_id),
-                forward_ledger_purpose: forward.map(|projection| &projection.ledger_purpose),
-                forward_terminal: forward
-                    .map(|projection| {
-                        terminal_policies
-                            .require(&projection.pair_id)
-                            .map(|policy| policy.is_terminal_phase(&projection.phase))
-                    })
-                    .transpose()
-                    .map_err(store_error)?
-                    .unwrap_or(false),
-            })
-            .map_err(certified_contract_mismatch)?;
-        self.verify_node_capability(
-            &payload.node_id,
-            &payload.capability_kind,
-            &payload.capability_version,
-        )?;
-        self.verify_node_adapter(
-            &payload.node_id,
-            &payload.adapter_kind,
-            &payload.adapter_version,
-        )?;
+        }
         Ok(())
     }
 
-    fn verify_invocation_prepared_resource_key(
-        &self,
-        payload: &side_effect::InvocationPrepared,
-        resource_keys: &BTreeMap<SideEffectPairId, events::ResourceKeyEvidence>,
-    ) -> Result<()> {
-        self.node(&payload.node_id)?;
-        let contract =
-            CertifiedSideEffectContract::for_node(&self.certified_spec.spec, &payload.node_id)
-                .map_err(certified_contract_mismatch)?;
-        contract
-            .validate_epoch_resource_consistency(
-                resource_keys.get(&payload.pair_id),
-                payload.resource_key.as_ref(),
-            )
-            .map_err(certified_contract_mismatch)?;
-        Ok(())
+    pub(super) fn artifact_references(&self) -> Result<Vec<&events::ArtifactReferenced>> {
+        let mut references = Vec::new();
+        let _ = store::current_lifecycle::read(self.view).visit_records(|record| {
+            if let store::current_lifecycle::CurrentRecordKindRef::ArtifactReferenced(reference) =
+                record.kind()
+            {
+                references.push(reference);
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        Ok(references)
     }
 
-    fn verify_resource_lane_claim(
-        &self,
-        payload: &events::ResourceLaneClaimed,
-        resource_keys: &mut BTreeMap<SideEffectPairId, events::ResourceKeyEvidence>,
-    ) -> Result<()> {
-        self.verify_side_effect_event_against_intent(
-            &payload.pair_id,
-            &payload.ledger_key,
-            payload.invocation_epoch,
-            payload.pair_role,
-            &payload.node_id,
-            &payload.attempt_id,
-        )?;
-        let contract =
-            CertifiedSideEffectContract::for_node(&self.certified_spec.spec, &payload.node_id)
-                .map_err(certified_contract_mismatch)?;
-        contract
-            .validate_epoch_resource_consistency(
-                resource_keys.get(&payload.pair_id),
-                Some(&payload.resource_key),
-            )
-            .map_err(certified_contract_mismatch)?;
-        resource_keys.insert(payload.pair_id.clone(), payload.resource_key.clone());
-        Ok(())
+    pub(super) fn retention_references(&self) -> Result<Vec<&events::RetentionRef>> {
+        let mut references = Vec::new();
+        let _ = store::current_lifecycle::read(self.view).visit_records(|record| {
+            if let store::current_lifecycle::CurrentRecordKindRef::RetentionRefsAppended(
+                retention,
+            ) = record.kind()
+            {
+                references.extend(retention.refs.iter());
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        Ok(references)
     }
 
-    fn verify_resource_lane_release_against_intent(
+    pub(super) fn produced_cell_records(&self) -> Result<Vec<ReplayProducedCellRecordRef<'_>>> {
+        let mut records = Vec::new();
+        let _ = store::current_lifecycle::read(self.view).visit_records(|record| {
+            if let store::current_lifecycle::CurrentRecordKindRef::CellProduced(payload) =
+                record.kind()
+            {
+                records.push(ReplayProducedCellRecordRef {
+                    sequence: record.sequence(),
+                    commit_key: record.commit_key(),
+                    payload,
+                });
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        Ok(records)
+    }
+
+    pub(super) fn fact_records(&self) -> Result<Vec<ReplayFactRecordRef<'_>>> {
+        let mut records = Vec::new();
+        let _ = store::current_lifecycle::read(self.view).visit_records(|record| {
+            if let store::current_lifecycle::CurrentRecordKindRef::FactRecorded(payload) =
+                record.kind()
+            {
+                records.push(ReplayFactRecordRef {
+                    event_id: record.event_id(),
+                    sequence: record.sequence(),
+                    ordinal: record.ordinal(),
+                    commit_key: record.commit_key(),
+                    payload,
+                });
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        Ok(records)
+    }
+
+    pub(super) fn side_effect_intents(&self) -> Result<Vec<&side_effect::IntentPersisted>> {
+        let mut intents = Vec::new();
+        let _ = store::current_lifecycle::read(self.view).visit_records(|record| {
+            if let store::current_lifecycle::CurrentRecordKindRef::SideEffectIntentPersisted(
+                intent,
+            ) = record.kind()
+            {
+                intents.push(intent);
+            }
+            ControlFlow::<()>::Continue(())
+        });
+        Ok(intents)
+    }
+
+    pub(super) fn side_effect_records_for_pair(
         &self,
         pair_id: &SideEffectPairId,
-        ledger_key: &events::SideEffectLedgerKey,
         invocation_epoch: u32,
-        pair_role: events::SideEffectPairRole,
-        release_authority: events::ResourceLaneReleaseAuthority,
-    ) -> Result<()> {
-        if pair_role != events::SideEffectPairRole::Verify {
-            return Err(side_effect_mismatch(
-                "resource lane release requires verify pair role",
-            ));
+    ) -> Result<ReplaySideEffectRecords<'_>> {
+        let mut matched = ReplaySideEffectRecords::default();
+        let flow =
+            store::current_lifecycle::read(self.view).visit_records(|record| match record.kind() {
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectInvocationPrepared(
+                    payload,
+                ) if payload.pair_id == *pair_id
+                    && payload.invocation_epoch == invocation_epoch =>
+                {
+                    set_side_effect_record(
+                        &mut matched.prepared,
+                        payload,
+                        "prepared invocation",
+                        pair_id,
+                    )
+                }
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionObserved(
+                    payload,
+                ) if payload.pair_id == *pair_id
+                    && payload.invocation_epoch == invocation_epoch =>
+                {
+                    set_side_effect_record(&mut matched.submission, payload, "submission", pair_id)
+                }
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectSubmissionUnknown(
+                    payload,
+                ) if payload.pair_id == *pair_id
+                    && payload.invocation_epoch == invocation_epoch =>
+                {
+                    set_side_effect_record(
+                        &mut matched.submission_unknown,
+                        payload,
+                        "submission-unknown evidence",
+                        pair_id,
+                    )
+                }
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectNotSubmittedProven(
+                    payload,
+                ) if payload.pair_id == *pair_id
+                    && payload.invocation_epoch == invocation_epoch =>
+                {
+                    set_side_effect_record(
+                        &mut matched.not_submitted,
+                        payload,
+                        "not-submitted proof",
+                        pair_id,
+                    )
+                }
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectReceiptObserved(
+                    payload,
+                ) if payload.pair_id == *pair_id
+                    && payload.invocation_epoch == invocation_epoch =>
+                {
+                    set_side_effect_record(&mut matched.receipt, payload, "receipt", pair_id)
+                }
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectConfirmationObserved(
+                    payload,
+                ) if payload.pair_id == *pair_id
+                    && payload.invocation_epoch == invocation_epoch =>
+                {
+                    set_side_effect_record(
+                        &mut matched.confirmation,
+                        payload,
+                        "confirmation",
+                        pair_id,
+                    )
+                }
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectAmbiguous(payload)
+                    if payload.pair_id == *pair_id
+                        && payload.invocation_epoch == invocation_epoch =>
+                {
+                    set_side_effect_record(&mut matched.ambiguity, payload, "ambiguity", pair_id)
+                }
+                _ => ControlFlow::Continue(()),
+            });
+        match flow {
+            ControlFlow::Continue(()) => Ok(matched),
+            ControlFlow::Break(error) => Err(error),
         }
-        match release_authority {
-            events::ResourceLaneReleaseAuthority::VerifyTerminal
-            | events::ResourceLaneReleaseAuthority::ManualResolution => {}
-        }
-        let intent = self.side_effect_intent_for_event(pair_id, ledger_key, invocation_epoch)?;
-        let (_verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
-        if verify.submit_node_id != intent.node_id {
-            return Err(side_effect_mismatch(
-                "resource lane release does not match certified pair",
-            ));
-        }
-        Ok(())
     }
 
-    fn verify_resource_touched_set(
+    pub(super) fn side_effect_intent(
         &self,
         pair_id: &SideEffectPairId,
-        pair_role: events::SideEffectPairRole,
-        node_id: &NodeId,
-        touched_set: Option<&events::ResourceTouchedSetEvidence>,
-    ) -> Result<()> {
-        let contract_node_id =
-            self.side_effect_contract_node_for_pair_event(pair_id, pair_role, node_id)?;
-        CertifiedSideEffectContract::for_node(&self.certified_spec.spec, contract_node_id)
-            .and_then(|contract| contract.validate_touched_set(touched_set))
-            .map_err(certified_contract_mismatch)
+    ) -> Result<&side_effect::IntentPersisted> {
+        let lifecycle = store::current_lifecycle::read(self.view);
+        let projected = lifecycle.side_effect(pair_id).ok_or_else(|| {
+            ReplayError::new(
+                ReplayErrorKind::SideEffectMissing,
+                format!("missing side-effect intent {pair_id}"),
+            )
+        })?;
+        let projected_epoch = projected.intent().invocation_epoch();
+        let mut found = None;
+        let flow = lifecycle.visit_records(|record| {
+            let store::current_lifecycle::CurrentRecordKindRef::SideEffectIntentPersisted(intent) =
+                record.kind()
+            else {
+                return ControlFlow::Continue(());
+            };
+            if intent.pair_id != *pair_id || intent.invocation_epoch != projected_epoch {
+                return ControlFlow::Continue(());
+            }
+            if found.is_some() {
+                return ControlFlow::Break(ReplayError::new(
+                    ReplayErrorKind::InvalidRunJournal,
+                    format!("duplicate side-effect intent {pair_id}"),
+                ));
+            }
+            found = Some(intent);
+            ControlFlow::Continue(())
+        });
+        if let ControlFlow::Break(error) = flow {
+            return Err(error);
+        }
+        found.ok_or_else(|| {
+            ReplayError::new(
+                ReplayErrorKind::InvalidRunJournal,
+                format!("projected side-effect {pair_id} lacks its committed intent record"),
+            )
+        })
     }
 
-    fn verify_manual_resolution_against_spec(
+    pub(super) fn fact_record_for_claim(
         &self,
-        envelope: &KernelEventEnvelope,
-        payload: &events::ManualResolutionRecorded,
-    ) -> Result<VerifiedManualResolutionForPrefix> {
-        let manual =
-            certified_manual_resolution_spec(&self.certified_spec.spec.saga).ok_or_else(|| {
-                certified_evidence_mismatch(
-                    "manual resolution was recorded without certified manual policy",
-                )
-            })?;
-        if payload.evidence_schema_id != manual.evidence_schema {
-            return Err(certified_evidence_mismatch(
-                "manual resolution evidence schema does not match certified policy",
-            ));
-        }
-        let authorization_schema_id = manual_authorization_proof_schema_id().map_err(|error| {
-            ReplayError::new(
-                ReplayErrorKind::CertifiedEvidenceMismatch,
-                error.to_string(),
-            )
-        })?;
-        if payload.authorization_schema_id != authorization_schema_id {
-            return Err(certified_evidence_mismatch(
-                "manual resolution authorization schema does not match certified policy",
-            ));
-        }
-        let manual_start = self
-            .stream
-            .iter()
-            .position(|event| {
-                event.seq() == envelope.seq()
-                    && event.ordinal() == envelope.ordinal()
-                    && event.event_id() == envelope.event_id()
-            })
-            .ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::InvalidRunStream,
-                    "manual resolution payload was not found in replay stream",
-                )
-            })?;
-        let prefix_projection = ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
-            &self.stream[..manual_start],
-            &self.artifact_byte_authority,
-        )
-        .map_err(|error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()))?;
-        let terminal_policies =
-            store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
-                .map_err(store_error)?;
-        prefix_projection
-            .require_manual_resolution_admissible(
-                &payload.run_id,
-                &self.certified_spec.spec.saga,
-                &terminal_policies,
+        fact_claim_id: &mfm_facts::FactClaimId,
+    ) -> Result<Option<ReplayFactEventRef<'_>>> {
+        for record in self.fact_records()? {
+            let candidate = mfm_facts::derive_fact_claim_id(
+                self.view.run_id().clone(),
+                record.sequence.as_u64(),
+                record.ordinal.as_u32(),
             )
             .map_err(|error| {
-                ReplayError::new(
-                    ReplayErrorKind::CertifiedEvidenceMismatch,
-                    error.to_string(),
-                )
+                ReplayError::new(ReplayErrorKind::InvalidRunJournal, error.to_string())
             })?;
-        let prefix_saga = prefix_projection
-            .derive_saga_projection(
-                &payload.run_id,
-                &self.certified_spec.spec.saga,
-                &terminal_policies,
-            )
-            .map_err(|error| {
-                ReplayError::new(
-                    ReplayErrorKind::CertifiedEvidenceMismatch,
-                    error.to_string(),
-                )
-            })?;
-        let block_reason = prefix_saga.manual_block_reason.ok_or_else(|| {
-            certified_evidence_mismatch("manual resolution prefix lacks block reason")
-        })?;
-        let evidence_requirement = store::EventArtifactRequirement {
-            source: store::EventArtifactReferenceSource::ManualResolutionEvidence,
-            artifact_id: payload.evidence_artifact_id.clone(),
-            evidence_hash: payload.evidence_artifact_evidence_hash.clone(),
-            digest: Some(payload.evidence_hash.clone()),
-            byte_len: None,
-            media_type: None,
-            schema_id: Some(payload.evidence_schema_id.clone()),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: Some(ArtifactRole::ManualResolutionEvidence),
-        };
-        let _evidence_artifact = exact_retained_artifact_for_requirement(
-            &self.retained_artifacts,
-            &evidence_requirement,
-        )?;
-        let authorization_requirement = store::EventArtifactRequirement {
-            source: store::EventArtifactReferenceSource::ManualResolutionAuthorization,
-            artifact_id: payload.authorization_artifact_id.clone(),
-            evidence_hash: payload.authorization_artifact_evidence_hash.clone(),
-            digest: Some(payload.authorization_hash.clone()),
-            byte_len: None,
-            media_type: None,
-            schema_id: Some(payload.authorization_schema_id.clone()),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: Some(ArtifactRole::ManualResolutionAuthorization),
-        };
-        let authorization_artifact = exact_retained_artifact_for_requirement(
-            &self.retained_artifacts,
-            &authorization_requirement,
-        )?;
-        let proof_bytes = self.artifact_bytes_for_evidence(authorization_artifact)?;
-        let prefix = ManualResolutionPrefixAuthority::new(
-            payload.run_id.clone(),
-            payload.spec_hash.clone(),
-            envelope.seq().as_u64(),
-            mfm_runtime::manual_resolution_stream_prefix_digest(&self.stream[..manual_start])?,
-            mfm_runtime::manual_resolution_block_reason(block_reason),
-            mfm_runtime::unresolved_manual_obligations_digest(&prefix_saga)?,
-            manual.clone(),
-        )
-        .map_err(|error| {
-            ReplayError::new(
-                ReplayErrorKind::CertifiedEvidenceMismatch,
-                format!("manual authorization prefix failed validation: {error}"),
-            )
-        })?;
-        let verified = ManualResolutionProofAuthority::new(
-            prefix,
-            payload.outcome,
-            ManualResolutionEvidenceRef {
-                schema_id: payload.evidence_schema_id.clone(),
-                content_hash: payload.evidence_hash.clone(),
-                artifact_id: payload.evidence_artifact_id.clone(),
-            },
-            ManualResolutionEvidenceRef {
-                schema_id: payload.authorization_schema_id.clone(),
-                content_hash: payload.authorization_hash.clone(),
-                artifact_id: payload.authorization_artifact_id.clone(),
-            },
-            proof_bytes.to_vec(),
-        )
-        .and_then(ManualResolutionProofAuthority::verify)
-        .map_err(|error| {
-            ReplayError::new(
-                ReplayErrorKind::CertifiedEvidenceMismatch,
-                format!("manual authorization proof failed verification: {error}"),
-            )
-        })?;
-        Ok(verified)
-    }
-
-    fn verify_terminal_outcome_agreement(&self) -> Result<()> {
-        let Some((terminal_start, payload)) = terminal_completion_event(&self.stream)? else {
-            return Ok(());
-        };
-        match &payload.outcome {
-            events::RunCompletionOutcome::Completed(evidence) => {
-                match self
-                    .projection
-                    .public_output(&self.run_id.run_id, &evidence.public_output_schema_id)
-                {
-                    Some(store::PublicOutputProjection::Produced { event_id, .. })
-                        if event_id == &evidence.public_output_event_id =>
-                    {
-                        Ok(())
-                    }
-                    _ => Err(certified_evidence_mismatch(
-                        "completed terminal outcome does not match projected public output",
-                    )),
-                }
-            }
-            events::RunCompletionOutcome::Compensated
-            | events::RunCompletionOutcome::ManuallyResolved
-            | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {
-                let prefix_next_seq = self.stream[..terminal_start]
-                    .last()
-                    .map(|event| {
-                        let next = event
-                            .seq()
-                            .as_u64()
-                            .checked_add(1)
-                            .ok_or(store::StoreError::SequenceOverflow)?;
-                        store::StreamSeq::new(next)
-                    })
-                    .transpose()?
-                    .unwrap_or(store::StreamSeq::FIRST);
-                let prefix_projection =
-                    ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
-                        &self.stream[..terminal_start],
-                        &self.artifact_byte_authority,
-                    )?;
-                let terminal_policies =
-                    store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
-                        .map_err(store_error)?;
-                let saga = prefix_projection.derive_saga_projection(
-                    &self.run_id.run_id,
-                    &self.certified_spec.spec.saga,
-                    &terminal_policies,
-                )?;
-                let proof = store::SagaTerminalProof::new(
-                    &self.certified_spec.spec.saga,
-                    &saga,
-                    prefix_next_seq,
-                    self.manual_resolutions.get(&self.run_id.run_id).cloned(),
-                )
-                .map_err(|error| {
-                    ReplayError::new(
-                        ReplayErrorKind::CertifiedEvidenceMismatch,
-                        error.to_string(),
-                    )
-                })?;
-                if proof.outcome() == payload.outcome {
-                    Ok(())
-                } else {
-                    Err(ReplayError::new(
-                        ReplayErrorKind::CertifiedEvidenceMismatch,
-                        "saga terminal outcome does not match proof",
-                    ))
-                }
+            if &candidate == fact_claim_id {
+                return Ok(Some(ReplayFactEventRef::Primary(record)));
             }
         }
+        for source in &self.source_fact_events {
+            if source.fact_claim_id() == fact_claim_id {
+                return Ok(Some(ReplayFactEventRef::Source(source)));
+            }
+        }
+        Ok(None)
     }
+}
 
-    fn reject_unauthorized_artifact_evidence(&self) -> Result<()> {
-        for (key, evidence) in &self.retained_artifacts {
-            if !self.artifacts.contains_key(key) {
+fn set_side_effect_record<'a, T>(
+    slot: &mut Option<&'a T>,
+    value: &'a T,
+    label: &'static str,
+    pair_id: &SideEffectPairId,
+) -> ControlFlow<ReplayError> {
+    if slot.replace(value).is_some() {
+        return ControlFlow::Break(ReplayError::new(
+            ReplayErrorKind::InvalidRunJournal,
+            format!("duplicate side-effect {label} {pair_id}"),
+        ));
+    }
+    ControlFlow::Continue(())
+}
+
+fn validate_additional_artifacts(artifacts: &[store::VerifiedRetainedArtifactBytes]) -> Result<()> {
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let key = replay_artifact_key(artifact.evidence())?;
+        for other in &artifacts[index + 1..] {
+            if replay_artifact_key(other.evidence())? != key {
+                continue;
+            }
+            if artifact != other {
                 return Err(ReplayError::new(
                     ReplayErrorKind::ArtifactMismatch,
                     format!(
-                        "retained artifact evidence supplied without replay authorization for {}",
-                        evidence.artifact_id
+                        "conflicting additional retained artifact evidence for {}",
+                        artifact.evidence().artifact_id
                     ),
                 ));
             }
         }
-        for key in self.artifact_bytes.keys() {
-            if !self.retained_artifacts.contains_key(key) {
+    }
+    Ok(())
+}
+
+fn validate_source_fact_events(source_facts: &[RetainedSourceFactReplayEvent]) -> Result<()> {
+    for (index, source) in source_facts.iter().enumerate() {
+        for other in &source_facts[index + 1..] {
+            if source.fact_claim_id() != other.fact_claim_id() {
+                continue;
+            }
+            if source.event_id() != other.event_id() || source.payload() != other.payload() {
                 return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!(
-                        "artifact bytes supplied without verified evidence for {}",
-                        key.0
-                    ),
+                    ReplayErrorKind::FactMismatch,
+                    "conflicting retained source fact events share one fact claim id",
                 ));
             }
         }
-        Ok(())
     }
-
-    fn verify_cell_produced_against_spec(&self, payload: &events::CellProduced) -> Result<()> {
-        let node = self.node(&payload.node_id)?;
-        if node.output_cell != payload.cell_id {
-            return Err(certified_evidence_mismatch(
-                "produced cell does not match certified node output",
-            ));
-        }
-        let cell = self.cell(&payload.cell_id)?;
-        if cell.producer != spec::CellProducer::Node(payload.node_id.clone())
-            || cell.scope_id != payload.scope_id
-            || cell.semantic_type_id != payload.semantic_type_id
-            || cell.schema_id != payload.schema_id
-            || cell.value_lineage != payload.value_lineage
-            || cell.context != payload.context
-        {
-            return Err(certified_evidence_mismatch(
-                "produced cell does not match certified cell spec",
-            ));
-        }
-        Ok(())
-    }
-
-    fn verify_cell_skipped_against_spec(&self, payload: &events::CellSkipped) -> Result<()> {
-        let node = self.node(&payload.node_id)?;
-        if node.output_cell != payload.cell_id {
-            return Err(certified_evidence_mismatch(
-                "skipped cell does not match certified node output",
-            ));
-        }
-        let cell = self.cell(&payload.cell_id)?;
-        if cell.producer != spec::CellProducer::Node(payload.node_id.clone())
-            || cell.scope_id != payload.scope_id
-            || cell.semantic_type_id != payload.semantic_type_id
-            || cell.schema_id != payload.schema_id
-            || cell.value_lineage != payload.value_lineage
-            || cell.context != payload.context
-        {
-            return Err(certified_evidence_mismatch(
-                "skipped cell does not match certified cell spec",
-            ));
-        }
-        Ok(())
-    }
+    Ok(())
 }

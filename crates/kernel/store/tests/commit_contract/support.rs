@@ -39,6 +39,8 @@ mod fact_response_materializer_prototype_tests;
 mod fact_retention_support;
 #[path = "facts_retention.rs"]
 mod facts_retention_tests;
+#[path = "journal.rs"]
+mod journal_tests;
 #[path = "lifecycle.rs"]
 mod lifecycle_tests;
 #[path = "manual_resolution_support.rs"]
@@ -117,11 +119,15 @@ impl StoreContractRunStore {
     }
 
     fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq {
-        poll_ready_store_future(self.inner.expected_next_seq(run_id)).expect("expected next seq")
+        self.inner
+            .expected_next_sequence_for_test(run_id)
+            .expect("expected next seq")
     }
 
-    fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
-        poll_ready_store_future(self.inner.load_run_stream(run_id)).expect("load run stream")
+    fn committed_records_for_projection_test(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
+        self.inner
+            .committed_records_for_test(run_id)
+            .expect("committed records for projection test")
     }
 
     fn projection_snapshot(&self) -> &ProjectionSnapshot {

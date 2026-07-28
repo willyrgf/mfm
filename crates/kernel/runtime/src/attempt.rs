@@ -8,13 +8,16 @@ use crate::commit::{
     AttemptFailureCommitInput, CommitPlanner, PreparedStagedArtifact, RunnerOutputCommitInput,
 };
 use crate::error::async_store_error;
-use crate::history::RuntimeRunView;
+use crate::history::{
+    refresh_current_after_commit, refresh_current_after_stale_append, VerifiedCurrentRun,
+};
 use crate::invocation::{ErasedRunCtx, InvocationBuilder, InvocationBuilderInput};
-use crate::side_effect_lifecycle::side_effect_projection_for_attempt;
+use crate::side_effect_lifecycle::side_effect_for_attempt;
+use crate::spec_authority::{CurrentRuntimeSpecRef, CurrentSpecRead};
 use crate::transition::TransitionAttempt;
 use crate::{
-    attempt_id, canonical_json, CertifiedRuntimeSpec, Result, RuntimeError,
-    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
+    attempt_id, canonical_json, Result, RuntimeError, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
+    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
 };
 
 /// Result of running one ordinary attempt lifecycle.
@@ -34,6 +37,25 @@ pub(crate) enum AttemptRunStatus {
     OperationalBlock,
 }
 
+/// One attempt status paired with the sole verified current-run authority.
+pub(crate) struct AttemptRunResult {
+    current_run: VerifiedCurrentRun,
+    status: AttemptRunStatus,
+}
+
+impl AttemptRunResult {
+    pub(crate) fn new(current_run: VerifiedCurrentRun, status: AttemptRunStatus) -> Self {
+        Self {
+            current_run,
+            status,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (VerifiedCurrentRun, AttemptRunStatus) {
+        (self.current_run, self.status)
+    }
+}
+
 /// Scoped resource-lane block carried between scheduler decisions.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ResourceLaneBlockWitness {
@@ -51,7 +73,7 @@ impl ResourceLaneBlockWitness {
     /// Returns true when this witness prevents starting or recovering the node.
     pub(crate) fn blocks_node(
         &self,
-        projections: &store::ProjectionSnapshot,
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
         node: &spec::NodeSpec,
     ) -> bool {
         if node.node_id.as_str() == self.node_id.as_str() {
@@ -60,7 +82,7 @@ impl ResourceLaneBlockWitness {
         if !node_resource_claims_lane_namespace(node, &self.lane_key) {
             return false;
         }
-        projected_started_attempt_active_lane_key(projections, node)
+        current_started_attempt_active_lane_key(lifecycle, node)
             .map(|lane_key| lane_key == self.lane_key)
             .unwrap_or(false)
     }
@@ -77,16 +99,12 @@ pub(crate) struct AttemptLifecycle {}
 /// Trusted context for terminalizing an observed post-start attempt failure.
 #[derive(Clone, Copy)]
 pub(crate) struct ObservedFailureContext<'a> {
-    /// Certified runtime spec for the attempt.
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
     /// Run id for the attempt.
     pub(crate) run_id: &'a RunId,
-    /// Attempted node.
-    pub(crate) node: &'a spec::NodeSpec,
+    /// Attempted certified node id.
+    pub(crate) node_id: &'a NodeId,
     /// Started attempt id.
     pub(crate) attempt_id: &'a AttemptId,
-    /// Verified view after the attempt start commit.
-    pub(crate) view: &'a RuntimeRunView,
     /// Trusted retryability policy derived from certified runtime authority.
     pub(crate) retryability: ObservedFailureRetryabilityPolicy,
 }
@@ -99,7 +117,10 @@ pub(crate) struct ObservedFailureRetryabilityPolicy {
 
 impl ObservedFailureRetryabilityPolicy {
     /// Derives retryability policy from certified saga and node authority.
-    pub(crate) fn for_attempt(runtime_spec: &CertifiedRuntimeSpec, node: &spec::NodeSpec) -> Self {
+    pub(crate) fn for_attempt<S>(runtime_spec: &S, node: &spec::NodeSpec) -> Self
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         Self {
             input_materialization_retryable: matches!(
                 &runtime_spec.spec().saga,
@@ -132,46 +153,55 @@ impl AttemptLifecycle {
     }
 
     /// Runs one ordinary attempt against an async typed store.
-    pub(crate) async fn run<S: store::RunEventStore + ?Sized>(
+    pub(crate) async fn run<S: store::RunJournalStore + ?Sized>(
         &self,
         store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
+        mut current: VerifiedCurrentRun,
         bound_context: &BoundRuntimeContext,
-        attempt: TransitionAttempt<'_>,
-    ) -> Result<AttemptRunStatus> {
+        attempt: TransitionAttempt,
+    ) -> Result<AttemptRunResult> {
         let TransitionAttempt {
-            node,
+            node_id,
             attempt_id: selected_attempt_id,
             attempt_no,
         } = attempt;
-        let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-        let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "node {} output cell {} is missing",
-                node.node_id, node.output_cell
-            ))
-        })?;
-        let binding = bound_context.runner_binding_for(node)?;
+        let run_id = current.view().run_id().clone();
+        let binding = {
+            let runtime_spec = current.runtime_spec();
+            let node = certified_node(&runtime_spec, &node_id)?;
+            bound_context.runner_binding_for(node)?
+        };
         let mut advanced = false;
         let (attempt_id, attempt_no) = match selected_attempt_id {
             None => {
-                let attempt_id =
-                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                let start_commit = CommitPlanner::prepare_attempt_start(
-                    runtime_spec,
-                    run_id,
-                    node,
-                    &attempt_id,
-                    attempt_no,
-                    view,
-                )?;
+                let (attempt_id, start_commit) = {
+                    let runtime_spec = current.runtime_spec();
+                    let lifecycle = current.lifecycle();
+                    let node = certified_node(&runtime_spec, &node_id)?;
+                    let attempt_id =
+                        attempt_id(&run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
+                    let start_commit = CommitPlanner::prepare_attempt_start(
+                        &runtime_spec,
+                        &run_id,
+                        node,
+                        &attempt_id,
+                        attempt_no,
+                        &lifecycle,
+                    )?;
+                    (attempt_id, start_commit)
+                };
                 let bundle = store::PreparedCommitBundle::without_artifacts(start_commit.into())?;
-                match store.append_prepared_commit_bundle(bundle).await {
-                    Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
+                let outcome = match store.append_prepared_commit_bundle(bundle).await {
+                    Ok(outcome) => outcome,
+                    Err(error) if async_error_is_stale_expected_next_seq(&error) => {
+                        current = refresh_current_after_stale_append(store, current).await?;
+                        return Ok(AttemptRunResult::new(current, AttemptRunStatus::StaleView));
                     }
-                    Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
+                    Err(error) => return Err(async_store_error(error)),
+                };
+                match &outcome {
+                    store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_) => {}
+                    store::CommitOutcome::AdmissionBlocked(block) => {
                         let holder = block
                             .holder
                             .as_ref()
@@ -181,50 +211,56 @@ impl AttemptLifecycle {
                             .unwrap_or_else(|| " with no active holder".to_owned());
                         return Err(RuntimeError::InvalidRunStream(format!(
                             "attempt start for node {} was blocked by resource lane {}:{}{}",
-                            node.node_id,
+                            node_id,
                             block.resource_lane_key.namespace,
                             block.resource_lane_key.key,
                             holder
                         )));
                     }
-                    Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
+                    store::CommitOutcome::ExecutionClaimBusy(_) => {
                         return Err(unexpected_execution_claim_busy("attempt start"));
                     }
-                    Err(error) if async_error_is_stale_expected_next_seq(&error) => {
-                        return Ok(AttemptRunStatus::StaleView);
-                    }
-                    Err(error) => return Err(async_store_error(error)),
                 }
+                current = refresh_current_after_commit(store, current, &outcome).await?;
                 advanced = true;
                 (attempt_id, attempt_no)
             }
             Some(attempt_id) => (attempt_id, attempt_no),
         };
 
-        let mut latest_view = load_runtime_run_view(runtime_spec, store, run_id).await?;
-        if node_needs_pre_invocation_lane_claim(
-            runtime_spec,
-            run_id,
-            &latest_view.projections,
-            node,
-            &attempt_id,
-        )? {
-            {
+        let needs_preclaim = {
+            let runtime_spec = current.runtime_spec();
+            let lifecycle = current.lifecycle();
+            let node = certified_node(&runtime_spec, &node_id)?;
+            node_needs_pre_invocation_lane_claim(&runtime_spec, &lifecycle, node, &attempt_id)?
+        };
+        if needs_preclaim {
+            let preclaim = {
+                let runtime_spec = current.runtime_spec();
+                let lifecycle = current.lifecycle();
+                let node = certified_node(&runtime_spec, &node_id)?;
+                let descriptor = runtime_spec.state_descriptor_for_node(node)?;
+                let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+                    RuntimeError::InvalidSpec(format!(
+                        "node {} output cell {} is missing",
+                        node.node_id, node.output_cell
+                    ))
+                })?;
                 let pre_invocation = InvocationBuilder::new(InvocationBuilderInput {
                     runtime_spec,
-                    run_id,
+                    run_id: &run_id,
                     node,
                     descriptor,
                     output_cell,
                     attempt_id: &attempt_id,
                     attempt_no,
-                    view: &latest_view,
+                    lifecycle,
                 })
                 .build_pre_invocation()
                 .map_err(|error| {
                     RuntimeError::InvalidRunStream(format!(
                         "failed to build resource-lane preflight context for node {}: {error}",
-                        node.node_id
+                        node_id
                     ))
                 })?;
                 let output = binding
@@ -232,12 +268,12 @@ impl AttemptLifecycle {
                     .preclaim_resource_lane(&pre_invocation)
                     .await?;
                 let preclaim = CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
-                    runtime_spec,
-                    run_id,
+                    runtime_spec: pre_invocation.runtime_spec(),
+                    run_id: &run_id,
                     node,
                     attempt_id: &attempt_id,
                     caps: pre_invocation.caps(),
-                    view: &latest_view,
+                    lifecycle: current.lifecycle(),
                     context_output_extractor: None,
                     saga_terminal_proof: None,
                     output,
@@ -245,190 +281,226 @@ impl AttemptLifecycle {
                 if !request_has_resource_lane_claim(preclaim.request()) {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(
                         "exclusive side-effect node {} did not emit pre-invocation resource-lane claim",
-                        node.node_id
+                        node_id
                     )));
                 }
-                let (bundle, settlement) = preclaim.into_prepared_commit_bundle()?;
-                match store.append_prepared_commit_bundle(bundle).await {
-                    Ok(store::CommitOutcome::Appended(_)) => {
-                        settle_runner_output(settlement);
-                        advanced = true;
-                    }
-                    Ok(store::CommitOutcome::Idempotent(_)) => {
-                        advanced = true;
-                    }
-                    Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
-                        return Ok(AttemptRunStatus::BlockedOnResourceLane {
-                            witness: Box::new(resource_lane_block_witness_from_outcome(
-                                &node.node_id,
-                                *block,
-                            )),
-                            advanced,
-                        });
-                    }
-                    Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
-                        return Err(unexpected_execution_claim_busy(
-                            "resource-lane pre-invocation commit",
-                        ));
-                    }
-                    Err(error) if async_error_is_stale_expected_next_seq(&error) => {
-                        return Ok(AttemptRunStatus::StaleView);
-                    }
-                    Err(error) => return Err(async_store_error(error)),
+                preclaim
+            };
+            let (bundle, settlement) = preclaim.into_prepared_commit_bundle()?;
+            let outcome = match store.append_prepared_commit_bundle(bundle).await {
+                Ok(outcome) => outcome,
+                Err(error) if async_error_is_stale_expected_next_seq(&error) => {
+                    current = refresh_current_after_stale_append(store, current).await?;
+                    return Ok(AttemptRunResult::new(current, AttemptRunStatus::StaleView));
                 }
+                Err(error) => return Err(async_store_error(error)),
+            };
+            if matches!(&outcome, store::CommitOutcome::Appended(_)) {
+                settle_runner_output(settlement);
             }
-            latest_view = load_runtime_run_view(runtime_spec, store, run_id).await?;
+            if let store::CommitOutcome::ExecutionClaimBusy(_) = &outcome {
+                return Err(unexpected_execution_claim_busy(
+                    "resource-lane pre-invocation commit",
+                ));
+            }
+            let blocked = match &outcome {
+                store::CommitOutcome::AdmissionBlocked(block) => {
+                    Some(resource_lane_block_witness_from_outcome(&node_id, block))
+                }
+                _ => None,
+            };
+            current = refresh_current_after_commit(store, current, &outcome).await?;
+            if let Some(witness) = blocked {
+                return Ok(AttemptRunResult::new(
+                    current,
+                    AttemptRunStatus::BlockedOnResourceLane {
+                        witness: Box::new(witness),
+                        advanced,
+                    },
+                ));
+            }
+            advanced = true;
         }
+
+        let retryability = {
+            let runtime_spec = current.runtime_spec();
+            let node = certified_node(&runtime_spec, &node_id)?;
+            ObservedFailureRetryabilityPolicy::for_attempt(&runtime_spec, node)
+        };
         let failure_context = ObservedFailureContext {
-            runtime_spec,
-            run_id,
-            node,
+            run_id: &run_id,
+            node_id: &node_id,
             attempt_id: &attempt_id,
-            view: &latest_view,
-            retryability: ObservedFailureRetryabilityPolicy::for_attempt(runtime_spec, node),
+            retryability,
         };
-        let invocation = match InvocationBuilder::new(InvocationBuilderInput {
-            runtime_spec,
-            run_id,
-            node,
-            descriptor,
-            output_cell,
-            attempt_id: &attempt_id,
-            attempt_no,
-            view: &latest_view,
-        })
-        .build()
-        {
+        let prepared_invocation = {
+            let runtime_spec = current.runtime_spec();
+            let lifecycle = current.lifecycle();
+            let node = certified_node(&runtime_spec, &node_id)?;
+            let descriptor = runtime_spec.state_descriptor_for_node(node)?;
+            let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "node {} output cell {} is missing",
+                    node.node_id, node.output_cell
+                ))
+            })?;
+            InvocationBuilder::new(InvocationBuilderInput {
+                runtime_spec,
+                run_id: &run_id,
+                node,
+                descriptor,
+                output_cell,
+                attempt_id: &attempt_id,
+                attempt_no,
+                lifecycle,
+            })
+            .build()
+        };
+        let invocation = match prepared_invocation {
             Ok(invocation) => invocation,
-            Err(error) => return terminalize_observed_failure(store, failure_context, error).await,
+            Err(error) => {
+                return terminalize_observed_failure(store, current, failure_context, error).await;
+            }
         };
-        let output = match binding
+        let output_result = binding
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
-            .await
-        {
+            .await;
+        let output = match output_result {
             Ok(output) => output,
             Err(RuntimeError::Blocked(_)) => {
-                return Ok(AttemptRunStatus::OperationalBlock);
+                drop(invocation);
+                return Ok(AttemptRunResult::new(
+                    current,
+                    AttemptRunStatus::OperationalBlock,
+                ));
             }
-            Err(error) => return terminalize_observed_failure(store, failure_context, error).await,
+            Err(error) => {
+                drop(invocation);
+                return terminalize_observed_failure(store, current, failure_context, error).await;
+            }
         };
         let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
-            runtime_spec,
-            run_id,
-            node,
+            runtime_spec: invocation.runtime_spec(),
+            run_id: &run_id,
+            node: invocation.node(),
             attempt_id: &attempt_id,
             caps: invocation.caps(),
-            view: &latest_view,
+            lifecycle: current.lifecycle(),
             context_output_extractor: binding.runner.context_output_extractor(),
             saga_terminal_proof: None,
             output,
         }) {
             Ok(output) => output,
-            Err(error) => return terminalize_observed_failure(store, failure_context, error).await,
+            Err(error) => {
+                drop(invocation);
+                return terminalize_observed_failure(store, current, failure_context, error).await;
+            }
         };
-        let lane_projection = store
-            .status_projection_snapshot(run_id)
-            .await
-            .map_err(async_store_error)?;
-        if let Some(witness) =
-            resource_lane_block_for_request(&lane_projection, terminal_output.request())
-        {
-            return Ok(AttemptRunStatus::BlockedOnResourceLane {
-                witness: Box::new(witness),
-                advanced,
-            });
-        }
+        drop(invocation);
         let has_resource_lane_claim = request_has_resource_lane_claim(terminal_output.request());
         let (bundle, settlement) = terminal_output.into_prepared_commit_bundle()?;
-        match store.append_prepared_commit_bundle(bundle).await {
-            Ok(store::CommitOutcome::Appended(_)) => {
-                settle_runner_output(settlement);
-                Ok(AttemptRunStatus::Advanced)
+        let outcome = match store.append_prepared_commit_bundle(bundle).await {
+            Ok(outcome) => outcome,
+            Err(error) if async_error_is_stale_expected_next_seq(&error) => {
+                current = refresh_current_after_stale_append(store, current).await?;
+                return Ok(AttemptRunResult::new(current, AttemptRunStatus::StaleView));
             }
-            Ok(store::CommitOutcome::Idempotent(_)) => Ok(AttemptRunStatus::Advanced),
-            Ok(store::CommitOutcome::AdmissionBlocked(block)) if has_resource_lane_claim => {
-                Ok(AttemptRunStatus::BlockedOnResourceLane {
-                    witness: Box::new(resource_lane_block_witness_from_outcome(
-                        &node.node_id,
-                        *block,
-                    )),
+            Err(error) => return Err(async_store_error(error)),
+        };
+        if matches!(&outcome, store::CommitOutcome::Appended(_)) {
+            settle_runner_output(settlement);
+        }
+        let status = match &outcome {
+            store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_) => {
+                AttemptRunStatus::Advanced
+            }
+            store::CommitOutcome::AdmissionBlocked(block) if has_resource_lane_claim => {
+                AttemptRunStatus::BlockedOnResourceLane {
+                    witness: Box::new(resource_lane_block_witness_from_outcome(&node_id, block)),
                     advanced,
-                })
+                }
             }
-            Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
-                Err(RuntimeError::InvalidRunStream(format!(
+            store::CommitOutcome::AdmissionBlocked(block) => {
+                return Err(RuntimeError::InvalidRunStream(format!(
                     "commit without resource-lane claim was blocked by lane {}:{}",
                     block.resource_lane_key.namespace, block.resource_lane_key.key
-                )))
+                )));
             }
-            Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
-                Err(unexpected_execution_claim_busy("terminal attempt commit"))
+            store::CommitOutcome::ExecutionClaimBusy(_) => {
+                return Err(unexpected_execution_claim_busy("terminal attempt commit"));
             }
-            Err(error) if async_error_is_stale_expected_next_seq(&error) => {
-                Ok(AttemptRunStatus::StaleView)
-            }
-            Err(error) => Err(async_store_error(error)),
-        }
+        };
+        current = refresh_current_after_commit(store, current, &outcome).await?;
+        Ok(AttemptRunResult::new(current, status))
     }
 }
 
-pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Sized>(
+pub(crate) async fn terminalize_observed_failure<S: store::RunJournalStore + ?Sized>(
     store: &S,
+    mut current: VerifiedCurrentRun,
     context: ObservedFailureContext<'_>,
     error: RuntimeError,
-) -> Result<AttemptRunStatus> {
+) -> Result<AttemptRunResult> {
     let ObservedFailureContext {
-        runtime_spec,
         run_id,
-        node,
+        node_id,
         attempt_id,
-        view,
         retryability,
     } = context;
     let Some(failure_info) = observed_attempt_failure_info(&error, retryability)? else {
         return Err(error);
     };
-    if !can_terminalize_observed_failure(runtime_spec, run_id, node, attempt_id, view)? {
-        return Err(error);
-    }
-    let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
-        runtime_spec,
-        run_id,
-        node,
-        attempt_id,
-        &failure_info.diagnostics,
-    )?;
-    let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
-        runtime_spec,
-        run_id,
-        node,
-        attempt_id,
-        view,
-        error: failure_info.error,
-        diagnostic_artifact: Some(diagnostic_artifact),
-    })?;
-    let (bundle, settlement) = failure.into_prepared_commit_bundle()?;
-    match store.append_prepared_commit_bundle(bundle).await {
-        Ok(store::CommitOutcome::Appended(_)) => {
-            settle_runner_output(settlement);
-            Ok(AttemptRunStatus::Advanced)
+    let failure = {
+        let runtime_spec = current.runtime_spec();
+        let lifecycle = current.lifecycle();
+        let node = certified_node(&runtime_spec, node_id)?;
+        if !can_terminalize_observed_failure(&runtime_spec, &lifecycle, node, attempt_id)? {
+            return Err(error);
         }
-        Ok(store::CommitOutcome::Idempotent(_)) => Ok(AttemptRunStatus::Advanced),
-        Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
-            Err(RuntimeError::InvalidRunStream(format!(
+        let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
+            &runtime_spec,
+            run_id,
+            node,
+            attempt_id,
+            &failure_info.diagnostics,
+        )?;
+        CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
+            runtime_spec,
+            run_id,
+            node,
+            attempt_id,
+            lifecycle,
+            error: failure_info.error,
+            diagnostic_artifact: Some(diagnostic_artifact),
+        })?
+    };
+    let (bundle, settlement) = failure.into_prepared_commit_bundle()?;
+    let outcome = match store.append_prepared_commit_bundle(bundle).await {
+        Ok(outcome) => outcome,
+        Err(error) if async_error_is_stale_expected_next_seq(&error) => {
+            current = refresh_current_after_stale_append(store, current).await?;
+            return Ok(AttemptRunResult::new(current, AttemptRunStatus::StaleView));
+        }
+        Err(error) => return Err(async_store_error(error)),
+    };
+    if matches!(&outcome, store::CommitOutcome::Appended(_)) {
+        settle_runner_output(settlement);
+    }
+    match &outcome {
+        store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_) => {}
+        store::CommitOutcome::AdmissionBlocked(block) => {
+            return Err(RuntimeError::InvalidRunStream(format!(
                 "attempt failure commit was blocked by lane {}:{}",
                 block.resource_lane_key.namespace, block.resource_lane_key.key
-            )))
+            )));
         }
-        Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
-            Err(unexpected_execution_claim_busy("attempt failure commit"))
+        store::CommitOutcome::ExecutionClaimBusy(_) => {
+            return Err(unexpected_execution_claim_busy("attempt failure commit"));
         }
-        Err(error) if async_error_is_stale_expected_next_seq(&error) => {
-            Ok(AttemptRunStatus::StaleView)
-        }
-        Err(error) => Err(async_store_error(error)),
     }
+    current = refresh_current_after_commit(store, current, &outcome).await?;
+    Ok(AttemptRunResult::new(current, AttemptRunStatus::Advanced))
 }
 
 fn settle_runner_output(settlement: Option<crate::RunnerOutputSettlement>) {
@@ -443,49 +515,31 @@ fn unexpected_execution_claim_busy(context: &str) -> RuntimeError {
     ))
 }
 
-async fn load_runtime_run_view<S: store::RunEventStore + ?Sized>(
-    runtime_spec: &CertifiedRuntimeSpec,
-    store: &S,
-    run_id: &RunId,
-) -> Result<RuntimeRunView> {
-    let committed = store
-        .load_committed_run_stream(run_id)
-        .await
-        .map_err(async_store_error)?;
-    let authority = store
-        .status_projection_snapshot(run_id)
-        .await
-        .map_err(async_store_error)?;
-    RuntimeRunView::from_committed_stream(runtime_spec, &committed)?
-        .with_status_authority(&authority)
-}
-
-fn can_terminalize_observed_failure(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
+fn can_terminalize_observed_failure<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-    view: &RuntimeRunView,
-) -> Result<bool> {
-    let Some(attempt) = view.projections.attempt(&node.node_id, attempt_id) else {
+) -> Result<bool>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let Some(attempt) = lifecycle.attempt(&node.node_id, attempt_id) else {
         return Ok(false);
     };
-    if !matches!(attempt.status, store::AttemptStatus::Started { .. }) {
+    if !matches!(
+        attempt.status(),
+        store::current_lifecycle::CurrentAttemptStatusRef::Started { .. }
+    ) {
         return Ok(false);
     }
     if node.side_effect.is_some() {
-        let Some(side_effect) = side_effect_projection_for_attempt(
-            runtime_spec,
-            run_id,
-            &view.projections,
-            node,
-            attempt_id,
-        )?
+        let Some(side_effect) = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)?
         else {
             return Ok(true);
         };
         return Ok(matches!(
-            side_effect.phase,
+            side_effect.phase(),
             store::SideEffectPhase::Claimed { .. }
         ));
     }
@@ -527,7 +581,11 @@ fn observed_attempt_failure_info(
                 retryable,
                 "runner output failed validation",
             )?,
-            _ => unreachable!("failure class must match runtime error"),
+            _ => {
+                return Err(RuntimeError::RuntimeValidation(
+                    "observed failure classification did not match its runtime error".to_owned(),
+                ));
+            }
         },
         ObservedFailureClass::RuntimeValidation => events::MfmErrorInfo::new(
             events::ErrorCode::new("runtime_validation_failed")?,
@@ -568,13 +626,16 @@ fn observed_failure_diagnostics(
     }
 }
 
-fn redacted_attempt_failure_diagnostic_artifact(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn redacted_attempt_failure_diagnostic_artifact<S>(
+    runtime_spec: &S,
     run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     diagnostics: &[mfm_capabilities::RedactedProviderDiagnostic],
-) -> Result<PreparedStagedArtifact> {
+) -> Result<PreparedStagedArtifact>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let bytes = canonical_json(serde_json::json!({
         "attempt_id": attempt_id.as_str(),
         "diagnostics": diagnostics,
@@ -625,29 +686,6 @@ fn redacted_attempt_failure_diagnostic_schema_id() -> Result<SchemaId> {
     )?)
 }
 
-fn resource_lane_block_for_request(
-    projections: &store::ProjectionSnapshot,
-    request: &store::CommitRequest,
-) -> Option<ResourceLaneBlockWitness> {
-    request.payloads().iter().find_map(|payload| {
-        let events::KernelEventPayload::ResourceLaneClaimIntent(payload) = payload else {
-            return None;
-        };
-        let lane_key = store::ResourceLaneKey::from_evidence(&payload.resource_key);
-        let holder =
-            store::SideEffectPairLedgerRef::new(request.run_id().clone(), payload.pair_id.clone());
-        projections
-            .resource_lane(&lane_key)
-            .filter(|projection| projection.holder != holder)
-            .map(|_| ResourceLaneBlockWitness {
-                node_id: payload.node_id.clone(),
-                lane_key,
-                waiter_id: None,
-                lane_ticket: None,
-            })
-    })
-}
-
 fn request_has_resource_lane_claim(request: &store::CommitRequest) -> bool {
     request.payloads().iter().any(|payload| {
         matches!(
@@ -659,11 +697,11 @@ fn request_has_resource_lane_claim(request: &store::CommitRequest) -> bool {
 
 fn resource_lane_block_witness_from_outcome(
     node_id: &NodeId,
-    block: store::WaitFifoAdmissionBlock,
+    block: &store::WaitFifoAdmissionBlock,
 ) -> ResourceLaneBlockWitness {
     ResourceLaneBlockWitness {
         node_id: node_id.clone(),
-        lane_key: block.resource_lane_key,
+        lane_key: block.resource_lane_key.clone(),
         waiter_id: block
             .waiter
             .as_ref()
@@ -688,13 +726,15 @@ fn node_resource_claims_lane_namespace(
     }
 }
 
-fn node_needs_pre_invocation_lane_claim(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
+fn node_needs_pre_invocation_lane_claim<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     if !matches!(
         node.side_effect
             .as_ref()
@@ -703,12 +743,11 @@ fn node_needs_pre_invocation_lane_claim(
     ) {
         return Ok(false);
     }
-    let Some(projection) =
-        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
+    let Some(side_effect) = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)?
     else {
         return Ok(true);
     };
-    let state = projection
+    let state = side_effect
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     Ok(matches!(
@@ -720,22 +759,37 @@ fn node_needs_pre_invocation_lane_claim(
     ))
 }
 
-fn projected_started_attempt_active_lane_key(
-    projections: &store::ProjectionSnapshot,
+fn certified_node<'a>(
+    runtime_spec: &CurrentRuntimeSpecRef<'a>,
+    node_id: &NodeId,
+) -> Result<&'a spec::NodeSpec> {
+    runtime_spec.node(node_id).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!("selected certified node {node_id} is missing"))
+    })
+}
+
+fn current_started_attempt_active_lane_key(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
 ) -> Option<store::ResourceLaneKey> {
-    for (lane_key, lane) in projections.resource_lanes() {
-        if lane.node_id != node.node_id {
-            continue;
+    let mut active = None;
+    let _ = lifecycle.visit_resource_lanes(|lane| {
+        if lane.node_id() != &node.node_id {
+            return std::ops::ControlFlow::Continue(());
         }
-        let Some(attempt) = projections.attempt(&node.node_id, &lane.attempt_id) else {
-            continue;
+        let Some(attempt) = lifecycle.attempt(&node.node_id, lane.attempt_id()) else {
+            return std::ops::ControlFlow::Continue(());
         };
-        if matches!(attempt.status, store::AttemptStatus::Started { .. }) {
-            return Some(lane_key.clone());
+        if matches!(
+            attempt.status(),
+            store::current_lifecycle::CurrentAttemptStatusRef::Started { .. }
+        ) {
+            active = Some(lane.key().clone());
+            return std::ops::ControlFlow::Break(());
         }
-    }
-    None
+        std::ops::ControlFlow::Continue(())
+    });
+    active
 }
 
 fn store_error_is_stale_expected_next_seq(error: &store::StoreError) -> bool {

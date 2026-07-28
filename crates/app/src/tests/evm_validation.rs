@@ -17,7 +17,7 @@ use mfm_program::{
 };
 use mfm_program_derive::PublicOutputs;
 use mfm_runtime::ErasedRunnerRegistry;
-use mfm_store::v1::{self as store, StoreScopeStore as _};
+use mfm_store::v1::{self as store, RunJournalStore as _, StoreScopeStore as _};
 
 const CONTRACT: Address = address!("1111111111111111111111111111111111111111");
 const CALLER: Address = address!("2222222222222222222222222222222222222222");
@@ -38,7 +38,7 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
     let live_reads = Arc::new(AtomicUsize::new(0));
     let certification = validation_certification_registry();
     let launch_services = make_run_services(
-        validation_runners(&store, Arc::clone(&live_reads)),
+        validation_runners(Arc::clone(&live_reads)),
         Arc::new(store.clone()),
         certification.clone(),
     );
@@ -72,11 +72,10 @@ async fn exact_anchor_validation_replays_without_live_evm_authority() {
         .await
         .expect("evidence-only validation replay");
     assert_eq!(replay.run_mode, RunModeStatus::Completed);
-    let broker = replay_services
-        .replay_broker_for_test(&run_id)
+    replay_services
+        .inspect_replay_broker_for_test(&run_id, mfm_evm_live::verify_evm_validation_replay)
         .await
-        .expect("validation replay broker");
-    mfm_evm_live::verify_evm_validation_replay(&broker)
+        .expect("validation replay broker")
         .expect("explicit validation foundation replay verifier");
     assert_eq!(live_reads.load(Ordering::SeqCst), 3);
 }
@@ -100,7 +99,6 @@ async fn contract_validation_validates_its_async_route_before_admission() {
     let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     register_evm_validation_runner(
         &mut runners,
-        Arc::new(store.clone()),
         Arc::new(ValidationSessions { live_reads: None }),
         &read_factory,
         &adapter_factory,
@@ -116,11 +114,10 @@ async fn contract_validation_validates_its_async_route_before_admission() {
     assert_eq!(error.code, "RuntimeConfigRequired");
     assert_eq!(error.diagnostics.len(), 1);
     assert_eq!(error.diagnostics[0].provider_family().as_str(), "evm");
-    assert!(store
-        .load_run_stream(&run_id)
-        .await
-        .expect("run stream")
-        .is_empty());
+    assert!(matches!(
+        store.load_committed_journal(&run_id).await,
+        Err(store::StoreError::RunNotFound { .. })
+    ));
 }
 
 fn validation_launch_material() -> (
@@ -188,16 +185,12 @@ fn validation_certification_registry() -> CertificationRegistry {
     registry
 }
 
-fn validation_runners(
-    store: &store::AsyncInMemoryRunStore,
-    live_reads: Arc<AtomicUsize>,
-) -> ErasedRunnerRegistry {
+fn validation_runners(live_reads: Arc<AtomicUsize>) -> ErasedRunnerRegistry {
     let mut runners = test_runner_registry();
     let read_factory = test_factory_binding(&runners, "read_external");
     let adapter_factory = test_factory_binding(&runners, "evm_jsonrpc_adapter");
     register_evm_validation_runner(
         &mut runners,
-        Arc::new(store.clone()),
         Arc::new(ValidationSessions {
             live_reads: Some(live_reads),
         }),

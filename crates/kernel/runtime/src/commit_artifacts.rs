@@ -239,14 +239,15 @@ pub(super) fn validate_staged_artifacts(
     Ok(by_artifact.into_values().collect())
 }
 
-pub(super) fn framework_retention_manifest_artifact(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
+pub(super) fn framework_retention_manifest_artifact<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
-    pre_projection_stream: &[store::KernelEventEnvelope],
-    artifact_bytes: &store::ArtifactByteAuthorityMap,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     staged_artifacts: &[ValidatedStagedArtifact],
-) -> Result<Option<RetentionManifestArtifact>> {
+) -> Result<Option<RetentionManifestArtifact>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let manifests = staged_artifacts
         .iter()
         .filter(|artifact| artifact.binding == StagedArtifactBindingKind::RetentionManifest)
@@ -285,12 +286,7 @@ pub(super) fn framework_retention_manifest_artifact(
             node.node_id
         )));
     };
-    let expected = build_retention_manifest_artifact(
-        runtime_spec,
-        run_id,
-        pre_projection_stream,
-        artifact_bytes,
-    )?;
+    let expected = build_retention_manifest_artifact(runtime_spec, lifecycle)?;
     if staged.evidence != expected.evidence || bytes != expected.bytes.as_bytes() {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "retention framework node {} staged manifest outside authoritative stream",
@@ -300,11 +296,14 @@ pub(super) fn framework_retention_manifest_artifact(
     Ok(Some(expected))
 }
 
-pub(crate) fn retention_manifest_payloads(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(crate) fn retention_manifest_payloads<S>(
+    runtime_spec: &S,
     run_id: &RunId,
     manifest: RetentionManifestArtifact,
-) -> Result<Vec<events::KernelEventPayload>> {
+) -> Result<Vec<events::KernelEventPayload>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let manifest_ref = manifest.evidence.retention_ref()?;
     Ok(vec![
         events::KernelEventPayload::RetentionManifestProjected(
@@ -735,14 +734,17 @@ pub(super) fn staged_artifact_reference_payloads(
     Ok(refs)
 }
 
-pub(super) fn bind_staged_retention_refs(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(super) fn bind_staged_retention_refs<S>(
+    runtime_spec: &S,
     run_id: &RunId,
     node: &spec::NodeSpec,
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     required_artifacts: &[store::ArtifactEvidenceRef],
     staged: Vec<StagedRetentionRefs>,
-) -> Result<Vec<events::KernelEventPayload>> {
+) -> Result<Vec<events::KernelEventPayload>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let mut payloads = Vec::with_capacity(staged.len());
     for staged_refs in staged {
         let reason = staged_refs.reason;
@@ -753,7 +755,7 @@ pub(super) fn bind_staged_retention_refs(
                 node.node_id
             )));
         }
-        validate_fact_query_evidence_retention_set(projections, &staged_refs)?;
+        validate_fact_query_evidence_retention_set(lifecycle, &staged_refs)?;
         for retention_ref in &staged_refs.refs {
             if let Some(artifact) =
                 artifact_evidence_for_retention_ref(required_artifacts, retention_ref)
@@ -770,7 +772,7 @@ pub(super) fn bind_staged_retention_refs(
             }
 
             if !staged_retention_ref_authorized_by_existing_fact_query_evidence(
-                projections,
+                lifecycle,
                 &staged_refs,
                 retention_ref,
             ) {
@@ -793,7 +795,7 @@ pub(super) fn bind_staged_retention_refs(
 }
 
 pub(super) fn validate_fact_query_evidence_retention_set(
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     staged_refs: &StagedRetentionRefs,
 ) -> Result<()> {
     let StagedRetentionRefAuthority::FactQueryEvidence { returned_refs } = &staged_refs.authority
@@ -813,7 +815,7 @@ pub(super) fn validate_fact_query_evidence_retention_set(
 
     for fact_ref in returned_refs {
         let [descriptor_ref, response_ref] =
-            fact_query_returned_ref_retention_refs(projections, fact_ref)?;
+            fact_query_returned_ref_retention_refs(lifecycle, fact_ref)?;
         if !staged_refs.refs.contains(&descriptor_ref) {
             return Err(RuntimeError::InvalidRunnerOutput(
                 "fact query evidence retention missing descriptor artifact authority".to_owned(),
@@ -831,7 +833,7 @@ pub(super) fn validate_fact_query_evidence_retention_set(
 }
 
 pub(super) fn staged_retention_ref_authorized_by_existing_fact_query_evidence(
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     staged_refs: &StagedRetentionRefs,
     retention_ref: &events::RetentionRef,
 ) -> bool {
@@ -843,7 +845,7 @@ pub(super) fn staged_retention_ref_authorized_by_existing_fact_query_evidence(
     match retention_ref.role {
         events::ArtifactRole::FactDescriptor | events::ArtifactRole::FactResponse => {
             returned_refs.iter().any(|fact_ref| {
-                fact_query_returned_ref_retention_refs(projections, fact_ref)
+                fact_query_returned_ref_retention_refs(lifecycle, fact_ref)
                     .map(|refs| refs.contains(retention_ref))
                     .unwrap_or(false)
             })
@@ -852,12 +854,15 @@ pub(super) fn staged_retention_ref_authorized_by_existing_fact_query_evidence(
     }
 }
 
-pub(super) fn validate_staged_retention_reason(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(super) fn validate_staged_retention_reason<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
     artifact_evidence: &[store::ArtifactEvidenceRef],
     staged_refs: &StagedRetentionRefs,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     match staged_refs.reason {
         events::RetentionReason::RunAdmitted | events::RetentionReason::ManifestProjection => {
             return Err(RuntimeError::InvalidRunnerOutput(format!(

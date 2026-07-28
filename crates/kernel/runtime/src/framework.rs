@@ -3,19 +3,21 @@ use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, ContentDigest, RunId};
+use mfm_ids::{ArtifactId, ContentDigest};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::artifacts::{verify_artifact_bytes, StagedArtifact, StagedRetentionRefs};
+use crate::history::committed_input_artifact;
 use crate::invocation::ErasedRunCtx;
 use crate::runners::{
     ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
     RunnerEventPayload,
 };
+use crate::spec_authority::CurrentSpecRead;
 use crate::{
-    canonical_json, content_digest_json, executable_identity_json, CertifiedRuntimeSpec,
-    ExecutableIdentityTemplate, Result, RuntimeError,
+    canonical_json, content_digest_json, executable_identity_json, ExecutableIdentityTemplate,
+    Result, RuntimeError,
 };
 
 pub(crate) fn framework_public_output_binding(
@@ -125,15 +127,20 @@ fn bridge_same_value(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             ))
         }
     };
-    let Some((bytes, source_evidence)) = ctx
-        .artifact_byte_authority()
-        .get(&(artifact_id.clone(), evidence_hash.clone()))
-    else {
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "bridge input artifact {} is not in committed byte authority",
-            artifact_id
-        )));
+    let role = match &input.terminal {
+        crate::MaterializedCellTerminal::Seed { .. } => events::ArtifactRole::SeedInput,
+        crate::MaterializedCellTerminal::Produced { .. } => events::ArtifactRole::StateOutput,
+        crate::MaterializedCellTerminal::Skipped { .. } => unreachable!("rejected above"),
     };
+    let source = committed_input_artifact(
+        ctx.lifecycle(),
+        &input.cell_id,
+        artifact_id,
+        evidence_hash,
+        role,
+    )?;
+    let bytes = source.bytes();
+    let source_evidence = source.evidence();
     if source_evidence.digest != *content_digest
         || source_evidence.schema_id.as_ref() != Some(&input.schema_id)
         || source_evidence.semantic_type_id.as_ref() != Some(&input.semantic_type_id)
@@ -157,7 +164,7 @@ fn bridge_same_value(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::StateOutput,
     };
-    let staged = StagedArtifact::inline_attempt_artifact(&ctx, bytes.clone(), output_evidence)?;
+    let staged = StagedArtifact::inline_attempt_artifact(&ctx, bytes.to_vec(), output_evidence)?;
     let output_evidence = staged.evidence().clone();
     let evidence_hash = output_evidence.evidence_hash()?;
     let produced = events::CellProduced {
@@ -302,14 +309,10 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     };
     let mut cells = Vec::with_capacity(render.required_cells.len());
     for required in &render.required_cells {
-        let Some(store::CellTerminalProjection::Produced {
-            artifact_id,
-            content_digest,
-            evidence_hash,
-            ..
-        }) = ctx
-            .projections()
-            .cell_terminal_for_run(ctx.run_id(), &required.cell_id)
+        let Some(produced) = ctx
+            .lifecycle()
+            .cell(&required.cell_id)
+            .and_then(|cell| cell.produced())
         else {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "public-output render node {} required incomplete cell {}",
@@ -325,9 +328,9 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             semantic_type_id: required.semantic_type_id.clone(),
             schema_id: required.schema_id.clone(),
             value_lineage: required.value_lineage.clone(),
-            content_digest: content_digest.clone(),
-            artifact_id: artifact_id.clone(),
-            evidence_hash: evidence_hash.clone(),
+            content_digest: produced.content_digest().clone(),
+            artifact_id: produced.artifact_id().clone(),
+            evidence_hash: produced.evidence_hash().clone(),
         });
     }
     let rendered_digest = public_output_rendered_digest(render, &cells)?;
@@ -373,18 +376,14 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
             ctx.node().node_id
         )));
     };
-    let manifest = build_retention_manifest_artifact(
-        ctx.runtime_spec(),
-        ctx.run_id(),
-        ctx.run_stream(),
-        ctx.artifact_byte_authority(),
-    )?;
+    let manifest = build_retention_manifest_artifact(&ctx.runtime_spec(), ctx.lifecycle())?;
     let manifest_artifact = StagedArtifact::inline_retention_manifest_artifact(
         &ctx,
         manifest.bytes.to_vec(),
         manifest.evidence.clone(),
     )?;
-    let receipt_bytes = retention_manifest_receipt_json(&manifest, ctx.run_stream())?;
+    let receipt_bytes =
+        retention_manifest_receipt_json(&manifest, current_sequence(ctx.lifecycle()))?;
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
     let receipt_retention_ref = receipt_artifact.evidence().retention_ref()?;
@@ -404,10 +403,13 @@ fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             ctx.node().node_id
         )));
     };
-    let completion = run_completion_evidence(ctx.runtime_spec(), ctx.run_id(), ctx.projections())?;
-    let retention_manifest = projected_retention_manifest(ctx.run_id(), ctx.projections())?;
-    let receipt_bytes =
-        complete_run_receipt_json(&completion, retention_manifest, ctx.run_stream())?;
+    let completion = run_completion_evidence(&ctx.runtime_spec(), ctx.lifecycle())?;
+    let retention_manifest = current_retention_manifest(ctx.lifecycle())?;
+    let receipt_bytes = complete_run_receipt_json(
+        &completion,
+        &retention_manifest,
+        current_sequence(ctx.lifecycle()),
+    )?;
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
     Ok(ErasedRunnerOutput::from_parts(
@@ -424,10 +426,12 @@ fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunner
             ctx.node().node_id
         )));
     };
-    let outcome =
-        saga_terminal_completion_outcome(ctx.runtime_spec(), ctx.run_id(), ctx.projections())?;
-    let receipt_bytes =
-        resolve_saga_terminal_receipt_json(ctx.runtime_spec(), &outcome, ctx.run_stream())?;
+    let outcome = saga_terminal_completion_outcome(&ctx.runtime_spec(), ctx.lifecycle())?;
+    let receipt_bytes = resolve_saga_terminal_receipt_json(
+        &ctx.runtime_spec(),
+        &outcome,
+        current_sequence(ctx.lifecycle()),
+    )?;
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
     Ok(ErasedRunnerOutput::from_parts(
@@ -491,121 +495,114 @@ pub(crate) fn public_output_rendered_digest(
     }))
 }
 
+fn current_sequence(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Option<u64> {
+    let mut sequence = None;
+    let _ = lifecycle.visit_records(|record| {
+        sequence = Some(record.sequence().as_u64());
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    sequence
+}
+
 pub(crate) fn retention_manifest_receipt_json(
     manifest: &RetentionManifestArtifact,
-    pre_projection_stream: &[store::KernelEventEnvelope],
+    pre_projection_sequence: Option<u64>,
 ) -> Result<PlainCanonicalJsonBytes> {
     canonical_json(serde_json::json!({
         "manifest_artifact_id": manifest.evidence.artifact_id.as_str(),
         "manifest_digest": manifest.evidence.digest.as_str(),
         "manifest_seq": manifest.manifest_seq,
-        "pre_projection_stream_seq": pre_projection_stream
-            .last()
-            .map(|event| event.seq().as_u64()),
+        "pre_projection_stream_seq": pre_projection_sequence,
         "previous_manifest_digest": manifest.previous_manifest_digest.as_ref().map(ContentDigest::as_str),
     }))
 }
 
 pub(crate) fn complete_run_receipt_json(
     completion: &events::PublicOutputCompletionEvidence,
-    retention_manifest: &store::RetentionManifestProjection,
-    pre_completion_stream: &[store::KernelEventEnvelope],
+    retention_manifest: &store::current_lifecycle::CurrentRetentionManifestRef<'_>,
+    pre_completion_sequence: Option<u64>,
 ) -> Result<PlainCanonicalJsonBytes> {
     canonical_json(serde_json::json!({
         "public_output_event_id": completion.public_output_event_id.as_str(),
         "public_output_schema_id": completion.public_output_schema_id.as_str(),
-        "retention_manifest_artifact_id": retention_manifest.manifest_artifact_id.as_str(),
-        "retention_manifest_digest": retention_manifest.manifest_digest.as_str(),
-        "retention_manifest_seq": retention_manifest.manifest_seq,
-        "pre_completion_stream_seq": pre_completion_stream
-            .last()
-            .map(|event| event.seq().as_u64()),
+        "retention_manifest_artifact_id": retention_manifest.artifact_id().as_str(),
+        "retention_manifest_digest": retention_manifest.digest().as_str(),
+        "retention_manifest_seq": retention_manifest.sequence(),
+        "pre_completion_stream_seq": pre_completion_sequence,
     }))
 }
 
-pub(crate) fn resolve_saga_terminal_receipt_json(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(crate) fn resolve_saga_terminal_receipt_json<S>(
+    runtime_spec: &S,
     outcome: &events::RunCompletionOutcome,
-    pre_resolution_stream: &[store::KernelEventEnvelope],
-) -> Result<PlainCanonicalJsonBytes> {
+    pre_resolution_sequence: Option<u64>,
+) -> Result<PlainCanonicalJsonBytes>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     canonical_json(serde_json::json!({
         "public_output_schema_id": runtime_spec.spec().public_outputs.public_schema_id.as_str(),
         "terminal_outcome": outcome.kind(),
-        "pre_resolution_stream_seq": pre_resolution_stream
-            .last()
-            .map(|event| event.seq().as_u64()),
+        "pre_resolution_stream_seq": pre_resolution_sequence,
     }))
 }
 
-pub(crate) fn saga_terminal_completion_outcome(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
-) -> Result<events::RunCompletionOutcome> {
+pub(crate) fn saga_terminal_completion_outcome<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<events::RunCompletionOutcome>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
-    projections
-        .saga_terminal_completion_outcome(run_id, &runtime_spec.spec().saga, &terminal_policies)
+    lifecycle
+        .saga_terminal_completion_outcome(&runtime_spec.spec().saga, &terminal_policies)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
 }
 
-pub(crate) fn saga_terminal_proof(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
-    prefix_next_seq: store::StreamSeq,
-    manual: Option<mfm_manual_auth::VerifiedManualResolutionForPrefix>,
-) -> Result<store::SagaTerminalProof> {
-    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
-    let saga = projections.derive_saga_projection(
-        run_id,
-        &runtime_spec.spec().saga,
-        &terminal_policies,
-    )?;
-    store::SagaTerminalProof::new(&runtime_spec.spec().saga, &saga, prefix_next_seq, manual)
-        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
-}
-
-pub(crate) fn run_completion_evidence(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
-) -> Result<events::PublicOutputCompletionEvidence> {
+pub(crate) fn run_completion_evidence<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<events::PublicOutputCompletionEvidence>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let public_schema_id = runtime_spec.spec().public_outputs.public_schema_id.clone();
-    match projections.public_output(run_id, &public_schema_id) {
-        Some(store::PublicOutputProjection::Produced { event_id, .. }) => {
-            Ok(events::PublicOutputCompletionEvidence {
-                public_output_schema_id: public_schema_id,
-                public_output_event_id: event_id.clone(),
-            })
-        }
-        Some(store::PublicOutputProjection::RenderFailed { .. }) | None => {
-            Err(RuntimeError::InvalidRunStream(
-                "run completion requires projected public output evidence".to_owned(),
-            ))
-        }
+    match lifecycle.public_output(&public_schema_id) {
+        Some(output) if output.produced().is_some() => Ok(events::PublicOutputCompletionEvidence {
+            public_output_schema_id: public_schema_id,
+            public_output_event_id: output.event_id().clone(),
+        }),
+        Some(_) | None => Err(RuntimeError::InvalidRunStream(
+            "run completion requires current public output evidence".to_owned(),
+        )),
     }
 }
 
-pub(crate) fn projected_retention_manifest<'a>(
-    run_id: &RunId,
-    projections: &'a store::ProjectionSnapshot,
-) -> Result<&'a store::RetentionManifestProjection> {
-    projections
-        .retention(run_id)
-        .and_then(|projection| projection.manifest.as_ref())
+pub(crate) fn current_retention_manifest<'a>(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'a>,
+) -> Result<store::current_lifecycle::CurrentRetentionManifestRef<'a>> {
+    lifecycle
+        .retention()
+        .and_then(|retention| retention.current_manifest())
         .ok_or_else(|| {
             RuntimeError::InvalidRunStream(
-                "run completion requires projected retention manifest evidence".to_owned(),
+                "run completion requires current retention manifest evidence".to_owned(),
             )
         })
 }
 
-pub(crate) fn framework_run_completed_payload(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
+pub(crate) fn framework_run_completed_payload<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
-    projections: &store::ProjectionSnapshot,
-) -> Result<Option<events::KernelEventPayload>> {
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<Option<events::KernelEventPayload>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let run_id = lifecycle.admission()?.run_id().clone();
     let outcome = match &node.framework {
         Some(spec::FrameworkNodeSpec::CompleteRun(complete)) => {
             let certified_node = certified_complete_run_node(runtime_spec)?;
@@ -621,8 +618,8 @@ pub(crate) fn framework_run_completed_payload(
                     node.node_id, complete.public_schema_id
                 )));
             }
-            let completion = run_completion_evidence(runtime_spec, run_id, projections)?;
-            projected_retention_manifest(run_id, projections)?;
+            let completion = run_completion_evidence(runtime_spec, lifecycle)?;
+            current_retention_manifest(lifecycle)?;
             events::RunCompletionOutcome::Completed(Box::new(completion))
         }
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)) => {
@@ -639,29 +636,17 @@ pub(crate) fn framework_run_completed_payload(
                     node.node_id, resolve.public_schema_id
                 )));
             }
-            saga_terminal_completion_outcome(runtime_spec, run_id, projections)?
+            saga_terminal_completion_outcome(runtime_spec, lifecycle)?
         }
         _ => return Ok(None),
     };
     Ok(Some(events::KernelEventPayload::RunCompleted(
         events::RunCompleted {
-            run_id: run_id.clone(),
+            run_id,
             spec_hash: runtime_spec.spec_hash().clone(),
             outcome,
         },
     )))
-}
-
-pub(crate) fn public_output_receipt_digest(
-    render: &spec::PublicOutputRenderNodeSpec,
-    cells: &[events::NamedTypedCellRef],
-    rendered_digest: &ContentDigest,
-    rendered_artifact_id: Option<&ArtifactId>,
-) -> Result<ContentDigest> {
-    Ok(
-        public_output_receipt_json(render, cells, rendered_digest, rendered_artifact_id)?
-            .content_digest(),
-    )
 }
 
 fn public_output_receipt_json(
@@ -694,15 +679,17 @@ fn public_output_cell_json(cell: &events::NamedTypedCellRef) -> serde_json::Valu
     })
 }
 
-fn retention_manifest_json(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    run_admitted: &events::RunAdmitted,
+fn retention_manifest_json<S>(
+    runtime_spec: &S,
+    run_admitted: &store::current_lifecycle::CurrentAdmissionRef<'_>,
     manifest_seq: u64,
     previous_manifest_digest: Option<&ContentDigest>,
     retained_refs: &[&events::RetentionRef],
-    stream: &[store::KernelEventEnvelope],
-) -> Result<PlainCanonicalJsonBytes> {
+    event_schema_ids: &[String],
+) -> Result<PlainCanonicalJsonBytes>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let spec_canonical = runtime_spec
         .spec()
         .canonical_json()
@@ -712,26 +699,20 @@ fn retention_manifest_json(
         .certificate()
         .canonical_json()
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
-    let event_schema_ids = stream
-        .iter()
-        .map(|event| event.event_schema_id().as_str())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
     let retained_by_role = retained_refs_by_role(retained_refs);
     canonical_json(serde_json::json!({
-        "adapter_executables": run_admitted.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
-        "canonicalizer_identity": run_admitted.canonicalizer_identity.as_str(),
+        "adapter_executables": run_admitted.adapter_executables().map(executable_identity_json).collect::<Vec<_>>(),
+        "canonicalizer_identity": run_admitted.canonicalizer_identity().as_str(),
         "certificate_artifact": {
-            "artifact_id": run_admitted.certificate_artifact.artifact_id.as_str(),
+            "artifact_id": run_admitted.certificate_artifact().artifact_id.as_str(),
             "byte_len": certificate_canonical.as_bytes().len(),
-            "content_digest": run_admitted.certificate_artifact.content_digest.as_str(),
-            "media_type": run_admitted.certificate_artifact.media_type.as_str(),
+            "content_digest": run_admitted.certificate_artifact().content_digest.as_str(),
+            "media_type": run_admitted.certificate_artifact().media_type.as_str(),
         },
         "config_artifacts": runtime_spec.spec().config_refs.iter().map(config_artifact_json).collect::<Vec<_>>(),
         "descriptor_digests": runtime_spec.spec().descriptor_identities.iter().map(descriptor_digest_json).collect::<Vec<_>>(),
         "descriptor_identities": runtime_spec.spec().descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
-        "entry_point": entry_point_launch_evidence_json(&run_admitted.entry_point),
+        "entry_point": entry_point_launch_evidence_json(run_admitted.entry_point()),
         "event_schema_ids": event_schema_ids,
         "manifest_seq": manifest_seq,
         "previous_manifest_digest": previous_manifest_digest.map(ContentDigest::as_str),
@@ -739,13 +720,13 @@ fn retention_manifest_json(
         "receipt_artifacts": retained_by_role.receipt_artifacts,
         "confirmation_artifacts": retained_by_role.confirmation_artifacts,
         "retained_refs": retained_refs.iter().map(|retention_ref| retention_ref_json(retention_ref)).collect::<Vec<_>>(),
-        "run_id": run_id.as_str(),
-        "runner_executables": run_admitted.runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+        "run_id": run_admitted.run_id().as_str(),
+        "runner_executables": run_admitted.runner_executables().map(executable_identity_json).collect::<Vec<_>>(),
         "spec_artifact": {
-            "artifact_id": run_admitted.spec_artifact.artifact_id.as_str(),
+            "artifact_id": run_admitted.spec_artifact().artifact_id.as_str(),
             "byte_len": spec_canonical.as_bytes().len(),
             "content_digest": spec_digest.as_str(),
-            "media_type": run_admitted.spec_artifact.media_type.as_str(),
+            "media_type": run_admitted.spec_artifact().media_type.as_str(),
         },
         "spec_hash": runtime_spec.spec_hash().as_str(),
         "value_artifacts": retained_by_role.value_artifacts,
@@ -894,69 +875,66 @@ pub(crate) struct RetentionManifestArtifact {
     pub(crate) previous_manifest_digest: Option<ContentDigest>,
 }
 
-pub(crate) fn public_output_is_produced(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
-) -> bool {
+pub(crate) fn public_output_is_produced<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> bool
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let public_schema_id = &runtime_spec.spec().public_outputs.public_schema_id;
-    matches!(
-        projections.public_output(run_id, public_schema_id),
-        Some(store::PublicOutputProjection::Produced { .. })
-    )
+    lifecycle
+        .public_output(public_schema_id)
+        .is_some_and(|output| output.produced().is_some())
 }
 
-pub(crate) fn build_retention_manifest_artifact(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-    artifact_bytes: &store::ArtifactByteAuthorityMap,
-) -> Result<RetentionManifestArtifact> {
-    store::ProjectionSnapshot::validate_run_stream(stream)?;
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
-        stream,
-        artifact_bytes,
-    )?;
-    let run_admitted = stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            RuntimeError::InvalidRunStream(
-                "retention manifest requires RunAdmitted evidence".to_owned(),
-            )
-        })?;
-    if &run_admitted.run_id != run_id || &run_admitted.spec_hash != runtime_spec.spec_hash() {
+pub(crate) fn build_retention_manifest_artifact<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<RetentionManifestArtifact>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let run_admitted = lifecycle.admission()?;
+    if run_admitted.spec_hash() != runtime_spec.spec_hash() {
         return Err(RuntimeError::InvalidRunStream(
             "retention manifest run-start evidence does not match certified run".to_owned(),
         ));
     }
-    let retention = projection.retention(run_id).cloned().unwrap_or_default();
-    let manifest_seq = retention
-        .manifest
+    let retention = lifecycle.retention();
+    let current_manifest = retention
+        .as_ref()
+        .and_then(store::current_lifecycle::CurrentRetentionRef::current_manifest);
+    let manifest_seq = current_manifest
         .as_ref()
         .map(|manifest| {
-            manifest.manifest_seq.checked_add(1).ok_or_else(|| {
+            manifest.sequence().checked_add(1).ok_or_else(|| {
                 RuntimeError::InvalidRunStream("retention manifest sequence overflow".to_owned())
             })
         })
         .transpose()?
         .unwrap_or(1);
-    let previous_manifest_digest = retention
-        .manifest
-        .as_ref()
-        .map(|manifest| manifest.manifest_digest.clone());
-    let retained_refs = retention.refs.values().collect::<Vec<_>>();
+    let previous_manifest_digest = current_manifest.map(|manifest| manifest.digest().clone());
+    let mut retained_refs = Vec::new();
+    if let Some(retention) = &retention {
+        let _ = retention.visit_references(|reference| {
+            retained_refs.push(reference);
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+    }
+    let mut event_schema_ids = BTreeSet::new();
+    let _ = lifecycle.visit_records(|record| {
+        event_schema_ids.insert(record.event_schema_id().as_str().to_owned());
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    let event_schema_ids = event_schema_ids.into_iter().collect::<Vec<_>>();
     let manifest_json = retention_manifest_json(
         runtime_spec,
-        run_id,
-        run_admitted,
+        &run_admitted,
         manifest_seq,
         previous_manifest_digest.as_ref(),
         &retained_refs,
-        stream,
+        &event_schema_ids,
     )?;
     let digest = manifest_json.content_digest();
     let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
@@ -981,9 +959,11 @@ pub(crate) fn build_retention_manifest_artifact(
     })
 }
 
-pub(crate) fn certified_retention_manifest_node(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<&spec::NodeSpec> {
+#[cfg(test)]
+pub(crate) fn certified_retention_manifest_node<S>(runtime_spec: &S) -> Result<&spec::NodeSpec>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     certified_framework_node(
         runtime_spec,
         |framework| {
@@ -997,9 +977,10 @@ pub(crate) fn certified_retention_manifest_node(
     )
 }
 
-pub(crate) fn certified_complete_run_node(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<&spec::NodeSpec> {
+pub(crate) fn certified_complete_run_node<S>(runtime_spec: &S) -> Result<&spec::NodeSpec>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     certified_framework_node(
         runtime_spec,
         |framework| matches!(framework, spec::FrameworkNodeSpec::CompleteRun(_)),
@@ -1008,9 +989,10 @@ pub(crate) fn certified_complete_run_node(
     )
 }
 
-pub(crate) fn certified_resolve_saga_terminal_node(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<&spec::NodeSpec> {
+pub(crate) fn certified_resolve_saga_terminal_node<S>(runtime_spec: &S) -> Result<&spec::NodeSpec>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     certified_framework_node(
         runtime_spec,
         |framework| matches!(framework, spec::FrameworkNodeSpec::ResolveSagaTerminal(_)),
@@ -1019,12 +1001,15 @@ pub(crate) fn certified_resolve_saga_terminal_node(
     )
 }
 
-fn certified_framework_node<'a>(
-    runtime_spec: &'a CertifiedRuntimeSpec,
+fn certified_framework_node<'a, S>(
+    runtime_spec: &'a S,
     matches_framework: impl Fn(&spec::FrameworkNodeSpec) -> bool,
     duplicate_message: &'static str,
     missing_message: &'static str,
-) -> Result<&'a spec::NodeSpec> {
+) -> Result<&'a spec::NodeSpec>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let mut framework_node = None;
     for node_id in runtime_spec.topological_order() {
         let node = runtime_spec.node(node_id).expect("topological node exists");

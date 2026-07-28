@@ -1,24 +1,18 @@
 use super::*;
 
-impl ReplayBroker {
+impl ReplayBroker<'_> {
     /// Returns the certified spec used as replay authority.
     pub fn certified_spec(&self) -> &HashedSpecEnvelope {
-        &self.certified_spec
+        store::current_lifecycle::read(self.view)
+            .certified_spec()
+            .envelope()
     }
 
-    /// Returns the run-start payload bound to this replay broker.
-    pub fn run_admitted(&self) -> &events::RunAdmitted {
-        &self.run_id
-    }
-
-    /// Returns the broker-owned verified history events used for replay evidence.
-    pub fn events(&self) -> &[KernelEventEnvelope] {
-        &self.stream
-    }
-
-    /// Returns the projection rebuilt from the authoritative run stream.
-    pub fn projection_snapshot(&self) -> &ProjectionSnapshot {
-        &self.projection
+    /// Returns the store-owned admitted-root reader bound to this replay broker.
+    pub fn admission(&self) -> Result<store::current_lifecycle::CurrentAdmissionRef<'_>> {
+        store::current_lifecycle::read(self.view)
+            .admission()
+            .map_err(ReplayError::from)
     }
 
     /// Returns retained artifact evidence for a direct artifact replay request.
@@ -40,29 +34,10 @@ impl ReplayBroker {
         &self,
         requirement: &store::EventArtifactRequirement,
     ) -> Result<ArtifactReplayEvidence> {
-        let evidence = self
-            .artifacts
-            .get(&(
-                requirement.artifact_id.clone(),
-                requirement.evidence_hash.clone(),
-            ))
-            .cloned()
-            .ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::ArtifactMissing,
-                    format!(
-                        "missing replay-authorized artifact evidence for {}",
-                        requirement.artifact_id
-                    ),
-                )
-            })?;
-        store::validate_artifact_requirement_against_evidence(requirement, &evidence).map_err(
-            |error| artifact_requirement_replay_error(error, "artifact evidence mismatch"),
-        )?;
-        let artifact_bytes = self.artifact_bytes_for_evidence(&evidence)?.to_vec();
+        let object = self.object_for_requirement(requirement)?;
         Ok(ArtifactReplayEvidence {
-            artifact_bytes,
-            artifact: evidence,
+            artifact_bytes: object.bytes().to_vec(),
+            artifact: object.evidence().clone(),
         })
     }
 
@@ -75,31 +50,33 @@ impl ReplayBroker {
         F: FnMut(&spec::NodeSpec, &spec::CellSpec, &events::CellProduced) -> Result<bool>,
     {
         let mut frames = Vec::new();
-        for envelope in &self.stream {
-            let KernelEventPayload::CellProduced(produced) = envelope.payload() else {
-                continue;
-            };
+        for record in self.produced_cell_records()? {
+            let produced = record.payload;
             let node = self.node(&produced.node_id)?;
             let cell = self.cell(&produced.cell_id)?;
             if !matches_cell(node, cell, produced)? {
                 continue;
             }
-            let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
-                artifact_id: &produced.artifact_id,
-                evidence_hash: &produced.evidence_hash,
-                digest: &produced.content_digest,
-                schema_id: Some(&produced.schema_id),
-                semantic_type_id: Some(&produced.semantic_type_id),
-                role: ArtifactRole::StateOutput,
-                producer_node_id: Some(&produced.node_id),
+            let requirement = store::EventArtifactRequirement {
+                source: store::EventArtifactReferenceSource::StateOutput,
+                artifact_id: produced.artifact_id.clone(),
+                evidence_hash: produced.evidence_hash.clone(),
+                digest: Some(produced.content_digest.clone()),
+                byte_len: None,
+                media_type: None,
+                schema_id: Some(produced.schema_id.clone()),
+                semantic_type_id: Some(produced.semantic_type_id.clone()),
+                producer_node_id: Some(produced.node_id.clone()),
                 producer_seed_id: None,
-            })?;
+                artifact_role: Some(ArtifactRole::StateOutput),
+            };
+            let artifact = self.object_for_requirement(&requirement)?;
             frames.push(ProducedCellReplayFrame {
                 node: node.clone(),
                 cell: cell.clone(),
                 produced: produced.clone(),
-                artifact_bytes: self.artifact_bytes_for_evidence(&artifact)?.to_vec(),
-                artifact,
+                artifact_bytes: artifact.bytes().to_vec(),
+                artifact: artifact.evidence().clone(),
             });
         }
         Ok(frames)
@@ -117,22 +94,23 @@ impl ReplayBroker {
         F: FnMut(&side_effect::IntentPersisted) -> Result<bool>,
     {
         let mut frames = Vec::new();
-        for intent in self.intents.values() {
+        for intent in self.side_effect_intents()? {
             if !matches_intent(intent)? {
                 continue;
             }
-            let key = (intent.pair_id.clone(), intent.invocation_epoch);
+            let records =
+                self.side_effect_records_for_pair(&intent.pair_id, intent.invocation_epoch)?;
             let certified_context = self.certified_side_effect_context_for_pair(&intent.pair_id)?;
             frames.push(SideEffectReplayFrame {
                 intent,
                 certified_context,
-                prepared: self.prepared_invocations.get(&key),
-                submission: self.submissions.get(&key),
-                submission_unknown: self.submission_unknown.get(&key),
-                not_submitted: self.not_submitted.get(&key),
-                receipt: self.receipts.get(&key),
-                confirmation: self.confirmations.get(&key),
-                ambiguity: self.ambiguities.get(&key),
+                prepared: records.prepared,
+                submission: records.submission,
+                submission_unknown: records.submission_unknown,
+                not_submitted: records.not_submitted,
+                receipt: records.receipt,
+                confirmation: records.confirmation,
+                ambiguity: records.ambiguity,
             });
         }
         Ok(frames)
@@ -144,8 +122,10 @@ impl ReplayBroker {
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<SubmissionReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let submission =
-            self.required_side_effect_record(&self.submissions, request, "submission")?;
+        let submission = self
+            .side_effect_records_for_request(request)?
+            .submission
+            .ok_or_else(|| missing_side_effect_record(request, "submission"))?;
         let artifact = self.verify_requested_side_effect_artifact(request, submission)?;
         Ok(SubmissionReplayEvidence {
             submission: submission.clone(),
@@ -160,11 +140,10 @@ impl ReplayBroker {
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<SubmissionUnknownReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let unknown = self.required_side_effect_record(
-            &self.submission_unknown,
-            request,
-            "submission-unknown evidence",
-        )?;
+        let unknown = self
+            .side_effect_records_for_request(request)?
+            .submission_unknown
+            .ok_or_else(|| missing_side_effect_record(request, "submission-unknown evidence"))?;
         let artifact = self.verify_requested_side_effect_artifact(request, unknown)?;
         Ok(SubmissionUnknownReplayEvidence {
             unknown: unknown.clone(),
@@ -179,11 +158,10 @@ impl ReplayBroker {
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<PreparedInvocationReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let prepared = self.required_side_effect_record(
-            &self.prepared_invocations,
-            request,
-            "prepared invocation",
-        )?;
+        let prepared = self
+            .side_effect_records_for_request(request)?
+            .prepared
+            .ok_or_else(|| missing_side_effect_record(request, "prepared invocation"))?;
         self.verify_prepared_invocation_artifact(prepared)
     }
 
@@ -193,8 +171,10 @@ impl ReplayBroker {
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<NotSubmittedReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let proof =
-            self.required_side_effect_record(&self.not_submitted, request, "not-submitted proof")?;
+        let proof = self
+            .side_effect_records_for_request(request)?
+            .not_submitted
+            .ok_or_else(|| missing_side_effect_record(request, "not-submitted proof"))?;
         Ok(NotSubmittedReplayEvidence {
             proof: proof.clone(),
             artifact: self.verify_requested_side_effect_artifact(request, proof)?,
@@ -227,7 +207,10 @@ impl ReplayBroker {
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<ReceiptReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let receipt = self.required_side_effect_record(&self.receipts, request, "receipt")?;
+        let receipt = self
+            .side_effect_records_for_request(request)?
+            .receipt
+            .ok_or_else(|| missing_side_effect_record(request, "receipt"))?;
         let artifact = self.verify_requested_side_effect_artifact(request, receipt)?;
         Ok(ReceiptReplayEvidence {
             receipt: receipt.clone(),
@@ -242,8 +225,10 @@ impl ReplayBroker {
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<ConfirmationReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let confirmation =
-            self.required_side_effect_record(&self.confirmations, request, "confirmation")?;
+        let confirmation = self
+            .side_effect_records_for_request(request)?
+            .confirmation
+            .ok_or_else(|| missing_side_effect_record(request, "confirmation"))?;
         let artifact = self.verify_requested_side_effect_artifact(request, confirmation)?;
         Ok(ConfirmationReplayEvidence {
             confirmation: confirmation.clone(),
@@ -258,8 +243,10 @@ impl ReplayBroker {
         request: &SideEffectEvidenceReplayRequest,
     ) -> Result<AmbiguityReplayEvidence> {
         self.verify_side_effect_intent(request)?;
-        let ambiguity =
-            self.required_side_effect_record(&self.ambiguities, request, "ambiguity")?;
+        let ambiguity = self
+            .side_effect_records_for_request(request)?
+            .ambiguity
+            .ok_or_else(|| missing_side_effect_record(request, "ambiguity"))?;
         let artifact = self.verify_requested_side_effect_artifact(request, ambiguity)?;
         Ok(AmbiguityReplayEvidence {
             ambiguity: ambiguity.clone(),
@@ -323,4 +310,14 @@ impl ReplayBroker {
             "typed replay brokers do not construct live capabilities",
         ))
     }
+}
+
+fn missing_side_effect_record(
+    request: &SideEffectEvidenceReplayRequest,
+    label: &'static str,
+) -> ReplayError {
+    ReplayError::new(
+        ReplayErrorKind::SideEffectMissing,
+        format!("missing side-effect {label} {}", request.pair_id),
+    )
 }

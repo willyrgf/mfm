@@ -171,7 +171,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         let retention_refs = fact_query_evidence_retention_refs(
             &artifact,
             &evidence,
-            self.artifacts.ctx.projections(),
+            self.artifacts.ctx.lifecycle(),
         )?;
         let returned_refs = evidence.receipt().returned_refs().to_vec();
         self.staged_artifacts.push(staged);
@@ -225,13 +225,13 @@ impl ErasedRunnerOutput {
 pub(crate) fn fact_query_evidence_retention_refs(
     evidence_artifact: &RunnerJsonArtifact,
     evidence: &mfm_facts::FactQueryEvidence,
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
 ) -> Result<Vec<events::RetentionRef>> {
     let mut refs = BTreeMap::<(ArtifactId, ContentDigest), events::RetentionRef>::new();
     insert_retention_ref(&mut refs, evidence_artifact.retention_ref()?);
 
     for fact_ref in evidence.receipt().returned_refs() {
-        for retention_ref in fact_query_returned_ref_retention_refs(projections, fact_ref)? {
+        for retention_ref in fact_query_returned_ref_retention_refs(lifecycle, fact_ref)? {
             insert_retention_ref(&mut refs, retention_ref);
         }
     }

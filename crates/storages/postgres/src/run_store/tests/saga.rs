@@ -164,11 +164,11 @@ async fn saga_projection_rebuilds_from_events() {
     );
     assert!(before.run_completion(&run).is_none());
 
-    let stream = store.load_run_stream(&run).await.expect("typed run stream");
-    assert_eq!(
-        ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("payload rebuild"),
-        before
-    );
+    let journal = store
+        .load_committed_journal(&run)
+        .await
+        .expect("committed journal");
+    assert_eq!(journal.current_run_sequence(), Some(7));
 
     let terminal_policy = SagaPolicySpec::FailWithoutAcdcClaim;
     let terminal_run = run_id_with_saga_policy(43, &terminal_policy);
@@ -282,22 +282,14 @@ async fn saga_projection_rebuilds_from_events() {
     )
     .await
     .expect("terminal side-effect submit attempt completed");
-    let terminal_before_completion = store
-        .status_projection_snapshot(&terminal_run)
-        .await
-        .expect("terminal projection before completion");
-    let terminal_policies =
-        confirmation_terminal_policies_for_projection(&terminal_before_completion, &terminal_run);
-    let terminal_saga = terminal_before_completion
-        .derive_saga_projection(&terminal_run, &terminal_policy, &terminal_policies)
-        .expect("terminal saga projection");
-    let terminal_next_seq = store
-        .expected_next_seq(&terminal_run)
-        .await
-        .expect("terminal next seq");
+    let terminal_next_seq = expected_next_sequence(&store, &terminal_run).await;
     let terminal_proof =
-        SagaTerminalProof::new(&terminal_policy, &terminal_saga, terminal_next_seq, None)
-            .expect("terminal proof");
+        mfm_store::v1::test_support::forged_failed_without_acdc_saga_terminal_proof_for_test(
+            terminal_run.clone(),
+            terminal_next_seq,
+            &terminal_policy,
+        )
+        .expect("terminal prepared-commit test token");
     let terminal_spec_hash = saga_authority_spec(terminal_policy.clone())
         .spec_hash()
         .expect("terminal saga authority spec hash");
@@ -340,15 +332,11 @@ async fn saga_projection_rebuilds_from_events() {
             .map(|projection| &projection.outcome),
         Some(events::RunCompletionOutcome::FailedWithoutAcdcClaim)
     ));
-    let terminal_stream = store
-        .load_run_stream(&terminal_run)
+    let terminal_journal = store
+        .load_committed_journal(&terminal_run)
         .await
-        .expect("terminal typed run stream");
-    assert_eq!(
-        ProjectionSnapshot::rebuild_from_run_stream(&terminal_stream)
-            .expect("terminal payload rebuild"),
-        terminal_before
-    );
+        .expect("terminal committed journal");
+    assert_eq!(terminal_journal.current_run_sequence(), Some(7));
 
     drop_schema(&store, &schema).await;
 }

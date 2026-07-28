@@ -5,6 +5,12 @@ pub(super) trait TestPreparedCommitExt {
         &mut self,
         request: store::CommitRequest,
     ) -> store::Result<store::CommitOutcome>;
+
+    fn append_prepared_commit_with_artifacts(
+        &mut self,
+        request: store::CommitRequest,
+        artifacts: Vec<(Vec<u8>, store::ArtifactEvidenceRef)>,
+    ) -> store::Result<store::CommitOutcome>;
 }
 
 impl TestPreparedCommitExt for TestTypedRunStore {
@@ -16,53 +22,49 @@ impl TestPreparedCommitExt for TestTypedRunStore {
         let plan = test_prepared_commit_plan(request, admitted_artifacts)?;
         self.append_test_commit_plan(plan)
     }
-}
-#[derive(Clone, Default)]
-pub(super) struct RunnerKitArtifactProvider {
-    artifacts: BTreeMap<store::ArtifactAuthorityKey, (Vec<u8>, store::ArtifactEvidenceRef)>,
-}
 
-impl RunnerKitArtifactProvider {
-    pub(super) fn new(artifacts: Vec<(Vec<u8>, store::ArtifactEvidenceRef)>) -> Self {
-        Self {
-            artifacts: artifacts
-                .into_iter()
-                .map(|(bytes, evidence)| {
-                    (
-                        test_artifact_authority_key(&evidence)
-                            .expect("test artifact evidence hash"),
-                        (bytes, evidence),
-                    )
-                })
-                .collect(),
+    fn append_prepared_commit_with_artifacts(
+        &mut self,
+        request: store::CommitRequest,
+        artifacts: Vec<(Vec<u8>, store::ArtifactEvidenceRef)>,
+    ) -> store::Result<store::CommitOutcome> {
+        let admitted_artifacts = request.required_artifacts().to_vec();
+        let plan = test_prepared_commit_plan(request, admitted_artifacts)?;
+        let mut artifact_bytes = Vec::with_capacity(artifacts.len());
+        let mut staged_keys = BTreeSet::new();
+        for (bytes, evidence) in artifacts {
+            staged_keys.insert((evidence.artifact_id.clone(), evidence.evidence_hash()?));
+            artifact_bytes.push(store::PreparedArtifactBytes::new(bytes, evidence)?);
         }
+        let existing = plan
+            .admitted_artifacts()
+            .iter()
+            .filter_map(|evidence| {
+                let evidence_hash = evidence.evidence_hash().ok()?;
+                (!staged_keys.contains(&(evidence.artifact_id.clone(), evidence_hash.clone())))
+                    .then(|| {
+                        store::ExistingArtifactAdmission::new(
+                            evidence.artifact_id.clone(),
+                            evidence_hash,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        self.inner.seed_artifact_evidence_for_test(
+            plan.admitted_artifacts()
+                .iter()
+                .filter(|evidence| {
+                    evidence.evidence_hash().is_ok_and(|hash| {
+                        !staged_keys.contains(&(evidence.artifact_id.clone(), hash))
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )?;
+        let bundle = store::PreparedCommitBundle::new(plan, artifact_bytes, existing)?;
+        block_on_ready(self.inner.append_prepared_commit_bundle(bundle))
     }
-}
-
-impl store::RetainedArtifactReadProvider for RunnerKitArtifactProvider {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        Box::pin(async move {
-            let key = (
-                requirement.artifact_id.clone(),
-                requirement.evidence_hash.clone(),
-            );
-            let Some((bytes, evidence)) = self.artifacts.get(&key) else {
-                return Err(store::StoreError::MissingArtifact {
-                    artifact_id: requirement.artifact_id.clone(),
-                });
-            };
-            store::VerifiedRetainedArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
-        })
-    }
-}
-
-fn test_artifact_authority_key(
-    evidence: &store::ArtifactEvidenceRef,
-) -> store::Result<store::ArtifactAuthorityKey> {
-    Ok((evidence.artifact_id.clone(), evidence.evidence_hash()?))
 }
 #[derive(Clone, Default)]
 pub(super) struct TestTypedRunStore {
@@ -84,39 +86,62 @@ impl TestTypedRunStore {
         block_on_ready(self.inner.append_prepared_commit_bundle(bundle))
     }
 
-    pub(super) fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        block_on_ready(self.inner.load_run_stream(run_id)).expect("test store read")
-    }
-
-    pub(super) fn run_admitted(&self, run_id: &RunId) -> Box<events::RunAdmitted> {
-        self.load_run_stream(run_id)
-            .into_iter()
-            .find_map(|event| match event.payload().clone() {
-                events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
-                _ => None,
-            })
-            .expect("RunAdmitted payload")
-    }
-
-    pub(super) fn assert_run_stream_len(&self, run_id: &RunId, expected: usize) {
-        assert_eq!(self.load_run_stream(run_id).len(), expected);
-    }
-
     pub(super) fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
-        block_on_ready(self.inner.expected_next_seq(run_id)).expect("test store next seq")
+        self.inner
+            .expected_next_sequence_for_test(run_id)
+            .expect("test store next seq")
     }
 
-    pub(super) fn projection_snapshot(&self) -> store::ProjectionSnapshot {
+    pub(super) fn committed_records_for_corruption(
+        &self,
+        run_id: &RunId,
+    ) -> Vec<store::KernelEventEnvelope> {
         self.inner
-            .projection_snapshot()
-            .expect("test store projection")
+            .committed_records_for_test(run_id)
+            .expect("test committed records")
+    }
+
+    pub(super) fn committed_artifact_authority_for_corruption(
+        &self,
+        run_id: &RunId,
+    ) -> store::ArtifactByteAuthorityMap {
+        self.inner
+            .committed_artifact_byte_authority_for_test(run_id)
+            .expect("test committed artifact authority")
+    }
+
+    pub(super) fn remove_committed_artifact_for_corruption(
+        &self,
+        artifact_id: &ArtifactId,
+        evidence_hash: &ContentDigest,
+    ) {
+        assert!(
+            self.inner
+                .remove_retained_artifact_bytes_for_test(artifact_id, evidence_hash)
+                .expect("remove retained test artifact"),
+            "retained test artifact must exist"
+        );
+    }
+
+    pub(super) fn replace_committed_artifact_for_corruption(
+        &self,
+        artifact_id: &ArtifactId,
+        evidence_hash: &ContentDigest,
+        bytes: Vec<u8>,
+    ) {
+        assert!(
+            self.inner
+                .replace_retained_artifact_bytes_for_test(artifact_id, evidence_hash, bytes)
+                .expect("replace retained test artifact"),
+            "retained test artifact must exist"
+        );
     }
 }
 
-impl store::RunEventStore for TestTypedRunStore {
+impl store::RunJournalBackend for TestTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_bundle<'a>(
+    fn backend_append<'a>(
         &'a self,
         bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
@@ -127,51 +152,19 @@ impl store::RunEventStore for TestTypedRunStore {
         })
     }
 
-    fn load_run_stream<'a>(
+    fn backend_load<'a>(
         &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        self.inner.load_run_stream(run_id)
-    }
-
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        self.inner.load_committed_run_stream(run_id)
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        self.inner.expected_next_seq(run_id)
-    }
-
-    fn status_projection_snapshot<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.status_projection_snapshot(run_id)
-    }
-
-    fn fact_projection_snapshot<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.fact_projection_snapshot()
+        verifier: store::JournalLoadVerifier,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunJournal, Self::Error> {
+        Box::pin(async move {
+            let run_id = verifier.run_id().clone();
+            let journal = self.inner.load_committed_journal(&run_id).await?;
+            verifier.accept_verified(journal)
+        })
     }
 }
 
 delegate_execution_claim_store!(TestTypedRunStore, delegate_execution_claim_direct);
-
-impl store::RetainedArtifactReadProvider for TestTypedRunStore {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        self.inner.read_retained_artifact(requirement)
-    }
-}
 #[derive(Clone)]
 pub(super) struct RecordedPreparedCommit {
     pub(super) seq: store::StreamSeq,
@@ -198,20 +191,6 @@ impl RecordingTypedRunStore {
             .lock()
             .expect("recording store commits lock")
             .clone()
-    }
-
-    pub(super) async fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        self.inner
-            .load_run_stream(run_id)
-            .await
-            .expect("recording store read")
-    }
-
-    pub(super) async fn projection_snapshot(&self, run_id: &RunId) -> store::ProjectionSnapshot {
-        self.inner
-            .status_projection_snapshot(run_id)
-            .await
-            .expect("recording store projection")
     }
 }
 pub(super) struct StaleOnceTypedRunStore {
@@ -242,19 +221,12 @@ impl StaleOnceTypedRunStore {
             target: StaleAppendTarget::SideEffectPreparation,
         }
     }
-
-    pub(super) async fn projection_snapshot(&self, run_id: &RunId) -> store::ProjectionSnapshot {
-        self.inner
-            .status_projection_snapshot(run_id)
-            .await
-            .expect("stale-once store projection")
-    }
 }
 
-impl store::RunEventStore for RecordingTypedRunStore {
+impl store::RunJournalBackend for RecordingTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_bundle<'a>(
+    fn backend_append<'a>(
         &'a self,
         bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
@@ -281,47 +253,24 @@ impl store::RunEventStore for RecordingTypedRunStore {
         })
     }
 
-    fn load_run_stream<'a>(
+    fn backend_load<'a>(
         &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        self.inner.load_run_stream(run_id)
-    }
-
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        self.inner.load_committed_run_stream(run_id)
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        self.inner.expected_next_seq(run_id)
-    }
-
-    fn status_projection_snapshot<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.status_projection_snapshot(run_id)
-    }
-
-    fn fact_projection_snapshot<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.fact_projection_snapshot()
+        verifier: store::JournalLoadVerifier,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunJournal, Self::Error> {
+        Box::pin(async move {
+            let run_id = verifier.run_id().clone();
+            let journal = self.inner.load_committed_journal(&run_id).await?;
+            verifier.accept_verified(journal)
+        })
     }
 }
 
 delegate_execution_claim_store!(RecordingTypedRunStore, delegate_execution_claim_direct);
 
-impl store::RunEventStore for StaleOnceTypedRunStore {
+impl store::RunJournalBackend for StaleOnceTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_bundle<'a>(
+    fn backend_append<'a>(
         &'a self,
         bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
@@ -365,7 +314,7 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
                 self.inner.append_prepared_commit_bundle(bundle).await?;
                 return Err(store::StoreError::StaleExpectedNextSeq {
                     expected,
-                    actual: self.inner.expected_next_seq(&run_id).await?,
+                    actual: self.inner.expected_next_sequence_for_test(&run_id)?,
                 });
             }
             self.inner
@@ -374,117 +323,16 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
         })
     }
 
-    fn load_run_stream<'a>(
+    fn backend_load<'a>(
         &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        self.inner.load_run_stream(run_id)
-    }
-
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        self.inner.load_committed_run_stream(run_id)
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        self.inner.expected_next_seq(run_id)
-    }
-
-    fn status_projection_snapshot<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.status_projection_snapshot(run_id)
-    }
-
-    fn fact_projection_snapshot<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.fact_projection_snapshot()
+        verifier: store::JournalLoadVerifier,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunJournal, Self::Error> {
+        Box::pin(async move {
+            let run_id = verifier.run_id().clone();
+            let journal = self.inner.load_committed_journal(&run_id).await?;
+            verifier.accept_verified(journal)
+        })
     }
 }
 
 delegate_execution_claim_store!(StaleOnceTypedRunStore, delegate_execution_claim_direct);
-pub(super) type TestArtifactMap =
-    BTreeMap<store::ArtifactAuthorityKey, (Vec<u8>, store::ArtifactEvidenceRef)>;
-
-#[derive(Clone, Default)]
-pub(super) struct TestRetainedArtifactStore {
-    pub(super) artifacts: Arc<Mutex<TestArtifactMap>>,
-}
-
-impl store::RetainedArtifactReadProvider for TestRetainedArtifactStore {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        Box::pin(async move {
-            let key = (
-                requirement.artifact_id.clone(),
-                requirement.evidence_hash.clone(),
-            );
-            let (bytes, evidence) = self
-                .artifacts
-                .lock()
-                .map_err(|_| store::StoreError::ArtifactReadFailed {
-                    artifact_id: requirement.artifact_id.clone(),
-                })?
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| store::StoreError::MissingArtifact {
-                    artifact_id: requirement.artifact_id.clone(),
-                })?;
-            store::VerifiedRetainedArtifactBytes::new(bytes, evidence, requirement)
-        })
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct FilteringRetainedArtifactStore {
-    source: TestTypedRunStore,
-    missing_artifacts: Arc<Mutex<BTreeSet<ArtifactId>>>,
-}
-
-impl FilteringRetainedArtifactStore {
-    pub(super) fn new(source: TestTypedRunStore) -> Self {
-        Self {
-            source,
-            missing_artifacts: Arc::new(Mutex::new(BTreeSet::new())),
-        }
-    }
-
-    pub(super) fn hide_artifact(&self, artifact_id: ArtifactId) {
-        self.missing_artifacts
-            .lock()
-            .expect("filtering artifact store")
-            .insert(artifact_id);
-    }
-}
-
-impl store::RetainedArtifactReadProvider for FilteringRetainedArtifactStore {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        Box::pin(async move {
-            if self
-                .missing_artifacts
-                .lock()
-                .map_err(|_| store::StoreError::ArtifactReadFailed {
-                    artifact_id: requirement.artifact_id.clone(),
-                })?
-                .contains(&requirement.artifact_id)
-            {
-                return Err(store::StoreError::MissingArtifact {
-                    artifact_id: requirement.artifact_id.clone(),
-                });
-            }
-            self.source.read_retained_artifact(requirement).await
-        })
-    }
-}

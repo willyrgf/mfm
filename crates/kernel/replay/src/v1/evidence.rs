@@ -4,36 +4,32 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedSourceFactReplayEvent {
     fact_claim_id: mfm_facts::FactClaimId,
-    envelope: KernelEventEnvelope,
+    event_id: mfm_ids::EventId,
+    payload: events::FactRecorded,
 }
 
 impl RetainedSourceFactReplayEvent {
-    /// Creates retained source fact event authority after validating the event coordinate.
-    pub fn new(
-        fact_claim_id: mfm_facts::FactClaimId,
-        envelope: KernelEventEnvelope,
+    /// Retains one verified source fact from controlled store record visitation.
+    pub fn from_current_record(
+        record: store::current_lifecycle::CurrentRecordRef<'_>,
     ) -> Result<Self> {
-        let expected = mfm_facts::derive_fact_claim_id(
-            envelope.run_id().clone(),
-            envelope.seq().as_u64(),
-            envelope.ordinal().as_u32(),
+        let fact_claim_id = mfm_facts::derive_fact_claim_id(
+            record.run_id().clone(),
+            record.sequence().as_u64(),
+            record.ordinal().as_u32(),
         )
-        .map_err(|error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()))?;
-        if expected != fact_claim_id {
-            return Err(ReplayError::new(
-                ReplayErrorKind::FactMismatch,
-                "retained source fact event coordinate does not match fact claim id",
-            ));
-        }
-        if !matches!(envelope.payload(), KernelEventPayload::FactRecorded(_)) {
+        .map_err(|error| ReplayError::new(ReplayErrorKind::InvalidRunJournal, error.to_string()))?;
+        let store::current_lifecycle::CurrentRecordKindRef::FactRecorded(payload) = record.kind()
+        else {
             return Err(ReplayError::new(
                 ReplayErrorKind::FactMismatch,
                 "retained source fact event payload is not FactRecorded",
             ));
-        }
+        };
         Ok(Self {
             fact_claim_id,
-            envelope,
+            event_id: record.event_id().clone(),
+            payload: payload.clone(),
         })
     }
 
@@ -42,9 +38,14 @@ impl RetainedSourceFactReplayEvent {
         &self.fact_claim_id
     }
 
-    /// Returns the retained source fact event envelope.
-    pub fn envelope(&self) -> &KernelEventEnvelope {
-        &self.envelope
+    /// Returns the source event id authenticated by the verified journal.
+    pub fn event_id(&self) -> &mfm_ids::EventId {
+        &self.event_id
+    }
+
+    /// Returns the retained typed source-fact payload.
+    pub fn payload(&self) -> &events::FactRecorded {
+        &self.payload
     }
 }
 
@@ -84,7 +85,7 @@ impl CertifiedSideEffectContext {
     }
 }
 
-/// Broker-indexed side-effect replay frame for one intent and invocation epoch.
+/// Borrowed side-effect replay frame for one intent and invocation epoch.
 ///
 /// The frame borrows recorded, replay-authorized event payloads from [`ReplayBroker`]. Domain
 /// verifiers still own cardinality, missing-evidence policy, and evidence interpretation.

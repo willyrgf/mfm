@@ -1,0 +1,16 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/fail/projection_cannot_mint_terminal_authority.rs:6:32
+  |
+6 |       let _ = SagaTerminalProof::new(policy, saga, StreamSeq::new(1).unwrap(), spec_hash, None);
+  |                                  ^^^ private associated function
+  |
+ ::: src/v1/saga_models.rs
+  |
+  | /     pub(in crate::v1) fn new(
+  | |         policy: &SagaPolicySpec,
+  | |         saga: &SagaProjection,
+  | |         prefix_next_seq: StreamSeq,
+  | |         certified_spec_hash: &SpecHash,
+  | |         manual: Option<&crate::v1::journal::history_validation::VerifiedHistoricalManualResolution>,
+  | |     ) -> Result<Self> {
+  | |_____________________- private associated function defined here

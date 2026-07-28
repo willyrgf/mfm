@@ -172,6 +172,7 @@ async fn store_scope_survives_reconnects_and_rejects_mutation() {
     let restarted = PostgresStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
+        committed_journal_load_test_barrier: None,
     };
     let restarted_store_scope = restarted
         .load_store_scope_id()

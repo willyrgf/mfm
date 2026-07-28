@@ -63,11 +63,7 @@ pub(super) async fn append_resource_lane_release(
     let lane = projection
         .resource_lane(&lane_key)
         .expect("active resource lane");
-    let next_seq = store
-        .expected_next_seq(run_id)
-        .await
-        .expect("release next seq")
-        .as_u64();
+    let next_seq = expected_next_sequence(store, run_id).await.as_u64();
     let verify_start_key = format!("{commit_key}-verify-attempt-start");
     append_prepared(
         store,
@@ -80,11 +76,7 @@ pub(super) async fn append_resource_lane_release(
         Vec::new(),
     )
     .await?;
-    let next_seq = store
-        .expected_next_seq(run_id)
-        .await
-        .expect("release next seq after verify start")
-        .as_u64();
+    let next_seq = expected_next_sequence(store, run_id).await.as_u64();
     append_prepared(
         store,
         certified_request(

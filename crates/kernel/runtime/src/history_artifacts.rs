@@ -1,309 +1,113 @@
 use super::*;
 
-pub(super) fn config_artifacts_from_run_admitted(
-    runtime_spec: &CertifiedRuntimeSpec,
-    config_artifacts: &[events::RunArtifactEvidenceRef],
-) -> Result<BTreeMap<String, store::ArtifactEvidenceRef>> {
-    let validated = validate_config_artifacts(
-        runtime_spec,
-        config_artifacts
-            .iter()
-            .map(store_artifact_from_run_ref)
-            .collect(),
-    )?;
-    Ok(validated
-        .into_iter()
-        .map(|artifact| {
-            let key = format!(
-                "{}:{}",
-                artifact
-                    .schema_id
-                    .as_ref()
-                    .expect("validated config artifact has schema id"),
-                artifact.digest
-            );
-            (key, artifact)
-        })
-        .collect())
+/// One exact input artifact borrowed from the verified current lifecycle.
+pub(crate) struct CurrentInputArtifactRef<'view> {
+    object: store::current_lifecycle::CurrentObjectRef<'view>,
+    attempt_id: Option<&'view AttemptId>,
 }
 
-pub(super) fn artifact_refs_from_stream(
-    stream: &[store::KernelEventEnvelope],
-    history: &RuntimeCommittedHistory,
-) -> Result<BTreeMap<store::ArtifactAuthorityKey, CommittedArtifactReference>> {
-    let mut artifacts = BTreeMap::new();
-    for batch in history.commits() {
-        let commit = batch.events(stream);
-        for event in commit {
-            match event.payload() {
-                events::KernelEventPayload::RunAdmitted(payload) => {
-                    for artifact in std::iter::once(&payload.spec_artifact)
-                        .chain(std::iter::once(&payload.certificate_artifact))
-                        .chain(payload.config_artifacts.iter())
-                        .chain(payload.fact_descriptor_artifacts.iter())
-                    {
-                        insert_committed_artifact(
-                            &mut artifacts,
-                            CommittedArtifactReference {
-                                evidence: store_artifact_from_run_ref(artifact),
-                                attempt_id: None,
-                                commit_seq: event.seq(),
-                                commit_key: event.commit_key().clone(),
-                            },
-                        )?;
-                    }
-                    for seed in &payload.seed_cells {
-                        insert_committed_artifact(
-                            &mut artifacts,
-                            CommittedArtifactReference {
-                                evidence: store_seed_artifact(seed),
-                                attempt_id: None,
-                                commit_seq: event.seq(),
-                                commit_key: event.commit_key().clone(),
-                            },
-                        )?;
-                    }
-                }
-                events::KernelEventPayload::ArtifactReferenced(payload)
-                    if staged_artifact_binding_kind(payload.artifact_ref.role).is_some() =>
-                {
-                    let (Some(node_id), Some(attempt_id)) =
-                        (payload.node_id.clone(), payload.attempt_id.clone())
-                    else {
-                        return Err(RuntimeError::InvalidRunStream(format!(
-                            "staged artifact reference {} must be scoped to a producer attempt",
-                            payload.artifact_ref.artifact_id
-                        )));
-                    };
-                    if !artifact_reference_matches_same_commit_payload(commit, payload) {
-                        return Err(RuntimeError::InvalidRunStream(format!(
-                            "staged artifact reference {} is not bound to a same-commit typed payload",
-                            payload.artifact_ref.artifact_id
-                        )));
-                    }
-                    if payload.artifact_ref.role == events::ArtifactRole::StateOutput {
-                        insert_committed_artifact(
-                            &mut artifacts,
-                            CommittedArtifactReference {
-                                evidence: store_artifact_from_event_ref(
-                                    &payload.artifact_ref,
-                                    Some(node_id),
-                                    None,
-                                ),
-                                attempt_id: Some(attempt_id),
-                                commit_seq: event.seq(),
-                                commit_key: event.commit_key().clone(),
-                            },
-                        )?;
-                    }
-                }
-                events::KernelEventPayload::ArtifactReferenced(payload)
-                    if payload.artifact_ref.role != events::ArtifactRole::TypedConfig =>
-                {
-                    return Err(RuntimeError::InvalidRunStream(format!(
-                        "unsupported artifact reference role {} for {}",
-                        artifact_role_name(payload.artifact_ref.role),
-                        payload.artifact_ref.artifact_id
-                    )));
-                }
-                _ => {}
-            }
-        }
+impl<'view> CurrentInputArtifactRef<'view> {
+    pub(crate) fn evidence(&self) -> &'view store::ArtifactEvidenceRef {
+        self.object.evidence()
     }
-    Ok(artifacts)
-}
 
-fn artifact_reference_matches_same_commit_payload(
-    commit: &[store::KernelEventEnvelope],
-    reference: &events::ArtifactReferenced,
-) -> bool {
-    let (Some(reference_node_id), Some(reference_attempt_id)) =
-        (&reference.node_id, &reference.attempt_id)
-    else {
-        return false;
-    };
-    commit.iter().any(|event| match event.payload() {
-        events::KernelEventPayload::CellProduced(payload) => {
-            reference.artifact_ref.role == events::ArtifactRole::StateOutput
-                && &payload.node_id == reference_node_id
-                && &payload.attempt_id == reference_attempt_id
-                && payload.artifact_id == reference.artifact_ref.artifact_id
-                && payload.content_digest == reference.artifact_ref.content_digest
-                && payload.evidence_hash == reference.artifact_ref.evidence_hash
-                && payload.schema_id == reference.artifact_ref.schema_id
-                && reference.artifact_ref.semantic_type_id.as_ref()
-                    == Some(&payload.semantic_type_id)
-        }
-        events::KernelEventPayload::FactRecorded(payload) => {
-            let response = payload.claim.response();
-            reference.artifact_ref.role == events::ArtifactRole::FactResponse
-                && &payload.node_id == reference_node_id
-                && &payload.attempt_id == reference_attempt_id
-                && response.artifact_id() == &reference.artifact_ref.artifact_id
-                && response.response_hash() == &reference.artifact_ref.content_digest
-                && response.artifact_evidence_hash() == &reference.artifact_ref.evidence_hash
-                && response.response_schema_id() == &reference.artifact_ref.schema_id
-        }
-        events::KernelEventPayload::PublicOutputProduced(payload) => {
-            reference.artifact_ref.role == events::ArtifactRole::PublicOutput
-                && &payload.node_id == reference_node_id
-                && &payload.attempt_id == reference_attempt_id
-                && payload.rendered_artifact_id.as_ref()
-                    == Some(&reference.artifact_ref.artifact_id)
-                && payload.rendered_digest == reference.artifact_ref.content_digest
-                && payload.rendered_artifact_evidence_hash.as_ref()
-                    == Some(&reference.artifact_ref.evidence_hash)
-                && payload.public_schema_id == reference.artifact_ref.schema_id
-        }
-        events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
-            reference.artifact_ref.role == events::ArtifactRole::RedactedDiagnostic
-                && &payload.node_id == reference_node_id
-                && &payload.attempt_id == reference_attempt_id
-                && payload
-                    .error
-                    .diagnostic_ref
-                    .as_ref()
-                    .is_some_and(|diagnostic| event_artifact_refs_match(diagnostic, reference))
-        }
-        events::KernelEventPayload::StateAttemptFailed(payload) => {
-            reference.artifact_ref.role == events::ArtifactRole::RedactedDiagnostic
-                && &payload.node_id == reference_node_id
-                && &payload.attempt_id == reference_attempt_id
-                && payload
-                    .error
-                    .diagnostic_ref
-                    .as_ref()
-                    .is_some_and(|diagnostic| event_artifact_refs_match(diagnostic, reference))
-        }
-        events::KernelEventPayload::ArtifactReferenced(payload) => {
-            matches!(
-                reference.artifact_ref.role,
-                events::ArtifactRole::FactQueryEvidence
-                    | events::ArtifactRole::ExternalReadEvidence
-            ) && payload.artifact_ref.role == reference.artifact_ref.role
-                && payload.node_id.as_ref() == Some(reference_node_id)
-                && payload.attempt_id.as_ref() == Some(reference_attempt_id)
-                && event_artifact_refs_match(&payload.artifact_ref, reference)
-        }
-        _ => false,
-    })
-}
-
-fn event_artifact_refs_match(
-    diagnostic: &events::ArtifactEvidenceRef,
-    reference: &events::ArtifactReferenced,
-) -> bool {
-    diagnostic.artifact_id == reference.artifact_ref.artifact_id
-        && diagnostic.role == reference.artifact_ref.role
-        && diagnostic.schema_id == reference.artifact_ref.schema_id
-        && diagnostic.semantic_type_id == reference.artifact_ref.semantic_type_id
-        && diagnostic.content_digest == reference.artifact_ref.content_digest
-        && diagnostic.evidence_hash == reference.artifact_ref.evidence_hash
-        && diagnostic.byte_len == reference.artifact_ref.byte_len
-        && diagnostic.media_type == reference.artifact_ref.media_type
-}
-
-fn insert_committed_artifact(
-    artifacts: &mut BTreeMap<store::ArtifactAuthorityKey, CommittedArtifactReference>,
-    artifact: CommittedArtifactReference,
-) -> Result<()> {
-    let key = (
-        artifact.evidence.artifact_id.clone(),
-        artifact
-            .evidence
-            .evidence_hash()
-            .map_err(RuntimeError::from)?,
-    );
-    if let Some(existing) = artifacts.get(&key) {
-        if existing != &artifact {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "conflicting committed artifact evidence for {}",
-                artifact.evidence.artifact_id
-            )));
-        }
-        return Ok(());
+    pub(crate) fn bytes(&self) -> &'view [u8] {
+        self.object.bytes()
     }
-    artifacts.insert(key, artifact);
-    Ok(())
+
+    pub(crate) fn attempt_id(&self) -> Option<&'view AttemptId> {
+        self.attempt_id
+    }
 }
 
 pub(crate) fn committed_config_artifact(
     node: &spec::NodeSpec,
-    view: &RuntimeRunView,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
 ) -> Result<store::ArtifactEvidenceRef> {
-    let key = config_ref_key(&node.config_ref);
-    let artifact = view.config_artifacts.get(&key).ok_or_else(|| {
-        RuntimeError::InputMaterialization(format!(
-            "node {} config artifact {} is not committed in the run stream",
-            node.node_id, node.config_ref.artifact_id
-        ))
-    })?;
-    if artifact.artifact_id != node.config_ref.artifact_id
-        || artifact.digest != node.config_ref.digest
-        || artifact.byte_len != node.config_ref.byte_len
-        || artifact.media_type != node.config_ref.media_type
-        || artifact.schema_id.as_ref() != Some(&node.config_ref.schema_id)
-        || artifact.semantic_type_id.is_some()
-        || artifact.producer_node_id.is_some()
-        || artifact.producer_seed_id.is_some()
-        || artifact.artifact_role != events::ArtifactRole::TypedConfig
+    let admitted = lifecycle
+        .config(&node.config_ref.artifact_id)?
+        .ok_or_else(|| {
+            RuntimeError::InputMaterialization(format!(
+                "node {} config artifact {} is not committed in the run journal",
+                node.node_id, node.config_ref.artifact_id
+            ))
+        })?;
+    let admitted = admitted.evidence();
+    if admitted.artifact_id != node.config_ref.artifact_id
+        || admitted.content_digest != node.config_ref.digest
+        || admitted.byte_len != node.config_ref.byte_len
+        || admitted.media_type != node.config_ref.media_type
+        || admitted.schema_id.as_ref() != Some(&node.config_ref.schema_id)
+        || admitted.semantic_type_id.is_some()
+        || admitted.role != events::ArtifactRole::TypedConfig
     {
         return Err(RuntimeError::InputMaterialization(format!(
             "node {} committed config artifact evidence does not match certified config ref",
             node.node_id
         )));
     }
-    Ok(artifact.clone())
+    let requirement = store::run_artifact_requirement(
+        store::EventArtifactReferenceSource::RunConfig,
+        admitted,
+        events::ArtifactRole::TypedConfig,
+    );
+    let object = lifecycle
+        .object_for_requirement(&requirement)
+        .ok_or_else(|| {
+            RuntimeError::InputMaterialization(format!(
+                "node {} config artifact {} lacks exact retained-object authority",
+                node.node_id, node.config_ref.artifact_id
+            ))
+        })?;
+    Ok(object.evidence().clone())
 }
 
-pub(super) fn committed_input_artifact(
-    view: &RuntimeRunView,
+pub(crate) fn committed_input_artifact<'view>(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'view>,
     cell_id: &CellId,
     artifact_id: &ArtifactId,
     evidence_hash: &ContentDigest,
-) -> Result<CommittedArtifactReference> {
-    view.artifact_refs
-        .get(&(artifact_id.clone(), evidence_hash.clone()))
-        .cloned()
+    expected_role: events::ArtifactRole,
+) -> Result<CurrentInputArtifactRef<'view>> {
+    let mut matched = None;
+    let _ = lifecycle.visit_records(|record| {
+        let (requirements, attempt_id) = match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::RunAdmitted(payload) => (
+                store::event_artifact_requirements(&events::KernelEventPayload::RunAdmitted(
+                    Box::new(payload.clone()),
+                )),
+                None,
+            ),
+            store::current_lifecycle::CurrentRecordKindRef::ArtifactReferenced(payload) => (
+                vec![store::artifact_referenced_artifact_requirement(payload)],
+                payload.attempt_id.as_ref(),
+            ),
+            _ => return std::ops::ControlFlow::Continue(()),
+        };
+        for requirement in requirements {
+            if &requirement.artifact_id == artifact_id
+                && &requirement.evidence_hash == evidence_hash
+                && requirement.artifact_role == Some(expected_role)
+            {
+                matched = Some((requirement, attempt_id));
+                return std::ops::ControlFlow::Break(());
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    let (requirement, attempt_id) = matched.ok_or_else(|| {
+        RuntimeError::InputMaterialization(format!(
+            "input cell {cell_id} artifact {artifact_id} is not committed in the run journal",
+        ))
+    })?;
+    let object = lifecycle
+        .object_for_requirement(&requirement)
         .ok_or_else(|| {
             RuntimeError::InputMaterialization(format!(
-                "input cell {cell_id} artifact {artifact_id} is not committed in the run stream",
+                "input cell {cell_id} artifact {artifact_id} lacks exact retained-object authority",
             ))
-        })
-}
-
-pub(super) fn store_artifact_from_event_ref(
-    evidence: &events::ArtifactEvidenceRef,
-    producer_node_id: Option<NodeId>,
-    producer_seed_id: Option<mfm_ids::SeedId>,
-) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id: evidence.artifact_id.clone(),
-        digest: evidence.content_digest.clone(),
-        byte_len: evidence.byte_len,
-        media_type: evidence.media_type.clone(),
-        schema_id: Some(evidence.schema_id.clone()),
-        semantic_type_id: evidence.semantic_type_id.clone(),
-        producer_node_id,
-        producer_seed_id,
-        artifact_role: evidence.role,
-    }
-}
-
-pub(super) fn store_artifact_from_run_ref(
-    evidence: &events::RunArtifactEvidenceRef,
-) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id: evidence.artifact_id.clone(),
-        digest: evidence.content_digest.clone(),
-        byte_len: evidence.byte_len,
-        media_type: evidence.media_type.clone(),
-        schema_id: evidence.schema_id.clone(),
-        semantic_type_id: evidence.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: evidence.role,
-    }
+        })?;
+    Ok(CurrentInputArtifactRef { object, attempt_id })
 }
 
 pub(crate) fn run_artifact_ref_from_store(
@@ -358,4 +162,127 @@ pub(crate) fn store_seed_artifact(seed: &events::SeedCellRef) -> store::Artifact
         producer_seed_id: Some(seed.seed_id.clone()),
         artifact_role: seed.seed_artifact.role,
     }
+}
+
+pub(crate) fn validate_spec_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    evidence: store::ArtifactEvidenceRef,
+) -> Result<store::ArtifactEvidenceRef> {
+    let canonical = runtime_spec
+        .spec()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    validate_certified_artifact(
+        evidence,
+        &canonical,
+        runtime_spec.spec().media_type.clone(),
+        spec::typed_execution_spec_schema_id()
+            .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+        events::ArtifactRole::TypedExecutionSpec,
+        "typed execution spec artifact evidence does not match the certified spec",
+    )
+}
+
+pub(crate) fn validate_certificate_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    evidence: store::ArtifactEvidenceRef,
+) -> Result<store::ArtifactEvidenceRef> {
+    let canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    let media_type = spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+        .map_err(|error| RuntimeError::Identity(error.to_string()))?;
+    validate_certified_artifact(
+        evidence,
+        &canonical,
+        media_type,
+        mfm_certify::typed_spec_certificate_schema_id()
+            .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+        events::ArtifactRole::TypedSpecCertificate,
+        "typed spec certificate artifact evidence does not match the certified spec",
+    )
+}
+
+fn validate_certified_artifact(
+    evidence: store::ArtifactEvidenceRef,
+    canonical: &mfm_canonical::PlainCanonicalJsonBytes,
+    media_type: spec::MediaType,
+    schema_id: SchemaId,
+    artifact_role: events::ArtifactRole,
+    mismatch_message: &'static str,
+) -> Result<store::ArtifactEvidenceRef> {
+    let digest = canonical.content_digest();
+    let expected_artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    if evidence.artifact_id != expected_artifact_id
+        || evidence.digest != digest
+        || evidence.byte_len != canonical.as_bytes().len() as u64
+        || evidence.media_type != media_type
+        || evidence.schema_id.as_ref() != Some(&schema_id)
+        || evidence.semantic_type_id.is_some()
+        || evidence.producer_node_id.is_some()
+        || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != artifact_role
+    {
+        return Err(RuntimeError::InvalidRunStream(mismatch_message.to_owned()));
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn validate_config_artifacts(
+    runtime_spec: &CertifiedRuntimeSpec,
+    evidence: Vec<store::ArtifactEvidenceRef>,
+) -> Result<Vec<store::ArtifactEvidenceRef>> {
+    let mut by_key = BTreeMap::new();
+    for artifact in evidence {
+        let Some(schema_id) = artifact.schema_id.clone() else {
+            return Err(RuntimeError::InvalidRunStream(
+                "typed config artifact evidence must carry schema_id".to_owned(),
+            ));
+        };
+        if artifact.artifact_role != events::ArtifactRole::TypedConfig
+            || artifact.semantic_type_id.is_some()
+            || artifact.producer_node_id.is_some()
+            || artifact.producer_seed_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "typed config artifact evidence has invalid role or producer metadata".to_owned(),
+            ));
+        }
+        let key = format!("{}:{}", schema_id, artifact.digest);
+        if by_key.insert(key, artifact).is_some() {
+            return Err(RuntimeError::InvalidRunStream(
+                "duplicate typed config artifact evidence".to_owned(),
+            ));
+        }
+    }
+
+    let mut validated = Vec::with_capacity(runtime_spec.spec().config_refs.len());
+    for config in &runtime_spec.spec().config_refs {
+        let key = config_ref_key(config);
+        let artifact = by_key.remove(&key).ok_or_else(|| {
+            RuntimeError::InvalidRunStream(format!(
+                "missing typed config artifact evidence for schema {} digest {}",
+                config.schema_id, config.digest
+            ))
+        })?;
+        if artifact.artifact_id != config.artifact_id
+            || artifact.digest != config.digest
+            || artifact.byte_len != config.byte_len
+            || artifact.media_type != config.media_type
+            || artifact.schema_id.as_ref() != Some(&config.schema_id)
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "typed config artifact evidence for schema {} digest {} does not match certified config ref",
+                config.schema_id, config.digest
+            )));
+        }
+        validated.push(artifact);
+    }
+    if !by_key.is_empty() {
+        return Err(RuntimeError::InvalidRunStream(
+            "typed config artifact evidence contains entries not certified by the spec".to_owned(),
+        ));
+    }
+    Ok(validated)
 }

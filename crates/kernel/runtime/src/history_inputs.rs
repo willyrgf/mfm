@@ -1,48 +1,37 @@
 use super::*;
 
-#[cfg(test)]
-pub(super) fn raw_stream_requires_artifact_byte_authority(
-    stream: &[store::KernelEventEnvelope],
-) -> bool {
-    stream.iter().any(|event| match event.payload() {
-        events::KernelEventPayload::RunAdmitted(payload) => {
-            !payload.fact_descriptor_artifacts.is_empty()
-        }
-        events::KernelEventPayload::FactRecorded(_) => true,
-        events::KernelEventPayload::ArtifactReferenced(payload) => matches!(
-            payload.artifact_ref.role,
-            events::ArtifactRole::FactDescriptor | events::ArtifactRole::ExternalReadEvidence
-        ),
-        _ => false,
-    })
-}
-
-pub(crate) fn materialize_inputs(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(crate) fn materialize_inputs<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
-    view: &RuntimeRunView,
-) -> Result<MaterializedInputs> {
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<MaterializedInputs>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     Ok(MaterializedInputs {
         input_schema_id: node.input_bindings.input_schema_id.clone(),
-        root: materialize_input_node(runtime_spec, node, &node.input_bindings.root, view)?,
+        root: materialize_input_node(runtime_spec, node, &node.input_bindings.root, lifecycle)?,
     })
 }
 
-fn materialize_input_node(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn materialize_input_node<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
     input: &spec::InputBindingNodeSpec,
-    view: &RuntimeRunView,
-) -> Result<MaterializedInputNode> {
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<MaterializedInputNode>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     match input {
         spec::InputBindingNodeSpec::Unit => Ok(MaterializedInputNode::Unit),
         spec::InputBindingNodeSpec::Cell(cell) => Ok(MaterializedInputNode::Cell(Box::new(
-            materialize_cell(runtime_spec, node, cell, view)?,
+            materialize_cell(runtime_spec, node, cell, lifecycle)?,
         ))),
         spec::InputBindingNodeSpec::Tuple(elements) => Ok(MaterializedInputNode::Tuple(
             elements
                 .iter()
-                .map(|element| materialize_input_node(runtime_spec, node, element, view))
+                .map(|element| materialize_input_node(runtime_spec, node, element, lifecycle))
                 .collect::<Result<Vec<_>>>()?,
         )),
         spec::InputBindingNodeSpec::Struct(fields) => Ok(MaterializedInputNode::Struct(
@@ -51,7 +40,7 @@ fn materialize_input_node(
                 .map(|field| {
                     Ok(NamedMaterializedInput {
                         field_path: field.field_path.clone(),
-                        node: materialize_input_node(runtime_spec, node, &field.node, view)?,
+                        node: materialize_input_node(runtime_spec, node, &field.node, lifecycle)?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
@@ -59,26 +48,29 @@ fn materialize_input_node(
         spec::InputBindingNodeSpec::Vec { elements, .. } => Ok(MaterializedInputNode::Vec(
             elements
                 .iter()
-                .map(|element| materialize_input_node(runtime_spec, node, element, view))
+                .map(|element| materialize_input_node(runtime_spec, node, element, lifecycle))
                 .collect::<Result<Vec<_>>>()?,
         )),
         spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
             Ok(MaterializedInputNode::NonEmptyVec(
                 elements
                     .iter()
-                    .map(|element| materialize_input_node(runtime_spec, node, element, view))
+                    .map(|element| materialize_input_node(runtime_spec, node, element, lifecycle))
                     .collect::<Result<Vec<_>>>()?,
             ))
         }
     }
 }
 
-fn materialize_cell(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn materialize_cell<S>(
+    runtime_spec: &S,
     node: &spec::NodeSpec,
     cell: &spec::InputBindingCellSpec,
-    view: &RuntimeRunView,
-) -> Result<MaterializedCell> {
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+) -> Result<MaterializedCell>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     let certified = runtime_spec.cell(&cell.cell_id).ok_or_else(|| {
         RuntimeError::InputMaterialization(format!(
             "input cell {} is not certified by the spec",
@@ -97,26 +89,29 @@ fn materialize_cell(
     validate_materialized_input_context(node, cell, certified)?;
     let terminal = match &certified.producer {
         spec::CellProducer::Seed(seed_id) => {
-            let seed = view.seed_cells.get(&cell.cell_id).ok_or_else(|| {
+            let seed = lifecycle.seed(&cell.cell_id)?.ok_or_else(|| {
                 RuntimeError::InputMaterialization(format!(
                     "seed cell {} has no RunAdmitted evidence",
                     cell.cell_id
                 ))
             })?;
+            let seed = seed.evidence();
             let seed_artifact = committed_input_artifact(
-                view,
+                lifecycle,
                 &cell.cell_id,
                 &seed.seed_artifact.artifact_id,
                 &seed.seed_artifact.evidence_hash,
+                events::ArtifactRole::SeedInput,
             )?;
-            if seed_artifact.evidence.digest != seed.digest
-                || seed_artifact.evidence.byte_len != seed.seed_artifact.byte_len
-                || seed_artifact.evidence.media_type != seed.seed_artifact.media_type
-                || seed_artifact.evidence.schema_id.as_ref() != Some(&seed.schema_id)
-                || seed_artifact.evidence.semantic_type_id.as_ref() != Some(&seed.semantic_type_id)
-                || seed_artifact.evidence.producer_node_id.is_some()
-                || seed_artifact.evidence.producer_seed_id.as_ref() != Some(seed_id)
-                || seed_artifact.evidence.artifact_role != events::ArtifactRole::SeedInput
+            let artifact_evidence = seed_artifact.evidence();
+            if artifact_evidence.digest != seed.digest
+                || artifact_evidence.byte_len != seed.seed_artifact.byte_len
+                || artifact_evidence.media_type != seed.seed_artifact.media_type
+                || artifact_evidence.schema_id.as_ref() != Some(&seed.schema_id)
+                || artifact_evidence.semantic_type_id.as_ref() != Some(&seed.semantic_type_id)
+                || artifact_evidence.producer_node_id.is_some()
+                || artifact_evidence.producer_seed_id.as_ref() != Some(seed_id)
+                || artifact_evidence.artifact_role != events::ArtifactRole::SeedInput
             {
                 return Err(RuntimeError::InputMaterialization(format!(
                     "seed cell {} committed artifact evidence does not match certified seed",
@@ -131,109 +126,105 @@ fn materialize_cell(
             }
         }
         spec::CellProducer::Node(_) => {
-            let projection = view
-                .projections
-                .cell_terminal_for_run(&view.run_admitted.run_id, &cell.cell_id)
-                .ok_or_else(|| {
-                    RuntimeError::InputMaterialization(format!(
-                        "input cell {} is not terminal",
+            let projection = lifecycle.cell(&cell.cell_id).ok_or_else(|| {
+                RuntimeError::InputMaterialization(format!(
+                    "input cell {} is not terminal",
+                    cell.cell_id
+                ))
+            })?;
+            if let Some(produced) = projection.produced() {
+                if certified.producer != spec::CellProducer::Node(produced.node_id().clone())
+                    || produced.schema_id() != &cell.schema_id
+                    || produced.semantic_type_id() != &cell.semantic_type_id
+                {
+                    return Err(RuntimeError::InputMaterialization(format!(
+                        "produced cell {} projection metadata mismatch",
                         cell.cell_id
-                    ))
-                })?;
-            match projection {
-                store::CellTerminalProjection::Produced {
-                    node_id,
-                    attempt_id,
-                    schema_id,
-                    semantic_type_id,
-                    artifact_id,
-                    content_digest,
-                    evidence_hash,
-                    ..
-                } => {
-                    if certified.producer != spec::CellProducer::Node(node_id.clone())
-                        || schema_id != &cell.schema_id
-                        || semantic_type_id != &cell.semantic_type_id
-                    {
+                    )));
+                }
+                match lifecycle.attempt(produced.node_id(), produced.attempt_id()) {
+                    Some(attempt)
+                        if matches!(
+                            attempt.status(),
+                            store::current_lifecycle::CurrentAttemptStatusRef::Completed {
+                                output_cell_id
+                            } if output_cell_id == &cell.cell_id
+                        ) => {}
+                    _ => {
                         return Err(RuntimeError::InputMaterialization(format!(
-                            "produced cell {} projection metadata mismatch",
+                            "produced cell {} is not backed by a completed producer attempt",
                             cell.cell_id
                         )));
                     }
-                    match view.projections.attempt(node_id, attempt_id) {
-                        Some(store::AttemptProjection {
-                            status: store::AttemptStatus::Completed { output_cell_id },
-                            ..
-                        }) if output_cell_id == &cell.cell_id => {}
-                        _ => {
-                            return Err(RuntimeError::InputMaterialization(format!(
-                                "produced cell {} is not backed by a completed producer attempt",
-                                cell.cell_id
-                            )));
-                        }
-                    }
-                    let artifact =
-                        committed_input_artifact(view, &cell.cell_id, artifact_id, evidence_hash)?;
-                    if artifact.evidence.digest != *content_digest
-                        || artifact.evidence.evidence_hash()? != *evidence_hash
-                        || artifact.evidence.schema_id.as_ref() != Some(schema_id)
-                        || artifact.evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
-                        || artifact.evidence.producer_node_id.as_ref() != Some(node_id)
-                        || artifact.evidence.producer_seed_id.is_some()
-                        || artifact.evidence.artifact_role != events::ArtifactRole::StateOutput
-                        || artifact.attempt_id.as_ref() != Some(attempt_id)
-                    {
-                        return Err(RuntimeError::InputMaterialization(format!(
+                }
+                let artifact = committed_input_artifact(
+                    lifecycle,
+                    &cell.cell_id,
+                    produced.artifact_id(),
+                    produced.evidence_hash(),
+                    events::ArtifactRole::StateOutput,
+                )?;
+                let artifact_evidence = artifact.evidence();
+                if artifact_evidence.digest != *produced.content_digest()
+                    || artifact_evidence.evidence_hash()? != *produced.evidence_hash()
+                    || artifact_evidence.schema_id.as_ref() != Some(produced.schema_id())
+                    || artifact_evidence.semantic_type_id.as_ref()
+                        != Some(produced.semantic_type_id())
+                    || artifact_evidence.producer_node_id.as_ref() != Some(produced.node_id())
+                    || artifact_evidence.producer_seed_id.is_some()
+                    || artifact_evidence.artifact_role != events::ArtifactRole::StateOutput
+                    || artifact.attempt_id() != Some(produced.attempt_id())
+                {
+                    return Err(RuntimeError::InputMaterialization(format!(
                             "produced cell {} committed artifact evidence does not match terminal projection",
                             cell.cell_id
                         )));
-                    }
-                    MaterializedCellTerminal::Produced {
-                        producer_node_id: node_id.clone(),
-                        artifact_id: artifact_id.clone(),
-                        content_digest: content_digest.clone(),
-                        evidence_hash: evidence_hash.clone(),
-                    }
                 }
-                store::CellTerminalProjection::Skipped {
-                    node_id,
-                    attempt_id,
-                    schema_id,
-                    semantic_type_id,
-                    skip_reason,
-                    ..
-                } => {
-                    if cell.required_terminal == spec::RequiredTerminal::ProducedOnly {
+                MaterializedCellTerminal::Produced {
+                    producer_node_id: produced.node_id().clone(),
+                    artifact_id: produced.artifact_id().clone(),
+                    content_digest: produced.content_digest().clone(),
+                    evidence_hash: produced.evidence_hash().clone(),
+                }
+            } else if let Some(skipped) = projection.skipped() {
+                if cell.required_terminal == spec::RequiredTerminal::ProducedOnly {
+                    return Err(RuntimeError::InputMaterialization(format!(
+                        "input cell {} requires produced terminal but was skipped",
+                        cell.cell_id
+                    )));
+                }
+                if certified.producer != spec::CellProducer::Node(skipped.node_id().clone())
+                    || skipped.schema_id() != &cell.schema_id
+                    || skipped.semantic_type_id() != &cell.semantic_type_id
+                {
+                    return Err(RuntimeError::InputMaterialization(format!(
+                        "skipped cell {} projection metadata mismatch",
+                        cell.cell_id
+                    )));
+                }
+                match lifecycle.attempt(skipped.node_id(), skipped.attempt_id()) {
+                    Some(attempt)
+                        if matches!(
+                            attempt.status(),
+                            store::current_lifecycle::CurrentAttemptStatusRef::Completed {
+                                output_cell_id
+                            } if output_cell_id == &cell.cell_id
+                        ) => {}
+                    _ => {
                         return Err(RuntimeError::InputMaterialization(format!(
-                            "input cell {} requires produced terminal but was skipped",
+                            "skipped cell {} is not backed by a completed producer attempt",
                             cell.cell_id
                         )));
                     }
-                    if certified.producer != spec::CellProducer::Node(node_id.clone())
-                        || schema_id != &cell.schema_id
-                        || semantic_type_id != &cell.semantic_type_id
-                    {
-                        return Err(RuntimeError::InputMaterialization(format!(
-                            "skipped cell {} projection metadata mismatch",
-                            cell.cell_id
-                        )));
-                    }
-                    match view.projections.attempt(node_id, attempt_id) {
-                        Some(store::AttemptProjection {
-                            status: store::AttemptStatus::Completed { output_cell_id },
-                            ..
-                        }) if output_cell_id == &cell.cell_id => {}
-                        _ => {
-                            return Err(RuntimeError::InputMaterialization(format!(
-                                "skipped cell {} is not backed by a completed producer attempt",
-                                cell.cell_id
-                            )));
-                        }
-                    }
-                    MaterializedCellTerminal::Skipped {
-                        skip_reason: skip_reason.clone(),
-                    }
                 }
+                MaterializedCellTerminal::Skipped {
+                    skip_reason: skipped.skip_reason().clone(),
+                }
+            } else {
+                return Err(RuntimeError::InputMaterialization(format!(
+                    "input cell {} has an unsupported terminal state",
+                    cell.cell_id
+                )));
             }
         }
     };
@@ -303,10 +294,13 @@ fn input_context_matches_cell_context(
     }
 }
 
-pub(crate) fn validate_seed_cells(
-    runtime_spec: &CertifiedRuntimeSpec,
+pub(crate) fn validate_seed_cells<S>(
+    runtime_spec: &S,
     seed_cells: &[events::SeedCellRef],
-) -> Result<BTreeMap<CellId, events::SeedCellRef>> {
+) -> Result<BTreeMap<CellId, events::SeedCellRef>>
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     let mut by_seed = BTreeMap::<_, _>::new();
     let mut by_cell = BTreeMap::<_, _>::new();
     for seed in seed_cells {

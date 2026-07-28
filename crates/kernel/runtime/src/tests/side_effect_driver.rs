@@ -88,23 +88,26 @@ async fn drive_until_side_effect_preparation<S>(
     fixture: &Fixture,
 ) -> bool
 where
-    S: store::RunEventStore<Error = store::StoreError>
-        + store::ExecutionClaimStore<Error = store::StoreError>
-        + ?Sized,
+    S: store::RunJournalStore + store::ExecutionClaimStore + ?Sized,
 {
+    let mut current = load_fixture_current(scheduler, store, fixture)
+        .await
+        .expect("load side-effect settlement run");
     for _ in 0..8 {
-        drive_once_with_claim(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
+        let result = drive_current_once_with_claim(scheduler, store, current)
             .await
             .expect("drive through preparation append");
-        let stream = store
-            .load_committed_run_stream(&fixture.run_id)
-            .await
-            .expect("load side-effect settlement stream");
-        let preparation_committed = stream.events().iter().any(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::SideEffectInvocationPrepared(_)
-            )
+        current = result.into_current_run();
+        let mut preparation_committed = false;
+        let _ = current.lifecycle().visit_records::<()>(|record| {
+            if matches!(
+                record.kind(),
+                store::current_lifecycle::CurrentRecordKindRef::SideEffectInvocationPrepared(_)
+            ) {
+                preparation_committed = true;
+                return std::ops::ControlFlow::Break(());
+            }
+            std::ops::ControlFlow::Continue(())
         });
         if preparation_committed {
             return true;
@@ -116,7 +119,12 @@ where
 #[tokio::test]
 async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_runs() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let mut peer = fixture.clone();
+    let mut peer = fixture_with_first_exclusive_side_effect_state();
+    assert_eq!(
+        peer.runtime_spec.spec_hash(),
+        fixture.runtime_spec.spec_hash(),
+        "peer run must use the same independently certified spec"
+    );
     refresh_fixture_run_id_with_identity(
         &mut peer,
         alternate_fixture_store_scope_id(),
@@ -133,74 +141,71 @@ async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_run
     )
     .await
     .expect("start first run");
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load first current run");
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Advanced,
         "first run claims resource lane"
     );
-    let first_stream = store.load_run_stream(&fixture.run_id);
-    let claim_seq = first_stream
-        .iter()
-        .find_map(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::ResourceLaneClaimed(_)
-            )
-            .then_some(event.seq())
-        })
-        .expect("first run recorded resource lane claim");
-    let prepared_seq = first_stream.iter().find_map(|event| {
-        matches!(
-            event.payload(),
-            events::KernelEventPayload::SideEffectInvocationPrepared(_)
-        )
-        .then_some(event.seq())
+    let mut claim_seq = None;
+    let mut prepared_seq = None;
+    let mut resource_key = None;
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::ResourceLaneClaimed(payload) => {
+                claim_seq = Some(record.sequence());
+                resource_key = Some(payload.resource_key.clone());
+            }
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectInvocationPrepared(_) => {
+                prepared_seq = Some(record.sequence());
+            }
+            _ => {}
+        }
+        std::ops::ControlFlow::Continue(())
     });
+    let claim_seq = claim_seq.expect("first run recorded resource lane claim");
     assert!(
         prepared_seq.is_none_or(|prepared_seq| claim_seq < prepared_seq),
         "exclusive invocation prepare must be committed after ResourceLaneClaimed"
     );
-    let resource_key = first_stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::ResourceLaneClaimed(payload) => {
-                Some(payload.resource_key.clone())
-            }
-            _ => None,
-        })
-        .expect("first run recorded resource key");
+    let resource_key = resource_key.expect("first run recorded resource key");
     assert_eq!(resource_key.key.as_str(), "mfm.test.driver.shared-resource");
     let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
-    assert!(store
-        .projection_snapshot()
-        .resource_lane(&lane_key)
-        .is_some());
+    assert!(current.lifecycle().resource_lane(&lane_key).is_some());
 
     start_fixture_run(&scheduler, &mut store, &peer, vec![peer.seed_ref.clone()])
         .await
         .expect("start peer run");
-    assert_eq!(
-        drive_once(&scheduler, &mut store, &peer.runtime_spec, &peer.run_id)
-            .await
-            .expect("peer run starts attempt before observing lane block"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        drive_once(&scheduler, &mut store, &peer.runtime_spec, &peer.run_id)
-            .await
-            .expect("peer run blocks on same resource lane"),
-        SchedulerStatus::Blocked
-    );
+    let mut current = load_fixture_current(&scheduler, &store, &peer)
+        .await
+        .expect("load peer current run");
+    let result = drive_current_once_with_claim(&scheduler, &store, current)
+        .await
+        .expect("peer run starts attempt before observing lane block");
+    assert_eq!(result.status(), SchedulerStatus::Advanced);
+    current = result.into_current_run();
+    let result = drive_current_once_with_claim(&scheduler, &store, current)
+        .await
+        .expect("peer run blocks on same resource lane");
+    assert_eq!(result.status(), SchedulerStatus::Blocked);
+    current = result.into_current_run();
+    let mut prepared = false;
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        if matches!(
+            record.kind(),
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectInvocationPrepared(_)
+        ) {
+            prepared = true;
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
     assert!(
-        store
-            .load_run_stream(&peer.run_id)
-            .iter()
-            .all(|event| !matches!(
-                event.payload(),
-                events::KernelEventPayload::SideEffectInvocationPrepared(_)
-            )),
+        !prepared,
         "peer run must not prepare while the cross-run resource lane is held"
     );
 }
@@ -212,45 +217,57 @@ async fn exclusive_side_effect_prepare_failure_after_claim_terminalizes_attempt(
         &fixture,
         FailingAfterPreclaimRunner::new(&fixture),
     ));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
+    let store = started_fixture_store(&scheduler, &fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Advanced,
         "exclusive run terminalizes failed resource-lane claim"
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let stream = store.load_run_stream(&fixture.run_id);
+    let mut claimed = false;
+    let mut released = false;
+    let mut failed = false;
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::ResourceLaneClaimed(_) => {
+                claimed = true;
+            }
+            store::current_lifecycle::CurrentRecordKindRef::ResourceLaneReleased(_) => {
+                released = true;
+            }
+            store::current_lifecycle::CurrentRecordKindRef::SideEffectFailed(_) => {
+                failed = true;
+            }
+            _ => {}
+        }
+        std::ops::ControlFlow::Continue(())
+    });
     assert!(
-        stream.iter().any(|event| matches!(
-            event.payload(),
-            events::KernelEventPayload::ResourceLaneClaimed(_)
-        )),
+        claimed,
         "failed exclusive attempt records the resource lane claim"
     );
     assert!(
-        stream.iter().any(|event| matches!(
-            event.payload(),
-            events::KernelEventPayload::ResourceLaneReleased(_)
-        )),
+        released,
         "failed exclusive attempt releases the resource lane"
     );
     assert!(
-        stream.iter().any(|event| matches!(
-            event.payload(),
-            events::KernelEventPayload::SideEffectFailed(_)
-        )),
+        failed,
         "failed exclusive attempt records terminal side-effect evidence"
     );
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+    assert_node_failed_with_code(&current, &node.node_id, "runner_output_invalid");
+    let mut active_lane = false;
+    let _ = current.lifecycle().visit_resource_lanes::<()>(|_| {
+        active_lane = true;
+        std::ops::ControlFlow::Break(())
+    });
     assert!(
-        store
-            .projection_snapshot()
-            .resource_lanes()
-            .next()
-            .is_none(),
+        !active_lane,
         "terminal attempt failure releases the exclusive resource lane"
     );
 }
@@ -259,29 +276,46 @@ async fn exclusive_side_effect_prepare_failure_after_claim_terminalizes_attempt(
 async fn runner_block_leaves_started_attempt_open_without_failure() {
     let fixture = fixture();
     let node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let mut registry = fixture_registry_with_first_runner(&fixture, "pure", BlockingRunner);
+    let mut registry = test_runner_registry();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            BlockingRunner,
+        ))
+        .expect("blocking runner binding");
+    register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     let scheduler = test_scheduler(registry);
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
+    let store = started_fixture_store(&scheduler, &fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Blocked,
         "blocked runner leaves attempt open"
     );
-    let stream = store.load_run_stream(&fixture.run_id);
-    assert!(stream.iter().any(|event| matches!(
-        event.payload(),
-        events::KernelEventPayload::StateAttemptStarted(payload)
-            if payload.node_id == node.node_id
-    )));
-    assert!(stream.iter().all(|event| !matches!(
-        event.payload(),
-        events::KernelEventPayload::StateAttemptFailed(payload)
-            if payload.node_id == node.node_id
-    )));
+    let attempt = current
+        .lifecycle()
+        .attempt(
+            &node.node_id,
+            &attempt_id(
+                &fixture.run_id,
+                fixture.runtime_spec.spec_hash(),
+                &node.node_id,
+                1,
+            )
+            .expect("attempt id"),
+        )
+        .expect("started attempt");
+    assert!(matches!(
+        attempt.status(),
+        store::current_lifecycle::CurrentAttemptStatusRef::Started { .. }
+    ));
 }
 
 #[tokio::test]
@@ -305,19 +339,19 @@ async fn side_effect_verify_block_leaves_framework_attempt_open_without_failure(
         DriverSideEffectRunner::new(&fixture),
         BlockingRunner,
     ));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
+    let store = started_fixture_store(&scheduler, &fixture).await;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
     let mut blocked = false;
     for _ in 0..12 {
-        match drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("drive side-effect pair")
-        {
+        let result = drive_current_once_with_claim(&scheduler, &store, current)
+            .await
+            .expect("drive side-effect pair");
+        let status = result.status();
+        current = result.into_current_run();
+        match status {
             SchedulerStatus::Advanced => {}
             SchedulerStatus::Blocked => {
                 blocked = true;
@@ -329,17 +363,21 @@ async fn side_effect_verify_block_leaves_framework_attempt_open_without_failure(
         }
     }
     assert!(blocked, "verify runner must report an operational block");
-    let stream = store.load_run_stream(&fixture.run_id);
-    assert!(stream.iter().any(|event| matches!(
-        event.payload(),
-        events::KernelEventPayload::StateAttemptStarted(payload)
-            if payload.node_id == verify_node.node_id
-    )));
-    assert!(stream.iter().all(|event| !matches!(
-        event.payload(),
-        events::KernelEventPayload::StateAttemptFailed(payload)
-            if payload.node_id == verify_node.node_id
-    )));
+    let verify_attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &verify_node.node_id,
+        1,
+    )
+    .expect("verify attempt id");
+    let attempt = current
+        .lifecycle()
+        .attempt(&verify_node.node_id, &verify_attempt_id)
+        .expect("started verify attempt");
+    assert!(matches!(
+        attempt.status(),
+        store::current_lifecycle::CurrentAttemptStatusRef::Started { .. }
+    ));
 }
 
 #[tokio::test]
@@ -356,11 +394,11 @@ async fn side_effect_driver_submits_from_started_projection() {
         "sidefx-driver-submit",
     );
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+    let current = verified_current_for_store(&store, &fixture);
 
-    let output =
-        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
-            .await
-            .expect("driver output");
+    let output = drive_side_effect_driver_from_current(&current, node, &attempt_id, &callbacks)
+        .await
+        .expect("driver output");
 
     assert_eq!(output.payloads().len(), 1);
     match &output.payloads()[0] {
@@ -384,6 +422,7 @@ async fn side_effect_driver_persists_submission_recovery_decisions() {
         "wallet-driver-recovery",
         "sidefx-driver-recovery",
     );
+    let current = verified_current_for_store(&store, &fixture);
 
     for (decision, expected) in [
         (
@@ -398,10 +437,9 @@ async fn side_effect_driver_persists_submission_recovery_decisions() {
     ] {
         let callbacks =
             TestSideEffectDriverCallbacks::new(&fixture).with_submission_decision(decision);
-        let output =
-            drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
-                .await
-                .expect("driver output");
+        let output = drive_side_effect_driver_from_current(&current, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
         let actual = output
             .payloads()
             .iter()
@@ -435,17 +473,19 @@ async fn side_effect_submission_unknown_keeps_exclusive_resource_lane_held() {
         "wallet-driver-unknown-lane",
         "sidefx-driver-unknown-lane",
     );
-    let before_unknown = store.projection_snapshot();
-    let (lane_key, held_lane) =
-        active_resource_lane_for_pair(&before_unknown, &fixture.run_id, &pair_id)
-            .expect("exclusive lane must be held before submission recovery");
+    let current = verified_current_for_store(&store, &fixture);
+    let held_lane = active_resource_lane_for_pair(&current, &pair_id)
+        .expect("exclusive lane must be held before submission recovery");
+    let lane_key = held_lane.key().clone();
+    let held_run_id = held_lane.holder().run_id().clone();
+    let held_pair_id = held_lane.holder().pair_id().clone();
+    let held_claim_id = held_lane.claim_id().clone();
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture)
         .with_submission_decision(TestSubmissionDecision::Unknown);
 
-    let output =
-        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
-            .await
-            .expect("driver output");
+    let output = drive_side_effect_driver_from_current(&current, node, &attempt_id, &callbacks)
+        .await
+        .expect("driver output");
     assert!(output
         .payloads()
         .iter()
@@ -481,19 +521,22 @@ async fn side_effect_submission_unknown_keeps_exclusive_resource_lane_held() {
         },
     );
 
-    let after_unknown = store.projection_snapshot();
-    let projection = after_unknown
-        .side_effect_for_pair(&fixture.run_id, &pair_id)
-        .expect("side-effect projection");
+    let current = verified_current_for_store(&store, &fixture);
+    let side_effect = current
+        .lifecycle()
+        .side_effect(&pair_id)
+        .expect("current side effect");
     assert!(matches!(
-        projection.phase,
+        side_effect.phase(),
         store::SideEffectPhase::SubmissionUnknown { .. }
     ));
-    let lane_after_unknown = after_unknown
+    let lane_after_unknown = current
+        .lifecycle()
         .resource_lane(&lane_key)
         .expect("submission-unknown phase must keep the resource lane held");
-    assert_eq!(lane_after_unknown.holder, held_lane.holder);
-    assert_eq!(lane_after_unknown.claim_id, held_lane.claim_id);
+    assert_eq!(lane_after_unknown.holder().run_id(), &held_run_id);
+    assert_eq!(lane_after_unknown.holder().pair_id(), &held_pair_id);
+    assert_eq!(lane_after_unknown.claim_id(), &held_claim_id);
 }
 
 #[tokio::test]
@@ -534,10 +577,10 @@ async fn side_effect_verify_driver_maps_receipt_to_state_output() {
         1,
     )
     .expect("verify attempt id");
+    let current = verified_current_for_store(&store, &fixture);
 
-    let output = drive_side_effect_verify_driver_from_store(
-        &fixture,
-        &store,
+    let output = drive_side_effect_verify_driver_from_current(
+        &current,
         verify_node,
         &verify_attempt_id,
         &callbacks,
@@ -556,38 +599,40 @@ async fn side_effect_verify_driver_maps_receipt_to_state_output() {
 #[tokio::test]
 async fn side_effect_receipt_verification_releases_exclusive_resource_lane() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
+    let (scheduler, store) = started_side_effect_fixture_run(&fixture).await;
     let submit_node = node_by_output(&fixture, &fixture.cell_a).clone();
     let verify_node = side_effect_verify_node_for_submit(&fixture, &submit_node).clone();
     let pair_id = fixture_side_effect_pair_id(&fixture, &submit_node);
     let mut saw_lane_claimed = false;
     let mut released_with_receipt_before_output = false;
     let mut terminal_output_after_release = false;
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
 
     for _ in 0..10 {
-        assert_ne!(
-            drive_fixture_once(&scheduler, &mut store, &fixture)
-                .await
-                .expect("advance receipt verification"),
-            SchedulerStatus::Blocked
-        );
-        let snapshot = store.projection_snapshot();
-        let active_lane = active_resource_lane_for_pair(&snapshot, &fixture.run_id, &pair_id);
+        let result = drive_current_once_with_claim(&scheduler, &store, current)
+            .await
+            .expect("advance receipt verification");
+        assert_ne!(result.status(), SchedulerStatus::Blocked);
+        current = result.into_current_run();
+        let active_lane = active_resource_lane_for_pair(&current, &pair_id);
         saw_lane_claimed |= active_lane.is_some();
-        let side_effect = snapshot
-            .side_effect_for_pair(&fixture.run_id, &pair_id)
-            .expect("side-effect projection");
+        let side_effect = current
+            .lifecycle()
+            .side_effect(&pair_id)
+            .expect("current side effect");
         if matches!(
-            side_effect.phase,
+            side_effect.phase(),
             store::SideEffectPhase::ReceiptObserved { .. }
         ) && active_lane.is_none()
-            && snapshot.cell_terminal(&verify_node.output_cell).is_none()
+            && current.lifecycle().cell(&verify_node.output_cell).is_none()
         {
             released_with_receipt_before_output = true;
         }
         if released_with_receipt_before_output
             && active_lane.is_none()
-            && snapshot.cell_terminal(&verify_node.output_cell).is_some()
+            && current.lifecycle().cell(&verify_node.output_cell).is_some()
         {
             terminal_output_after_release = true;
             break;
@@ -628,9 +673,10 @@ async fn side_effect_driver_rejects_ambiguous_projection() {
         "sidefx-driver-ambiguous-terminal",
     );
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+    let current = verified_current_for_store(&store, &fixture);
 
     assert!(matches!(
-        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks).await,
+        drive_side_effect_driver_from_current(&current, node, &attempt_id, &callbacks).await,
         Err(RuntimeError::InvalidRunnerOutput(message))
             if message.contains("unsupported side-effect driver phase: ambiguous")
     ));

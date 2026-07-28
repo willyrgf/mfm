@@ -67,16 +67,14 @@ pub(super) async fn started_side_effect_fixture_run(
     (scheduler, store)
 }
 
-pub(super) async fn start_fixture_run_async_store<S: store::RunEventStore + ?Sized>(
+pub(super) async fn start_fixture_run_async_store<S: store::RunJournalStore + ?Sized>(
     scheduler: &SerialTypedScheduler,
     store: &S,
     fixture: &Fixture,
     seed_cells: Vec<events::SeedCellRef>,
 ) -> Result<store::CommitOutcome> {
-    let expected_next_seq = store
-        .expected_next_seq(&fixture.run_id)
-        .await
-        .map_err(crate::error::async_store_error)?;
+    let expected_next_seq =
+        store::test_support::expected_next_sequence_for_test(store, &fixture.run_id).await;
     let launch = scheduler
         .prepare_run_launch(
             &fixture.runtime_spec,
@@ -96,32 +94,47 @@ pub(super) async fn scheduler_start_run(
     scheduler.start_run(&*store, launch).await
 }
 
-pub(super) async fn scheduler_start_run_admitted(
+pub(super) async fn load_fixture_current<S>(
     scheduler: &SerialTypedScheduler,
-    store: &mut TestTypedRunStore,
-    runtime_spec: &CertifiedRuntimeSpec,
-    launch: PreparedRunLaunch,
-) -> Result<RunAdmissionAuthority> {
+    store: &S,
+    fixture: &Fixture,
+) -> Result<VerifiedCurrentRun>
+where
+    S: store::RunJournalStore + ?Sized,
+{
     scheduler
-        .start_run_admitted(&*store, runtime_spec, launch)
+        .load_admitted_run(
+            store,
+            recertified_runtime_spec(&fixture.runtime_spec),
+            &fixture.run_id,
+        )
         .await
 }
 
-pub(super) async fn drive_once(
-    scheduler: &SerialTypedScheduler,
-    store: &mut TestTypedRunStore,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-) -> Result<SchedulerStatus> {
-    drive_once_with_claim(scheduler, &*store, runtime_spec, run_id).await
-}
-
-pub(super) async fn drive_fixture_once(
+pub(super) async fn started_fixture_current(
     scheduler: &SerialTypedScheduler,
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
-) -> Result<SchedulerStatus> {
-    drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id).await
+    seed_cells: Vec<events::SeedCellRef>,
+) -> Result<VerifiedCurrentRun> {
+    start_fixture_run(scheduler, store, fixture, seed_cells).await?;
+    load_fixture_current(scheduler, &*store, fixture).await
+}
+
+pub(super) async fn drive_current_once_with_claim<S>(
+    scheduler: &SerialTypedScheduler,
+    store: &S,
+    current: VerifiedCurrentRun,
+) -> Result<SchedulerDriveResult>
+where
+    S: store::RunJournalStore + store::ExecutionClaimStore + ?Sized,
+{
+    let execution_scope = execution_claim_scope(&current)?;
+    let run_id = current.view().run_id().clone();
+    let token = execution_claim_token(store, &execution_scope, &run_id).await?;
+    scheduler
+        .drive_once(store, current, &execution_scope, token)
+        .await
 }
 
 pub(super) async fn assert_invalid_output_after(
@@ -131,93 +144,46 @@ pub(super) async fn assert_invalid_output_after(
     drive_count: usize,
     expected_message: &str,
 ) {
+    let mut current = load_fixture_current(scheduler, &*store, fixture)
+        .await
+        .expect("load current run");
     for _ in 0..drive_count {
-        assert_eq!(
-            drive_fixture_once(scheduler, store, fixture)
-                .await
-                .expect("advance before invalid output"),
-            SchedulerStatus::Advanced
-        );
+        let result = drive_current_once_with_claim(scheduler, &*store, current)
+            .await
+            .expect("advance before invalid output");
+        assert_eq!(result.status(), SchedulerStatus::Advanced);
+        current = result.into_current_run();
     }
     assert!(matches!(
-        drive_fixture_once(scheduler, store, fixture).await,
+        drive_current_once_with_claim(scheduler, &*store, current).await,
         Err(RuntimeError::InvalidRunnerOutput(message))
             if message.contains(expected_message)
     ));
 }
 
-pub(super) async fn drive_until_blocked(
-    scheduler: &SerialTypedScheduler,
-    store: &mut TestTypedRunStore,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-) -> Result<SchedulerStatus> {
-    drive_until_blocked_with_claim(scheduler, &*store, runtime_spec, run_id).await
-}
-
-pub(super) async fn drive_fixture_until_blocked(
-    scheduler: &SerialTypedScheduler,
-    store: &mut TestTypedRunStore,
-    fixture: &Fixture,
-) -> Result<SchedulerStatus> {
-    drive_until_blocked(scheduler, store, &fixture.runtime_spec, &fixture.run_id).await
-}
-
-pub(super) async fn drive_once_with_claim<S>(
+pub(super) async fn drive_current_until_blocked_with_claim<S>(
     scheduler: &SerialTypedScheduler,
     store: &S,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-) -> Result<SchedulerStatus>
+    current: VerifiedCurrentRun,
+) -> Result<SchedulerDriveResult>
 where
-    S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
+    S: store::RunJournalStore + store::ExecutionClaimStore + ?Sized,
 {
-    let execution_scope = execution_claim_scope(store, run_id).await?;
-    let token = execution_claim_token(store, &execution_scope, run_id).await?;
+    let execution_scope = execution_claim_scope(&current)?;
+    let run_id = current.view().run_id().clone();
+    let token = execution_claim_token(store, &execution_scope, &run_id).await?;
     scheduler
-        .drive_once(store, runtime_spec, run_id, &execution_scope, token)
+        .drive_until_blocked(store, current, &execution_scope, token)
         .await
 }
 
-pub(super) async fn drive_until_blocked_with_claim<S>(
-    scheduler: &SerialTypedScheduler,
-    store: &S,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-) -> Result<SchedulerStatus>
-where
-    S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
-{
-    let execution_scope = execution_claim_scope(store, run_id).await?;
-    let token = execution_claim_token(store, &execution_scope, run_id).await?;
-    scheduler
-        .drive_until_blocked(store, runtime_spec, run_id, &execution_scope, token)
-        .await
-}
-
-pub(super) async fn execution_claim_scope<S>(
-    store: &S,
-    run_id: &RunId,
-) -> Result<store::ExecutionClaimScope>
-where
-    S: store::RunEventStore + ?Sized,
-{
-    let committed = store
-        .load_committed_run_stream(run_id)
-        .await
-        .map_err(crate::error::async_store_error)?;
-    committed
-        .events()
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(
-                store::ExecutionClaimScope::from_run_identity_material(&payload.identity_material),
-            ),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            RuntimeError::InvalidRunStream(format!("run {run_id} has no RunAdmitted event"))
-        })
+pub(super) fn execution_claim_scope(
+    current: &VerifiedCurrentRun,
+) -> Result<store::ExecutionClaimScope> {
+    let admission = current.lifecycle().admission()?;
+    Ok(store::ExecutionClaimScope::from_run_identity_material(
+        admission.identity_material(),
+    ))
 }
 
 pub(super) async fn execution_claim_token<S>(
@@ -265,30 +231,12 @@ where
 pub(super) async fn record_manual_resolution(
     scheduler: &SerialTypedScheduler,
     store: &mut TestTypedRunStore,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
+    current: VerifiedCurrentRun,
     request: ManualResolutionRequest,
-) -> Result<store::CommitOutcome> {
+) -> Result<VerifiedCurrentRun> {
     scheduler
-        .record_manual_resolution(&*store, runtime_spec, run_id, request)
+        .record_manual_resolution(&*store, current, request)
         .await
-}
-
-pub(super) fn build_manual_resolution_prefix_authority_for_tests(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    store: &TestTypedRunStore,
-    manual: spec::ManualResolutionEvidenceSpec,
-) -> Result<mfm_manual_auth::ManualResolutionPrefixAuthority> {
-    let projection_snapshot = store.projection_snapshot();
-    crate::manual_resolution::build_manual_resolution_prefix_authority_from_parts(
-        runtime_spec,
-        run_id,
-        manual,
-        &store.load_run_stream(run_id),
-        store.expected_next_seq(run_id),
-        &projection_snapshot,
-    )
 }
 
 pub(super) fn run_start_evidence(
@@ -500,36 +448,6 @@ pub(super) fn terminal_payloads(
     })]
 }
 
-pub(super) fn fact_query_terminal_output(
-    ctx: &ErasedRunCtx<'_>,
-    state_evidence: &store::ArtifactEvidenceRef,
-    staged_artifacts: Vec<StagedArtifact>,
-    staged_retention_refs: Vec<StagedRetentionRefs>,
-) -> ErasedRunnerOutput {
-    ErasedRunnerOutput::from_parts(
-        staged_artifacts,
-        staged_retention_refs,
-        terminal_payloads(ctx, state_evidence),
-    )
-}
-
-pub(super) fn prepare_runner_output_for_invocation(
-    invocation: &PreparedRunnerInvocation<'_>,
-    output: ErasedRunnerOutput,
-) -> Result<crate::commit::PreparedRunnerOutput> {
-    CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
-        runtime_spec: invocation.runtime_spec,
-        run_id: invocation.run_id,
-        node: invocation.node,
-        attempt_id: invocation.attempt_id,
-        caps: &invocation.caps,
-        view: invocation.view,
-        context_output_extractor: None,
-        saga_terminal_proof: None,
-        output,
-    })
-}
-
 pub(super) fn state_output_artifact(
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
@@ -645,27 +563,8 @@ pub(super) fn staged_attempt_artifact(
     ctx: &ErasedRunCtx<'_>,
     evidence: store::ArtifactEvidenceRef,
 ) -> Result<StagedArtifact> {
-    let binding = staged_artifact_binding_kind(evidence.artifact_role).expect("staged role");
-    StagedArtifact::finalized_attempt_artifact_for_tests(ctx, evidence, binding)
-}
-
-pub(super) fn staged_side_effect_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    evidence: store::ArtifactEvidenceRef,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> Result<StagedArtifact> {
-    let phase =
-        staged_side_effect_artifact_phase(evidence.artifact_role).expect("staged side-effect role");
-    StagedArtifact::finalized_attempt_artifact_for_tests(
-        ctx,
-        evidence,
-        StagedArtifactBindingKind::SideEffectEvidence {
-            ledger_key,
-            invocation_epoch,
-            phase,
-        },
-    )
+    let bytes = synthetic_artifact_bytes_for_digest(&evidence.digest);
+    StagedArtifact::inline_attempt_artifact(ctx, bytes, evidence)
 }
 
 pub(super) fn node_by_output<'a>(fixture: &'a Fixture, cell_id: &CellId) -> &'a spec::NodeSpec {
@@ -762,13 +661,13 @@ pub(super) fn append_or_get_started_attempt(
         attempt_no,
     )
     .expect("attempt id");
-    if let Some(attempt) = store
-        .projection_snapshot()
-        .attempt(&node.node_id, &attempt_id)
-        .cloned()
-    {
+    let current = verified_current_for_store(&*store, fixture);
+    if let Some(attempt) = current.lifecycle().attempt(&node.node_id, &attempt_id) {
         assert!(
-            matches!(attempt.status, store::AttemptStatus::Started { .. }),
+            matches!(
+                attempt.status(),
+                store::current_lifecycle::CurrentAttemptStatusRef::Started { .. }
+            ),
             "attempt {attempt_id} for node {} is not active",
             node.node_id
         );

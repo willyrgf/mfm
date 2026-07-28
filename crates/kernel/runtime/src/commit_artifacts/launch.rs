@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn required_artifacts_for_payloads(
-    view: &RuntimeRunView,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     required_artifacts: Vec<store::ArtifactEvidenceRef>,
     payloads: &[events::KernelEventPayload],
 ) -> Result<Vec<store::ArtifactEvidenceRef>> {
@@ -15,15 +15,7 @@ pub(crate) fn required_artifacts_for_payloads(
             }) {
                 continue;
             }
-            let Some(evidence) = committed_artifact_for_requirement(view, &requirement) else {
-                if requirement.source.is_retention() {
-                    if let Some(evidence) =
-                        retained_fact_artifact_evidence_for_requirement(view, &requirement)?
-                    {
-                        required_artifacts.push(evidence);
-                    }
-                    continue;
-                }
+            let Some(evidence) = committed_artifact_for_requirement(lifecycle, &requirement) else {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "payload references artifact {} without required evidence",
                     requirement.artifact_id
@@ -35,67 +27,36 @@ pub(crate) fn required_artifacts_for_payloads(
     Ok(required_artifacts)
 }
 
-fn retained_fact_artifact_evidence_for_requirement(
-    view: &RuntimeRunView,
-    requirement: &store::EventArtifactRequirement,
-) -> Result<Option<store::ArtifactEvidenceRef>> {
-    match requirement.artifact_role {
-        Some(events::ArtifactRole::FactDescriptor) => {
-            let descriptor_hash = requirement.digest.as_ref().ok_or_else(|| {
-                RuntimeError::InvalidRunnerOutput(format!(
-                    "retention ref for artifact {} lacks descriptor digest",
-                    requirement.artifact_id
-                ))
-            })?;
-            let Some(descriptor) = view
-                .projections
-                .fact_descriptor(descriptor_hash)
-                .filter(|descriptor| descriptor.descriptor_artifact_id == requirement.artifact_id)
-                .filter(|descriptor| {
-                    descriptor
-                        .descriptor_artifact_evidence
-                        .evidence_hash()
-                        .is_ok_and(|actual| actual == requirement.evidence_hash)
-                })
-            else {
-                return Ok(None);
-            };
-            Ok(Some(descriptor.descriptor_artifact_evidence.clone()))
-        }
-        Some(events::ArtifactRole::FactResponse) => Ok(view
-            .projections
-            .fact_query_entries()
-            .find(|(_, projection)| {
-                projection.artifact_id() == &requirement.artifact_id
-                    && requirement
-                        .digest
-                        .as_ref()
-                        .is_some_and(|digest| projection.response_hash() == digest)
-                    && projection.artifact_evidence_hash() == &requirement.evidence_hash
-            })
-            .and_then(|(_claim_id, projection)| {
-                let evidence = projection.response_artifact_evidence()?;
-                let evidence_hash = evidence.evidence_hash().ok()?;
-                (evidence_hash == requirement.evidence_hash).then(|| evidence.clone())
-            })),
-        _ => Ok(None),
-    }
-}
-
 fn committed_artifact_for_requirement(
-    view: &RuntimeRunView,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     requirement: &store::EventArtifactRequirement,
 ) -> Option<store::ArtifactEvidenceRef> {
-    view.artifact_refs
-        .get(&(
-            requirement.artifact_id.clone(),
-            requirement.evidence_hash.clone(),
-        ))
-        .filter(|reference| {
-            store::validate_artifact_requirement_against_evidence(requirement, &reference.evidence)
+    let mut matched = None;
+    let _ = lifecycle.visit_records(|record| {
+        let _ = record.visit_artifact_requirements(|committed_requirement| {
+            if committed_requirement.artifact_id != requirement.artifact_id
+                || committed_requirement.evidence_hash != requirement.evidence_hash
+            {
+                return std::ops::ControlFlow::Continue(());
+            }
+            let Some(object) = lifecycle.object_for_requirement(committed_requirement) else {
+                return std::ops::ControlFlow::Continue(());
+            };
+            if store::validate_artifact_requirement_against_evidence(requirement, object.evidence())
                 .is_ok()
-        })
-        .map(|reference| reference.evidence.clone())
+            {
+                matched = Some(object.evidence().clone());
+                return std::ops::ControlFlow::Break(());
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        if matched.is_some() {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    });
+    matched
 }
 
 pub(crate) fn launch_artifacts_by_evidence(

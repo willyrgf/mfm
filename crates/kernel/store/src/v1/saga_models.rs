@@ -329,7 +329,8 @@ fn require_closed_obligations_non_empty(
 fn require_failed_without_acdc_claim(
     policy: &SagaPolicySpec,
     saga: &SagaProjection,
-    manual: Option<VerifiedManualResolutionForPrefix>,
+    certified_spec_hash: &SpecHash,
+    manual: Option<&crate::v1::journal::history_validation::VerifiedHistoricalManualResolution>,
 ) -> Result<Option<SpecHash>> {
     if saga.run_mode != RunMode::FailedWithoutAcdcClaim {
         return Err(StoreError::ProjectionConflict {
@@ -343,14 +344,15 @@ fn require_failed_without_acdc_claim(
     if saga.manual_resolution.is_some() {
         let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
             key: format!("run:{}:saga_terminal", saga.run_id),
-            message: "manual failed terminal requires verified manual resolution proof".to_owned(),
+            message: "manual failed terminal requires verified manual resolution history"
+                .to_owned(),
         })?;
         require_verified_manual_resolution_matches(
             saga,
-            &verified,
+            verified,
             events::ManualResolutionOutcome::FailWithoutAcdcClaim,
         )?;
-        return Ok(Some(verified.prefix().spec_hash().clone()));
+        return Ok(Some(certified_spec_hash.clone()));
     }
     if !policy_allows_failed_without_acdc_claim(policy) {
         return Err(StoreError::ProjectionConflict {
@@ -382,11 +384,12 @@ enum SagaTerminalProofKind {
 
 impl SagaTerminalProof {
     /// Mints terminal proof from certified saga policy plus current saga projection.
-    pub fn new(
+    pub(in crate::v1) fn new(
         policy: &SagaPolicySpec,
         saga: &SagaProjection,
         prefix_next_seq: StreamSeq,
-        manual: Option<VerifiedManualResolutionForPrefix>,
+        certified_spec_hash: &SpecHash,
+        manual: Option<&crate::v1::journal::history_validation::VerifiedHistoricalManualResolution>,
     ) -> Result<Self> {
         let saga_policy_digest = policy
             .saga_policy_digest()
@@ -399,20 +402,22 @@ impl SagaTerminalProof {
             RunMode::ManuallyResolved => {
                 let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
                     key: format!("run:{}:saga_terminal", saga.run_id),
-                    message: "manual terminal requires verified manual resolution proof".to_owned(),
+                    message: "manual terminal requires verified manual resolution history"
+                        .to_owned(),
                 })?;
                 require_verified_manual_resolution_matches(
                     saga,
-                    &verified,
+                    verified,
                     events::ManualResolutionOutcome::ConfirmRemediated,
                 )?;
                 (
                     SagaTerminalProofKind::ManuallyResolved,
-                    Some(verified.prefix().spec_hash().clone()),
+                    Some(certified_spec_hash.clone()),
                 )
             }
             RunMode::FailedWithoutAcdcClaim => {
-                let manual_spec_hash = require_failed_without_acdc_claim(policy, saga, manual)?;
+                let manual_spec_hash =
+                    require_failed_without_acdc_claim(policy, saga, certified_spec_hash, manual)?;
                 (
                     SagaTerminalProofKind::FailedWithoutAcdcClaim,
                     manual_spec_hash,
@@ -484,9 +489,24 @@ impl SagaTerminalProof {
     pub(super) fn manual_spec_hash(&self) -> Option<&SpecHash> {
         self.manual_spec_hash.as_ref()
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn forged_failed_without_acdc_claim_for_test(
+        run_id: RunId,
+        prefix_next_seq: StreamSeq,
+        saga_policy_digest: ContentDigest,
+    ) -> Self {
+        Self {
+            run_id,
+            prefix_next_seq,
+            saga_policy_digest,
+            manual_spec_hash: None,
+            kind: SagaTerminalProofKind::FailedWithoutAcdcClaim,
+        }
+    }
 }
 
-pub(super) fn manual_policy_for_block_reason(
+pub(in crate::v1) fn manual_policy_for_block_reason(
     policy: &SagaPolicySpec,
     reason: ManualBlockReason,
 ) -> Option<&ManualResolutionEvidenceSpec> {
@@ -520,19 +540,13 @@ fn policy_allows_failed_without_acdc_claim(policy: &SagaPolicySpec) -> bool {
 
 fn require_verified_manual_resolution_matches(
     saga: &SagaProjection,
-    verified: &VerifiedManualResolutionForPrefix,
+    verified: &crate::v1::journal::history_validation::VerifiedHistoricalManualResolution,
     expected_outcome: events::ManualResolutionOutcome,
 ) -> Result<()> {
-    if verified.prefix().run_id() != &saga.run_id {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("run:{}:saga_terminal", saga.run_id),
-            message: "manual proof run id does not match saga projection".to_owned(),
-        });
-    }
     if verified.outcome() != expected_outcome {
         return Err(StoreError::ProjectionConflict {
             key: format!("run:{}:saga_terminal", saga.run_id),
-            message: "manual proof outcome does not match terminal outcome".to_owned(),
+            message: "verified manual history outcome does not match terminal outcome".to_owned(),
         });
     }
     let Some(manual) = saga.manual_resolution.as_ref() else {
@@ -548,41 +562,7 @@ fn require_verified_manual_resolution_matches(
                 .to_owned(),
         });
     }
-    if manual.evidence_schema_id != verified.evidence().schema_id
-        || manual.evidence_hash != verified.evidence().content_hash
-        || manual.evidence_artifact_id != verified.evidence().artifact_id
-        || manual.authorization_schema_id != verified.authorization().schema_id
-        || manual.authorization_hash != verified.authorization().content_hash
-        || manual.authorization_artifact_id != verified.authorization().artifact_id
-    {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("run:{}:saga_terminal", saga.run_id),
-            message: "recorded manual resolution artifacts do not match verified proof".to_owned(),
-        });
-    }
-    if saga.manual_block_reason.map(manual_block_reason_for_auth)
-        != Some(verified.prefix().manual_block_reason())
-        && saga.run_mode == RunMode::ManualBlocked
-    {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("run:{}:saga_terminal", saga.run_id),
-            message: "manual block reason does not match verified proof".to_owned(),
-        });
-    }
     Ok(())
-}
-
-const fn manual_block_reason_for_auth(reason: ManualBlockReason) -> ManualResolutionBlockReason {
-    match reason {
-        ManualBlockReason::PolicyManualResolution => {
-            ManualResolutionBlockReason::PolicyManualResolution
-        }
-        ManualBlockReason::ForwardAmbiguous => ManualResolutionBlockReason::ForwardAmbiguous,
-        ManualBlockReason::RemediationFailed => ManualResolutionBlockReason::RemediationFailed,
-        ManualBlockReason::RemediationAmbiguous => {
-            ManualResolutionBlockReason::RemediationAmbiguous
-        }
-    }
 }
 
 pub(super) const fn manual_block_reason_from_auth(

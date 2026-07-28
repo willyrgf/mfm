@@ -3,15 +3,14 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use mfm_events::v1::KernelEventPayload;
 use mfm_integration_tests::test_support::{
     connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema, json_post,
     response_json, schema_scoped_database_url, start_counted_portfolio_rpc_mock,
-    start_portfolio_rpc_mock, unique_postgres_schema, write_portfolio_runtime_config_for_test,
-    UncertainFactSettlementStore,
+    start_portfolio_rpc_mock, unique_postgres_schema, verified_run_view,
+    write_portfolio_runtime_config_for_test, UncertainFactSettlementStore,
 };
 use mfm_portfolio::PortfolioConfig;
-use mfm_store::v1::{RunEventStore, StoreScopeStore};
+use mfm_store::v1::StoreScopeStore;
 use mfm_values::MfmConfig;
 use serde_json::json;
 use sqlx::PgPool;
@@ -253,7 +252,7 @@ async fn parity_postgres_uncertain_fact_settlement_does_not_repeat_live_io() {
     .await
     .expect("prepare snapshot launch");
     let run_id = launch.run_id.clone();
-    let services = mfm_app::make_run_services(runners, uncertain.clone(), certification);
+    let services = mfm_app::make_run_services(runners, uncertain.clone(), certification.clone());
 
     let response = services
         .launch_run(launch)
@@ -268,32 +267,45 @@ async fn parity_postgres_uncertain_fact_settlement_does_not_repeat_live_io() {
         uncertain.injected(),
         "the fact settlement must be uncertain"
     );
-    let stream = store
-        .load_run_stream(&run_id)
-        .await
-        .expect("uncertain snapshot stream");
-    let facts = stream
-        .iter()
-        .filter_map(|event| match event.payload() {
-            KernelEventPayload::FactRecorded(payload) => Some((event, payload)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let view = verified_run_view(&store, &certification, &run_id).await;
+    let lifecycle = mfm_store::v1::current_lifecycle::read(&view);
+    let mut facts = Vec::new();
+    let _ = lifecycle.visit_records(|record| {
+        if let mfm_store::v1::current_lifecycle::CurrentRecordKindRef::FactRecorded(fact) =
+            record.kind()
+        {
+            facts.push((
+                fact,
+                record.commit_key().clone(),
+                record.store_commit_order(),
+            ));
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
     assert_eq!(
         facts.len(),
         2,
         "both collector facts must commit completely"
     );
-    for (fact_event, fact) in facts {
+    for (fact, fact_commit_key, fact_store_commit_order) in facts {
+        let mut shares_commit_with_output = false;
+        let _ = lifecycle.visit_records(|record| {
+            if let mfm_store::v1::current_lifecycle::CurrentRecordKindRef::CellProduced(payload) =
+                record.kind()
+            {
+                shares_commit_with_output = payload.node_id == fact.node_id
+                    && payload.attempt_id == fact.attempt_id
+                    && record.commit_key() == &fact_commit_key
+                    && record.store_commit_order() == fact_store_commit_order;
+            }
+            if shares_commit_with_output {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
         assert!(
-            stream.iter().any(|event| matches!(
-                event.payload(),
-                KernelEventPayload::CellProduced(payload)
-                    if payload.node_id == fact.node_id
-                        && payload.attempt_id == fact.attempt_id
-                        && event.commit_key() == fact_event.commit_key()
-                        && event.store_commit_order() == fact_event.store_commit_order()
-            )),
+            shares_commit_with_output,
             "every fact must share its commit with the collection output"
         );
     }
@@ -401,23 +413,17 @@ async fn parity_rest_snapshot_start_retains_configured_target_evidence_and_repla
         .parse()
         .expect("typed started run id");
 
-    let stream = store
-        .load_run_stream(&run_id)
-        .await
-        .expect("started run stream");
-    let admitted = stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            KernelEventPayload::RunAdmitted(payload) => Some(payload.as_ref()),
-            _ => None,
-        })
-        .expect("run admission evidence");
+    let certification = mfm_app::production_certification_registry()
+        .expect("production snapshot certification registry");
+    let view = verified_run_view(&store, &certification, &run_id).await;
+    let lifecycle = mfm_store::v1::current_lifecycle::read(&view);
+    let admitted = lifecycle.admission().expect("run admission evidence");
     assert_eq!(
-        admitted.entry_point.entry_point_id.as_str(),
+        admitted.entry_point().entry_point_id.as_str(),
         "mfm.portfolio/snapshot@1"
     );
-    assert_eq!(admitted.entry_point.configured_targets.len(), 1);
-    let source = &admitted.entry_point.configured_targets[0];
+    assert_eq!(admitted.entry_point().configured_targets.len(), 1);
+    let source = &admitted.entry_point().configured_targets[0];
     assert_eq!(source.target.as_str(), publication.target);
     assert_eq!(source.schema_id, publication.schema_id);
     assert_eq!(source.digest, publication.digest);

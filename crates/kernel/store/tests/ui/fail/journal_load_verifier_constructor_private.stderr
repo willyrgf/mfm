@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/fail/journal_load_verifier_constructor_private.rs:4:45
+  |
+4 |     let _constructor = JournalLoadVerifier::new;
+  |                                             ^^^ private associated function
+  |
+ ::: src/v1/journal.rs
+  |
+  |     pub(super) fn new(run_id: RunId) -> Self {
+  |     ---------------------------------------- private associated function defined here

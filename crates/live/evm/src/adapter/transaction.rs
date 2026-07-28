@@ -21,15 +21,16 @@ use mfm_evm::{
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    load_launch_config_for_node, load_materialized_struct_input, load_runner_config_for_node,
-    load_side_effect_artifact, preclaim_side_effect_resource_lane, side_effect_idempotency_key,
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerRegistry, MaterializedInputs, PreInvocationRunCtx, PreInvocationRunnerFuture,
-    RunnerCapabilityBinding, RunnerFactoryBinding, RunnerIngressContext, RunnerIngressFuture,
-    RunnerOutputSettlement, RunnerRegistrationBuilder, SideEffectAdapter, SideEffectDriver,
-    SideEffectDriverFuture, SideEffectObservedEvidence, SideEffectPreparedInvocation,
-    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision,
-    SideEffectVerifyDriver,
+    load_launch_config_for_node, load_materialized_struct_input,
+    load_pre_invocation_materialized_struct_input, load_pre_invocation_runner_config_for_node,
+    load_runner_config_for_node, load_side_effect_artifact, preclaim_side_effect_resource_lane,
+    side_effect_idempotency_key, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerFuture, ErasedRunnerRegistry, MaterializedInputs, PreInvocationRunCtx,
+    PreInvocationRunnerFuture, RunnerCapabilityBinding, RunnerFactoryBinding, RunnerIngressContext,
+    RunnerIngressFuture, RunnerOutputSettlement, RunnerRegistrationBuilder, SideEffectAdapter,
+    SideEffectDriver, SideEffectDriverFuture, SideEffectObservedEvidence,
+    SideEffectPreparedInvocation, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -51,7 +52,6 @@ type ValidateMutation =
     dyn Fn(EvmNetworkBinding, mfm_signing::SignerRef) -> EvmMutationValidationFuture + Send + Sync;
 #[derive(Clone)]
 struct EvmTransactionRunnerCapabilities {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
     validate_mutation: Arc<ValidateMutation>,
     transaction_sessions: Arc<dyn EvmTransactionSessionSet>,
@@ -59,7 +59,6 @@ struct EvmTransactionRunnerCapabilities {
 
 impl EvmTransactionRunnerCapabilities {
     fn new<V, F>(
-        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
         validate_mutation: V,
         transaction_sessions: Arc<dyn EvmTransactionSessionSet>,
@@ -71,7 +70,6 @@ impl EvmTransactionRunnerCapabilities {
         let validate_mutation: Arc<ValidateMutation> =
             Arc::new(move |binding, signer_ref| Box::pin(validate_mutation(binding, signer_ref)));
         Self {
-            artifacts,
             signing_provider_binder,
             validate_mutation,
             transaction_sessions,
@@ -131,7 +129,6 @@ impl EvmTransactionRunnerCapabilities {
 #[allow(clippy::too_many_arguments)]
 pub fn register_evm_transaction_runner<V, F>(
     registry: &mut ErasedRunnerRegistry,
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     signing_provider_binder: mfm_signing::DeterministicSigningProviderBinder,
     validate_mutation: V,
     transaction_sessions: Arc<dyn EvmTransactionSessionSet>,
@@ -144,7 +141,6 @@ where
     F: Future<Output = mfm_runtime::Result<()>> + Send + 'static,
 {
     let capabilities = EvmTransactionRunnerCapabilities::new(
-        artifacts,
         signing_provider_binder,
         validate_mutation,
         transaction_sessions,
@@ -212,8 +208,7 @@ impl ErasedNodeRunner for EvmTransactionSubmitRunner {
         ctx: &'a PreInvocationRunCtx<'a>,
     ) -> PreInvocationRunnerFuture<'a> {
         Box::pin(async move {
-            let (state, input, context) =
-                preclaim_state_material(ctx, self.adapter.capabilities.artifacts.as_ref()).await?;
+            let (state, input, context) = preclaim_state_material(ctx)?;
             let authored = state.intent(&input, &context).map_err(state_error)?;
             let lane = authored.intent().sender_lane();
             let resource_key = sender_lane_resource_key(ctx.node(), &lane)?;
@@ -661,11 +656,9 @@ impl SideEffectAdapter for EvmTransactionAdapter {
         submit_inputs: &'a MaterializedInputs,
     ) -> SideEffectDriverFuture<'a, mfm_program::SideEffectIntent<Self::Intent, Self::Idempotency>>
     {
-        let artifacts = Arc::clone(&self.capabilities.artifacts);
         Box::pin(async move {
             let (state, input, context) =
-                transaction_state_material(ctx, submit_node, submit_inputs, artifacts.as_ref())
-                    .await?;
+                transaction_state_material(ctx, submit_node, submit_inputs)?;
             state.intent(&input, &context).map_err(state_error)
         })
     }
@@ -681,19 +674,16 @@ impl SideEffectAdapter for EvmTransactionAdapter {
 
     fn load_prepared<'a, 'ctx>(
         &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        submit_node: &'a spec::NodeSpec,
-        prepared: &'a store::SideEffectArtifactProjection,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
-        let artifacts = Arc::clone(&self.capabilities.artifacts);
         Box::pin(async move {
             let prepared = load_transaction_artifact::<EvmPreparedTransaction>(
+                ctx,
                 prepared,
                 events::ArtifactRole::PreparedInvocation,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             prepared.validate().map_err(state_error)?;
             Ok(prepared)
         })
@@ -725,28 +715,23 @@ impl SideEffectAdapter for EvmTransactionAdapter {
 
     fn observe_receipt<'a, 'ctx>(
         &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        submit_node: &'a spec::NodeSpec,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
-        let artifacts = Arc::clone(&self.capabilities.artifacts);
         Box::pin(async move {
             let prepared = load_transaction_artifact::<EvmPreparedTransaction>(
+                ctx,
                 prepared,
                 events::ArtifactRole::PreparedInvocation,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             let submission = load_transaction_artifact::<EvmTransactionSubmission>(
+                ctx,
                 submission,
                 events::ArtifactRole::Submission,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             submission
                 .validate_against(&prepared)
                 .map_err(state_error)?;
@@ -778,36 +763,29 @@ impl SideEffectAdapter for EvmTransactionAdapter {
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
-        receipt: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
-        let artifacts = Arc::clone(&self.capabilities.artifacts);
         Box::pin(async move {
             let prepared = load_transaction_artifact::<EvmPreparedTransaction>(
+                ctx,
                 prepared,
                 events::ArtifactRole::PreparedInvocation,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             let submission = load_transaction_artifact::<EvmTransactionSubmission>(
+                ctx,
                 submission,
                 events::ArtifactRole::Submission,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             submission
                 .validate_against(&prepared)
                 .map_err(state_error)?;
             let retained_receipt = load_transaction_artifact::<EvmTransactionReceipt>(
+                ctx,
                 receipt,
                 events::ArtifactRole::Receipt,
-                ctx.node(),
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             retained_receipt
                 .validate_with_submission(&prepared, &submission)
                 .map_err(state_error)?;
@@ -893,37 +871,29 @@ impl SideEffectAdapter for EvmTransactionAdapter {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
-        receipt: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
-        let artifacts = Arc::clone(&self.capabilities.artifacts);
         Box::pin(async move {
             let submit_node = transaction_submit_node(ctx)?;
             let (state, input, context) =
-                transaction_state_material(ctx, submit_node, submit_inputs, artifacts.as_ref())
-                    .await?;
+                transaction_state_material(ctx, submit_node, submit_inputs)?;
             let prepared = load_transaction_artifact::<EvmPreparedTransaction>(
+                ctx,
                 prepared,
                 events::ArtifactRole::PreparedInvocation,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             let submission = load_transaction_artifact::<EvmTransactionSubmission>(
+                ctx,
                 submission,
                 events::ArtifactRole::Submission,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             let receipt = load_transaction_artifact::<EvmTransactionReceipt>(
+                ctx,
                 receipt,
                 events::ArtifactRole::Receipt,
-                ctx.node(),
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             state
                 .output_from_receipt(&input, &prepared, &submission, &receipt, &context)
                 .map_err(state_error)
@@ -934,45 +904,35 @@ impl SideEffectAdapter for EvmTransactionAdapter {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         submit_inputs: &'a MaterializedInputs,
-        prepared: &'a store::SideEffectArtifactProjection,
-        submission: &'a store::SideEffectArtifactProjection,
-        receipt: &'a store::SideEffectArtifactProjection,
-        confirmation: &'a store::SideEffectArtifactProjection,
+        prepared: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        submission: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        receipt: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
+        confirmation: &'a store::current_lifecycle::CurrentArtifactProjectionRef<'ctx>,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
-        let artifacts = Arc::clone(&self.capabilities.artifacts);
         Box::pin(async move {
             let submit_node = transaction_submit_node(ctx)?;
             let (state, input, context) =
-                transaction_state_material(ctx, submit_node, submit_inputs, artifacts.as_ref())
-                    .await?;
+                transaction_state_material(ctx, submit_node, submit_inputs)?;
             let prepared = load_transaction_artifact::<EvmPreparedTransaction>(
+                ctx,
                 prepared,
                 events::ArtifactRole::PreparedInvocation,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             let submission = load_transaction_artifact::<EvmTransactionSubmission>(
+                ctx,
                 submission,
                 events::ArtifactRole::Submission,
-                submit_node,
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             let receipt = load_transaction_artifact::<EvmTransactionReceipt>(
+                ctx,
                 receipt,
                 events::ArtifactRole::Receipt,
-                ctx.node(),
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             let confirmation = load_transaction_artifact::<EvmTransactionConfirmation>(
+                ctx,
                 confirmation,
                 events::ArtifactRole::Confirmation,
-                ctx.node(),
-                artifacts.as_ref(),
-            )
-            .await?;
+            )?;
             state
                 .output_from_confirmation(
                     &input,
@@ -1047,41 +1007,37 @@ async fn lookup_submission(
     }
 }
 
-async fn transaction_state_material(
+fn transaction_state_material(
     ctx: &ErasedRunCtx<'_>,
     submit_node: &spec::NodeSpec,
     submit_inputs: &MaterializedInputs,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<(
     SubmitEvmTransactionState,
     EvmTransactionAction,
     mfm_program::CertifiedContext<mfm_program::NoContext>,
 )> {
-    let config =
-        load_runner_config_for_node::<EvmTransactionConfig>(submit_node, artifacts).await?;
+    let config = load_runner_config_for_node::<EvmTransactionConfig>(ctx, submit_node)?;
     let state = SubmitEvmTransactionState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let input =
-        load_materialized_struct_input::<EvmTransactionAction>(submit_inputs, artifacts).await?;
+    let input = load_materialized_struct_input::<EvmTransactionAction>(ctx, submit_inputs)?;
     let context = ctx
         .invocation_context_for_node(submit_node)?
         .certified_context::<mfm_program::NoContext>()?;
     Ok((state, input, context))
 }
 
-async fn preclaim_state_material(
+fn preclaim_state_material(
     ctx: &PreInvocationRunCtx<'_>,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<(
     SubmitEvmTransactionState,
     EvmTransactionAction,
     mfm_program::CertifiedContext<mfm_program::NoContext>,
 )> {
-    let config = load_runner_config_for_node::<EvmTransactionConfig>(ctx.node(), artifacts).await?;
+    let config =
+        load_pre_invocation_runner_config_for_node::<EvmTransactionConfig>(ctx, ctx.node())?;
     let state = SubmitEvmTransactionState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let input =
-        load_materialized_struct_input::<EvmTransactionAction>(ctx.inputs(), artifacts).await?;
+    let input = load_pre_invocation_materialized_struct_input::<EvmTransactionAction>(ctx)?;
     let context = ctx
         .context()
         .clone()
@@ -1102,18 +1058,15 @@ fn transaction_submit_node<'a>(
     })
 }
 
-async fn load_transaction_artifact<T>(
-    artifact: &store::SideEffectArtifactProjection,
+fn load_transaction_artifact<T>(
+    ctx: &ErasedRunCtx<'_>,
+    artifact: &store::current_lifecycle::CurrentArtifactProjectionRef<'_>,
     role: events::ArtifactRole,
-    _producer_node: &spec::NodeSpec,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<T>
 where
     T: MfmValue + DeserializeOwned,
 {
-    load_side_effect_artifact::<T>(artifact, role, artifacts)
-        .await
-        .map(|(value, _)| value)
+    load_side_effect_artifact::<T>(ctx, artifact, role).map(|(value, _)| value)
 }
 
 fn sender_lane_resource_key(

@@ -55,9 +55,12 @@ async fn runtime_fails_active_forward_attempts_before_saga_terminal() {
 
         let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
         append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
+        let mut current = load_fixture_current(&scheduler, &store, &fixture)
+            .await
+            .expect("load current run");
         if matches!(case, Case::PreBoundary) {
             assert_eq!(
-                derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode,
+                with_fixture_saga(&current, &fixture, |saga| saga.run_mode()),
                 store::RunMode::FailedWithoutAcdcClaim
             );
         }
@@ -65,21 +68,19 @@ async fn runtime_fails_active_forward_attempts_before_saga_terminal() {
         assert_drive!(
             scheduler,
             store,
-            fixture,
+            current,
             Advanced,
             "fail active forward attempt before saga terminal"
         );
-        let projection_snapshot = store.projection_snapshot();
-        let projection = side_effect_projection_for_attempt(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &projection_snapshot,
+        let side_effect = side_effect_for_attempt(
+            &current.runtime_spec(),
+            &current.lifecycle(),
             &forward_node,
             &forward_attempt,
         )
         .expect("side-effect lookup")
-        .expect("side-effect projection");
-        match (case, &projection.phase) {
+        .expect("current side effect");
+        match (case, side_effect.phase()) {
             (
                 Case::PreBoundary,
                 store::SideEffectPhase::Failed {
@@ -98,32 +99,29 @@ async fn runtime_fails_active_forward_attempts_before_saga_terminal() {
         }
         if matches!(case, Case::PreBoundary) {
             assert!(matches!(
-                store
-                    .projection_snapshot()
+                current
+                    .lifecycle()
                     .attempt(&forward_node.node_id, &forward_attempt)
                     .expect("forward attempt")
-                    .status,
-                store::AttemptStatus::Failed { .. }
+                    .status(),
+                store::current_lifecycle::CurrentAttemptStatusRef::Failed { .. }
             ));
         }
-        assert!(store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
-            .is_none());
+        assert!(current.lifecycle().completion().is_none());
 
         assert_drive!(
             scheduler,
             store,
-            fixture,
+            current,
             Advanced,
             "resolve saga terminal after active attempt closed"
         );
         assert!(matches!(
-            store
-                .projection_snapshot()
-                .run_completion(&fixture.run_id)
+            current
+                .lifecycle()
+                .completion()
                 .expect("run completion")
-                .outcome,
+                .outcome(),
             events::RunCompletionOutcome::FailedWithoutAcdcClaim
         ));
     }
@@ -176,29 +174,31 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         "drive forward side-effect phase",
     )
     .await;
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&forward_a_output)
-        .is_some());
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&forward_b_output)
-        .is_some());
-    let forward_a_ledger =
-        forward_ledger_for_node(&store.projection_snapshot(), &forward_a.node_id);
-    let forward_b_ledger =
-        forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
-    let forward_a_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_a_ledger);
-    let forward_b_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_b_ledger);
+    let mut current = verified_current_for_store(&store, &fixture);
+    assert!(current.lifecycle().cell(&forward_a_output).is_some());
+    assert!(current.lifecycle().cell(&forward_b_output).is_some());
+    let forward_a_ledger = forward_ledger_for_node(&current, &forward_a.node_id);
+    let forward_b_ledger = forward_ledger_for_node(&current, &forward_b.node_id);
+    let forward_a_pair = forward_pair_for_ledger(&current, &forward_a_ledger);
+    let forward_b_pair = forward_pair_for_ledger(&current, &forward_b_ledger);
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
-    assert_eq!(saga.run_mode, store::RunMode::Remediating);
-    assert_eq!(saga.obligations.len(), 2);
+    current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("reload current run after failure");
+    with_fixture_saga(&current, &fixture, |saga| {
+        assert_eq!(saga.run_mode(), store::RunMode::Remediating);
+        let mut obligation_count = 0;
+        let _ = saga.visit_obligations::<()>(|_| {
+            obligation_count += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+        assert_eq!(obligation_count, 2);
+    });
 
     for _ in 0..20 {
-        let status = drive_ok!(scheduler, store, fixture, "drive remediation phase");
+        let status = drive_ok!(scheduler, store, current, "drive remediation phase");
         assert!(
             matches!(
                 status,
@@ -206,66 +206,55 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
             ),
             "unexpected remediation status: {status:?}"
         );
-        if derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode
+        if with_fixture_saga(&current, &fixture, |saga| saga.run_mode())
             == store::RunMode::Compensated
         {
             break;
         }
     }
-    let remediation_order = remediation_intent_forward_links(&store, &fixture.run_id);
+    let remediation_order = remediation_intent_forward_links(&store, &fixture);
     assert_eq!(
         remediation_order,
         vec![forward_b_pair.clone(), forward_a_pair.clone()]
     );
-    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
-    assert_eq!(saga.run_mode, store::RunMode::Compensated);
-    for forward_ledger in [forward_a_ledger, forward_b_ledger] {
-        let forward_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_ledger);
-        let obligation = saga
-            .obligations
-            .get(&forward_pair)
-            .expect("forward obligation");
-        assert_eq!(
-            obligation.classification,
-            store::ForwardLedgerClassification::Owed
-        );
-        assert!(
-            obligation
-                .remediation
-                .as_ref()
+    with_fixture_saga(&current, &fixture, |saga| {
+        assert_eq!(saga.run_mode(), store::RunMode::Compensated);
+        for forward_pair in [&forward_a_pair, &forward_b_pair] {
+            let obligation = saga.obligation(forward_pair).expect("forward obligation");
+            assert_eq!(
+                obligation.classification(),
+                store::ForwardLedgerClassification::Owed
+            );
+            assert!(obligation
+                .remediation()
                 .expect("remediation ledger")
-                .closed
-        );
-    }
+                .closed());
+        }
+    });
     for _ in 0..8 {
-        if store.projection_snapshot().run_state(&fixture.run_id) == store::RunState::Completed {
+        if current.lifecycle().run_state() == store::RunState::Completed {
             break;
         }
-        let status = drive_ok!(scheduler, store, fixture, "resolve compensated terminal");
+        let status = drive_ok!(scheduler, store, current, "resolve compensated terminal");
         assert!(matches!(
             status,
             SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
         ));
     }
-    assert_eq!(
-        store.projection_snapshot().run_state(&fixture.run_id),
-        store::RunState::Completed
-    );
+    assert_eq!(current.lifecycle().run_state(), store::RunState::Completed);
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
+        current
+            .lifecycle()
+            .completion()
             .expect("run completion")
-            .outcome,
+            .outcome(),
         events::RunCompletionOutcome::Compensated
     ));
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        PublicOutputProjected,
-        "completed compensated run"
-    );
+    let result = drive_current_once_with_claim(&scheduler, &store, current)
+        .await
+        .expect("completed compensated run");
+    assert_eq!(result.status(), SchedulerStatus::PublicOutputProjected);
+    let _current = result.into_current_run();
 }
 
 #[tokio::test]
@@ -308,7 +297,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         "forward a confirmation before output",
     )
     .await;
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
 
     scheduler = compensated_saga_scheduler(&fixture);
     drive_until_cells_terminal(
@@ -319,22 +308,28 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         "forward outputs",
     )
     .await;
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
-    let forward_a_ledger =
-        forward_ledger_for_node(&store.projection_snapshot(), &forward_a.node_id);
-    let forward_b_ledger =
-        forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
-    let forward_a_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_a_ledger);
-    let forward_b_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_b_ledger);
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
+    let mut current = verified_current_for_store(&store, &fixture);
+    let forward_a_ledger = forward_ledger_for_node(&current, &forward_a.node_id);
+    let forward_b_ledger = forward_ledger_for_node(&current, &forward_b.node_id);
+    let forward_a_pair = forward_pair_for_ledger(&current, &forward_a_ledger);
+    let forward_b_pair = forward_pair_for_ledger(&current, &forward_b_ledger);
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
-    assert_eq!(saga.run_mode, store::RunMode::Remediating);
-    assert_eq!(saga.obligations.len(), 2);
+    current = verified_current_for_store(&store, &fixture);
+    with_fixture_saga(&current, &fixture, |saga| {
+        assert_eq!(saga.run_mode(), store::RunMode::Remediating);
+        let mut obligation_count = 0;
+        let _ = saga.visit_obligations::<()>(|_| {
+            obligation_count += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+        assert_eq!(obligation_count, 2);
+    });
 
     scheduler = compensated_saga_scheduler(&fixture);
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
     drive_until_remediation_phase(
         &scheduler,
         &mut store,
@@ -344,7 +339,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         "first remedial submission",
     )
     .await;
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
 
     scheduler = compensated_saga_scheduler(&fixture);
     drive_until_remediation_phase(
@@ -356,11 +351,9 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         "first remedial confirmation",
     )
     .await;
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&remediation_b_output)
-        .is_none());
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    current = verified_current_for_store(&store, &fixture);
+    assert!(current.lifecycle().cell(&remediation_b_output).is_none());
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
 
     scheduler = compensated_saga_scheduler(&fixture);
     drive_until_cells_terminal(
@@ -371,20 +364,18 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         "first remedial output",
     )
     .await;
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
 
     drive_until_compensated_before_terminal(&scheduler, &mut store, &fixture).await;
+    current = verified_current_for_store(&store, &fixture);
     assert!(matches!(
-        remediation_projection_for_forward_pair(store.projection_snapshot(), &forward_a_pair)
-            .expect("second remediation projection")
-            .phase,
+        remediation_side_effect_for_forward_pair(&current, &forward_a_pair)
+            .expect("second remediation side effect")
+            .phase(),
         store::SideEffectPhase::ConfirmationObserved { .. }
     ));
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&remediation_a_output)
-        .is_none());
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    assert!(current.lifecycle().cell(&remediation_a_output).is_none());
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
 
     scheduler = compensated_saga_scheduler(&fixture);
     drive_until_cells_terminal(
@@ -395,62 +386,56 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         "second remedial output",
     )
     .await;
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&remediation_a_output)
-        .is_some());
-    assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
+    current = verified_current_for_store(&store, &fixture);
+    assert!(current.lifecycle().cell(&remediation_a_output).is_some());
+    assert_no_duplicate_side_effect_submissions(&store, &fixture);
     assert_eq!(
-        derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode,
+        with_fixture_saga(&current, &fixture, |saga| saga.run_mode()),
         store::RunMode::Compensated
     );
-    assert_ne!(
-        store.projection_snapshot().run_state(&fixture.run_id),
-        store::RunState::Completed
-    );
+    assert_ne!(current.lifecycle().run_state(), store::RunState::Completed);
 
     scheduler = compensated_saga_scheduler(&fixture);
+    current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("reload current run after scheduler restart");
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Advanced,
         "resolve compensated terminal after resume"
     );
-    assert_eq!(
-        store.projection_snapshot().run_state(&fixture.run_id),
-        store::RunState::Completed
-    );
+    assert_eq!(current.lifecycle().run_state(), store::RunState::Completed);
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
+        current
+            .lifecycle()
+            .completion()
             .expect("run completion")
-            .outcome,
+            .outcome(),
         events::RunCompletionOutcome::Compensated
     ));
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        PublicOutputProjected,
-        "completed compensated run"
-    );
+    let result = drive_current_once_with_claim(&scheduler, &store, current)
+        .await
+        .expect("completed compensated run");
+    assert_eq!(result.status(), SchedulerStatus::PublicOutputProjected);
+    let _current = result.into_current_run();
 
     assert_eq!(
-        remediation_intent_forward_links(&store, &fixture.run_id),
+        remediation_intent_forward_links(&store, &fixture),
         vec![forward_b_pair.clone(), forward_a_pair.clone()]
     );
+    let current = verified_current_for_store(&store, &fixture);
     for forward_ledger in [&forward_a_ledger, &forward_b_ledger] {
         assert_eq!(
-            side_effect_submission_count_for_ledger(&store, &fixture.run_id, forward_ledger),
+            side_effect_submission_count_for_ledger(&store, &fixture, forward_ledger),
             1
         );
         assert_eq!(
             remediation_submission_count_for_forward_pair(
                 &store,
-                &fixture.run_id,
-                &forward_pair_for_ledger(&store.projection_snapshot(), forward_ledger)
+                &fixture,
+                &forward_pair_for_ledger(&current, forward_ledger)
             ),
             1
         );
@@ -461,27 +446,40 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
 async fn runtime_resolves_clean_failure_without_acdc_claim() {
     let fixture = fixture();
     let failure_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    let mut registry = test_runner_registry();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    register_default_fixture_pure_runner(&mut registry, &fixture);
+    register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
-    assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
-    assert!(saga.obligations.is_empty());
+    let mut current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
+    with_fixture_saga(&current, &fixture, |saga| {
+        assert_eq!(saga.run_mode(), store::RunMode::FailedWithoutAcdcClaim);
+        let mut has_obligation = false;
+        let _ = saga.visit_obligations::<()>(|_| {
+            has_obligation = true;
+            std::ops::ControlFlow::Break(())
+        });
+        assert!(!has_obligation);
+    });
 
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Advanced,
         "resolve clean failure terminal"
     );
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
+        current
+            .lifecycle()
+            .completion()
             .expect("run completion")
-            .outcome,
+            .outcome(),
         events::RunCompletionOutcome::FailedWithoutAcdcClaim
     ));
 }
@@ -548,59 +546,54 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         &ledger,
         "sidefx-confirmed-forward-output-before-failure-confirmation",
     );
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&forward_output)
-        .is_none());
-    let projection_snapshot = store.projection_snapshot();
-    let projection = side_effect_projection_for_attempt(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &projection_snapshot,
+    let mut current = verified_current_for_store(&store, &fixture);
+    assert!(current.lifecycle().cell(&forward_output).is_none());
+    let side_effect = side_effect_for_attempt(
+        &current.runtime_spec(),
+        &current.lifecycle(),
         &forward_node,
         &forward_attempt,
     )
-    .expect("side-effect projection lookup")
-    .expect("side-effect projection");
+    .expect("side-effect lookup")
+    .expect("current side effect");
     assert!(matches!(
-        projection.phase,
+        side_effect.phase(),
         store::SideEffectPhase::ConfirmationObserved { .. }
     ));
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
-    assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
+    current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("reload current run after failure");
+    assert_eq!(
+        with_fixture_saga(&current, &fixture, |saga| saga.run_mode()),
+        store::RunMode::FailedWithoutAcdcClaim
+    );
 
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Advanced,
         "materialize confirmed forward output"
     );
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&forward_output)
-        .is_some());
-    assert!(store
-        .projection_snapshot()
-        .run_completion(&fixture.run_id)
-        .is_none());
+    assert!(current.lifecycle().cell(&forward_output).is_some());
+    assert!(current.lifecycle().completion().is_none());
 
     assert_drive!(
         scheduler,
         store,
-        fixture,
+        current,
         Advanced,
         "resolve failed-without-claim terminal"
     );
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
+        current
+            .lifecycle()
+            .completion()
             .expect("run completion")
-            .outcome,
+            .outcome(),
         events::RunCompletionOutcome::FailedWithoutAcdcClaim
     ));
 }

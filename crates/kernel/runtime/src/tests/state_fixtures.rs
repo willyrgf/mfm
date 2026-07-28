@@ -467,6 +467,52 @@ pub(super) fn runtime_state_kind(
     .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
+pub(super) struct RuntimeSourceState {
+    config: CertifierConfig,
+}
+
+impl StateSpec for RuntimeSourceState {
+    type Config = CertifierConfig;
+    type Context = NoContext;
+    type Input = CertifierValue;
+    type Output = FixtureOutputValue;
+    type Effect = mfm_capabilities::Pure;
+    type Caps = mfm_capabilities::NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        runtime_state_kind("source", DigestBytes::from_array([0xa0; 32]))
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.runtime.test.source.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.runtime.test.source"
+    }
+
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for RuntimeSourceState {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        Ok(fixture_output_value(
+            input.amount * self.config.multiplier,
+            "mfm.runtime.test.source",
+            "typed-pure",
+        ))
+    }
+}
+
 macro_rules! impl_runtime_read_state {
     ($state:ident, $input:ty, $kind:literal, $version:literal, $name:literal, $digest:expr) => {
         pub(super) struct $state {
@@ -492,6 +538,10 @@ macro_rules! impl_runtime_read_state {
 
             fn name() -> &'static str {
                 $name
+            }
+
+            fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+                Ok(vec![runtime_adapter_binding()])
             }
 
             fn new(
@@ -652,6 +702,86 @@ impl_runtime_read_state!(
     "mfm.runtime.test.read_output",
     DigestBytes::from_array([0xa3; 32])
 );
+
+pub(super) struct RuntimeFactReadState {
+    config: CertifierConfig,
+}
+
+impl StateSpec for RuntimeFactReadState {
+    type Config = CertifierConfig;
+    type Context = NoContext;
+    type Input = FixtureOutputValue;
+    type Output = FixtureOutputValue;
+    type Effect = mfm_capabilities::ReadExternal;
+    type Caps = (RuntimeReadCap,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        runtime_state_kind("fact-read", DigestBytes::from_array([0xa6; 32]))
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.runtime.test.fact_read.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.runtime.test.fact_read"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        Ok(vec![runtime_adapter_binding()])
+    }
+
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl ReadState for RuntimeFactReadState {
+    type Plan = FixtureOutputValue;
+    type Evidence = FixtureOutputValue;
+    type Facts = mfm_values::NonEmpty<RuntimeTestFact>;
+
+    fn plan(
+        &self,
+        _input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Plan> {
+        Ok(fixture_output_value(
+            self.config.multiplier,
+            "mfm.runtime.test.fact_read",
+            "typed-read",
+        ))
+    }
+
+    fn reduce(
+        &self,
+        input: &Self::Input,
+        evidence: &mfm_program::ExternalReadEvidenceSet<Self::Evidence>,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<(Self::Output, Self::Facts)> {
+        if !evidence.fact_query_evidence().is_empty()
+            || evidence.primary_evidence() != &self.plan(input, context)?
+        {
+            return Err(mfm_program::StateError::Message(
+                "runtime fact fixture read evidence did not match its plan".to_owned(),
+            ));
+        }
+        let output = evidence.primary_evidence().clone();
+        let fact = RuntimeTestFact {
+            subject: CertifierValue {
+                amount: input.amount,
+            },
+            response: CertifierValue {
+                amount: output.amount,
+            },
+        };
+        Ok((output, mfm_values::NonEmpty::new(fact, Vec::new())))
+    }
+}
+
 impl_runtime_read_state!(
     RuntimeSeedReadState,
     CertifierValue,
@@ -715,10 +845,6 @@ pub(super) fn certifier_backed_runtime_authority() -> (
     states
         .register::<CertifierState>()
         .expect("state registration");
-    let mut registry = mfm_certify::CertificationRegistry::new();
-    registry
-        .register_state::<CertifierState>()
-        .expect("certification registry");
     let draft = build_root_with_registries(
         ScopeKey::new("root").expect("root key"),
         states.snapshot(),
@@ -741,6 +867,8 @@ pub(super) fn certifier_backed_runtime_authority() -> (
         },
     )
     .expect("program draft");
+    let registry = mfm_certify::CertificationRegistry::from_program_draft(&draft)
+        .expect("certification registry");
     (
         mfm_certify::certify_program_draft(&draft).expect("certified program"),
         registry,

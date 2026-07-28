@@ -1,24 +1,20 @@
 use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 
 use mfm_capabilities::CapabilityRole;
 use mfm_ids::{AttemptId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::attempt::{
-    async_error_is_stale_expected_next_seq, AttemptRunStatus, ResourceLaneBlockWitness,
-};
+use crate::attempt::{async_error_is_stale_expected_next_seq, ResourceLaneBlockWitness};
 use crate::commit::{AttemptInterruptionCommitInput, CommitPlanner};
 use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::frontier::node_inputs_ready;
-use crate::history::RuntimeRunView;
-use crate::side_effect_lifecycle::{
-    open_attempt_disposition, validate_terminal_evidence, SideEffectOpenAttemptDisposition,
-};
-use crate::side_effects::validate_terminal_cell_has_completed_attempt;
+use crate::side_effect_lifecycle::{open_attempt_disposition, SideEffectOpenAttemptDisposition};
+use crate::spec_authority::CurrentSpecRead;
 use crate::transition::TransitionAttempt;
-use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
+use crate::{Result, RuntimeError};
 
 /// Recovery disposition for one projected open attempt.
 pub(crate) enum OpenAttemptDisposition<'a> {
@@ -72,38 +68,58 @@ pub(crate) enum OpenAttemptDisposition<'a> {
 /// Recovery lifecycle for open-attempt disposition checks.
 pub(crate) struct AttemptRecoveryLifecycle;
 
+pub(crate) enum RecoveryDispatch {
+    Continue,
+    OperationalBlock,
+    Commit(Box<store::CommitOutcome>),
+    StaleView,
+}
+
 impl AttemptRecoveryLifecycle {
     /// Returns the next recoverable open attempt, if one exists.
-    pub(crate) fn next_open_attempt_disposition<'a>(
-        runtime_spec: &'a CertifiedRuntimeSpec,
-        view: &RuntimeRunView,
+    pub(crate) fn next_open_attempt_disposition<'a, S>(
+        runtime_spec: &'a S,
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
         blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
-    ) -> Result<Option<OpenAttemptDisposition<'a>>> {
-        for node in runtime_spec.executable_nodes() {
+    ) -> Result<Option<OpenAttemptDisposition<'a>>>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
+        for node in runtime_spec.executable_nodes()? {
             if blocked_lanes
                 .iter()
-                .any(|witness| witness.blocks_node(&view.projections, node))
+                .any(|witness| witness.blocks_node(lifecycle, node))
             {
                 continue;
             }
-            let Some((attempt_id, attempt_no)) = open_started_attempt_for_node(node, view)? else {
+            let Some((attempt_id, attempt_no)) = open_started_attempt_for_node(node, lifecycle)?
+            else {
                 continue;
             };
-            return Self::classify_open_attempt(runtime_spec, view, node, attempt_id, attempt_no)
-                .map(Some);
+            return Self::classify_open_attempt(
+                runtime_spec,
+                lifecycle,
+                node,
+                attempt_id,
+                attempt_no,
+            )
+            .map(Some);
         }
         Ok(None)
     }
 
-    /// Classifies a selected open attempt before its attempt lifecycle is resumed.
-    fn open_attempt_disposition_for_attempt<'a>(
-        runtime_spec: &'a CertifiedRuntimeSpec,
-        view: &RuntimeRunView,
+    fn open_attempt_disposition_for_attempt<'a, S>(
+        runtime_spec: &'a S,
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
         node: &'a spec::NodeSpec,
         attempt_id: &AttemptId,
         attempt_no: u32,
-    ) -> Result<OpenAttemptDisposition<'a>> {
-        let Some((open_attempt_id, open_attempt_no)) = open_started_attempt_for_node(node, view)?
+    ) -> Result<OpenAttemptDisposition<'a>>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
+        let Some((open_attempt_id, open_attempt_no)) =
+            open_started_attempt_for_node(node, lifecycle)?
         else {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "recovery selected node {} attempt {} but no started attempt is open",
@@ -116,141 +132,107 @@ impl AttemptRecoveryLifecycle {
                 node.node_id, attempt_id, attempt_no, open_attempt_id, open_attempt_no
             )));
         }
-        Self::classify_open_attempt(runtime_spec, view, node, open_attempt_id, open_attempt_no)
+        Self::classify_open_attempt(
+            runtime_spec,
+            lifecycle,
+            node,
+            open_attempt_id,
+            open_attempt_no,
+        )
     }
 
     /// Dispatches recovery-owned async work for a selected open attempt.
-    pub(crate) async fn dispatch_open_attempt_for_attempt<S: store::RunEventStore + ?Sized>(
-        store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
+    pub(crate) async fn dispatch_open_attempt_for_attempt<Store>(
+        store: &Store,
+        runtime_spec: &crate::spec_authority::CurrentRuntimeSpecRef<'_>,
         run_id: &RunId,
-        view: &RuntimeRunView,
-        attempt: &TransitionAttempt<'_>,
-    ) -> Result<Option<AttemptRunStatus>> {
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+        attempt: &TransitionAttempt,
+    ) -> Result<RecoveryDispatch>
+    where
+        Store: store::RunJournalStore + ?Sized,
+    {
         let Some(attempt_id) = attempt.attempt_id.as_ref() else {
-            return Ok(None);
+            return Ok(RecoveryDispatch::Continue);
         };
+        let node = runtime_spec.node(&attempt.node_id).ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "recovery selected missing certified node {}",
+                attempt.node_id
+            ))
+        })?;
         match Self::open_attempt_disposition_for_attempt(
             runtime_spec,
-            view,
-            attempt.node,
+            lifecycle,
+            node,
             attempt_id,
             attempt.attempt_no,
         )? {
             OpenAttemptDisposition::Interrupt {
                 node, attempt_id, ..
-            } => Self::interrupt_attempt(store, runtime_spec, run_id, view, node, &attempt_id)
-                .await
-                .map(Some),
+            } => {
+                Self::interrupt_attempt(store, runtime_spec, run_id, lifecycle, node, &attempt_id)
+                    .await
+            }
             OpenAttemptDisposition::OperationalBlock { .. } => {
-                Ok(Some(AttemptRunStatus::OperationalBlock))
+                Ok(RecoveryDispatch::OperationalBlock)
             }
             OpenAttemptDisposition::Continue { .. }
             | OpenAttemptDisposition::RetryTerminalization { .. }
-            | OpenAttemptDisposition::DelegateSideEffect { .. } => Ok(None),
+            | OpenAttemptDisposition::DelegateSideEffect { .. } => Ok(RecoveryDispatch::Continue),
         }
     }
 
-    /// Appends the recovery-owned interruption evidence for a resumable async store.
-    async fn interrupt_attempt<S: store::RunEventStore + ?Sized>(
-        store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
+    async fn interrupt_attempt<Store>(
+        store: &Store,
+        runtime_spec: &crate::spec_authority::CurrentRuntimeSpecRef<'_>,
         run_id: &RunId,
-        view: &RuntimeRunView,
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
-    ) -> Result<AttemptRunStatus> {
+    ) -> Result<RecoveryDispatch>
+    where
+        Store: store::RunJournalStore + ?Sized,
+    {
         let commit = CommitPlanner::prepare_attempt_interruption(AttemptInterruptionCommitInput {
-            runtime_spec,
+            runtime_spec: runtime_spec.current_spec_ref(),
             run_id,
             node,
             attempt_id,
-            view,
+            lifecycle,
         })?;
         let bundle = store::PreparedCommitBundle::without_artifacts(commit)?;
         match store.append_prepared_commit_bundle(bundle).await {
-            Ok(_) => Ok(AttemptRunStatus::Advanced),
+            Ok(
+                outcome @ (store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)),
+            ) => Ok(RecoveryDispatch::Commit(Box::new(outcome))),
+            Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
+                Err(RuntimeError::InvalidRunStream(format!(
+                    "attempt interruption was blocked by resource lane {}:{}",
+                    block.resource_lane_key.namespace, block.resource_lane_key.key
+                )))
+            }
+            Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => Err(RuntimeError::InvalidRunStream(
+                "attempt interruption requested an execution claim outside admission".to_owned(),
+            )),
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
-                Ok(AttemptRunStatus::StaleView)
+                Ok(RecoveryDispatch::StaleView)
             }
             Err(error) => Err(async_store_error(error)),
         }
     }
 
-    /// Validates that projected attempts and terminal cells form a recoverable frontier.
-    pub(crate) fn validate_frontier(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &store::ProjectionSnapshot,
-    ) -> Result<()> {
-        for node in runtime_spec.executable_nodes() {
-            if let Some(terminal) = projections.cell_terminal_for_run(run_id, &node.output_cell) {
-                let attempt_id = validate_terminal_cell_has_completed_attempt(
-                    runtime_spec,
-                    projections,
-                    node,
-                    terminal,
-                )?;
-                if node.side_effect.is_some() {
-                    validate_terminal_evidence(
-                        runtime_spec,
-                        run_id,
-                        projections,
-                        node,
-                        &attempt_id,
-                    )?;
-                }
-            }
-            let mut started = None;
-            for ((attempt_node_id, attempt_id), projection) in projections.attempts() {
-                if attempt_node_id != &node.node_id {
-                    continue;
-                }
-                match &projection.status {
-                    store::AttemptStatus::Started { .. } => {
-                        if projections
-                            .cell_terminal_for_run(run_id, &node.output_cell)
-                            .is_some()
-                        {
-                            return Err(RuntimeError::InvalidRunStream(format!(
-                                "node {} has a started attempt after its output cell became terminal",
-                                node.node_id
-                            )));
-                        }
-                        if started.replace(attempt_id.clone()).is_some() {
-                            return Err(RuntimeError::InvalidRunStream(format!(
-                                "node {} has multiple started attempts during recovery",
-                                node.node_id
-                            )));
-                        }
-                    }
-                    store::AttemptStatus::Completed { output_cell_id }
-                        if projections
-                            .cell_terminal_for_run(run_id, output_cell_id)
-                            .is_none() =>
-                    {
-                        return Err(RuntimeError::InvalidRunStream(format!(
-                            "node {} attempt {} completed without terminal cell projection",
-                            node.node_id, attempt_id
-                        )));
-                    }
-                    store::AttemptStatus::Completed { .. }
-                    | store::AttemptStatus::Failed { .. }
-                    | store::AttemptStatus::Interrupted => {}
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn classify_open_attempt<'a>(
-        runtime_spec: &'a CertifiedRuntimeSpec,
-        view: &RuntimeRunView,
+    fn classify_open_attempt<'a, S>(
+        runtime_spec: &'a S,
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
         node: &'a spec::NodeSpec,
         attempt_id: AttemptId,
         attempt_no: u32,
-    ) -> Result<OpenAttemptDisposition<'a>> {
-        if !node_inputs_ready(runtime_spec, node, view)? {
+    ) -> Result<OpenAttemptDisposition<'a>>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
+        if !node_inputs_ready(runtime_spec, node, lifecycle)? {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "node {} has a started attempt before certified inputs are terminal",
                 node.node_id
@@ -264,13 +246,7 @@ impl AttemptRecoveryLifecycle {
             });
         }
         if node.side_effect.is_some() {
-            match open_attempt_disposition(
-                runtime_spec,
-                &view.run_admitted.run_id,
-                &view.projections,
-                node,
-                &attempt_id,
-            )? {
+            match open_attempt_disposition(runtime_spec, lifecycle, node, &attempt_id)? {
                 SideEffectOpenAttemptDisposition::ContinueBeforeLedger => {
                     return Ok(OpenAttemptDisposition::Continue {
                         node,
@@ -301,7 +277,7 @@ impl AttemptRecoveryLifecycle {
                 }
             }
         }
-        if attempt_has_committed_progress(view, &attempt_id)
+        if attempt_has_committed_progress(lifecycle, &attempt_id)
             || node_requires_same_attempt_recovery(node)
         {
             return Ok(OpenAttemptDisposition::Continue {
@@ -320,48 +296,69 @@ impl AttemptRecoveryLifecycle {
 
 fn open_started_attempt_for_node(
     node: &spec::NodeSpec,
-    view: &RuntimeRunView,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
 ) -> Result<Option<(AttemptId, u32)>> {
-    if view
-        .projections
-        .cell_terminal_for_run(&view.run_admitted.run_id, &node.output_cell)
-        .is_some()
-    {
+    if lifecycle.cell(&node.output_cell).is_some() {
         return Ok(None);
     }
     let mut started = None;
-    for ((attempt_node_id, attempt_id), projection) in view.projections.attempts() {
-        if attempt_node_id != &node.node_id {
-            continue;
+    let mut failure = None;
+    let _ = lifecycle.visit_attempts(|attempt| {
+        if attempt.node_id() != &node.node_id {
+            return ControlFlow::Continue(());
         }
-        let store::AttemptStatus::Started {
+        let store::current_lifecycle::CurrentAttemptStatusRef::Started {
             attempt_no,
             state_kind,
             state_version,
-        } = &projection.status
+        } = attempt.status()
         else {
-            continue;
+            return ControlFlow::Continue(());
         };
         if state_kind != &node.state_kind || state_version != &node.state_version {
-            return Err(RuntimeError::InvalidRunStream(format!(
+            failure = Some(RuntimeError::InvalidRunStream(format!(
                 "started attempt {} for node {} has state identity outside the certified spec",
-                attempt_id, node.node_id
+                attempt.attempt_id(),
+                node.node_id
             )));
+            return ControlFlow::Break(());
         }
-        if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
-            return Err(RuntimeError::InvalidRunStream(format!(
+        if started
+            .replace((attempt.attempt_id().clone(), attempt_no))
+            .is_some()
+        {
+            failure = Some(RuntimeError::InvalidRunStream(format!(
                 "node {} has multiple started attempts during recovery",
                 node.node_id
             )));
+            return ControlFlow::Break(());
         }
+        ControlFlow::Continue(())
+    });
+    if let Some(error) = failure {
+        return Err(error);
     }
     Ok(started)
 }
 
-fn attempt_has_committed_progress(view: &RuntimeRunView, attempt_id: &AttemptId) -> bool {
-    view.artifact_refs
-        .values()
-        .any(|reference| reference.attempt_id.as_ref() == Some(attempt_id))
+fn attempt_has_committed_progress(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+    attempt_id: &AttemptId,
+) -> bool {
+    matches!(
+        lifecycle.visit_records(|record| {
+            let store::current_lifecycle::CurrentRecordKindRef::ArtifactReferenced(reference) =
+                record.kind()
+            else {
+                return ControlFlow::Continue(());
+            };
+            if reference.attempt_id.as_ref() == Some(attempt_id) {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }),
+        ControlFlow::Break(())
+    )
 }
 
 fn node_requires_same_attempt_recovery(node: &spec::NodeSpec) -> bool {

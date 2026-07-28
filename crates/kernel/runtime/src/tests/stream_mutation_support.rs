@@ -1,174 +1,5 @@
 use super::*;
 
-pub(super) struct StaleStreamStore<'a> {
-    inner: RefCell<&'a mut TestTypedRunStore>,
-    stream: Vec<store::KernelEventEnvelope>,
-}
-
-impl<'a> StaleStreamStore<'a> {
-    pub(super) fn new(
-        inner: &'a mut TestTypedRunStore,
-        stream: Vec<store::KernelEventEnvelope>,
-    ) -> Self {
-        Self {
-            inner: RefCell::new(inner),
-            stream,
-        }
-    }
-}
-
-impl store::RunEventStore for StaleStreamStore<'_> {
-    type Error = store::StoreError;
-
-    fn append_prepared_commit_bundle<'a>(
-        &'a self,
-        bundle: store::PreparedCommitBundle,
-    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .append_prepared_commit_bundle(bundle),
-        );
-        Box::pin(std::future::ready(result))
-    }
-
-    fn load_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        let _ = run_id;
-        Box::pin(std::future::ready(Ok(self.stream.clone())))
-    }
-
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        let result = store::CommittedRunStream::from_events(run_id.clone(), self.stream.clone());
-        Box::pin(std::future::ready(result))
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        let result = Ok(self.inner.borrow().expected_next_seq(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn status_projection_snapshot<'a>(
-        &'a self,
-        _run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        let result = Ok(self.inner.borrow().projection_snapshot().clone());
-        Box::pin(std::future::ready(result))
-    }
-
-    fn fact_projection_snapshot<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        let result = Ok(self.inner.borrow().projection_snapshot().clone());
-        Box::pin(std::future::ready(result))
-    }
-}
-
-delegate_execution_claim_store!(StaleStreamStore<'_>, delegate_execution_claim_refcell);
-
-pub(super) struct MissingInputArtifactRefStore<'a> {
-    inner: RefCell<&'a mut TestTypedRunStore>,
-    producer_node_id: NodeId,
-}
-
-impl<'a> MissingInputArtifactRefStore<'a> {
-    pub(super) fn new(inner: &'a mut TestTypedRunStore, producer_node_id: NodeId) -> Self {
-        Self {
-            inner: RefCell::new(inner),
-            producer_node_id,
-        }
-    }
-}
-
-impl store::RunEventStore for MissingInputArtifactRefStore<'_> {
-    type Error = store::StoreError;
-
-    fn append_prepared_commit_bundle<'a>(
-        &'a self,
-        bundle: store::PreparedCommitBundle,
-    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .append_prepared_commit_bundle(bundle),
-        );
-        Box::pin(std::future::ready(result))
-    }
-
-    fn load_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        let result = rewrite_stream_without_payloads(
-            &self.inner.borrow().load_run_stream(run_id),
-            |payload| {
-                matches!(
-                    payload,
-                    events::KernelEventPayload::ArtifactReferenced(payload)
-                        if payload.artifact_ref.role == events::ArtifactRole::StateOutput
-                            && payload.node_id.as_ref() == Some(&self.producer_node_id)
-                )
-            },
-        );
-        Box::pin(std::future::ready(Ok(result)))
-    }
-
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        let stream = rewrite_stream_without_payloads(
-            &self.inner.borrow().load_run_stream(run_id),
-            |payload| {
-                matches!(
-                    payload,
-                    events::KernelEventPayload::ArtifactReferenced(payload)
-                        if payload.artifact_ref.role == events::ArtifactRole::StateOutput
-                            && payload.node_id.as_ref() == Some(&self.producer_node_id)
-                )
-            },
-        );
-        let result = store::CommittedRunStream::from_events(run_id.clone(), stream);
-        Box::pin(std::future::ready(result))
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        let result = Ok(self.inner.borrow().expected_next_seq(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn status_projection_snapshot<'a>(
-        &'a self,
-        _run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        let result = Ok(self.inner.borrow().projection_snapshot().clone());
-        Box::pin(std::future::ready(result))
-    }
-
-    fn fact_projection_snapshot<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        let result = Ok(self.inner.borrow().projection_snapshot().clone());
-        Box::pin(std::future::ready(result))
-    }
-}
-
-delegate_execution_claim_store!(
-    MissingInputArtifactRefStore<'_>,
-    delegate_execution_claim_refcell
-);
-
 pub(super) fn rewrite_envelope(
     event: &store::KernelEventEnvelope,
     seq: store::StreamSeq,
@@ -197,27 +28,41 @@ pub(super) fn rewrite_envelope(
     .expect("rewritten envelope")
 }
 
-pub(super) fn rewrite_stream_without_payloads<F>(
-    stream: &[store::KernelEventEnvelope],
+pub(super) fn rewrite_record_payload(
+    record: &store::KernelEventEnvelope,
+    payload: events::KernelEventPayload,
+) -> store::KernelEventEnvelope {
+    test_persisted_event_with_ordinal(
+        record.run_id(),
+        record.seq().as_u64(),
+        record.store_commit_order().as_u64(),
+        record.ordinal().as_u32(),
+        record.commit_key().clone(),
+        payload,
+    )
+}
+
+pub(super) fn rewrite_records_without_payloads<F>(
+    records: &[store::KernelEventEnvelope],
     mut should_remove: F,
 ) -> Vec<store::KernelEventEnvelope>
 where
     F: FnMut(&events::KernelEventPayload) -> bool,
 {
-    let mut rewritten = Vec::with_capacity(stream.len());
+    let mut rewritten = Vec::with_capacity(records.len());
     let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
+    while index < records.len() {
+        let first = &records[index];
         let seq = first.seq();
         let commit_key = first.commit_key().clone();
         let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == seq
-            && stream[end].commit_key() == &commit_key
+        while end < records.len()
+            && records[end].seq() == seq
+            && records[end].commit_key() == &commit_key
         {
             end += 1;
         }
-        let commit = &stream[index..end];
+        let commit = &records[index..end];
         let payloads = commit
             .iter()
             .filter(|event| !should_remove(event.payload()))
@@ -251,21 +96,22 @@ where
 
 pub(super) fn assert_every_certified_node_has_attempt(
     runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
+    current: &VerifiedCurrentRun,
 ) {
     let mut started = BTreeSet::new();
     let mut completed = BTreeSet::new();
-    for event in stream {
-        match event.payload() {
-            events::KernelEventPayload::StateAttemptStarted(payload) => {
+    let _ = current.lifecycle().visit_records::<()>(|record| {
+        match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptStarted(payload) => {
                 started.insert(payload.node_id.clone());
             }
-            events::KernelEventPayload::StateAttemptCompleted(payload) => {
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptCompleted(payload) => {
                 completed.insert(payload.node_id.clone());
             }
             _ => {}
         }
-    }
+        std::ops::ControlFlow::Continue(())
+    });
     for node in &runtime_spec.spec().nodes {
         if matches!(
             node.framework,

@@ -1,8 +1,8 @@
 use super::*;
 
-#[path = "fixture_builders/spec_helpers.rs"]
-mod spec_helpers;
-pub(super) use self::spec_helpers::*;
+#[path = "fixture_builders/certification_helpers.rs"]
+mod certification_helpers;
+pub(super) use self::certification_helpers::*;
 #[path = "fixture_builders/base_fixtures.rs"]
 mod base_fixtures;
 pub(super) use self::base_fixtures::*;

@@ -481,7 +481,7 @@ required invocation key digest. The raw CLI `--invocation-key` is optional; when
 mints a fresh opaque key before deriving the digest.
 
 The CLI starts only through registered entry-point ops that app assembly plans and certifies into
-typed execution specs, and it resumes/replays only from stored typed run streams.
+typed execution specs, and it resumes/replays only from a store-owned verified run view.
 
 `keystore tx-sign` is a thin client of the app-assembled canonical signing service. It does not
 submit or resume certified typed runs and is not an alternate transaction implementation.
@@ -556,9 +556,10 @@ Stable launch errors include:
 
 ### `run resume`
 
-Resumes a certified typed run by loading the spec and certificate artifacts bound by `RunAdmitted`,
-verifying them against the compiled certification registry, rebuilding stream evidence, and driving
-the typed scheduler until it blocks or the run completes.
+Resumes a certified typed run by loading the one store-owned committed journal, verifying its
+bound spec, certificate, records, and retained objects against the compiled certification
+registry, and lending the resulting verified view to the typed scheduler until it blocks or the
+run completes.
 
 **Usage:**
 ```sh
@@ -580,11 +581,12 @@ safety must use certified `Finalized(depth)` verification.
 
 ### `run manual-resolution`
 
-Records a signed manual resolution for a certified typed run whose current stream prefix derives
-`manual_blocked`. The command reads the evidence artifact bytes exactly as supplied, canonicalizes
-the authorization proof JSON, and submits both through `mfm-app` so runtime can derive prefix
-authority, verify signatures/quorum, stage artifacts, and append the typed manual-resolution commit.
-It does not load keystores, signer registries, password files, or other signer runtime sources.
+Records a signed manual resolution for a certified typed run whose current committed-journal prefix
+derives `manual_blocked`. The command reads the evidence artifact bytes exactly as supplied,
+canonicalizes the authorization proof JSON, and submits both through `mfm-app` so runtime can derive
+prefix authority, verify signatures/quorum, stage artifacts, and append the typed manual-resolution
+commit. It does not load keystores, signer registries, password files, or other signer runtime
+sources.
 
 **Usage:**
 ```sh
@@ -611,7 +613,9 @@ Stable manual-resolution errors include:
 - `ManualResolutionEvidenceMediaTypeInvalid`: the evidence media type is invalid.
 - `ManualResolutionNoteInvalid`: the optional note is not accepted by the event text contract.
 - `LaunchRuntimeError`: runtime rejected the prefix or proof binding.
-- `RunStoreRejected`: the prepared commit was stale or violated typed store admission.
+- `ManualResolutionRequestStale`: another commit extended the signed prefix; reload the run and
+  submit a fresh request authorized for the new prefix.
+- `RunStoreRejected`: the prepared commit violated typed store admission.
 
 ### `run list`
 
@@ -671,7 +675,7 @@ mfm_cli run status <RUN_ID> [OPTIONS]
 ### `run stream`
 
 Prints store-owned references for certified typed run events. Sequence range filters are applied
-only after the app service validates the full stored stream.
+only after the app service loads the complete store-owned verified run view.
 
 **Usage:**
 ```sh
@@ -684,9 +688,8 @@ mfm_cli run stream <RUN_ID> [OPTIONS]
 
 ### `run public-output`
 
-Renders a typed public output by schema id through sealed read authority minted from verified stored
-spec/certificate artifacts, rebuilt stream evidence, store-owned public-output projection evidence,
-and typed artifact bytes. Rendered JSON is not resume, replay, or render authority.
+Renders a typed public output by schema id from the store-owned verified run view and its exact
+retained object evidence. Rendered JSON is not resume, replay, or render authority.
 
 **Usage:**
 ```sh
@@ -695,12 +698,11 @@ mfm_cli run public-output <RUN_ID> --schema-id <SCHEMA_ID> [OPTIONS]
 
 ### `run replay`
 
-Verifies replay authority for a certified typed run by loading the stored certified spec and
-certificate artifacts, comparing them to `RunAdmitted`, verifying them against the production
-registry, loading retained artifact evidence, and then constructing the typed replay broker. The
-command rejects missing retained evidence, executable identity drift, and live-capability fallback.
-Domain replay execution is available only after the corresponding typed runner/replay adapter is
-registered by a domain port.
+Verifies replay for a certified typed run by borrowing the one store-owned verified run view.
+Replay does not construct a second stream, projection, artifact map, or owned primary-history
+authority. The command rejects missing retained evidence, executable identity drift, and
+live-capability fallback. Domain replay execution is available only after the corresponding typed
+verifier is registered by a domain port.
 
 **Usage:**
 ```sh

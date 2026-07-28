@@ -1,19 +1,11 @@
-error: cannot construct `ReplayReadAuthority` with struct literal syntax due to private fields
-  --> tests/ui/fail/replay_read_authority_fields_private.rs:6:13
-   |
- 6 |     let _ = mfm_replay::v1::ReplayReadAuthority {
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
- 7 |         certified_spec: value(),
-   |         ----------------------- private field
- 8 |         stream: Vec::new(),
-   |         ------------------ private field
- 9 |         canonicalizer_identity: value(),
-   |         ------------------------------- private field
-10 |         runner_executables: Vec::new(),
-   |         ------------------------------ private field
-11 |         adapter_executables: Vec::new(),
-   |         ------------------------------- private field
-12 |         artifact_evidence: Vec::new(),
-   |         ----------------------------- private field
-   |
-   = note: ...and other private fields `capability_implementations`, `artifact_bytes`, `additional_artifact_evidence` and `source_fact_events` that were not provided
+error[E0451]: fields `view`, `additional_artifacts` and `source_fact_events` of struct `ReplayReadAuthority` are private
+ --> tests/ui/fail/replay_read_authority_fields_private.rs:7:9
+  |
+6 |     let _ = mfm_replay::v1::ReplayReadAuthority {
+  |             ----------------------------------- in this type
+7 |         view: value(),
+  |         ^^^^ private field
+8 |         additional_artifacts: Vec::new(),
+  |         ^^^^^^^^^^^^^^^^^^^^ private field
+9 |         source_fact_events: Vec::new(),
+  |         ^^^^^^^^^^^^^^^^^^ private field

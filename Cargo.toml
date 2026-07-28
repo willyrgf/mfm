@@ -15,6 +15,7 @@ members = [
 	"crates/kernel/capabilities",
 	"crates/kernel/certify",
 	"crates/kernel/events",
+	"crates/kernel/journal",
 	"crates/kernel/executor",
 	"crates/kernel/facts",
 	"crates/kernel/ids",

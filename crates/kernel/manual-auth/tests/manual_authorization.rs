@@ -97,6 +97,25 @@ fn registry_rejects_policy_and_quorum_mismatches_before_verifier() {
 }
 
 #[test]
+fn registry_rejects_duplicate_signer_even_when_quorum_is_satisfied() {
+    let policy = policy();
+    let mut proof = proof();
+    proof.signatures.push(proof.signatures[0].clone());
+    let mut registry = ManualAuthorizationVerifierRegistry::new();
+    registry
+        .register(policy.verifier_id.clone(), AcceptingVerifier)
+        .expect("register verifier");
+
+    let error = registry
+        .verify(&policy, claim(), proof)
+        .expect_err("duplicate signer must reject before verifier acceptance");
+    assert!(matches!(
+        error,
+        ManualAuthorizationError::DuplicateSigner(_)
+    ));
+}
+
+#[test]
 fn proof_authority_verifies_canonical_proof_bytes_for_prefix() {
     let policy = policy();
     let claim = claim();

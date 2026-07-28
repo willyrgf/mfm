@@ -7,11 +7,11 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::{Json, Router};
 use mfm_integration_tests::test_support::{
-    write_portfolio_runtime_config_for_test, UncertainFactSettlementStore,
+    verified_run_view, write_portfolio_runtime_config_for_test, UncertainFactSettlementStore,
 };
 use mfm_portfolio::portfolio_snapshot_program_draft;
 use mfm_portfolio::{PortfolioConfig, ValidatedPortfolioConfig};
-use mfm_store::v1::{self as store, RunEventStore as _};
+use mfm_store::v1::{self as store, CurrentProjectionStore as _};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
@@ -265,14 +265,19 @@ async fn snapshot_root_blocks_when_the_fact_query_store_is_unavailable() {
         .any(|attempt| attempt.disposition == "failed"));
     assert_eq!(query_store.batch_widths(), vec![1]);
     let run_id = response.run_id.parse().expect("blocked snapshot run id");
-    let stream = store
-        .load_run_stream(&run_id)
-        .await
-        .expect("blocked snapshot stream");
-    assert!(!stream.iter().any(|event| matches!(
-        event.payload(),
-        mfm_events::v1::KernelEventPayload::StateAttemptFailed(_)
-    )));
+    let certification =
+        mfm_app::production_certification_registry().expect("snapshot certification registry");
+    let view = verified_run_view(&store, &certification, &run_id).await;
+    let lifecycle = store::current_lifecycle::read(&view);
+    let mut attempt_failed = false;
+    let _ = lifecycle.visit_records(|record| {
+        attempt_failed |= matches!(
+            record.kind(),
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptFailed(_)
+        );
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    assert!(!attempt_failed);
 }
 
 async fn assert_atomic_evm_fact_publication(
@@ -280,7 +285,10 @@ async fn assert_atomic_evm_fact_publication(
     run_id: &mfm_ids::RunId,
     expected_count: usize,
 ) {
-    let projection = store.projection_snapshot().expect("fact projection");
+    let projection = store
+        .fact_projection_snapshot()
+        .await
+        .expect("fact projection");
     assert_eq!(
         projection
             .fact_query_entries()
@@ -293,55 +301,62 @@ async fn assert_atomic_evm_fact_publication(
         "the run must publish one unified EVM fact per demanded source"
     );
 
-    let stream = store
-        .load_run_stream(run_id)
-        .await
-        .expect("completed snapshot stream");
-    let facts = stream
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                mfm_events::v1::KernelEventPayload::FactRecorded(payload)
-                    if payload.claim.fact_kind().as_str() == "evm.balance_snapshot"
-            )
-        })
-        .collect::<Vec<_>>();
+    let certification =
+        mfm_app::production_certification_registry().expect("snapshot certification registry");
+    let view = verified_run_view(store, &certification, run_id).await;
+    let lifecycle = store::current_lifecycle::read(&view);
+    let mut facts = Vec::new();
+    let _ = lifecycle.visit_records(|record| {
+        if let store::current_lifecycle::CurrentRecordKindRef::FactRecorded(payload) = record.kind()
+        {
+            if payload.claim.fact_kind().as_str() == "evm.balance_snapshot" {
+                facts.push((
+                    payload,
+                    record.commit_key().clone(),
+                    record.store_commit_order(),
+                ));
+            }
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
     assert_eq!(facts.len(), expected_count);
     let Some(first) = facts.first() else {
         return;
     };
-    let mfm_events::v1::KernelEventPayload::FactRecorded(first_payload) = first.payload() else {
-        unreachable!("filtered FactRecorded event")
-    };
-    assert!(facts.iter().all(|event| {
-        let mfm_events::v1::KernelEventPayload::FactRecorded(payload) = event.payload() else {
-            return false;
-        };
-        payload.node_id == first_payload.node_id
-            && payload.attempt_id == first_payload.attempt_id
-            && event.commit_key() == first.commit_key()
-            && event.store_commit_order() == first.store_commit_order()
-    }));
+    let (first_payload, first_commit_key, first_store_commit_order) = first;
+    assert!(facts
+        .iter()
+        .all(|(payload, commit_key, store_commit_order)| {
+            payload.node_id == first_payload.node_id
+                && payload.attempt_id == first_payload.attempt_id
+                && commit_key == first_commit_key
+                && store_commit_order == first_store_commit_order
+        }));
+    let mut shares_commit_with_output = false;
+    let _ = lifecycle.visit_records(|record| {
+        if let store::current_lifecycle::CurrentRecordKindRef::CellProduced(payload) = record.kind()
+        {
+            shares_commit_with_output = payload.node_id == first_payload.node_id
+                && payload.attempt_id == first_payload.attempt_id
+                && record.commit_key() == first_commit_key
+                && record.store_commit_order() == *first_store_commit_order;
+        }
+        if shares_commit_with_output {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    });
     assert!(
-        stream.iter().any(|event| {
-            matches!(
-                event.payload(),
-                mfm_events::v1::KernelEventPayload::CellProduced(payload)
-                    if payload.node_id == first_payload.node_id
-                        && payload.attempt_id == first_payload.attempt_id
-                        && event.commit_key() == first.commit_key()
-                        && event.store_commit_order() == first.store_commit_order()
-            )
-        }),
+        shares_commit_with_output,
         "the EVM collection receipt and every fact must share one atomic commit"
     );
 }
 
-/// A complete mixed snapshot rejects retained query or selected-holdings substitutions before
-/// either can influence the reconstructed report.
+/// A complete mixed snapshot rejects exact retained-journal object substitutions before either
+/// can influence replay.
 #[tokio::test]
-async fn snapshot_root_replay_rejects_tampered_retained_projection_evidence() {
+async fn snapshot_root_replay_rejects_tampered_retained_journal_evidence() {
     let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
     let runtime_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
@@ -350,7 +365,7 @@ async fn snapshot_root_replay_rejects_tampered_retained_projection_evidence() {
     let run_id = launch_snapshot_completed(
         &services,
         &snapshot_config(SnapshotDemand::Mixed),
-        "tampered-retained-projection-evidence",
+        "tampered-retained-journal-evidence",
     )
     .await;
     let source_calls_before_replay = server.calls();
@@ -390,7 +405,7 @@ async fn snapshot_root_replay_rejects_tampered_retained_projection_evidence() {
             .verify_replay_for_run(&run_id)
             .await
             .expect_err("tampered retained evidence must fail replay");
-        assert_eq!(error.code, "ArtifactEvidenceMismatch", "{label}");
+        assert_eq!(error.code, "RunStoreRejected", "{label}");
     }
     assert_eq!(server.calls(), source_calls_before_replay);
 }
@@ -547,15 +562,20 @@ async fn snapshot_root_resumes_and_replays_after_live_inputs_disappear() {
     entered_rx
         .await
         .expect("selection started after complete live collection");
-    let stream = store
-        .load_run_stream(&run_id)
-        .await
-        .expect("interrupted stream");
-    assert!(stream.iter().any(|event| matches!(
-        event.payload(),
-        mfm_events::v1::KernelEventPayload::StateAttemptStarted(payload)
-            if payload.state_kind.as_str().contains("select_holdings")
-    )));
+    let certification =
+        mfm_app::production_certification_registry().expect("snapshot certification registry");
+    let view = verified_run_view(&store, &certification, &run_id).await;
+    let lifecycle = store::current_lifecycle::read(&view);
+    let mut selection_started = false;
+    let _ = lifecycle.visit_records(|record| {
+        if let store::current_lifecycle::CurrentRecordKindRef::StateAttemptStarted(payload) =
+            record.kind()
+        {
+            selection_started |= payload.state_kind.as_str().contains("select_holdings");
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    assert!(selection_started);
     let source_calls_before_resume = server.calls();
     launch.abort();
     let _ = launch.await;
@@ -614,7 +634,7 @@ async fn snapshot_root_replay_verifies_each_downstream_output_prefix() {
         let runtime_path = write_portfolio_runtime_config_for_test(runtime_dir.path(), &server.url);
         let store = store::AsyncInMemoryRunStore::default();
         let (entered_tx, entered_rx) = oneshot::channel();
-        let blocked_store = Arc::new(SnapshotStore::blocking_artifact(
+        let blocked_store = Arc::new(SnapshotStore::blocking_journal_at_output(
             store.clone(),
             blocked_input_schema,
             entered_tx,
@@ -843,7 +863,8 @@ fn symbol(symbol_id: &str, network_id: &str, source: Value) -> Value {
 }
 
 trait SnapshotServiceStore:
-    store::RunEventStore<Error = store::StoreError>
+    store::RunJournalStore<Error = store::StoreError>
+    + store::CurrentProjectionStore
     + store::StoreScopeStore<Error = store::StoreError>
     + store::ExecutionClaimStore<Error = store::StoreError>
     + store::RetainedArtifactReadProvider
@@ -855,7 +876,8 @@ trait SnapshotServiceStore:
 }
 
 impl<T> SnapshotServiceStore for T where
-    T: store::RunEventStore<Error = store::StoreError>
+    T: store::RunJournalStore<Error = store::StoreError>
+        + store::CurrentProjectionStore
         + store::StoreScopeStore<Error = store::StoreError>
         + store::ExecutionClaimStore<Error = store::StoreError>
         + store::RetainedArtifactReadProvider
@@ -957,7 +979,7 @@ enum SnapshotQueryBehavior {
 
 enum SnapshotArtifactBehavior {
     Passthrough,
-    Block {
+    BlockJournalAtOutput {
         schema: &'static str,
         entered: Mutex<Option<oneshot::Sender<()>>>,
     },
@@ -1007,7 +1029,7 @@ impl SnapshotStore {
         }
     }
 
-    fn blocking_artifact(
+    fn blocking_journal_at_output(
         inner: store::AsyncInMemoryRunStore,
         schema: &'static str,
         entered: oneshot::Sender<()>,
@@ -1015,7 +1037,7 @@ impl SnapshotStore {
         Self {
             inner,
             query: Arc::new(SnapshotQueryBehavior::Passthrough),
-            artifacts: Arc::new(SnapshotArtifactBehavior::Block {
+            artifacts: Arc::new(SnapshotArtifactBehavior::BlockJournalAtOutput {
                 schema,
                 entered: Mutex::new(Some(entered)),
             }),
@@ -1151,48 +1173,78 @@ impl store::FactQueryStore for SnapshotStore {
     }
 }
 
-impl store::RunEventStore for SnapshotStore {
+impl store::RunJournalBackend for SnapshotStore {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_bundle<'a>(
+    fn backend_append<'a>(
         &'a self,
         bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        store::RunEventStore::append_prepared_commit_bundle(&self.inner, bundle)
+        store::RunJournalStore::append_prepared_commit_bundle(&self.inner, bundle)
     }
 
-    fn load_run_stream<'a>(
+    fn backend_load<'a>(
         &'a self,
-        run_id: &'a mfm_ids::RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        store::RunEventStore::load_run_stream(&self.inner, run_id)
+        verifier: store::JournalLoadVerifier,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunJournal, Self::Error> {
+        let run_id = verifier.run_id().clone();
+        Box::pin(async move {
+            match self.artifacts.as_ref() {
+                SnapshotArtifactBehavior::BlockJournalAtOutput { schema, entered } => {
+                    let records = self.inner.committed_records_for_test(&run_id)?;
+                    let reached_output = records.iter().any(|record| {
+                        matches!(
+                            record.payload(),
+                            mfm_events::v1::KernelEventPayload::CellProduced(payload)
+                                if payload.schema_id.canonical_name() == Some(*schema)
+                        )
+                    });
+                    if reached_output {
+                        let entered = entered.lock().expect("blocking journal state").take();
+                        if let Some(entered) = entered {
+                            let _ = entered.send(());
+                            future::pending::<()>().await;
+                        }
+                    }
+                }
+                SnapshotArtifactBehavior::Tamper(tamper) => {
+                    let records = self.inner.committed_records_for_test(&run_id)?;
+                    let mut objects = self
+                        .inner
+                        .committed_artifact_byte_authority_for_test(&run_id)?;
+                    let Some((bytes, evidence)) = objects
+                        .values_mut()
+                        .find(|(_, evidence)| snapshot_artifact_tamper_applies(evidence, *tamper))
+                    else {
+                        return Err(store::StoreError::Event(format!(
+                            "journal has no {} object to tamper",
+                            tamper.label()
+                        )));
+                    };
+                    *bytes = tampered_snapshot_artifact_bytes(bytes, evidence, *tamper);
+                    return verifier.verify(records, objects);
+                }
+                SnapshotArtifactBehavior::Passthrough => {}
+            }
+            let journal =
+                store::RunJournalStore::load_committed_journal(&self.inner, &run_id).await?;
+            verifier.accept_verified(journal)
+        })
     }
+}
 
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a mfm_ids::RunId,
-    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        store::RunEventStore::load_committed_run_stream(&self.inner, run_id)
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a mfm_ids::RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        store::RunEventStore::expected_next_seq(&self.inner, run_id)
-    }
-
+impl store::CurrentProjectionStore for SnapshotStore {
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a mfm_ids::RunId,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        store::RunEventStore::status_projection_snapshot(&self.inner, run_id)
+        store::CurrentProjectionStore::status_projection_snapshot(&self.inner, run_id)
     }
 
     fn fact_projection_snapshot<'a>(
         &'a self,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        store::RunEventStore::fact_projection_snapshot(&self.inner)
+        store::CurrentProjectionStore::fact_projection_snapshot(&self.inner)
     }
 }
 
@@ -1280,23 +1332,6 @@ impl store::RetainedArtifactReadProvider for SnapshotStore {
         requirement: &'a store::EventArtifactRequirement,
     ) -> store::RetainedArtifactReadFuture<'a> {
         Box::pin(async move {
-            if let SnapshotArtifactBehavior::Block { schema, entered } = self.artifacts.as_ref() {
-                let blocks_output = requirement.artifact_role
-                    == Some(mfm_events::v1::ArtifactRole::StateOutput)
-                    && requirement
-                        .schema_id
-                        .as_ref()
-                        .and_then(|value| value.canonical_name())
-                        == Some(*schema);
-                if blocks_output {
-                    let entered = entered.lock().expect("blocking artifact state").take();
-                    if let Some(entered) = entered {
-                        let _ = entered.send(());
-                        future::pending().await
-                    }
-                }
-            }
-
             let artifact = store::RetainedArtifactReadProvider::read_retained_artifact(
                 &self.inner,
                 requirement,
@@ -1306,9 +1341,8 @@ impl store::RetainedArtifactReadProvider for SnapshotStore {
                 SnapshotArtifactBehavior::Tamper(tamper) => {
                     tamper_snapshot_artifact(artifact, requirement, *tamper)
                 }
-                SnapshotArtifactBehavior::Passthrough | SnapshotArtifactBehavior::Block { .. } => {
-                    Ok(artifact)
-                }
+                SnapshotArtifactBehavior::Passthrough
+                | SnapshotArtifactBehavior::BlockJournalAtOutput { .. } => Ok(artifact),
             }
         })
     }
@@ -1322,53 +1356,82 @@ enum SnapshotArtifactTamper {
     SelectedHoldings,
 }
 
+impl SnapshotArtifactTamper {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::EvmCollectionReceipt => "EVM collection receipt",
+            Self::FactQueryEvidence => "fact-query evidence",
+            Self::EvmFactResponse => "EVM fact response",
+            Self::SelectedHoldings => "selected-holdings output",
+        }
+    }
+}
+
 fn tamper_snapshot_artifact(
     artifact: store::VerifiedRetainedArtifactBytes,
     requirement: &store::EventArtifactRequirement,
     tamper: SnapshotArtifactTamper,
 ) -> store::Result<store::VerifiedRetainedArtifactBytes> {
-    let schema_name = artifact
-        .evidence()
+    if !snapshot_artifact_tamper_applies(artifact.evidence(), tamper) {
+        return Ok(artifact);
+    }
+    let tampered_bytes =
+        tampered_snapshot_artifact_bytes(artifact.bytes(), artifact.evidence(), tamper);
+    store::VerifiedRetainedArtifactBytes::new(
+        tampered_bytes,
+        artifact.evidence().clone(),
+        requirement,
+    )
+}
+
+fn snapshot_artifact_tamper_applies(
+    evidence: &store::ArtifactEvidenceRef,
+    tamper: SnapshotArtifactTamper,
+) -> bool {
+    let schema_name = evidence
         .schema_id
         .as_ref()
         .and_then(|schema| schema.canonical_name());
-    let applies = match tamper {
+    match tamper {
         SnapshotArtifactTamper::EvmCollectionReceipt => {
-            artifact.evidence().artifact_role == mfm_events::v1::ArtifactRole::StateOutput
+            evidence.artifact_role == mfm_events::v1::ArtifactRole::StateOutput
                 && schema_name == Some("mfm.evm.balance_collection_receipt")
         }
         SnapshotArtifactTamper::FactQueryEvidence => {
-            artifact.evidence().artifact_role == mfm_events::v1::ArtifactRole::FactQueryEvidence
+            evidence.artifact_role == mfm_events::v1::ArtifactRole::FactQueryEvidence
         }
         SnapshotArtifactTamper::EvmFactResponse => {
-            artifact.evidence().artifact_role == mfm_events::v1::ArtifactRole::FactResponse
+            evidence.artifact_role == mfm_events::v1::ArtifactRole::FactResponse
                 && schema_name == Some("mfm.evm.fact.balance_snapshot.response")
         }
         SnapshotArtifactTamper::SelectedHoldings => {
-            artifact.evidence().artifact_role == mfm_events::v1::ArtifactRole::StateOutput
+            evidence.artifact_role == mfm_events::v1::ArtifactRole::StateOutput
                 && schema_name == Some("mfm.portfolio.selected_holdings")
         }
-    };
-    if !applies {
-        return Ok(artifact);
     }
+}
 
-    let tampered_bytes = match tamper {
+fn tampered_snapshot_artifact_bytes(
+    bytes: &[u8],
+    evidence: &store::ArtifactEvidenceRef,
+    tamper: SnapshotArtifactTamper,
+) -> Vec<u8> {
+    debug_assert!(snapshot_artifact_tamper_applies(evidence, tamper));
+    match tamper {
         SnapshotArtifactTamper::EvmCollectionReceipt
         | SnapshotArtifactTamper::FactQueryEvidence => {
-            let mut bytes = artifact.bytes().to_vec();
+            let mut bytes = bytes.to_vec();
             bytes.push(b'\n');
             bytes
         }
         SnapshotArtifactTamper::EvmFactResponse => {
-            let mut value: Value =
-                serde_json::from_slice(artifact.bytes()).expect("EVM fact response JSON");
+            let mut value: Value = serde_json::from_slice(bytes).expect("EVM fact response JSON");
             value["raw_units"] = json!("999");
             serde_json::to_vec(&value).expect("tampered EVM fact response JSON")
         }
         SnapshotArtifactTamper::SelectedHoldings => {
             let mut value: Value =
-                serde_json::from_slice(artifact.bytes()).expect("selected holdings output JSON");
+                serde_json::from_slice(bytes).expect("selected holdings output JSON");
             let observations = value["observations"]
                 .as_array_mut()
                 .expect("selected holdings");
@@ -1384,12 +1447,7 @@ fn tamper_snapshot_artifact(
             observations.push(duplicate);
             serde_json::to_vec(&value).expect("tampered selected holdings JSON")
         }
-    };
-    store::VerifiedRetainedArtifactBytes::new(
-        tampered_bytes,
-        artifact.evidence().clone(),
-        requirement,
-    )
+    }
 }
 
 #[derive(Clone)]

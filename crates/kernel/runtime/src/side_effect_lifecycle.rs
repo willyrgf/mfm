@@ -1,10 +1,11 @@
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, RunId, SideEffectPairId};
+use mfm_ids::{AttemptId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::invocation::{ErasedRunCtx, PreInvocationRunCtx};
-use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
+use crate::spec_authority::CurrentSpecRead;
+use crate::{Result, RuntimeError};
 
 /// Store-verified side-effect ledger view for one certified node attempt.
 ///
@@ -12,17 +13,16 @@ use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 /// side-effect projection lookup and validates the projected ledger typestate before exposing it
 /// to side-effect protocol helpers.
 pub(crate) struct SideEffectAttemptView<'a> {
-    projection: Option<&'a store::SideEffectProjection>,
-    ledger_state: Option<store::SideEffectLedgerState<'a>>,
+    ledger: Option<store::current_lifecycle::CurrentSideEffectRef<'a>>,
+    ledger_state: Option<store::current_lifecycle::CurrentSideEffectLedgerState<'a>>,
 }
 
 impl<'a> SideEffectAttemptView<'a> {
     /// Builds a side-effect attempt view from a prepared runner context.
     pub(crate) fn from_erased_context(ctx: &'a ErasedRunCtx<'_>) -> Result<Self> {
         Self::from_verified_parts(
-            ctx.runtime_spec(),
-            ctx.run_id(),
-            ctx.projections(),
+            &ctx.runtime_spec(),
+            ctx.lifecycle(),
             ctx.node(),
             ctx.attempt_id(),
         )
@@ -31,51 +31,47 @@ impl<'a> SideEffectAttemptView<'a> {
     /// Builds a side-effect attempt view from a pre-invocation resource-lane context.
     pub(crate) fn from_pre_invocation_context(ctx: &'a PreInvocationRunCtx<'_>) -> Result<Self> {
         Self::from_verified_parts(
-            ctx.runtime_spec(),
-            ctx.run_id(),
-            ctx.projections(),
+            &ctx.runtime_spec(),
+            ctx.lifecycle(),
             ctx.node(),
             ctx.attempt_id(),
         )
     }
 
-    fn from_verified_parts(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &'a store::ProjectionSnapshot,
+    fn from_verified_parts<S>(
+        runtime_spec: &S,
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'a>,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
-    ) -> Result<Self> {
-        let projection = side_effect_projection_for_attempt(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-        )?;
-        let ledger_state = projection
-            .map(|projection| {
-                projection
+    ) -> Result<Self>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
+        let ledger = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)?;
+        let ledger_state = ledger
+            .as_ref()
+            .map(|ledger| {
+                ledger
                     .ledger_state()
                     .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
             })
             .transpose()?;
         Ok(Self {
-            projection,
+            ledger,
             ledger_state,
         })
     }
 
-    /// Returns the backing side-effect projection, when this attempt has persisted ledger evidence.
-    pub(crate) fn projection(&self) -> Option<&'a store::SideEffectProjection> {
-        self.projection
+    /// Returns the borrowed current ledger, when this attempt has persisted ledger evidence.
+    pub(crate) fn ledger(&self) -> Option<&store::current_lifecycle::CurrentSideEffectRef<'a>> {
+        self.ledger.as_ref()
     }
 
     /// Returns the validated ledger phase, when this attempt has persisted ledger evidence.
     pub(crate) fn phase(&self) -> Option<store::SideEffectLedgerPhase<'a>> {
         self.ledger_state
             .as_ref()
-            .map(store::SideEffectLedgerState::phase)
+            .map(store::current_lifecycle::CurrentSideEffectLedgerState::phase)
     }
 }
 
@@ -92,45 +88,36 @@ pub(crate) enum SideEffectOpenAttemptDisposition {
 }
 
 /// Validates that a side-effect attempt has certified terminal evidence before producing output.
-pub(crate) fn validate_terminal_evidence(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
+pub(crate) fn validate_terminal_evidence<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-) -> Result<()> {
-    let terminal_skipped = matches!(
-        projections.cell_terminal_for_run(run_id, &node.output_cell),
-        Some(store::CellTerminalProjection::Skipped {
-            node_id,
-            attempt_id: cell_attempt_id,
-            ..
-        }) if node_id == &node.node_id && cell_attempt_id == attempt_id
-    );
-    validate_terminal_batch_evidence(
-        runtime_spec,
-        run_id,
-        projections,
-        node,
-        attempt_id,
-        terminal_skipped,
-    )
+) -> Result<()>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let terminal_skipped = lifecycle
+        .cell(&node.output_cell)
+        .and_then(|cell| cell.skipped())
+        .is_some_and(|cell| cell.node_id() == &node.node_id && cell.attempt_id() == attempt_id);
+    validate_terminal_batch_evidence(runtime_spec, lifecycle, node, attempt_id, terminal_skipped)
 }
 
 /// Returns whether standalone interruption can close this attempt without ledger recovery.
-pub(crate) fn standalone_interruption_allowed(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
+pub(crate) fn standalone_interruption_allowed<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-) -> Result<bool> {
-    let Some(projection) =
-        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
-    else {
+) -> Result<bool>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let Some(ledger) = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)? else {
         return Ok(true);
     };
-    let state = projection
+    let state = ledger
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     Ok(matches!(
@@ -141,19 +128,19 @@ pub(crate) fn standalone_interruption_allowed(
 }
 
 /// Classifies an open side-effect attempt from store-owned ledger typestate.
-pub(crate) fn open_attempt_disposition(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
+pub(crate) fn open_attempt_disposition<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-) -> Result<SideEffectOpenAttemptDisposition> {
-    let Some(projection) =
-        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
-    else {
+) -> Result<SideEffectOpenAttemptDisposition>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let Some(ledger) = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)? else {
         return Ok(SideEffectOpenAttemptDisposition::ContinueBeforeLedger);
     };
-    let state = projection
+    let state = ledger
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     match state.phase() {
@@ -177,27 +164,32 @@ pub(crate) fn open_attempt_disposition(
     }
 }
 
-pub(crate) fn side_effect_projection_for_attempt<'a>(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &'a store::ProjectionSnapshot,
+pub(crate) fn side_effect_for_attempt<'a, S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'a>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-) -> Result<Option<&'a store::SideEffectProjection>> {
+) -> Result<Option<store::current_lifecycle::CurrentSideEffectRef<'a>>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let Some(pair_id) = certified_side_effect_pair_id(runtime_spec, node)? else {
         return Ok(None);
     };
-    let Some(projection) = projections.side_effect_for_pair(run_id, pair_id) else {
+    let Some(ledger) = lifecycle.side_effect(pair_id) else {
         return Ok(None);
     };
-    validate_side_effect_actor_eligibility(node, attempt_id, pair_id, projection)?;
-    Ok(Some(projection))
+    validate_side_effect_actor_eligibility(node, attempt_id, pair_id, &ledger)?;
+    Ok(Some(ledger))
 }
 
-fn certified_side_effect_pair_id<'a>(
-    runtime_spec: &'a CertifiedRuntimeSpec,
+fn certified_side_effect_pair_id<'a, S>(
+    runtime_spec: &'a S,
     node: &'a spec::NodeSpec,
-) -> Result<Option<&'a SideEffectPairId>> {
+) -> Result<Option<&'a SideEffectPairId>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     match &node.framework {
         Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Ok(Some(&verify.pair_id)),
         _ if node.side_effect.is_some() => runtime_spec
@@ -217,33 +209,35 @@ fn validate_side_effect_actor_eligibility(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     pair_id: &SideEffectPairId,
-    projection: &store::SideEffectProjection,
+    ledger: &store::current_lifecycle::CurrentSideEffectRef<'_>,
 ) -> Result<()> {
-    if projection.pair_id != *pair_id {
+    if ledger.pair_id() != pair_id {
         return Err(RuntimeError::InvalidRunStream(format!(
             "side-effect pair {} projected as pair {}",
-            pair_id, projection.pair_id
+            pair_id,
+            ledger.pair_id()
         )));
     }
+    let intent = ledger.intent();
     match &node.framework {
         Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
-            if projection.intent.node_id != verify.submit_node_id =>
+            if intent.node_id() != &verify.submit_node_id =>
         {
             Err(RuntimeError::InvalidRunStream(format!(
                 "side-effect verify node {} pair {} points at submit node {} but projection belongs to node {}",
-                node.node_id, pair_id, verify.submit_node_id, projection.intent.node_id
+                node.node_id, pair_id, verify.submit_node_id, intent.node_id()
             )))
         }
-        _ if node.side_effect.is_some() && projection.intent.node_id != node.node_id => {
+        _ if node.side_effect.is_some() && intent.node_id() != &node.node_id => {
             Err(RuntimeError::InvalidRunStream(format!(
                 "side-effect node {} pair {} projection belongs to node {}",
-                node.node_id, pair_id, projection.intent.node_id
+                node.node_id, pair_id, intent.node_id()
             )))
         }
-        _ if node.side_effect.is_some() && projection.intent.attempt_id != *attempt_id => {
+        _ if node.side_effect.is_some() && intent.attempt_id() != attempt_id => {
             Err(RuntimeError::InvalidRunStream(format!(
                 "side-effect node {} pair {} projection belongs to attempt {} instead of {}",
-                node.node_id, pair_id, projection.intent.attempt_id, attempt_id
+                node.node_id, pair_id, intent.attempt_id(), attempt_id
             )))
         }
         _ => Ok(()),
@@ -251,23 +245,23 @@ fn validate_side_effect_actor_eligibility(
 }
 
 /// Validates legal terminal evidence for a same-batch side-effect runner output.
-pub(crate) fn validate_terminal_batch_evidence(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
+pub(crate) fn validate_terminal_batch_evidence<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     terminal_skipped: bool,
-) -> Result<()> {
-    let Some(projection) =
-        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
-    else {
+) -> Result<()>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let Some(ledger) = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)? else {
         return Err(RuntimeError::InvalidRunStream(format!(
             "side-effect node {} attempt {} produced output without ledger evidence",
             node.node_id, attempt_id
         )));
     };
-    let state = projection
+    let state = ledger
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     if terminal_skipped {
@@ -286,11 +280,11 @@ pub(crate) fn validate_terminal_batch_evidence(
             node.node_id, attempt_id
         )));
     }
-    let pair_id = projection.pair_id.clone();
+    let pair_id = ledger.pair_id().clone();
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     if terminal_policies
         .require(&pair_id)?
-        .is_terminal_phase(&projection.phase)
+        .is_terminal_phase(ledger.phase())
     {
         Ok(())
     } else {
@@ -302,17 +296,17 @@ pub(crate) fn validate_terminal_batch_evidence(
 }
 
 /// Validates legal runner evidence when resuming an open side-effect ledger.
-pub(crate) fn validate_resume_output(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
+pub(crate) fn validate_resume_output<S>(
+    runtime_spec: &S,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     payloads: &[events::KernelEventPayload],
-) -> Result<()> {
-    let Some(projection) =
-        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
-    else {
+) -> Result<()>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let Some(ledger) = side_effect_for_attempt(runtime_spec, lifecycle, node, attempt_id)? else {
         return Ok(());
     };
     let has_takeover = payloads.iter().any(|payload| {
@@ -352,7 +346,7 @@ pub(crate) fn validate_resume_output(
         events::KernelEventPayload::SideEffectFailed(payload) => Some(payload),
         _ => None,
     });
-    let state = projection
+    let state = ledger
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let phase = state.phase();
@@ -363,7 +357,7 @@ pub(crate) fn validate_resume_output(
             if !closes_projection && !has_takeover && !has_invocation_prepared {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed claimed ledger {} without takeover or prepared invocation",
-                    node.node_id, projection.ledger_key
+                    node.node_id, ledger.ledger_key()
                 )));
             }
         }
@@ -371,7 +365,7 @@ pub(crate) fn validate_resume_output(
             if !closes_projection && !has_takeover && !has_invocation_started {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed prepared ledger {} without takeover or invocation start",
-                    node.node_id, projection.ledger_key
+                    node.node_id, ledger.ledger_key()
                 )));
             }
         }
@@ -382,7 +376,8 @@ pub(crate) fn validate_resume_output(
             if !closes_projection && !closes_submission_boundary && !has_claim {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed not-submitted ledger {} without next-epoch claim",
-                    node.node_id, projection.ledger_key
+                    node.node_id,
+                    ledger.ledger_key()
                 )));
             }
         }
@@ -393,7 +388,7 @@ pub(crate) fn validate_resume_output(
             if !closes_submission_boundary && !has_submission_recovery {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed uncertain submission ledger {} without submission recovery evidence",
-                    node.node_id, projection.ledger_key
+                    node.node_id, ledger.ledger_key()
                 )));
             }
         }
@@ -401,20 +396,22 @@ pub(crate) fn validate_resume_output(
             if !has_submission_recovery {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed uncertain submission ledger {} without submission recovery evidence",
-                    node.node_id, projection.ledger_key
+                    node.node_id, ledger.ledger_key()
                 )));
             }
         }
         store::SideEffectLedgerPhase::Ambiguous { .. } => {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect node {} attempted to run ambiguous ledger {}",
-                node.node_id, projection.ledger_key
+                node.node_id,
+                ledger.ledger_key()
             )));
         }
         store::SideEffectLedgerPhase::Failed { .. } => {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect node {} attempted to run failed ledger {} on the same attempt",
-                node.node_id, projection.ledger_key
+                node.node_id,
+                ledger.ledger_key()
             )));
         }
         store::SideEffectLedgerPhase::IntentPersisted { .. }

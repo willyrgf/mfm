@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn postgres_backend_receives_the_blanket_journal_contract() {
+    fn require_backend_and_consumer_contract<T>()
+    where
+        T: RunJournalBackend + mfm_store::v1::RunJournalStore,
+    {
+    }
+
+    require_backend_and_consumer_contract::<PostgresStore>();
+}
+
+#[test]
 fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
     assert_eq!(
         decode_artifact_role_tag("fact_descriptor").expect("fact descriptor role tag parses"),

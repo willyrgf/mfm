@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_events::v1 as events;
-use mfm_ids::{
-    ArtifactId, AttemptId, CellId, ContentDigest, NodeId, RunId, SchemaId, SemanticTypeId, SpecHash,
-};
+use mfm_ids::{ArtifactId, AttemptId, ContentDigest, RunId, SchemaId, SemanticTypeId, SpecHash};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -15,23 +13,23 @@ use crate::artifacts::{
 };
 use crate::binding::BoundRuntimeContext;
 use crate::framework::{
-    build_retention_manifest_artifact, framework_run_completed_payload,
-    projected_retention_manifest, retention_reason_str, run_completion_evidence,
-    RetentionManifestArtifact,
+    build_retention_manifest_artifact, current_retention_manifest, framework_run_completed_payload,
+    retention_reason_str, run_completion_evidence, RetentionManifestArtifact,
 };
 use crate::history::{
     event_artifact_ref_from_store, payload_spec_hash, run_artifact_ref_from_store,
     store_seed_artifact, validate_certificate_artifact, validate_config_artifacts,
-    validate_seed_cells, validate_spec_artifact, RuntimeRunView,
+    validate_seed_cells, validate_spec_artifact,
 };
 use crate::runners::{
     ContextOutputExtractor, ErasedRunnerOutput, RunnerEventPayload, RunnerOutputSettlement,
 };
 use crate::side_effect_lifecycle::{
-    side_effect_projection_for_attempt, standalone_interruption_allowed, validate_resume_output,
+    side_effect_for_attempt, standalone_interruption_allowed, validate_resume_output,
     validate_terminal_batch_evidence,
 };
 use crate::side_effects::validate_runner_side_effect_payload;
+use crate::spec_authority::{CurrentRuntimeSpecRef, CurrentSpecRead};
 use crate::{
     content_digest_json, require_attempt, validate_public_output,
     validate_public_output_render_node, CertifiedRuntimeCapabilities, CertifiedRuntimeSpec, Result,
@@ -107,63 +105,39 @@ pub struct PreparedRunLaunch {
 }
 
 impl PreparedRunLaunch {
-    pub(crate) fn run_id(&self) -> &RunId {
-        self.commit.request().run_id()
-    }
-
     pub(crate) fn into_prepared_commit_bundle(self) -> Result<store::PreparedCommitBundle> {
         prepared_commit_bundle(self.commit.into(), self.artifacts_to_stage)
     }
 }
 
 pub(crate) struct RunnerOutputCommitInput<'a> {
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) runtime_spec: CurrentRuntimeSpecRef<'a>,
     pub(crate) run_id: &'a RunId,
     pub(crate) node: &'a spec::NodeSpec,
     pub(crate) attempt_id: &'a AttemptId,
     pub(crate) caps: &'a CertifiedRuntimeCapabilities,
-    pub(crate) view: &'a RuntimeRunView,
+    pub(crate) lifecycle: store::current_lifecycle::CurrentLifecycleReader<'a>,
     pub(crate) context_output_extractor: Option<&'a dyn ContextOutputExtractor>,
     pub(crate) saga_terminal_proof: Option<store::SagaTerminalProof>,
     pub(crate) output: ErasedRunnerOutput,
 }
 
 pub(crate) struct AttemptFailureCommitInput<'a> {
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) runtime_spec: CurrentRuntimeSpecRef<'a>,
     pub(crate) run_id: &'a RunId,
     pub(crate) node: &'a spec::NodeSpec,
     pub(crate) attempt_id: &'a AttemptId,
-    pub(crate) view: &'a RuntimeRunView,
+    pub(crate) lifecycle: store::current_lifecycle::CurrentLifecycleReader<'a>,
     pub(crate) error: events::MfmErrorInfo,
     pub(crate) diagnostic_artifact: Option<PreparedStagedArtifact>,
 }
 
 pub(crate) struct AttemptInterruptionCommitInput<'a> {
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) runtime_spec: CurrentRuntimeSpecRef<'a>,
     pub(crate) run_id: &'a RunId,
     pub(crate) node: &'a spec::NodeSpec,
     pub(crate) attempt_id: &'a AttemptId,
-    pub(crate) view: &'a RuntimeRunView,
-}
-
-/// Validation input for a sealed terminal lifecycle commit batch.
-///
-/// `CompleteRun` and `ResolveSagaTerminal` both append `StateAttemptStarted` before running and
-/// then emit the same four-event terminal batch (`CellProduced`, `StateAttemptCompleted`,
-/// `ArtifactReferenced`, `RunCompleted`); they differ only in the committed completion outcome and
-/// the diagnostic label. A single validator over this input keeps the two terminal paths from
-/// drifting.
-pub(crate) struct SealedTerminalCommitValidation<'a> {
-    pub(crate) label: &'static str,
-    pub(crate) run_id: &'a RunId,
-    pub(crate) spec_hash: &'a SpecHash,
-    pub(crate) outcome: &'a events::RunCompletionOutcome,
-    pub(crate) node_id: &'a NodeId,
-    pub(crate) attempt_id: &'a AttemptId,
-    pub(crate) receipt_cell_id: &'a CellId,
-    pub(crate) receipt_artifact_id: &'a ArtifactId,
-    pub(crate) receipt_digest: &'a ContentDigest,
-    pub(crate) expected_receipt_ref: &'a events::ArtifactEvidenceRef,
+    pub(crate) lifecycle: &'a store::current_lifecycle::CurrentLifecycleReader<'a>,
 }
 
 pub(crate) struct PreparedRunnerOutput {
@@ -398,14 +372,17 @@ impl CommitPlanner {
         })
     }
 
-    pub(crate) fn prepare_attempt_start(
-        runtime_spec: &CertifiedRuntimeSpec,
+    pub(crate) fn prepare_attempt_start<S>(
+        runtime_spec: &S,
         run_id: &RunId,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
         attempt_no: u32,
-        view: &RuntimeRunView,
-    ) -> Result<store::PreparedCommit<store::StateAttemptStarted>> {
+        lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+    ) -> Result<store::PreparedCommit<store::StateAttemptStarted>>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         let start_payload =
             events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
                 spec_hash: runtime_spec.spec_hash().clone(),
@@ -418,7 +395,7 @@ impl CommitPlanner {
         let preconditions = attempt_commit_preconditions(runtime_spec, node, None)?;
         let request = store::CommitRequest::from_payloads(
             run_id.clone(),
-            view.next_seq,
+            lifecycle.next_sequence()?,
             store::CommitKey::new(format!("attempt-start:{}:{}", node.node_id, attempt_id))?,
             vec![start_payload],
             Vec::new(),
@@ -436,19 +413,19 @@ impl CommitPlanner {
         let (staged_artifacts, staged_retention_refs, read_facts, runner_payloads, settlement) =
             input.output.into_parts();
         let runner_payloads = runner_payloads_with_derived_lifecycle(
-            input.runtime_spec,
+            &input.runtime_spec,
             input.node,
             input.attempt_id,
             read_facts,
             runner_payloads,
         )?;
         validate_runner_output(RunnerOutputValidation {
-            runtime_spec: input.runtime_spec,
+            runtime_spec: &input.runtime_spec,
             run_id: input.run_id,
             node: input.node,
             attempt_id: input.attempt_id,
             caps: input.caps,
-            projections: &input.view.projections,
+            lifecycle: &input.lifecycle,
             payloads: &runner_payloads,
         })?;
         if matches!(
@@ -471,11 +448,9 @@ impl CommitPlanner {
             &staged_artifacts,
         )?;
         let retention_manifest = framework_retention_manifest_artifact(
-            input.runtime_spec,
-            input.run_id,
+            &input.runtime_spec,
             input.node,
-            &input.view.stream,
-            &input.view.artifact_byte_authority,
+            &input.lifecycle,
             &staged_artifacts,
         )?;
         let payload_bound_artifacts = staged_artifacts
@@ -499,7 +474,7 @@ impl CommitPlanner {
         payloads.extend(runner_payloads);
         if let Some(manifest) = retention_manifest {
             payloads.extend(retention_manifest_payloads(
-                input.runtime_spec,
+                &input.runtime_spec,
                 input.run_id,
                 manifest,
             )?);
@@ -536,35 +511,32 @@ impl CommitPlanner {
             .collect::<Vec<_>>();
         let required_artifacts = admitted_artifacts.clone();
         payloads.extend(bind_staged_retention_refs(
-            input.runtime_spec,
+            &input.runtime_spec,
             input.run_id,
             input.node,
-            &input.view.projections,
+            &input.lifecycle,
             &required_artifacts,
             staged_retention_refs,
         )?);
-        if let Some(run_completed) = framework_run_completed_payload(
-            input.runtime_spec,
-            input.run_id,
-            input.node,
-            &input.view.projections,
-        )? {
+        if let Some(run_completed) =
+            framework_run_completed_payload(&input.runtime_spec, input.node, &input.lifecycle)?
+        {
             payloads.push(run_completed);
         }
         let required_artifacts =
-            required_artifacts_for_payloads(input.view, required_artifacts, &payloads)?;
+            required_artifacts_for_payloads(&input.lifecycle, required_artifacts, &payloads)?;
         let preconditions = runner_output_preconditions(
-            input.runtime_spec,
+            &input.runtime_spec,
             input.run_id,
             input.node,
             input.attempt_id,
-            &input.view.projections,
+            &input.lifecycle,
             &payloads,
             true,
         )?;
         let request = store::CommitRequest::from_payloads(
             input.run_id.clone(),
-            input.view.next_seq,
+            input.lifecycle.next_sequence()?,
             runner_output_commit_key(input.node, input.attempt_id, &payloads)?,
             payloads,
             required_artifacts.clone(),
@@ -603,25 +575,24 @@ impl CommitPlanner {
             None => {}
         }
         let terminal_side_effect_payloads = if input.node.side_effect.is_some() {
-            side_effect_projection_for_attempt(
-                input.runtime_spec,
-                input.run_id,
-                &input.view.projections,
+            side_effect_for_attempt(
+                &input.runtime_spec,
+                &input.lifecycle,
                 input.node,
                 input.attempt_id,
             )?
-            .map(|projection| match &projection.phase {
+            .map(|ledger| match ledger.phase() {
                 store::SideEffectPhase::Claimed {
                     invocation_epoch, ..
                 } => {
                     let mut payloads = Vec::new();
                     if let Some(release) = resource_lane_release_intent_for_failure(
-                        input.runtime_spec,
+                        &input.runtime_spec,
                         input.run_id,
                         input.node,
                         input.attempt_id,
-                        &input.view.projections,
-                        projection,
+                        &input.lifecycle,
+                        &ledger,
                         *invocation_epoch,
                     )? {
                         payloads.push(release);
@@ -631,9 +602,9 @@ impl CommitPlanner {
                             spec_hash: input.runtime_spec.spec_hash().clone(),
                             node_id: input.node.node_id.clone(),
                             attempt_id: input.attempt_id.clone(),
-                            ledger_key: projection.ledger_key.clone(),
-                            ledger_purpose: projection.ledger_purpose.clone(),
-                            pair_id: projection.pair_id.clone(),
+                            ledger_key: ledger.ledger_key().clone(),
+                            ledger_purpose: ledger.ledger_purpose().clone(),
+                            pair_id: ledger.pair_id().clone(),
                             pair_role: events::SideEffectPairRole::Submit,
                             invocation_epoch: *invocation_epoch,
                             failure_phase:
@@ -646,7 +617,7 @@ impl CommitPlanner {
                 }
                 _ => Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} attempt {} has acquired side-effect authority for ledger {}",
-                    input.node.node_id, input.attempt_id, projection.ledger_key
+                    input.node.node_id, input.attempt_id, ledger.ledger_key()
                 ))),
             })
             .transpose()?
@@ -694,19 +665,19 @@ impl CommitPlanner {
                 (Vec::new(), Vec::new(), Vec::new())
             };
         let mut preconditions =
-            attempt_commit_preconditions(input.runtime_spec, input.node, Some(input.attempt_id))?;
+            attempt_commit_preconditions(&input.runtime_spec, input.node, Some(input.attempt_id))?;
         if payloads
             .iter()
             .any(events::KernelEventPayload::is_side_effect_terminal)
         {
             preconditions.certified_run_authority =
-                Some(certified_run_authority(input.runtime_spec, input.run_id)?);
+                Some(certified_run_authority(&input.runtime_spec, input.run_id)?);
         }
         let required_artifacts =
-            required_artifacts_for_payloads(input.view, required_artifacts, &payloads)?;
+            required_artifacts_for_payloads(&input.lifecycle, required_artifacts, &payloads)?;
         let request = store::CommitRequest::from_payloads(
             input.run_id.clone(),
-            input.view.next_seq,
+            input.lifecycle.next_sequence()?,
             store::CommitKey::new(format!(
                 "attempt-failure:{}:{}:{}",
                 input.node.node_id, input.attempt_id, commit_fragment
@@ -731,8 +702,7 @@ impl CommitPlanner {
         input: AttemptInterruptionCommitInput<'_>,
     ) -> Result<store::PreparedCommitPlan> {
         let Some(attempt) = input
-            .view
-            .projections
+            .lifecycle
             .attempt(&input.node.node_id, input.attempt_id)
         else {
             return Err(RuntimeError::InvalidRunStream(format!(
@@ -740,7 +710,10 @@ impl CommitPlanner {
                 input.attempt_id, input.node.node_id
             )));
         };
-        if !matches!(attempt.status, store::AttemptStatus::Started { .. }) {
+        if !matches!(
+            attempt.status(),
+            store::current_lifecycle::CurrentAttemptStatusRef::Started { .. }
+        ) {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "cannot interrupt terminal attempt {} for node {}",
                 input.attempt_id, input.node.node_id
@@ -748,9 +721,8 @@ impl CommitPlanner {
         }
         if input.node.side_effect.is_some()
             && !standalone_interruption_allowed(
-                input.runtime_spec,
-                input.run_id,
-                &input.view.projections,
+                &input.runtime_spec,
+                input.lifecycle,
                 input.node,
                 input.attempt_id,
             )?
@@ -768,10 +740,10 @@ impl CommitPlanner {
                 attempt_id: input.attempt_id.clone(),
             });
         let preconditions =
-            attempt_commit_preconditions(input.runtime_spec, input.node, Some(input.attempt_id))?;
+            attempt_commit_preconditions(&input.runtime_spec, input.node, Some(input.attempt_id))?;
         let request = store::CommitRequest::from_payloads(
             input.run_id.clone(),
-            input.view.next_seq,
+            input.lifecycle.next_sequence()?,
             store::CommitKey::new(format!(
                 "attempt-interruption:{}:{}",
                 input.node.node_id, input.attempt_id
@@ -784,41 +756,49 @@ impl CommitPlanner {
     }
 }
 
-fn resource_lane_release_intent_for_failure(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn resource_lane_release_intent_for_failure<S>(
+    runtime_spec: &S,
     run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-    projections: &store::ProjectionSnapshot,
-    projection: &store::SideEffectProjection,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
+    ledger: &store::current_lifecycle::CurrentSideEffectRef<'_>,
     invocation_epoch: u32,
-) -> Result<Option<events::KernelEventPayload>> {
-    let holder = store::SideEffectPairLedgerRef::new(run_id.clone(), projection.pair_id.clone());
-    let Some((_, lane)) = projections
-        .resource_lanes()
-        .find(|(_, lane)| lane.holder == holder)
-    else {
+) -> Result<Option<events::KernelEventPayload>>
+where
+    S: CurrentSpecRead + ?Sized,
+{
+    let mut active_lane = None;
+    let _ = lifecycle.visit_resource_lanes(|lane| {
+        let holder = lane.holder();
+        if holder.run_id() == run_id && holder.pair_id() == ledger.pair_id() {
+            active_lane = Some(lane);
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    let Some(lane) = active_lane else {
         return Ok(None);
     };
-    if lane.node_id != node.node_id
-        || lane.attempt_id != *attempt_id
-        || lane.ledger_purpose != projection.ledger_purpose
-        || lane.invocation_epoch != invocation_epoch
+    if lane.node_id() != &node.node_id
+        || lane.attempt_id() != attempt_id
+        || lane.ledger_purpose() != ledger.ledger_purpose()
+        || lane.invocation_epoch() != invocation_epoch
     {
         return Err(RuntimeError::InvalidRunStream(format!(
             "active resource lane for ledger {} does not match side-effect failure context",
-            projection.ledger_key
+            ledger.ledger_key()
         )));
     }
     Ok(Some(events::KernelEventPayload::ResourceLaneReleaseIntent(
         events::ResourceLaneReleaseIntent {
             spec_hash: runtime_spec.spec_hash().clone(),
-            ledger_key: projection.ledger_key.clone(),
-            ledger_purpose: projection.ledger_purpose.clone(),
-            pair_id: projection.pair_id.clone(),
+            ledger_key: ledger.ledger_key().clone(),
+            ledger_purpose: ledger.ledger_purpose().clone(),
+            pair_id: ledger.pair_id().clone(),
             pair_role: events::SideEffectPairRole::Verify,
             invocation_epoch,
-            claim_id: lane.claim_id.clone(),
+            claim_id: lane.claim_id().clone(),
             release_authority: events::ResourceLaneReleaseAuthority::VerifyTerminal,
             release_reason: events::ResourceLaneReleaseReason::new("side_effect.failed")?,
         },

@@ -66,7 +66,6 @@ where
     S: ReadState,
     E: ExternalReadPlanExecutor<S>,
 {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     executor: E,
     output_extractor: Option<Arc<dyn ContextOutputExtractor>>,
     _state: PhantomData<fn(S) -> S>,
@@ -77,10 +76,9 @@ where
     S: ReadState,
     E: ExternalReadPlanExecutor<S>,
 {
-    /// Creates a generic runner from retained-artifact authority and a live plan executor.
-    pub fn new(artifacts: Arc<dyn store::RetainedArtifactReadProvider>, executor: E) -> Self {
+    /// Creates a generic runner from a live plan executor.
+    pub fn new(executor: E) -> Self {
         Self {
-            artifacts,
             executor,
             output_extractor: None,
             _state: PhantomData,
@@ -123,13 +121,10 @@ where
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> crate::ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config_for_node::<S::Config>(ctx.node(), self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<S::Config>(&ctx, ctx.node())?;
             let state = S::new(config)
                 .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-            let input =
-                load_materialized_input::<S::Input>(ctx.inputs(), self.artifacts.as_ref()).await?;
+            let input = load_materialized_input::<S::Input>(&ctx)?;
             let context = ctx.certified_context::<S::Context>()?;
             let plan = state
                 .plan(&input, &context)

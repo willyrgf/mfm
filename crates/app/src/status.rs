@@ -1,85 +1,79 @@
 use super::*;
+use mfm_store::v1::current_lifecycle::{
+    CurrentAttemptRef, CurrentAttemptStatusRef, CurrentLifecycleReader, CurrentSagaObligationRef,
+    CurrentSagaRef, CurrentSideEffectRef,
+};
 
-pub(super) fn run_status_from_projection(
-    run_id: &RunId,
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-    projection: &store::ProjectionSnapshot,
+pub(super) fn run_response_from_verified_status(
+    context: &VerifiedStatusReadContext,
+    scheduler_status: &str,
 ) -> Result<RunResponse, PublicError> {
-    let spec_hash = run_admitted_spec_hash(stream)?;
-    run_response_from_projection_with_spec_hash(
-        run_id,
-        runtime_spec,
-        stream,
-        projection,
-        &spec_hash,
-        "observed",
+    run_response_from_verified_current(
+        context.run(),
+        context.resource_lane_projection(),
+        scheduler_status,
     )
 }
 
-fn run_response_from_projection_with_spec_hash(
-    run_id: &RunId,
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-    projection: &store::ProjectionSnapshot,
-    spec_hash: &SpecHash,
+pub(super) fn run_response_from_verified_current(
+    current: &VerifiedCurrentRun,
+    resource_lane_projection: &store::ProjectionSnapshot,
     scheduler_status: &str,
 ) -> Result<RunResponse, PublicError> {
-    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
-    let saga =
-        projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;
-    Ok(RunResponse {
-        run_id: run_id.as_str().to_owned(),
-        spec_hash: spec_hash.as_str().to_owned(),
-        run_mode: run_mode_status(saga.run_mode),
-        saga: saga_status_with_resources(runtime_spec.spec(), projection, &saga),
-        attempt_dispositions: attempt_dispositions(projection),
-        scheduler_status: scheduler_status.to_owned(),
-        head_seq: stream_head(stream),
-    })
+    let view = current.view();
+    let lifecycle = store::current_lifecycle::read(view);
+    let certified_spec = lifecycle.certified_spec().validated_spec().spec();
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(certified_spec)?;
+    lifecycle
+        .with_saga(&certified_spec.saga, &terminal_policies, |saga| {
+            RunResponse {
+                run_id: view.run_id().as_str().to_owned(),
+                spec_hash: view.spec_hash().as_str().to_owned(),
+                run_mode: run_mode_status(saga.run_mode()),
+                saga: saga_status_with_resources(
+                    certified_spec,
+                    &lifecycle,
+                    Some(resource_lane_projection),
+                    &saga,
+                ),
+                attempt_dispositions: attempt_dispositions(&lifecycle),
+                scheduler_status: scheduler_status.to_owned(),
+                head_seq: view.current_run_sequence().unwrap_or_default(),
+            }
+        })
+        .map_err(PublicError::from)
 }
 
 pub(super) fn run_stream_response_from_verified_context(
     context: &VerifiedRunReadContext,
 ) -> RunStreamResponse {
-    let events = context.events();
+    let lifecycle = context.lifecycle();
+    let mut events = Vec::new();
+    let _ = lifecycle.visit_records(|record| {
+        events.push(run_event_ref(record));
+        std::ops::ControlFlow::<()>::Continue(())
+    });
     RunStreamResponse {
         run_id: context.view().run_id().as_str().to_owned(),
-        head_seq: stream_head(events),
-        events: events.iter().map(run_event_ref).collect(),
+        head_seq: context.view().current_run_sequence().unwrap_or(0),
+        events,
     }
 }
 
-/// Builds typed public-output read authority from certified runtime authority, verified run-history
-/// view, rebuilt projection, and verified typed artifact evidence.
-pub async fn public_output_read_authority_for_run(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    runtime_spec: &CertifiedRuntimeSpec,
-    verified_view: &VerifiedRunHistoryView,
+/// Builds typed public-output read authority by borrowing one verified run view.
+pub fn public_output_read_authority_for_run<'view>(
+    verified_view: &'view store::VerifiedRunView,
     public_schema_id: &SchemaId,
-) -> Result<PublicOutputReadAuthority, PublicError> {
-    if runtime_spec.spec_hash() != verified_view.spec_hash() {
-        return Err(PublicError::new(
-            ErrorClass::Internal,
-            "PublicOutputAuthorityMismatch",
-            "verified history spec hash does not match certified runtime authority",
-        ));
-    }
-    let projection = verified_view.projection_snapshot();
-    let public_output = projection
-        .public_output(verified_view.run_id(), public_schema_id)
-        .ok_or_else(|| {
-            PublicError::not_found(
-                "PublicOutputNotFound",
-                "typed public output was not found for the requested schema",
-            )
-        })?;
-    let store::PublicOutputProjection::Produced {
-        event_id,
-        rendered_digest,
-        rendered_artifact_id,
-    } = public_output
-    else {
+) -> Result<PublicOutputReadAuthority<'view>, PublicError> {
+    let lifecycle = store::current_lifecycle::read(verified_view);
+    let certified_spec = lifecycle.certified_spec().validated_spec().spec();
+    let public_output = lifecycle.public_output(public_schema_id).ok_or_else(|| {
+        PublicError::not_found(
+            "PublicOutputNotFound",
+            "typed public output was not found for the requested schema",
+        )
+    })?;
+    let Some(produced) = public_output.produced() else {
         return Err(PublicError::new(
             ErrorClass::Conflict,
             "PublicOutputRenderFailed",
@@ -87,11 +81,11 @@ pub async fn public_output_read_authority_for_run(
         ));
     };
 
-    let payload =
-        public_output_payload_from_stream(verified_view.events(), event_id, public_schema_id)?;
-    if &payload.spec_hash != runtime_spec.spec_hash()
+    let event_id = public_output.event_id();
+    let payload = public_output_payload_from_view(verified_view, event_id, public_schema_id)?;
+    if &payload.spec_hash != verified_view.spec_hash()
         || &payload.public_schema_id != public_schema_id
-        || public_schema_id != &runtime_spec.spec().public_outputs.public_schema_id
+        || public_schema_id != &certified_spec.public_outputs.public_schema_id
     {
         return Err(PublicError::new(
             ErrorClass::Internal,
@@ -100,35 +94,39 @@ pub async fn public_output_read_authority_for_run(
         ));
     }
     verify_public_output_authority_artifacts(
-        artifacts,
+        verified_view,
         payload,
-        rendered_artifact_id.as_ref(),
-        rendered_digest,
-    )
-    .await?;
+        produced.rendered_artifact_id(),
+        produced.rendered_digest(),
+    )?;
 
     Ok(PublicOutputReadAuthority {
-        run_id: verified_view.run_id().clone(),
-        public_schema_id: public_schema_id.clone(),
-        event_id: event_id.clone(),
-        rendered_digest: rendered_digest.clone(),
-        rendered_artifact_id: rendered_artifact_id.clone(),
-        payload: payload.clone(),
+        run_id: verified_view.run_id(),
+        public_schema_id: &payload.public_schema_id,
+        event_id,
+        rendered_digest: produced.rendered_digest(),
+        rendered_artifact_id: produced.rendered_artifact_id(),
+        payload,
     })
 }
 
-pub(super) async fn verify_public_output_authority_artifacts(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+pub(super) fn verify_public_output_authority_artifacts(
+    view: &store::VerifiedRunView,
     payload: &events::PublicOutputProduced,
     rendered_artifact_id: Option<&ArtifactId>,
     rendered_digest: &ContentDigest,
 ) -> Result<(), PublicError> {
+    let lifecycle = store::current_lifecycle::read(view);
     for cell in &payload.cells {
-        let artifact = artifacts
-            .read_retained_artifact(&store::public_output_cell_artifact_requirement(cell))
-            .await?;
-        let evidence = artifact.evidence().clone();
-        verify_public_output_cell_evidence(cell, &evidence)?;
+        let requirement = store::public_output_cell_artifact_requirement(cell);
+        let artifact = lifecycle
+            .object_for_requirement(&requirement)
+            .ok_or_else(|| {
+                public_output_artifact_mismatch(
+                    "typed public-output cell object is missing from verified history",
+                )
+            })?;
+        verify_public_output_cell_evidence(cell, artifact.evidence())?;
     }
     if let Some(artifact_id) = rendered_artifact_id {
         let json_media_type = public_output_json_media_type()?;
@@ -138,10 +136,15 @@ pub(super) async fn verify_public_output_authority_artifacts(
             rendered_digest,
             json_media_type,
         )?;
-        let artifact = artifacts.read_retained_artifact(&requirement).await?;
-        let evidence = artifact.evidence().clone();
+        let artifact = lifecycle
+            .object_for_requirement(&requirement)
+            .ok_or_else(|| {
+                public_output_artifact_mismatch(
+                    "typed public-output rendered object is missing from verified history",
+                )
+            })?;
         verify_public_output_rendered_artifact_evidence(
-            &evidence,
+            artifact.evidence(),
             artifact_id,
             rendered_digest,
             payload,
@@ -150,22 +153,26 @@ pub(super) async fn verify_public_output_authority_artifacts(
     Ok(())
 }
 
-/// Renders typed public output from app-verified read authority and typed artifact bytes.
-pub async fn render_public_output(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    authority: &PublicOutputReadAuthority,
+/// Renders typed public output from one verified view and scoped read authority.
+pub fn render_public_output(
+    view: &store::VerifiedRunView,
+    authority: &PublicOutputReadAuthority<'_>,
 ) -> Result<PublicOutputResponse, PublicError> {
+    if authority.run_id() != view.run_id() {
+        return Err(PublicError::new(
+            ErrorClass::Internal,
+            "PublicOutputAuthorityMismatch",
+            "typed public-output authority belongs to a different verified run",
+        ));
+    }
     let json = match authority.rendered_artifact_id() {
-        Some(artifact_id) => Some(
-            load_public_output_json(
-                artifacts,
-                artifact_id,
-                authority.rendered_digest(),
-                &authority.payload,
-            )
-            .await?,
-        ),
-        None => Some(render_public_output_json_from_authority(artifacts, authority).await?),
+        Some(artifact_id) => Some(load_public_output_json(
+            view,
+            artifact_id,
+            authority.rendered_digest(),
+            authority.payload,
+        )?),
+        None => Some(render_public_output_json_from_authority(view, authority)?),
     };
     Ok(PublicOutputResponse {
         run_id: authority.run_id().as_str().to_owned(),
@@ -179,48 +186,51 @@ pub async fn render_public_output(
     })
 }
 
-pub(super) fn public_output_payload_from_stream<'a>(
-    stream: &'a [store::KernelEventEnvelope],
+pub(super) fn public_output_payload_from_view<'a>(
+    view: &'a store::VerifiedRunView,
     event_id: &EventId,
     public_schema_id: &SchemaId,
 ) -> Result<&'a events::PublicOutputProduced, PublicError> {
-    stream
-        .iter()
-        .find_map(|event| {
-            if event.event_id() != event_id {
-                return None;
-            }
-            match event.payload() {
-                events::KernelEventPayload::PublicOutputProduced(payload)
-                    if &payload.public_schema_id == public_schema_id =>
-                {
-                    Some(payload)
+    let lifecycle = store::current_lifecycle::read(view);
+    let mut payload = None;
+    let _ = lifecycle.visit_records(|record| {
+        if record.event_id() == event_id {
+            if let store::current_lifecycle::CurrentRecordKindRef::PublicOutputProduced(candidate) =
+                record.kind()
+            {
+                if &candidate.public_schema_id == public_schema_id {
+                    payload = Some(candidate);
                 }
-                _ => None,
             }
-        })
-        .ok_or_else(|| {
-            PublicError::new(
-                ErrorClass::Internal,
-                "PublicOutputProjectionMismatch",
-                "typed public-output projection does not match the authoritative run stream",
-            )
-        })
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    payload.ok_or_else(|| {
+        PublicError::new(
+            ErrorClass::Internal,
+            "PublicOutputProjectionMismatch",
+            "typed public-output projection does not match the verified journal",
+        )
+    })
 }
 
-pub(super) async fn render_public_output_json_from_authority(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    authority: &PublicOutputReadAuthority,
+pub(super) fn render_public_output_json_from_authority(
+    view: &store::VerifiedRunView,
+    authority: &PublicOutputReadAuthority<'_>,
 ) -> Result<Value, PublicError> {
+    let lifecycle = store::current_lifecycle::read(view);
     let mut root = Map::new();
     for cell in &authority.payload.cells {
-        let artifact = artifacts
-            .read_retained_artifact(&store::public_output_cell_artifact_requirement(cell))
-            .await?;
-        let evidence = artifact.evidence().clone();
-        verify_public_output_cell_evidence(cell, &evidence)?;
-        let bytes = artifact.into_bytes();
-        let value = serde_json::from_slice(&bytes).map_err(|error| {
+        let requirement = store::public_output_cell_artifact_requirement(cell);
+        let artifact = lifecycle
+            .object_for_requirement(&requirement)
+            .ok_or_else(|| {
+                public_output_artifact_mismatch(
+                    "typed public-output cell object is missing from verified history",
+                )
+            })?;
+        verify_public_output_cell_evidence(cell, artifact.evidence())?;
+        let value = serde_json::from_slice(artifact.bytes()).map_err(|error| {
             let _ = error;
             PublicError::backend(
                 ErrorClass::Internal,
@@ -259,7 +269,12 @@ pub(super) fn insert_public_output_value(
         if parts.peek().is_none() {
             match current.entry(part.to_owned()) {
                 Entry::Vacant(entry) => {
-                    entry.insert(value.take().expect("public output value inserted once"));
+                    let Some(value) = value.take() else {
+                        return Err(public_output_artifact_mismatch(
+                            "typed public-output field value was consumed more than once",
+                        ));
+                    };
+                    entry.insert(value);
                     return Ok(());
                 }
                 Entry::Occupied(_) => {
@@ -286,8 +301,8 @@ pub(super) fn insert_public_output_value(
     ))
 }
 
-pub(super) async fn load_public_output_json(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+pub(super) fn load_public_output_json(
+    view: &store::VerifiedRunView,
     artifact_id: &ArtifactId,
     rendered_digest: &mfm_ids::ContentDigest,
     payload: &events::PublicOutputProduced,
@@ -299,16 +314,20 @@ pub(super) async fn load_public_output_json(
         rendered_digest,
         json_media_type,
     )?;
-    let artifact = artifacts.read_retained_artifact(&requirement).await?;
-    let evidence = artifact.evidence().clone();
+    let artifact = store::current_lifecycle::read(view)
+        .object_for_requirement(&requirement)
+        .ok_or_else(|| {
+            public_output_artifact_mismatch(
+                "typed public-output rendered object is missing from verified history",
+            )
+        })?;
     verify_public_output_rendered_artifact_evidence(
-        &evidence,
+        artifact.evidence(),
         artifact_id,
         rendered_digest,
         payload,
     )?;
-    let bytes = artifact.into_bytes();
-    serde_json::from_slice(&bytes).map_err(|error| {
+    serde_json::from_slice(artifact.bytes()).map_err(|error| {
         let _ = error;
         PublicError::backend(
             ErrorClass::Internal,
@@ -357,201 +376,45 @@ pub(super) fn public_output_artifact_mismatch(message: &'static str) -> PublicEr
     )
 }
 
-pub(super) fn run_admitted_payload<'a>(
-    run_id: &RunId,
-    stream: &'a [store::KernelEventEnvelope],
-) -> Result<&'a events::RunAdmitted, PublicError> {
-    stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(payload.as_ref()),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            PublicError::new(
-                ErrorClass::Internal,
-                "RunAdmittedMissing",
-                "typed run stream is missing RunAdmitted evidence",
-            )
-        })
-        .and_then(|run_admitted| {
-            if &run_admitted.run_id == run_id {
-                Ok(run_admitted)
-            } else {
-                Err(PublicError::new(
-                    ErrorClass::Internal,
-                    "RunAdmittedMismatch",
-                    "typed run stream RunAdmitted evidence is bound to a different run id",
-                ))
-            }
-        })
-}
-
-pub(super) fn validate_spec_artifact_evidence(
-    run_admitted: &events::RunAdmitted,
-    evidence: &store::ArtifactEvidenceRef,
-) -> Result<(), PublicError> {
-    if run_admitted.spec_artifact.role != events::ArtifactRole::TypedExecutionSpec {
-        return Err(PublicError::new(
-            ErrorClass::Internal,
-            "CertifiedSpecArtifactMismatch",
-            "typed execution spec artifact metadata does not match RunAdmitted evidence",
-        ));
-    }
-    validate_artifact_requirement_for_app(
-        store::run_artifact_requirement(
-            store::EventArtifactReferenceSource::RunSpec,
-            &run_admitted.spec_artifact,
-            events::ArtifactRole::TypedExecutionSpec,
-        ),
-        evidence,
-        ErrorClass::Internal,
-        "CertifiedSpecArtifactMismatch",
-        "typed execution spec artifact metadata does not match RunAdmitted evidence",
-    )?;
-    let expected_spec_hash =
-        SpecHash::from_digest(evidence.digest.algorithm(), *evidence.digest.digest());
-    if expected_spec_hash != run_admitted.spec_hash {
-        return Err(PublicError::new(
-            ErrorClass::Internal,
-            "CertifiedSpecArtifactMismatch",
-            "typed execution spec artifact metadata does not match RunAdmitted evidence",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_certificate_artifact_evidence(
-    run_admitted: &events::RunAdmitted,
-    evidence: &store::ArtifactEvidenceRef,
-) -> Result<(), PublicError> {
-    if run_admitted.certificate_artifact.role != events::ArtifactRole::TypedSpecCertificate {
-        return Err(PublicError::new(
-            ErrorClass::Internal,
-            "CertifiedCertificateArtifactMismatch",
-            "typed spec certificate artifact metadata does not match RunAdmitted evidence",
-        ));
-    }
-    validate_artifact_requirement_for_app(
-        store::run_artifact_requirement(
-            store::EventArtifactReferenceSource::RunCertificate,
-            &run_admitted.certificate_artifact,
-            events::ArtifactRole::TypedSpecCertificate,
-        ),
-        evidence,
-        ErrorClass::Internal,
-        "CertifiedCertificateArtifactMismatch",
-        "typed spec certificate artifact metadata does not match RunAdmitted evidence",
-    )?;
-    Ok(())
-}
-
-pub(super) fn validate_run_admitted_matches_spec(
-    run_admitted: &events::RunAdmitted,
-    envelope: &spec::HashedSpecEnvelope,
-) -> Result<(), PublicError> {
-    if envelope.spec_hash != run_admitted.spec_hash
-        || envelope.spec.media_type != run_admitted.spec_artifact.media_type
-        || envelope.spec.spec_version != run_admitted.spec_version
-        || envelope.spec.lowering_version != run_admitted.lowering_version
-        || envelope.spec.public_outputs.public_schema_id != run_admitted.public_output_schema_id
-        || envelope.spec.descriptor_identities != run_admitted.descriptor_identities
-        || envelope
-            .spec
-            .public_outputs
-            .renderer_descriptor
-            .canonicalizer_identity
-            != run_admitted.canonicalizer_identity
-    {
-        return Err(PublicError::new(
-            ErrorClass::Internal,
-            "RunAdmittedSpecMismatch",
-            "RunAdmitted evidence does not match the stored certified spec artifact",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn run_response_from_projection(
-    run_id: &RunId,
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-    projection: &store::ProjectionSnapshot,
-    status: DriveStatus,
-) -> Result<RunResponse, PublicError> {
-    run_response_from_projection_with_spec_hash(
-        run_id,
-        runtime_spec,
-        stream,
-        projection,
-        runtime_spec.spec_hash(),
-        status.as_str(),
-    )
-}
-
-pub(super) fn status_projection_from_verified_view_with_resource_lanes(
-    view: &VerifiedRunHistoryView,
-    global_projection: &store::ProjectionSnapshot,
-) -> Result<store::ProjectionSnapshot, store::StoreError> {
-    projection_with_resource_lanes(
-        view.projection_snapshot(),
-        global_projection
-            .resource_lanes()
-            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-            .collect(),
-    )
-}
-
-pub(super) fn projection_with_resource_lanes(
-    snapshot: &store::ProjectionSnapshot,
-    resource_lanes: BTreeMap<store::ResourceLaneKey, store::ResourceLaneProjection>,
-) -> Result<store::ProjectionSnapshot, store::StoreError> {
-    let mut parts = store::ProjectionSnapshotParts::from_snapshot(snapshot);
-    parts.resource_lanes = resource_lanes;
-    store::ProjectionSnapshot::from_parts(parts)
-}
-
-pub(super) fn stream_head(stream: &[store::KernelEventEnvelope]) -> u64 {
-    stream.last().map_or(0, |event| event.seq().as_u64())
-}
-
 pub(super) fn run_mode_status(mode: store::RunMode) -> RunModeStatus {
     mode.into()
 }
 
 pub(super) fn attempt_dispositions(
-    projection: &store::ProjectionSnapshot,
+    lifecycle: &CurrentLifecycleReader<'_>,
 ) -> Vec<AttemptDispositionStatus> {
-    projection
-        .attempts()
-        .map(|(_key, attempt)| attempt_disposition(attempt))
-        .collect()
+    let mut dispositions = Vec::new();
+    let _ = lifecycle.visit_attempts(|attempt| {
+        dispositions.push(attempt_disposition(attempt));
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    dispositions
 }
 
-pub(crate) fn attempt_disposition(attempt: &store::AttemptProjection) -> AttemptDispositionStatus {
-    let (disposition, attempt_no, retryable, error_code, output_cell_id) = match &attempt.status {
-        store::AttemptStatus::Started { attempt_no, .. } => {
-            ("started", Some(*attempt_no), None, None, None)
+pub(crate) fn attempt_disposition(attempt: CurrentAttemptRef<'_>) -> AttemptDispositionStatus {
+    let (disposition, attempt_no, retryable, error_code, output_cell_id) = match attempt.status() {
+        CurrentAttemptStatusRef::Started { attempt_no, .. } => {
+            ("started", Some(attempt_no), None, None, None)
         }
-        store::AttemptStatus::Completed { output_cell_id } => (
+        CurrentAttemptStatusRef::Completed { output_cell_id } => (
             "completed",
             None,
             None,
             None,
             Some(output_cell_id.as_str().to_owned()),
         ),
-        store::AttemptStatus::Failed { retryable, error } => (
+        CurrentAttemptStatusRef::Failed { retryable, error } => (
             "failed",
             None,
-            Some(*retryable),
+            Some(retryable),
             Some(error.code.as_str().to_owned()),
             None,
         ),
-        store::AttemptStatus::Interrupted => ("interrupted", None, None, None, None),
+        CurrentAttemptStatusRef::Interrupted => ("interrupted", None, None, None, None),
     };
     AttemptDispositionStatus {
-        node_id: attempt.node_id.as_str().to_owned(),
-        attempt_id: attempt.attempt_id.as_str().to_owned(),
+        node_id: attempt.node_id().as_str().to_owned(),
+        attempt_id: attempt.attempt_id().as_str().to_owned(),
         disposition: disposition.to_owned(),
         attempt_no,
         retryable,
@@ -562,49 +425,36 @@ pub(crate) fn attempt_disposition(attempt: &store::AttemptProjection) -> Attempt
 
 pub(super) fn saga_status_with_resources(
     certified_spec: &spec::TypedExecutionSpec,
-    projection: &store::ProjectionSnapshot,
-    saga: &store::SagaProjection,
+    lifecycle: &CurrentLifecycleReader<'_>,
+    resource_lane_projection: Option<&store::ProjectionSnapshot>,
+    saga: &CurrentSagaRef,
 ) -> SagaStatus {
-    saga_status_inner(
-        &certified_spec.saga,
-        Some(certified_spec),
-        Some(projection),
-        saga,
-    )
-}
-
-pub(super) fn saga_status_inner(
-    policy: &spec::SagaPolicySpec,
-    certified_spec: Option<&spec::TypedExecutionSpec>,
-    projection: Option<&store::ProjectionSnapshot>,
-    saga: &store::SagaProjection,
-) -> SagaStatus {
+    let mut obligations = Vec::new();
+    let _ = saga.visit_obligations(|obligation| {
+        obligations.push(obligation_status(
+            obligation,
+            certified_spec,
+            lifecycle,
+            resource_lane_projection,
+        ));
+        std::ops::ControlFlow::<()>::Continue(())
+    });
     SagaStatus {
-        policy: saga_policy_status(policy),
-        obligations: saga
-            .obligations
-            .values()
-            .map(|obligation| {
-                obligation_status(&saga.run_id, obligation, certified_spec, projection)
-            })
-            .collect(),
-        resource_ledgers: match (certified_spec, projection) {
-            (Some(certified_spec), Some(projection)) => {
-                resource_ledgers_for_run(certified_spec, projection, &saga.run_id)
-            }
-            _ => Vec::new(),
-        },
-        resource_lanes: projection
-            .map(|projection| resource_lanes_for_run(projection, &saga.run_id))
-            .unwrap_or_default(),
-        manual_block_reason: saga.manual_block_reason.map(manual_block_reason_str),
-        required_manual_authorization: matches!(saga.run_mode, store::RunMode::ManualBlocked)
-            .then(|| manual_authorization_for_policy(policy))
+        policy: saga_policy_status(&certified_spec.saga),
+        obligations,
+        resource_ledgers: resource_ledgers_for_run(
+            certified_spec,
+            lifecycle,
+            resource_lane_projection,
+        ),
+        resource_lanes: resource_lanes_for_run(lifecycle, resource_lane_projection),
+        manual_block_reason: saga.manual_block_reason().map(manual_block_reason_str),
+        required_manual_authorization: matches!(saga.run_mode(), store::RunMode::ManualBlocked)
+            .then(|| manual_authorization_for_policy(&certified_spec.saga))
             .flatten(),
         terminal_resolution: saga
-            .run_completion
-            .as_ref()
-            .map(|completion| terminal_resolution_status(&completion.outcome)),
+            .completion()
+            .map(|completion| terminal_resolution_status(completion.outcome())),
     }
 }
 
@@ -689,34 +539,45 @@ pub(super) fn manual_authorization_requirements(
 }
 
 pub(super) fn obligation_status(
-    run_id: &RunId,
-    obligation: &store::SagaObligationProjection,
-    certified_spec: Option<&spec::TypedExecutionSpec>,
-    projection: Option<&store::ProjectionSnapshot>,
+    obligation: CurrentSagaObligationRef<'_>,
+    certified_spec: &spec::TypedExecutionSpec,
+    lifecycle: &CurrentLifecycleReader<'_>,
+    resource_lane_projection: Option<&store::ProjectionSnapshot>,
 ) -> SagaObligationStatus {
-    let forward_resource = projection
-        .and_then(|projection| projection.side_effect_for_pair(run_id, &obligation.forward_pair_id))
-        .and_then(|side_effect| resource_ledger_status(certified_spec?, projection?, side_effect));
+    let forward_resource = lifecycle
+        .side_effect(obligation.forward_pair_id())
+        .and_then(|side_effect| {
+            resource_ledger_status(
+                certified_spec,
+                lifecycle,
+                resource_lane_projection,
+                side_effect,
+            )
+        });
     SagaObligationStatus {
-        forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
-        forward_phase: side_effect_phase_str(&obligation.forward_phase),
-        classification: forward_classification_str(obligation.classification),
+        forward_ledger_key: obligation.forward_ledger_key().as_str().to_owned(),
+        forward_phase: side_effect_phase_str(obligation.forward_phase()),
+        classification: forward_classification_str(obligation.classification()),
         resource: forward_resource,
-        remediation: obligation.remediation.as_ref().map(|remediation| {
-            let remediation_resource = projection
-                .and_then(|projection| {
-                    projection.side_effect_for_pair(run_id, &remediation.pair_id)
-                })
-                .and_then(|side_effect| {
-                    resource_ledger_status(certified_spec?, projection?, side_effect)
-                });
+        remediation: obligation.remediation().map(|remediation| {
+            let remediation_resource =
+                lifecycle
+                    .side_effect(remediation.pair_id())
+                    .and_then(|side_effect| {
+                        resource_ledger_status(
+                            certified_spec,
+                            lifecycle,
+                            resource_lane_projection,
+                            side_effect,
+                        )
+                    });
             RemediationLedgerStatus {
-                ledger_key: remediation.ledger_key.as_str().to_owned(),
-                forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
-                phase: side_effect_phase_str(&remediation.phase),
+                ledger_key: remediation.ledger_key().as_str().to_owned(),
+                forward_ledger_key: obligation.forward_ledger_key().as_str().to_owned(),
+                phase: side_effect_phase_str(remediation.phase()),
                 resource: remediation_resource,
-                closed: remediation.closed,
-                unresolved: remediation.unresolved.map(manual_block_reason_str),
+                closed: remediation.closed(),
+                unresolved: remediation.unresolved().map(manual_block_reason_str),
             }
         }),
     }
@@ -724,52 +585,70 @@ pub(super) fn obligation_status(
 
 pub(super) fn resource_ledger_status(
     certified_spec: &spec::TypedExecutionSpec,
-    projection: &store::ProjectionSnapshot,
-    side_effect: &store::SideEffectProjection,
+    lifecycle: &CurrentLifecycleReader<'_>,
+    resource_lane_projection: Option<&store::ProjectionSnapshot>,
+    side_effect: CurrentSideEffectRef<'_>,
 ) -> Option<ResourceLedgerStatus> {
-    let node = certified_node(certified_spec, &side_effect.intent.node_id)?;
+    let node = certified_node(certified_spec, side_effect.intent().node_id())?;
     let claim = &node.side_effect.as_ref()?.resource_claim;
-    let key = side_effect.resource_key.as_ref().map(resource_key_status);
+    let key = side_effect.resource_key().map(resource_key_status);
     let touched_set = side_effect
-        .resource_touched_set
-        .as_ref()
+        .resource_touched_set()
         .map(resource_touched_set_status);
     let (active_lane, blocked_by_lane) =
-        if side_effect_phase_has_live_resource_lane_interest(&side_effect.phase) {
-            side_effect
-                .resource_key
-                .as_ref()
-                .and_then(|resource_key| {
-                    let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
-                    projection
-                        .resource_lane(&lane_key)
-                        .map(|lane| (lane_key, lane))
-                })
-                .map(|(lane_key, lane)| {
-                    let holder = resource_lane_holder_status(projection, &lane_key, lane);
-                    let side_effect_ref = store::SideEffectPairLedgerRef::new(
-                        side_effect.run_id.clone(),
-                        side_effect.pair_id.clone(),
-                    );
-                    if lane.holder == side_effect_ref {
-                        (Some(holder), None)
-                    } else {
-                        (None, Some(holder))
-                    }
-                })
-                .unwrap_or((None, None))
+        if side_effect_phase_has_live_resource_lane_interest(side_effect.phase()) {
+            if let Some(projection) = resource_lane_projection {
+                side_effect
+                    .resource_key()
+                    .and_then(|resource_key| {
+                        let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
+                        projection
+                            .resource_lane(&lane_key)
+                            .map(|lane| (lane_key, lane))
+                    })
+                    .map(|(lane_key, lane)| {
+                        let holder = resource_lane_holder_status(projection, &lane_key, lane);
+                        if &lane.holder.run_id == side_effect.run_id()
+                            && &lane.holder.pair_id == side_effect.pair_id()
+                        {
+                            (Some(holder), None)
+                        } else {
+                            (None, Some(holder))
+                        }
+                    })
+                    .unwrap_or((None, None))
+            } else {
+                side_effect
+                    .resource_key()
+                    .and_then(|resource_key| {
+                        let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
+                        let lane = lifecycle.resource_lane(&lane_key)?;
+                        Some((lane_key, lane))
+                    })
+                    .map(|(_lane_key, lane)| {
+                        let holder = current_resource_lane_holder_status(lifecycle, &lane);
+                        if lane.holder().run_id() == side_effect.run_id()
+                            && lane.holder().pair_id() == side_effect.pair_id()
+                        {
+                            (Some(holder), None)
+                        } else {
+                            (None, Some(holder))
+                        }
+                    })
+                    .unwrap_or((None, None))
+            }
         } else {
             (None, None)
         };
-    let ledger_purpose = ledger_purpose_status(&side_effect.ledger_purpose);
+    let ledger_purpose = ledger_purpose_status(side_effect.ledger_purpose());
     let forward_ledger_key =
-        forward_ledger_key_status(projection, &side_effect.run_id, &side_effect.ledger_purpose);
+        current_forward_ledger_key_status(lifecycle, side_effect.ledger_purpose());
 
     Some(ResourceLedgerStatus {
-        ledger_key: side_effect.ledger_key.as_str().to_owned(),
+        ledger_key: side_effect.ledger_key().as_str().to_owned(),
         ledger_purpose,
         forward_ledger_key,
-        phase: side_effect_phase_str(&side_effect.phase),
+        phase: side_effect_phase_str(side_effect.phase()),
         claim: resource_claim_status(claim),
         key,
         touched_set,
@@ -780,46 +659,55 @@ pub(super) fn resource_ledger_status(
 
 pub(super) fn resource_ledgers_for_run(
     certified_spec: &spec::TypedExecutionSpec,
-    projection: &store::ProjectionSnapshot,
-    run_id: &RunId,
+    lifecycle: &CurrentLifecycleReader<'_>,
+    resource_lane_projection: Option<&store::ProjectionSnapshot>,
 ) -> Vec<ResourceLedgerStatus> {
-    projection
-        .side_effects()
-        .filter_map(|(_, side_effect)| {
-            if &side_effect.run_id == run_id {
-                resource_ledger_status(certified_spec, projection, side_effect)
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut statuses = Vec::new();
+    let _ = lifecycle.visit_side_effects(|side_effect| {
+        if let Some(status) = resource_ledger_status(
+            certified_spec,
+            lifecycle,
+            resource_lane_projection,
+            side_effect,
+        ) {
+            statuses.push(status);
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    statuses
 }
 
 pub(super) fn resource_lanes_for_run(
-    projection: &store::ProjectionSnapshot,
-    run_id: &RunId,
+    lifecycle: &CurrentLifecycleReader<'_>,
+    resource_lane_projection: Option<&store::ProjectionSnapshot>,
 ) -> Vec<ResourceLaneHolderStatus> {
-    let referenced_lane_keys = projection
-        .side_effects()
-        .filter_map(|(_, side_effect)| {
-            if &side_effect.run_id != run_id {
-                return None;
+    let mut referenced_lane_keys = BTreeSet::new();
+    let _ = lifecycle.visit_side_effects(|side_effect| {
+        if side_effect_phase_has_live_resource_lane_interest(side_effect.phase()) {
+            if let Some(resource_key) = side_effect.resource_key() {
+                referenced_lane_keys.insert(store::ResourceLaneKey::from_evidence(resource_key));
             }
-            if !side_effect_phase_has_live_resource_lane_interest(&side_effect.phase) {
-                return None;
-            }
-            side_effect
-                .resource_key
-                .as_ref()
-                .map(store::ResourceLaneKey::from_evidence)
-        })
-        .collect::<BTreeSet<_>>();
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
 
-    projection
-        .resource_lanes()
-        .filter(|(lane_key, _lane)| referenced_lane_keys.contains(*lane_key))
-        .map(|(lane_key, lane)| resource_lane_holder_status(projection, lane_key, lane))
-        .collect()
+    if let Some(resource_lane_projection) = resource_lane_projection {
+        return resource_lane_projection
+            .resource_lanes()
+            .filter(|(lane_key, _lane)| referenced_lane_keys.contains(*lane_key))
+            .map(|(lane_key, lane)| {
+                resource_lane_holder_status(resource_lane_projection, lane_key, lane)
+            })
+            .collect();
+    }
+    let mut statuses = Vec::new();
+    let _ = lifecycle.visit_resource_lanes(|lane| {
+        if referenced_lane_keys.contains(lane.key()) {
+            statuses.push(current_resource_lane_holder_status(lifecycle, &lane));
+        }
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    statuses
 }
 
 pub(super) fn side_effect_phase_has_live_resource_lane_interest(
@@ -905,6 +793,28 @@ pub(super) fn resource_lane_holder_status(
     }
 }
 
+fn current_resource_lane_holder_status(
+    lifecycle: &CurrentLifecycleReader<'_>,
+    lane: &store::current_lifecycle::CurrentResourceLaneRef<'_>,
+) -> ResourceLaneHolderStatus {
+    let holder = lane.holder();
+    ResourceLaneHolderStatus {
+        namespace: lane.key().namespace.as_str().to_owned(),
+        key_schema_id: lane.key().key_schema_id.as_str().to_owned(),
+        key_digest: resource_lane_key_digest(lane.key()),
+        holding_run_id: holder.run_id().as_str().to_owned(),
+        holding_ledger_key: lane.ledger_key().as_str().to_owned(),
+        holding_ledger_purpose: ledger_purpose_status(lane.ledger_purpose()),
+        holding_forward_ledger_key: current_forward_ledger_key_status(
+            lifecycle,
+            lane.ledger_purpose(),
+        ),
+        holding_node_id: lane.node_id().as_str().to_owned(),
+        holding_attempt_id: lane.attempt_id().as_str().to_owned(),
+        invocation_epoch: lane.invocation_epoch(),
+    }
+}
+
 #[derive(Serialize)]
 struct ResourceKeyDigestMaterial<'a> {
     key: &'a str,
@@ -943,6 +853,18 @@ pub(super) fn ledger_purpose_status(purpose: &events::SideEffectLedgerPurpose) -
     match purpose {
         events::SideEffectLedgerPurpose::Forward => "forward".to_owned(),
         events::SideEffectLedgerPurpose::Remediation { .. } => "remediation".to_owned(),
+    }
+}
+
+fn current_forward_ledger_key_status(
+    lifecycle: &CurrentLifecycleReader<'_>,
+    purpose: &events::SideEffectLedgerPurpose,
+) -> Option<String> {
+    match purpose {
+        events::SideEffectLedgerPurpose::Forward => None,
+        events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => lifecycle
+            .side_effect(forward_pair_id)
+            .map(|side_effect| side_effect.ledger_key().as_str().to_owned()),
     }
 }
 
@@ -1005,24 +927,6 @@ pub(super) fn side_effect_phase_str(phase: &store::SideEffectPhase) -> String {
     phase.as_str().to_owned()
 }
 
-pub(super) fn run_admitted_spec_hash(
-    stream: &[store::KernelEventEnvelope],
-) -> Result<SpecHash, PublicError> {
-    stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(payload.spec_hash.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            PublicError::new(
-                ErrorClass::Internal,
-                "RunAdmittedMissing",
-                "typed run stream is missing RunAdmitted evidence",
-            )
-        })
-}
-
 pub(super) fn scheduler_status_str(status: SchedulerStatus) -> &'static str {
     match status {
         SchedulerStatus::Advanced => "advanced",
@@ -1031,17 +935,17 @@ pub(super) fn scheduler_status_str(status: SchedulerStatus) -> &'static str {
     }
 }
 
-pub(crate) fn run_event_ref(event: &store::KernelEventEnvelope) -> RunEventRef {
+pub(crate) fn run_event_ref(record: store::current_lifecycle::CurrentRecordRef<'_>) -> RunEventRef {
     RunEventRef {
-        event_id: event.event_id().as_str().to_owned(),
-        event_schema_id: event.event_schema_id().as_str().to_owned(),
-        seq: event.seq().as_u64(),
-        ordinal: event.ordinal().as_u32(),
-        commit_key: event.commit_key().as_str().to_owned(),
-        logical_key: event.logical_key().as_str().to_owned(),
-        payload_hash: event.payload_hash().as_str().to_owned(),
-        error_code: match event.payload() {
-            events::KernelEventPayload::StateAttemptFailed(payload) => {
+        event_id: record.event_id().as_str().to_owned(),
+        event_schema_id: record.event_schema_id().as_str().to_owned(),
+        seq: record.sequence().as_u64(),
+        ordinal: record.ordinal().as_u32(),
+        commit_key: record.commit_key().as_str().to_owned(),
+        logical_key: record.logical_key().as_str().to_owned(),
+        payload_hash: record.payload_hash().as_str().to_owned(),
+        error_code: match record.kind() {
+            store::current_lifecycle::CurrentRecordKindRef::StateAttemptFailed(payload) => {
                 Some(payload.error.code.as_str().to_owned())
             }
             _ => None,

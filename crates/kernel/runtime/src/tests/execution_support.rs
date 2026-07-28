@@ -1,8 +1,6 @@
 use super::*;
 
-pub(super) fn started_fixture_projection_and_stream(
-    fixture: &Fixture,
-) -> (store::ProjectionSnapshot, Vec<store::KernelEventEnvelope>) {
+fn started_fixture_context(fixture: &Fixture) -> VerifiedCurrentRun {
     let has_side_effect_nodes = fixture.runtime_spec.spec().nodes.iter().any(|node| {
         node.side_effect.is_some()
             || matches!(
@@ -17,17 +15,42 @@ pub(super) fn started_fixture_projection_and_stream(
     };
     let scheduler = test_scheduler(registry);
     let mut store = TestTypedRunStore::new();
-    block_on_ready(start_fixture_run(
+    block_on_ready(started_fixture_current(
         &scheduler,
         &mut store,
         fixture,
         vec![fixture.seed_ref.clone()],
     ))
-    .expect("start fixture for prepared runner context");
-    (
-        store.projection_snapshot().clone(),
-        store.load_run_stream(&fixture.run_id),
-    )
+    .expect("start fixture current-run context")
+}
+
+fn with_current_runner_erased_ctx<R>(
+    current: &VerifiedCurrentRun,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+    test: impl for<'a> FnOnce(ErasedRunCtx<'a>) -> R,
+) -> R {
+    let runtime_spec = current.runtime_spec();
+    let node = runtime_spec.node(node_id).expect("certified node");
+    let descriptor = runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = runtime_spec.cell(&node.output_cell).expect("output cell");
+    let lifecycle = current.lifecycle();
+    let invocation =
+        crate::invocation::InvocationBuilder::new(crate::invocation::InvocationBuilderInput {
+            runtime_spec,
+            run_id: current.view().run_id(),
+            node,
+            descriptor,
+            output_cell,
+            attempt_id,
+            attempt_no: 1,
+            lifecycle,
+        })
+        .build()
+        .expect("prepared runner invocation");
+    test(ErasedRunCtx::from_prepared(&invocation))
 }
 
 pub(super) fn with_runner_erased_ctx<R, F>(fixture: &Fixture, cell_id: &CellId, test: F) -> R
@@ -53,10 +76,8 @@ where
         1,
     )
     .expect("attempt id");
-    let (projections, run_stream) = started_fixture_projection_and_stream(fixture);
-    with_prepared_runner_ctx!(fixture, node, &attempt_id, projections, run_stream, |ctx| {
-        test(ctx)
-    },)
+    let current = started_fixture_context(fixture);
+    with_current_runner_erased_ctx(&current, &node.node_id, &attempt_id, test)
 }
 
 pub(super) async fn drive_side_effect_driver_empty<C>(
@@ -75,15 +96,32 @@ where
         1,
     )
     .expect("attempt id");
-    let (projections, run_stream) = started_fixture_projection_and_stream(fixture);
-    with_prepared_runner_ctx!(fixture, node, &attempt_id, projections, run_stream, |ctx| {
-        SideEffectDriver::drive(ctx, callbacks).await
-    },)
+    let current = started_fixture_context(fixture);
+    let runtime_spec = current.runtime_spec();
+    let current_node = runtime_spec.node(&node.node_id).expect("certified node");
+    let descriptor = runtime_spec
+        .state_descriptor_for_node(current_node)
+        .expect("state descriptor");
+    let output_cell = runtime_spec
+        .cell(&current_node.output_cell)
+        .expect("output cell");
+    let invocation =
+        crate::invocation::InvocationBuilder::new(crate::invocation::InvocationBuilderInput {
+            runtime_spec,
+            run_id: current.view().run_id(),
+            node: current_node,
+            descriptor,
+            output_cell,
+            attempt_id: &attempt_id,
+            attempt_no: 1,
+            lifecycle: current.lifecycle(),
+        })
+        .build()?;
+    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
 }
 
-pub(super) async fn drive_side_effect_driver_from_store<C>(
-    fixture: &Fixture,
-    store: &TestTypedRunStore,
+pub(super) async fn drive_side_effect_driver_from_current<C>(
+    current: &VerifiedCurrentRun,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     callbacks: &C,
@@ -91,19 +129,31 @@ pub(super) async fn drive_side_effect_driver_from_store<C>(
 where
     C: SideEffectAdapter + ?Sized,
 {
-    with_prepared_runner_ctx!(
-        fixture,
-        node,
-        attempt_id,
-        store.projection_snapshot().clone(),
-        store.load_run_stream(&fixture.run_id),
-        |ctx| { SideEffectDriver::drive(ctx, callbacks).await },
-    )
+    let runtime_spec = current.runtime_spec();
+    let current_node = runtime_spec
+        .node(&node.node_id)
+        .ok_or_else(|| RuntimeError::InvalidSpec("test node is not certified".to_owned()))?;
+    let descriptor = runtime_spec.state_descriptor_for_node(current_node)?;
+    let output_cell = runtime_spec
+        .cell(&current_node.output_cell)
+        .ok_or_else(|| RuntimeError::InvalidSpec("test output cell is not certified".to_owned()))?;
+    let invocation =
+        crate::invocation::InvocationBuilder::new(crate::invocation::InvocationBuilderInput {
+            runtime_spec,
+            run_id: current.view().run_id(),
+            node: current_node,
+            descriptor,
+            output_cell,
+            attempt_id,
+            attempt_no: 1,
+            lifecycle: current.lifecycle(),
+        })
+        .build()?;
+    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
 }
 
-pub(super) async fn drive_side_effect_verify_driver_from_store<C>(
-    fixture: &Fixture,
-    store: &TestTypedRunStore,
+pub(super) async fn drive_side_effect_verify_driver_from_current<C>(
+    current: &VerifiedCurrentRun,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     callbacks: &C,
@@ -111,14 +161,27 @@ pub(super) async fn drive_side_effect_verify_driver_from_store<C>(
 where
     C: SideEffectAdapter + ?Sized,
 {
-    with_prepared_runner_ctx!(
-        fixture,
-        node,
-        attempt_id,
-        store.projection_snapshot().clone(),
-        store.load_run_stream(&fixture.run_id),
-        |ctx| { SideEffectVerifyDriver::drive(ctx, callbacks).await },
-    )
+    let runtime_spec = current.runtime_spec();
+    let current_node = runtime_spec
+        .node(&node.node_id)
+        .ok_or_else(|| RuntimeError::InvalidSpec("test node is not certified".to_owned()))?;
+    let descriptor = runtime_spec.state_descriptor_for_node(current_node)?;
+    let output_cell = runtime_spec
+        .cell(&current_node.output_cell)
+        .ok_or_else(|| RuntimeError::InvalidSpec("test output cell is not certified".to_owned()))?;
+    let invocation =
+        crate::invocation::InvocationBuilder::new(crate::invocation::InvocationBuilderInput {
+            runtime_spec,
+            run_id: current.view().run_id(),
+            node: current_node,
+            descriptor,
+            output_cell,
+            attempt_id,
+            attempt_no: 1,
+            lifecycle: current.lifecycle(),
+        })
+        .build()?;
+    SideEffectVerifyDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
 }
 
 #[tokio::test]
@@ -130,20 +193,20 @@ pub(super) async fn scheduler_reloads_and_redecides_after_stale_expected_sequenc
     start_fixture_run_async_store(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
         .await
         .expect("start run");
-
-    assert_eq!(
-        drive_once_with_claim(&scheduler, &store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive after injected stale terminal append"),
-        SchedulerStatus::Advanced
-    );
+    let current = load_fixture_current(&scheduler, &store, &fixture)
+        .await
+        .expect("load current run");
+    let result = drive_current_once_with_claim(&scheduler, &store, current)
+        .await
+        .expect("drive after injected stale terminal append");
+    assert_eq!(result.status(), SchedulerStatus::Advanced);
     assert!(
-        store
-            .projection_snapshot(&fixture.run_id)
-            .await
-            .cell_terminal(&fixture.cell_a)
+        result
+            .current_run()
+            .lifecycle()
+            .cell(&fixture.cell_a)
             .is_some(),
-        "scheduler must reload and observe the concurrently advanced terminal projection"
+        "scheduler must reload and observe the concurrently advanced terminal cell"
     );
 }
 
@@ -165,14 +228,12 @@ async fn runner_output_settlement_requires_an_appended_outcome() {
     )
     .await
     .expect("start appended settlement run");
-    drive_once_with_claim(
-        &appended_scheduler,
-        &appended_store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive appended settlement");
+    let appended_current = load_fixture_current(&appended_scheduler, &appended_store, &fixture)
+        .await
+        .expect("load appended settlement run");
+    drive_current_once_with_claim(&appended_scheduler, &appended_store, appended_current)
+        .await
+        .expect("drive appended settlement");
     assert_eq!(appended_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     let uncertain_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -189,14 +250,12 @@ async fn runner_output_settlement_requires_an_appended_outcome() {
     )
     .await
     .expect("start uncertain settlement run");
-    drive_once_with_claim(
-        &uncertain_scheduler,
-        &uncertain_store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive uncertain settlement");
+    let uncertain_current = load_fixture_current(&uncertain_scheduler, &uncertain_store, &fixture)
+        .await
+        .expect("load uncertain settlement run");
+    drive_current_once_with_claim(&uncertain_scheduler, &uncertain_store, uncertain_current)
+        .await
+        .expect("drive uncertain settlement");
     assert_eq!(
         uncertain_count.load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -236,120 +295,97 @@ fn settlement_fixture_runners(
             SettlementFixtureRunner {
                 inner: RecordingRunner {
                     expected_caps: Vec::new(),
-                    output_artifact: artifact(0xa1),
                     output_digest: content(0xa2),
                 },
                 settled,
             },
         ))
         .expect("settlement runner binding");
-    register_fixture_read_runner(&mut registry, fixture, "read");
+    register_fixture_read_runner(&mut registry, fixture, READ_EXTERNAL_RUNNER);
     registry
 }
 
-pub(super) fn attempt_started_count(
-    store: &TestTypedRunStore,
-    run_id: &RunId,
-    node_id: &NodeId,
-) -> usize {
-    store
-        .load_run_stream(run_id)
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::StateAttemptStarted(payload)
-                    if &payload.node_id == node_id
-            )
-        })
-        .count()
+pub(super) fn attempt_started_count(current: &VerifiedCurrentRun, node_id: &NodeId) -> usize {
+    let mut count = 0;
+    let _ = current.lifecycle().visit_attempts::<()>(|attempt| {
+        if attempt.node_id() == node_id {
+            count += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    count
 }
 
-pub(super) fn runtime_lifecycle_summary(store: &TestTypedRunStore, run_id: &RunId) -> String {
-    let projections = store.projection_snapshot();
+pub(super) fn runtime_lifecycle_summary(current: &VerifiedCurrentRun) -> String {
+    let lifecycle = current.lifecycle();
     let mut started = 0;
     let mut completed = 0;
     let mut failed = 0;
     let mut interrupted = 0;
-    for (_, attempt) in projections
-        .attempts()
-        .filter(|(_, attempt)| &attempt.run_id == run_id)
-    {
-        match attempt.status {
-            store::AttemptStatus::Started { .. } => started += 1,
-            store::AttemptStatus::Completed { .. } => completed += 1,
-            store::AttemptStatus::Failed { .. } => failed += 1,
-            store::AttemptStatus::Interrupted => interrupted += 1,
+    let _ = lifecycle.visit_attempts::<()>(|attempt| {
+        match attempt.status() {
+            store::current_lifecycle::CurrentAttemptStatusRef::Started { .. } => started += 1,
+            store::current_lifecycle::CurrentAttemptStatusRef::Completed { .. } => completed += 1,
+            store::current_lifecycle::CurrentAttemptStatusRef::Failed { .. } => failed += 1,
+            store::current_lifecycle::CurrentAttemptStatusRef::Interrupted => interrupted += 1,
         }
-    }
+        std::ops::ControlFlow::Continue(())
+    });
     let total = started + completed + failed + interrupted;
-    let run_attempts = projections
-        .attempts()
-        .filter(|(_, attempt)| &attempt.run_id == run_id)
-        .map(|((node_id, attempt_id), _)| (node_id.clone(), attempt_id.clone()))
-        .collect::<BTreeSet<_>>();
-    let cells = projections
-        .cells()
-        .filter(|(_, _, terminal)| match terminal {
-            store::CellTerminalProjection::Produced {
-                node_id,
-                attempt_id,
-                ..
-            }
-            | store::CellTerminalProjection::Skipped {
-                node_id,
-                attempt_id,
-                ..
-            } => run_attempts.contains(&(node_id.clone(), attempt_id.clone())),
-        })
+    let runtime_spec = current.runtime_spec();
+    let cells = runtime_spec
+        .spec()
+        .cells
+        .iter()
+        .filter(|cell| lifecycle.cell(&cell.cell_id).is_some())
         .count();
-    let side_effects = projections
-        .side_effects()
-        .filter(|(_, side_effect)| &side_effect.run_id == run_id)
-        .count();
-    let lanes_total = projections.resource_lanes().count();
-    let lanes = projections
-        .resource_lanes()
-        .filter(|(_, lane)| &lane.holder.run_id == run_id)
-        .count();
-    let public_outputs = projections.public_outputs().count();
-    let retentions = projections
-        .retentions()
-        .filter(|(retention_run_id, _)| *retention_run_id == run_id)
-        .count();
+    let mut side_effects = 0;
+    let _ = lifecycle.visit_side_effects::<()>(|_| {
+        side_effects += 1;
+        std::ops::ControlFlow::Continue(())
+    });
+    let mut lanes = 0;
+    let _ = lifecycle.visit_resource_lanes::<()>(|_| {
+        lanes += 1;
+        std::ops::ControlFlow::Continue(())
+    });
+    let public_outputs = usize::from(
+        lifecycle
+            .public_output(&runtime_spec.spec().public_outputs.public_schema_id)
+            .is_some(),
+    );
+    let retentions = usize::from(lifecycle.retention().is_some());
     format!(
-        "run={:?} attempts[started={started} completed={completed} failed={failed} interrupted={interrupted} total={total}] cells={cells} side_effects={side_effects} lanes[run={lanes} total={lanes_total}] public_outputs={public_outputs} retentions={retentions}",
-        projections.run_state(run_id)
+        "run={:?} attempts[started={started} completed={completed} failed={failed} interrupted={interrupted} total={total}] cells={cells} side_effects={side_effects} lanes={lanes} public_outputs={public_outputs} retentions={retentions}",
+        lifecycle.run_state()
     )
 }
 
 pub(super) fn assert_node_failed_with_code(
-    store: &TestTypedRunStore,
+    current: &VerifiedCurrentRun,
     node_id: &NodeId,
     code: &str,
 ) -> AttemptId {
-    assert_node_failed_with_code_and_retryable(store, node_id, code, false)
+    assert_node_failed_with_code_and_retryable(current, node_id, code, false)
 }
 
 pub(super) fn assert_node_failed_with_code_and_retryable(
-    store: &TestTypedRunStore,
+    current: &VerifiedCurrentRun,
     node_id: &NodeId,
     code: &str,
     expected_retryable: bool,
 ) -> AttemptId {
-    let failures = store
-        .projection_snapshot()
-        .attempts()
-        .filter_map(|((attempt_node_id, attempt_id), attempt)| {
-            if attempt_node_id != node_id {
-                return None;
+    let mut failures = Vec::new();
+    let _ = current.lifecycle().visit_attempts::<()>(|attempt| {
+        if attempt.node_id() == node_id {
+            if let store::current_lifecycle::CurrentAttemptStatusRef::Failed { retryable, error } =
+                attempt.status()
+            {
+                failures.push((attempt.attempt_id().clone(), retryable, error.clone()));
             }
-            let store::AttemptStatus::Failed { retryable, error } = &attempt.status else {
-                return None;
-            };
-            Some((attempt_id.clone(), *retryable, error.as_ref().clone()))
-        })
-        .collect::<Vec<_>>();
+        }
+        std::ops::ControlFlow::Continue(())
+    });
     assert_eq!(
         failures.len(),
         1,
@@ -378,19 +414,18 @@ pub(super) fn assert_node_failed_with_code_and_retryable(
         )),
         "diagnostic schema id should identify the runtime redacted failure diagnostic schema"
     );
-    let retained = store
-        .projection_snapshot()
-        .retentions()
-        .any(|(_, retention)| {
-            retention
-                .refs
-                .values()
-                .find(|retention_ref| retention_ref.artifact_id == diagnostic.artifact_id)
-                .is_some_and(|retention_ref| {
-                    retention_ref.role == events::ArtifactRole::RedactedDiagnostic
-                        && retention_ref.content_digest == diagnostic.content_digest
-                })
+    let mut retained = false;
+    if let Some(retention) = current.lifecycle().retention() {
+        let _ = retention.visit_references::<()>(|retention_ref| {
+            if retention_ref.artifact_id == diagnostic.artifact_id
+                && retention_ref.role == events::ArtifactRole::RedactedDiagnostic
+                && retention_ref.content_digest == diagnostic.content_digest
+            {
+                retained = true;
+            }
+            std::ops::ControlFlow::Continue(())
         });
+    }
     assert!(
         retained,
         "failure-safe diagnostic artifact should be retained as runtime evidence"
@@ -398,27 +433,29 @@ pub(super) fn assert_node_failed_with_code_and_retryable(
     attempt_id
 }
 
-pub(super) fn assert_failure_code_count(store: &TestTypedRunStore, code: &str, expected: usize) {
-    let count = store
-        .projection_snapshot()
-        .attempts()
-        .filter(|(_, attempt)| {
-            matches!(
-                &attempt.status,
-                store::AttemptStatus::Failed { error, .. } if error.code.as_str() == code
-            )
-        })
-        .count();
+pub(super) fn assert_failure_code_count(current: &VerifiedCurrentRun, code: &str, expected: usize) {
+    let mut count = 0;
+    let _ = current.lifecycle().visit_attempts::<()>(|attempt| {
+        if matches!(
+            attempt.status(),
+            store::current_lifecycle::CurrentAttemptStatusRef::Failed { error, .. }
+                if error.code.as_str() == code
+        ) {
+            count += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    });
     assert_eq!(count, expected, "failure code count for {code}");
 }
 
 #[test]
 pub(super) fn runtime_order_is_deterministic_for_reordered_spec_nodes() {
     let fixture = fixture();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    envelope.spec.nodes.reverse();
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    let runtime = CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime");
+    let mut reordered = fixture.runtime_spec.spec().clone();
+    reordered.nodes.reverse();
+    let certified = certify_fixture_spec(&fixture.runtime_spec, reordered, |_| Ok(()))
+        .expect("certified reordered runtime spec");
+    let runtime = CertifiedRuntimeSpec::new(certified).expect("runtime");
     assert_eq!(
         runtime.topological_order(),
         fixture.runtime_spec.topological_order()
@@ -440,7 +477,7 @@ pub(super) fn registered_fixture_runners_with_adapter_executable(
         adapter_executable,
     );
     register_default_fixture_pure_runner(&mut registry, fixture);
-    register_fixture_read_runner(&mut registry, fixture, "read");
+    register_fixture_read_runner(&mut registry, fixture, READ_EXTERNAL_RUNNER);
     registry
 }
 

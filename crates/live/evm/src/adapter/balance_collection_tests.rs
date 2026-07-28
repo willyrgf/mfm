@@ -322,15 +322,13 @@ fn capabilities(
     session: Arc<RecordingSession>,
     binds: Arc<AtomicUsize>,
 ) -> EvmReadRunnerCapabilities {
-    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
-        Arc::new(store::AsyncInMemoryRunStore::default());
     let sessions = test_read_session_set(
         session as Arc<dyn EvmReadSession>,
         None,
         Arc::new(AtomicUsize::new(0)),
         binds,
     );
-    EvmReadRunnerCapabilities::new(artifacts, sessions)
+    EvmReadRunnerCapabilities::new(sessions)
 }
 
 fn registry() -> ErasedRunnerRegistry {
@@ -367,7 +365,6 @@ fn adapter_registration_accepts_a_fake_pure_session_set() {
 
     register_evm_balance_runners(
         &mut registry,
-        capabilities.artifacts,
         capabilities.sessions,
         &read_factory,
         &adapter_factory,
@@ -446,15 +443,13 @@ async fn final_number_recheck_exposes_reorg_to_the_deterministic_reducer() {
 async fn temporary_provider_outage_blocks_the_balance_collector() {
     let plan = plan_for(vec![source(ACCOUNT, EvmBalanceAsset::Native)]);
     let session = Arc::new(UnavailableSession::new(&plan.binding().expect("binding")));
-    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
-        Arc::new(store::AsyncInMemoryRunStore::default());
     let sessions = test_read_session_set(
         session as Arc<dyn EvmReadSession>,
         None,
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
     );
-    let capabilities = EvmReadRunnerCapabilities::new(artifacts, sessions);
+    let capabilities = EvmReadRunnerCapabilities::new(sessions);
 
     let error = collect_evm_balances(&plan, &capabilities)
         .await

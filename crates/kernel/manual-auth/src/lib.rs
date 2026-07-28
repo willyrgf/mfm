@@ -607,6 +607,9 @@ pub enum ManualAuthorizationError {
         /// Accepted unique operator signatures.
         accepted: usize,
     },
+    /// Proof repeated one operator signer entry.
+    #[error("manual authorization proof repeats operator signer {0}")]
+    DuplicateSigner(spec::OperatorId),
     /// Verifier id is not registered in the process-local verifier registry.
     #[error("manual authorization verifier {0} is not registered")]
     UnknownVerifier(spec::ManualAuthorizationVerifierId),
@@ -652,7 +655,11 @@ fn validate_policy_claim_proof(
         if !authority.contains(&key) {
             return Err(ManualAuthorizationError::PolicyMismatch("authority"));
         }
-        accepted.insert(key);
+        if !accepted.insert(key) {
+            return Err(ManualAuthorizationError::DuplicateSigner(
+                signature.operator_id.clone(),
+            ));
+        }
     }
     let required = policy.quorum.required_signatures();
     if accepted.len() < required as usize {

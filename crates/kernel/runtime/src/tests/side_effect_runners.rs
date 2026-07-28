@@ -131,10 +131,9 @@ pub(super) struct PrePreparedSideEffectRunner {
 impl ErasedNodeRunner for PrePreparedSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            if side_effect_projection_for_attempt(
-                ctx.runtime_spec(),
-                ctx.run_id(),
-                ctx.projections(),
+            if side_effect_for_attempt(
+                &ctx.runtime_spec(),
+                ctx.lifecycle(),
                 ctx.node(),
                 ctx.attempt_id(),
             )?
@@ -262,24 +261,29 @@ impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let terminal_policies = runtime_spec_terminal_policies(ctx.runtime_spec());
-            let saga = ctx
-                .projections()
-                .derive_saga_projection(
-                    ctx.run_id(),
-                    &ctx.runtime_spec().spec().saga,
-                    &terminal_policies,
-                )
-                .expect("saga projection");
-            let projected = side_effect_projection_for_attempt(
-                ctx.runtime_spec(),
-                ctx.run_id(),
-                ctx.projections(),
+            let runtime_spec = ctx.runtime_spec();
+            let terminal_policies =
+                store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())
+                    .expect("certified terminal policies");
+            let saga_engaged = ctx
+                .lifecycle()
+                .with_saga(&runtime_spec.spec().saga, &terminal_policies, |saga| {
+                    saga.engagement().is_some()
+                })
+                .expect("saga state");
+            let projected = side_effect_for_attempt(
+                &runtime_spec,
+                ctx.lifecycle(),
                 ctx.node(),
                 ctx.attempt_id(),
             )?
-            .map(|projection| (projection.ledger_key.clone(), projection.phase.clone()));
-            if saga.engagement.is_some() {
+            .map(|side_effect| {
+                (
+                    side_effect.ledger_key().clone(),
+                    side_effect.phase().clone(),
+                )
+            });
+            if saga_engaged {
                 if let Some((ledger, phase)) = &projected {
                     if let Some((invocation_epoch, failure_phase)) =
                         saga_closure_failure_for_phase(phase)
@@ -436,6 +440,30 @@ pub(super) struct PrematureSideEffectOutputRunner {
 impl ErasedNodeRunner for PrematureSideEffectOutputRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
+            if side_effect_for_attempt(
+                &ctx.runtime_spec(),
+                ctx.lifecycle(),
+                ctx.node(),
+                ctx.attempt_id(),
+            )?
+            .is_none()
+            {
+                let SideEffectFixtureIntentOutput {
+                    ledger,
+                    staged_artifact,
+                    payload,
+                } = side_effect_fixture_intent_output(
+                    &ctx,
+                    events::SideEffectLedgerPurpose::Forward,
+                    1,
+                )?;
+                let claimed = side_effect_claimed(&ctx, ledger, 1, 1);
+                return Ok(ErasedRunnerOutput::from_parts(
+                    vec![staged_artifact],
+                    Vec::new(),
+                    vec![payload, claimed],
+                ));
+            }
             let artifact = state_output_artifact(
                 ctx.node(),
                 ctx.descriptor(),

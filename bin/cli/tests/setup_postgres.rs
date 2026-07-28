@@ -8,8 +8,7 @@ use assert_cmd::Command;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use mfm_app::{PostgresSchema, PostgresStore};
-use mfm_events::v1::KernelEventPayload;
-use mfm_store::v1::{CommitOutcome, RunEventStore, StoreScopeStore};
+use mfm_store::v1::{CommitOutcome, RunJournalStore, StoreScopeStore};
 use serde_json::{json, Value};
 use sqlx::{AssertSqlSafe, PgPool};
 use tempfile::TempDir;
@@ -123,33 +122,46 @@ fn start_args<'a>(
 }
 
 async fn admission_evidence(store: &PostgresStore, run_id: &mfm_ids::RunId) -> AdmissionEvidence {
-    let stream = store
-        .load_run_stream(run_id)
-        .await
-        .expect("started run stream");
-    let admitted = stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            KernelEventPayload::RunAdmitted(payload) => Some(payload.as_ref()),
-            _ => None,
-        })
-        .expect("run admission evidence");
+    let view = verified_run_view(store, run_id).await;
+    let lifecycle = mfm_store::v1::current_lifecycle::read(&view);
+    let admitted = lifecycle.admission().expect("run admission evidence");
     assert_eq!(
-        admitted.entry_point.entry_point_id.as_str(),
+        admitted.entry_point().entry_point_id.as_str(),
         "mfm.portfolio/snapshot@1"
     );
-    assert_eq!(admitted.entry_point.configured_targets.len(), 1);
-    let source = &admitted.entry_point.configured_targets[0];
+    assert_eq!(admitted.entry_point().configured_targets.len(), 1);
+    let source = &admitted.entry_point().configured_targets[0];
     AdmissionEvidence {
         target: source.target.as_str().to_owned(),
         schema_id: source.schema_id.as_str().to_owned(),
         digest: source.digest.as_str().to_owned(),
         certified_spec_hash: admitted
-            .identity_material
+            .identity_material()
             .certified_spec_hash
             .as_str()
             .to_owned(),
     }
+}
+
+async fn verified_run_view(
+    store: &PostgresStore,
+    run_id: &mfm_ids::RunId,
+) -> mfm_store::v1::VerifiedRunView {
+    let journal = store
+        .load_committed_journal(run_id)
+        .await
+        .expect("committed run journal");
+    let (_, spec_bytes) = journal.certified_spec_object();
+    let (_, certificate_bytes) = journal.certificate_object();
+    let registry =
+        mfm_app::production_certification_registry().expect("production certification registry");
+    let certified = mfm_certify::verify_persisted_spec_certificate_with_trusted_registry(
+        spec_bytes,
+        certificate_bytes,
+        &registry,
+    )
+    .expect("stored certified spec");
+    journal.verify(certified).expect("verified run view")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -183,18 +195,14 @@ async fn admit_configured_target_without_driving(
     )
     .await
     .expect("production runners");
-    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
-    let runtime_spec =
-        mfm_runtime::CertifiedRuntimeSpec::new(request.certified_spec).expect("runtime spec");
+    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners);
+    let runtime_spec = request.runtime_spec;
     let launch = scheduler
         .prepare_run_launch(
             &runtime_spec,
             request.identity_material,
             request.evidence,
-            store
-                .expected_next_seq(&run_id)
-                .await
-                .expect("expected next sequence"),
+            mfm_store::v1::StreamSeq::FIRST,
         )
         .await
         .expect("prepare admission");
@@ -408,15 +416,18 @@ async fn configured_target_cli_and_rest_enforce_executable_authority_and_nonterm
         "postgres-cli-portfolio-resume",
     )
     .await;
-    let admitted_stream = store
-        .load_run_stream(&unfinished_run)
-        .await
-        .expect("admitted unfinished run stream");
-    assert_eq!(admitted_stream.len(), 1);
-    assert!(matches!(
-        admitted_stream[0].payload(),
-        KernelEventPayload::RunAdmitted(_)
-    ));
+    let admitted_view = verified_run_view(&store, &unfinished_run).await;
+    let admitted_head = admitted_view.current_run_sequence();
+    let admitted_lifecycle = mfm_store::v1::current_lifecycle::read(&admitted_view);
+    let mut admitted_record_count = 0;
+    let _ = admitted_lifecycle.visit_records(|_record| {
+        admitted_record_count += 1;
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    assert_eq!(admitted_record_count, 1);
+    admitted_lifecycle
+        .admission()
+        .expect("admitted unfinished run");
 
     let configured_pool = PgPool::connect(&scoped_url)
         .await
@@ -443,12 +454,11 @@ async fn configured_target_cli_and_rest_enforce_executable_authority_and_nonterm
         "LaunchRunnerUnavailable"
     );
     assert_eq!(
-        store
-            .load_run_stream(&unfinished_run)
+        verified_run_view(&store, &unfinished_run)
             .await
-            .expect("cross-executable rejection leaves stream unchanged")
-            .len(),
-        1
+            .current_run_sequence(),
+        admitted_head,
+        "cross-executable rejection leaves journal unchanged"
     );
 
     let resume_application =
@@ -464,14 +474,14 @@ async fn configured_target_cli_and_rest_enforce_executable_authority_and_nonterm
         resumed_unfinished.run_mode,
         mfm_app::RunModeStatus::Completed
     );
-    let resumed_stream = store
-        .load_run_stream(&unfinished_run)
-        .await
-        .expect("resumed unfinished run stream");
-    assert!(resumed_stream.len() > 1);
-    assert!(resumed_stream
-        .iter()
-        .any(|event| matches!(event.payload(), KernelEventPayload::RunCompleted(_))));
+    let resumed_view = verified_run_view(&store, &unfinished_run).await;
+    assert!(resumed_view.current_run_sequence() > admitted_head);
+    assert!(
+        mfm_store::v1::current_lifecycle::read(&resumed_view)
+            .completion()
+            .is_some(),
+        "resumed run must record terminal completion"
+    );
 
     std::fs::remove_file(&runtime_config_path).expect("remove live runtime config");
     let replay = json_output(run_cli(

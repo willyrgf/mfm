@@ -9,7 +9,7 @@ authority. It provides:
 - one-transaction target-keyed publication of complete typed values to Postgres;
 - current-target integrity/type/semantic verification at launch;
 - entry-point operation planning and typed certification;
-- production store, artifact, runner, and capability wiring;
+- production store-owned verified-journal, runner, and capability wiring;
 - exact runtime signer/keystore assembly for canonical EIP-1559 signing;
 - typed start/resume/replay dispatch and public-output read authority.
 
@@ -69,11 +69,11 @@ or render its bytes. The CLI uses this facade for its explicit local bearer-outp
 owned transaction adapter calls the same canonical `mfm-evm` primitive during transaction
 preparation.
 
-After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
-reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They
-do not consult mutable current configuration. Public-output JSON is a cache surface and cannot
-authorize
-resume, replay, certification, or another render.
+After `RunAdmitted`, the run is self-contained. The store loads and verifies one committed journal
+and exposes one borrowed `VerifiedRunView` to resume, replay, status, stream, and public-output
+consumers. Those consumers do not copy a stream, rebuild a projection, duplicate primary history
+inside replay authority, or consult mutable current configuration. Public-output JSON is a cache
+surface and cannot authorize resume, replay, certification, or another render.
 
 Runtime TOML is a separate process-local routing and signer boundary. Each live dispatch resolves
 only the distinct routes required by its certified pending nodes and fixes each selected route for

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn app_read_services_reconstruct_fact_bearing_status_from_committed_stream() {
+async fn app_read_services_reconstruct_fact_bearing_status_from_committed_journal() {
     let (run_id, store, registry) = launch_app_fact_run().await;
     let read_services = make_run_read_services(Arc::new(store.clone()), registry);
 
@@ -22,14 +22,13 @@ async fn app_read_services_reconstruct_fact_bearing_status_from_committed_stream
 
 #[tokio::test]
 async fn app_read_services_fail_closed_for_missing_or_tampered_fact_artifacts() {
-    let (run_id, store, registry) = launch_app_fact_run().await;
-
     for mode in [
-        CommittedStreamArtifactMode::Missing,
-        CommittedStreamArtifactMode::TamperFactResponse,
+        CommittedJournalArtifactMode::Missing,
+        CommittedJournalArtifactMode::TamperFactResponse,
     ] {
-        let overridden = OverriddenCommittedStreamStore::new(store.clone(), mode);
-        let read_services = make_run_read_services(Arc::new(overridden), registry.clone());
+        let (run_id, store, registry) = launch_app_fact_run().await;
+        corrupt_committed_fact_response_for_test(&store, &run_id, mode);
+        let read_services = make_run_read_services(Arc::new(store), registry);
 
         let status_error = read_services
             .run_status(&run_id)
@@ -49,7 +48,10 @@ async fn app_read_services_fail_closed_for_missing_or_tampered_fact_artifacts() 
 async fn public_fact_catalog_discovers_projected_descriptors() {
     let (_run_id, store, _registry) = launch_app_fact_run().await;
     let descriptor = AppLaunchFact::descriptor().expect("fact descriptor");
-    let projection = store.projection_snapshot().expect("projection snapshot");
+    let projection = store
+        .fact_projection_snapshot()
+        .await
+        .expect("fact projection snapshot");
     let public_catalog =
         FactCatalogService::from_public_projection(vec![descriptor.clone()], &projection)
             .expect("public catalog");
@@ -108,7 +110,10 @@ async fn run_read_services_load_public_fact_catalog_from_retained_projection_aut
         .expect("fact explanation");
     assert_eq!(explained.descriptors, described);
 
-    let projection = store.projection_snapshot().expect("projection snapshot");
+    let projection = store
+        .fact_projection_snapshot()
+        .await
+        .expect("fact projection snapshot");
     let (_claim_id, entry) = projection
         .fact_query_entries()
         .next()
@@ -181,7 +186,10 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
 #[tokio::test]
 async fn public_fact_query_redacts_internal_projection_fields() {
     let (_run_id, store, registry) = launch_app_fact_run().await;
-    let projection = store.projection_snapshot().expect("projection snapshot");
+    let projection = store
+        .fact_projection_snapshot()
+        .await
+        .expect("fact projection snapshot");
     let (_claim_id, entry) = projection
         .fact_query_entries()
         .next()
@@ -382,9 +390,7 @@ async fn run_read_services_are_evidence_only() {
 async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
     let store = store::AsyncInMemoryRunStore::default();
     let request = prepare_app_fact_launch().expect("prepared launch");
-    let runtime_spec =
-        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
-    let runners = app_fact_runner_registry(&runtime_spec, Arc::new(store.clone()));
+    let runners = app_fact_runner_registry(&request.runtime_spec);
     let services = make_run_services(
         runners,
         Arc::new(store.clone()),
@@ -416,12 +422,19 @@ async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
         .expect("launch retries after expired claim");
 
     assert!(matches!(launch, RunLaunchOutcome::Admitted { .. }));
-    assert!(store
-        .load_run_stream(&run_id)
+    let registry = app_fact_certification_registry();
+    let view = load_verified_run_view(&store, &registry, &run_id)
         .await
-        .expect("run stream")
-        .iter()
-        .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))));
+        .expect("verified admitted run");
+    assert_eq!(
+        store::current_lifecycle::read(&view)
+            .admission()
+            .expect("current admission")
+            .identity_material()
+            .derive_run_id()
+            .expect("admitted run id"),
+        run_id
+    );
     assert!(matches!(
         store
             .execution_claim_status(&execution_scope)
@@ -454,48 +467,4 @@ async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
             "app error leaked `{forbidden}` in {rendered}"
         );
     }
-}
-
-#[test]
-fn public_status_dto_surfaces_attempt_error_codes() {
-    use mfm_ids::{AttemptId, EventId, NodeId};
-
-    let run_id = RunId::parse(
-        "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
-    .expect("run id");
-    let node_id = NodeId::parse(
-        "node:sha256-jcs-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    )
-    .expect("node id");
-    let attempt_id = AttemptId::parse(
-        "attempt:sha256-jcs-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    )
-    .expect("attempt id");
-    let event_id = EventId::parse(
-        "event:sha256-jcs-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    )
-    .expect("event id");
-    let attempt = store::AttemptProjection {
-        run_id,
-        node_id,
-        attempt_id,
-        event_id,
-        status: store::AttemptStatus::Failed {
-            retryable: false,
-            error: Box::new(
-                events::MfmErrorInfo::new(
-                    events::ErrorCode::new("missing_fact").expect("code"),
-                    events::ErrorCategory::Validation,
-                    false,
-                    "holding fact is missing".to_owned(),
-                )
-                .expect("error info"),
-            ),
-        },
-    };
-    let disposition = attempt_disposition(&attempt);
-    assert_eq!(disposition.disposition, "failed");
-    assert_eq!(disposition.error_code.as_deref(), Some("missing_fact"));
-    assert_eq!(disposition.retryable, Some(false));
 }

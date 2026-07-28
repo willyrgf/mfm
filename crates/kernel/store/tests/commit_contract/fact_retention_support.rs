@@ -336,30 +336,40 @@ pub(super) fn retention_manifest_commit_payloads(
 pub(super) fn projection_differential_summary(
     store: &StoreContractRunStore,
     run_id: &RunId,
-    stream: &[KernelEventEnvelope],
+    records: &[KernelEventEnvelope],
 ) -> String {
-    let rebuilt = ProjectionSnapshot::rebuild_from_run_stream(stream).expect("rebuild projections");
+    let rebuilt =
+        ProjectionSnapshot::rebuild_from_run_stream(records).expect("rebuild projections");
     assert_eq!(store.projection_snapshot(), &rebuilt);
 
-    let committed =
-        CommittedRunStream::from_events(run_id.clone(), stream.to_vec()).expect("committed stream");
-    assert_eq!(committed.projection(), &rebuilt);
-
-    projection_snapshot_summary(&rebuilt, &committed)
+    let commit_count = records
+        .iter()
+        .enumerate()
+        .filter(|(index, record)| *index == 0 || records[*index - 1].seq() != record.seq())
+        .count();
+    let next_seq = records
+        .last()
+        .map(KernelEventEnvelope::seq)
+        .and_then(|sequence| sequence.as_u64().checked_add(1))
+        .and_then(|sequence| StreamSeq::new(sequence).ok())
+        .expect("projection differential has a bounded committed head");
+    projection_snapshot_summary(&rebuilt, run_id, commit_count, records.len(), next_seq)
 }
 
-pub(super) fn projection_snapshot_summary(
+fn projection_snapshot_summary(
     snapshot: &ProjectionSnapshot,
-    committed: &CommittedRunStream,
+    run_id: &RunId,
+    commit_count: usize,
+    event_count: usize,
+    next_seq: StreamSeq,
 ) -> String {
-    let run_id = committed.run_id();
     let mut rows = Vec::new();
     rows.push(format!(
         "committed run_state={:?} commits={} events={} next_seq={}",
         snapshot.run_state(run_id),
-        committed.commits().len(),
-        committed.events().len(),
-        committed.next_seq().as_u64()
+        commit_count,
+        event_count,
+        next_seq.as_u64()
     ));
 
     rows.extend(snapshot.fact_query_entries().map(|(_claim_id, fact)| {

@@ -1,19 +1,17 @@
 use super::*;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use mfm_canonical::{sha256_digest_bytes, CanonicalValue};
+use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
-    CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, CapabilitySpec, EffectSpec,
-    ExternalMutationAuthorityRole, ReadExternalRole,
+    CapabilityDescriptor, CapabilityRole, CapabilitySpec, ExternalMutationAuthorityRole,
+    ReadExternalRole,
 };
 use mfm_ids::{
-    ArtifactId, ContextRef, ContextResourceKind, ContextStage, DigestBytes, EffectKind,
-    EffectVersion, EventId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, StateKind,
-    StateVersion, StoreScopeId,
+    ArtifactId, ContextRef, ContextResourceKind, ContextStage, DigestBytes, EventId, SchemaId,
+    SeedId, SemanticTypeId, SideEffectPairId, StateKind, StateVersion, StoreScopeId,
 };
 use mfm_manual_auth::{
     ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
@@ -31,17 +29,19 @@ use mfm_store::v1::{
     test_support::{
         event_id_for_envelope_inputs_for_test as test_event_id_for_envelope_inputs,
         fact_query_receipt_for_test as test_fact_query_receipt,
+        persisted_kernel_event_envelope_with_ordinal_for_test as test_persisted_event_with_ordinal,
+        poll_ready_store_future_for_test,
         prepared_commit_bundle_from_plan as test_bundle_from_plan,
         prepared_commit_plan_for_test as test_prepared_commit_plan,
-        FactQueryReceiptFixtureInputForTest,
+        FactQueryReceiptFixtureInputForTest, StaticRunJournalBackendForTest,
     },
-    RetainedArtifactReadProvider, RunEventStore,
+    RunJournalStore,
 };
 use mfm_values::ContextBoundOutput;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
-use crate::commit::{CommitPlanner, RunnerOutputCommitInput};
+use crate::spec_authority::CurrentSpecRead;
 
 #[test]
 fn framework_authoring_catalog_matches_the_closed_certified_lifecycle() {
@@ -87,19 +87,11 @@ mod fact_support;
 #[path = "runner_kit.rs"]
 mod runner_kit_tests;
 use self::fact_support::{
-    projection_snapshot_with_returned_fact_authority, test_fact_claim, test_fact_key,
-    test_fact_query_evidence, test_fact_query_evidence_with_returned_refs,
-    test_fact_response_artifact, test_returned_fact_authority,
+    test_fact_claim, test_fact_key, test_fact_query_evidence, test_fact_response_artifact,
 };
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
 const D1: DigestBytes = DigestBytes::from_array([0x11; 32]);
-const D2: DigestBytes = DigestBytes::from_array([0x12; 32]);
-const D3: DigestBytes = DigestBytes::from_array([0x13; 32]);
-const D4: DigestBytes = DigestBytes::from_array([0x14; 32]);
-const D5: DigestBytes = DigestBytes::from_array([0x15; 32]);
-const D6: DigestBytes = DigestBytes::from_array([0x16; 32]);
-const D7: DigestBytes = DigestBytes::from_array([0x17; 32]);
 const D8: DigestBytes = DigestBytes::from_array([0x18; 32]);
 const D9: DigestBytes = DigestBytes::from_array([0x19; 32]);
 const APPLY_SIDE_EFFECT_RUNNER: &str = "apply_side_effect";
@@ -167,17 +159,6 @@ macro_rules! delegate_execution_claim_direct {
     ($inner:expr, $_borrow:ident, $method:ident, ($($arg:expr),*)) => {
         $inner.$method($($arg),*)
     };
-}
-
-macro_rules! delegate_execution_claim_refcell {
-    ($inner:expr, $borrow:ident, $method:ident, ()) => {{
-        let result = block_on_ready($inner.$borrow().$method());
-        Box::pin(std::future::ready(result))
-    }};
-    ($inner:expr, $borrow:ident, $method:ident, ($($arg:expr),*)) => {{
-        let result = block_on_ready($inner.$borrow().$method($($arg),*));
-        Box::pin(std::future::ready(result))
-    }};
 }
 
 macro_rules! delegate_execution_claim_store {
@@ -269,9 +250,6 @@ use self::runner_fixtures::*;
 #[path = "fixture_builders.rs"]
 mod fixture_builders;
 use self::fixture_builders::*;
-#[path = "lifecycle_node_support.rs"]
-mod lifecycle_node_support;
-use self::lifecycle_node_support::*;
 #[path = "side_effect_helpers.rs"]
 mod side_effect_helpers;
 use self::side_effect_helpers::*;
@@ -285,25 +263,15 @@ use self::stream_mutation_support::*;
 mod side_effect_runners;
 use self::side_effect_runners::*;
 
-fn derive_fixture_saga(
-    fixture: &Fixture,
-    projection: store::ProjectionSnapshot,
-) -> store::SagaProjection {
-    projection
-        .derive_saga_projection(
-            &fixture.run_id,
-            &fixture.runtime_spec.spec().saga,
-            &fixture_terminal_policies(fixture),
-        )
-        .expect("saga projection")
-}
-
-fn side_effect_pair_fields_for_purpose(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn side_effect_pair_fields_for_purpose<S>(
+    runtime_spec: &S,
     node_id: &NodeId,
     ledger_purpose: &events::SideEffectLedgerPurpose,
     role: events::SideEffectPairRole,
-) -> (SideEffectPairId, events::SideEffectPairRole) {
+) -> (SideEffectPairId, events::SideEffectPairRole)
+where
+    S: crate::spec_authority::CurrentSpecRead + ?Sized,
+{
     match ledger_purpose {
         events::SideEffectLedgerPurpose::Forward
         | events::SideEffectLedgerPurpose::Remediation { .. } => {
@@ -322,7 +290,7 @@ fn side_effect_pair_fields_for_ctx(
     role: events::SideEffectPairRole,
 ) -> (SideEffectPairId, events::SideEffectPairRole) {
     side_effect_pair_fields_for_purpose(
-        ctx.runtime_spec(),
+        &ctx.runtime_spec(),
         &ctx.node().node_id,
         ledger_purpose,
         role,
@@ -407,12 +375,20 @@ use self::launch_helpers::*;
 mod event_helpers;
 use self::event_helpers::*;
 
-fn validate_runtime_stream_for_tests(
+fn validate_corrupted_journal_for_tests(
+    store: &TestTypedRunStore,
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
+    records: Vec<store::KernelEventEnvelope>,
 ) -> Result<()> {
-    RuntimeRunView::from_stream(runtime_spec, run_id, stream).map(|_| ())
+    let backend = StaticRunJournalBackendForTest::new(
+        run_id.clone(),
+        records,
+        store.committed_artifact_authority_for_corruption(run_id),
+    );
+    let journal = poll_ready_store_future_for_test(backend.load_committed_journal(run_id))
+        .map_err(RuntimeError::from)?;
+    verify_current_run(journal, recertified_runtime_spec(runtime_spec)).map(|_| ())
 }
 
 fn block_on_ready<F: Future>(future: F) -> F::Output {
@@ -426,14 +402,7 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
 }
 
 fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
-    test_scheduler_with_artifacts(registry, Arc::new(TestRetainedArtifactStore::default()))
-}
-
-fn test_scheduler_with_artifacts(
-    registry: ErasedRunnerRegistry,
-    artifact_store: Arc<dyn store::RetainedArtifactReadProvider>,
-) -> SerialTypedScheduler {
-    SerialTypedScheduler::new(registry, artifact_store)
+    SerialTypedScheduler::new(registry)
 }
 
 fn fixture_scheduler(registry: ErasedRunnerRegistry, fixture: &Fixture) -> SerialTypedScheduler {
@@ -451,7 +420,6 @@ fn register_fixture_read_runner(
             runner_name,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
                 output_digest: content(0xb2),
             },
         ))
@@ -465,7 +433,6 @@ fn register_default_fixture_pure_runner(registry: &mut ErasedRunnerRegistry, fix
             "pure",
             RecordingRunner {
                 expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
                 output_digest: content(0xa2),
             },
         ))
@@ -481,7 +448,7 @@ fn fixture_registry_with_first_runner<R: ErasedNodeRunner + 'static>(
     registry
         .register(binding(fixture.descriptor_a.clone(), runner_name, runner))
         .expect("binding a");
-    register_fixture_read_runner(&mut registry, fixture, "read");
+    register_fixture_read_runner(&mut registry, fixture, READ_EXTERNAL_RUNNER);
     registry
 }
 
@@ -502,29 +469,31 @@ fn side_effect_driver_registry_with_submission_decision(
 }
 
 macro_rules! assert_drive {
-    ($scheduler:ident, $store:ident, $fixture:ident, $status:ident, $message:literal $(,)?) => {
-        assert_eq!(
-            drive_fixture_once(&$scheduler, &mut $store, &$fixture)
-                .await
-                .expect($message),
-            SchedulerStatus::$status
-        );
-    };
+    ($scheduler:ident, $store:ident, $current:ident, $status:ident, $message:literal $(,)?) => {{
+        let result = drive_current_once_with_claim(&$scheduler, &$store, $current)
+            .await
+            .expect($message);
+        assert_eq!(result.status(), SchedulerStatus::$status);
+        $current = result.into_current_run();
+    }};
 }
 
 macro_rules! drive_ok {
-    ($scheduler:ident, $store:ident, $fixture:ident, $message:literal $(,)?) => {
-        drive_fixture_once(&$scheduler, &mut $store, &$fixture)
+    ($scheduler:ident, $store:ident, $current:ident, $message:literal $(,)?) => {{
+        let result = drive_current_once_with_claim(&$scheduler, &$store, $current)
             .await
-            .expect($message)
-    };
+            .expect($message);
+        let status = result.status();
+        $current = result.into_current_run();
+        status
+    }};
 }
 
 macro_rules! assert_first_node_invalid_after_drive {
-    ($scheduler:ident, $store:ident, $fixture:ident, $message:literal $(,)?) => {{
-        assert_drive!($scheduler, $store, $fixture, Advanced, $message);
+    ($scheduler:ident, $store:ident, $current:ident, $fixture:ident, $message:literal $(,)?) => {{
+        assert_drive!($scheduler, $store, $current, Advanced, $message);
         let node = node_by_output(&$fixture, &$fixture.cell_a);
-        assert_node_failed_with_code(&$store, &node.node_id, "runner_output_invalid");
+        assert_node_failed_with_code(&$current, &node.node_id, "runner_output_invalid");
     }};
 }
 
@@ -606,11 +575,6 @@ fn test_runner_registry_with_digest(binary_digest: ContentDigest) -> ErasedRunne
 }
 
 const DA: DigestBytes = DigestBytes::from_array([0x1a; 32]);
-const DB: DigestBytes = DigestBytes::from_array([0x1b; 32]);
-const DC: DigestBytes = DigestBytes::from_array([0x1c; 32]);
-const DD: DigestBytes = DigestBytes::from_array([0x1d; 32]);
-const DE: DigestBytes = DigestBytes::from_array([0x1e; 32]);
-const DF: DigestBytes = DigestBytes::from_array([0x1f; 32]);
 const TEST_CONFIG_BYTES: &[u8] = b"{}";
 const TEST_SEED_BYTES: &[u8] = br#"{"seed":true}"#;
 const CERTIFIER_SEED_BYTES: &[u8] = br#"{"amount":2}"#;
@@ -619,7 +583,6 @@ const CONFIG_MULTIPLIER_3_BYTES: &[u8] = br#"{"multiplier":3}"#;
 const CONFIG_MULTIPLIER_5_BYTES: &[u8] = br#"{"multiplier":5}"#;
 const CONFIG_MULTIPLIER_7_BYTES: &[u8] = br#"{"multiplier":7}"#;
 
-#[derive(Clone)]
 struct Fixture {
     runtime_spec: CertifiedRuntimeSpec,
     run_id: RunId,
@@ -638,61 +601,6 @@ struct Fixture {
     cap_version: CapabilityVersion,
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
-}
-
-macro_rules! with_prepared_runner_ctx {
-    (
-        $fixture:expr,
-        $node:expr,
-        $attempt_id:expr,
-        $projections:expr,
-        $run_stream:expr,
-        |$ctx:ident| $body:block $(,)?
-    ) => {{
-        let invocation_node = $node;
-        let descriptor = $fixture
-            .runtime_spec
-            .state_descriptor_for_node(invocation_node)
-            .expect("state descriptor");
-        let output_cell = $fixture
-            .runtime_spec
-            .cell(&invocation_node.output_cell)
-            .expect("output cell");
-        let config_artifact =
-            config_artifact(&$fixture.runtime_spec, &invocation_node.config_ref).evidence;
-        let projections = $projections;
-        let run_stream = $run_stream;
-        let committed =
-            store::CommittedRunStream::from_events($fixture.run_id.clone(), run_stream.clone())
-                .expect("prepared runner committed stream");
-        let view = RuntimeRunView::from_committed_stream(&$fixture.runtime_spec, &committed)
-            .expect("prepared runner view");
-        let invocation = PreparedRunnerInvocation {
-            runtime_spec: &$fixture.runtime_spec,
-            run_id: &$fixture.run_id,
-            spec_hash: $fixture.runtime_spec.spec_hash(),
-            node: invocation_node,
-            descriptor,
-            output_cell,
-            context: $fixture
-                .runtime_spec
-                .invocation_context_for_node(invocation_node)
-                .expect("invocation context"),
-            attempt_id: $attempt_id,
-            attempt_no: 1,
-            config_artifact,
-            inputs: MaterializedInputs {
-                input_schema_id: invocation_node.input_bindings.input_schema_id.clone(),
-                root: MaterializedInputNode::Unit,
-            },
-            caps: CertifiedRuntimeCapabilities::for_node(invocation_node),
-            projections: &projections,
-            run_stream: &run_stream,
-            view: &view,
-        };
-        let $ctx = ErasedRunCtx::from_prepared(&invocation);
-        $body
-    }};
 }
 
 #[path = "execution_support.rs"]
@@ -714,8 +622,21 @@ mod side_effect_driver_tests;
 fn content(byte: u8) -> ContentDigest {
     ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
+        sha256_digest_bytes(&synthetic_artifact_bytes(byte)),
     )
+}
+
+fn synthetic_artifact_bytes(byte: u8) -> Vec<u8> {
+    vec![byte; 17]
+}
+
+fn synthetic_artifact_bytes_for_digest(digest: &ContentDigest) -> Vec<u8> {
+    (u8::MIN..=u8::MAX)
+        .find_map(|byte| {
+            let bytes = synthetic_artifact_bytes(byte);
+            (content(byte) == *digest).then_some(bytes)
+        })
+        .unwrap_or_else(|| panic!("test digest {} has no synthetic byte fixture", digest))
 }
 
 fn artifact(byte: u8) -> ArtifactId {

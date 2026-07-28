@@ -376,6 +376,67 @@ impl AsyncInMemoryRunStore {
             .and_then(|mut store| admit_artifact_evidence(&mut store.artifacts, admitted_artifacts))
     }
 
+    /// Returns a cloned raw-record snapshot for store-contract corruption tests.
+    #[doc(hidden)]
+    pub fn committed_records_for_test(&self, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
+        self.lock_inner().map(|store| store.load_run_stream(run_id))
+    }
+
+    /// Returns exact retained-object authority required by this run's committed records.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn committed_artifact_byte_authority_for_test(
+        &self,
+        run_id: &RunId,
+    ) -> Result<ArtifactByteAuthorityMap> {
+        self.lock_inner().map(|store| {
+            let records = store.load_run_stream(run_id);
+            required_artifact_byte_authority(&records, &store.artifact_bytes)
+        })
+    }
+
+    /// Returns the private in-memory append head for current-format test fixture sequencing.
+    #[doc(hidden)]
+    pub fn expected_next_sequence_for_test(&self, run_id: &RunId) -> Result<StreamSeq> {
+        self.lock_inner()
+            .map(|store| store.expected_next_seq(run_id))
+    }
+
+    /// Removes retained bytes for one exact authority key in corruption tests.
+    #[doc(hidden)]
+    pub fn remove_retained_artifact_bytes_for_test(
+        &self,
+        artifact_id: &ArtifactId,
+        evidence_hash: &ContentDigest,
+    ) -> Result<bool> {
+        self.lock_inner().map(|mut store| {
+            store
+                .artifact_bytes
+                .remove(&(artifact_id.clone(), evidence_hash.clone()))
+                .is_some()
+        })
+    }
+
+    /// Replaces retained bytes without changing evidence for one exact corruption-test key.
+    #[doc(hidden)]
+    pub fn replace_retained_artifact_bytes_for_test(
+        &self,
+        artifact_id: &ArtifactId,
+        evidence_hash: &ContentDigest,
+        bytes: Vec<u8>,
+    ) -> Result<bool> {
+        self.lock_inner().map(|mut store| {
+            let Some((stored_bytes, _)) = store
+                .artifact_bytes
+                .get_mut(&(artifact_id.clone(), evidence_hash.clone()))
+            else {
+                return false;
+            };
+            *stored_bytes = bytes;
+            true
+        })
+    }
+
     /// Seeds a projection snapshot and exact retained artifact bytes for tests.
     pub fn seed_projection_snapshot_for_test(
         &self,
@@ -473,10 +534,10 @@ impl AsyncInMemoryRunStore {
     }
 }
 
-impl RunEventStore for AsyncInMemoryRunStore {
+impl RunJournalBackend for AsyncInMemoryRunStore {
     type Error = StoreError;
 
-    fn append_prepared_commit_bundle<'a>(
+    fn backend_append<'a>(
         &'a self,
         bundle: PreparedCommitBundle,
     ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
@@ -486,38 +547,23 @@ impl RunEventStore for AsyncInMemoryRunStore {
         Box::pin(std::future::ready(result))
     }
 
-    fn load_run_stream<'a>(
+    fn backend_load<'a>(
         &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
-        let result = self.lock_inner().map(|store| store.load_run_stream(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn load_committed_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, CommittedRunStream, Self::Error> {
-        let result = self.lock_inner().and_then(|store| {
-            CommittedRunStream::from_events_with_artifact_bytes(
-                run_id.clone(),
-                store.load_run_stream(run_id),
-                &store.artifact_bytes,
-            )
+        verifier: JournalLoadVerifier,
+    ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error> {
+        let loaded = self.lock_inner().map(|store| {
+            let run_id = verifier.run_id();
+            let records = store.load_run_stream(run_id);
+            let artifact_bytes = required_artifact_byte_authority(&records, &store.artifact_bytes);
+            (records, artifact_bytes)
         });
+        let result =
+            loaded.and_then(|(records, artifact_bytes)| verifier.verify(records, artifact_bytes));
         Box::pin(std::future::ready(result))
     }
+}
 
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
-        let result = self
-            .lock_inner()
-            .map(|store| store.expected_next_seq(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
+impl CurrentProjectionStore for AsyncInMemoryRunStore {
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -526,12 +572,11 @@ impl RunEventStore for AsyncInMemoryRunStore {
             .lock_inner()
             .map(|store| {
                 let stream = store.load_run_stream(run_id);
-                let committed = CommittedRunStream::from_events_with_artifact_bytes(
-                    run_id.clone(),
-                    stream,
-                    &store.artifact_bytes,
-                )?;
-                let run_projection = committed.projection().clone();
+                let run_projection =
+                    ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+                        &stream,
+                        &store.artifact_bytes,
+                    )?;
                 projection_with_store_authority(&run_projection, store.projection_snapshot())
             })
             .and_then(|result| result);

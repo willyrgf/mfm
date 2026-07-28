@@ -21,7 +21,7 @@ use mfm_spec::v1::{
 };
 use mfm_store::v1::test_support::{
     artifact_bytes_for_digest_for_test, artifact_content_digest_for_test as content_digest,
-    confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
+    expected_next_sequence_for_test as expected_next_sequence,
     fact_descriptor_projection_fixture_for_test, fixed_attempt_id_for_test as attempt_id,
     fixed_cell_id_for_test as cell_id, fixed_descriptor_id_for_test as descriptor_id,
     fixed_digest_bytes_for_test as digest_bytes, fixed_node_id_for_test as node_id,
@@ -37,9 +37,9 @@ use mfm_store::v1::{
     CellTerminalProjection, CertifiedRunStoreAuthority, CommitArtifactEvidenceSet, CommitKey,
     CommitOutcome, CommitPreconditions, ExecutionClaimStatus, ExecutionClaimStore,
     ExistingArtifactAdmission, ManualResolution, NowaitSkipAdmissionResult, PreparedCommit,
-    PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunState,
-    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError,
-    StoreScopeId, StoreScopeStore, StreamSeq,
+    PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunJournalStore, RunState,
+    SagaEngagementReason, SagaTerminal, SideEffectPhase, StoreError, StoreScopeId, StoreScopeStore,
+    StreamSeq,
 };
 use sqlx::postgres::PgConnectOptions;
 use sqlx::AssertSqlSafe;
@@ -154,7 +154,11 @@ pub(super) async fn test_store() -> (PostgresStore, String) {
     let authority = crate::schema::validate_pool(&pool)
         .await
         .expect("validate schema");
-    let store = PostgresStore { pool, authority };
+    let store = PostgresStore {
+        pool,
+        authority,
+        committed_journal_load_test_barrier: None,
+    };
     (store, schema)
 }
 
@@ -254,6 +258,10 @@ fn assert_fact_query_receipt(
 mod artifact_tests;
 #[path = "facts_retention.rs"]
 mod facts_retention_tests;
+#[path = "journal_manual_authorization.rs"]
+mod journal_manual_authorization_tests;
+#[path = "journal.rs"]
+mod journal_tests;
 #[path = "lifecycle.rs"]
 mod lifecycle_tests;
 #[path = "observation.rs"]

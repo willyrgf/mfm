@@ -483,8 +483,9 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
         .projection_snapshot()
         .resource_lane(&lane_key)
         .is_some());
-    let rebuilt = ProjectionSnapshot::rebuild_from_run_stream(&manual_store.load_run_stream(&run))
-        .expect("rebuild ambiguous terminal stream");
+    let records = manual_store.committed_records_for_projection_test(&run);
+    let rebuilt = ProjectionSnapshot::rebuild_from_run_stream(&records)
+        .expect("rebuild ambiguous terminal records");
     assert!(rebuilt.resource_lane(&lane_key).is_some());
 
     let run = run_id(208);
@@ -652,7 +653,7 @@ fn resource_lane_reprepare_after_release_requires_stable_resource_key_evidence()
 }
 
 #[test]
-fn resource_lane_projection_rebuilds_from_non_terminal_run_stream() {
+fn resource_lane_projection_rebuilds_from_non_terminal_committed_records() {
     let run = run_id(209);
     let lane_key = resource_lane_key_with_schema("wallet-5", 205);
     let mut store = admitted_store(&run, "resource-rebuild-run-start");
@@ -666,8 +667,9 @@ fn resource_lane_projection_rebuilds_from_non_terminal_run_stream() {
         true,
     );
 
-    let stream = store.load_run_stream(&run);
-    let rebuilt = ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild projection");
+    let records = store.committed_records_for_projection_test(&run);
+    let rebuilt =
+        ProjectionSnapshot::rebuild_from_run_stream(&records).expect("rebuild projection");
     let lane = rebuilt
         .resource_lane(&lane_key)
         .expect("rebuilt non-terminal lane");

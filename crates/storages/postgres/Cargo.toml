@@ -24,7 +24,11 @@ k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-certify = { path = "../../kernel/certify" }
 mfm-manual-auth = { path = "../../kernel/manual-auth" }
+mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
+mfm-values = { path = "../../kernel/values" }
+serde = { workspace = true }
 
 [features]
 parity-tests = []

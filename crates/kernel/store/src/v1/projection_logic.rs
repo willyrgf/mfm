@@ -107,7 +107,7 @@ impl ProjectionSnapshot {
 
     /// Validates that a loaded run stream is ordered and contiguous.
     pub fn validate_run_stream(events: &[KernelEventEnvelope]) -> Result<()> {
-        validate_run_stream_order(events)?;
+        validate_journal_record_order(events)?;
         validate_supported_stream_model(events)
     }
 
@@ -137,7 +137,7 @@ impl ProjectionSnapshot {
         }
         let mut snapshot = Self::default();
         let artifact_bytes = ArtifactByteAuthorityMap::new();
-        for commit in committed_run_stream_commits(events) {
+        for commit in committed_journal_commits(events) {
             let payloads = commit
                 .events
                 .iter()
@@ -149,7 +149,7 @@ impl ProjectionSnapshot {
             validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
             validate_retention_manifest_pairs(&payloads)?;
             for event in commit.events {
-                projection::apply_projection(&mut snapshot, &event, &artifact_bytes)?;
+                projection::apply_projection(&mut snapshot, event, &artifact_bytes)?;
             }
         }
         Ok(snapshot)
@@ -164,9 +164,31 @@ impl ProjectionSnapshot {
         events: &[KernelEventEnvelope],
         artifact_bytes: &ArtifactByteAuthorityMap,
     ) -> Result<Self> {
+        Self::rebuild_from_committed_records(events, artifact_bytes)
+    }
+
+    pub(in crate::v1) fn rebuild_from_committed_records<R>(
+        events: &[KernelEventEnvelope],
+        objects: &R,
+    ) -> Result<Self>
+    where
+        R: ExactRetainedObjectResolver + ?Sized,
+    {
         Self::validate_run_stream(events)?;
         let mut snapshot = Self::default();
-        for commit in committed_run_stream_commits(events) {
+        snapshot.extend_from_committed_records(events, objects)?;
+        Ok(snapshot)
+    }
+
+    pub(in crate::v1) fn extend_from_committed_records<R>(
+        &mut self,
+        events: &[KernelEventEnvelope],
+        objects: &R,
+    ) -> Result<()>
+    where
+        R: ExactRetainedObjectResolver + ?Sized,
+    {
+        for commit in committed_journal_commits(events) {
             let payloads = commit
                 .events
                 .iter()
@@ -175,13 +197,13 @@ impl ProjectionSnapshot {
             validate_terminal_attempt_cell_pairs(&payloads)?;
             validate_fact_settlement_commit(&payloads)?;
             validate_terminal_side_effect_evidence_pairs(&payloads)?;
-            validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
+            validate_side_effect_attempt_failures_have_terminal_evidence(self, &payloads)?;
             validate_retention_manifest_pairs(&payloads)?;
             for event in commit.events {
-                projection::apply_projection(&mut snapshot, &event, artifact_bytes)?;
+                projection::apply_projection(self, event, objects)?;
             }
         }
-        Ok(snapshot)
+        Ok(())
     }
 
     /// Rebuilds non-fact projections plus fact record identities for external fact query storage.
@@ -192,7 +214,7 @@ impl ProjectionSnapshot {
     pub fn rebuild_for_external_fact_queries(events: &[KernelEventEnvelope]) -> Result<Self> {
         Self::validate_run_stream(events)?;
         let mut snapshot = Self::default();
-        for commit in committed_run_stream_commits(events) {
+        for commit in committed_journal_commits(events) {
             let payloads = commit
                 .events
                 .iter()
@@ -204,7 +226,7 @@ impl ProjectionSnapshot {
             validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
             validate_retention_manifest_pairs(&payloads)?;
             for event in commit.events {
-                projection::apply_projection_for_external_fact_queries(&mut snapshot, &event)?;
+                projection::apply_projection_for_external_fact_queries(&mut snapshot, event)?;
             }
         }
         Ok(snapshot)

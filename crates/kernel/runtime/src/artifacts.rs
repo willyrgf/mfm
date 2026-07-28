@@ -300,18 +300,6 @@ impl StagedArtifact {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn finalized_attempt_artifact_for_tests(
-        ctx: &ErasedRunCtx<'_>,
-        evidence: store::ArtifactEvidenceRef,
-        binding: StagedArtifactBindingKind,
-    ) -> Result<Self> {
-        Ok(Self {
-            handle: StagedArtifactHandle::for_attempt(ctx, evidence, binding)?,
-            bytes: None,
-        })
-    }
-
     /// Returns the sealed handle.
     pub(crate) fn handle(&self) -> &StagedArtifactHandle {
         &self.handle
@@ -518,22 +506,22 @@ impl StagedRetentionRefs {
 }
 
 fn validate_fact_query_returned_ref_authority(
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     fact_ref: &mfm_facts::InternalFactRef,
 ) -> Result<()> {
-    let descriptor = projections
+    let descriptor = lifecycle
         .fact_descriptor(fact_ref.fact_descriptor_hash())
         .ok_or_else(|| fact_query_ref_authority_error("missing descriptor authority"))?;
-    if !fact_descriptor_projection_matches_returned_ref(descriptor, fact_ref) {
+    if !fact_descriptor_matches_returned_ref(&descriptor, fact_ref) {
         return Err(fact_query_ref_authority_error(
             "descriptor authority does not match returned ref",
         ));
     }
 
-    let projection = projections
+    let query = lifecycle
         .fact_query_entry(fact_ref.fact_claim_id())
         .ok_or_else(|| fact_query_ref_authority_error("missing fact query authority"))?;
-    if projection.internal_ref().ok().as_ref() != Some(fact_ref) {
+    if query.internal_ref().ok().as_ref() != Some(fact_ref) {
         return Err(fact_query_ref_authority_error(
             "fact query authority does not match returned ref",
         ));
@@ -543,20 +531,22 @@ fn validate_fact_query_returned_ref_authority(
 }
 
 pub(crate) fn fact_query_returned_ref_retention_refs(
-    projections: &store::ProjectionSnapshot,
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     fact_ref: &mfm_facts::InternalFactRef,
 ) -> Result<[events::RetentionRef; 2]> {
-    validate_fact_query_returned_ref_authority(projections, fact_ref)?;
-    let descriptor = projections
+    validate_fact_query_returned_ref_authority(lifecycle, fact_ref)?;
+    let descriptor = lifecycle
         .fact_descriptor(fact_ref.fact_descriptor_hash())
         .ok_or_else(|| fact_query_ref_authority_error("missing descriptor authority"))?;
-    let response_evidence = projections
+    let query = lifecycle
         .fact_query_entry(fact_ref.fact_claim_id())
-        .and_then(store::FactQueryProjection::response_artifact_evidence)
+        .ok_or_else(|| fact_query_ref_authority_error("missing response artifact authority"))?;
+    let response_evidence = query
+        .response_artifact_evidence()
         .ok_or_else(|| fact_query_ref_authority_error("missing response artifact authority"))?;
     Ok([
         descriptor
-            .descriptor_artifact_evidence
+            .artifact_evidence()
             .retention_ref()
             .map_err(|_| fact_query_ref_authority_error("invalid descriptor artifact authority"))?,
         response_evidence
@@ -565,14 +555,14 @@ pub(crate) fn fact_query_returned_ref_retention_refs(
     ])
 }
 
-fn fact_descriptor_projection_matches_returned_ref(
-    descriptor: &store::FactDescriptorProjection,
+fn fact_descriptor_matches_returned_ref(
+    descriptor: &store::current_lifecycle::CurrentFactDescriptorRef<'_>,
     fact_ref: &mfm_facts::InternalFactRef,
 ) -> bool {
-    &descriptor.descriptor_hash == fact_ref.fact_descriptor_hash()
-        && &descriptor.fact_kind == fact_ref.fact_kind()
-        && &descriptor.response_schema_id == fact_ref.response_schema_id()
-        && &descriptor.fact_subject_namespace_hash == fact_ref.fact_subject_namespace_hash()
+    descriptor.descriptor_hash() == fact_ref.fact_descriptor_hash()
+        && descriptor.fact_kind() == fact_ref.fact_kind()
+        && descriptor.response_schema_id() == fact_ref.response_schema_id()
+        && descriptor.subject_namespace_hash() == fact_ref.fact_subject_namespace_hash()
 }
 
 fn fact_query_ref_authority_error(message: &'static str) -> RuntimeError {

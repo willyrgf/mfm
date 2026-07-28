@@ -1,5 +1,69 @@
 use super::*;
 
+impl SyntheticSideEffectAppend<'_> {
+    pub(in crate::tests::support) fn append_with_artifact_bytes(
+        &self,
+        store: &mut TestTypedRunStore,
+        commit_key: &str,
+        payloads: Vec<events::KernelEventPayload>,
+        artifacts: Vec<(Vec<u8>, store::ArtifactEvidenceRef)>,
+        required_side_effect_state: store::RequiredSideEffectState,
+        require_attempt_started: bool,
+    ) {
+        let required_artifacts = artifacts
+            .iter()
+            .map(|(_, evidence)| evidence.clone())
+            .collect::<Vec<_>>();
+        let required_present_logical_keys = require_attempt_started
+            .then(|| {
+                store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    self.node.node_id, self.attempt_id
+                ))
+                .expect("attempt logical key")
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        store
+            .append_prepared_commit_with_artifacts(
+                store_typed_commit_request! {
+                    run_id: self.run_id.clone(),
+                    expected_next_seq: store.expected_next_seq(self.run_id),
+                    commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+                    payloads: payloads,
+                    required_artifacts: required_artifacts,
+                    preconditions: store::CommitPreconditions {
+                        required_run_state: store::RequiredRunState::NotCompleted,
+                        required_present_logical_keys,
+                        required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                            pair_id: fixture_side_effect_pair_id(self.fixture, self.node),
+                            required: required_side_effect_state,
+                        }],
+                        certified_run_authority: Some(
+                            store::CertifiedRunStoreAuthority::from_spec(
+                                self.run_id.clone(),
+                                self.fixture.runtime_spec.spec(),
+                            )
+                            .expect("certified run authority"),
+                        ),
+                        ..store::CommitPreconditions::default()
+                    },
+                },
+                artifacts,
+            )
+            .expect("append synthetic side-effect commit with artifact bytes");
+    }
+}
+
+pub(in crate::tests::support) fn canonical_fixture_side_effect_bytes(
+    value: &FixtureSideEffectEvidence,
+) -> Vec<u8> {
+    let json = serde_json::to_string(value).expect("serialize fixture side-effect evidence");
+    mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+        .expect("canonical fixture side-effect evidence")
+        .to_vec()
+}
+
 pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
@@ -38,8 +102,11 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
         events::SideEffectLedgerKey::new(format!("holder-{commit_key}")).expect("holder ledger");
     let intent = fixture_side_effect_evidence(21, node.node_id.as_str(), attempt_id.as_str());
     let idempotency = fixture_side_effect_evidence(34, node.node_id.as_str(), attempt_id.as_str());
-    let intent_hash = content_digest_json(serde_json::to_value(&intent).expect("intent value"))
-        .expect("intent digest");
+    let intent_bytes = canonical_fixture_side_effect_bytes(&intent);
+    let intent_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(&intent_bytes),
+    );
     let idempotency_hash =
         content_digest_json(serde_json::to_value(&idempotency).expect("idempotency value"))
             .expect("idempotency digest");
@@ -59,7 +126,7 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
     let intent_artifact = store::ArtifactEvidenceRef {
         artifact_id: intent_artifact_id.clone(),
         digest: intent_hash.clone(),
-        byte_len: 17,
+        byte_len: intent_bytes.len() as u64,
         media_type: spec::MediaType::new("application/json").expect("media"),
         schema_id: Some(evidence_schema.clone()),
         semantic_type_id: None,
@@ -67,15 +134,16 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::SideEffectIntent,
     };
-    let prepared_hash = content_digest_json(serde_json::json!({
-        "intent_hash": intent_hash.as_str(),
-        "prepared": true,
-    }))
-    .expect("prepared digest");
+    let prepared = fixture_side_effect_evidence(35, node.node_id.as_str(), attempt_id.as_str());
+    let prepared_bytes = canonical_fixture_side_effect_bytes(&prepared);
+    let prepared_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(&prepared_bytes),
+    );
     let prepared_artifact = store::ArtifactEvidenceRef {
         artifact_id: ArtifactId::from_digest(prepared_hash.algorithm(), *prepared_hash.digest()),
         digest: prepared_hash.clone(),
-        byte_len: 17,
+        byte_len: prepared_bytes.len() as u64,
         media_type: spec::MediaType::new("application/json").expect("media"),
         schema_id: Some(evidence_schema.clone()),
         semantic_type_id: None,
@@ -86,7 +154,7 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
     let side_effect = SyntheticSideEffectAppend::new(fixture, run_id, node, &attempt_id);
     let ledger_purpose = side_effect.ledger_purpose();
     let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Submit);
-    side_effect.append(
+    side_effect.append_with_artifact_bytes(
         store,
         commit_key,
         vec![
@@ -172,7 +240,10 @@ pub(in crate::tests::support) fn append_synthetic_exclusive_prepare(
                 },
             ),
         ],
-        vec![intent_artifact, prepared_artifact],
+        vec![
+            (intent_bytes, intent_artifact),
+            (prepared_bytes, prepared_artifact),
+        ],
         store::RequiredSideEffectState::Absent,
         true,
     );

@@ -26,19 +26,6 @@ pub(super) fn next_seq_from_head(head: u64) -> Result<StreamSeq> {
     Ok(StreamSeq::new(next)?)
 }
 
-pub(super) async fn read_head(pool: &PgPool, run_id: &RunId) -> Result<u64> {
-    let row =
-        sqlx::query("SELECT COALESCE(MAX(seq), 0) AS head_seq FROM commits WHERE run_id = $1")
-            .bind(run_id.as_str())
-            .fetch_one(pool)
-            .await
-            .map_err(|error| database_error("failed to query run head", error))?;
-    let head_seq: i64 = row
-        .try_get("head_seq")
-        .map_err(|error| database_error("failed to decode run head", error))?;
-    i64_to_nonnegative_u64(head_seq, "commits.seq")
-}
-
 pub(super) async fn read_head_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,

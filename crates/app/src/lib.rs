@@ -24,17 +24,17 @@ use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, LocalPublicId, RunId, SchemaId, SeedId,
-    SemanticTypeId, SpecHash, StoreScopeId,
+    SemanticTypeId, StoreScopeId,
 };
 use mfm_replay::v1::{ReplayBroker, ReplayReadAuthority, RetainedSourceFactReplayEvent};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
     RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
-    VerifiedRunHistoryView,
+    VerifiedCurrentRun,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::RunEventStore;
+use mfm_store::v1::CurrentProjectionStore;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
@@ -101,8 +101,8 @@ use self::launch_artifacts::*;
 #[path = "services.rs"]
 mod services;
 
-use self::services::VerifiedRunReadContext;
 pub use self::services::{RunReadServices, RunServices};
+use self::services::{VerifiedRunReadContext, VerifiedStatusReadContext};
 
 use live_transports::{LiveDispatchRoutes, RuntimeConfigLoader, SharedLiveTransports};
 
@@ -126,16 +126,10 @@ pub fn make_run_services<S>(
     certification_registry: CertificationRegistry,
 ) -> RunServices<S>
 where
-    S: store::RunEventStore
-        + store::StoreScopeStore
-        + store::RetainedArtifactReadProvider
-        + Send
-        + Sync
-        + 'static,
+    S: store::RunJournalStore + store::StoreScopeStore + Send + Sync + 'static,
 {
-    let runtime_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
     RunServices::new_with_certification_registry(
-        SerialTypedScheduler::new(runners, runtime_artifacts),
+        SerialTypedScheduler::new(runners),
         store,
         certification_registry,
     )
@@ -147,12 +141,7 @@ pub fn make_run_read_services<S>(
     certification_registry: CertificationRegistry,
 ) -> RunReadServices<S>
 where
-    S: store::RunEventStore
-        + store::StoreScopeStore
-        + store::RetainedArtifactReadProvider
-        + Send
-        + Sync
-        + 'static,
+    S: store::RunJournalStore + store::StoreScopeStore + Send + Sync + 'static,
 {
     RunReadServices::new_with_certification_registry(store, certification_registry)
 }
@@ -221,7 +210,6 @@ where
     let bitcoin_adapter_factory = runner_factory_binding(&registry, "bitcoin_jsonrpc_adapter")?;
     let evm_adapter_factory = runner_factory_binding(&registry, "evm_jsonrpc_adapter")?;
     let portfolio_adapter_factory = runner_factory_binding(&registry, "portfolio_adapter")?;
-    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> = store.clone();
     mfm_portfolio_live::register_portfolio_live(
         &mut registry,
         store,
@@ -234,14 +222,12 @@ where
     )?;
     btc_collector::register_btc_collector_runners(
         &mut registry,
-        artifacts.clone(),
         routes.clone(),
         &read_factory,
         &bitcoin_adapter_factory,
     )?;
     evm_runtime::register_evm_balance_runners(
         &mut registry,
-        artifacts,
         routes,
         &read_factory,
         &evm_adapter_factory,
@@ -390,10 +376,10 @@ fn invocation_key_error(_error: mfm_events::EventError) -> PublicError {
 }
 
 /// Request to start a certified typed run.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RunLaunchRequest {
-    /// Certifier-backed typed spec authority.
-    pub certified_spec: CertifiedTypedSpec,
+    /// Non-cloneable pre-admission runtime authority.
+    pub runtime_spec: CertifiedRuntimeSpec,
     /// Derived run id to bind.
     pub run_id: RunId,
     /// Store-owned and certified identity material used to derive `run_id`.
@@ -550,118 +536,96 @@ fn replay_diagnostic_error() -> PublicError {
     )
 }
 
-/// Loads and verifies the certified spec artifact bound by a typed run stream.
-pub async fn load_certified_spec_for_run(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+fn certified_spec_from_committed_journal(
+    journal: &store::CommittedRunJournal,
     registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
 ) -> Result<CertifiedTypedSpec, PublicError> {
-    let run_admitted = run_admitted_payload(run_id, stream)?;
-    let spec_artifact = artifacts
-        .read_retained_artifact(&store::run_artifact_requirement(
-            store::EventArtifactReferenceSource::RunSpec,
-            &run_admitted.spec_artifact,
-            events::ArtifactRole::TypedExecutionSpec,
-        ))
-        .await?;
-    let spec_evidence = spec_artifact.evidence().clone();
-    validate_spec_artifact_evidence(run_admitted, &spec_evidence)?;
-    let spec_bytes = spec_artifact.into_bytes();
-    let certificate_artifact = artifacts
-        .read_retained_artifact(&store::run_artifact_requirement(
-            store::EventArtifactReferenceSource::RunCertificate,
-            &run_admitted.certificate_artifact,
-            events::ArtifactRole::TypedSpecCertificate,
-        ))
-        .await?;
-    let certificate_evidence = certificate_artifact.evidence().clone();
-    validate_certificate_artifact_evidence(run_admitted, &certificate_evidence)?;
-    let certificate_bytes = certificate_artifact.into_bytes();
-    let certified = mfm_certify::verify_persisted_spec_certificate_with_trusted_registry(
-        &spec_bytes,
-        &certificate_bytes,
-        registry,
-    )?;
-    validate_run_admitted_matches_spec(run_admitted, certified.envelope())?;
-    Ok(certified)
+    let (_, spec_bytes) = journal.certified_spec_object();
+    let (_, certificate_bytes) = journal.certificate_object();
+    Ok(
+        mfm_certify::verify_persisted_spec_certificate_with_trusted_registry(
+            spec_bytes,
+            certificate_bytes,
+            registry,
+        )?,
+    )
 }
 
-async fn stored_launch_evidence_from_run_admitted(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    run_admitted: &events::RunAdmitted,
+async fn load_verified_run_view<S>(
+    store: &S,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+) -> Result<store::VerifiedRunView, PublicError>
+where
+    S: store::RunJournalStore + ?Sized,
+{
+    let journal = store
+        .load_committed_journal(run_id)
+        .await
+        .map_err(async_app_store_error)?;
+    let certified = certified_spec_from_committed_journal(&journal, registry)?;
+    Ok(journal.verify(certified)?)
+}
+
+fn stored_launch_evidence_from_verified_run(
+    current: &VerifiedCurrentRun,
 ) -> Result<RunLaunchEvidence, PublicError> {
+    let lifecycle = store::current_lifecycle::read(current.view());
+    let admission = lifecycle.admission()?;
     let spec_artifact = stored_run_launch_artifact(
-        artifacts,
+        &lifecycle,
         store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunSpec,
-            &run_admitted.spec_artifact,
+            admission.spec_artifact(),
             events::ArtifactRole::TypedExecutionSpec,
         ),
-        |evidence| validate_spec_artifact_evidence(run_admitted, evidence),
-    )
-    .await?;
+    )?;
     let certificate_artifact = stored_run_launch_artifact(
-        artifacts,
+        &lifecycle,
         store::run_artifact_requirement(
             store::EventArtifactReferenceSource::RunCertificate,
-            &run_admitted.certificate_artifact,
+            admission.certificate_artifact(),
             events::ArtifactRole::TypedSpecCertificate,
         ),
-        |evidence| validate_certificate_artifact_evidence(run_admitted, evidence),
-    )
-    .await?;
-    let mut config_artifacts = Vec::with_capacity(run_admitted.config_artifacts.len());
-    for config in &run_admitted.config_artifacts {
-        config_artifacts.push(
-            stored_run_launch_artifact(
-                artifacts,
-                store::run_artifact_requirement(
-                    store::EventArtifactReferenceSource::RunConfig,
-                    config,
-                    events::ArtifactRole::TypedConfig,
-                ),
-                |_| Ok(()),
-            )
-            .await?,
-        );
+    )?;
+    let configs = admission.config_artifacts();
+    let mut config_artifacts = Vec::with_capacity(configs.len());
+    for config in configs {
+        config_artifacts.push(stored_run_launch_artifact(
+            &lifecycle,
+            store::run_artifact_requirement(
+                store::EventArtifactReferenceSource::RunConfig,
+                config,
+                events::ArtifactRole::TypedConfig,
+            ),
+        )?);
     }
-    let mut fact_descriptor_artifacts =
-        Vec::with_capacity(run_admitted.fact_descriptor_artifacts.len());
-    for descriptor in &run_admitted.fact_descriptor_artifacts {
-        fact_descriptor_artifacts.push(
-            stored_run_launch_artifact(
-                artifacts,
-                store::run_artifact_requirement(
-                    store::EventArtifactReferenceSource::FactDescriptor,
-                    descriptor,
-                    events::ArtifactRole::FactDescriptor,
-                ),
-                |_| Ok(()),
-            )
-            .await?,
-        );
+    let descriptors = admission.fact_descriptor_artifacts();
+    let mut fact_descriptor_artifacts = Vec::with_capacity(descriptors.len());
+    for descriptor in descriptors {
+        fact_descriptor_artifacts.push(stored_run_launch_artifact(
+            &lifecycle,
+            store::run_artifact_requirement(
+                store::EventArtifactReferenceSource::FactDescriptor,
+                descriptor,
+                events::ArtifactRole::FactDescriptor,
+            ),
+        )?);
     }
-    let mut seed_cells = Vec::with_capacity(run_admitted.seed_cells.len());
-    for cell in &run_admitted.seed_cells {
-        let artifact = artifacts
-            .read_retained_artifact(&store::seed_cell_artifact_requirement(cell))
-            .await?;
-        let evidence = artifact.evidence().clone();
-        validate_artifact_requirement_for_app(
-            store::seed_cell_artifact_requirement(cell),
-            &evidence,
-            ErrorClass::Internal,
-            "RunAdmittedSeedArtifactMismatch",
-            "RunAdmitted seed artifact evidence does not match retained bytes",
-        )?;
+    let seeds = admission.seed_cells();
+    let mut seed_cells = Vec::with_capacity(seeds.len());
+    for cell in seeds {
+        let requirement = store::seed_cell_artifact_requirement(cell);
+        let artifact = lifecycle
+            .object_for_requirement(&requirement)
+            .ok_or_else(run_admitted_artifact_mismatch)?;
         seed_cells.push(RunLaunchSeedCell {
-            bytes: artifact.into_bytes(),
+            bytes: artifact.bytes().to_vec(),
             cell: cell.clone(),
         });
     }
     Ok(RunLaunchEvidence {
-        entry_point: run_admitted.entry_point.clone(),
+        entry_point: admission.entry_point().clone(),
         spec_artifact,
         certificate_artifact,
         config_artifacts,
@@ -670,56 +634,42 @@ async fn stored_launch_evidence_from_run_admitted(
     })
 }
 
-async fn stored_run_launch_artifact(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+fn stored_run_launch_artifact(
+    lifecycle: &store::current_lifecycle::CurrentLifecycleReader<'_>,
     requirement: store::EventArtifactRequirement,
-    validate: impl FnOnce(&store::ArtifactEvidenceRef) -> Result<(), PublicError>,
 ) -> Result<RunLaunchArtifact, PublicError> {
-    let artifact = artifacts.read_retained_artifact(&requirement).await?;
-    let evidence = artifact.evidence().clone();
-    validate_artifact_requirement_for_app(
-        requirement,
-        &evidence,
-        ErrorClass::Internal,
-        "RunAdmittedArtifactMismatch",
-        "RunAdmitted artifact evidence does not match retained bytes",
-    )?;
-    validate(&evidence)?;
+    let artifact = lifecycle
+        .object_for_requirement(&requirement)
+        .ok_or_else(run_admitted_artifact_mismatch)?;
     Ok(RunLaunchArtifact {
-        bytes: artifact.into_bytes(),
-        evidence,
+        bytes: artifact.bytes().to_vec(),
+        evidence: artifact.evidence().clone(),
     })
 }
 
-async fn load_runtime_spec_for_run(
-    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
-    registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<CertifiedRuntimeSpec, PublicError> {
-    let certified = load_certified_spec_for_run(artifacts, registry, run_id, stream).await?;
-    Ok(CertifiedRuntimeSpec::new(certified)?)
+fn run_admitted_artifact_mismatch() -> PublicError {
+    PublicError::backend(
+        ErrorClass::Internal,
+        "RunAdmittedArtifactMismatch",
+        "RunAdmitted retained object does not match verified journal evidence",
+    )
 }
 
-async fn replay_read_authority_for_run_with_retained_source_facts<S, A>(
+async fn replay_read_authority_for_run_with_retained_source_facts<'view, S>(
     store: &S,
-    artifacts: &A,
-    runtime_spec: &CertifiedRuntimeSpec,
-    verified_view: &VerifiedRunHistoryView,
-) -> Result<ReplayReadAuthority, PublicError>
+    registry: &CertificationRegistry,
+    verified_view: &'view store::VerifiedRunView,
+) -> Result<ReplayReadAuthority<'view>, PublicError>
 where
-    S: store::RunEventStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + ?Sized,
+    S: store::RunJournalStore + Send + Sync,
 {
-    let source_fact_events =
-        retained_source_fact_events_from_query_evidence(store, artifacts, verified_view.events())
-            .await?;
+    let (source_fact_events, source_fact_artifacts) =
+        retained_source_fact_events_from_query_evidence(store, registry, verified_view).await?;
     Ok(
-        ReplayReadAuthority::from_verified_run_history_view_with_source_facts_and_artifacts(
-            runtime_spec,
+        ReplayReadAuthority::from_verified_run_view_with_source_facts_and_artifacts(
             verified_view,
             source_fact_events,
-            Vec::new(),
+            source_fact_artifacts,
         )?,
     )
 }
@@ -858,7 +808,7 @@ fn prepare_certified_run_launch(
     config_inputs: Vec<RunLaunchConfigArtifact>,
     seed_inputs: Vec<RunLaunchSeedArtifact>,
 ) -> Result<RunLaunchRequest, PublicError> {
-    let runtime_spec = CertifiedRuntimeSpec::new(input.certified_spec.clone())?;
+    let runtime_spec = CertifiedRuntimeSpec::new(input.certified_spec)?;
     let spec_artifact = certified_spec_launch_artifact(&runtime_spec)?;
     let certificate_artifact = certified_spec_certificate_launch_artifact(&runtime_spec)?;
     let config_artifacts =
@@ -879,7 +829,7 @@ fn prepare_certified_run_launch(
         )
     })?;
     Ok(RunLaunchRequest {
-        certified_spec: input.certified_spec,
+        runtime_spec,
         run_id,
         identity_material,
         evidence: RunLaunchEvidence {
@@ -919,12 +869,20 @@ fn default_execution_claim_heartbeat_interval() -> Duration {
     Duration::from_secs(store::EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS)
 }
 
-fn async_app_store_error(_error: impl fmt::Display) -> PublicError {
-    PublicError::backend(
-        ErrorClass::Conflict,
-        "RunStoreRejected",
-        "Run store rejected the requested operation",
-    )
+fn async_app_store_error<E>(error: E) -> PublicError
+where
+    E: store::StoreErrorInspection + fmt::Display,
+{
+    match error.as_store_error() {
+        Some(store::StoreError::RunNotFound { .. }) => {
+            PublicError::not_found("RunNotFound", "typed run was not found")
+        }
+        _ => PublicError::backend(
+            ErrorClass::Conflict,
+            "RunStoreRejected",
+            "Run store rejected the requested operation",
+        ),
+    }
 }
 
 fn observation_app_store_error<E>(error: E) -> PublicError

@@ -312,18 +312,6 @@ impl DeterministicSigningProvider for MismatchedProvider {
     }
 }
 
-struct MissingArtifacts;
-
-impl store::RetainedArtifactReadProvider for MissingArtifacts {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        let artifact_id = requirement.artifact_id.clone();
-        Box::pin(async move { Err(store::StoreError::MissingArtifact { artifact_id }) })
-    }
-}
-
 fn vector_calldata() -> Vec<u8> {
     hex!("a22cb4650000000000000000000000005eee75727d804a2b13038928d36f8b188945a57a0000000000000000000000000000000000000000000000000000000000000000").to_vec()
 }
@@ -377,7 +365,6 @@ fn make_adapter(session: Arc<MockSession>, signer: Arc<FixedProvider>) -> EvmTra
     )
     .expect("signer binder");
     EvmTransactionAdapter::new(EvmTransactionRunnerCapabilities::new(
-        Arc::new(MissingArtifacts),
         signer_binder,
         |_binding, _signer_ref| Box::pin(async { Ok(()) }),
         mock_transaction_sessions(session),
@@ -702,7 +689,6 @@ async fn signer_implementation_mismatch_fails_before_requesting_a_signature() {
     )
     .expect("signer binder");
     let adapter = EvmTransactionAdapter::new(EvmTransactionRunnerCapabilities::new(
-        Arc::new(MissingArtifacts),
         signer_binder,
         |_binding, _signer_ref| Box::pin(async { Ok(()) }),
         mock_transaction_sessions(session),

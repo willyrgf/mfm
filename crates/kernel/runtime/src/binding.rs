@@ -8,6 +8,7 @@ use crate::runners::{
     CapabilityImplementationBinding, ErasedRunnerBinding, ErasedRunnerRegistry,
     RunnerIngressContext,
 };
+use crate::spec_authority::CurrentSpecRead;
 use crate::{
     canonical_json, capability_implementation_identity_json, executable_identity_json,
     CertifiedRuntimeSpec, Result, RunLaunchEvidence, RuntimeError,
@@ -95,9 +96,16 @@ impl BoundRuntimeContext {
         runtime_spec: &CertifiedRuntimeSpec,
         runners: &ErasedRunnerRegistry,
     ) -> Result<Self> {
+        Self::bind_current(runtime_spec, runners)
+    }
+
+    pub(crate) fn bind_current<S>(runtime_spec: &S, runners: &ErasedRunnerRegistry) -> Result<Self>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         let mut accumulator = BindingAccumulator::default();
 
-        for node in runtime_spec.executable_nodes() {
+        for node in runtime_spec.executable_nodes()? {
             bind_node(runtime_spec, runners, node, &mut accumulator)?;
         }
 
@@ -141,30 +149,39 @@ impl BoundRuntimeContext {
         ))
     }
 
-    pub(crate) fn validate_run_admitted_binding(
+    pub(crate) fn validate_current_admission_binding(
         &self,
-        run_admitted: &events::RunAdmitted,
+        admission: &mfm_store::v1::current_lifecycle::CurrentAdmissionRef<'_>,
     ) -> Result<()> {
-        if run_admitted.runner_executables != self.runner_executables {
+        if !admission
+            .runner_executables()
+            .eq(self.runner_executables.iter())
+        {
             return Err(RuntimeError::RunnerBinding(
                 "RunAdmitted runner executable identities do not match bound runtime context"
                     .to_owned(),
             ));
         }
-        if run_admitted.adapter_executables != self.adapter_executables {
+        if !admission
+            .adapter_executables()
+            .eq(self.adapter_executables.iter())
+        {
             return Err(RuntimeError::RunnerBinding(
                 "RunAdmitted adapter executable identities do not match bound runtime context"
                     .to_owned(),
             ));
         }
-        if run_admitted.capability_implementations != self.capability_implementations {
+        if !admission
+            .capability_implementations()
+            .eq(self.capability_implementations.iter())
+        {
             return Err(RuntimeError::RunnerBinding(
                 "RunAdmitted capability implementation identities do not match bound runtime context"
                     .to_owned(),
             ));
         }
         let digest = self.admitted_binding_digest()?;
-        if digest != run_admitted.admitted_binding_digest {
+        if &digest != admission.admitted_binding_digest() {
             return Err(RuntimeError::RunnerBinding(
                 "RunAdmitted binding digest does not match bound runtime context".to_owned(),
             ));
@@ -203,23 +220,26 @@ impl BoundRuntimeContext {
         Ok(binding.clone())
     }
 
-    pub(crate) fn validate_admission_authority(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-    ) -> Result<()> {
-        for node in runtime_spec.executable_nodes() {
+    pub(crate) fn validate_admission_authority<S>(&self, runtime_spec: &S) -> Result<()>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
+        for node in runtime_spec.executable_nodes()? {
             self.require_node_authority(node)?;
         }
         Ok(())
     }
 
-    pub(crate) async fn validate_launch_ingress(
+    pub(crate) async fn validate_launch_ingress<S>(
         &self,
-        runtime_spec: &CertifiedRuntimeSpec,
+        runtime_spec: &S,
         launch: &RunLaunchEvidence,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         let mut required = Vec::new();
-        for node in runtime_spec.executable_nodes() {
+        for node in runtime_spec.executable_nodes()? {
             if node.framework.is_none() {
                 collect_runtime_config_requirement(
                     self.validate_node_ingress(runtime_spec, node, launch).await,
@@ -236,20 +256,18 @@ impl BoundRuntimeContext {
     /// completed node cannot regain work, so revalidating its process-local provider would make
     /// later deterministic work depend on configuration it no longer needs. Pending domain nodes
     /// retain the same ingress check before the scheduler acquires a claim.
-    pub(crate) async fn validate_pending_launch_ingress(
+    pub(crate) async fn validate_pending_launch_ingress<S>(
         &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &mfm_ids::RunId,
-        projection: &mfm_store::v1::ProjectionSnapshot,
+        runtime_spec: &S,
+        lifecycle: &mfm_store::v1::current_lifecycle::CurrentLifecycleReader<'_>,
         launch: &RunLaunchEvidence,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         let mut required = Vec::new();
-        for node in runtime_spec.executable_nodes() {
-            if node.framework.is_none()
-                && projection
-                    .cell_terminal_for_run(run_id, &node.output_cell)
-                    .is_none()
-            {
+        for node in runtime_spec.executable_nodes()? {
+            if node.framework.is_none() && lifecycle.cell(&node.output_cell).is_none() {
                 collect_runtime_config_requirement(
                     self.validate_node_ingress(runtime_spec, node, launch).await,
                     &mut required,
@@ -309,12 +327,15 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
-    async fn validate_node_ingress(
+    async fn validate_node_ingress<S>(
         &self,
-        runtime_spec: &CertifiedRuntimeSpec,
+        runtime_spec: &S,
         node: &spec::NodeSpec,
         launch: &RunLaunchEvidence,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
         let binding = self.runner_binding_for(node)?;
         binding
             .runner
@@ -490,14 +511,24 @@ impl BoundRuntimeContextLoader {
     pub fn load(&self, runtime_spec: &CertifiedRuntimeSpec) -> Result<BoundRuntimeContext> {
         BoundRuntimeContext::bind(runtime_spec, &self.runners)
     }
+
+    pub(crate) fn load_current<S>(&self, runtime_spec: &S) -> Result<BoundRuntimeContext>
+    where
+        S: CurrentSpecRead + ?Sized,
+    {
+        BoundRuntimeContext::bind_current(runtime_spec, &self.runners)
+    }
 }
 
-fn bind_node(
-    runtime_spec: &CertifiedRuntimeSpec,
+fn bind_node<S>(
+    runtime_spec: &S,
     runners: &ErasedRunnerRegistry,
     node: &spec::NodeSpec,
     accumulator: &mut BindingAccumulator,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: CurrentSpecRead + ?Sized,
+{
     let descriptor = runtime_spec.state_descriptor_for_node(node)?;
     let binding = runners.resolve(runtime_spec, node, descriptor)?;
     let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {

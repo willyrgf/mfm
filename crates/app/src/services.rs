@@ -7,7 +7,9 @@ mod services_read;
 mod services_run;
 
 pub use self::services_read::RunReadServices;
-pub(super) use self::services_read::{TrustedRunReader, VerifiedRunReadContext};
+pub(super) use self::services_read::{
+    TrustedRunReader, VerifiedRunReadContext, VerifiedStatusReadContext,
+};
 
 /// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
@@ -27,12 +29,7 @@ impl<S> Deref for RunServices<S> {
 
 impl<S> RunServices<S>
 where
-    S: store::RunEventStore
-        + store::StoreScopeStore
-        + store::RetainedArtifactReadProvider
-        + Send
-        + Sync
-        + 'static,
+    S: store::RunJournalStore + store::StoreScopeStore + Send + Sync + 'static,
 {
     /// Creates typed async app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
@@ -47,22 +44,21 @@ where
         }
     }
 
-    async fn run_response_from_verified_status(
+    async fn run_response_from_verified_current(
         &self,
-        run_id: &RunId,
+        current: &VerifiedCurrentRun,
         status: DriveStatus,
-    ) -> Result<RunResponse, PublicError> {
-        let context = self
-            .trusted_run_reader()
-            .load_status_context(run_id)
-            .await?;
-        run_response_from_projection(
-            run_id,
-            context.runtime_spec(),
-            context.events(),
-            context.projection(),
-            status,
-        )
+    ) -> Result<RunResponse, PublicError>
+    where
+        S: store::CurrentProjectionStore,
+    {
+        let resource_lane_projection = self
+            .read
+            .store()
+            .status_projection_snapshot(current.view().run_id())
+            .await
+            .map_err(async_app_store_error)?;
+        run_response_from_verified_current(current, &resource_lane_projection, status.as_str())
     }
 
     fn trusted_run_reader(&self) -> TrustedRunReader<'_, S> {
