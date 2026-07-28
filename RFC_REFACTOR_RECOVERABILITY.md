@@ -1,15 +1,23 @@
 # RFC: Complete Transition Journal and Recoverable External Access
 
-Status: provisionally accepted — contract gates open; not implementation-ready
+Status: accepted target contract — retained contract-shaping evidence closed; schema-freeze and
+production-rollout gates remain open
 
 Scope: typed state execution, certified specs, run journal, external-access audit, recoverability,
 replay, facts, framework enforcement, execution catalogs, and app status
 
 This RFC defines the target breaking replacement of the current event, projection, attempt,
-side-effect, and generic saga machinery. It is not yet the current implementation authority. The
-pre-cutover contract, prototype/inventory, identity, and schema gates must close before the
+side-effect, and generic saga machinery. Its architecture and fixed contract choices are closed,
+with repository evidence and remaining gate classification recorded in the versioned
+[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md). It is not yet
+the current implementation authority. Identity, schema, and golden-vector gates must close before
+the atomic vertical cutover moves the
 [design contract](docs/design.md), [architecture guide](docs/architecture.md), affected companion
-documents, code, schemas, and tests move to this design together.
+documents, code, schemas, and tests to this design together. The retained prototypes and
+inventories close the contract-shaping evidence gate; identity, schema, and golden-vector work
+remain the next freeze boundary. Production-rollout gates block deployment or capability
+registration, not schema freeze, and cannot create an alternate schema, compatibility reader, or
+optional audit mode.
 
 ## Executive Decision
 
@@ -275,7 +283,6 @@ inside the source run.
 | --- | --- | --- | --- |
 | Direct MFM audit and executor-supplied delivery audit form one reviewable trace. | An affine Rust value cannot control a remote executor's internal HTTP/RPC exchanges. | An unmatched executor call may leave MFM without the latest target-attempt frontier, and consumers might conflate direct authorization with executor attestation. | Require a durable executor authorization before every target attempt, immutable predecessor-linked frontiers retained by MFM with each result, and a proof/attestation basis labeled distinctly from MFM authorization/observation. |
 | A durable authorization is acceptable as the honest pre-call audit fact. | No local database protocol can atomically prove that a remote boundary was physically entered. | Consumers could incorrectly read authorization as proof that a request was sent. | Name and document the record as authorization, expose unmatched records as `CrashAmbiguous`, and never claim exact physical delivery. |
-| Reviewed typed results and safe failure summaries provide enough audit detail. | Raw provider bodies or error chains may contain useful diagnostics as well as secrets, and semantic secrecy is not decidable from a Rust type alone. | Redaction may omit forensic detail; retaining raw material may violate the no-secret invariant. | Define bounded closed public result/failure schemas per capability, qualify classifiers/canonicalizers, and adversarially test credential, bearer, and low-entropy-secret leakage. |
 | Complete transition/audit correlation and retention are acceptable in the run journal. | Exact input lineage, non-public outputs/facts/evidence, redacted access order, frequency, source choice, and wall-clock metadata may reveal tenant behavior or provider incidents. | Indefinite immutable retention or broad trace dereferencing could conflict with privacy, erasure, tenant isolation, or least-access requirements. | Keep status/public-output access separate from privileged tenant/run-authorized trace and object access, omit source and precise time by default, and define the production retention policy before rollout. If deletion is mandatory, resolve the journal-integrity and archival contract in a follow-up RFC rather than silently weakening this trace. |
 | Same-tenant cross-run sources and fact selection cover the baseline product. | A future aggregate or delegated analysis may need to consume another tenant's approved data. | Allowing that implicitly would turn a run reference or fact query into cross-tenant bearer authority; forbidding it may constrain future products. | Reject cross-tenant sources and facts in this cutover. If required later, design a separate delegated-access contract with explicit source authority before changing the frozen schemas. |
 | Semantic closure may be followed by audit-only observations. | Current terminal models often prohibit every later run append. | A stale call returning after closure could not be recorded, or one crashed call could block closure forever. | Make closure absorbing for semantic transitions and new authorizations while allowing one observation for a pre-closure unmatched authorization. |
@@ -285,8 +292,6 @@ inside the source run.
 | Intended mutation executors can provide permanent keyed convergence. | Some systems have finite idempotency windows or no client-chosen identity. | A delayed call could create another mutation or cost-bearing operation. | Inventory executors and certify permanent destination-native convergence or a keyed executor with its own reviewed downstream convergence proof. Unsupported effect states remain unregistered. |
 | Executor-owned delivery state is acceptable as an irreducible external authority. | The goal is to remove secondary run-state stores, but an executor ledger still does not create destination convergence by itself. | Mistaking the ledger for a generic idempotency proof could duplicate a downstream mutation after `target applied -> executor crash`. | Treat the ledger as external-delivery authority only and require an independently reviewed downstream convergence mechanism, permanent anti-rollback bindings, and disaster-recovery tests. |
 | Cross-effect resource coordination can leave the kernel. | Different effect keys may still compete for one nonce, UTXO, sequence, inventory item, or business resource. | Removing resource lanes without a replacement owner could admit conflicting external operations. | Require the executor/destination to provide exclusive ownership, one shared durable coordinator, or atomic domain preconditions. Keep an effect state unregistered until that ownership is concrete. |
-| Explicit per-operation read states are practical at production fan-out. | Current EVM collection can issue many independent reads, while Bitcoin collection contains several response-dependent RPCs. | The chosen audit guarantee may materially increase graph size, journal volume, and latency. | Prototype the exact EVM and Bitcoin target graphs, including cancellation and partial failure, before schema freeze. Measure representative fan-out and optimize only without combining audit identities or moving adaptive request authorship outside typed states. |
-| Bitcoin `scantxoutset "start"` qualifies as a repeat-work-safe read. | It initiates costly shared server work even though it does not create a durable domain mutation. | Crash recovery may repeat work or contend with another scan; if that consequence is not bounded and accepted, classifying it as an ordinary read is dishonest. | Prototype lost responses, cancellation, concurrent scans, delayed reissue, bounded descriptors/results, and provider cost. Keep production Bitcoin collection unregistered unless it passes; otherwise design a keyed work executor plus audited status reads without changing the generic runtime. |
 | Provider-native multi-operation batching can remain unsupported in the baseline. | A later optimization may want to carry several ready requests in one HTTP or JSON-RPC exchange. | Treating the transport envelope as one audit unit would hide independently meaningful operations; adding batching prematurely would complicate affine authority and partial-observation atomicity. | Baseline capabilities perform one application-protocol operation. A future batching RFC must preserve one authorization and one outcome identity per member and prove consumption, cancellation, and partial-return behavior. A collection-valued method is one operation only when its members have one indivisible semantic identity and shared snapshot/result contract. |
 | Read and effect request authorship can be total over certified typed inputs. | Existing planners may accept weak types and report domain errors before producing a request. | A generic pre-call runner-failure path would reintroduce another lifecycle. | Move fallible validation into an upstream pure state that produces a stronger type and property-test request totality. If a legitimate case remains, specify one closed local typed-failure transition rather than generic runner errors. |
 | Every kernel invariant can be excluded at the typed execution boundary or enforced at an unavoidable trust boundary. | Persisted bytes, external evidence, catalog erasure, and concurrent appends cannot be made safe by Rust types before they are decoded or admitted. | Calling all invariants “type guaranteed” could hide required replay, store, or evidence verification; adding named validation phases would recreate a lifecycle. | Inventory every invariant. Use sealed constructors and certified types inside the process, and keep decoding, cryptographic verification, exact-head compare-and-swap, and atomic append as boundary predicates rather than framework phases. |
@@ -303,11 +308,9 @@ inside the source run.
 | Selected compiled planner, state, and capability implementations are trusted to obey their certified purity, determinism, audited-IO, and secrecy contracts. | Rust signatures do not prevent compiled code from reading time, environment, filesystem, network, globals, RNG, or FFI directly. | Exact reproduction may detect a differing result but cannot prove that a matching result had no undeclared influence; a capability could bypass the audited wrapper internally. | Treat registrations as reviewed trusted platform code, add conformance and adversarial tests, and restrict direct transport/ambient-authority dependencies. If untrusted implementations are required, introduce a capability-confined sandbox in a separate design. |
 | `mfm.executable-bytes.v1` identifies the executing callback closure closely enough, and historical whole executables can be retained and run safely for the required reproduction horizon. | Dynamic libraries, loaders, and OS behavior may sit outside the hashed artifact; old artifacts may be unavailable or vulnerable; and unrelated rebuilds change a whole-binary digest. | “Exact” could overstate its proof, or semantic reproduction could become unavailable for some runs or require more deployment pinning, although structural verification remains valid. | Define a hermetic/static artifact boundary or report reproduction unavailable, retain immutable artifacts under an explicit policy, run them capability-free in isolation, measure overbinding across representative upgrades, and do not invent per-callback equivalence aliases in this cutover. Equality proves only self-attested artifact-byte identity, not callback purity or business correctness. |
 | Cross-version callbacks remain meaningfully comparable against old manifests and schemas. | A candidate executable may remove or reinterpret an old state, node, request, or evidence schema. | A tool could hide incompatibility behind adapters or incorrectly call a partial comparison agreement. | Report `NotComparable` per plan/transition, never synthesize compatibility adapters in this contract, and keep every candidate result non-authoritative. |
-| Full transition and artifact retention is acceptable initially. | Complete future analysis requires the referenced bytes, not only their hashes. | Indefinite retention can produce material storage growth. | Measure expected volume. Design garbage collection only after a complete dependency-closure and archival contract exists. |
-| A same-journal history scan is sufficient for the initial reserved fact-selection capability. | Fact volume and latency objectives are not defined. | Cross-run selection can become unbounded, and its two audit appends may be material. | Locate every fact-bearing transition through a validated routing column and batch-verify it initially. Measure full audited requests, and add only a rebuildable, watermarked candidate index when required. |
+| Full transition and artifact retention is acceptable initially. | Complete future analysis requires the referenced bytes, not only their hashes. | Indefinite retention can produce material storage growth. | Measure expected volume and obtain capacity approval before production rollout. Design garbage collection only after a complete dependency-closure and archival contract exists. |
 | Tenant-scoped fact-order barriers are sufficiently narrow for the initial workload. | Hot tenants with many fact publications and selections still serialize on one tenant frontier, and the final tenant/scoping boundary is deployment-specific. | Fact-heavy workloads may contend or an incorrect scope could mix authority across tenants. | Freeze the tenant scope in admission, prototype concurrent fact publication and selection, verify dense-prefix recovery, and measure hot-tenant throughput before schema freeze. |
 | Append-time store attestation is sufficient to establish a historical fact-selection barrier's freshness. | A barrier snapshots the tenant publication head but does not itself advance or enter that tenant's dense publication chronology, so a later reader cannot independently rederive that the stored value equaled the head at the historical instant. | Treating density alone as retrospective proof would overstate omission verification after restart or export. | Make equality to the locked tenant head an explicit qualified-store append invariant; on reload verify the immutable barrier commit, tenant, range, dense publication prefix, and response binding. Same-store completeness trusts that attested append. If independently portable freshness is later required, add a tenant-scoped authenticated publication/barrier chain in a separate RFC. |
-| Portable replay can carry the transitive proof closure of cross-run root sources. | A correction chain may reference several earlier closed runs and profiles. | Bundles may grow materially, while omitting one source would make effective-output or evidence-role verification incomplete. | Require an acyclic closed-source dependency DAG, deduplicate proof objects, measure bundle size, and reject verified replay when any dependency proof is absent. |
 | Cross-run consumers can author queries from base inputs, and same-run fact flow can use graph edges. | Existing code may derive a second query adaptively from selected facts or use the fact store as indirect same-run wiring. | Hidden multi-phase reads or compatibility materializers would return. | Inventory consumers; split adaptive queries into typed read-state chains and replace same-run queries with explicit typed edges. |
 | Generic typed read-response materialization can resolve selected fact value references. | Existing materialization may be limited to state inputs. | A fact-specific loader would create another runtime path. | Generalize the ordinary content-addressed response materializer and prohibit a fact-only loader. |
 | The canonical semantic-state digest schema can be frozen independently of Rust layout. | The RFC defines its components but not final byte-level versioned schemas. | An implementation refactor could invalidate history or Postgres/memory parity. | Specify canonical test vectors for genesis and every transition variant before implementation cutover. |
@@ -687,7 +690,9 @@ CapabilityBinding =
         capability_contract_ref,
         admitted_implementation_ref,
         safe_classifier_contract_ref,
-        reviewed_source_scope_ref?,
+        safe_failure_contract_ref,
+        reviewed_source_scope_ref,
+        routing_generation_ref,
     }
   | ExecutorBinding {
         executor_contract_ref,
@@ -698,7 +703,7 @@ CapabilityBinding =
 ExecutorDeployment {
     executor_namespace_ref,
     durable_ledger_generation_ref,
-    tenant_scope_id,
+    tenant_scope_id: TenantScopeId,
     evidence_authority_ref,
     resource_ownership_ref?,
 }
@@ -719,6 +724,12 @@ ExecutorContractDescriptor {
     ensure_contract_ref,
     request_schema_ref,
     result_schema_ref,
+    delivery_audit_schema_ref,
+    terminal_evidence_schema_ref,
+    safe_failure_contract_ref,
+    downstream_convergence_contract_ref,
+    evidence_bounds,
+    resource_domain_requirement,
     required_plan_expansions: [
         {
             executor_operation_id,
@@ -734,6 +745,23 @@ CapabilityBindingRef {
 }
 ```
 
+The two-field shape is the universal lightweight `ContentRef` owned by `mfm-ids`:
+
+```text
+ContentRef {
+    schema_id,
+    content_digest,
+}
+```
+
+Executor deployments, bindings, resource-ownership descriptors, contracts, and frontier
+descriptors use `ContentRef` or a typed wrapper over it. A `ContentRef` identifies reviewed
+content only; it proves neither retention, journal producer lineage, run reachability, nor access
+authority. The full journal-retained `ValueRef` defined below remains a distinct shape with
+artifact identity, evidence hash, role, byte length, media type, semantic type, and producer
+binding. The executor prototype's current lightweight type named `ValueRef` is renamed
+`ContentRef`; no compatibility alias remains.
+
 `ReadCapabilityBindingRef` and `ExecutorBindingRef` are typed wrappers over
 `CapabilityBindingRef` that verify the referenced variant; they do not introduce another identity.
 `executor_deployment_ref` content-addresses the canonical non-secret `ExecutorDeployment` object
@@ -746,7 +774,20 @@ legal only when the certified executor contract proves that distinct effect keys
 externally exclusive resource.
 
 These are closed public identities, never endpoints, credentials, signer handles, or
-secret-derived values. An executor binding is the one immutable recovery-routing identity. Its
+secret-derived values. `TenantScopeId` is the canonical bounded non-secret scalar selected by app
+authorization and copied directly into `ExecutorDeployment`; it is not a `ContentRef`. Admission,
+executor-ledger partitioning, and every ensure call require exact equality with
+`RunAdmitted.tenant_scope_id` before lookup or mutation. Every read binding carries one immutable
+non-secret
+`routing_generation_ref` in addition to its reviewed source scope. Current configuration may
+select a newer generation only for a new run. Resume and every later access resolve the exact
+admitted generation; inability to resolve it blocks the run rather than falling back, failing
+over, reselecting a provider, or silently changing source scope. Endpoint credentials may rotate
+behind that generation only when the binding's qualified resolver proves the reviewed source
+semantics are unchanged. The reserved journal fact capability uses an internal generation bound to
+the admitted journal/store contract and cannot be overridden by app configuration.
+
+An executor binding is the one immutable recovery-routing identity. Its
 reference, rather than a copied subset of its fields, is used by the effect request, effect key,
 authorization, executor ledger, terminal evidence, restore/failover routing, and replay. A pending
 effect can be driven only through its original binding. An upgrade that cannot load that exact
@@ -765,7 +806,9 @@ coordination. Admission requires its tenant scope to equal `RunAdmitted.tenant_s
 resource ownership whenever the contract declares a shared-resource domain, and rejects any
 incomplete binding. Runtime, replay, effect identity, and evidence propagate and compare only the
 one `ExecutorBindingRef`; they do not copy its contract or deployment components. Read bindings
-have no executor deployment.
+have no executor deployment, but their source scope and routing generation are immutable parts of
+`ReadCapabilityBindingRef`, `FrozenReadIntent`, every authorization, observation compatibility,
+resume, and exact reproduction.
 
 A replacement deployment generation with bound resource ownership cannot claim an existing
 `external_resource_domain_ref` while any authority issued by the old generation could still
@@ -1504,11 +1547,13 @@ Four distinct rules follow:
 A generic optional collection of evidence references is forbidden, and required safety evidence
 cannot use an optional slot.
 
-Run admission itself performs no external provider, routing, filesystem, signer, or executor probe.
-Any live information needed to select or validate a source is modeled as an audited bootstrap read
-state after `RunAdmitted`. This keeps the claim “every MFM-controlled semantic external access is
-audited” true from the run root and prevents pre-admission IO from influencing an untraceable
-configuration choice.
+Run admission itself performs no external provider, source, chain, signer, route-validity, or
+executor semantic probe. Platform configuration may select one already qualified immutable
+non-secret `routing_generation_ref` for a new run, but it cannot contact, validate, or silently
+reselect the source. Any live information needed to resolve or validate that exact generation is
+modeled as an audited bootstrap read state after `RunAdmitted`. This keeps the claim “every
+MFM-controlled semantic external access is audited” true from the run root and prevents
+pre-admission IO from influencing an untraceable live-source choice.
 
 ### Production read decomposition
 
@@ -1518,16 +1563,15 @@ composition:
 
 ```text
 EVM balance collection:
-  audited source/bootstrap read when live validation is required
-    -> audited latest-anchor read
+  audited source/chain bootstrap for the admitted routing_generation_ref
+    -> audited initial-anchor read
     -> ordinary fan-out with one audited token-metadata or balance node per invocation
        at that exact anchor
     -> audited final-anchor confirmation
     -> pure typed aggregation
 
 Bitcoin balance collection:
-  audited source/bootstrap read when live validation is required
-    -> audited blockchain-info read
+  audited source/bootstrap getblockchaininfo read for the admitted routing_generation_ref
     -> audited scantxoutset "start" read with one indivisible collection-valued request
     -> audited block-hash confirmation derived from the scan result
     -> pure typed aggregation
@@ -1541,8 +1585,12 @@ callers do not manually assemble protocol steps and runtime learns no EVM- or Bi
 phase.
 
 The production-read prototype gate must exercise partial return, cancellation, compare-and-swap
-loss, anchor change, and maximum certified fan-out. Performance may motivate a later
-authority-preserving batching design, but cannot relax this audit unit.
+loss, anchor change, immutable routing-generation resolution across resume, and maximum certified
+fan-out. Performance may motivate a later authority-preserving batching design, but cannot relax
+this audit unit. The current aggregate EVM and Bitcoin readers are not qualification evidence and
+are deleted. An EVM or Bitcoin read capability is registered at cutover only when its decomposed
+graph and exact-call conformance pass; otherwise that capability remains unavailable without
+changing the generic runtime.
 
 The target classifies Bitcoin `scantxoutset "start"` as a read, not a mutation effect, only after
 its production capability qualifies that choice. Qualification must establish that it creates no
@@ -1666,17 +1714,16 @@ Its normative meaning is:
 The append has a closed result:
 
 ```text
-NewlyAppended(
-    AuthorizedReadAccess
-  | AuthorizedEnsureAccess
-)
+NewlyAppended(NewlyAppendedAuthorization)
 AlreadyCommitted
 Rejected
 OutcomeUnknown
 ```
 
-Only a positively acknowledged `NewlyAppended` result mints a publicly nameable but privately
-constructible, non-cloneable, non-serializable, affine authority. The concrete type seals:
+Only a positively acknowledged `NewlyAppended` result returns the store-owned,
+non-cloneable, non-serializable `NewlyAppendedAuthorization` permit. Runtime consumes that permit,
+checks the exact admitted catalog binding, and constructs one private
+`AuthorizedReadAccess` or `AuthorizedEnsureAccess`. The permit and resulting affine authority bind:
 
 ```text
 authorization_ref
@@ -1691,8 +1738,8 @@ committed effect request                       # ensure only
 ```
 
 An idempotently found record, reload, stale response, commit-then-error, or lost acknowledgement
-mints no authority. A later physical call requires a fresh authorization append identity even when
-the semantic read request or effect request is unchanged.
+returns no permit and mints no authority. A later physical call requires a fresh authorization
+append identity even when the semantic read request or effect request is unchanged.
 
 For `mfm.journal.fact-selection.v1`, `tenant_fact_frontier` is resolved from the positively
 acknowledged authorization commit's `FactSelectionBarrier`; other capabilities cannot carry it.
@@ -1811,10 +1858,14 @@ trait AuditedReadCapability {
     type Response;
 
     async fn read(
-        access: AuthorizedReadAccess<CommittedRequest<Read, Request>>,
+        access: AuthorizedReadAccess<Request>,
     ) -> AccessReturn<Response>;
 }
 ```
+
+The private access value carries the runtime-owned committed-request proof; the live adapter can
+inspect only the typed request view needed for its one operation. A raw `Request`, a
+`RequestView`, or an existing authorization record cannot construct this authority.
 
 The runtime result flow is:
 
@@ -2080,7 +2131,10 @@ enum Ensure<Evidence> {
 `delivery_audit_ref` is mandatory for `Pending` and is a required field of terminal `evidence`. It
 addresses an immutable, bounded, reviewed, non-secret object retained by MFM through the
 observation's `result_ref`; it is never a remote locator. It uses the ordinary content-addressed
-`ValueRef` and introduces no independently authoritative handle type. Its logical shape is:
+full journal `ValueRef` and introduces no independently authoritative handle type. Lightweight
+executor-internal descriptor and frontier references remain `ContentRef`s; MFM promotes supplied
+bytes to a producer-bound `ValueRef` only through the ordinary atomic object-admission path.
+Possession of either reference is never bearer authority. The evidence's logical shape is:
 
 ```text
 ExecutorEvidenceRecord ::=
@@ -2142,9 +2196,14 @@ commitments. The exact executor contract defines each record schema and proof re
 Before target boundary entry, the executor durably appends `DeliveryAttemptAuthorized` to the exact
 keyed ledger. Only a positively acknowledged new append mints executor-internal authority for zero
 or one target operation; reloading an old record or resolving an ambiguous append mints none. A
-surviving result durably appends at most one `DeliveryAttemptObserved`. An unmatched authorization
-remains ambiguous and is never rewritten to “not called.” A convergence-safe repeat uses a new
-ordinal and attempt identity. The canonical empty frontier represents no delivery authorization.
+successful target entry returns a durable receipt naming the exact attempt that entered or
+returned from the destination. Only that receipt can identify the corresponding
+`DeliveryAttemptObserved`; neither delivery order nor the latest unobserved authorization may be
+used to infer it. A surviving result durably appends at most one exact linked observation. An
+unmatched authorization remains ambiguous and is never rewritten to “not called.” A
+convergence-safe repeat uses a new ordinal and attempt identity. A returned delivery-audit chain is
+never empty: an effect with no delivery authorization still returns its chain beginning at the
+single `EffectBound`.
 
 Every `Returned(Pending { .. })` and `Returned(Terminal { .. })` result supplies the complete
 content-addressed suffix needed to reach its frontier. Every returned chain descends from exactly
@@ -2160,13 +2219,30 @@ delivery evidence. The greatest frontier is a rebuildable private fold over comm
 observations, not a persisted executor-status authority.
 
 The executor contract's finite attempt-count, total evidence-record count, and retained-frontier
-byte bounds make every complete new suffix representable in one reviewed result. Before
-authorizing another target attempt, the executor proves that the resulting counts and complete
-retained frontier remain within every bound. Once a bound is exhausted, or the next authorization
-could exceed it, `ensure` may only inspect its own retained state or return already obtained
-operation evidence. It cannot enter the target boundary or authorize another target attempt. If no
-terminal proof can be obtained, the effect remains permanently pending. The baseline has no
-delivery-audit pagination protocol.
+byte bounds make every complete new suffix representable in one reviewed result. At every
+frontier, unused capacity must cover one worst-case `DeliveryAttemptObserved` for each unmatched
+authorization plus one worst-case `TerminalTombstone` while no tombstone exists. Authorizing
+another target attempt adds another observation debt; a fixed allowance for only the newest
+attempt is invalid. The structural minimum immediately after the first authorization is therefore
+two completion records, while the actual reserved record and byte capacity grows cumulatively
+with unmatched attempts. Before authorizing another target attempt, the executor proves that the
+resulting counts, cumulative completion debt, and complete retained frontier remain within every
+bound. Once a bound is exhausted, or the next authorization could exceed it, `ensure` may only
+inspect its own retained state or return already obtained operation evidence. It cannot enter the
+target boundary or authorize another target attempt. If no terminal proof can be obtained, the
+effect remains permanently pending. The baseline has no delivery-audit pagination protocol.
+
+The retained reference contract admits non-empty effect identifiers of at most 256 UTF-8 bytes and
+rejects a longer identifier before constructing or persisting any effect row. Authoritative refold
+enforces the same bound. This closes the fixed byte reserve because the identifier is the only
+variable input repeated by completion-record routing strings: an observation contains it in the
+effect stream and append identity, while a tombstone additionally contains the derived target
+operation reference. Executor binding and destination identity are contract-fixed, attempt and
+outcome references are fixed-width digests, ordinals are attempt-bounded, and the destination
+account is a fixed-width integer. At the exact 256-byte boundary the retained PostgreSQL prototype
+currently accounts 1,041 bytes for the worst-case returned observation (attempt ordinal 63) and
+1,331 bytes for the tombstone, both within the 16,384-byte per-completion reserve; 257 bytes is
+rejected.
 
 This is not a generic evidence bag. The exact bound `executor_contract_ref` fixes both the
 delivery-audit and terminal-evidence schemas, canonicalization, verifier, and permitted proof forms;
@@ -2186,8 +2262,9 @@ If a committed request deliberately pins an expiring quote or resource, it also 
 frontier and a certified terminal-rejection proof. Expiry, timeout, or lookup absence alone cannot
 prove permanent non-application and may leave the effect pending.
 
-Only `AuthorizedEnsureAccess`, already bound to a `CommittedEffectRequest` reconstructed from a
-verified pending transition, can reach `ensure`. Request and authority cannot be substituted
+Only the runtime-owned private `AuthorizedEnsureAccess`, already bound to a
+`CommittedEffectRequest` reconstructed from a verified pending transition, can reach `ensure`.
+Generic executor callers cannot construct it, and request and authority cannot be substituted
 independently. The raw mutation transport is not supplied to state code or ordinary runtime
 execution.
 
@@ -2467,6 +2544,22 @@ can atomically cover both MFM authorization and an arbitrary external target. Th
 authority for run state: MFM commits the returned delivery frontier and terminal evidence into the
 one run journal, and settlement, status, trace, and replay never query mutable executor state.
 
+The generic executor contract owns immutable keyed effect/resource streams, append and
+compare-and-swap semantics, typed resource-policy boundaries, target-entry permits, evidence
+frontiers, and restore/failover requirements. A PostgreSQL executor backend may implement those
+streams, but PostgreSQL durability alone is not non-rollback or split-brain authority. Production
+registration additionally requires a deployment-owned fence outside every database rollback
+domain that preserves the exact executor ledger generation, rejects stale/sibling writers, and
+proves the destination convergence or resource fence named by the binding. The MFM store's
+authoritative-writer/WAL fence and the executor/destination fence are independent authorities:
+neither can stand in for the other.
+
+The contract-shaping reference-executor and PostgreSQL prototypes close the logical pre-freeze
+gate but do not by themselves satisfy that production HA obligation. Until a concrete deployment
+promotion/restore procedure and its external fence pass, no mutation executor may be registered
+from memory checkpoints, local files, ordinary PostgreSQL commit acknowledgement, or an unfenced
+replica.
+
 Qualification must prove either that every actor capable of mutating the resource participates in
 the one bound owner, or that the authoritative destination enforces the same permanent conditional
 or fencing rule against every actor. The owner must never reassign a resource while an earlier
@@ -2525,7 +2618,7 @@ read:
   request(StateFrame)
     -> one immutable typed Request
 
-  apply(StateFrame, CommittedObservation<Read, Response>)
+  apply(StateFrame, ObservationView<Response>)
     -> Settlement | InsufficientEvidence | InvalidEvidence
 
 effect:
@@ -2534,11 +2627,19 @@ effect:
 
   settle(
       original StateFrame,
-      CommittedRequest<Ensure, Request>,
-      CommittedObservation<Ensure, TerminalEvidence>
+      RequestView<Request>,
+      ObservationView<TerminalEvidence>
   )
     -> Settlement | InsufficientEvidence | InvalidEvidence
 ```
+
+`StateFrame`, `RequestView<T>`, `ObservationView<R>`, and `Settlement` are owned by
+`mfm-program`. The borrowed views contain typed values and their exact immutable references, but no
+append, external-access, store, or runtime authority. `mfm-runtime` privately owns the
+`CommittedRequest`, `CommittedObservation`, and selected-record proof behind those views. It
+invokes the callback with borrowed value views and binds the returned settlement to the exact
+committed proof before constructing a transition candidate. Pure domain crates therefore do not
+depend on runtime or store authority.
 
 `Settlement` is exactly `Succeeded { output_bindings, fact_emissions }` or
 `Failed { typed_failure_ref }`. A typed failure is domain truth and commits. Invalid inputs,
@@ -2681,31 +2782,47 @@ is outside this baseline; runtime does not recover it through a hidden global br
 
 ### Authority-bearing execution types
 
-Keep only the public or crate-visible phase types that prevent an unsafe crossing:
+Keep only the types that prevent an unsafe crossing, with ownership following dependency
+direction:
 
 ```text
-StateFrame<S>
-  verified typed view over one deterministic input-manifest candidate; no append authority
+mfm-program:
+  StateFrame<S>
+    verified typed value view over one deterministic input-manifest candidate
 
-CommittedRequest<K, T>
-  the exact read or effect request with durable authorization/transition authority
+  RequestView<T>
+    borrowed typed request value plus its exact immutable reference
 
-AuthorizedAccess<K, T>
-  non-cloneable affine authority for one boundary operation
+  ObservationView<R>
+    borrowed typed observation value plus its exact immutable reference
 
-CommittedObservation<K, R>
-  one verified observation that a state callback may examine
+  Settlement<S>
+    typed success or typed domain failure returned for transition validation
 
-Settlement<S>
-  typed success or typed domain failure ready for transition validation
+mfm-runtime, private:
+  CommittedRequest<K, T>
+    exact request plus its durable authorization/transition proof
+
+  CommittedObservation<K, R>
+    exact verified observation and selected-record proof
+
+  AuthorizedAccess<K, T>
+    non-cloneable affine authority for one registered capability boundary operation
+
+mfm-store, sealed:
+  NewlyAppendedAuthorization
+    non-cloneable permit returned only for a directly observed new authorization append
 ```
 
 `K` is a sealed `Read` or `Ensure` marker. The read request becomes committed in its authorization
 batch; the effect request becomes committed in `EffectRequested`.
 `AuthorizedReadAccess` and `AuthorizedEnsureAccess` may be aliases over the one implementation.
-These authority types are publicly nameable so implementations in other crates can accept them,
-but constructors and fields remain private. The pre-observation wrapper result, variant-specific
-transition candidates, and erased catalog dispatch remain private.
+The store returns `NewlyAppendedAuthorization` only with a directly observed
+`NewlyAppended` result. Runtime consumes that permit into `AuthorizedAccess`. `OutcomeUnknown`,
+`ExistingSame`, idempotent reload, and compare-and-swap loss never mint it. Private live adapters
+accept `AuthorizedAccess`; lower reusable transports remain runtime-agnostic. The pre-observation
+wrapper result, committed proof types, variant-specific transition candidates, and erased catalog
+dispatch remain private.
 
 ### Computation ownership
 
@@ -2738,11 +2855,12 @@ define replay behavior. The architectural adapter role remains the private live-
 state-owned capability intent to the reusable transport. It owns neither a runtime lifecycle nor a
 semantic execution layer.
 
-The kernel runtime crate owns the sealed `AuthorizedAccess` and uncommitted/committed observation
-types. A private live `CapabilityCatalog` binding accepts that authority and calls a lower
-runtime-agnostic reusable transport. Runtime never depends on a domain live crate, and the affine
-token does not infect a public transport API used outside MFM. The compile-time guarantee covers
-invocation of a registered MFM capability entry, not independent use of the transport primitive.
+The kernel runtime crate owns the sealed `AuthorizedAccess` and uncommitted/committed proof types.
+A private live `CapabilityCatalog` binding accepts that authority and calls a lower
+runtime-agnostic reusable transport. Runtime never depends on a domain live crate, pure domains see
+only program-owned value views, and the affine token does not infect a public transport API used
+outside MFM. The compile-time guarantee covers invocation of a registered MFM capability entry,
+not independent use of the transport primitive.
 
 The effect executor owns external convergence, delivery state, cross-effect resource coordination,
 signing/delivery choices, and durable terminal evidence within its certified equivalence contract.
@@ -2926,6 +3044,8 @@ entries cannot change the run contract. Admission and resume fail closed when th
 or a selected entry is missing or mismatched. Catalog construction and binding perform no
 semantic IO;
 provider, source, chain, signer, or route probing belongs in an audited post-admission read state.
+Binding a read catalog entry resolves the exact admitted `routing_generation_ref`; it cannot
+consult a mutable route alias, choose a newer generation on resume, or fail over to another source.
 Injected and authored states enter this manifest identically; runtime dispatch does not retain an
 origin bit or use a second catalog.
 The reserved `mfm.journal.fact-selection.v1` entry is constructed internally from the exact
@@ -3431,10 +3551,28 @@ references without inline duplication or a fact-specific state loader.
    and tie-break; and
 6. produces the complete deterministic response, including explicit empty results.
 
-The scan runs against the authoritative writer snapshot or a replica that proves it has applied
-the barrier commit and every fact publication through that barrier's frontier. A lagging or
-unproven replica waits or fails closed; it cannot answer from its local maximum and call the result
-complete.
+One winning `NewlyAppendedAuthorization` is consumed affinely to construct a private,
+non-cloneable, non-serializable `FactScanSession` containing the authorization reference, request
+digest, exact `TenantFactFrontier`, next `(fact_order, fact_ordinal)`, bounded per-query top-K
+accumulator, and measurement counters. A step consumes the session, keyset-reads the next
+contiguous same-tenant interval from the fenced writer, and returns only private `More(session)` or
+`Complete(response)`. `More` is not an observation, persisted checkpoint, scheduler action, second
+authorization, second frontier, or public bearer value. No cryptographic cursor seal or
+predecessor-step hash exists because this position never crosses a trust boundary. Only the
+consuming session that has traversed the exact frontier may construct the one
+`FactSelectionResponse`.
+
+The baseline step work budget is 4,096 publications and 8,192 facts; the canonical response limit
+is 128 items. Those step budgets affect only the number of internal `More` results. They never
+truncate a prefix, reject an otherwise valid tenant history, or change response bytes. A process
+loss drops the private session and leaves the ordinary unmatched-authorization recovery condition;
+retry obtains ordinary authorization and rescans from the immutable prefix. There is no wall-time
+or total-publication/fact validity threshold.
+
+The v1 scan runs only against the fenced authoritative writer snapshot. A replica cannot answer a
+store-backed fact selection or claim `SameStoreVerified`, even when it appears caught up. A later
+replica-authority contract would have to prove the exact store lineage plus application of the
+barrier commit and every publication through its frontier; this RFC defines no such reader.
 
 The state owns query construction and response interpretation. The capability cannot construct
 state output, facts, typed failure, graph behavior, or transition authority.
@@ -3585,6 +3723,25 @@ transition and closure, referenced objects, and certified destination role. Veri
 the effective post output or evidence-only role from the retained graph. A missing or downgraded
 source proof makes the view invalid rather than trusting a destination root hash.
 
+Portable transfer preserves that content-addressed DAG and object annex as deterministic,
+individually bounded records; it does not impose a total source, object, or byte validity ceiling.
+A private, non-cloneable `ClosureVerificationSession` contains the root candidate and bundle root,
+ordered traversal stack, active and verified source sets, exact verified-object set, any current
+object offset, and logical/unique measurement counters. Each bounded step consumes it and returns
+only private `More(session)` or `Complete(verified_closure)`. The baseline step budgets are 256 new
+sources, 512 new unique objects, and 256 KiB processed bytes. A large object may continue by offset
+through the ordinary retained-object reader and becomes typed only after its complete `ValueRef`,
+schema, evidence, length, digest, role, and reachability checks pass. The session is disposable
+scratch, not a serialized or cryptographically sealed proof.
+
+`More`, disposable scratch, and an operational checkpoint are not proof authority. `Complete` is
+constructible only with an empty pending traversal after every reachable dependency and object
+verifies. Missing, extra, cyclic, reordered, wrongly bound, or tampered material rejects. Repeated
+logical references remain present and verified while identical payload bytes are transferred once.
+Loss or unverifiable restoration of scratch restarts verification from the immutable bundle; it
+never upgrades a partial closure. Total deduplicated counts/bytes and elapsed time are measurement
+only.
+
 For a fact-selection transition, omission verification additionally requires the authoritative
 same-store, same-tenant fact history through the authorization's exact
 `TenantFactFrontier`. A portable bundle reports selection completeness as `Unverified`; it may
@@ -3668,8 +3825,10 @@ invalid. A callback divergence returns `Mismatch` and never rewrites or repairs 
 Exact identity proves only that the reproducer self-attested the same admitted artifact bytes and
 that this recorded path reproduced. It does not prove business correctness, callback purity,
 absence of undeclared ambient influence, compiler or OS equivalence outside the defined artifact
-boundary, or safety of future branches. Historical executables run capability-free and under the
-isolation/retention policy fixed before cutover.
+boundary, or safety of future branches. Historical executables run only in the OS-enforced
+capability-free boundary. The pre-cutover gate demonstrates that path with one retained artifact;
+production rollout fixes the long-term retention and isolation policy. A run whose required
+artifact is unavailable reports `Unavailable`; callback-free verification remains available.
 
 ### Cross-version candidate comparison
 
@@ -3783,7 +3942,27 @@ A domain may report `compensated` only when typed evidence proves the claimed eq
 explicit precondition, touched-resource, and concurrency assumptions. Completing a corrective
 effect without that proof may report only `remediation_completed`.
 
-## EVM Qualification
+## Capability Qualification Dispositions
+
+### EVM read qualification
+
+The current aggregate EVM reader is deleted. EVM balance and metadata reads may be registered in
+the core cutover only after the decomposed source/chain bootstrap, initial anchor,
+one-operation-per-node fan-out, final anchor confirmation, immutable
+`routing_generation_ref`, cancellation, partial-failure, and exact-call tests pass. Failure to
+qualify leaves EVM collection unavailable; it does not retain the aggregate reader or add a hidden
+runtime phase.
+
+### Bitcoin read qualification
+
+The current aggregate Bitcoin reader is deleted. Bitcoin collection may be registered only when
+the decomposed bootstrap, `scantxoutset "start"`, and block-hash confirmation graph passes the
+repeat-work-safe read gate defined above. If `scantxoutset "start"` does not qualify under lost
+response, cancellation, concurrent scan, delayed reissue, bounded work/result, and provider-cost
+tests, Bitcoin collection remains unregistered until a separate keyed work-executor and audited
+status-read contract is accepted. The generic runtime is unchanged.
+
+### EVM transaction qualification
 
 The current EVM transaction implementation does not qualify for keyed `ensure`.
 
@@ -3831,7 +4010,8 @@ block, and assurance frontier, plus the declared proof/attestation basis for req
 correspondence. Raw signed transaction bytes remain absent from MFM journal, artifacts, public
 status, errors, and replay.
 
-`SubmitEvmTransactionState` remains unregistered until the executor passes:
+`SubmitEvmTransactionState` is removed from registration in the core cutover and returns only in a
+later EVM qualification change after the executor passes:
 
 - same-key/different-request rejection;
 - concurrent and delayed ensure;
@@ -3852,8 +4032,8 @@ absence, and nonce observation do not prove permanent non-executability.
 
 The generic executor, binding, evidence, restore, and failover schemas are not frozen solely from
 mocks. Before the complete journal schema freezes, one narrow durable reference executor must
-implement the contract against a convergence-safe semantic destination. A transactional durable
-queue whose enqueue key is the destination identity is sufficient; it need not enable EVM.
+implement the logical contract against a convergence-safe semantic destination. A transactional
+durable queue whose enqueue key is the destination identity is sufficient; it need not enable EVM.
 
 The prototype must exercise:
 
@@ -3862,16 +4042,28 @@ The prototype must exercise:
 - executor crash before and after destination mutation;
 - terminal tombstone retention;
 - append-only evidence strengthening;
-- restore, migration, stale replica, rollback, and split-brain attempts;
+- strict export/import and authoritative refold, plus modeled migration, stale generation,
+  rollback, fork, and split-brain candidates;
 - exact original-binding routing across an implementation upgrade; and
 - positively acknowledged delivery authorization before target entry, unmatched intent, linked
-  outcome, prefix-frontier proof, attempt/frontier-bound exhaustion, and no credentials or bearer
-  material.
+  exact-attempt outcome, prefix-frontier proof, cumulative completion-reserve exhaustion, and no
+  credentials or bearer material.
 
-Its binding and evidence objects become golden-vector inputs. If the prototype requires a field or
-authority not expressible by the generic schemas, those schemas change before the memory,
-PostgreSQL, runtime, and replay implementations proceed independently. EVM qualification remains a
-later domain gate over the already proven generic contract.
+The retained managed-PostgreSQL prototype closes this logical contract-shaping gate. It proves the
+closed five-record evidence algebra, atomic effect/resource compare-and-swap, exact-attempt
+destination receipts including exact post-tombstone audit strengthening, cumulative completion
+reserve, the 256 UTF-8-byte effect-identifier bound, two materially different typed resource
+policies, strict refolded restore, generation-race rejection, bounded hostile decoding, and
+secret-free retained surfaces. Its binding and evidence objects become golden-vector inputs. If
+the annex requires a field or authority not expressible by this contract, the contract and
+prototype change together before memory, PostgreSQL, runtime, and replay implementations proceed
+independently.
+
+This closure is not physical production-HA qualification. Real WAL/backup lineage, commit-error
+ambiguity under process or network loss, an independently non-rollback generation fence,
+stale/sibling-writer exclusion across failure domains, destination-owner coverage, and the
+promotion procedure remain production-rollout obligations. EVM qualification remains a later
+domain gate over the already proven generic contract.
 
 ## Security and Redaction
 
@@ -3900,19 +4092,134 @@ binding, which may contain an optional closed source scope.
 Provider-generated request IDs are omitted unless a capability-specific review proves them bounded,
 non-secret, non-bearer, and necessary.
 
-`safe_failure` contains only:
+`mfm-capabilities` owns one generic envelope used by direct read observations and executor
+delivery evidence:
 
 ```text
-stable_code
-failure_class
-boundary_stage
-optional reviewed coarse_size_class
-optional reviewed redacted diagnostic_ref
+SafeFailure<Code, DiagnosticRef> {
+    safe_failure_contract_ref: ContentRef,
+    stable_code: Code,
+    failure_class: FailureClass,
+    boundary_stage: BoundaryStage,
+    coarse_size_class: CoarseSizeClass?,
+    diagnostic_ref: DiagnosticRef?,
+}
 ```
 
-These are closed capability-specific values. The audit API accepts no arbitrary string, metadata
-map, provider error object, request body, response body, `Display`/`Debug` output, or error source
-chain. If a failure cannot be classified safely, it records only `UnclassifiedFailure`.
+A direct journal observation instantiates `DiagnosticRef = ValueRef`; executor-internal evidence
+instantiates `DiagnosticRef = ContentRef` and must later pass ordinary MFM object admission when
+the diagnostic is retained by the journal. `safe_failure_contract_ref` selects the exact allowed
+code, class/stage combinations, diagnostic union and schema. Unknown combinations reject.
+
+The universal closed enums are:
+
+```text
+FailureClass =
+    authorization
+  | configuration
+  | request
+  | cancellation
+  | transport
+  | destination
+  | unrepresentable_response
+  | integrity
+  | resource_conflict
+  | unclassified
+
+BoundaryStage =
+    before_boundary_entry
+  | boundary_entry
+  | boundary_observation
+
+CoarseSizeClass =
+    zero             # exactly 0 bytes
+  | up_to_16_kib     # 1..=16_384 bytes
+  | up_to_1_mib      # 16_385..=1_048_576 bytes
+  | over_1_mib       # at least 1_048_577 bytes
+```
+
+An absent size class means unavailable or not approved for retention. The bucket describes the
+provider-controlled envelope that could not be retained, never the diagnostic object's byte
+length. Every retained safe diagnostic is an exact contract-specific canonical union of at most
+16,384 bytes. The audit API accepts no arbitrary string, metadata map, provider error object,
+request body, response body, `Display`/`Debug` output, or error source chain.
+
+Cooperative cancellation is a first-class class, not a transport or authorization alias. A
+surviving cancellation result proven before boundary entry is
+`DidNotEnter/cancellation/before_boundary_entry`; after possible entry it is
+`Indeterminate/cancellation/boundary_entry`. Task or process loss with no surviving wrapper
+result remains an unmatched authorization and recovery never fabricates cancellation. Every
+executor failure contract includes `access_cancelled` with the same two legal combinations.
+
+The EVM read safe-failure codes are exactly:
+
+```text
+routing_generation_unavailable
+configuration_invalid
+request_invalid
+access_cancelled
+transport_failed
+http_status
+json_rpc_error
+response_invalid
+response_missing_result
+response_too_large
+unclassified_failure
+```
+
+Its diagnostic union is exactly:
+
+```text
+EvmSafeDiagnostic =
+    HttpStatus { status: u16 }
+  | JsonRpcError { code: i64 }
+  | ResponseInvalid {
+        kind:
+            malformed_envelope
+          | missing_result
+          | invalid_result
+          | too_large
+    }
+```
+
+The Bitcoin read contract has the same codes plus `scan_busy`. Its diagnostic union is the same
+except that it also contains the fieldless `ScanBusy` variant. Provider family and operation are
+already bound by the authorization and are not duplicated in either diagnostic. There is no
+generic diagnostic field map.
+
+The common EVM/Bitcoin mapping is:
+
+| Code or condition | Observation | Class | Stage | Diagnostic |
+| --- | --- | --- | --- | --- |
+| `routing_generation_unavailable` | `DidNotEnter` | `authorization` | `before_boundary_entry` | none |
+| `configuration_invalid` | `DidNotEnter` | `configuration` | `before_boundary_entry` | none |
+| `request_invalid` | `DidNotEnter` | `request` | `before_boundary_entry` | none |
+| `access_cancelled` before entry | `DidNotEnter` | `cancellation` | `before_boundary_entry` | none |
+| `access_cancelled` after possible entry | `Indeterminate` | `cancellation` | `boundary_entry` | none |
+| `transport_failed` with proven no entry | `DidNotEnter` | `transport` | `before_boundary_entry` | none |
+| `transport_failed` after possible entry | `Indeterminate` | `transport` | `boundary_entry` | none |
+| `http_status` | `Indeterminate` | `destination` | `boundary_observation` | `HttpStatus` |
+| `json_rpc_error` | `Indeterminate` | `destination` | `boundary_observation` | `JsonRpcError` |
+| `response_invalid` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid` |
+| `response_missing_result` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { missing_result }` |
+| `response_too_large` | `Indeterminate` | `unrepresentable_response` | `boundary_observation` | `ResponseInvalid { too_large }` |
+| `unclassified_failure` | `Indeterminate` | `unclassified` | `boundary_observation` | none |
+
+For EVM reads, HTTP `408`, `425`, `429`, `500`, `502`, `503`, `504`, and `507`, and JSON-RPC
+`-32603`, `-32001`, `-32002`, and `-32005`, are the exact operationally retryable numeric set;
+`429` and `-32005` are the reviewed busy/rate-limited cases. Other numeric HTTP/JSON-RPC
+rejections retain their closed numeric diagnostic but are terminal read validation failures.
+
+For Bitcoin, `scan_busy` is
+`Indeterminate/destination/boundary_observation/ScanBusy` and is emitted only when the reviewed
+classifier matches Bitcoin Core's exact scan-busy condition, including JSON-RPC code `-8`. The
+provider text may be compared to the reviewed constant and is then discarded; a near match is
+ordinary `json_rpc_error`. HTTP `408`, `425`, `429`, `500`, `502`, `503`, `504`, and `507` are
+operationally retryable; only exact `scan_busy` is a retryable Bitcoin JSON-RPC busy result in v1.
+Observed EVM source/chain mismatch and anchor drift, and Bitcoin source/network mismatch,
+`scantxoutset.success = false`, and anchor drift, are bounded `Returned` typed semantic failures,
+not safe-failure codes. Bitcoin remains unregistered because its repeat-work-safe provider
+qualification did not pass.
 
 The no-secret contract is enforced by closed persisted schemas, private constructors, bounded
 classifiers/canonicalizers, implementation review, and adversarial tests. Rust types exclude
@@ -3929,8 +4236,39 @@ are not secrets. Normal run status and transition output do not expose audit int
 privileged versioned audit export defaults to omitting source scope and precise time and remains
 subject to the unresolved retention policy in `Material Uncertainties`.
 
-Hashed structures remain canonical, domain-separated, and float-free. Bounded-input validation
-applies before hashing or retaining provider-controlled content.
+Every RFC expression `H(domain, canonical(value))` uses one universal preimage and no alternate
+framing:
+
+```text
+DomainSeparatedPreimageV1 {
+    domain,
+    value,
+}
+
+H(domain, value) =
+    SHA-256(JCS({
+        "domain": domain,
+        "value": value,
+    }))
+```
+
+The annex owns every exact versioned `mfm.*.v1` domain constant and value schema. The value is
+schema-validated and float-free before hashing. Prefix concatenation, NUL separation, length
+prefixes, raw noncanonical JSON, and compatibility decoding are forbidden. The composite-planner
+prototype's former `domain || NUL || JCS(value)` derivation must be regenerated under this
+envelope; the executor's local helper becomes the shared `mfm-canonical` implementation.
+
+Plain content integrity is deliberately distinct:
+
+```text
+content_digest = SHA-256(exact retained bytes)
+```
+
+For canonical JSON objects those bytes are their exact JCS encoding. `ContentRef.schema_id`
+supplies interpretation; a bare content digest is never semantic or access authority. The
+separately specified `mfm.executable-bytes.v1` raw-executable descriptor remains the one explicit
+byte-content derivation. Bounded-input validation applies before hashing or retaining
+provider-controlled content.
 
 ## Canonical Schema and Golden-Vector Gate
 
@@ -3948,7 +4286,7 @@ Before memory and PostgreSQL implement the cutover independently, the annex free
 - genesis, predecessor, semantic-state, candidate, record, and commit digest preimages;
 - whole-executable and component implementation identities; planning profiles/planner contracts;
   capability bindings; executor contracts, deployments, resource ownership, and planning-expansion
-  bindings;
+  bindings, including reviewed read-source scope and immutable routing-generation references;
 - frozen read intent, compatible observation-chain identity, and head-relative consumability
   predicates;
 - input manifests, binding deltas, facts, outputs, evidence, and cross-run sources;
@@ -4091,6 +4429,14 @@ are never merged or resumed as one store.
 The HA/WAL consensus or primary-fencing mechanism is irreducible storage authority, not a second
 run-lifecycle model. Worker leases, process epochs, and executor fences cannot substitute for it.
 
+The v1 live-store baseline is writer-only for authority. Every admission, journal, object, and
+fact-completeness read that can construct a verified view or influence a state, and every write,
+uses that fenced authoritative writer. Status, replay loading, trace/audit/export dereference, and
+resume use the same rule because stale bytes cannot mint store-backed authority. Pure verification
+of an already authorized offline bundle is separate and grants no store access. No replica may
+claim store-backed authority until a later contract qualifies its non-rollback lineage and exact
+applied frontier; a connection option or apparent catch-up is insufficient.
+
 The application role has insert/select access but no update, delete, or truncate access to
 `store_identity`, tenant fact-order heads, journal commits, records, blobs, admissions, or
 bindings. Owner-only guard triggers reject those operations even if application SQL regresses;
@@ -4161,11 +4507,12 @@ outbox.
 Mutable operational coordination is optional:
 
 - A worker lease may reduce duplicate work but never grants semantic authority.
-- Per-run status/watch uses run sequence. A cross-run WAL/changefeed cursor is an advisory,
-  rebuildable delivery position only: failover, retention expiry, or cursor loss may require a
-  full rescan/resubscription and may redeliver items. It proves no completeness, semantic order, or
-  exactly-once delivery. An API promising an exact durable changefeed requires a separate
-  persisted-delivery contract.
+- Per-run status/watch for one exactly authorized run uses run sequence against the writer. The v1
+  public surface has no cross-run run list/watch. An internal operational WAL/changefeed cursor is
+  an advisory, rebuildable delivery position only: failover, retention expiry, or cursor loss may
+  require a full rescan/resubscription and may redeliver items. It proves no completeness,
+  semantic order, or exactly-once delivery. A public or exact durable changefeed requires a
+  separate scoped authority and persisted-delivery contract.
 - `fact_order` enters authority only as the tagged publication/barrier coordinate covered by
   `commit_digest` and as the same-store fact-completeness frontier. A head therefore commits it
   transitively through `JournalHead.commit_digest`, but it is not a separate head coordinate and
@@ -4231,6 +4578,14 @@ or evidence. A separately authorized trace inspection may expose:
 - result, outputs, facts, and evidence; and
 - closure identity when terminal.
 
+The v1 public surface has no store-wide fact catalog/query/reference API and no cross-run run
+list/watch API. Delete the current CLI fact commands, `/v1/facts/*`, `GET /v1/runs`, and their app
+DTOs/services without a compatibility alias. Certified states consume same-run facts through graph
+edges and prior-run facts only through the reserved audited capability. Entry-point discovery may
+list exact entry-point/profile contracts because it exposes no run or fact history. Any future
+tenant-wide discovery or changefeed requires a separately scoped authority and contract; a
+run-bound `ReadPublic` grant cannot be broadened for it.
+
 External-access audit exposes safe statuses:
 
 ```text
@@ -4250,6 +4605,15 @@ journal at H.” It never presents F as the executor's current history. It may c
 delivery history only when the bound verifier proves a sealed terminal frontier that cannot gain
 another target-attempt record. An unmatched MFM authorization, asynchronous work after
 `Returned(Pending)`, or later evidence strengthening can all make a newer frontier arrive.
+
+The canonical portable document contains no digest of itself in its manifest or any nested member.
+After deterministic closure traversal finishes and the final canonical bytes exist, the exporter
+computes `SHA-256(exact canonical export bytes)` and returns that content digest outside the bytes.
+REST returns it only as the exact `Mfm-Content-Digest` header; the app's
+`PortableRunExport.digest` is the same external value. No separate manifest digest, bundle digest,
+domain-hashed export identity, or compatibility checksum is semantic authority. Missing,
+duplicated, extra, cyclic, or tampered members reject before a complete export or verified view is
+reported.
 
 It may expose stable public capability, operation, request, result, and failure identities. It must
 not expose credentials, bearer bytes, raw provider errors, secret-bearing routes, or executor
@@ -4283,11 +4647,13 @@ Add:
 
 - complete transition input/output/evidence contracts;
 - one closed `StateExecution` contract with pure, read, and effect cases;
-- `StateFrame`, exact typed failure, and evidence-verdict contracts;
+- `StateFrame`, borrowed value-only `RequestView`/`ObservationView`, exact typed failure, and
+  evidence-verdict contracts;
 - external-read typed request and response contracts;
 - `FactSelectionRequest`, `FactSelectionResponse`, and the reserved same-journal capability
   contract;
-- audited read-capability and executor-binding identity;
+- audited read-capability identity with immutable source scope and `routing_generation_ref`, plus
+  immutable executor-binding identity;
 - pure effect-request authorship;
 - keyed executor identity and convergence assurance;
 - one reusable keyed-executor ledger substrate with typed domain resource policies;
@@ -4324,7 +4690,7 @@ Add:
 - the five-record journal algebra;
 - complete transition structural validation;
 - external-access authorization/observation legality;
-- newly-appended-only affine access authority;
+- a non-cloneable authorization permit returned only for a directly observed new append;
 - post-closure audit-tail validation;
 - predecessor-linked commit digests;
 - per-run journal-head compare-and-swap and tagged tenant fact publication/barrier coordinates;
@@ -4358,7 +4724,7 @@ Add:
   state-implementation and capability-binding manifests;
 - complete transition-frame construction and verification;
 - audited capability wrappers;
-- common bound affine access and committed-observation authorities;
+- common bound affine access and runtime-private committed-request/observation proofs;
 - one read request and one accepted observation per read occurrence;
 - the non-overridable same-journal fact-selection binding and its pure recorded-response verifier;
 - generic typed read-response materialization of content-addressed value references;
@@ -4376,7 +4742,8 @@ Add:
 Delete generic saga, manual-resolution, worker-attempt, resource-lane, side-effect-phase,
 runner-factory, and adapter-lifecycle DTOs, commands, modes, and routes. App assembly supplies the
 compiled `StateCatalog` and `CapabilityCatalog` but owns no execution callbacks or framework-hook
-registry and cannot replace the reserved fact-selection binding.
+registry and cannot replace the reserved fact-selection binding. Delete public fact browse/query
+services and CLI/REST routes, plus cross-run run list/watch, with no v1 replacement.
 
 Add transition inspection, safe access-audit inspection, pending-effect status, and the one
 `drive_once` action plus an optional mechanical drive-until-waiting convenience. Gate admission,
@@ -4386,6 +4753,8 @@ drive, replay, public read, trace, audit, object, and export services with the e
 ### Postgres
 
 Reset the pre-production schema baseline and reject old histories.
+Before resetting any deployment, complete and verify its export-or-destroy disposition from the
+versioned recoverability cutover inventory. The target binary never reads the old schema.
 
 Keep authoritative commits, records, object blobs/bindings, store metadata and protected tenant
 fact-order heads, current configuration, and only explicitly required operational cursor state.
@@ -4572,8 +4941,11 @@ runner authority rather than the architectural role.
   `AuthorizedReadAccess` or `AuthorizedEnsureAccess`, while proving the lower reusable transport
   remains runtime-agnostic and independently reusable outside MFM.
 - Compile-fail direct calls that try to bypass the audited wrapper or substitute raw request data
-  for `CommittedRequest`.
-- Prove only `NewlyAppended` authorization mints affine authority.
+  or a program-owned `RequestView` for the runtime-private committed-request proof.
+- Compile-fail domain code attempting to name or construct runtime/store proofs while allowing it
+  to consume only borrowed `RequestView`/`ObservationView` values.
+- Prove only a directly observed `NewlyAppended` authorization returns
+  `NewlyAppendedAuthorization` and that runtime must consume that permit to mint affine authority.
 - Prove already-committed, acknowledgement-ambiguous, compare-and-swap-losing, and rejected
   authorization candidates mint no authority.
 - Reject authority substitution across run, node, capability, `capability_operation_id`, request,
@@ -4610,6 +4982,9 @@ runner authority rather than the architectural role.
   Bitcoin collection unregistered.
 - Prove provider/source validation that performs live IO occurs only in post-admission bootstrap
   read states.
+- Bind one immutable `routing_generation_ref` and reviewed source scope in every admitted read
+  binding; rotate current configuration, restart, and prove resume resolves only the original
+  generation with no fallback, failover, source reselection, or silent scope change.
 - Prove unused and in-flight authorizations do not block semantic closure.
 - Admit one late observation for a pre-closure authorization and reject every other post-closure
   append.
@@ -4748,6 +5123,13 @@ runner authority rather than the architectural role.
 - Revalidate every effective-output/evidence-only cross-run source from its complete source
   admission/spec/journal/closure/object/role proof plus retained profile/planner/expansion proof;
   reject a missing or downgraded dependency bundle.
+- Verify portable source closures larger than one 256-source/512-object/256-KiB step reach the same
+  byte-identical terminal result as a single-step fixture, with budget changes affecting only
+  private step count; reject reordered supplied records, premature completion, missing
+  dependency/object, cycle, conflicting reference, or tampered schema/evidence, while treating
+  total counts, bytes, and elapsed time as measurement only.
+- Discard closure-verifier scratch and restart from immutable inputs; prove no partial progress or
+  checkpoint can construct `VerifiedRunView`.
 - Status, scheduling, resume, and transition trace consume one verified journal view at one
   loaded journal head. That view reports the fixed semantic closure coordinate separately from any
   later audit-only tail.
@@ -4766,8 +5148,9 @@ runner authority rather than the architectural role.
   and no fact-head lock contention.
 - Resolve an acknowledgement-ambiguous barrier append by `append_request_id` and return its
   original frontier without minting a second live-access authority or another barrier.
-- Prove a fact scan runs on the authoritative writer or a replica applied through the barrier and
-  every publication through its frontier; a lagging or unproven replica waits or fails closed.
+- Prove every store-backed fact scan and authority-bearing read runs on the fenced authoritative
+  writer. Reject replica configuration as an authority source in v1, irrespective of apparent
+  catch-up.
 - Give one fact-emitting transition exactly one publication order even when it emits several facts;
   prove rollback creates no gap and ambiguous append resolution returns the original coordinate.
 - Replay empty, one-result, bounded-many, ordering, limiting, and tie-breaking cases exactly.
@@ -4793,7 +5176,14 @@ runner authority rather than the architectural role.
   completeness as unverified; verify included-fact integrity without disclosing an unrelated
   tenant record.
 - Test missing, swapped, tampered, or wrong-schema objects.
-- Measure history-scan volume and latency.
+- Scan prefixes larger than one 4,096-publication/8,192-fact step, including continuation within a
+  multi-fact publication; prove one-step and exact-boundary many-step execution produce
+  byte-identical selection, exact omission detection, fixed-frontier completion, deterministic
+  rescan after discarded private state, and exclusion of a publication appended between steps
+  above that frontier.
+- Compile-check that scan continuation is private, consuming, non-cloneable, and non-serializable;
+  no caller-supplied resume position or premature completion exists. Measure total history-scan
+  volume and latency without a total-work or wall-time pass/fail threshold.
 - If a candidate index exists, property-test scan/index parity and require an incomplete index to
   scan the verified tail or fail closed.
 - Prove no fact publication flag, promotion record, dual reader, or compatibility materializer
@@ -4819,6 +5209,8 @@ runner authority rather than the architectural role.
 - Verify public status and privileged access-audit export expose only reviewed redacted fields.
 - Reject transition/audit/object dereferencing without exact tenant/store/run authorization; prove
   ordinary public APIs expose only status and certified public output by default.
+- Prove no public fact catalog/query/reference or cross-run run list/watch command, route, DTO, or
+  service remains.
 
 ### Correction
 
@@ -4881,27 +5273,65 @@ runner authority rather than the architectural role.
 - Prove no `store_commit_order` schema/hash/API, global allocator, old compatibility path, dual
   writer, or dual fact reader exists.
 
+## Gate Classification
+
+The versioned
+[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md) is the closure
+record for repository-wide producer/consumer disposition. The target choices are fixed; an open
+gate cannot reintroduce an alternate lifecycle, schema, route fallback, public fact/list surface,
+or weaker capability.
+
+Schema- and implementation-shaping gates close before the canonical schema freezes or before the
+affected capability registers. They include the program value-view/runtime-proof/store-permit
+vertical proof, exact routing-generation/bootstrap contracts, composite expansion prototypes,
+request totality, evidence/fact consumer disposal, reference-executor and resource-policy
+prototypes, tenant fact-frontier behavior, one retained historical executable reproducing in the
+selected OS-enforced capability-free boundary, and the canonical vector corpus. The historical
+isolation gate demonstrates the implementation path before persisted schemas freeze; it does not
+decide the production retention horizon. An EVM or Bitcoin capability that misses its specific
+qualification gate remains unregistered; it does not block an otherwise complete core cutover.
+
+The following are production-rollout gates, not schema-freeze gates:
+
+- privacy and retention approval for complete immutable transition/audit/object lineage;
+- capacity approval for initially indefinite retention;
+- availability approval for fail-closed audit authorization;
+- qualification of the fenced authoritative-writer and HA/WAL promotion procedure;
+- for every registered mutation executor, separate qualification of its preserved ledger
+  generation, stale/sibling-writer fence, destination convergence/resource fence, restore
+  lineage, and promotion procedure; and
+- the long-term historical executable retention horizon and production isolation policy,
+  including when an individual run reports `Unavailable`.
+
+Each deployment also inventories and either exports or explicitly discards legacy history before
+its destructive schema reset. These rollout decisions block that deployment, not implementation,
+and cannot produce a compatibility reader or dual writer.
+
 ## Pre-Cutover Gates and Work Packages
 
 The boundaries below are coherent landing boundaries, not sufficient implementation tasks.
 The vertical cutover does not begin until these gates close in order:
 
-1. **Contract decisions:** accept the per-operation audit unit, no baseline transport batch,
+1. **Contract decisions — closed:** the accepted choices are the per-operation audit unit, no
+   baseline transport batch,
    graph-derived forward-failure semantics, domain-derived correction identity, exact executor
    binding, same-tenant cross-run scope, same-store-only fact completeness, and purpose-bound run
    access; the frozen-intent observation predicate; per-run heads plus tenant fact frontiers; exact
    executable reproduction versus candidate diagnostics; the closed fan-out priority; and
-   framework-outer/executor-inner expansion.
-2. **Contract-shaping prototypes and inventories:** express the EVM and Bitcoin reads as the
-   specified typed state chains and qualify one durable reference executor against a
-   convergence-safe destination. Prototype framework expansion across pure/read/effect,
-   nested-child, fan-out and fan-in shapes; executor-required expansion; at least two typed resource
-   policies on the shared executor substrate; and concurrent same-tenant fact
-   publication/barrier behavior and hot-tenant throughput. Prove request-author totality for the
-   production state set. Inventory and dispose every generic evidence-bag producer/consumer,
-   pre-admission semantic probe, fact consumer, published entry point/profile, and retained legacy
-   history/export requirement. Reproduce one retained historical executable in the selected
-   capability-free isolation boundary.
+   framework-outer/executor-inner expansion. The program value-view/runtime-proof split,
+   immutable routing generation, writer-only authority baseline, public fact/list removal, and
+   capability dispositions above are also closed.
+2. **Contract-shaping prototypes and inventories — closed:** the retained evidence expresses the
+   EVM and Bitcoin reads as the specified typed state chains and qualifies one durable reference
+   executor against a convergence-safe destination. It covers framework expansion across
+   pure/read/effect, nested-child, fan-out and fan-in shapes; executor-required expansion; at least
+   two typed resource policies on the shared executor substrate; concurrent same-tenant fact
+   publication/barrier behavior; request-author totality for the production state set; and one
+   retained historical executable in the selected OS-enforced capability-free isolation boundary.
+   The versioned closure document records the repository inventory and target disposition for
+   every generic evidence-bag producer/consumer, pre-admission semantic probe, fact consumer,
+   published entry point/profile, and retained legacy history/export requirement. Code-level
+   deletion remains part of the atomic cutover.
 3. **Identity and schema freeze:** finalize node-occurrence derivation, terminal/dependency
    contracts, every canonical persisted schema, and the complete golden-vector corpus.
 4. **Implementation package plan:** assign crate ownership, dependency order, deletion checkpoints,
@@ -4913,17 +5343,19 @@ The implementation packages are:
 A  surviving committed-journal / private-fold / verified-view ownership
 B  canonical schema, identity, codec, digest, and golden-vector corpus
 C  composite authored-program/framework/executor expansion, planning profile, certification, and
-   terminal/dependency contracts
+   terminal/dependency contracts, plus program-owned RequestView/ObservationView callback values
 D  journal records, per-run heads, tenant fact coordinates, sealed append authority, memory store,
-   and PostgreSQL parity
-E  exact executable/catalog gate, closed StateExecution catalog, scheduler priority, and stateless
-   drive_once
-F  per-operation read audit wrappers and production read graph migration
+   newly-appended authorization permit, and PostgreSQL parity
+E  exact executable/catalog gate, private committed request/observation proofs, affine access,
+   closed StateExecution catalog, scheduler priority, and stateless drive_once
+F  immutable read routing generations, per-operation audit wrappers, and production read graph
+   migration
 G  keyed effect request, executor binding, shared immutable append/CAS executor substrate, typed
    resource-policy boundary, bounded delivery frontier, terminal evidence, and reference executor
 H  callback-free history verification, exact/candidate reproduction modes, cross-run sources,
    TenantFactFrontier completeness, and portable inclusion-only reporting
-I  app/CLI/REST run-access authority, status, privileged trace/audit, and public-output defaults
+I  app/CLI/REST run-access authority, status, privileged trace/audit, public-output defaults, and
+   public fact/list removal
 J  deletion of attempts, phases, saga, lanes, projections, adapter lifecycle/reducers, old schemas,
    and documentation
 ```
@@ -4933,8 +5365,10 @@ Packages C
 through J may be developed and reviewed behind the cutover branch boundary, but they do not ship
 as a parallel lifecycle, dual writer, compatibility reader, or partially selectable runtime. The
 final producer/consumer/schema switch remains coherent and deletes the old path in the same landing.
-Package D owns persisted authorization/observation legality. Package E owns the shared sealed
-affine authority, committed-observation types, and generic audited wrapper. Packages F and G add
+Package D owns persisted authorization/observation legality and returns the sealed permit only for
+a directly observed new authorization append. Package E consumes that permit into the shared
+affine authority and privately owns committed request/observation proofs and the generic audited
+wrapper. Package C exposes only borrowed value views to domain callbacks. Packages F and G add
 only read- and effect-specific orchestration over that one boundary.
 
 ## Coherent Landing Boundaries
@@ -4956,13 +5390,15 @@ only read- and effect-specific orchestration over that one boundary.
    records, per-operation external-access authorization/observation, affine access authority, keyed
    effect requests with immutable executor bindings, the durable reference executor,
    tenant-scoped admission and purpose-bound run access, domain-derived correction identity, the
-   closed three-case `StateExecution`, `drive_once`, state/capability catalogs,
+   closed three-case `StateExecution`, program value views with runtime-private committed proofs,
+   immutable read routing generations, `drive_once`, state/capability catalogs,
    exact executable/reproduction modes, certified composite planning-time framework/executor state
    injection, per-run heads, tenant fact frontiers, semantic closure with audit tails, and
    transition facts. Delete worker attempts, custom runners, adapter-owned lifecycle/reducers,
    replay brokers, phase ledgers, saga/manual resolution, resource lanes, universal projections,
    synthetic completion/retention, physical fact-projection authority, old events, and every
-   compatibility path. Cut fact storage, selection, completeness replay, and transition emission
+   compatibility path, including public fact browsing and cross-run run list/watch. Cut fact
+   storage, selection, completeness replay, and transition emission
    over in the final cutover change; use the reserved audited read capability and its private
    history scan at the authorization's `TenantFactFrontier` with no dual fact reader.
 
@@ -4971,12 +5407,13 @@ only read- and effect-specific orchestration over that one boundary.
    Add the reviewed wallet/relayer contract and conformance suite, then enable EVM transaction
    registration. Until this commit is possible, EVM mutation remains deliberately unavailable.
 
-The implementation plan divides packages A–J into ordered logical commits, each internally
-coherent and free of compatibility paths, while preserving the three boundaries above as review
-and landing constraints. Each landed boundary updates its code, tests, design and architecture
-contracts, persisted/public surface
-inventory, and relevant API documentation. Inseparable producer/consumer/schema changes remain in
-the same commit. No intermediate compatibility or parallel lifecycle path is allowed.
+The
+[fixed six-commit implementation sequence](docs/recoverability-cutover-gates-v1.md#fixed-implementation-commit-sequence)
+assigns packages A–J to internally coherent changes without compatibility paths, while preserving
+the three boundaries above as review and landing constraints. Each landed boundary updates its
+code, tests, design and architecture contracts, persisted/public surface inventory, and relevant
+API documentation. Inseparable producer/consumer/schema changes remain in the same commit. No
+intermediate compatibility or parallel lifecycle path is allowed.
 
 ## Alternatives Rejected
 
@@ -5155,7 +5592,7 @@ survives.
 | Added | Complete transition before/input/evidence/result/output/after lineage; one authorization per independently meaningful external operation before access; one observation per surviving wrapper result; one frozen read intent per occurrence; immutable compatibility plus state-dependent consumability; keyed-convergent redelivery; stable tenant-scoped admission identity; per-run heads and tenant fact frontiers; exact whole-executable live-resume and reproduction gates; diagnostic cross-version comparison; deterministic composite framework/executor expansion; closed fan-out scheduling; immutable semantic closure; exact capability/executor binding; domain-derived at-most-once identity for correction entry points that claim it; purpose-bound run access and privileged trace/object access. |
 | Removed | Generic saga/remediation obligations; reverse compensation ordering; generic rollback/finally; manual terminalization; worker-attempt history; phase ledgers; FIFO waiters and resource lanes; store-global commit order; custom runner and adapter-owned lifecycle/reducer machinery; runtime pre/post hooks; universal projection authority; support for non-convergent writes; compatibility readers and dual writers. |
 | Delegated | Destination delivery and convergence, nonce/UTXO/sequence/resource ownership, and executor-internal delivery-attempt evidence move to the exact certified executor/domain binding over a reusable durable ledger substrate or destination-native equivalent. They are not a second MFM run-state model. |
-| Changed or restricted | Independent ready effects may begin after another node fails unless the certified graph/profile gates them; semantic closure may receive audit-only observations for pre-closure authorizations; unresolved effects may remain pending indefinitely; finite executor evidence-record/attempt/frontier bounds forbid another target attempt and can force permanent pending, with no baseline pagination; exact reproduction may be unavailable without historical executable bytes while recorded-history verification remains valid; EVM writes remain unavailable until qualification; cross-run sources and facts are same-tenant; fact-selection completeness is same-store only and portable bundles are inclusion-only; complete transition and audit traces are privileged rather than ordinary public output. |
+| Changed or restricted | Independent ready effects may begin after another node fails unless the certified graph/profile gates them; semantic closure may receive audit-only observations for pre-closure authorizations; unresolved effects may remain pending indefinitely; finite executor evidence-record/attempt/frontier bounds forbid another target attempt and can force permanent pending, with no baseline pagination; exact reproduction may be unavailable without historical executable bytes while recorded-history verification remains valid; EVM writes remain unavailable until qualification; cross-run sources and facts are same-tenant; fact-selection completeness is same-store, authoritative-writer-only, and portable bundles are inclusion-only; public fact browsing and cross-run run list/watch are removed; complete transition and audit traces are privileged rather than ordinary public output. |
 
 ## Decision Summary
 
@@ -5199,7 +5636,8 @@ The target core is an auditable, event-sourced typed state machine:
 - spec-resolved cross-run source roles that cannot bypass an effective post output;
 - one immutable tenant scope per admitted run and transient purpose-bound authority at every run
   access surface;
-- one fenced writable journal lineage for each store identity;
+- one fenced writable journal lineage for each store identity and writer-only authority-bearing
+  live reads in v1;
 - one reusable durable keyed-executor substrate with typed domain allocation policies, short
   allocation transactions, stateless transports, and destination fencing or exclusive ownership;
 - operational telemetry derived without semantic authority;
@@ -5213,7 +5651,8 @@ The target core is an auditable, event-sourced typed state machine:
   runtime hook chain, or universal projection;
 - explicit typed corrective runs with domain-derived admission identity for domain remediation; and
 - privileged tenant/run-authorized transition, audit, object, and portable-export surfaces with
-  public-output-only dereferencing by default.
+  public-output-only dereferencing by default; and
+- no public fact-browsing or cross-run run-list/watch surface in v1.
 
 If data affects a semantic transition, it must appear in that transition's certified inputs,
 accepted observations, outputs, facts, evidence, or before/after anchors. If MFM authorizes a live

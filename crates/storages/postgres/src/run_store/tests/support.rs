@@ -260,3 +260,5 @@ mod lifecycle_tests;
 mod observation_tests;
 #[path = "saga.rs"]
 mod saga_tests;
+#[path = "tenant_fact_frontier_postgres_prototype.rs"]
+mod tenant_fact_frontier_postgres_prototype_tests;

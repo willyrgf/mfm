@@ -33,6 +33,8 @@ mod authority_support;
 mod codec_tests;
 #[path = "commit.rs"]
 mod commit_tests;
+#[path = "fact_response_materializer_prototype.rs"]
+mod fact_response_materializer_prototype_tests;
 #[path = "fact_retention_support.rs"]
 mod fact_retention_support;
 #[path = "facts_retention.rs"]
@@ -53,6 +55,8 @@ mod saga_tests;
 mod side_effect_support;
 #[path = "side_effects.rs"]
 mod side_effects_tests;
+#[path = "tenant_fact_frontier_prototype.rs"]
+mod tenant_fact_frontier_prototype_tests;
 use self::append_support::*;
 use self::authority_support::*;
 use self::fact_retention_support::*;

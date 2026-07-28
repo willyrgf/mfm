@@ -16,6 +16,257 @@ fn binding() -> BitcoinSourceBinding {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeReadObservation {
+    DidNotEnter,
+    Indeterminate,
+    ReturnedSemanticFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeBitcoinStableFailureCode {
+    RoutingGenerationUnavailable,
+    ConfigurationInvalid,
+    RequestInvalid,
+    AccessCancelled,
+    TransportFailed,
+    HttpStatus,
+    JsonRpcError,
+    ResponseInvalid,
+    ResponseMissingResult,
+    ResponseTooLarge,
+    UnclassifiedFailure,
+    ScanBusy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeFailureClass {
+    Authorization,
+    Configuration,
+    Request,
+    Cancellation,
+    Transport,
+    Destination,
+    UnrepresentableResponse,
+    Integrity,
+    ResourceConflict,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeBoundaryStage {
+    BeforeBoundaryEntry,
+    BoundaryEntry,
+    BoundaryObservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeCoarseSizeClass {
+    Zero,
+    UpTo16Kib,
+    UpTo1Mib,
+    Over1Mib,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeBitcoinDiagnostic {
+    HttpStatus { status: u16 },
+    JsonRpcError { code: i64 },
+    ScanBusy,
+    ResponseInvalid { kind: PrototypeResponseFailureKind },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeResponseFailureKind {
+    MalformedEnvelope,
+    MissingResult,
+    InvalidResult,
+    TooLarge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrototypeReadClassification {
+    observation: PrototypeReadObservation,
+    stable_code: Option<PrototypeBitcoinStableFailureCode>,
+    failure_class: Option<PrototypeFailureClass>,
+    boundary_stage: Option<PrototypeBoundaryStage>,
+    coarse_size_class: Option<PrototypeCoarseSizeClass>,
+    diagnostic: Option<PrototypeBitcoinDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PrototypeBitcoinReadFailure {
+    RoutingGenerationUnavailable,
+    ConfigurationInvalid,
+    RequestInvalid,
+    CancelBeforeEntry,
+    CancelAfterEntry,
+    TransportBeforeEntry,
+    TransportAfterPossibleEntry,
+    HttpStatus(u16),
+    JsonRpcError(i64),
+    ScanBusy,
+    UnrepresentableResponse {
+        kind: PrototypeResponseFailureKind,
+        bytes: usize,
+    },
+    UnsafeUnknown,
+    SourceMismatch,
+    ScanIncomplete,
+    AnchorChanged,
+}
+
+fn prototype_size_class(bytes: usize) -> PrototypeCoarseSizeClass {
+    match bytes {
+        0 => PrototypeCoarseSizeClass::Zero,
+        1..=16_384 => PrototypeCoarseSizeClass::UpTo16Kib,
+        16_385..=1_048_576 => PrototypeCoarseSizeClass::UpTo1Mib,
+        _ => PrototypeCoarseSizeClass::Over1Mib,
+    }
+}
+
+fn prototype_bitcoin_failure(failure: PrototypeBitcoinReadFailure) -> PrototypeReadClassification {
+    use PrototypeBitcoinStableFailureCode::{
+        AccessCancelled, ConfigurationInvalid, HttpStatus, JsonRpcError, RequestInvalid,
+        ResponseInvalid, ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable,
+        ScanBusy, TransportFailed, UnclassifiedFailure,
+    };
+    use PrototypeBoundaryStage::{BeforeBoundaryEntry, BoundaryEntry, BoundaryObservation};
+    use PrototypeFailureClass::{
+        Authorization, Cancellation, Configuration, Destination, Request, Transport, Unclassified,
+        UnrepresentableResponse as UnrepresentableClass,
+    };
+    use PrototypeReadObservation::{DidNotEnter, Indeterminate, ReturnedSemanticFailure};
+
+    let safe =
+        |observation, stable_code, failure_class, boundary_stage, coarse_size_class, diagnostic| {
+            PrototypeReadClassification {
+                observation,
+                stable_code: Some(stable_code),
+                failure_class: Some(failure_class),
+                boundary_stage: Some(boundary_stage),
+                coarse_size_class,
+                diagnostic,
+            }
+        };
+    match failure {
+        PrototypeBitcoinReadFailure::RoutingGenerationUnavailable => safe(
+            DidNotEnter,
+            RoutingGenerationUnavailable,
+            Authorization,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::ConfigurationInvalid => safe(
+            DidNotEnter,
+            ConfigurationInvalid,
+            Configuration,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::RequestInvalid => safe(
+            DidNotEnter,
+            RequestInvalid,
+            Request,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::CancelBeforeEntry => safe(
+            DidNotEnter,
+            AccessCancelled,
+            Cancellation,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::CancelAfterEntry => safe(
+            Indeterminate,
+            AccessCancelled,
+            Cancellation,
+            BoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::TransportBeforeEntry => safe(
+            DidNotEnter,
+            TransportFailed,
+            Transport,
+            BeforeBoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::TransportAfterPossibleEntry => safe(
+            Indeterminate,
+            TransportFailed,
+            Transport,
+            BoundaryEntry,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::HttpStatus(status) => safe(
+            Indeterminate,
+            HttpStatus,
+            Destination,
+            BoundaryObservation,
+            None,
+            Some(PrototypeBitcoinDiagnostic::HttpStatus { status }),
+        ),
+        PrototypeBitcoinReadFailure::JsonRpcError(code) => safe(
+            Indeterminate,
+            JsonRpcError,
+            Destination,
+            BoundaryObservation,
+            None,
+            Some(PrototypeBitcoinDiagnostic::JsonRpcError { code }),
+        ),
+        PrototypeBitcoinReadFailure::ScanBusy => safe(
+            Indeterminate,
+            ScanBusy,
+            Destination,
+            BoundaryObservation,
+            None,
+            Some(PrototypeBitcoinDiagnostic::ScanBusy),
+        ),
+        PrototypeBitcoinReadFailure::UnrepresentableResponse { kind, bytes } => {
+            let stable_code = match kind {
+                PrototypeResponseFailureKind::MalformedEnvelope
+                | PrototypeResponseFailureKind::InvalidResult => ResponseInvalid,
+                PrototypeResponseFailureKind::MissingResult => ResponseMissingResult,
+                PrototypeResponseFailureKind::TooLarge => ResponseTooLarge,
+            };
+            safe(
+                Indeterminate,
+                stable_code,
+                UnrepresentableClass,
+                BoundaryObservation,
+                Some(prototype_size_class(bytes)),
+                Some(PrototypeBitcoinDiagnostic::ResponseInvalid { kind }),
+            )
+        }
+        PrototypeBitcoinReadFailure::UnsafeUnknown => safe(
+            Indeterminate,
+            UnclassifiedFailure,
+            Unclassified,
+            BoundaryObservation,
+            None,
+            None,
+        ),
+        PrototypeBitcoinReadFailure::SourceMismatch
+        | PrototypeBitcoinReadFailure::ScanIncomplete
+        | PrototypeBitcoinReadFailure::AnchorChanged => PrototypeReadClassification {
+            observation: ReturnedSemanticFailure,
+            stable_code: None,
+            failure_class: None,
+            boundary_stage: None,
+            coarse_size_class: None,
+            diagnostic: None,
+        },
+    }
+}
+
 #[test]
 fn aggregate_capability_identity_is_stable() {
     assert_eq!(
@@ -194,4 +445,217 @@ fn provider_failures_expose_only_closed_diagnostics_and_retryability() {
     let rendered = format!("{permanent:?} {permanent}");
     assert!(!rendered.contains("http://"));
     assert!(!rendered.contains("secret"));
+}
+
+#[test]
+fn recoverability_safe_failure_prototype_classifies_bitcoin_reads_exhaustively() {
+    use PrototypeBitcoinStableFailureCode::{
+        AccessCancelled, ConfigurationInvalid, HttpStatus, JsonRpcError, RequestInvalid,
+        ResponseInvalid, ResponseMissingResult, ResponseTooLarge, RoutingGenerationUnavailable,
+        ScanBusy, TransportFailed, UnclassifiedFailure,
+    };
+    use PrototypeBoundaryStage::{BeforeBoundaryEntry, BoundaryEntry, BoundaryObservation};
+    use PrototypeFailureClass::{
+        Authorization, Cancellation, Configuration, Destination, Integrity, Request,
+        ResourceConflict, Transport, Unclassified, UnrepresentableResponse,
+    };
+    use PrototypeReadObservation::{DidNotEnter, Indeterminate, ReturnedSemanticFailure};
+    use PrototypeResponseFailureKind::{InvalidResult, MalformedEnvelope, MissingResult, TooLarge};
+
+    let compact = |observation, code, class, stage, size, diagnostic| PrototypeReadClassification {
+        observation,
+        stable_code: code,
+        failure_class: class,
+        boundary_stage: stage,
+        coarse_size_class: size,
+        diagnostic,
+    };
+
+    let universal_failure_classes = [
+        Authorization,
+        Configuration,
+        Request,
+        Cancellation,
+        Transport,
+        Destination,
+        UnrepresentableResponse,
+        Integrity,
+        ResourceConflict,
+        Unclassified,
+    ];
+    assert_eq!(universal_failure_classes.len(), 10);
+
+    for (failure, expected) in [
+        (
+            PrototypeBitcoinReadFailure::RoutingGenerationUnavailable,
+            compact(
+                DidNotEnter,
+                Some(RoutingGenerationUnavailable),
+                Some(Authorization),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::ConfigurationInvalid,
+            compact(
+                DidNotEnter,
+                Some(ConfigurationInvalid),
+                Some(Configuration),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::RequestInvalid,
+            compact(
+                DidNotEnter,
+                Some(RequestInvalid),
+                Some(Request),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::CancelBeforeEntry,
+            compact(
+                DidNotEnter,
+                Some(AccessCancelled),
+                Some(Cancellation),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::CancelAfterEntry,
+            compact(
+                Indeterminate,
+                Some(AccessCancelled),
+                Some(Cancellation),
+                Some(BoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::TransportBeforeEntry,
+            compact(
+                DidNotEnter,
+                Some(TransportFailed),
+                Some(Transport),
+                Some(BeforeBoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::TransportAfterPossibleEntry,
+            compact(
+                Indeterminate,
+                Some(TransportFailed),
+                Some(Transport),
+                Some(BoundaryEntry),
+                None,
+                None,
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::ScanBusy,
+            compact(
+                Indeterminate,
+                Some(ScanBusy),
+                Some(Destination),
+                Some(BoundaryObservation),
+                None,
+                Some(PrototypeBitcoinDiagnostic::ScanBusy),
+            ),
+        ),
+        (
+            PrototypeBitcoinReadFailure::UnsafeUnknown,
+            compact(
+                Indeterminate,
+                Some(UnclassifiedFailure),
+                Some(Unclassified),
+                Some(BoundaryObservation),
+                None,
+                None,
+            ),
+        ),
+    ] {
+        assert_eq!(prototype_bitcoin_failure(failure), expected);
+    }
+
+    for status in [400, 401, 403, 408, 429, 500, 502, 503] {
+        let classification =
+            prototype_bitcoin_failure(PrototypeBitcoinReadFailure::HttpStatus(status));
+        assert_eq!(classification.stable_code, Some(HttpStatus));
+        assert_eq!(classification.failure_class, Some(Destination));
+        assert_eq!(
+            classification.diagnostic,
+            Some(PrototypeBitcoinDiagnostic::HttpStatus { status })
+        );
+    }
+    for code in [-8, -32_603, -32_600, 3] {
+        let classification =
+            prototype_bitcoin_failure(PrototypeBitcoinReadFailure::JsonRpcError(code));
+        assert_eq!(classification.stable_code, Some(JsonRpcError));
+        assert_eq!(classification.failure_class, Some(Destination));
+        assert_eq!(
+            classification.diagnostic,
+            Some(PrototypeBitcoinDiagnostic::JsonRpcError { code })
+        );
+    }
+
+    for (kind, stable_code) in [
+        (MalformedEnvelope, ResponseInvalid),
+        (MissingResult, ResponseMissingResult),
+        (InvalidResult, ResponseInvalid),
+        (TooLarge, ResponseTooLarge),
+    ] {
+        let classification =
+            prototype_bitcoin_failure(PrototypeBitcoinReadFailure::UnrepresentableResponse {
+                kind,
+                bytes: 42,
+            });
+        assert_eq!(classification.stable_code, Some(stable_code));
+        assert_eq!(classification.failure_class, Some(UnrepresentableResponse));
+        assert_eq!(classification.boundary_stage, Some(BoundaryObservation));
+        assert_eq!(
+            classification.diagnostic,
+            Some(PrototypeBitcoinDiagnostic::ResponseInvalid { kind })
+        );
+    }
+
+    for (bytes, size) in [
+        (0, PrototypeCoarseSizeClass::Zero),
+        (1, PrototypeCoarseSizeClass::UpTo16Kib),
+        (16_384, PrototypeCoarseSizeClass::UpTo16Kib),
+        (16_385, PrototypeCoarseSizeClass::UpTo1Mib),
+        (1_048_576, PrototypeCoarseSizeClass::UpTo1Mib),
+        (1_048_577, PrototypeCoarseSizeClass::Over1Mib),
+        (usize::MAX, PrototypeCoarseSizeClass::Over1Mib),
+    ] {
+        assert_eq!(
+            prototype_bitcoin_failure(PrototypeBitcoinReadFailure::UnrepresentableResponse {
+                kind: TooLarge,
+                bytes,
+            })
+            .coarse_size_class,
+            Some(size)
+        );
+    }
+    for semantic in [
+        PrototypeBitcoinReadFailure::SourceMismatch,
+        PrototypeBitcoinReadFailure::ScanIncomplete,
+        PrototypeBitcoinReadFailure::AnchorChanged,
+    ] {
+        assert_eq!(
+            prototype_bitcoin_failure(semantic),
+            compact(ReturnedSemanticFailure, None, None, None, None, None)
+        );
+    }
 }

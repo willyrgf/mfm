@@ -2,6 +2,7 @@
 
 use super::*;
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +26,107 @@ const ACCOUNT: Address = address!("000000000000000000000000000000000000dead");
 const TOKEN: Address = address!("0000000000000000000000000000000000000001");
 const ANCHOR_HASH: B256 = b256!("1111111111111111111111111111111111111111111111111111111111111111");
 const REORG_HASH: B256 = b256!("2222222222222222222222222222222222222222222222222222222222222222");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PrototypeAuditedOperation {
+    Bootstrap,
+    LatestAnchor,
+    TokenMetadata,
+    Balance,
+    ConfirmAnchor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeReturned {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrototypeObservation {
+    Returned(PrototypeReturned),
+    DidNotEnter,
+    Indeterminate,
+}
+
+#[derive(Default)]
+struct PrototypeAuditLedger {
+    next_authorization: usize,
+    authorizations: Vec<(usize, PrototypeAuditedOperation)>,
+    observations: Vec<(usize, PrototypeObservation)>,
+    boundary_entries: BTreeMap<usize, usize>,
+}
+
+impl PrototypeAuditLedger {
+    fn authorize(
+        ledger: &Arc<Mutex<Self>>,
+        operation: PrototypeAuditedOperation,
+    ) -> PrototypeAccessAuthority {
+        let mut state = ledger.lock().expect("audit ledger");
+        let authorization = state.next_authorization;
+        state.next_authorization += 1;
+        state.authorizations.push((authorization, operation));
+        drop(state);
+        PrototypeAccessAuthority {
+            authorization,
+            ledger: Arc::clone(ledger),
+            entered: false,
+            observed: false,
+        }
+    }
+}
+
+struct PrototypeAccessAuthority {
+    authorization: usize,
+    ledger: Arc<Mutex<PrototypeAuditLedger>>,
+    entered: bool,
+    observed: bool,
+}
+
+impl PrototypeAccessAuthority {
+    fn enter(&mut self) -> Result<(), &'static str> {
+        if self.entered || self.observed {
+            return Err("one authorization permits at most one boundary entry");
+        }
+        self.entered = true;
+        *self
+            .ledger
+            .lock()
+            .expect("audit ledger")
+            .boundary_entries
+            .entry(self.authorization)
+            .or_default() += 1;
+        Ok(())
+    }
+
+    fn returned(&mut self, returned: PrototypeReturned) {
+        assert!(self.entered, "returned requires boundary entry");
+        self.observe(PrototypeObservation::Returned(returned));
+    }
+
+    fn did_not_enter(&mut self) {
+        assert!(!self.entered, "DidNotEnter forbids boundary entry");
+        self.observe(PrototypeObservation::DidNotEnter);
+    }
+
+    fn cancelled_after_possible_entry(&mut self) {
+        assert!(
+            self.entered,
+            "Indeterminate requires possible boundary entry"
+        );
+        self.observe(PrototypeObservation::Indeterminate);
+    }
+
+    fn observe(&mut self, observation: PrototypeObservation) {
+        assert!(!self.observed, "one authorization permits one observation");
+        self.ledger
+            .lock()
+            .expect("audit ledger")
+            .observations
+            .push((self.authorization, observation));
+        self.observed = true;
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ReadRecord {
@@ -461,4 +563,128 @@ async fn wrong_chain_session_is_rejected_before_any_network_read() {
         .await
         .expect_err("wrong-chain session must fail binding");
     assert!(session.records().is_empty());
+}
+
+#[test]
+fn recoverability_prototype_classifies_every_operation_failure_and_cancellation() {
+    let ledger = Arc::new(Mutex::new(PrototypeAuditLedger::default()));
+    let operations = [
+        PrototypeAuditedOperation::Bootstrap,
+        PrototypeAuditedOperation::LatestAnchor,
+        PrototypeAuditedOperation::TokenMetadata,
+        PrototypeAuditedOperation::Balance,
+        PrototypeAuditedOperation::ConfirmAnchor,
+    ];
+
+    for operation in operations {
+        let mut failed = PrototypeAuditLedger::authorize(&ledger, operation);
+        failed.enter().expect("one boundary entry");
+        assert_eq!(
+            failed.enter(),
+            Err("one authorization permits at most one boundary entry")
+        );
+        failed.returned(PrototypeReturned::Failed);
+
+        let mut cancelled = PrototypeAuditLedger::authorize(&ledger, operation);
+        cancelled.enter().expect("possible boundary entry");
+        cancelled.cancelled_after_possible_entry();
+
+        let mut rejected = PrototypeAuditLedger::authorize(&ledger, operation);
+        rejected.did_not_enter();
+    }
+
+    let state = ledger.lock().expect("audit ledger");
+    assert_eq!(state.authorizations.len(), operations.len() * 3);
+    assert_eq!(state.observations.len(), operations.len() * 3);
+    assert!(state.boundary_entries.values().all(|entries| *entries == 1));
+    for operation in operations {
+        let authorizations = state
+            .authorizations
+            .iter()
+            .filter(|(_, observed)| *observed == operation)
+            .map(|(authorization, _)| *authorization)
+            .collect::<Vec<_>>();
+        let observations = state
+            .observations
+            .iter()
+            .filter(|(authorization, _)| authorizations.contains(authorization))
+            .map(|(_, observation)| *observation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observations,
+            [
+                PrototypeObservation::Returned(PrototypeReturned::Failed),
+                PrototypeObservation::Indeterminate,
+                PrototypeObservation::DidNotEnter,
+            ]
+        );
+    }
+}
+
+#[test]
+fn recoverability_prototype_preserves_partial_fanout_observations() {
+    let ledger = Arc::new(Mutex::new(PrototypeAuditLedger::default()));
+    let mut metadata =
+        PrototypeAuditLedger::authorize(&ledger, PrototypeAuditedOperation::TokenMetadata);
+    let mut failed_balance =
+        PrototypeAuditLedger::authorize(&ledger, PrototypeAuditedOperation::Balance);
+    let mut cancelled_balance =
+        PrototypeAuditLedger::authorize(&ledger, PrototypeAuditedOperation::Balance);
+    metadata.enter().expect("metadata entry");
+    failed_balance.enter().expect("failed balance entry");
+    cancelled_balance.enter().expect("cancelled balance entry");
+
+    metadata.returned(PrototypeReturned::Succeeded);
+    failed_balance.returned(PrototypeReturned::Failed);
+    cancelled_balance.cancelled_after_possible_entry();
+
+    let state = ledger.lock().expect("audit ledger");
+    assert_eq!(
+        state.observations,
+        [
+            (
+                metadata.authorization,
+                PrototypeObservation::Returned(PrototypeReturned::Succeeded),
+            ),
+            (
+                failed_balance.authorization,
+                PrototypeObservation::Returned(PrototypeReturned::Failed),
+            ),
+            (
+                cancelled_balance.authorization,
+                PrototypeObservation::Indeterminate,
+            ),
+        ],
+        "one sibling failure must not swallow completed or in-flight sibling history"
+    );
+    assert!(
+        state
+            .observations
+            .iter()
+            .any(|(_, observation)| *observation
+                == PrototypeObservation::Returned(PrototypeReturned::Succeeded)),
+        "completed metadata remains independently auditable"
+    );
+}
+
+#[test]
+fn recoverability_prototype_abrupt_loss_leaves_an_unmatched_authorization() {
+    let ledger = Arc::new(Mutex::new(PrototypeAuditLedger::default()));
+    let authorization = {
+        let mut access =
+            PrototypeAuditLedger::authorize(&ledger, PrototypeAuditedOperation::LatestAnchor);
+        access.enter().expect("boundary entry");
+        access.authorization
+    };
+
+    let state = ledger.lock().expect("audit ledger");
+    assert!(state
+        .authorizations
+        .iter()
+        .any(|(candidate, _)| *candidate == authorization));
+    assert!(state
+        .observations
+        .iter()
+        .all(|(candidate, _)| *candidate != authorization));
+    assert_eq!(state.boundary_entries.get(&authorization), Some(&1));
 }

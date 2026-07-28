@@ -56,6 +56,10 @@
           pkgs.stdenv.cc
           (mkSqlxCli system)
         ]
+        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+          pkgs.bubblewrap
+          pkgs.glibc.bin
+        ]
         ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
     in
     {

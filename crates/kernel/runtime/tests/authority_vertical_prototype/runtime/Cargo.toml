@@ -1,0 +1,13 @@
+[package]
+name = "mfm-runtime-authority-prototype"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "mfm_runtime_authority_prototype"
+path = "src/lib.rs"
+
+[dependencies]
+mfm-program-authority-prototype = { path = "../program" }
+mfm-store-authority-prototype = { path = "../store" }
