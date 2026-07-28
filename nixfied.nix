@@ -62,9 +62,6 @@ let
     DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
     SQLX_OFFLINE = "false";
   };
-  rethEnv = {
-    MFM_RETH_PARITY_HTTP_URL = "http://127.0.0.1:\${port:reth}";
-  };
   bitcoinCore =
     assert lib.versionAtLeast pkgs.bitcoind.version "28";
     assert pkgs.bitcoind.version == "31.0";
@@ -184,10 +181,9 @@ let
     };
 in
 {
-  # Postgres and Reth use upstream adapters; Bitcoin Core remains project-owned below.
+  # Postgres uses its upstream adapter; Bitcoin Core remains project-owned below.
   imports = [
     adapters.postgres
-    adapters.reth
   ];
 
   nixfied.project.projectId = "mfm";
@@ -339,19 +335,6 @@ in
         "--workspace"
         "--features"
         "mfm-app/test-support"
-        "--filter-expr"
-        "not binary(=historical_executable_isolation)"
-      ];
-    };
-    historical-executable-isolation = cargoLeaf {
-      run = [
-        "cargo"
-        "nextest"
-        "run"
-        "-p"
-        "mfm-replay"
-        "--test"
-        "historical_executable_isolation"
       ];
     };
     doc-tests = cargoLeaf {
@@ -360,30 +343,6 @@ in
         "test"
         "--workspace"
         "--doc"
-      ];
-    };
-    authority-vertical-prototype-clippy = cargoLeaf {
-      run = [
-        "cargo"
-        "clippy"
-        "--manifest-path"
-        "crates/kernel/runtime/tests/authority_vertical_prototype/Cargo.toml"
-        "--workspace"
-        "--all-targets"
-        "--locked"
-        "--"
-        "-D"
-        "warnings"
-      ];
-    };
-    authority-vertical-prototype-tests = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "--manifest-path"
-        "crates/kernel/runtime/tests/authority_vertical_prototype/Cargo.toml"
-        "--workspace"
-        "--locked"
       ];
     };
     parity-cli-keystore = cargoLeaf {
@@ -427,91 +386,41 @@ in
           prepare_check() {
             cargo sqlx prepare --check -- --all-targets --features parity-tests
           }
+          authoritative_schema_check() {
+            cargo test --features parity-tests --lib \
+              tests::verification_probe_accepts_the_current_authoritative_schema \
+              -- --ignored --exact --nocapture
+          }
           prepare_check
+          authoritative_schema_check
 
-          # The migration-ledger query must notice schema changes even when Rust
-          # sources are unchanged and Cargo would otherwise reuse its artifacts.
+          # Runtime queries deliberately consume the closed schema through the
+          # authoritative validator rather than SQLx compile-time macros. Probe
+          # that exact model even when Cargo reuses its compiled artifacts.
           psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "ALTER TABLE \"$schema\"._sqlx_migrations DROP COLUMN checksum"
-          if mutation_output="$(prepare_check 2>&1)"; then
-            echo "schema mutation was not detected by cargo sqlx prepare --check" >&2
+          if mutation_output="$(authoritative_schema_check 2>&1)"; then
+            echo "schema mutation was not detected by authoritative validation" >&2
             exit 1
           fi
           mutation_output="''${mutation_output,,}"
-          if [[ "$mutation_output" != *checksum* ]]; then
+          if [[ "$mutation_output" != *schemaauthoritymismatch* ]]; then
             echo "schema mutation failed for an unexpected reason" >&2
             exit 1
           fi
-          echo "schema mutation correctly rejected by cargo sqlx prepare --check"
+          echo "schema mutation correctly rejected by authoritative validation"
 
           psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS \"$schema\" CASCADE"
           psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA \"$schema\""
           cargo sqlx migrate run --source migrations
           prepare_check
-          echo "restored schema accepted by cargo sqlx prepare --check"
+          authoritative_schema_check
+          echo "restored schema accepted by SQLx and authoritative validation"
         ''
       ];
       env = postgresSqlxEnv;
       requires = [ "postgres" ];
     };
-    mfm-store = {
-      serviceLifetime = "persistent-until-down";
-      invocation = {
-        tools = [ sqlxCli ];
-        run = [
-          "sqlx"
-          "migrate"
-          "run"
-          "--source"
-          "crates/storages/postgres/migrations"
-        ];
-        env = postgresSqlxEnv;
-        timeoutMs = 60000;
-      };
-      requires = [ "postgres" ];
-    };
-    mfm-cli-build = cargoLeaf {
-      run = [
-        "cargo"
-        "build"
-        "-p"
-        "mfm"
-        "--bin"
-        "mfm_cli"
-      ];
-    };
-    parity-cli-setup = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm"
-        "--features"
-        "parity-tests"
-        "--test"
-        "setup_postgres"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-postgres-rest-api = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "parity_rest_api_postgres_smoke"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-postgres-state-events = cargoLeaf {
+    recoverability-postgres-v1 = cargoLeaf {
       run = [
         "cargo"
         "test"
@@ -519,7 +428,6 @@ in
         "mfm-storage-postgres"
         "--features"
         "parity-tests"
-        "--lib"
         "--"
         "--nocapture"
       ];
@@ -541,54 +449,6 @@ in
       ];
       env = postgresEnv;
       requires = [ "postgres" ];
-    };
-    prototype-postgres-ha-writer-fence = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-storage-postgres"
-        "--features"
-        "parity-tests"
-        "--test"
-        "recoverability_postgres_ha_writer_fence_prototype"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    prototype-postgres-executor = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-storage-postgres"
-        "--features"
-        "parity-tests"
-        "--test"
-        "recoverability_postgres_executor_prototype"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-reth-eip1559 = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "parity_reth_eip1559"
-        "--"
-        "--nocapture"
-      ];
-      env = rethEnv;
-      requires = [ "reth" ];
     };
     parity-bitcoin-core = cargoLeaf {
       tools = cargoTools ++ [ "bitcoin-core-cli" ];
@@ -615,22 +475,13 @@ in
         "HEAD^{commit}"
       ];
     };
-    # Keep workspace, OS-isolation, and doctest commands as explicit leaves so
-    # each has its own evidence. The workspace run enables app test support
-    # in-place and excludes the separately qualified isolation binary.
+    # Keep workspace and doctest commands as explicit leaves so each has its
+    # own evidence. The workspace run enables app test support in-place.
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
         "nextest-run"
-        "historical-executable-isolation"
         "doc-tests"
-      ];
-    };
-    authority-vertical-prototype = {
-      kind = "composite";
-      steps = nixfiedLib.seq [
-        "authority-vertical-prototype-clippy"
-        "authority-vertical-prototype-tests"
       ];
     };
 
@@ -646,10 +497,7 @@ in
 
     test = {
       kind = "composite";
-      steps = {
-        workspace-tests.task = "workspace-tests";
-        authority-vertical-prototype.task = "authority-vertical-prototype";
-      };
+      steps.workspace-tests.task = "workspace-tests";
     };
 
     test-db = {
@@ -657,34 +505,14 @@ in
       steps = {
         executor-postgres-qualification.task = "executor-postgres-qualification";
         postgres-sqlx-check.task = "postgres-sqlx-check";
-        mfm-cli-build = {
-          task = "mfm-cli-build";
+        recoverability-postgres-v1 = {
+          task = "recoverability-postgres-v1";
           dependsOn = [ "postgres-sqlx-check" ];
-        };
-        parity-postgres-state-events = {
-          task = "parity-postgres-state-events";
-          dependsOn = [ "postgres-sqlx-check" ];
-        };
-        prototype-postgres-ha-writer-fence = {
-          task = "prototype-postgres-ha-writer-fence";
-          dependsOn = [ "postgres-sqlx-check" ];
-        };
-        prototype-postgres-executor = {
-          task = "prototype-postgres-executor";
-          dependsOn = [ "postgres-sqlx-check" ];
-        };
-        parity-cli-setup = {
-          task = "parity-cli-setup";
-          dependsOn = [ "mfm-cli-build" ];
-        };
-        parity-postgres-rest-api = {
-          task = "parity-postgres-rest-api";
-          dependsOn = [ "parity-postgres-state-events" ];
         };
       };
     };
 
-    # Order service-free verification before Postgres, Reth, and project-owned
+    # Order service-free verification before PostgreSQL and project-owned
     # Bitcoin parity, then record the source revision that completed the gate.
     ci = {
       kind = "composite";
@@ -702,13 +530,9 @@ in
           task = "test-db";
           dependsOn = [ "parity-cli-keystore" ];
         };
-        parity-reth-eip1559 = {
-          task = "parity-reth-eip1559";
-          dependsOn = [ "test-db" ];
-        };
         parity-bitcoin-core = {
           task = "parity-bitcoin-core";
-          dependsOn = [ "parity-reth-eip1559" ];
+          dependsOn = [ "test-db" ];
         };
         closing-source-revision = {
           task = "closing-source-revision";

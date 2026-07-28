@@ -1,43 +1,40 @@
-use std::fmt;
-
-use crate::commands::result::{CommandOutput, CommandResult};
-use crate::commands::CommandContext;
-use crate::presentation::output::handle_command_result;
 use clap::Subcommand;
-use serde::Serialize;
+
+use crate::commands::CommandContext;
+use crate::presentation::output::handle_public_result;
+use crate::support::application::{connect_application, ApplicationConnectionArgs};
 
 /// Public entry-point discovery commands.
 #[derive(Subcommand)]
 pub(crate) enum OpsCommand {
-    /// List the exact entry-point ids in this binary.
-    List,
+    /// List every complete compiled entry-point contract.
+    List {
+        /// Non-semantic process connection options.
+        #[command(flatten)]
+        connection: ApplicationConnectionArgs,
+    },
 }
 
 impl OpsCommand {
     /// Dispatches the selected discovery command.
     pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
-            Self::List => handle_command_result(execute_list().await, &ctx.output_format),
+            Self::List { connection } => {
+                let result = connect_application(connection)
+                    .await
+                    .map(|application| application.entry_points().to_vec());
+                handle_public_result(result, &ctx.output_format, |entries| {
+                    let mut text = entries
+                        .iter()
+                        .map(|entry| entry.entry_point_id().as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    Ok(text)
+                })
+            }
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OpsOutput {
-    entry_points: &'static [&'static str],
-}
-
-impl fmt::Display for OpsOutput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for entry_point in self.entry_points {
-            writeln!(f, "{entry_point}")?;
-        }
-        Ok(())
-    }
-}
-
-async fn execute_list() -> CommandResult<OpsOutput> {
-    Ok(CommandOutput::new(OpsOutput {
-        entry_points: mfm_app::entry_point_ids(),
-    }))
 }

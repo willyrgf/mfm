@@ -2,7 +2,7 @@
 name = "mfm-evm"
 version = "0.1.0"
 edition = "2021"
-description = "Pure EVM model, capability, signing, state, and operation contracts for MFM"
+description = "Pure EVM audited-read graph, protocol, and signing contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -22,13 +22,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-certify = { path = "../../kernel/certify" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
+mfm-journal = { path = "../../kernel/journal" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-signing = { path = "../../signing" }
+mfm-spec = { path = "../../kernel/spec" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]

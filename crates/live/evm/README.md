@@ -1,20 +1,30 @@
 # mfm-evm-live
 
-Runtime and replay bindings for exactly three reusable EVM state kinds:
-`CollectEvmBalancesState`, `SubmitEvmTransactionState`, and `ValidateEvmContractState`.
+This crate owns the exact-generation EVM JSON-RPC transport and runtime
+bindings for six independently audited read operations:
 
-`EvmReadRunnerCapabilities` is the single source-bound read assembly used by balance collection and
-exact-anchor validation. Both families resolve a checked session from one supplied session set
-before admission. The balance executor resolves one anchor, performs bounded ordered native and
-ERC-20 reads, and retains complete reducer evidence. The read reducer returns the complete
-`evm.balance_snapshot` batch with its checked receipt for atomic runtime settlement.
+- `eth_chain_id`
+- `eth_get_block_by_number_latest`
+- `eth_call_erc20_decimals`
+- `eth_get_balance`
+- `eth_call_erc20_balance_of`
+- `eth_get_block_by_number_confirm`
 
-Registration is deliberately split: `register_evm_balance_runners`,
-`register_evm_validation_runner`, and `register_evm_transaction_runner` let each consumer install
-only the state family it owns. The production app selects balance registration only; validation and
-transaction registration remain explicit library/test foundations.
+Every typed transport method performs zero or one HTTP exchange. Immutable
+generation lookup and source checks happen locally; redirects, retries,
+failover, current-route aliases, batching, arbitrary method calls, and
+aggregate reductions are absent. Fan-out reads use the exact EIP-1898 block
+hash with `requireCanonical: true`, and final confirmation resolves the initial
+block number to a hash.
 
-`verify_evm_balance_collection_replay` recomputes the read output, fact batch, receipt, and recorded
-fact evidence without runtime config or a live route. Transaction and validation replay remain in
-the private adapter module. The public transport is independently reusable without runtime
-registration. Operation topology is intentionally absent.
+After the app admits its one complete support graph, the sealed EVM
+qualification artifacts verify the executable, shared 12-component
+qualification, and exact adapter semantic/callback/implementation tuple. The
+qualified factory borrows those artifacts and returns a closed six-entry typed
+dispatch table for the sole program registry. All entries share one binding,
+component implementation, routing catalog, and aggregate adapter. Qualification
+also proves the safe classifier and failure contracts, reviewed source scope,
+the routing catalog, and every immutable generation before registration.
+
+No transaction/effect state, Bitcoin state, replay reducer, aggregate reader,
+or mutation lifecycle is registered.

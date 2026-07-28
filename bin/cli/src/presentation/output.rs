@@ -272,6 +272,50 @@ where
     }
 }
 
+/// Renders a new ops/run success directly, without the legacy CLI success envelope.
+pub(crate) fn handle_public_result<T>(
+    result: Result<T, PublicError>,
+    format: &OutputFormat,
+    text: impl FnOnce(&T) -> Result<String, PublicError>,
+) -> !
+where
+    T: mfm_app::PublicJsonResponse,
+{
+    match result {
+        Ok(output) => {
+            if format.is_json() {
+                match output.public_json().and_then(|value| {
+                    serde_json::to_string_pretty(&value).map_err(|_| {
+                        PublicError::internal(
+                            "SerializationError",
+                            "Failed to serialize response payload",
+                        )
+                    })
+                }) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => {
+                        print_error(error, format);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                match text(&output) {
+                    Ok(text) => print!("{text}"),
+                    Err(error) => {
+                        print_error(error, format);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            std::process::exit(0);
+        }
+        Err(error) => {
+            print_error(error, format);
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

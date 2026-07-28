@@ -1,18 +1,17 @@
 # mfm-spec
 
-Typed kernel crate for typed execution spec data contracts.
+Frozen recoverability-v1 value contracts for authored programs, planning profiles, expanded
+graphs, implementation manifests, and certificates.
 
-`mfm_spec::v1::HashedSpecEnvelope` is a hash-only envelope for canonical spec bytes and
-non-semantic audit metadata. It is not certification authority; callers must use
-`mfm-certify` to obtain or verify a non-forgeable certified typed-spec authority.
+The crate owns canonical data and strict Annex-backed codecs only. It does not author programs,
+plan graphs, execute callbacks, bind live capabilities, or grant admission authority.
 
-Parsed persisted typed spec bytes are typed data only and remain hostile until verified by
-`mfm-certify` against a registry and certificate. Hash matches, audit metadata, summaries, or
-source scans do not certify this data.
+Persisted authored/spec/manifest/certificate bytes remain untrusted data until `mfm-certify`
+strictly decodes them and reproduces the exact expanded graph and certificate. A content reference
+or hash by itself is not certification authority.
 
-The v1 spec shape includes an explicit certified transition-context table plus node, cell, and input
-context constraints. Specs with implicit context absence are rejected; ordinary states carry explicit
-`NoContext` metadata.
+Certified retained slots use and re-export the single
+`mfm_values::RetainedValueContract`; the spec does not define a parallel retained metadata type.
 
 `docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
 must remain domain-free.

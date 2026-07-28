@@ -1,94 +1,177 @@
-//! Deterministic reusable EVM balance collection topology.
-//!
-//! [`EvmBalanceCollectionOperation`] expands to one fact-producing external read and exports its
-//! resulting receipt. Parent operations compose it directly.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use mfm_evm::EvmBalanceCollectionOperation;
-//! use mfm_program::Operation as _;
-//!
-//! assert_eq!(EvmBalanceCollectionOperation::name(), "mfm.evm.balance_collection");
-//! ```
+//! Deterministic EVM balance-read graph authoring.
+
+use mfm_ids::StableId;
+use mfm_journal::v1::ValueRef;
+use mfm_program::{AuthoredHandle, AuthoredProgramBuilder, Operation, StateBindings};
 
 use crate::state::{
-    CollectEvmBalancesState, EvmBalanceCollectionConfig, EvmBalanceCollectionReceipt,
+    AggregateEvmBalancesState, BootstrapEvmSourceState, ConfirmEvmAnchorState, EvmBalanceAsset,
+    EvmBalanceCollection, EvmBalanceCollectionConfig, EvmBalanceSource, ReadEvmInitialAnchorState,
+    ReadEvmNativeBalanceState, ReadEvmTokenBalanceState, ReadEvmTokenDecimalsState,
 };
-use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
-use mfm_program::{NoContext, Operation, OperationExpansion, StateKey};
-use mfm_program_derive::OperationOutput;
 
-const OP_NAMESPACE: &str = "mfm.evm";
-const OP_KIND_NAME: &str = "balance_collection";
-const OP_VERSION: &str = "mfm.evm.operation.balance_collection.v1";
+use crate::EvmNetworkBinding;
 
-/// Output of one reusable EVM balance collection operation.
-#[derive(OperationOutput)]
-#[mfm(schema = "mfm.evm.operation_outputs.balance_collection")]
-pub struct EvmBalanceCollectionOutputs<'program, 'scope> {
-    /// Checked receipt returned by the fact-producing read state.
-    pub receipt: mfm_program::Handle<'program, 'scope, EvmBalanceCollectionReceipt>,
+/// Stable internal operation identity for a reusable EVM collection graph.
+pub const EVM_BALANCE_COLLECTION_OPERATION_ID: &str = "mfm.evm/balance-collection";
+
+/// Validator-owned field selections consumed by one static collection graph.
+pub struct EvmBalanceCollectionAuthoringInputs {
+    unit_config_ref: ValueRef,
+    binding: AuthoredHandle<EvmNetworkBinding>,
+    native_decimals: AuthoredHandle<u8>,
+    sources: Vec<AuthoredHandle<EvmBalanceSource>>,
+    token_contracts: Vec<AuthoredHandle<String>>,
 }
 
-/// Reusable one-state EVM balance collection operation.
-pub struct EvmBalanceCollectionOperation;
+impl EvmBalanceCollectionAuthoringInputs {
+    /// Binds one graph to the retained framework unit config and validator output fields.
+    pub fn new(
+        unit_config_ref: ValueRef,
+        binding: AuthoredHandle<EvmNetworkBinding>,
+        native_decimals: AuthoredHandle<u8>,
+        sources: Vec<AuthoredHandle<EvmBalanceSource>>,
+        token_contracts: Vec<AuthoredHandle<String>>,
+    ) -> Self {
+        Self {
+            unit_config_ref,
+            binding,
+            native_decimals,
+            sources,
+            token_contracts,
+        }
+    }
+}
+
+/// Typed output handle for one EVM balance collection graph.
+pub struct EvmBalanceCollectionOutputs {
+    /// Pure aggregate output consumed directly by the parent operation.
+    pub collection: AuthoredHandle<EvmBalanceCollection>,
+}
+
+/// Reusable certified collection operation.
+///
+/// `topology` is inspected only while the package author deterministically
+/// enumerates a bounded graph. Every runtime value still comes from the
+/// successful validator output selected by `inputs`.
+pub struct EvmBalanceCollectionOperation {
+    topology: EvmBalanceCollectionConfig,
+    inputs: EvmBalanceCollectionAuthoringInputs,
+}
+
+impl EvmBalanceCollectionOperation {
+    /// Creates one exact graph and rejects a topology/selector cardinality mismatch.
+    pub fn new(
+        topology: EvmBalanceCollectionConfig,
+        inputs: EvmBalanceCollectionAuthoringInputs,
+    ) -> mfm_program::Result<Self> {
+        if topology.sources().len() != inputs.sources.len()
+            || topology.token_contracts().len() != inputs.token_contracts.len()
+        {
+            return Err(mfm_program::ProgramError::Authoring(
+                "EVM collection topology differs from validator field selections".to_owned(),
+            ));
+        }
+        Ok(Self { topology, inputs })
+    }
+
+    /// Returns the immutable topology inspected during package authoring.
+    pub const fn topology(&self) -> &EvmBalanceCollectionConfig {
+        &self.topology
+    }
+
+    fn bindings(&self) -> StateBindings {
+        StateBindings::new(self.inputs.unit_config_ref.clone(), None)
+    }
+}
 
 impl Operation for EvmBalanceCollectionOperation {
-    type Config = EvmBalanceCollectionConfig;
-    type Input<'program, 'scope> = ();
-    type Output<'program, 'scope> = EvmBalanceCollectionOutputs<'program, 'scope>;
+    type Output = EvmBalanceCollectionOutputs;
 
-    fn kind() -> mfm_program::Result<OperationKind> {
-        OperationKind::new(
-            OP_NAMESPACE,
-            OP_KIND_NAME,
-            DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::sha256_digest_bytes(b"mfm.evm.operation:balance_collection"),
-        )
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-    }
+    fn author(&self, builder: &mut AuthoredProgramBuilder) -> mfm_program::Result<Self::Output> {
+        let bootstrap = builder
+            .state::<BootstrapEvmSourceState>(stable_id("bootstrap_source")?, self.bindings())?;
+        builder.connect_to(&self.inputs.binding, &bootstrap, 0)?;
 
-    fn version() -> mfm_program::Result<OperationVersion> {
-        OperationVersion::new(OP_VERSION)
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-    }
+        let initial = builder
+            .state::<ReadEvmInitialAnchorState>(stable_id("initial_anchor")?, self.bindings())?;
+        builder.connect_to(bootstrap.output(), &initial, 0)?;
 
-    fn name() -> &'static str {
-        "mfm.evm.balance_collection"
-    }
+        let mut fanout = Vec::with_capacity(
+            self.topology.sources().len() + self.topology.token_contracts().len(),
+        );
+        for (index, contract) in self.inputs.token_contracts.iter().enumerate() {
+            let state = builder.state::<ReadEvmTokenDecimalsState>(
+                indexed_key("token_decimals", index)?,
+                self.bindings(),
+            )?;
+            builder.connect_to(initial.output(), &state, 0)?;
+            builder.connect_to(contract, &state, 1)?;
+            fanout.push(state.into_output());
+        }
+        for (index, (source, source_handle)) in self
+            .topology
+            .sources()
+            .iter()
+            .zip(&self.inputs.sources)
+            .enumerate()
+        {
+            match source.asset() {
+                EvmBalanceAsset::Native => {
+                    let state = builder.state::<ReadEvmNativeBalanceState>(
+                        indexed_key("native_balance", index)?,
+                        self.bindings(),
+                    )?;
+                    builder.connect_to(initial.output(), &state, 0)?;
+                    builder.connect_to(source_handle, &state, 1)?;
+                    fanout.push(state.into_output());
+                }
+                EvmBalanceAsset::Erc20 { .. } => {
+                    let state = builder.state::<ReadEvmTokenBalanceState>(
+                        indexed_key("token_balance", index)?,
+                        self.bindings(),
+                    )?;
+                    builder.connect_to(initial.output(), &state, 0)?;
+                    builder.connect_to(source_handle, &state, 1)?;
+                    fanout.push(state.into_output());
+                }
+            }
+        }
 
-    fn expand<'program, 'scope>(
-        &self,
-        config: mfm_program::ValidatedConfig<Self::Config>,
-        _input: Self::Input<'program, 'scope>,
-        builder: &mut OperationExpansion<'program, 'scope>,
-        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
-    ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        let receipt = builder.state::<CollectEvmBalancesState, _>(
-            StateKey::new("collect_balances")?,
-            NoContext,
-            config.into_inner(),
-            (),
+        let confirmation = builder
+            .state::<ConfirmEvmAnchorState>(stable_id("confirm_anchor")?, self.bindings())?;
+        for result in &fanout {
+            builder.connect_to(result, &confirmation, 0)?;
+        }
+
+        let aggregate = builder.state::<AggregateEvmBalancesState>(
+            stable_id("aggregate_balances")?,
+            self.bindings(),
         )?;
-        Ok(EvmBalanceCollectionOutputs { receipt })
+        builder.connect_to(&self.inputs.binding, &aggregate, 0)?;
+        builder.connect_to(&self.inputs.native_decimals, &aggregate, 1)?;
+        for result in &fanout {
+            builder.connect_to(result, &aggregate, 2)?;
+        }
+        builder.connect_to(confirmation.output(), &aggregate, 2)?;
+        for source in &self.inputs.sources {
+            builder.connect_to(source, &aggregate, 3)?;
+        }
+        for contract in &self.inputs.token_contracts {
+            builder.connect_to(contract, &aggregate, 4)?;
+        }
+        builder.required_success(aggregate.output())?;
+
+        Ok(EvmBalanceCollectionOutputs {
+            collection: aggregate.into_output(),
+        })
     }
 }
 
-mfm_certify::define_program_descriptor_registry! {
-    state_registry: pub evm_collectors_state_registry,
-    operation_registry: pub evm_collectors_operation_registry,
-    certification: pub register_evm_collectors_certification_descriptors,
-    authoring_catalog: pub evm_collectors_authoring_catalog,
-    includes: [],
-    states: [
-        CollectEvmBalancesState,
-    ],
-    operations: [
-        EvmBalanceCollectionOperation,
-    ],
+fn indexed_key(prefix: &str, index: usize) -> mfm_program::Result<StableId> {
+    stable_id(format!("{prefix}/{index:04}"))
 }
 
-#[cfg(test)]
-#[path = "operation_tests.rs"]
-mod tests;
+fn stable_id(value: impl AsRef<str>) -> mfm_program::Result<StableId> {
+    StableId::new(value).map_err(|error| mfm_program::ProgramError::Authoring(error.to_string()))
+}

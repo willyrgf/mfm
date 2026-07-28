@@ -1,204 +1,222 @@
-use super::*;
+use mfm_ids::{ArtifactId, RunId, SemanticDigest, TenantScopeId};
 
-/// Error returned by typed store contract validation.
+use mfm_journal::v1::JournalHead;
+
+/// Error returned by the recoverability-v1 store contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
-    /// No committed journal exists for the requested run.
-    #[error("committed journal not found for run {run_id}")]
-    RunNotFound {
-        /// Requested run id.
+    /// No committed journal exists for the requested authorized run.
+    #[error("committed journal not found")]
+    RunNotFound,
+    /// A purpose authority did not belong to this exact store instance.
+    #[error("store access denied for {purpose}")]
+    AccessDenied {
+        /// Reviewed purpose label.
+        purpose: &'static str,
+    },
+    /// A policy-approved authority target violated its frozen grammar.
+    #[error("invalid authority binding for {field}")]
+    InvalidAuthorityBinding {
+        /// Reviewed field label.
+        field: &'static str,
+    },
+    /// An admission authority did not match the exact admitted root.
+    #[error("admission authority does not match the exact root")]
+    AdmissionAuthorityMismatch,
+    /// The admission logical key already names different immutable root content.
+    #[error("admission logical key conflicts with an existing root")]
+    AdmissionConflict,
+    /// An annex-backed journal value failed strict construction or projection.
+    #[error("journal contract validation failed")]
+    JournalContract,
+    /// A prepared append violated the exhaustive legal batch contract.
+    #[error("invalid {purpose} append: {message}")]
+    InvalidPreparedAppend {
+        /// Closed append purpose.
+        purpose: &'static str,
+        /// Reviewed invariant diagnostic.
+        message: &'static str,
+    },
+    /// A loaded journal was absent or contained no admission root.
+    #[error("committed journal is empty")]
+    EmptyJournal,
+    /// A loaded row disagreed with a store-derived field.
+    #[error("persisted journal mismatch for {field}")]
+    PersistedMismatch {
+        /// Reviewed field label.
+        field: &'static str,
+    },
+    /// A candidate named a stale physical predecessor.
+    #[error("journal head compare-and-swap failed")]
+    HeadMismatch {
+        /// Candidate predecessor.
+        expected: Box<JournalHead>,
+        /// Current physical head.
+        actual: Box<JournalHead>,
+    },
+    /// A non-admission append targeted an absent run.
+    #[error("append targeted an absent run")]
+    AppendRunNotFound {
+        /// Absent run.
         run_id: RunId,
     },
-    /// A commit contained no payloads.
-    #[error("typed commit cannot be empty")]
-    EmptyCommit,
-    /// Stream sequence arithmetic overflowed.
-    #[error("typed stream sequence overflowed")]
+    /// An append request id was reused with different predecessor or candidate bytes.
+    #[error("append request id was reused with different content")]
+    AppendRequestConflict,
+    /// A per-run sequence would overflow.
+    #[error("run sequence overflow")]
     SequenceOverflow,
-    /// A payload was bound to a different run.
-    #[error("payload run mismatch: expected {expected}, got {actual}")]
-    PayloadRunMismatch {
-        /// Run supplied to the commit API.
-        expected: Box<RunId>,
-        /// Run found inside the payload.
-        actual: Box<RunId>,
+    /// A tenant fact publication order would overflow.
+    #[error("tenant fact publication order overflow")]
+    FactOrderOverflow {
+        /// Tenant whose dense order exhausted.
+        tenant_scope_id: TenantScopeId,
     },
-    /// Payloads in one commit carried different certified spec hashes.
-    #[error("payload spec hash mismatch: expected {expected}, got {actual}")]
-    PayloadSpecHashMismatch {
-        /// First payload spec hash.
-        expected: Box<SpecHash>,
-        /// Later payload spec hash.
-        actual: Box<SpecHash>,
-    },
-    /// A purpose-specific prepared commit constructor rejected the payload/precondition shape.
-    #[error("invalid prepared {purpose} commit: {message}")]
-    InvalidPreparedCommitPurpose {
-        /// Purpose constructor that rejected the request.
-        purpose: &'static str,
-        /// Stable diagnostic.
-        message: String,
-    },
-    /// The commit key was reused for a different canonical commit.
-    #[error("commit key reused for different payloads: {commit_key}")]
-    CommitConflict {
-        /// Reused commit key.
-        commit_key: CommitKey,
-    },
-    /// The caller's expected next sequence is stale.
-    #[error("stale expected_next_seq: expected {expected}, actual {actual}")]
-    StaleExpectedNextSeq {
-        /// Expected sequence supplied by the caller.
-        expected: StreamSeq,
-        /// Actual next sequence owned by the store.
-        actual: StreamSeq,
-    },
-    /// A required logical key precondition failed.
-    #[error("logical key precondition failed for {logical_key}: {message}")]
-    LogicalKeyPreconditionFailed {
-        /// Logical key that failed the precondition.
-        logical_key: LogicalEventKey,
-        /// Stable diagnostic.
-        message: String,
-    },
-    /// A run-state precondition failed.
-    #[error("run state precondition failed: required {required:?}, actual {actual:?}")]
-    RunStatePreconditionFailed {
-        /// Required run state.
-        required: RequiredRunState,
-        /// Actual run state.
-        actual: RunState,
-    },
-    /// A cell-state precondition failed.
-    #[error("cell state precondition failed for {cell_id}: required {required:?}")]
-    CellStatePreconditionFailed {
-        /// Cell id that failed the precondition.
-        cell_id: CellId,
-        /// Required cell state.
-        required: RequiredCellState,
-    },
-    /// A side-effect-state precondition failed.
-    #[error("side-effect state precondition failed for pair {pair_id}: required {required:?}")]
-    SideEffectStatePreconditionFailed {
-        /// Certified pair id that failed the precondition.
-        pair_id: SideEffectPairId,
-        /// Required side-effect state.
-        required: RequiredSideEffectState,
-    },
-    /// A public output was already projected when absence was required.
-    #[error("public output absence precondition failed")]
-    PublicOutputPreconditionFailed,
-    /// A referenced artifact is missing from the store-owned artifact evidence table.
-    #[error("missing artifact evidence for {artifact_id}")]
-    MissingArtifact {
-        /// Missing artifact id.
-        artifact_id: ArtifactId,
-    },
-    /// Stored artifact evidence does not match a required artifact reference.
-    #[error("artifact evidence mismatch for {artifact_id} field {field}")]
-    ArtifactEvidenceMismatch {
-        /// Artifact id with mismatched evidence.
-        artifact_id: ArtifactId,
-        /// Mismatched field label.
+    /// A transition or authorization tried to extend a semantically closed run.
+    #[error("semantic run is closed")]
+    RunClosed,
+    /// A closure was not adjacent to and inseparable from its terminal transition.
+    #[error("invalid run closure")]
+    InvalidClosure,
+    /// One closed logical record slot was already occupied.
+    #[error("duplicate logical record slot")]
+    DuplicateLogicalRecord,
+    /// An authorization was incompatible with the current structural node state.
+    #[error("external access authorization is not structurally eligible")]
+    AuthorizationNotEligible,
+    /// An observation referenced no matching committed authorization.
+    #[error("external access observation references an unknown authorization")]
+    UnknownAuthorization,
+    /// An authorization already has its one observation.
+    #[error("external access authorization is already observed")]
+    ObservationAlreadyCommitted,
+    /// A post-closure observation did not reference an unmatched pre-closure authorization.
+    #[error("external access observation is not a legal audit tail")]
+    InvalidAuditTail,
+    /// An access-audit page request violated its bounded head-fixed contract.
+    #[error("invalid access-audit page for {field}")]
+    InvalidAuditPage {
+        /// Reviewed invalid request field.
         field: &'static str,
     },
-    /// Artifact bytes or metadata could not be loaded from retained evidence storage.
-    #[error("failed to read retained artifact {artifact_id}")]
-    ArtifactReadFailed {
-        /// Artifact id whose retained bytes could not be loaded.
-        artifact_id: ArtifactId,
-    },
-    /// A prepared commit tried to admit artifact evidence that no event in the commit
-    /// references.
-    #[error("prepared commit admitted unreferenced artifact evidence {artifact_id}")]
-    UnreferencedArtifactEvidence {
-        /// Unreferenced artifact id.
-        artifact_id: ArtifactId,
-    },
-    /// A logical key that must be unique already exists.
-    #[error("duplicate logical key {logical_key}")]
-    DuplicateLogicalKey {
-        /// Duplicate logical key.
-        logical_key: LogicalEventKey,
-    },
-    /// A logical key conflict would corrupt an existing projection.
-    #[error("logical key conflict {logical_key}")]
-    LogicalKeyConflict {
-        /// Conflicting logical key.
-        logical_key: LogicalEventKey,
-    },
-    /// A projection transition would corrupt an existing projection.
-    #[error("projection conflict for {key}: {message}")]
-    ProjectionConflict {
-        /// Projection key.
-        key: String,
-        /// Stable diagnostic.
-        message: String,
-    },
-    /// A run observation cursor was malformed, tampered, or belongs to an unsupported format.
-    #[error("invalid run observation cursor: {message}")]
-    InvalidCursor {
-        /// Stable diagnostic.
-        message: String,
-    },
-    /// A run observation cursor belongs to a previous store epoch.
-    #[error("run observation cursor expired")]
-    CursorExpired,
-    /// A run observation limit was outside the supported v1 range.
-    #[error("run observation limit {limit} is outside 1..={max}")]
-    LimitOutOfRange {
-        /// Requested limit.
-        limit: u32,
-        /// Maximum accepted limit.
-        max: u32,
-    },
-    /// Required observation rows were unavailable or corrupt.
-    #[error("run observation unavailable: {message}")]
-    ObservationUnavailable {
-        /// Stable diagnostic.
-        message: String,
-    },
-    /// A prepared commit bundle did not carry bytes or exact existing evidence for an admitted artifact.
-    #[error("prepared commit bundle missing artifact bytes for {artifact_id}")]
-    MissingPreparedArtifactBytes {
-        /// Artifact id missing from the bundle.
-        artifact_id: ArtifactId,
-    },
-    /// A prepared commit bundle carried artifact bytes not admitted by the prepared authority.
-    #[error("prepared commit bundle carried extra artifact bytes for {artifact_id}")]
-    ExtraPreparedArtifactBytes {
-        /// Extra artifact id carried by the bundle.
-        artifact_id: ArtifactId,
-    },
-    /// A prepared commit bundle carried duplicate artifact bytes or evidence references.
-    #[error("prepared commit bundle carried duplicate artifact evidence for {artifact_id}")]
-    DuplicatePreparedArtifactBytes {
-        /// Duplicated artifact id.
-        artifact_id: ArtifactId,
-    },
-    /// A persisted event row disagrees with store-derived typed event fields.
-    #[error("persisted event mismatch for {field}: {message}")]
-    PersistedEventMismatch {
-        /// Mismatched field label.
+    /// A transition-trace page or its supplied source-authority set violated its sealed contract.
+    #[error("invalid transition-trace page for {field}")]
+    InvalidTracePage {
+        /// Reviewed invalid request or token field.
         field: &'static str,
-        /// Stable diagnostic.
-        message: String,
     },
-    /// Identity construction failed.
-    #[error("identity error: {0}")]
-    Identity(String),
-    /// JSON serialization failed before canonicalization.
-    #[error("store JSON serialization error: {0}")]
-    Serialize(String),
-    /// Canonical JSON construction failed.
-    #[error("store canonicalization error: {0}")]
-    Canonical(String),
-    /// Event schema id construction failed.
-    #[error("event contract error: {0}")]
-    Event(String),
+    /// A read retry changed its first frozen intent.
+    #[error("read authorization conflicts with the frozen intent")]
+    FrozenReadIntentConflict,
+    /// A transition consumed an unavailable or incompatible observation.
+    #[error("transition consumed an incompatible observation")]
+    ObservationNotConsumable,
+    /// A transition's before/after assertions disagree with the private fold.
+    #[error("transition fold mismatch for {field}")]
+    TransitionFoldMismatch {
+        /// Reviewed field label.
+        field: &'static str,
+    },
+    /// Object path bindings or admission intents were not canonical and exact.
+    #[error("invalid exact object authority: {message}")]
+    InvalidObjectAuthority {
+        /// Reviewed invariant diagnostic.
+        message: &'static str,
+    },
+    /// A required exact object did not have prior or same-batch authority.
+    #[error("required exact object is missing")]
+    MissingObjectAuthority {
+        /// Missing artifact.
+        artifact_id: ArtifactId,
+    },
+    /// Staged bytes did not match the exact bound content identity.
+    #[error("staged object bytes do not match exact content identity")]
+    ObjectContentMismatch {
+        /// Mismatched artifact.
+        artifact_id: ArtifactId,
+    },
+    /// Existing object authority disagreed with the supplied exact identity.
+    #[error("object authority conflicts with existing immutable evidence")]
+    ObjectAuthorityConflict {
+        /// Conflicting artifact.
+        artifact_id: ArtifactId,
+    },
+    /// A requested retained object is not reachable from the authorized journal.
+    #[error("retained object is not reachable from the authorized journal")]
+    ObjectNotReachable,
+    /// A tenant fact coordinate disagreed with the legal batch or routing copies.
+    #[error("invalid tenant fact coordinate")]
+    InvalidFactCoordinate,
+    /// Retained tenant publication/barrier structure was not a dense valid prefix.
+    #[error("tenant fact history is corrupt")]
+    CorruptFactHistory,
+    /// A fact scan request exceeded the frozen response bound.
+    #[error("fact selection limit exceeds 128")]
+    FactSelectionLimitExceeded,
+    /// A fact scan session was used with a different authorization or frontier.
+    #[error("fact scan session binding mismatch")]
+    FactScanBindingMismatch,
+    /// A source closure crossed its admitted store or tenant scope.
+    #[error("cross-run source scope mismatch")]
+    SourceScopeMismatch,
+    /// A source closure was incomplete, cyclic, or inconsistent.
+    #[error("cross-run source closure is invalid")]
+    InvalidSourceClosure,
+    /// A digest derived from canonical retained material disagreed with its persisted identity.
+    #[error("semantic digest mismatch")]
+    DigestMismatch {
+        /// Expected digest.
+        expected: SemanticDigest,
+        /// Derived digest.
+        actual: SemanticDigest,
+    },
+    /// The in-memory backend lock was poisoned.
+    #[error("in-memory store lock poisoned")]
+    MemoryLockPoisoned,
+    /// A second test-only commit failure was armed before the first was consumed.
+    #[error("in-memory commit failure selector is already armed")]
+    MemoryFailureSelectorAlreadyArmed,
+    /// A test-only injected failure occurred before atomic publication.
+    #[error("injected in-memory append failure at {point}")]
+    InjectedFailure {
+        /// Stable injection point.
+        point: &'static str,
+    },
 }
 
-/// Exposes wrapped typed store errors without parsing display strings.
+impl From<mfm_journal::v1::JournalError> for StoreError {
+    fn from(_: mfm_journal::v1::JournalError) -> Self {
+        Self::JournalContract
+    }
+}
+
+impl From<mfm_ids::IdentityError> for StoreError {
+    fn from(_: mfm_ids::IdentityError) -> Self {
+        Self::JournalContract
+    }
+}
+
+impl From<mfm_ids::CheckedStringError> for StoreError {
+    fn from(_: mfm_ids::CheckedStringError) -> Self {
+        Self::JournalContract
+    }
+}
+
+impl From<mfm_canonical::RecoverabilityError> for StoreError {
+    fn from(_: mfm_canonical::RecoverabilityError) -> Self {
+        Self::JournalContract
+    }
+}
+
+impl From<mfm_spec::SpecError> for StoreError {
+    fn from(_: mfm_spec::SpecError) -> Self {
+        Self::PersistedMismatch {
+            field: "certified_spec",
+        }
+    }
+}
+
+/// Exposes a wrapped typed store error without parsing display strings.
 pub trait StoreErrorInspection {
     /// Returns the typed store error when this error wraps one.
     fn as_store_error(&self) -> Option<&StoreError>;
@@ -208,57 +226,4 @@ impl StoreErrorInspection for StoreError {
     fn as_store_error(&self) -> Option<&StoreError> {
         Some(self)
     }
-}
-
-impl From<IdentityError> for StoreError {
-    fn from(error: IdentityError) -> Self {
-        Self::Identity(error.to_string())
-    }
-}
-
-impl From<CodecError> for StoreError {
-    fn from(error: CodecError) -> Self {
-        match error {
-            CodecError::Field(message) => Self::Event(message),
-            CodecError::Identity(message) => Self::Identity(message),
-        }
-    }
-}
-
-impl From<IdentityError> for CodecError {
-    fn from(error: IdentityError) -> Self {
-        Self::Identity(error.to_string())
-    }
-}
-
-impl From<mfm_events::EventError> for CodecError {
-    fn from(error: mfm_events::EventError) -> Self {
-        Self::Field(error.to_string())
-    }
-}
-
-impl From<mfm_events::EventError> for StoreError {
-    fn from(error: mfm_events::EventError) -> Self {
-        Self::Event(error.to_string())
-    }
-}
-
-impl From<mfm_capabilities::CapabilityError> for StoreError {
-    fn from(error: mfm_capabilities::CapabilityError) -> Self {
-        Self::Identity(error.to_string())
-    }
-}
-
-/// Backend-neutral error for the shared kernel JSON codec.
-///
-/// The codec is reused by the in-memory store and the Postgres adapter; each backend maps this
-/// into its own error type via `From`, so the parse/encode logic lives in exactly one place.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum CodecError {
-    /// A required JSON field was missing or had the wrong shape.
-    #[error("codec field error: {0}")]
-    Field(String),
-    /// A typed identity, digest, or enum tag failed to parse.
-    #[error("codec identity error: {0}")]
-    Identity(String),
 }

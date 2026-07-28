@@ -553,6 +553,11 @@ impl CanonicalBytes {
         &self.bytes
     }
 
+    /// Consumes this value and returns the decoded bytes without copying them.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// Returns the base64url-without-padding spelling.
     pub fn encoded(&self) -> &str {
         &self.encoded

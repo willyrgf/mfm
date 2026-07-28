@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `mfm_runtime::VerifiedRunHistoryView`
- --> tests/ui/fail/legacy_verified_run_history_view_absent.rs:1:5
-  |
-1 | use mfm_runtime::VerifiedRunHistoryView;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `VerifiedRunHistoryView` in the root

@@ -160,56 +160,20 @@ pub enum SemanticTypeKind {}
 /// Marker for schema ids.
 pub enum SchemaKind {}
 
-/// Marker for state kind ids.
-pub enum StateKindKind {}
-
 /// Marker for effect kind ids.
 pub enum EffectKindKind {}
 
 /// Marker for capability kind ids.
 pub enum CapabilityKindKind {}
 
-/// Marker for adapter kind ids.
-pub enum AdapterKindKind {}
-
-/// Marker for operation kind ids.
-pub enum OperationKindKind {}
-
-/// Marker for operation instance ids.
-pub enum OperationInstanceIdKind {}
-
-/// Marker for descriptor ids.
-pub enum DescriptorKind {}
-
 /// Marker for typed execution spec hashes.
 pub enum SpecHashKind {}
-
-/// Marker for certified transition context refs.
-pub enum ContextRefKind {}
-
-/// Marker for certified transition context descriptor ids.
-pub enum ContextDescriptorKind {}
-
-/// Marker for certified side-effect submit/verify pair ids.
-pub enum SideEffectPairIdKind {}
 
 /// Marker for node ids.
 pub enum NodeIdKind {}
 
-/// Marker for cell ids.
-pub enum CellIdKind {}
-
-/// Marker for scope ids.
-pub enum ScopeIdKind {}
-
-/// Marker for seed ids.
-pub enum SeedIdKind {}
-
 /// Marker for run ids.
 pub enum RunIdKind {}
-
-/// Marker for event ids.
-pub enum EventIdKind {}
 
 /// Marker for artifact ids.
 pub enum ArtifactIdKind {}
@@ -217,14 +181,8 @@ pub enum ArtifactIdKind {}
 /// Marker for generic content digests.
 pub enum ContentDigestKind {}
 
-/// Marker for semantic type versions.
-pub enum SemanticTypeVersionKind {}
-
 /// Marker for schema versions.
 pub enum SchemaVersionKind {}
-
-/// Marker for state versions.
-pub enum StateVersionKind {}
 
 /// Marker for effect versions.
 pub enum EffectVersionKind {}
@@ -232,26 +190,11 @@ pub enum EffectVersionKind {}
 /// Marker for capability versions.
 pub enum CapabilityVersionKind {}
 
-/// Marker for adapter versions.
-pub enum AdapterVersionKind {}
-
-/// Marker for operation versions.
-pub enum OperationVersionKind {}
-
-/// Marker for typed execution spec versions.
-pub enum SpecVersionKind {}
-
-/// Marker for lowering algorithm versions.
-pub enum LoweringVersionKind {}
-
 /// Typed semantic type identity.
 pub type SemanticTypeId = Identity<SemanticTypeKind>;
 
 /// Typed schema identity.
 pub type SchemaId = Identity<SchemaKind>;
-
-/// Typed state kind identity.
-pub type StateKind = Identity<StateKindKind>;
 
 /// Typed effect kind identity.
 pub type EffectKind = Identity<EffectKindKind>;
@@ -259,47 +202,14 @@ pub type EffectKind = Identity<EffectKindKind>;
 /// Typed capability kind identity.
 pub type CapabilityKind = Identity<CapabilityKindKind>;
 
-/// Typed adapter kind identity.
-pub type AdapterKind = Identity<AdapterKindKind>;
-
-/// Typed operation kind identity.
-pub type OperationKind = Identity<OperationKindKind>;
-
-/// Planned operation instance identity.
-pub type OperationInstanceId = Identity<OperationInstanceIdKind>;
-
-/// Typed descriptor identity.
-pub type DescriptorId = Identity<DescriptorKind>;
-
 /// Digest of a certified typed execution spec.
 pub type SpecHash = Identity<SpecHashKind>;
-
-/// Content-addressed certified transition context reference.
-pub type ContextRef = Identity<ContextRefKind>;
-
-/// Certified transition context descriptor identity.
-pub type ContextDescriptorId = Identity<ContextDescriptorKind>;
-
-/// Certified side-effect submit/verify pair identity.
-pub type SideEffectPairId = Identity<SideEffectPairIdKind>;
 
 /// Planned or certified node identity.
 pub type NodeId = Identity<NodeIdKind>;
 
-/// Planned or certified cell identity.
-pub type CellId = Identity<CellIdKind>;
-
-/// Typed scope identity.
-pub type ScopeId = Identity<ScopeIdKind>;
-
-/// Typed seed identity.
-pub type SeedId = Identity<SeedIdKind>;
-
 /// Typed run identity.
 pub type RunId = Identity<RunIdKind>;
-
-/// Store-owned event identity.
-pub type EventId = Identity<EventIdKind>;
 
 /// Artifact storage object identity.
 pub type ArtifactId = Identity<ArtifactIdKind>;
@@ -581,32 +491,14 @@ impl<'de> Deserialize<'de> for ContentRef {
     }
 }
 
-/// Semantic type version string.
-pub type SemanticTypeVersion = Version<SemanticTypeVersionKind>;
-
 /// Schema version string.
 pub type SchemaVersion = Version<SchemaVersionKind>;
-
-/// State implementation version string.
-pub type StateVersion = Version<StateVersionKind>;
 
 /// Effect descriptor version string.
 pub type EffectVersion = Version<EffectVersionKind>;
 
 /// Capability implementation version string.
 pub type CapabilityVersion = Version<CapabilityVersionKind>;
-
-/// Adapter implementation version string.
-pub type AdapterVersion = Version<AdapterVersionKind>;
-
-/// Operation implementation version string.
-pub type OperationVersion = Version<OperationVersionKind>;
-
-/// Certified spec contract version string.
-pub type SpecVersion = Version<SpecVersionKind>;
-
-/// Lowering algorithm version string.
-pub type LoweringVersion = Version<LoweringVersionKind>;
 
 fn parse_identity<K>(value: &str) -> Result<Identity<K>>
 where
@@ -971,47 +863,6 @@ fn validate_field_path(grammar: &'static str, value: &str) -> CheckedStringResul
     Ok(())
 }
 
-fn validate_resource_namespace(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_len(value, grammar, 256)?;
-    if !value.contains('.') {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::MissingSeparator { separator: '.' },
-        ));
-    }
-    for segment in value.split('.') {
-        validate_non_empty(segment, grammar).map_err(|_| {
-            CheckedStringError::new(grammar, CheckedStringErrorReason::EmptySegment)
-        })?;
-        let mut chars = segment.chars();
-        let Some(first) = chars.next() else {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::EmptySegment,
-            ));
-        };
-        if !is_lower_or_digit(first) {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidStart,
-            ));
-        }
-        for (offset, ch) in chars.enumerate() {
-            if is_lower_or_digit(ch) || matches!(ch, '_' | '-') {
-                continue;
-            }
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidCharacter {
-                    ch,
-                    index: offset + 1,
-                },
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn validate_local_public_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
     validate_len(value, grammar, 128)?;
     let Some(first) = value.bytes().next() else {
@@ -1057,107 +908,6 @@ fn validate_runtime_env_name(grammar: &'static str, value: &str) -> CheckedStrin
     validate_len(value, grammar, 256)?;
     for (index, byte) in value.bytes().enumerate() {
         if matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_') {
-            continue;
-        }
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidCharacter {
-                ch: byte as char,
-                index,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn validate_runtime_binding_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_runtime_identifier(grammar, value, 128)
-}
-
-fn validate_runtime_token(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_runtime_identifier(grammar, value, 512)
-}
-
-fn validate_context_component(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_len(value, grammar, 256)?;
-    for segment in value.split('/') {
-        validate_segment_len(grammar, segment, 64)?;
-        let mut chars = segment.chars();
-        let Some(first) = chars.next() else {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::EmptySegment,
-            ));
-        };
-        if !is_lower_or_digit(first) {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidStart,
-            ));
-        }
-        for (offset, ch) in chars.enumerate() {
-            if is_lower_or_digit(ch) || matches!(ch, '.' | '_' | '-') {
-                continue;
-            }
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidCharacter {
-                    ch,
-                    index: offset + 1,
-                },
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_runtime_identifier(
-    grammar: &'static str,
-    value: &str,
-    max: usize,
-) -> CheckedStringResult<()> {
-    validate_len(value, grammar, max)?;
-    for (index, ch) in value.chars().enumerate() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':') {
-            continue;
-        }
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidCharacter { ch, index },
-        ));
-    }
-    Ok(())
-}
-
-fn validate_visible_ascii(
-    grammar: &'static str,
-    value: &str,
-    max: usize,
-) -> CheckedStringResult<()> {
-    validate_len(value, grammar, max)?;
-    for (index, byte) in value.bytes().enumerate() {
-        if matches!(byte, 0x21..=0x7e) {
-            continue;
-        }
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidCharacter {
-                ch: byte as char,
-                index,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn validate_printable_ascii(
-    grammar: &'static str,
-    value: &str,
-    max: usize,
-) -> CheckedStringResult<()> {
-    validate_len(value, grammar, max)?;
-    for (index, byte) in value.bytes().enumerate() {
-        if matches!(byte, 0x20..=0x7e) {
             continue;
         }
         return Err(CheckedStringError::new(
@@ -1282,24 +1032,12 @@ impl private::IdentityCategory for SchemaKind {
     const ALGORITHM: Option<DigestAlgorithm> = Some(DigestAlgorithm::Sha256JcsV1);
     const REQUIRED_VERSION: Option<&'static str> = Some("1");
 }
-impl_identity_category!(StateKindKind, "state", NamespaceNameDigest);
 impl_identity_category!(EffectKindKind, "effect", NamespaceNameDigest);
 impl_identity_category!(CapabilityKindKind, "capability", NamespaceNameDigest);
-impl_identity_category!(AdapterKindKind, "adapter", NamespaceNameDigest);
-impl_identity_category!(OperationKindKind, "operation", NamespaceNameDigest);
 
-impl_digest_only_category!(OperationInstanceIdKind, "op");
-impl_digest_only_category!(DescriptorKind, "descriptor");
 impl_digest_only_category!(SpecHashKind, "spec");
-impl_digest_only_category!(ContextRefKind, "context");
-impl_digest_only_category!(ContextDescriptorKind, "context_descriptor");
-impl_digest_only_category!(SideEffectPairIdKind, "side_effect_pair");
 impl_digest_only_category!(NodeIdKind, "node");
-impl_digest_only_category!(CellIdKind, "cell");
-impl_digest_only_category!(ScopeIdKind, "scope");
-impl_digest_only_category!(SeedIdKind, "seed");
 impl_digest_only_category!(RunIdKind, "run");
-impl_digest_only_category!(EventIdKind, "event");
 impl_digest_only_category!(ArtifactIdKind, "artifact");
 impl_unrestricted_digest_only_category!(ContentDigestKind, "content");
 
@@ -1311,15 +1049,9 @@ macro_rules! impl_version_category {
     };
 }
 
-impl_version_category!(SemanticTypeVersionKind, "semantic type version");
 impl_version_category!(SchemaVersionKind, "schema version");
-impl_version_category!(StateVersionKind, "state version");
 impl_version_category!(EffectVersionKind, "effect version");
 impl_version_category!(CapabilityVersionKind, "capability version");
-impl_version_category!(AdapterVersionKind, "adapter version");
-impl_version_category!(OperationVersionKind, "operation version");
-impl_version_category!(SpecVersionKind, "spec version");
-impl_version_category!(LoweringVersionKind, "lowering version");
 
 #[cfg(test)]
 #[path = "tests.rs"]

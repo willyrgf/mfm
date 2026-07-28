@@ -1,37 +1,33 @@
 # mfm-portfolio
 
-One pure portfolio domain package owns the canonical model, reusable states, and complete snapshot
-objective. Its private roles flow from model to state to operation; the root exposes only the
-consumer API.
+This pure aggregate-domain crate owns the canonical portfolio model, the sole
+published snapshot entry point, its deterministic EVM-only topology, and the
+three portfolio state callbacks.
 
-The operation role owns the complete internal portfolio objective through two composable operations:
+The production graph is:
 
 ```text
-PortfolioSnapshotOperation(normalized PortfolioConfig)
-  ├─→ Bitcoin collection children → typed Bitcoin receipt vector ─┐
-  ├─→ EVM balance collection children → typed EVM receipt vector ─┤
-  └─→ PortfolioReportOperation(receipt handles) ←──────────────────┘
-        → receipt-pinned Bitcoin/EVM store selection
-        → snapshot assembly → report projection → one PortfolioPublicOutputs root binding
+ValidatePortfolioSnapshotSelectionState
+  -> one EVM collection per validated network position
+       bootstrap -> latest anchor -> bounded decimals/balance fan-out
+       -> confirm anchor -> pure exact aggregation
+  -> AssemblePortfolioSnapshotState
+  -> ProjectPortfolioReportState
+  -> PortfolioPublicOutputs { snapshot, report }
 ```
 
-`portfolio_snapshot_program_draft` and `portfolio_snapshot_program_launch_plan` build the same
-certified graph. App ingress uses that one graph for `mfm.portfolio/snapshot@1` after resolving one
-target-keyed current `PortfolioConfig`; the app has no parallel graph builder. The two typed family
-receipt vectors flow directly into `SelectHoldingsState`, so collector settlement is the
-selection barrier without a generic fan-in state. Assembly consumes no direct family observation.
-`PortfolioSnapshotOperation` constructs no states directly. `PortfolioReportOperation` owns the
-exact SelectHoldings → AssembleSnapshot → ProjectReport state chain, and its structured operation
-input is the same binding consumed by `SelectHoldingsState`.
+`PortfolioSnapshotSelector { target }` is the only run-admission input.
+Configuration publication separately retains the matching `PortfolioConfig`.
+Qualified support retains one immutable `PortfolioRoutingManifest` and the
+framework `UnitConfig`; deterministic authoring reads those verified values
+only to assemble topology. The validator is the single upstream state that
+mints stronger selection authority for every downstream read and output.
 
-The state role validates both typed receipt vectors against exact portfolio demand, issues all
-Bitcoin/EVM selection requests over one shared fact snapshot, and deterministically reduces only
-identity-verified response evidence. Snapshot assembly then enforces exact wallet, symbol, source,
-and network-anchor coverage before report projection. Live query execution and retained-artifact
-hydration remain outside this pure package.
+The only published entry point is `mfm.portfolio/snapshot@1`, backed by stable
+operation `mfm.portfolio/snapshot`, an empty framework-policy list, and empty
+canonical profile parameters. Package-owned registration helpers expose the
+entry contract, the three portfolio states, exact value contracts, and fixed
+support-root paths without admitting support or performing provider IO.
 
-Portfolio planning compiles normalized wallet/symbol demand into one sorted, unique generic
-`EvmBalanceCollectionConfig` per network, then calls `EvmBalanceCollectionOperation` in a child
-scope and bridges only its receipt. Portfolio config validation enforces collection cardinality
-limits before graph expansion. The package performs no live IO and constructs no family state
-directly; family and portfolio live bindings supply runners for certified descriptors.
+Bitcoin execution, aggregate live readers, retry/failover/reselection, mutation
+lifecycle, prior-run reducers, fact queries, and replay helpers are absent.

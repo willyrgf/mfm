@@ -1,8 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
-/// Public fact query commands.
-mod facts;
 /// Keystore-oriented CLI commands.
 mod keystore;
 /// Public entry-point operation discovery commands.
@@ -11,8 +10,6 @@ mod ops;
 pub(crate) mod result;
 /// Run lifecycle and artifact commands.
 mod run;
-/// Current target-keyed configuration setup commands.
-mod setup;
 
 pub(crate) const OUTPUT_FORMAT_ENV: &str = "MFM_OUTPUT_FORMAT";
 const DEFAULT_OUTPUT_FORMAT: OutputFormat = OutputFormat::Text;
@@ -83,17 +80,22 @@ where
     fallback_format
 }
 
-/// Context passed to CLI commands containing shared output settings.
+/// Context passed to CLI commands containing shared transport settings.
 #[derive(Debug, Clone)]
 struct CommandContext {
     /// Output format requested by the caller.
     output_format: OutputFormat,
+    /// Opaque credential source required by every run command.
+    access_token_file: Option<PathBuf>,
 }
 
 impl CommandContext {
-    /// Builds a command context for the supplied output format.
-    fn new(output_format: OutputFormat) -> Self {
-        Self { output_format }
+    /// Builds a command context for the supplied global settings.
+    fn new(output_format: OutputFormat, access_token_file: Option<PathBuf>) -> Self {
+        Self {
+            output_format,
+            access_token_file,
+        }
     }
 }
 
@@ -107,6 +109,10 @@ pub(crate) struct Cli {
     #[arg(long = "output-format", value_enum, env = OUTPUT_FORMAT_ENV, default_value_t = DEFAULT_OUTPUT_FORMAT)]
     output_format: OutputFormat,
 
+    /// File containing the opaque access token consumed by one run command.
+    #[arg(long, global = true, value_name = "PATH")]
+    access_token_file: Option<PathBuf>,
+
     /// Top-level command selected by the caller.
     #[command(subcommand)]
     command: Commands,
@@ -115,12 +121,6 @@ pub(crate) struct Cli {
 /// Top-level CLI command tree.
 #[derive(Subcommand)]
 enum Commands {
-    /// Public fact discovery and query operations
-    Facts {
-        /// Nested facts command to execute.
-        #[command(subcommand)]
-        command: facts::FactsCommand,
-    },
     /// Keystore management operations
     Keystore {
         /// Nested keystore command to execute.
@@ -133,13 +133,7 @@ enum Commands {
         #[command(subcommand)]
         command: ops::OpsCommand,
     },
-    /// Current target-keyed configuration setup
-    Setup {
-        /// Nested setup command to execute.
-        #[command(subcommand)]
-        command: setup::SetupCommand,
-    },
-    /// Run operations (start/resume/inspect)
+    /// Purpose-authorized run operations
     Run {
         /// Nested run command to execute.
         #[command(subcommand)]
@@ -150,13 +144,11 @@ enum Commands {
 impl Cli {
     /// Dispatches the parsed command and terminates the process with the command's exit code.
     pub(crate) async fn execute(&self) -> ! {
-        let ctx = CommandContext::new(self.output_format);
+        let ctx = CommandContext::new(self.output_format, self.access_token_file.clone());
 
         match &self.command {
-            Commands::Facts { command } => command.execute(&ctx).await,
             Commands::Keystore { command } => command.execute(&ctx).await,
             Commands::Ops { command } => command.execute(&ctx).await,
-            Commands::Setup { command } => command.execute(&ctx).await,
             Commands::Run { command } => command.execute(&ctx).await,
         }
     }

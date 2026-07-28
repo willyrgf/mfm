@@ -1,3 +1,11 @@
+error[E0046]: not all trait items implemented, missing: `input_destination_paths`
+ --> tests/ui/fail/manual_state_input_impl.rs:8:1
+  |
+8 | impl mfm_values::StateInput for ManualInput {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `input_destination_paths` in implementation
+  |
+  = help: implement the missing item: `fn input_destination_paths() -> Result<std::vec::Vec<FieldPath>, ValueError> { todo!() }`
+
 error[E0624]: associated function `framework` is private
   --> tests/ui/fail/manual_state_input_impl.rs:22:38
    |

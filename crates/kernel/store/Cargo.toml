@@ -22,27 +22,21 @@ test-support = []
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
-mfm-certify = { path = "../certify" }
-mfm-events = { path = "../events" }
+mfm-executor = { path = "../executor" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
-mfm-manual-auth = { path = "../manual-auth" }
+mfm-journal = { path = "../journal" }
 mfm-spec = { path = "../spec" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
-mfm-program = { path = "../program" }
-mfm-program-derive = { path = "../program-derive" }
-mfm-spec = { path = "../spec" }
-mfm-values = { path = "../values" }
 serde = { workspace = true }
+tokio = { workspace = true }
 trybuild = "1.0"
 
 [[test]]
-name = "commit_contract"
-path = "tests/commit_contract.rs"
+name = "mfm-store-memory"
+path = "tests/memory_conformance.rs"
 required-features = ["test-support"]

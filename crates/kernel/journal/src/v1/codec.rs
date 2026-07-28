@@ -120,6 +120,9 @@ pub enum JournalError {
     /// A derived access-audit entry disagrees with its authorization or observation.
     #[error("access-audit entry does not match its journal evidence")]
     AccessAuditMismatch,
+    /// A fact-selection request could not provide its frozen identity.
+    #[error("fact-selection request identity is invalid")]
+    FactSelectionRequest(#[source] mfm_facts::FactError),
     /// A shared retained-value contract failed exact validation.
     #[error(transparent)]
     RetainedValueContract(#[from] mfm_values::ValueError),
@@ -136,6 +139,7 @@ impl JournalError {
             | Self::FactSelectionCoverage
             | Self::ReferenceMismatch
             | Self::AccessAuditMismatch
+            | Self::FactSelectionRequest(_)
             | Self::RetainedValueContract(_) => None,
         }
     }

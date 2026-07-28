@@ -1,371 +1,151 @@
-# MFM REST API Documentation
+# MFM REST API
 
-Experimental REST API (Axum) for certified typed runs.
+`mfm-rest-api` is the HTTP adapter for the recoverability-v1 `mfm_app::Application` facade. The
+router owns request decoding, bearer extraction, status mapping, and response envelopes only.
+Storage, authentication policy, tenant derivation, run authority, planning, runtime, and replay
+remain behind the application facade.
 
-The REST API is an HTTP transport over the opaque `mfm-app` application facade. It decodes requests,
-applies process-role route admission, invokes app operations, and renders the current response
-envelopes. Store implementations, registries, live transports, replay services, and configuration
-resolution stay behind `mfm-app`.
+## Routes
 
-## Running locally
+The complete route set is:
 
-```bash
-nix develop
-export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-cargo sqlx migrate run --source crates/storages/postgres/migrations
-cargo run -p mfm-rest-api -- --runtime-config /run/mfm/runtime.toml
-```
-
-The repository does not expose a managed REST API app. The caller owns the
-PostgreSQL process and supplies its endpoint; the server validates the migrated
-schema on startup.
-
-## Configuration
-
-Environment variables:
-
-- `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
-- `DATABASE_URL`: Postgres URL for the certified run store (required)
-- `MFM_REST_ROLE`: process role (`live` or `read`; default `live`)
-
-The optional `--runtime-config <PATH>` process argument explicitly selects the runtime config for
-live capability-backed runs. There is no environment-selected config path.
-
-The REST API validates the PostgreSQL schema on startup and does not create or
-alter tables. Apply the `mfm-storage-postgres` migrations before starting the
-server, as shown in the local run sequence above.
-
-Use a fresh or explicitly reset database for this typed Postgres baseline. There
-is no downgrade migration; rollback to another branch requires resetting the
-database or schema to that branch's expected baseline. Filesystem artifact roots
-outside the typed run store are not read or migrated by the REST API.
-
-### Process roles
-
-| Role | Application use | Serves |
+| Method | Route | Authentication |
 | --- | --- | --- |
-| `live` (default) | evidence services plus lazy live services | start/resume, status/stream/replay, public fact queries |
-| `read` | evidence-only facade methods | status, stream, list, replay, public-output, public fact queries |
+| `GET` | `/v1/health` | none |
+| `GET` | `/v1/ready` | none |
+| `GET` | `/v1/entry-points` | none |
+| `POST` | `/v1/runs` | `Admit` |
+| `GET` | `/v1/runs/{run_id}` | `ReadPublic` |
+| `POST` | `/v1/runs/{run_id}/drive` | `Drive` |
+| `POST` | `/v1/runs/{run_id}/replay` | `Replay` |
+| `GET` | `/v1/runs/{run_id}/trace` | `InspectTrace` |
+| `GET` | `/v1/runs/{run_id}/audit` | `InspectAudit` |
+| `POST` | `/v1/runs/{run_id}/exports` | `Export` |
 
-Only live start/resume requires `MFM_REST_ROLE=live`. Public fact queries are deterministic evidence
-reads and are available from either role.
+There is no fact endpoint, `GET /v1/runs` list/watch route, start/resume route, status/stream
+split, manual-resolution route, public-output route, or arbitrary object endpoint.
 
-Public fact queries return descriptor-filtered committed facts with deterministic evidence metadata;
-they do not depend on process-local signing material.
+`GET /v1/health` is process liveness only. `GET /v1/ready` performs one bounded PostgreSQL
+writable-lineage probe against the already qualified authoritative store. It never performs EVM,
+DNS, provider, semantic-callback, or run work. Any readiness-probe failure returns the same
+`503 NotReady` error with `The authoritative run store is not ready`.
 
-REST startup and evidence-only facade methods do not load or validate the explicit runtime config
-path; malformed or missing config is reported only when a live start/resume request needs the
-affected capability family.
+## Authentication and errors
 
-## API
+Every protected request accepts exactly:
 
-All responses are JSON envelopes:
-
-- success: `{"status":"success","data": ...}`
-- error: `{"status":"error","error":{"code":"...","message":"...","diagnostics":[...]}}`
-
-REST error envelopes contain the same shared app `PublicError` payload used by CLI JSON. The
-`diagnostics` member is omitted when empty and, when present, contains only closed redaction-safe
-provider diagnostics. HTTP status is derived from the non-serialized public error classification.
-
-Endpoints:
-
-- `GET /v1/health`
-- `GET /v1/ready`
-- `GET /v1/facts/kinds`
-- `GET /v1/facts/kinds/:kind`
-- `GET /v1/facts/:kind?shape=<shape>&order=<ordering>&field=<field>&limit=<n>`
-- `GET /v1/facts/:kind/latest?shape=<shape>&order=<ordering>&field=<field>`
-- `GET /v1/facts/ref/:public_ref`
-- `GET /v1/runs?cursor=<opaque>&limit=<n>&wait_ms=<n>`
-- `POST /v1/runs/start`
-- `POST /v1/runs/:run_id/resume`
-- `POST /v1/runs/:run_id/manual-resolution`
-- `GET /v1/runs/:run_id/status`
-- `GET /v1/runs/:run_id/stream?from_seq=1&to_seq=<optional>`
-- `POST /v1/runs/:run_id/replay`
-- `GET /v1/runs/:run_id/public-output/:schema_id`
-
-Probe semantics:
-
-- `/v1/health`: liveness only (process is running)
-- `/v1/ready`: run store probe must succeed
-
-## Public Facts
-
-The `/v1/facts/...` routes expose descriptor-scoped committed facts. REST decodes path
-and query parameters into `mfm-app` public fact DTOs; descriptor resolution, field validation,
-query compilation, public ref resolution, and non-public filtering are owned by the app/facts
-services.
-
-Routes:
-
-- `GET /v1/facts/kinds`: list public fact kinds.
-- `GET /v1/facts/kinds/:kind`: describe public descriptors for one kind.
-- `GET /v1/facts/:kind`: query public fact history for one kind.
-- `GET /v1/facts/:kind/latest`: query one latest fact for one kind. This is `limit = 1` plus the
-  explicit `order` parameter; there is no mutable latest row.
-- `GET /v1/facts/ref/:public_ref`: resolve an opaque public fact reference.
-
-Query parameters for `GET /v1/facts/:kind` and `GET /v1/facts/:kind/latest`:
-
-- `shape`: optional descriptor shape selector, matching a descriptor schema id.
-- `order`: required descriptor ordering policy name.
-- `field`: required and repeatable returnable field id.
-- `subject`: repeatable subject predicate, such as `network=bitcoin-mainnet` or `subject.network.eq=bitcoin-mainnet`.
-- `result`: repeatable result predicate, such as `amount_sat.gt=1000`.
-- `where`: repeatable fully qualified predicate, such as `subject.bitcoin_network.eq=main`.
-- `limit`: optional non-zero limit for `GET /v1/facts/:kind`; ignored by `/latest`, which always
-  uses one result.
-
-Predicate operators use suffixes: `.eq`, `.lt`, `.lte`, `.gt`, and `.gte`. Values are inferred as
-booleans, signed or unsigned integers, decimal strings, or plain strings. Explicit typed values can
-use prefixes: `string:`, `bool:`, `i64:`, `u64:`, `timestamp:`, `decimal:`, or `digest:`.
-
-Examples:
-
-```bash
-curl -s "http://127.0.0.1:3001/v1/facts/kinds"
-
-curl -s "http://127.0.0.1:3001/v1/facts/kinds/wallet.balance"
-
-curl -s "http://127.0.0.1:3001/v1/facts/wallet.balance/latest?shape=mfm.wallet.balance.v1&order=result:block_number:desc&field=result.amount_sat&subject=chain%3Dbitcoin&subject=asset_ref%3Dbtc"
-
-curl -s "http://127.0.0.1:3001/v1/facts/weather.observation?shape=mfm.weather.observation.v1&order=metadata:recorded_at:desc&field=result.temperature_celsius_milli&subject=country%3DIE&result=temperature_celsius_milli.lt%3D0&limit=20"
-
-curl -s "http://127.0.0.1:3001/v1/facts/ref/pfr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+```http
+Authorization: Bearer <opaque credential>
 ```
 
-Query response shape:
+The credential is bounded to 64 KiB and passed to the app in a consuming zeroizing type. Tenant
+scope is derived only by the injected access policy. Tenant headers, query parameters, request
+fields, cookies, and sessions are not accepted.
+
+JSON successes use:
+
+```json
+{"status":"success","data":{}}
+```
+
+Errors use:
+
+```json
+{"status":"error","error":{"code":"...","message":"..."}}
+```
+
+Methods not registered for a listed path return `405 MethodNotAllowed`; unknown paths return
+`404 NotFound`. Every listed path explicitly rejects `HEAD`; on `GET` paths this prevents Axum's
+implicit GET handling from invoking
+authentication or application work. Per HTTP semantics the HEAD response retains the reviewed
+status and headers, including `Content-Type: application/json` and an `Allow` header containing
+only the route's real `GET` or `POST` method, but has an empty body.
+
+Authentication failures are `401 AuthenticationRequired`; a valid credential lacking the exact
+grant receives `403 GrantDenied`. An absent run and a run in another tenant both receive the same
+`404 RunNotFound`. Export dependency denial or a wrong-tenant dependency receives
+`403 SourceRunExportDenied`; if a separately authorized dependency named by verified append-only
+history is then absent, the response is the fixed `500 ReplayVerificationFailed`.
+
+## Requests and responses
+
+Admission accepts the exact annex-validated request:
 
 ```json
 {
-  "facts": [
-    {
-      "public_ref": "pfr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "fact_kind": "wallet.balance",
-      "descriptor": {
-        "descriptor_schema_id": "schema:mfm.wallet.balance.v1:...",
-        "subject_schema_id": "schema:mfm.wallet.balance.subject.v1:...",
-        "response_schema_id": "schema:mfm.wallet.balance.response.v1:..."
-      },
-      "recorded_at": "2026-07-02T00:00:00.000000Z",
-      "fields": [
-        {
-          "field_id": "result.amount_sat",
-          "path": "result.amount_sat",
-          "source": "result",
-          "value_type": "unsigned_integer",
-          "value": { "type": "unsigned_integer", "value": 1000 },
-          "unit": "sat",
-          "scale": null
-        }
-      ]
-    }
-  ],
-  "next_cursor": null
+  "version": "mfm.admit-run-request.v1",
+  "entry_point_id": "mfm.portfolio/snapshot@1",
+  "invocation_identity": "de305d54-75b4-431b-adb2-eb6b9e546014",
+  "input": {"target": "portfolio-name"}
 }
 ```
 
-Privacy and error contract:
+`newly_admitted`, `attached`, and `outcome_unknown` map to HTTP `201`, `200`, and `202`
+respectively. Drive has an empty body. Replay accepts the exact tagged union:
 
-- Facts have no caller-authored visibility, audience, or scope branch; discovery, query, and
-  exact-ref lookup use the one committed store-wide projection.
-- Public outputs never include internal fact refs, descriptor hashes, fact keys, subject material,
-  subject hashes, response artifacts, request/response hashes, artifact ids, artifact evidence
-  hashes, raw run ids, event ids, source sequences, event ordinals, adapter routing, or capability
-  routing details.
-- Unknown public refs and refs that resolve only to non-public facts return the same redacted
-  `FactNotFound` class.
-- Malformed query parameters return `InvalidQuery`; malformed predicates return
-  `FactPredicateInvalid`; missing `order` returns `FactOrderingMissing`; missing `field` returns
-  `FactReturnFieldMissing`; zero limits return `FactQueryLimitInvalid`.
+```json
+{"mode":"verify"}
+```
 
-## List Runs
-
-`GET /v1/runs` returns one observation-only page. Without `cursor`, it lists the latest observed
-run rows bounded by one sealed frontier. With `cursor`, it returns changes after that cursor and a
-fresh `next_cursor`. A long-poll timeout is a successful empty page.
-
-Run observation cursors are opaque server-issued tokens. In v1 they are epoch-bound and do not have
-wall-clock TTL or garbage collection: a cursor remains valid while its durable token row, cursor
-version, cursor key id, and store epoch still match the live store. Unknown, missing, retired-key,
-or stale-format cursors return `InvalidCursor`. Store epoch mismatches return `CursorExpired`; clients
-recover by listing again without a cursor.
-
-Response shape:
+or, for `reproduce` and `compare_current`:
 
 ```json
 {
-  "next_cursor": "opaque",
-  "runs": [
-    {
-      "run_id": "run:sha256-jcs-v1:...",
-      "head_seq": 3,
-      "observed_status": "started",
-      "started_at": "2026-01-01T00:00:00.000000Z",
-      "updated_at": "2026-01-01T00:00:01.000000Z",
-      "completed_at": null
-    }
-  ]
+  "mode": "reproduce",
+  "portable_export_ref": {
+    "content_digest": "content:sha256-v1:...",
+    "schema_id": "schema:mfm.portable-run-export:1:sha256-jcs-v1:..."
+  },
+  "portable_export_base64url": "..."
 }
 ```
 
-## Start A Run
+The export is canonical unpadded base64url, at most 22,369,622 encoded characters and 16,777,216
+decoded bytes. Both export fields are forbidden for verify and required for either non-verify
+mode. Non-verify replay obtains a separate same-run semantic `Export` decision and rejects a
+wrong ref, digest, run/store/tenant binding, semantic coordinate, or closure before any resolver.
+Replay never generates or fetches a replacement export.
 
-`POST /v1/runs/start` accepts one exact entry-point id and one stable target. The REST layer
-delegates current-target resolution, planning, certification, admission, and verified rendering to
-app assembly.
+Malformed, noncanonical, missing, forbidden, or binding-mismatched caller artifacts return
+`400 ReplayArtifactInvalid` with `The replay artifact is invalid.` Encoded, decoded, or complete
+replay-body size violations return `400 ReplayArtifactTooLarge` with
+`The replay artifact exceeds the allowed size.` Authenticated store/history integrity failures
+remain `500 ReplayVerificationFailed`.
+Candidate execution and comparison-integrity failures use that same 500 response. An unavailable
+sealed current candidate returns `503 RuntimeCatalogUnavailable` with
+`The exact admitted runtime catalog is unavailable`; a missing exact historical executable remains
+a successful `reproduced` response whose result is `unavailable`.
 
-The endpoint shape is an `entry_point`, `target`, and optional `invocation_key` JSON object. The
-only accepted entry point is `mfm.portfolio/snapshot@1`:
+Trace and audit use only `cursor` and `limit` query parameters, with a default of 100 and maximum
+of 500.
+Protected request bodies are read only after bearer extraction and reject duplicate JSON fields.
+Ordinary request bodies are bounded to 16 MiB; the complete replay HTTP envelope is bounded to
+22,373,718 bytes, enough for the exact maximum base64url export and its fixed request fields. The
+protected `GET` routes and `drive` reject non-empty bodies.
+Transition traces render an authorized-but-absent cross-run source with the same redacted lineage
+as a source denied by grant or tenant. A fresh source `AuthenticationRequired` decision fails the
+page with `401`.
+Each audit entry exposes exactly `authorization_ref`, `observation_ref`,
+`authorization_journal_head`, `observation_journal_head`, `capability_binding_ref`,
+`capability_operation_id`, `request_ref`, `status`, `result_ref`, `failure`, `effect_key`,
+`delivery_audit_ref`, and `delivery_audit_terminal`. The last field is `true` for a verified
+terminal returned ensure, `false` for a verified pending returned ensure, and `null` for reads or
+when no returned ensure is verified at the page head. It is presentation-only; the journal
+persists only `delivery_audit_ref`.
 
-```json
-{
-  "entry_point": "mfm.portfolio/snapshot@1",
-  "target": "acme/primary"
-}
-```
+Export accepts `{"kind":"semantic"}` or `{"kind":"audit"}`. It is the only non-envelope success:
+the response body is the exact canonical portable-export bytes, `Content-Type` is
+`application/vnd.mfm.run-export.v1+json`, and `Mfm-Content-Digest` is the raw-byte content digest.
 
-No other run-start entry point or selector form is admitted.
+## Deployment
 
-Request notes:
+The repository's standalone server does not possess a deployment-owned
+`AuthoritativeWriterFence`, so `make_default_app_state` fails closed with
+`AuthoritativeWriterFenceUnavailable` before binding a socket. `MFM_REST_API_ADDR` controls only
+the bind address and cannot grant writer authority.
 
-- `entry_point` is required and must be one exact id, including namespace and version.
-- `target` is required, must be a stable target string, and is rejected when the envelope contains
-  unknown fields.
-- A published objective selects the target's current configuration only; catalog name/digest
-  objects, revision/history lookup, and latest resolution do not exist.
-- Normal start derives the typed run id from certified run identity material: certified spec hash,
-  store scope, and a required invocation key digest.
-- `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
-  When omitted, the app mints a fresh opaque invocation key before deriving `run_id`. The raw key is
-  not persisted; only a domain-separated digest enters run identity material.
-- `run_id` is not a start field.
+A deployment embeds this crate, constructs a qualified `mfm_app::Application` with its real access
+policy and writer fence, wraps it in `AppState::new`, and passes that state to `make_app`.
 
-The response is `{"outcome": "...", "run": ..., "active_run_id": "...", "public_output": ...}`
-inside the standard success envelope. Fresh admissions report `admitted`. Duplicate starts for the
-same certified run identity report `attached` without driving. If another process holds the
-execution lane for the same base work identity, start reports `already_active` with
-`active_run_id` and omits `run`.
-`public_output` is present when the run completes while driving and the op exposes a public output
-schema id.
-
-EVM transaction and validation state primitives are not direct REST operations. RPC endpoints,
-auth headers, keystore paths, unlock files, and private material remain runtime-only.
-
-Stable launch error codes:
-
-- `InvalidJson`: the request envelope is not accepted by the route schema.
-- `EntryPointNotFound`: the exact entry-point id is not registered.
-- `ConfiguredStoreUnavailable`: current configuration is unavailable during new-run preparation.
-- `ConfiguredTargetInvalid`: the target is not valid for the selected entry point.
-- `ConfiguredValueNotFound`: the target has no current configuration.
-- `ConfiguredValueSchemaInvalid`: the target's current row has the wrong schema.
-- `ConfiguredValueTypeInvalid`: the target's current row does not decode as the expected type.
-- `ConfiguredValueCanonicalMismatch`: a current row fails canonical byte/digest verification.
-- `ConfiguredValueValidationFailed`: a current row fails semantic validation.
-- `ConfiguredTargetMismatch`: the stored embedded id differs from the selected target.
-- `PortfolioSnapshotPlanFailed`: portfolio snapshot planning failed.
-- `EntryPointCertificationFailed`: the planned spec failed app-owned certification.
-- `RuntimeConfigRequired`: one or more certified live-source routes are absent. The response message
-  identifies the configured target and required provider families, while diagnostics retain only
-  semantic network bindings.
-- `RuntimeConfigInvalid`: a supplied runtime config is unreadable, malformed, or semantically
-  invalid.
-
-Both runtime-config failures use HTTP 503. REST preserves the shared neutral app message and never
-adds CLI syntax such as `--runtime-config`.
-- `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
-  runner binding.
-
-## Resume, Replay, And Public Output
-
-Resume:
-
-```bash
-curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/resume"
-```
-
-Manual resume is the v1 recovery trigger for a run left with an open execution claim,
-side-effect uncertainty, or a resumable frontier. Automatic dead-driver takeover and background
-worker-pool dispatch are deferred. Receipt-level side-effect terminalization is final-at-risk: a
-later reorg can invalidate the published receipt-derived output, so operations that need reorg
-safety must use certified `Finalized(depth)` verification.
-
-Record a signed manual resolution:
-
-```bash
-curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/manual-resolution" \
-  -H "content-type: application/json" \
-  -d '{
-    "kind": "manual_resolution_v1",
-    "outcome": "confirm_remediated",
-    "evidence_json": {
-      "operator_note": "reviewed"
-    },
-    "authorization_proof": {
-      "...": "canonical manual authorization proof JSON"
-    }
-  }'
-```
-
-The manual-resolution route canonicalizes `evidence_json` and `authorization_proof`, then submits
-the resulting bytes to `mfm-app`. Runtime derives the current prefix authority from the verified
-committed journal, verifies the proof against the certified manual policy, checks signatures and
-quorum, stages the evidence and authorization artifacts, and appends only through the typed
-manual-resolution commit boundary. The route does not accept request-supplied prefix facts, artifact
-ids, hashes, verifier ids, authority ids, quorum values, keystore paths, signer configuration, or
-signature secrets. Proof authoring is outside this REST ingress; submitted proof bytes are always
-untrusted until runtime verifies them. If another commit extends the signed prefix,
-the HTTP `409` error `ManualResolutionRequestStale` tells the client to reload the run and submit a
-fresh request authorized for the new prefix.
-
-Optional fields:
-
-- `evidence_media_type`: defaults to `application/json`.
-- `note`: optional redaction-safe operator note recorded in `ManualResolutionRecorded`.
-
-Replay verification:
-
-```bash
-curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/replay"
-```
-
-Render typed public output:
-
-```bash
-curl -s "http://127.0.0.1:3001/v1/runs/$RUN_ID/public-output/$SCHEMA_ID"
-```
-
-The status and stream endpoints are typed inspection readers over one store-owned verified run
-view. Stream range filters are applied only after the app service loads and verifies the complete
-committed journal. Resume, replay, and public-output rendering borrow that same view; they do not
-construct another stream, projection, artifact map, or owned primary-history authority. Rendered
-public-output JSON is an output/cache surface only.
-
-Typed run responses expose semantic status through `run_mode`. `run_mode` is one of `forward`,
-`remediating`, `manual_blocked`, `completed`, `compensated`,
-`manually_resolved`, or `failed_without_acdc_claim`. The nested `saga` object reports the certified
-policy, derived per-forward-ledger obligations, linked remediation ledgers, manual-block reason and
-manual authorization requirements when applicable, terminal resolution claim when present,
-projected resource ledgers with declared claim/touched-set evidence and resource-key digests, and
-active exclusive lane holders referenced by the target run's persisted live side-effect ledgers.
-Status does not serialize raw resource keys, unrelated global lane holders, or scheduler waiters
-that blocked before appending lane evidence.
-`attempt_dispositions` reports committed attempt-level lifecycle status separately from `run_mode`;
-each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
-`interrupted`), and status-specific fields such as `attempt_no`, `retryable`, `error_code`, or
-`output_cell_id`. Failed attempt event references also expose the redaction-safe `error_code`.
-`scheduler_status` is read-only `observed` for `GET /v1/runs/:run_id/status`; start/resume responses
-set it to `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
-`execution_claim_lost` according to the app dispatch loop and claim-coordination outcome.
-Manual authorization requirements include the required evidence schema, signing scheme, authority id,
-allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
-sources, keystore paths, password paths, passwords, or other secrets.
-
-Docs:
-
-- Design contract: [`../../docs/design.md`](../../docs/design.md)
-- Architecture overview: [`../../docs/architecture.md`](../../docs/architecture.md)
-- CLI docs (parallel surface): [`../cli/README.md`](../cli/README.md)
+The frozen application and wire contract is
+[`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md).

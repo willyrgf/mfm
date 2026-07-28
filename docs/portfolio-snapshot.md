@@ -1,90 +1,140 @@
 # Portfolio Snapshot
 
-MFM exposes one portfolio workflow:
+MFM publishes exactly one product entry point:
 
 ```text
-mfm.portfolio/snapshot@1
+entry_point_id           = "mfm.portfolio/snapshot@1"
+entry_point_operation_id = "mfm.portfolio/snapshot"
 ```
 
-Start it with one stable target:
+Its exact content-addressed `PlanningProfile` has one planner contract, one planner implementation,
+an empty ordered `framework_policy_refs` list, and an empty canonical parameter object. Generic
+authoring helpers do not grant admission authority.
+
+## Admit And Drive
+
+Deployment administration must provision a canonical `PortfolioConfig` under its intrinsic
+`portfolio_id`; the runtime application exposes no configuration mutation surface. Admission
+resolves that stable target under the caller's exact tenant and entry point and requires a
+caller-generated canonical lower-case hyphenated UUIDv4:
 
 ```sh
-mfm_cli run start mfm.portfolio/snapshot@1 acme/primary
+mfm run admit mfm.portfolio/snapshot@1 \
+  --invocation-identity de305d54-75b4-431b-adb2-eb6b9e546014 \
+  --target acme/primary \
+  --access-token-file /path/to/token
 ```
 
-Import a `PortfolioConfig` through setup first. Its intrinsic `portfolio_id` becomes the target,
-so `portfolio_id = "acme/primary"` is selected with `acme/primary` on CLI or with
-`{"entry_point":"mfm.portfolio/snapshot@1","target":"acme/primary"}` over REST. Only that exact
-versioned snapshot objective is published.
+Admission:
 
-For a runnable token-only setup, import
-[`examples/setup/portfolio-erc20.toml`](../examples/setup/portfolio-erc20.toml) and use the EVM
-route in [`examples/configs/runtime-ethereum-mainnet.toml`](../examples/configs/runtime-ethereum-mainnet.toml)
-with `MFM_ETHEREUM_MAINNET_RPC_URL` set. The setup deliberately has an ERC-20 contract address but
-no authored token decimals, endpoint, runtime binding, or read bound; EVM collection observes
-decimals and balances at the retained anchor.
+1. authenticates and authorizes `Admit`;
+2. resolves the target's current canonical configuration;
+3. verifies schema, digest, embedded portfolio id, and bounded aggregate demand;
+4. deterministically authors and expands the graph;
+5. certifies the exact planning profile, graph, implementations, terminal contract, and public
+   output;
+6. binds immutable non-secret routing-generation references; and
+7. appends `RunAdmitted`.
 
-At admission, the app loads the target's current configuration, verifies and normalizes it, records
-the target/schema/digest evidence in `RunAdmitted`, and gives the concrete `PortfolioConfig` to the
-snapshot operation. That operation constructs only collector child calls and one report-operation
-call; it constructs no state directly. Admission also enforces the configured network, wallet,
-symbol, wallet-to-symbol, and per-EVM-network source limits before graph expansion.
+It performs no EVM, Bitcoin, provider, signer, or executor semantic call and does not drive the
+graph. Repeating the exact invocation and root attaches to the same run; changed root material is
+an admission conflict.
 
-The operation derives only explicit wallet-to-symbol demand. Bitcoin collection performs one
-bounded multi-descriptor scan per demanded semantic source and emits checked receipts at one shared
-anchor. Each EVM network becomes one child call to `EvmBalanceCollectionOperation`; that reusable
-operation contains one fact-producing external-read state. One checked session resolves latest once, reads
-deduplicated token metadata and every native/ERC-20 balance at the exact hash, and rechecks that
-hash by block number. The bounded concurrent scheduler issues each chunk in certified plan order
-and preserves that order independently of response completion order.
+Execution is invoker-driven one action at a time:
 
-The external-read settlement records the complete ordered `evm.balance_snapshot` fact batch and a
-checked `EvmBalanceCollectionReceipt` together. That receipt contains the network/chain, exact anchor,
-sorted sources, and verified fact content identities, but no duplicate balance response material.
-Collector batches commit independently. If one sibling collector fails, no report is produced;
-already committed sibling facts remain valid append-only observations, and resume advances the
-unfinished graph. MFM does not wrap independent networks in a cross-family database transaction or
-delete successful observations as compensation.
+```sh
+mfm run drive RUN_ID --access-token-file /path/to/token
+mfm run show RUN_ID --access-token-file /path/to/token
+```
 
-The typed Bitcoin and EVM receipt vectors flow into one `PortfolioReportOperation`. Its structured
-operation input is passed unchanged into `SelectHoldingsState`; those receipt input edges are the
-collector completion barrier. The report operation then owns snapshot assembly and report
-projection. Selection issues all family queries over one store snapshot, rehydrates every
-candidate response, rederives fact identity, and admits only the exact receipt-authorized content.
-Byte-identical append occurrences are equivalent; same-subject facts with different response
-content are filtered before ordering. Assembly consumes only these store-reread observations,
-including for token-only and all-EVM portfolios.
+Any authorized process can issue the next `drive` call. Runtime reconstructs all semantic state
+from the certified graph and verified journal; no process-local run state is required.
 
-Portfolio planning projects configured `NormalizedEvmAddress` and `HoldingSourceConfig` values
-into generic `EvmBalanceSource` and `EvmBalanceAsset` demand before the child call. Collection
-plans, evidence, receipts, and facts contain only those EVM-domain source identities. Session
-evidence and the shared checked `EvmBlockAnchor` come from the EVM capability contract; the block
-number retains the full U256 range as a canonical decimal string in persisted values.
+## Current Production Graph
 
-Each collector invocation retains its own network anchor; MFM does not invent a simultaneous
-cross-chain tip. Freshness, maximum-age, and as-of behavior must be explicit authored policy and are
-never inferred by selecting the current latest fact. A cross-run balance or token-decimals cache
-requires its own explicit anchor and invalidation contract before it can be introduced.
+The portfolio operation projects explicit wallet-to-symbol demand into ordinary typed source
+graphs and a final portfolio graph. Same-run source values travel through graph edges; the report
+does not query a store-global fact surface to recover values produced by its own run.
 
-A wallet with no configured symbols is retained with empty observations and zero quote totals, but
-creates no collection work or network pin; the aggregate remains valid only when another explicit
-wallet-to-symbol edge exists.
+For each demanded EVM network, the certified graph is:
 
-Every persisted `WalletSnapshot` retains the checked `WalletSubject` algebra directly rather than a
-parallel address string. EVM execution pins use the shared checked `EvmBlockAnchor` nested under a
-non-zero chain id; transaction receipts, logs, validation evidence, collection evidence, and public
-portfolio pins reuse the same number/hash value.
+```text
+audited routing-generation/source/chain bootstrap
+  -> audited initial number/hash anchor
+  -> independently audited fan-out:
+       native balance reads
+       ERC-20 metadata reads
+       ERC-20 balance reads
+  -> audited final number-to-hash confirmation
+  -> pure typed EVM aggregation
+  -> portfolio assembly
+  -> public report projection
+```
 
-The root returns `PortfolioPublicOutputs` with exactly `snapshot` and `report`. It preserves zero
-holdings, exposes direct quote totals, and does not expose receipt entries, source keys, fact
-identities, artifact references, provider evidence, scan bounds, or runtime routes.
-The snapshot and report both emit `schema_version: 1`. Version selection is not a request or
-certified-state policy.
+Every external JSON-RPC operation has its own `ExternalAccessAuthorized` and
+`ExternalAccessObserved` records. Every request derived from another response is linked by a typed
+graph edge. Independent fan-out nodes may run in any process and settle in certified node order;
+one missing or cancelled call cannot disappear inside an aggregate capability result.
 
-After admission current configuration is not run authority. Resume, replay, status, stream
-inspection, and public-output rendering use the certified spec and retained evidence. EVM-adapter
-replay recomputes EVM facts and receipts. Portfolio replay independently verifies receipt-pinned
-selection from retained query/response evidence and recomputes snapshot/report outputs. Live
-capability routes remain process-local runtime configuration. Evidence-only replay does not load
-them; a live resume loads them only when verified unfinished external nodes still require a live
-capability.
+All anchored reads use the exact EIP-1898 block hash with `requireCanonical: true`. The final
+number-to-hash observation must match the initial anchor. The pure EVM aggregation state validates
+complete demand, deduplicated metadata, exact source/chain/anchor agreement, canonical quantities,
+and one result per certified request before producing typed balances and transition facts.
+
+The portfolio graph consumes those typed outputs directly, rechecks exact config-derived coverage,
+constructs wallet snapshots, and produces the public output. Transition facts remain available for
+explicit future certified cross-run selection, but they are not an indirect wiring mechanism for
+this run.
+
+## Bitcoin Availability
+
+Bitcoin collection is not registered in the production state/capability catalog. A portfolio
+configuration that requires Bitcoin cannot be admitted as an executable current product graph.
+There is no aggregate-reader fallback.
+
+The prospective Bitcoin graph and its repeat-work-safe qualification requirements are documented
+in `docs/btc-rpc-routing.md`. Registration requires a separate reviewed change after those gates
+pass.
+
+## Facts And Prior-Run Selection
+
+An ordinary portfolio snapshot does not browse or select arbitrary prior facts. If a future
+certified operation deliberately consumes a prior-run observation, it authors one
+`FactSelectionRequest` and uses the reserved audited `mfm.journal.fact-selection.v1` capability at
+an exact tenant frontier. The returned response is interpreted by its state callback and recorded
+as normal read evidence.
+
+There is no public fact command, route, catalog, or object reader.
+
+## Public Output
+
+The certified root binds one `PortfolioPublicOutputs` value with exactly:
+
+```text
+snapshot
+report
+```
+
+Both use `schema_version: 1`. They preserve explicit zero holdings and reviewed quote totals. They
+do not expose:
+
+- transition or record identities;
+- provider/source routing;
+- capability requests or observations;
+- fact or artifact references;
+- executor evidence;
+- internal anchors beyond reviewed public portfolio pins; or
+- credentials and secret-bearing configuration.
+
+`mfm run show` and `GET /v1/runs/{run_id}` return status plus this certified public output under
+`ReadPublic`. Trace, audit, replay, and export require separate grants.
+
+## Replay
+
+Recorded verification checks the complete transition graph, exact inputs and outputs, EVM access
+audit, facts, object bindings, and closure without callbacks or live IO. Exact reproduction reruns
+the admitted pure request/reduction and portfolio computations using only retained values.
+Candidate comparison uses only the self-attested current candidate catalog.
+
+No replay mode resolves routing, opens JSON-RPC, reads current configuration, invokes an executor,
+or appends to the run.

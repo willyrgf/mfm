@@ -1,4 +1,5 @@
 use mfm_canonical::CanonicalValue;
+use mfm_facts::FactSelectionRequest;
 use mfm_ids::{
     ContentRef, FactContentIdentityDigest, FactLogicalIdentityDigest, FactQueryDigest, StoreEpoch,
     StoreScopeId, TenantScopeId,
@@ -379,6 +380,31 @@ impl FactSelectionResponse {
                 .map(FactSelectionResult::from_canonical_value)
                 .collect::<Result<_>>()?,
         })
+    }
+
+    /// Validates digest identity and exact ordinal coverage against an authored request.
+    pub fn validate_request(&self, request: &FactSelectionRequest) -> Result<()> {
+        let fields = self.fields()?;
+        let request_digest = request
+            .request_digest()
+            .map_err(super::JournalError::FactSelectionRequest)?;
+        if fields.request_digest != request_digest
+            || fields.results.len() != request.queries().len()
+        {
+            return Err(super::JournalError::FactSelectionCoverage);
+        }
+        for (expected, result) in fields.results.iter().enumerate() {
+            let expected =
+                u32::try_from(expected).map_err(|_| super::JournalError::FactSelectionCoverage)?;
+            let result = result.fields()?;
+            if result.query_ordinal != expected {
+                return Err(super::JournalError::FactSelectionCoverage);
+            }
+            for selected in result.selected {
+                selected.validate_reference_relation()?;
+            }
+        }
+        Ok(())
     }
 }
 

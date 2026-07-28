@@ -1,168 +1,185 @@
-# EVM Runtime Sessions
+# EVM Routing Generations And Audited Reads
 
-Status: typed transport runbook for EVM-backed reads, transactions, and signing resources.
+Status: production transport and state-graph contract for EVM-backed reads
 
-RPC endpoints, authorization, signer bindings, and keystore paths are live runtime inputs. They are
-not semantic run authority and must not be persisted in manifests, events, artifacts, public
-outputs, fixtures, or replay inputs.
+EVM endpoints, authorization values, connection pools, and local routing configuration are
+process/deployment resources. They are never typed workflow configuration and never appear in a
+spec, journal record, retained object, fact, public output, portable export, fixture, or diagnostic.
 
-## Direct routes
+## Immutable Routing Generation
 
-Live CLI start accepts `--runtime-config <PATH>`. Resume needs it only while verified history still
-has a pending EVM live node. The REST server accepts the same explicit flag. There is no
-environment-selected config path. Evidence-only commands and replay do not load this file.
+For each certified semantic EVM binding, admission selects one already qualified immutable
+non-secret `routing_generation_ref`. The root retains that reference with the expected semantic
+network and chain identity.
 
-Each semantic EVM network has exactly one direct route:
+Admission may check local syntax and select the generation. It must not:
 
-```toml
-[evm.routes.reth-dev]
-source_ref = "reth-local"
-rpc_url = { direct = "http://127.0.0.1:8545" }
+- contact an endpoint;
+- call `eth_chainId`;
+- validate live source health;
+- inspect current block state;
+- rotate or rank sources; or
+- silently substitute another generation.
 
-[evm.routes.ethereum-mainnet]
-source_ref = "mainnet-primary"
-rpc_url = { file = "/run/mfm/mainnet-rpc-url" }
-auth_header = { file = "/run/mfm/mainnet-auth-header" }
+After admission, every EVM call resolves the exact recorded generation. If it cannot be resolved,
+the audited bootstrap call records the reviewed failure. Resume never reinterprets a mutable route
+label and never falls back to a newer generation. A new run may select a different generation.
 
-[keystores.default]
-keystore_path = { direct = "/run/mfm/deployer.keystore" }
-unlock_file_path = { direct = "/run/mfm/deployer.password" }
+The generation's secret-bearing material remains below the capability boundary:
 
-[signers.deployer]
-provider = "keystore"
-keystore_ref = "default"
-entry_id = "00000000-0000-0000-0000-000000000000"
+- HTTP(S) endpoint;
+- optional HTTP authorization;
+- connection and request limits;
+- secret-source locations; and
+- concrete transport pool/session resources.
+
+Only reviewed source-scope and implementation identities may appear in access audit.
+
+## Production Read Graph
+
+The aggregate EVM reader is not a capability. The reusable operation expands one certified graph:
+
+```text
+BootstrapEvmSource
+  -> ReadEvmInitialAnchor
+  -> one node per independently meaningful RPC request
+       ReadNativeBalance
+       ReadTokenMetadata
+       ReadTokenBalance
+  -> ConfirmEvmAnchor
+  -> AggregateEvmBalances
 ```
 
-JSON with the same shape is accepted. Expected chain id comes from certified workflow semantics;
-runtime routes cannot override it. There are no source registries, policy ids, ordered candidates,
-or fallback rotation.
+The exact state names may remain private, but the audit units and edges are mandatory.
 
-Every runtime value is an exact-one source object: `direct`, `env`, `file`, or `file_env`.
-Authorization cannot use `direct`; its source must be indirect even in an unselected route.
+### Bootstrap
 
-Live reads load only the requested route. Transaction assembly loads that route plus the exact
-referenced signer and keystore. Unrelated malformed EVM routes or signer entries do not block the
-selected resource, while malformed selected material fails closed.
+The bootstrap state authors one immutable request containing the admitted routing generation and
+expected semantic source/chain binding. Its one audited capability operation resolves that
+generation and calls the exact chain-identity protocol operation. A returned mismatch is a typed
+`source_mismatch` domain result; it is not a route fallback trigger.
 
-Selected RPC URLs must use `http` or `https`, must not contain userinfo, and selected authorization
-values must parse as one HTTP header value. Selective route resolution enforces all three rules on
-the blocking config worker before admission, before any transport or signer is constructed.
-Missing selected routes surface `RuntimeConfigRequired`; unreadable or malformed selected routes,
-including unsupported schemes and invalid authorization values, surface `RuntimeConfigInvalid`.
-Both retain only closed semantic EVM diagnostics and leave the run stream empty.
+The typed bootstrap output carries only reviewed non-secret binding evidence required by later
+nodes. Endpoint and credential material remain in the private capability implementation.
 
-## Source-bound sessions
+### Initial anchor
 
-The EVM state-facing capability surface has two coherent authorities:
+The anchor state performs one audited read that obtains the exact canonical number/hash pair.
+Block numbers retain the full U256 range as canonical decimal strings. The returned typed anchor is
+an explicit input edge for every later anchored request.
 
-- `EvmReadCapability` / `EvmReadSession` for block, balance, code, and call reads;
-- `EvmTransactionCapability` / `EvmTransactionSession` for pending nonce, fee inputs, estimation,
-  submission, transaction observation, receipt observation, and confirmation blocks.
+### Fan-out
 
-App assembly derives an `EvmNetworkBinding` from certified `network_id` and non-zero chain id. Each
-start or resume creates a fresh routed set; its shared asynchronous route validator resolves every
-required network once through selective runtime-config loading on a blocking worker. Only after
-validation may execution bind `EvmJsonRpcSession` through the process-shared, secret-free
-`EvmJsonRpcTransport`. Binding calls `eth_chainId` once. A mismatch fails before admission, or
-before claim acquisition on resume. The resulting session is fixed to one endpoint and one redacted
-`source_ref` for that dispatch; methods do not reselect, reprobe, or fail over. A later call gets a
-new routed set and re-resolves current routing.
+Each independently meaningful metadata or balance request is its own certified state occurrence and
+its own authorization/observation pair:
 
-The bind-time `EvmSessionEvidence` contains only semantic network id, verified chain id, source ref,
-and the certified session implementation id. The source ref is audit provenance for the route used
-by that attempt, not semantic policy: it may change across attempts or resume, and replay never
-resolves it against current runtime routing. Endpoints and credentials never enter capability
-requests or evidence.
+- native balance: one account at the exact anchor;
+- token metadata: one contract/field request at the exact anchor;
+- token balance: one account/contract call at the exact anchor.
 
-The HTTP transport has one shared connection pool, a global bound of 64 in-flight exchanges, a
-process-local bound of 16 in-flight exchanges for each `source_ref`, a 10-second connection timeout,
-a 30-second request timeout, and a one-MiB outer response limit. Deployed-code and contract-call
-responses instead derive a smaller body limit from the 128-KiB code bound or the call's explicit
-decoded-result bound plus a fixed JSON-RPC envelope allowance. Both content length and streamed
-chunks are checked against that method limit before JSON decoding. Redirect following and
-reqwest's implicit retry policy are disabled. Every capability call therefore owns exactly one
-exchange with its fixed endpoint. The transport never retries a broadcast, and durable submission
-uncertainty is recovered only by exact-hash observation. The transport requires JSON-RPC version
-`2.0`, exact response id `1`, and exactly
-one of `result` or `error`. Quantities, hashes, addresses, bytes, transactions, receipts, and
-complete logs are decoded into checked Alloy-backed types. Submission succeeds only when the
-provider hash equals the local hash of the submitted bytes.
+Requests use the anchor hash through EIP-1898 with `requireCanonical: true`. Token metadata may be
+deduplicated by deterministic planning/dataflow, but a capability call cannot hide several
+application-protocol operations behind one authorization.
 
-## Exact anchors
+Runtime may execute ready nodes concurrently across repeated `drive_once` callers, but each drive
+performs at most one audited operation. Response completion order does not alter certified node or
+aggregation order.
 
-Portfolio reads first resolve a number/hash anchor. Balance and ERC-20 calls use the anchor hash as
-an EIP-1898 selector with `requireCanonical: true`. After the anchored reads, the same session reads
-the anchor by number and requires the returned hash to equal the original hash. Asking for the old
-hash again is not a canonicality check and is forbidden.
+### Final anchor confirmation
 
-For each `EvmBalanceCollectionOperation` call, `CollectEvmBalancesState` resolves latest once,
-deduplicates ERC-20 metadata by contract, reads every sorted native/token source at that exact hash,
-and performs one final number-to-hash check. Metadata and balance reads have a hard concurrency
-limit of 16. Its single aggregate evidence value retains the checked session, requests/results,
-and final canonicality observation. The state-owned reducer enforces exact order and coverage for
-both live execution and replay.
+The final state performs one audited number-to-hash read and requires the hash to equal the initial
+anchor. Asking for the old hash again is not a canonicality check. Anchor drift is a typed returned
+semantic failure.
 
-The `CollectEvmBalancesState` reducer emits one `evm.balance_snapshot` fact per source and a checked
-`EvmBalanceCollectionReceipt`; runtime records them with evidence and completion in one atomic
-external-read settlement. The receipt carries the exact anchor, sorted sources, and verified
-content identities without copying balance response material. The live runner and evidence-only
-replay live in the private adapter of `mfm-evm-live`.
-`PortfolioReportOperation` receives the typed family receipt vectors and passes the same structured
-binding to selection, which queries receipt-authorized content through the shared Bitcoin/EVM fact
-snapshot, rehydrates response artifacts, and rederives exact content identity before assembly. The
-receipts come from the same run, while any byte-identical append occurrence with the authorized
-content identity is interchangeable. All-EVM portfolios use this same store path. EVM replay
-reruns collection reduction in the EVM adapter; portfolio replay reconstructs only
-receipt-pinned selection and report projection. Neither requires runtime config or network access.
+### Pure aggregation
 
-## Signing
+Aggregation performs no IO. It receives the bootstrap, anchor, metadata, balance, and confirmation
+values through exact graph bindings. It verifies:
 
-`keystore tx-sign` selects one exact `[signers]` entry and its referenced `[keystores]` profile. It
-does not require an EVM route. The app calls the same canonical Alloy EIP-1559 signing service used
-by reusable mutation code. The deterministic RFC 6979 recoverable low-s profile is explicit, the
-provider is called once, and the expected sender and local transaction hash are verified.
+- complete certified source coverage;
+- unique results for every request;
+- exact source, chain, and routing-generation agreement;
+- exact common anchor;
+- canonical addresses and U256 quantities;
+- token decimal bounds; and
+- deterministic output/fact order.
 
-Keystore paths, unlock files, passwords, private keys, mnemonics, signatures, signed envelopes, and
-raw transactions remain runtime-only. The explicit `tx-sign --out` file is the sole user-selected
-bearer boundary and is written mode 0600; stdout and stderr expose only redacted metadata.
+It then produces typed EVM balance values and any transition fact emissions. Portfolio states
+consume same-run values directly through graph edges.
 
-## Failure and replay rules
+## Authorization And Observation
 
-No runtime file, no `evm` family, or no selected route is a missing provider configuration. An
-unreadable, malformed, or invalid selected route is invalid provider configuration. Diagnostics may
-carry the certified network, expected chain id, source ref, closed operation id, and reviewed
-numeric codes, but never endpoints, authorization, provider messages, response bodies, or paths.
+Every EVM protocol operation follows:
 
-Read-only and pre-mutation availability/resource failures block the attempt so process-local routing
-can be repaired. HTTP 408, 425, 429, 500, 502, 503, 504, and 507 are availability/resource failures;
-other non-success HTTP statuses are deterministic rejections. JSON-RPC internal error `-32603` and
-Ethereum resource errors `-32001`, `-32002`, and `-32005` are availability/resource failures; other
-numeric JSON-RPC errors are deterministic rejections. A missing or wrongly typed numeric field is
-a response-contract violation. Deterministic request and response-contract violations remain
-terminal. After transaction submission is durably possible, every provider/session failure blocks:
-it cannot prove the transaction failed and cannot authorize rebroadcast. Classification uses typed
-capability variants and closed numeric diagnostics only, never provider messages.
+```text
+pure request authorship
+  -> ExternalAccessAuthorized
+  -> one affine AuthorizedAccess call
+  -> ExternalAccessObserved
+  -> later state settlement
+```
 
-Replay uses the certified spec, append-only stream, retained typed artifacts, and replay verifiers.
-It must not open an RPC connection, resolve a current route, or construct a signer.
+The transport performs no implicit retry or source rotation. `InsufficientEvidence` may cause a
+later `drive_once` to append a new authorization for the same immutable request.
 
-For the complete transaction state, lane, preparation, recovery, receipt, and finality contract,
-see [EVM Transactions](evm-transactions.md).
+Only these safe-failure codes are admitted by the frozen EVM contract:
 
-Contributor ownership:
+```text
+routing_generation_unavailable
+configuration_invalid
+request_invalid
+access_cancelled
+transport_failed
+http_status
+json_rpc_error
+response_invalid
+response_missing_result
+response_too_large
+unclassified_failure
+```
 
-- private app assembly parses and selectively resolves routes and signers, selects runtime
-  resources, and binds sessions;
-- the public `mfm_evm_live::transport` module owns bounded JSON-RPC, checked sessions, and typed
-  protocol decoding;
-- the private adapter in `mfm-evm-live` owns reusable balance collection/publication,
-  transaction, validation, and evidence-only replay bindings;
-- `mfm-portfolio-live` owns receipt-pinned fact-query selection, canonical response hydration, and
-  snapshot/report projection bindings only;
-- portfolio and reusable EVM states own their deterministic validation/reduction semantics;
-  binaries only pass paths and render results.
+The only typed diagnostics are reviewed HTTP status, JSON-RPC numeric code, or closed
+response-invalid kind. Provider messages, response bodies, URLs, authorization, and paths are
+discarded.
 
-Package boundaries are governed by the property-based
-[semantic package metadata](architecture.md#semantic-package-metadata), not an exact EVM package
-inventory.
+The retryable HTTP set is `408`, `425`, `429`, `500`, `502`, `503`, `504`, and `507`. The
+retryable JSON-RPC set is `-32603`, `-32001`, `-32002`, and `-32005`. Those observations yield
+`InsufficientEvidence`; nonretryable numeric destination rejection may become the closed typed
+`destination_rejected` failure. Invalid/unrepresentable responses yield `InvalidEvidence`.
+
+Cancellation or transport failure after boundary entry may be `Indeterminate`; that audit outcome
+does not invent an EVM result.
+
+## Transport Contract
+
+The reusable EVM transport owns:
+
+- exact generation resolution;
+- bounded HTTP(S) request/response IO;
+- redirects and implicit retries disabled;
+- JSON-RPC 2.0 envelope/id validation;
+- checked Alloy-backed hash, address, bytes, quantity, block, and call decoding;
+- semantic response-size limits in addition to an outer transport limit; and
+- the closed safe-failure mapping.
+
+It receives operation-only typed requests. It knows neither the portfolio graph nor journal/store
+authority. A private live adapter consumes runtime's affine access authority and calls the
+transport; the public reusable transport API remains runtime-agnostic.
+
+## Replay And Inspection
+
+Recorded verification checks authorization/observation linkage, request/response schemas, graph
+lineage, anchors, outputs, facts, and closure without invoking state callbacks.
+
+Exact reproduction reruns the admitted pure request authors and reducers from retained typed values.
+Candidate comparison runs only explicitly identified candidate callbacks. No replay mode resolves a
+routing generation, opens HTTP, reads current routing config, or appends.
+
+`ReadPublic` exposes only certified portfolio output. Exact EVM requests, observations, safe
+diagnostics, and facts require separately authorized trace, audit, replay, or export access.
+
+## Mutation Exclusion
+
+This routing/read graph grants no transaction, signer, nonce, or raw-broadcast authority. Product
+EVM mutation is unregistered until the durable keyed executor qualification described in
+`docs/evm-transactions.md` lands.

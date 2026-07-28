@@ -17,16 +17,15 @@ name = "mfm_program"
 path = "src/lib.rs"
 
 [dependencies]
-mfm-capabilities = { path = "../capabilities" }
 mfm-canonical = { path = "../canonical" }
+mfm-executor = { path = "../executor" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
+mfm-journal = { path = "../journal" }
+mfm-program-derive = { path = "../program-derive" }
 mfm-spec = { path = "../spec" }
+mfm-store = { path = "../store" }
 mfm-values = { path = "../values" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-mfm-program-derive = { path = "../program-derive" }
-serde = { workspace = true }
-trybuild = "1.0"

@@ -1,5 +1,0 @@
-error[E0599]: no method named `into_parts` found for struct `CertifiedTypedSpec` in the current scope
- --> tests/ui/fail/certified_spec_owned_parts_absent.rs:9:34
-  |
-9 |     let _owned_parts = authority.into_parts();
-  |                                  ^^^^^^^^^^ method not found in `CertifiedTypedSpec`

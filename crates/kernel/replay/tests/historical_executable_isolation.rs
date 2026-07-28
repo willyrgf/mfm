@@ -29,25 +29,37 @@
 //! - Copying the current test executable proves exact-byte handshaking on Linux and macOS. It does
 //!   not establish long-term artifact retention, loader compatibility, code-signing policy, or
 //!   reproducibility across toolchains and operating-system versions.
-//! - The structural, exact, and candidate result types below are conformance models only. They do
-//!   not construct `mfm-replay` authority or create a parallel production replay path.
+//! - The structural and exact result types below remain conformance models. The test-only adapter
+//!   exercises the real bytes-only `mfm-replay` resolver trait, but constructs no store/run
+//!   authority and creates no parallel production replay path.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, Output, Stdio};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV1};
+use mfm_ids::{ContentDigest, ContentRef, JournalCommitDigest, JournalRecordHash, RunId};
+use mfm_journal::v1::{JournalHead, RecordRef, TransitionRef};
+use mfm_replay::v1::{
+    ExactReproduction as ReplayExactReproduction, ExactReproductionPlan, ReproductionFuture,
+    ReproductionResolver,
+};
 use serde::{Deserialize, Serialize};
 
 const PROTOCOL: &str = "mfm.replay.capability-free-executable.v1";
 const EXECUTABLE_IDENTITY_CONTRACT: &str = "mfm.executable-bytes.v1";
+const EXECUTABLE_DESCRIPTOR_CONTRACT: &str = "mfm.executable-bytes-descriptor.v1";
 const WORKER_ENV: &str = "MFM_REPLAY_CAPABILITY_FREE_WORKER";
 const RESPONSE_PREFIX: &str = "MFM_REPLAY_CAPABILITY_FREE_RESPONSE:";
 #[cfg(target_os = "linux")]
@@ -55,6 +67,8 @@ const SANDBOX_EXECUTABLE_PATH: &str = "/replay/executable";
 #[cfg(target_os = "linux")]
 const SANDBOX_SCRATCH_PATH: &str = "/tmp";
 static TEMP_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+type ExactWorkerRequestParts = (String, Vec<(String, TransitionRef)>, Vec<TransitionRequest>);
 
 #[derive(Debug)]
 struct RetainedExecutable {
@@ -173,38 +187,6 @@ enum ExactReproduction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CandidateComparisonResult {
-    Compared(CandidateComparison),
-    Unavailable {
-        reason: UnavailableReason,
-        evidence: Option<ModeEvidence>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CandidateComparison {
-    admitted_executable_identity: String,
-    candidate_executable_identity: String,
-    live_authority_minted: bool,
-    transitions: Vec<TransitionComparison>,
-    evidence: ModeEvidence,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct TransitionComparison {
-    transition_ref: String,
-    result: ComparisonResult,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ComparisonResult {
-    Agrees,
-    Differs,
-    NotComparable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct ModeEvidence {
     self_attested_identity: String,
     trace: Vec<TraceEvent>,
@@ -317,7 +299,6 @@ impl PrototypeLauncher {
         };
         let request = WorkerRequest {
             protocol: PROTOCOL.to_owned(),
-            mode: WorkerMode::Exact,
             expected_executable_identity: admitted_executable_identity.to_owned(),
             sandbox,
             capability_descriptors,
@@ -343,73 +324,6 @@ impl PrototypeLauncher {
                 reason,
                 evidence: Some(evidence),
             },
-            WorkerOutcome::CandidateCompared { .. } => ExactReproduction::Unavailable {
-                reason: UnavailableReason::ProtocolViolation,
-                evidence: Some(evidence),
-            },
-        }
-    }
-
-    fn compare_candidate(
-        &self,
-        artifact: &RetainedExecutable,
-        admitted_executable_identity: String,
-        capability_descriptors: Vec<String>,
-        transitions: Vec<TransitionRequest>,
-    ) -> CandidateComparisonResult {
-        if let Err(reason) = verify_retained_artifact(artifact) {
-            return CandidateComparisonResult::Unavailable {
-                reason,
-                evidence: None,
-            };
-        }
-        let sandbox = match sandbox_expectation(artifact) {
-            Ok(sandbox) => sandbox,
-            Err(reason) => {
-                return CandidateComparisonResult::Unavailable {
-                    reason,
-                    evidence: None,
-                };
-            }
-        };
-        let request = WorkerRequest {
-            protocol: PROTOCOL.to_owned(),
-            mode: WorkerMode::Candidate,
-            expected_executable_identity: artifact.retained_identity().to_owned(),
-            sandbox,
-            capability_descriptors,
-            transitions,
-        };
-        let response = match self.launch(artifact.path(), &request) {
-            Ok(response) => response,
-            Err(reason) => {
-                return CandidateComparisonResult::Unavailable {
-                    reason,
-                    evidence: None,
-                };
-            }
-        };
-        let evidence = ModeEvidence::from(&response);
-        match response.outcome {
-            WorkerOutcome::CandidateCompared { transitions } => {
-                CandidateComparisonResult::Compared(CandidateComparison {
-                    admitted_executable_identity,
-                    candidate_executable_identity: response.self_attested_identity,
-                    live_authority_minted: response.live_authority_minted,
-                    transitions,
-                    evidence,
-                })
-            }
-            WorkerOutcome::Unavailable { reason } => CandidateComparisonResult::Unavailable {
-                reason,
-                evidence: Some(evidence),
-            },
-            WorkerOutcome::ExactMatched | WorkerOutcome::ExactMismatch { .. } => {
-                CandidateComparisonResult::Unavailable {
-                    reason: UnavailableReason::ProtocolViolation,
-                    evidence: Some(evidence),
-                }
-            }
         }
     }
 
@@ -451,6 +365,100 @@ impl PrototypeLauncher {
             .env_clear()
             .env(WORKER_ENV, "1");
         run_worker_command(command, request, UnavailableReason::LaunchFailed)
+    }
+}
+
+/// Test-only bridge from the frozen bytes-only replay callback to the qualified sandbox
+/// prototype. It deliberately retains the executable out of band: the replay service can pass
+/// only canonical plan bytes.
+struct QualifiedResolverAdapter<'a> {
+    launcher: &'a PrototypeLauncher,
+    artifact: &'a RetainedExecutable,
+}
+
+impl ReproductionResolver for QualifiedResolverAdapter<'_> {
+    fn reproduce_exact<'a>(
+        &'a self,
+        canonical_plan: &'a [u8],
+    ) -> ReproductionFuture<'a, ReplayExactReproduction> {
+        Box::pin(async move {
+            let Ok((expected_identity, transition_refs, requests)) =
+                exact_worker_request(canonical_plan)
+            else {
+                return ReplayExactReproduction::Unavailable;
+            };
+            match self.launcher.reproduce_exact(
+                self.artifact,
+                &expected_identity,
+                Vec::new(),
+                requests,
+            ) {
+                ExactReproduction::Matched(_) => ReplayExactReproduction::Matched,
+                ExactReproduction::Mismatch { transition_ref, .. } => {
+                    let transition_ref = transition_refs
+                        .into_iter()
+                        .find(|(encoded, _)| encoded == &transition_ref)
+                        .map(|(_, reference)| reference);
+                    match transition_ref {
+                        Some(transition_ref) => ReplayExactReproduction::Mismatch {
+                            transition_ref: Some(transition_ref),
+                        },
+                        None => ReplayExactReproduction::Unavailable,
+                    }
+                }
+                ExactReproduction::Unavailable { .. } => ReplayExactReproduction::Unavailable,
+            }
+        })
+    }
+}
+
+fn exact_worker_request(canonical_plan: &[u8]) -> Result<ExactWorkerRequestParts, ()> {
+    let plan = ExactReproductionPlan::strict_decode(canonical_plan).map_err(|_| ())?;
+    let value = plan.canonical_value().map_err(|_| ())?;
+    let admitted = canonical_field(&value, "admitted_executable_identity_ref")?;
+    let expected_identity = canonical_string(admitted, "content_digest")?.to_owned();
+    let CanonicalValue::Array(transitions) = canonical_field(&value, "ordered_transition_refs")?
+    else {
+        return Err(());
+    };
+    let transition_refs = transitions
+        .iter()
+        .cloned()
+        .map(|value| {
+            let reference = TransitionRef::from_canonical_value(value).map_err(|_| ())?;
+            let encoded = String::from_utf8(reference.as_bytes().to_vec()).map_err(|_| ())?;
+            Ok((encoded, reference))
+        })
+        .collect::<Result<Vec<_>, ()>>()?;
+    let requests = transition_refs
+        .iter()
+        .map(|(encoded, _)| TransitionRequest::comparable(encoded, "recorded", "recorded"))
+        .collect();
+    Ok((expected_identity, transition_refs, requests))
+}
+
+fn canonical_field<'a>(value: &'a CanonicalValue, field: &str) -> Result<&'a CanonicalValue, ()> {
+    let CanonicalValue::Object(object) = value else {
+        return Err(());
+    };
+    object
+        .entries()
+        .find_map(|(key, value)| (key == field).then_some(value))
+        .ok_or(())
+}
+
+fn canonical_string<'a>(value: &'a CanonicalValue, field: &str) -> Result<&'a str, ()> {
+    match canonical_field(value, field)? {
+        CanonicalValue::String(value) => Ok(value),
+        _ => Err(()),
+    }
+}
+
+fn resolve_ready<T>(mut future: Pin<Box<dyn Future<Output = T> + Send + '_>>) -> T {
+    let mut context = Context::from_waker(Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("test resolver unexpectedly yielded"),
     }
 }
 
@@ -741,24 +749,15 @@ struct NamespaceIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WorkerRequest {
     protocol: String,
-    mode: WorkerMode,
     expected_executable_identity: String,
     sandbox: SandboxExpectation,
     capability_descriptors: Vec<String>,
     transitions: Vec<TransitionRequest>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum WorkerMode {
-    Exact,
-    Candidate,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TransitionRequest {
     transition_ref: String,
-    candidate_understands_schema: bool,
     recorded_output: String,
     callback_output: String,
 }
@@ -767,18 +766,8 @@ impl TransitionRequest {
     fn comparable(transition_ref: &str, recorded_output: &str, callback_output: &str) -> Self {
         Self {
             transition_ref: transition_ref.to_owned(),
-            candidate_understands_schema: true,
             recorded_output: recorded_output.to_owned(),
             callback_output: callback_output.to_owned(),
-        }
-    }
-
-    fn not_comparable(transition_ref: &str) -> Self {
-        Self {
-            transition_ref: transition_ref.to_owned(),
-            candidate_understands_schema: false,
-            recorded_output: "recorded".to_owned(),
-            callback_output: "must-not-run".to_owned(),
         }
     }
 }
@@ -804,22 +793,14 @@ enum TraceEvent {
     CapabilityEnvironmentDenied,
     CapabilityDescriptorsDenied { descriptors: Vec<String> },
     CallbackInvoked { transition_ref: String },
-    TransitionNotComparable { transition_ref: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WorkerOutcome {
     ExactMatched,
-    ExactMismatch {
-        transition_ref: String,
-    },
-    CandidateCompared {
-        transitions: Vec<TransitionComparison>,
-    },
-    Unavailable {
-        reason: UnavailableReason,
-    },
+    ExactMismatch { transition_ref: String },
+    Unavailable { reason: UnavailableReason },
 }
 
 fn worker_response(request: WorkerRequest) -> WorkerResponse {
@@ -878,10 +859,7 @@ fn worker_response(request: WorkerRequest) -> WorkerResponse {
         return response;
     }
 
-    match request.mode {
-        WorkerMode::Exact => run_exact_callbacks(&mut response, request.transitions),
-        WorkerMode::Candidate => run_candidate_callbacks(&mut response, request.transitions),
-    }
+    run_exact_callbacks(&mut response, request.transitions);
     response
 }
 
@@ -1031,35 +1009,6 @@ fn run_exact_callbacks(response: &mut WorkerResponse, transitions: Vec<Transitio
     response.outcome = WorkerOutcome::ExactMatched;
 }
 
-fn run_candidate_callbacks(response: &mut WorkerResponse, transitions: Vec<TransitionRequest>) {
-    let mut comparisons = Vec::with_capacity(transitions.len());
-    for transition in transitions {
-        let result = if transition.candidate_understands_schema {
-            response.callback_count += 1;
-            response.trace.push(TraceEvent::CallbackInvoked {
-                transition_ref: transition.transition_ref.clone(),
-            });
-            if transition.callback_output == transition.recorded_output {
-                ComparisonResult::Agrees
-            } else {
-                ComparisonResult::Differs
-            }
-        } else {
-            response.trace.push(TraceEvent::TransitionNotComparable {
-                transition_ref: transition.transition_ref.clone(),
-            });
-            ComparisonResult::NotComparable
-        };
-        comparisons.push(TransitionComparison {
-            transition_ref: transition.transition_ref,
-            result,
-        });
-    }
-    response.outcome = WorkerOutcome::CandidateCompared {
-        transitions: comparisons,
-    };
-}
-
 fn executable_identity_for_path(path: &Path) -> io::Result<String> {
     executable_identity_for_bytes(&fs::read(path)?)
 }
@@ -1074,9 +1023,133 @@ fn executable_identity_for_bytes(bytes: &[u8]) -> io::Result<String> {
         ("sha256", CanonicalValue::String(raw_sha256)),
     ])
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    Ok(CanonicalJsonBytes::from_value(&identity)
-        .content_digest()
-        .to_string())
+    let contract = RecoverabilityContractV1::embedded()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let descriptor = contract
+        .encode(EXECUTABLE_DESCRIPTOR_CONTRACT, &identity)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    contract
+        .content_ref(&descriptor)
+        .map(|reference| reference.content_digest().to_string())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+}
+
+fn exact_plan_for_adapter(
+    artifact: &RetainedExecutable,
+    transitions: &[TransitionRef],
+) -> ExactReproductionPlan {
+    let contract = RecoverabilityContractV1::embedded().expect("recoverability contract");
+    let run_id = RunId::from_str(
+        "run:sha256-jcs-v1:\
+         0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect("run id");
+    let commit_digest = JournalCommitDigest::from_str(
+        "sha256-jcs-v1:\
+         1111111111111111111111111111111111111111111111111111111111111111",
+    )
+    .expect("commit digest");
+    let semantic_head = JournalHead::new(2, &commit_digest).expect("semantic head");
+    let portable_export_ref = ContentRef::new(
+        contract
+            .schema_id("mfm.portable-run-export.v1")
+            .expect("portable schema")
+            .clone(),
+        ContentDigest::from_str(
+            "content:sha256-v1:\
+             2222222222222222222222222222222222222222222222222222222222222222",
+        )
+        .expect("portable digest"),
+    )
+    .expect("portable content ref");
+    let executable_identity_ref = ContentRef::new(
+        contract
+            .schema_id(EXECUTABLE_DESCRIPTOR_CONTRACT)
+            .expect("executable descriptor schema")
+            .clone(),
+        ContentDigest::from_str(artifact.retained_identity()).expect("executable digest"),
+    )
+    .expect("executable identity ref");
+    let state_manifest_ref = ContentRef::new(
+        contract
+            .schema_id("mfm.state-implementation-manifest.v1")
+            .expect("state manifest schema")
+            .clone(),
+        ContentDigest::from_str(
+            "content:sha256-v1:\
+             3333333333333333333333333333333333333333333333333333333333333333",
+        )
+        .expect("state manifest digest"),
+    )
+    .expect("state manifest ref");
+    let value = CanonicalValue::object([
+        (
+            "version",
+            CanonicalValue::String("mfm.exact-reproduction-plan.v1".to_owned()),
+        ),
+        ("run_id", CanonicalValue::String(run_id.as_str().to_owned())),
+        (
+            "semantic_head",
+            semantic_head
+                .canonical_value()
+                .expect("semantic head value"),
+        ),
+        (
+            "portable_export_ref",
+            content_ref_value(&portable_export_ref),
+        ),
+        (
+            "admitted_executable_identity_ref",
+            content_ref_value(&executable_identity_ref),
+        ),
+        (
+            "state_implementation_manifest_ref",
+            content_ref_value(&state_manifest_ref),
+        ),
+        (
+            "ordered_transition_refs",
+            CanonicalValue::Array(
+                transitions
+                    .iter()
+                    .map(|reference| reference.canonical_value().expect("transition ref"))
+                    .collect(),
+            ),
+        ),
+    ])
+    .expect("exact plan value");
+    let encoded = contract
+        .encode("mfm.exact-reproduction-plan.v1", &value)
+        .expect("exact plan");
+    ExactReproductionPlan::strict_decode(encoded.as_bytes()).expect("strict exact plan")
+}
+
+fn content_ref_value(reference: &ContentRef) -> CanonicalValue {
+    CanonicalValue::object([
+        (
+            "schema_id",
+            CanonicalValue::String(reference.schema_id().as_str().to_owned()),
+        ),
+        (
+            "content_digest",
+            CanonicalValue::String(reference.content_digest().as_str().to_owned()),
+        ),
+    ])
+    .expect("content ref value")
+}
+
+fn adapter_transition_ref() -> TransitionRef {
+    let run_id = RunId::from_str(
+        "run:sha256-jcs-v1:\
+         0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect("run id");
+    let record_hash = JournalRecordHash::from_str(
+        "sha256-jcs-v1:\
+         4444444444444444444444444444444444444444444444444444444444444444",
+    )
+    .expect("record hash");
+    let record_ref = RecordRef::new(&run_id, 2, 0, &record_hash).expect("record ref");
+    TransitionRef::new(&record_ref).expect("transition ref")
 }
 
 #[test]
@@ -1103,7 +1176,7 @@ fn structural_mode_invokes_no_executable_or_callback() {
     let launcher = PrototypeLauncher::new();
     let history = vec![
         TransitionRequest::comparable("transition:1", "one", "different callback result"),
-        TransitionRequest::not_comparable("transition:2"),
+        TransitionRequest::comparable("transition:2", "two", "two"),
     ];
 
     let verified = verify_recorded_history_structurally(&history).expect("structural history");
@@ -1117,11 +1190,50 @@ fn structural_mode_invokes_no_executable_or_callback() {
 }
 
 #[test]
+fn replay_resolver_receives_only_strict_canonical_plan_bytes() {
+    let artifact = RetainedExecutable::capture().expect("retained executable");
+    let launcher = PrototypeLauncher::new();
+    let resolver = QualifiedResolverAdapter {
+        launcher: &launcher,
+        artifact: &artifact,
+    };
+    let transition_ref = adapter_transition_ref();
+    let plan = exact_plan_for_adapter(&artifact, std::slice::from_ref(&transition_ref));
+
+    let result = resolve_ready(resolver.reproduce_exact(plan.as_bytes()));
+
+    #[cfg(target_os = "linux")]
+    assert_eq!(result, ReplayExactReproduction::Matched);
+    #[cfg(target_os = "macos")]
+    assert!(matches!(
+        result,
+        ReplayExactReproduction::Matched | ReplayExactReproduction::Unavailable
+    ));
+
+    let unavailable_launcher = PrototypeLauncher::unavailable();
+    let unavailable_resolver = QualifiedResolverAdapter {
+        launcher: &unavailable_launcher,
+        artifact: &artifact,
+    };
+    let unavailable = resolve_ready(unavailable_resolver.reproduce_exact(plan.as_bytes()));
+    assert_eq!(unavailable, ReplayExactReproduction::Unavailable);
+    assert_eq!(unavailable_launcher.launch_count(), 0);
+
+    let invalid_launcher = PrototypeLauncher::new();
+    let invalid_resolver = QualifiedResolverAdapter {
+        launcher: &invalid_launcher,
+        artifact: &artifact,
+    };
+    let invalid = resolve_ready(invalid_resolver.reproduce_exact(b"not a canonical plan"));
+    assert_eq!(invalid, ReplayExactReproduction::Unavailable);
+    assert_eq!(invalid_launcher.launch_count(), 0);
+}
+
+#[test]
 fn env_clear_without_platform_sandbox_is_rejected_before_callbacks() {
     let artifact = RetainedExecutable::capture().expect("retained executable");
     let request = WorkerRequest {
         protocol: PROTOCOL.to_owned(),
-        mode: WorkerMode::Exact,
         expected_executable_identity: artifact.retained_identity().to_owned(),
         sandbox: sandbox_expectation(&artifact).expect("sandbox expectation"),
         capability_descriptors: Vec::new(),
@@ -1347,104 +1459,4 @@ fn missing_or_changed_retained_artifact_is_unavailable_without_launch() {
         }
     ));
     assert_eq!(changed_launcher.launch_count(), 0);
-}
-
-#[test]
-fn candidate_mode_never_mints_authority_and_reports_not_comparable_per_transition() {
-    let candidate = RetainedExecutable::capture().expect("candidate executable");
-    let admitted_identity = executable_identity_for_bytes(b"historical admitted executable")
-        .expect("admitted identity");
-    let launcher = PrototypeLauncher::new();
-
-    let denied = launcher.compare_candidate(
-        &candidate,
-        admitted_identity.clone(),
-        vec!["mfm.run-access.drive.v1".to_owned()],
-        vec![TransitionRequest::comparable(
-            "transition:must-not-run",
-            "recorded",
-            "recorded",
-        )],
-    );
-    let denial_evidence = match denied {
-        CandidateComparisonResult::Unavailable {
-            reason: UnavailableReason::CapabilityDescriptorDenied,
-            evidence: Some(evidence),
-        } => evidence,
-        CandidateComparisonResult::Unavailable {
-            reason: UnavailableReason::SandboxUnavailable,
-            evidence: None,
-        } => {
-            #[cfg(target_os = "macos")]
-            {
-                return;
-            }
-            #[cfg(target_os = "linux")]
-            panic!("Linux Bubblewrap became unavailable during candidate conformance");
-        }
-        _ => {
-            panic!("candidate capability request was not denied: {denied:?}");
-        }
-    };
-    assert_eq!(denial_evidence.callback_count, 0);
-    assert!(!denial_evidence.live_authority_minted);
-
-    let result = launcher.compare_candidate(
-        &candidate,
-        admitted_identity.clone(),
-        Vec::new(),
-        vec![
-            TransitionRequest::comparable("transition:agrees", "same", "same"),
-            TransitionRequest::not_comparable("transition:unknown-schema"),
-            TransitionRequest::comparable("transition:differs", "recorded", "candidate"),
-        ],
-    );
-
-    let CandidateComparisonResult::Compared(comparison) = result else {
-        panic!("candidate comparison was unavailable: {result:?}");
-    };
-    assert_eq!(launcher.launch_count(), 2);
-    assert_eq!(comparison.admitted_executable_identity, admitted_identity);
-    assert_eq!(
-        comparison.candidate_executable_identity,
-        candidate.retained_identity()
-    );
-    assert!(!comparison.live_authority_minted);
-    assert!(!comparison.evidence.live_authority_minted);
-    assert_eq!(comparison.evidence.callback_count, 2);
-    assert_eq!(
-        comparison.transitions,
-        vec![
-            TransitionComparison {
-                transition_ref: "transition:agrees".to_owned(),
-                result: ComparisonResult::Agrees,
-            },
-            TransitionComparison {
-                transition_ref: "transition:unknown-schema".to_owned(),
-                result: ComparisonResult::NotComparable,
-            },
-            TransitionComparison {
-                transition_ref: "transition:differs".to_owned(),
-                result: ComparisonResult::Differs,
-            },
-        ]
-    );
-    let identity_position = comparison
-        .evidence
-        .trace
-        .iter()
-        .position(|event| matches!(event, TraceEvent::IdentityAttested { .. }))
-        .expect("identity trace");
-    let first_callback_position = comparison
-        .evidence
-        .trace
-        .iter()
-        .position(|event| matches!(event, TraceEvent::CallbackInvoked { .. }))
-        .expect("callback trace");
-    assert!(identity_position < first_callback_position);
-    assert!(comparison.evidence.trace.iter().any(|event| matches!(
-        event,
-        TraceEvent::TransitionNotComparable { transition_ref }
-            if transition_ref == "transition:unknown-schema"
-    )));
 }

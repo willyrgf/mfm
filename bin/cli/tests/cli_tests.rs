@@ -18,13 +18,15 @@ fn test_cli_help() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("MFM - On-chain operations tool"))
-        .stdout(predicate::str::contains("facts"))
         .stdout(predicate::str::contains("keystore"))
-        .stdout(predicate::str::contains("ops"));
+        .stdout(predicate::str::contains("ops"))
+        .stdout(predicate::str::contains("setup").not())
+        .stdout(predicate::str::contains("run"))
+        .stdout(predicate::str::contains("facts").not());
 }
 
 #[test]
-fn test_ops_help_and_list() {
+fn ops_list_uses_the_production_connection_surface_and_fails_closed_standalone() {
     let mut help = Command::cargo_bin("mfm_cli").unwrap();
     help.args(["ops", "--help"]);
     help.assert()
@@ -34,91 +36,55 @@ fn test_ops_help_and_list() {
         ))
         .stdout(predicate::str::contains("list"));
 
+    let mut list_help = Command::cargo_bin("mfm_cli").unwrap();
+    list_help.args(["ops", "list", "--help"]);
+    list_help
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--database-url"))
+        .stdout(predicate::str::contains("--runtime-config"));
+
     let mut list = Command::cargo_bin("mfm_cli").unwrap();
-    let output = list
-        .args(["ops", "list"])
+    list.args(["ops", "list"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "AuthoritativeWriterFenceUnavailable",
+        ));
+}
+
+#[test]
+fn run_help_has_only_the_recoverability_v1_commands() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args(["run", "--help"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let rendered = String::from_utf8(output).expect("ops output is UTF-8");
-    let entry_points = rendered
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>();
-    assert_eq!(entry_points.len(), 1, "public operation output: {rendered}");
-    assert!(
-        entry_points[0] == "mfm.portfolio/snapshot@1",
-        "unexpected public operation: {rendered}"
-    );
-}
-
-#[test]
-fn test_facts_help() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["facts", "--help"]);
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Public fact discovery and query operations",
-        ))
-        .stdout(predicate::str::contains("kinds"))
-        .stdout(predicate::str::contains("describe"))
-        .stdout(predicate::str::contains("explain"))
-        .stdout(predicate::str::contains("query"))
-        .stdout(predicate::str::contains("latest"))
-        .stdout(predicate::str::contains("history"))
-        .stdout(predicate::str::contains("top"))
-        .stdout(predicate::str::contains("show"));
-}
-
-#[test]
-fn test_facts_query_help_has_public_query_shape() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["facts", "query", "--help"]);
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("--kind"))
-        .stdout(predicate::str::contains("--shape"))
-        .stdout(predicate::str::contains("--order"))
-        .stdout(predicate::str::contains("--subject"))
-        .stdout(predicate::str::contains("--result"))
-        .stdout(predicate::str::contains("--where"))
-        .stdout(predicate::str::contains("--field"))
-        .stdout(predicate::str::contains("--limit"))
-        .stdout(predicate::str::contains("--audience").not())
-        .stdout(predicate::str::contains("--scope").not())
-        .stdout(predicate::str::contains("control").not())
-        .stdout(predicate::str::contains("RunPrivate").not());
-}
-
-#[test]
-fn facts_commands_use_public_evidence_only_services() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source =
-        std::fs::read_to_string(manifest_dir.join("src/commands/facts.rs")).expect("facts source");
-
-    assert!(
-        source.contains("connect_application"),
-        "facts commands must use the opaque application facade"
-    );
-
-    for forbidden in [
-        "FactAudience::Control",
-        "RunPrivate",
-        "audience:",
-        "scope:",
-        "runtime_config",
-        "start_entry_point_run",
-        "resume_run",
-        "record_manual_resolution",
+    let rendered = String::from_utf8(output).expect("run help is UTF-8");
+    for command in [
+        "admit", "drive", "show", "replay", "trace", "audit", "export",
+    ] {
+        assert!(rendered.contains(command), "missing {command}: {rendered}");
+    }
+    for removed in [
+        "start",
+        "resume",
+        "status",
+        "stream",
+        "manual-resolution",
+        "public-output",
+        "list",
+        "watch",
     ] {
         assert!(
-            !source.contains(forbidden),
-            "facts command source must not expose {forbidden}"
+            !rendered
+                .lines()
+                .any(|line| line.trim_start().starts_with(removed)),
+            "removed run command {removed} survived: {rendered}"
         );
     }
 }

@@ -2,7 +2,7 @@
 name = "mfm-bitcoin"
 version = "0.1.0"
 edition = "2021"
-description = "Pure Bitcoin model, capability, state, and operation contracts for MFM"
+description = "Runtime-independent Bitcoin read qualification models for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -15,13 +15,4 @@ domain-role = "source"
 bitcoin = { workspace = true }
 thiserror = { workspace = true }
 
-mfm-canonical = { path = "../../kernel/canonical" }
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-certify = { path = "../../kernel/certify" }
-mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-program = { path = "../../kernel/program" }
-mfm-program-derive = { path = "../../kernel/program-derive" }
-mfm-values = { path = "../../kernel/values" }
-serde = { workspace = true }
-serde_json = { workspace = true }

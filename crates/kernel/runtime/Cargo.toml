@@ -2,7 +2,7 @@
 name = "mfm-runtime"
 version = "0.1.0"
 edition = "2021"
-description = "Serial typed scheduler for MFM certified execution specs"
+description = "Stateless audited interpreter for MFM certified execution specs"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -19,22 +19,18 @@ path = "src/lib.rs"
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
-mfm-certify = { path = "../certify" }
-mfm-events = { path = "../events" }
+mfm-executor = { path = "../executor" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
-mfm-manual-auth = { path = "../manual-auth" }
+mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
-mfm-values = { path = "../values" }
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-program-derive = { path = "../program-derive" }
+mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
 mfm-store = { path = "../store", features = ["test-support"] }
+serde_json = { workspace = true }
 tokio = { workspace = true }
-trybuild = "1.0"

@@ -39,15 +39,6 @@ fn accepts_category_identity_golden_strings() {
         Some("1"),
     );
     assert_identity!(
-        StateKind::parse(format!(
-            "state:mfm.evm:read-balance:sha256-jcs-v1:{DIGEST_HEX}"
-        ))
-        .expect("state kind"),
-        "state:mfm.evm:read-balance:sha256-jcs-v1:",
-        Some("mfm.evm/read-balance"),
-        None,
-    );
-    assert_identity!(
         EffectKind::parse(format!(
             "effect:mfm.kernel:read-external:sha256-jcs-v1:{DIGEST_HEX}"
         ))
@@ -65,61 +56,22 @@ fn accepts_category_identity_golden_strings() {
         Some("mfm.evm/rpc-read"),
         None,
     );
-    assert_identity!(
-        AdapterKind::parse(format!(
-            "adapter:mfm.evm:json-rpc:sha256-jcs-v1:{DIGEST_HEX}"
-        ))
-        .expect("adapter kind"),
-        "adapter:mfm.evm:json-rpc:sha256-jcs-v1:",
-        Some("mfm.evm/json-rpc"),
-        None,
-    );
-    assert_identity!(
-        OperationKind::parse(format!(
-            "operation:mfm.portfolio:track:sha256-jcs-v1:{DIGEST_HEX}"
-        ))
-        .expect("operation kind"),
-        "operation:mfm.portfolio:track:sha256-jcs-v1:",
-        Some("mfm.portfolio/track"),
-        None,
-    );
 }
 
 #[test]
 fn accepts_digest_only_identity_golden_strings() {
     let cases = [
-        DescriptorId::parse(format!("descriptor:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("descriptor id")
-            .to_string(),
         SpecHash::parse(format!("spec:sha256-jcs-v1:{DIGEST_HEX}"))
             .expect("spec hash")
             .to_string(),
-        SideEffectPairId::parse(format!("side_effect_pair:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("side-effect pair id")
-            .to_string(),
-        OperationInstanceId::parse(format!("op:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("operation instance id")
-            .to_string(),
         NodeId::parse(format!("node:sha256-jcs-v1:{DIGEST_HEX}"))
             .expect("node id")
-            .to_string(),
-        CellId::parse(format!("cell:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("cell id")
-            .to_string(),
-        ScopeId::parse(format!("scope:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("scope id")
-            .to_string(),
-        SeedId::parse(format!("seed:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("seed id")
             .to_string(),
         AttemptId::parse(format!("attempt:sha256-jcs-v1:{DIGEST_HEX}"))
             .expect("attempt id")
             .to_string(),
         RunId::parse(format!("run:sha256-jcs-v1:{DIGEST_HEX}"))
             .expect("run id")
-            .to_string(),
-        EventId::parse(format!("event:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("event id")
             .to_string(),
         ArtifactId::parse(format!("artifact:sha256-jcs-v1:{DIGEST_HEX}"))
             .expect("artifact id")
@@ -132,17 +84,10 @@ fn accepts_digest_only_identity_golden_strings() {
     assert_eq!(
         cases,
         [
-            format!("descriptor:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("spec:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("side_effect_pair:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("op:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("node:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("cell:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("scope:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("seed:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("attempt:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("run:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("event:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("artifact:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("content:sha256-jcs-v1:{DIGEST_HEX}"),
         ]
@@ -177,27 +122,10 @@ fn checked_constructors_produce_canonical_strings() {
     );
 
     assert_eq!(
-        StateKind::new(
-            "mfm.portfolio",
-            "load",
-            DigestAlgorithm::Sha256JcsV1,
-            digest()
-        )
-        .expect("state constructor")
-        .as_str(),
-        format!("state:mfm.portfolio:load:sha256-jcs-v1:{DIGEST_HEX}")
-    );
-
-    assert_eq!(
         EffectKind::new("mfm.kernel", "pure", DigestAlgorithm::Sha256JcsV1, digest())
             .expect("effect constructor")
             .as_str(),
         format!("effect:mfm.kernel:pure:sha256-jcs-v1:{DIGEST_HEX}")
-    );
-
-    assert_eq!(
-        DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest()).as_str(),
-        format!("descriptor:sha256-jcs-v1:{DIGEST_HEX}")
     );
 }
 
@@ -222,16 +150,16 @@ fn store_scope_id_accepts_only_stable_lowercase_hex_shape() {
 }
 
 #[test]
-fn checked_versions_reject_stringly_mixups() {
-    let state_version = StateVersion::new("mfm.state.v1").expect("state version");
+fn checked_versions_reject_invalid_tokens() {
+    let schema_version = SchemaVersion::new("1").expect("schema version");
     let effect_version = EffectVersion::new("mfm.effect.v1").expect("effect version");
-    let operation_version = OperationVersion::new("mfm.operation.v1").expect("operation version");
+    let capability_version =
+        CapabilityVersion::new("mfm.capability.v1").expect("capability version");
 
-    assert_eq!(state_version.as_str(), "mfm.state.v1");
+    assert_eq!(schema_version.as_str(), "1");
     assert_eq!(effect_version.as_str(), "mfm.effect.v1");
-    assert_eq!(operation_version.as_str(), "mfm.operation.v1");
-    assert!(StateVersion::new("_private").is_err());
-    assert!(SpecVersion::new("MFM.typed.v1").is_err());
+    assert_eq!(capability_version.as_str(), "mfm.capability.v1");
+    assert!(SchemaVersion::new("_private").is_err());
 }
 
 #[test]
@@ -243,32 +171,32 @@ fn rejects_invalid_identity_strings() {
             SchemaId::parse(value).is_err()
         }),
         (
-            "state:mfm:reader:1:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| StateKind::parse(value).is_err(),
+            "effect:mfm:reader:1:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            |value| EffectKind::parse(value).is_err(),
         ),
         (
-            "state:Mfm:reader:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| StateKind::parse(value).is_err(),
+            "effect:Mfm:reader:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            |value| EffectKind::parse(value).is_err(),
         ),
         (
-            "state:mfm:_reader:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| StateKind::parse(value).is_err(),
+            "effect:mfm:_reader:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            |value| EffectKind::parse(value).is_err(),
         ),
         (
-            "state:mfm:reader:sha256-jcs-unsupported:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| StateKind::parse(value).is_err(),
+            "effect:mfm:reader:sha256-jcs-unsupported:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            |value| EffectKind::parse(value).is_err(),
         ),
         (
-            "state:mfm:reader:sha256-jcs-v1:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| StateKind::parse(value).is_err(),
+            "effect:mfm:reader:sha256-jcs-v1:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+            |value| EffectKind::parse(value).is_err(),
         ),
         (
             "schema:mfm.name:1:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| StateKind::parse(value).is_err(),
+            |value| EffectKind::parse(value).is_err(),
         ),
         (
-            "descriptor:mfm.name:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| DescriptorId::parse(value).is_err(),
+            "spec:mfm.name:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            |value| SpecHash::parse(value).is_err(),
         ),
     ];
 

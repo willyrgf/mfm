@@ -1,29 +1,29 @@
 # RFC: Complete Transition Journal and Recoverable External Access
 
-Status: schema-frozen accepted target contract — retained contract-shaping, identity, schema, and
-golden-vector gates closed; implementation-cutover and production-rollout gates remain open
+Status: implemented current core contract — retained contract-shaping, identity, schema,
+golden-vector, and core implementation-cutover gates closed; EVM mutation qualification remains
+open and deployment rollout approval remains deployment-specific
 
 Scope: typed state execution, certified specs, run journal, external-access audit, recoverability,
 replay, facts, framework enforcement, execution catalogs, and app status
 
-This RFC defines the target breaking replacement of the current event, projection, attempt,
-side-effect, and generic saga machinery. Its architecture and fixed contract choices are closed,
-with repository evidence and remaining gate classification recorded in the versioned
-[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md). It is not yet
-the current implementation authority. The frozen identity, schema, and golden-vector artifacts
-constrain the implementation work, but only the atomic vertical cutover moves the
+This RFC records the breaking replacement of the former event, projection, attempt, side-effect,
+and generic saga machinery. Its architecture and fixed contract choices are the implemented core
+authority, with repository evidence and remaining gate classification recorded in the versioned
+[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md). The
 [design contract](docs/design.md), [architecture guide](docs/architecture.md), affected companion
-documents, code, schemas, and tests to this design together. The retained prototypes and
-inventories close the contract-shaping evidence gate; the commit-2 annex and shared corpus close
-the identity, schema, and golden-vector gate. Production-rollout gates remain open and block
-deployment or capability registration, not implementation of the frozen target. They cannot
-create an alternate schema, compatibility reader, or optional audit mode.
+documents, code, schemas, and tests now implement this design together. The retained prototypes
+and inventories closed the contract-shaping evidence gate; the commit-2 annex and shared corpus
+closed the identity, schema, and golden-vector gate; and the atomic vertical cutover closed the
+core implementation gate. EVM mutation remains unregistered pending its separate qualification.
+Deployment rollout approvals remain deployment-specific and cannot create an alternate schema,
+compatibility reader, or optional audit mode.
 
 ## Executive Decision
 
-MFM will have one append-only transition journal as the sole semantic authority for a run.
+MFM has one append-only transition journal as the sole semantic authority for a run.
 
-Every committed state transition will be independently traceable from:
+Every committed state transition is independently traceable from:
 
 - the exact certified run and node;
 - the exact journal head the state observed;
@@ -110,14 +110,14 @@ Journal predecessor authority and compare-and-swap are per run. Cross-run fact c
 only a dense tenant-scoped order advanced by fact-emitting commits and snapshotted by
 fact-selection barriers; ordinary run appends do not contend on a store-wide semantic head.
 
-## Problem Situation
+## Pre-Cutover Problem Situation
 
 ### Transition history is fragmented instead of being the primitive
 
-The current run stream is authoritative, but one state evaluation is represented through several
+The former run stream was authoritative, but one state evaluation was represented through several
 event families and then reconstructed through broad projections and runtime-specific maps. Exact
-inputs exist during materialization, while outputs, facts, evidence, attempts, side-effect phases,
-public output, and completion are persisted separately.
+inputs existed during materialization, while outputs, facts, evidence, attempts, side-effect
+phases, public output, and completion were persisted separately.
 
 This makes a basic question unnecessarily expensive:
 
@@ -129,9 +129,9 @@ artifact, phase, and completion models.
 
 ### Projection became a second model of the runtime
 
-The current projection surface collects admission, attempts, cells, side-effect phases, saga
+The former projection surface collected admission, attempts, cells, side-effect phases, saga
 state, resource claims, retention, public output, and terminal state into a broadly shared
-snapshot. Runtime and replay then construct additional lifecycle maps over the same history.
+snapshot. Runtime and replay then constructed additional lifecycle maps over the same history.
 
 The consequences are:
 
@@ -165,14 +165,14 @@ An external access can:
 These are auditable facts about MFM's interaction boundary. They must not disappear merely because
 they did not produce a typed state output.
 
-The current worker-attempt lifecycle is too broad for this purpose. It records process driving and
-is entangled with node recovery, side-effect ownership, claims, and terminalization. The needed
-primitive is narrower: immutable authorization and observation records around every audited live
-application-protocol operation.
+The former worker-attempt lifecycle was too broad for this purpose. It recorded process driving
+and was entangled with node recovery, side-effect ownership, claims, and terminalization. The
+replacement primitive is narrower: immutable authorization and observation records around every
+audited live application-protocol operation.
 
 ### Recoverability is distributed across too many phases
 
-The current mutation lifecycle distinguishes intent, claim, prepared invocation, invocation
+The former mutation lifecycle distinguished intent, claim, prepared invocation, invocation
 started, submission known or unknown, receipt, confirmation, ambiguity, failure, attempt recovery,
 resource lanes, and saga recovery.
 
@@ -195,10 +195,10 @@ contract.
 
 ### Generic saga policy remains too large for the provable claim
 
-The current [certified saga contract](docs/saga.md) honestly narrows AC/DC claims. It nevertheless
-requires the kernel to understand forward and remediation roles, pair linkage, engagement,
-quiescence, obligations, reverse remediation order, run modes, manual authorization, and public
-compensation outcomes.
+The removed certified saga contract honestly narrowed AC/DC claims. It nevertheless required the
+kernel to understand forward and remediation roles, pair linkage, engagement, quiescence,
+obligations, reverse remediation order, run modes, manual authorization, and public compensation
+outcomes.
 
 A generic kernel cannot prove that an arbitrary external compensation restored business
 equivalence. A signed operator decision proves authorization to make a decision, not external
@@ -275,7 +275,7 @@ inside the source run.
   correct, or publish a run.
 - Runtime-loaded native libraries, WASM states, or remote state-execution ABIs in this cutover.
 - Cross-store import of run-source authority.
-- Backward compatibility with current event, projection, attempt, saga, or store schemas.
+- Backward compatibility with the former event, projection, attempt, saga, or store schemas.
 
 ## Material Uncertainties
 
@@ -487,7 +487,7 @@ record.
 
 ## Journal Record Algebra
 
-The proposed top-level record algebra is deliberately small:
+The current top-level record algebra is deliberately small:
 
 ```text
 RunJournalRecord ::=
@@ -759,7 +759,7 @@ descriptors use `ContentRef` or a typed wrapper over it. A `ContentRef` identifi
 content only; it proves neither retention, journal producer lineage, run reachability, nor access
 authority. The full journal-retained `ValueRef` defined below remains a distinct shape with
 artifact identity, evidence hash, role, byte length, media type, semantic type, and producer
-binding. The executor prototype's current lightweight type named `ValueRef` is renamed
+binding. The executor prototype's former lightweight type named `ValueRef` was renamed
 `ContentRef`; no compatibility alias remains.
 
 `ReadCapabilityBindingRef` and `ExecutorBindingRef` are typed wrappers over
@@ -1557,8 +1557,8 @@ pre-admission IO from influencing an untraceable live-source choice.
 
 ### Production read decomposition
 
-The cutover does not preserve the current aggregate live-reader implementations as hidden
-multi-operation capability calls. Their target graphs are ordinary reusable operation
+The current implementation does not preserve the former aggregate live-reader implementations as
+hidden multi-operation capability calls. Its read graphs are ordinary reusable operation
 composition:
 
 ```text
@@ -1584,27 +1584,27 @@ aggregate capability result. The high-level operation builder owns this reusable
 callers do not manually assemble protocol steps and runtime learns no EVM- or Bitcoin-specific
 phase.
 
-The production-read prototype gate must exercise partial return, cancellation, compare-and-swap
-loss, anchor change, immutable routing-generation resolution across resume, and maximum certified
+The production-read qualification exercised partial return, cancellation, compare-and-swap loss,
+anchor change, immutable routing-generation resolution across resume, and maximum certified
 fan-out. Performance may motivate a later authority-preserving batching design, but cannot relax
-this audit unit. The current aggregate EVM and Bitcoin readers are not qualification evidence and
-are deleted. An EVM or Bitcoin read capability is registered at cutover only when its decomposed
-graph and exact-call conformance pass; otherwise that capability remains unavailable without
-changing the generic runtime.
+this audit unit. The former aggregate EVM and Bitcoin readers are deleted. The decomposed EVM read
+graph and its exact-call conformance are qualified and registered in the current core. Bitcoin
+collection is deliberately unregistered under its closed repeat-work-safe read disposition; it is
+outside the fixed implementation sequence and does not change the generic runtime.
 
-The target classifies Bitcoin `scantxoutset "start"` as a read, not a mutation effect, only after
-its production capability qualifies that choice. Qualification must establish that it creates no
-durable domain mutation; the collection has one indivisible snapshot and outcome; each invocation
-has bounded work and retained result; repeated work, provider cost, and shared scan concurrency are
-explicitly accepted; and the capability performs only `start`, with no hidden `status`, `abort`,
-retry, or provider reselection. Timeout or cancellation after possible entry is `Indeterminate`,
-and any later reissue uses a fresh MFM authorization and may execute another full scan after the
-earlier work finishes. A reviewed “scan already in progress” return proves only that this invocation
-did not start another scan; it does not synthesize the outcome of an earlier authorization. MFM
-guarantees separately audited calls and anchor-verified results, not at-most-once scan cost. If the
-prototype cannot establish these properties, production Bitcoin collection remains unregistered
-until a separate keyed work executor and audited status-read design is specified; the generic
-runtime gains no read/effect recovery mode.
+Bitcoin could be registered as a read, rather than a mutation effect, only if its production
+capability qualified `scantxoutset "start"` under this contract: it creates no durable domain
+mutation; the collection has one indivisible snapshot and outcome; each invocation has bounded
+work and retained result; repeated work, provider cost, and shared scan concurrency are explicitly
+accepted; and the capability performs only `start`, with no hidden `status`, `abort`, retry, or
+provider reselection. Timeout or cancellation after possible entry is `Indeterminate`, and any
+later reissue uses a fresh MFM authorization and may execute another full scan after the earlier
+work finishes. A reviewed “scan already in progress” return proves only that this invocation did
+not start another scan; it does not synthesize the outcome of an earlier authorization. MFM
+guarantees separately audited calls and anchor-verified results, not at-most-once scan cost. The
+qualification did not establish these properties, so production Bitcoin collection is
+unregistered. A separately scoped future proposal may specify a keyed work executor and audited
+status-read design; the generic runtime gains no read/effect recovery mode.
 
 ### Authorization record
 
@@ -2912,8 +2912,9 @@ observations. It returns `Advanced` only when a settlement candidate now exists.
 `Returned(Pending { .. })`
 or all-`InsufficientEvidence` returns `Waiting::RetryableEvidenceGap` after preserving the audit
 record; invalid evidence returns `Waiting::IntegrityBlock`. A later host call may retry according to
-its backoff and budget, but `drive_until_waiting` stops and never hot-loops another live call.
-Missing capabilities and other operational prerequisites return `Waiting::OperationalBlock`.
+its backoff and budget, but an explicit host drive loop stops on this result and never hot-loops
+another live call. Missing capabilities and other operational prerequisites return
+`Waiting::OperationalBlock`.
 
 The crate-private action algebra is:
 
@@ -3826,7 +3827,7 @@ Exact identity proves only that the reproducer self-attested the same admitted a
 that this recorded path reproduced. It does not prove business correctness, callback purity,
 absence of undeclared ambient influence, compiler or OS equivalence outside the defined artifact
 boundary, or safety of future branches. Historical executables run only in the OS-enforced
-capability-free boundary. The pre-cutover gate demonstrates that path with one retained artifact;
+capability-free boundary. The retained core-gate evidence demonstrates that path with one artifact;
 production rollout fixes the long-term retention and isolation policy. A run whose required
 artifact is unavailable reports `Unavailable`; callback-free verification remains available.
 
@@ -3946,21 +3947,20 @@ effect without that proof may report only `remediation_completed`.
 
 ### EVM read qualification
 
-The current aggregate EVM reader is deleted. EVM balance and metadata reads may be registered in
-the core cutover only after the decomposed source/chain bootstrap, initial anchor,
-one-operation-per-node fan-out, final anchor confirmation, immutable
-`routing_generation_ref`, cancellation, partial-failure, and exact-call tests pass. Failure to
-qualify leaves EVM collection unavailable; it does not retain the aggregate reader or add a hidden
-runtime phase.
+The former aggregate EVM reader is deleted. The current core registers decomposed EVM balance and
+metadata reads after the source/chain bootstrap, initial anchor, one-operation-per-node fan-out,
+final anchor confirmation, immutable `routing_generation_ref`, cancellation, partial-failure, and
+exact-call tests passed. The registered graph adds no hidden aggregate reader or runtime phase.
 
-### Bitcoin read qualification
+### Bitcoin read disposition
 
-The current aggregate Bitcoin reader is deleted. Bitcoin collection may be registered only when
-the decomposed bootstrap, `scantxoutset "start"`, and block-hash confirmation graph passes the
-repeat-work-safe read gate defined above. If `scantxoutset "start"` does not qualify under lost
-response, cancellation, concurrent scan, delayed reissue, bounded work/result, and provider-cost
-tests, Bitcoin collection remains unregistered until a separate keyed work-executor and audited
-status-read contract is accepted. The generic runtime is unchanged.
+The aggregate Bitcoin reader is deleted, and the current disposition is closed as unregistered
+because `scantxoutset "start"` did not pass the repeat-work-safe read gate. Bitcoin is outside the
+fixed implementation sequence. Any future registration is a separately scoped proposal and may
+occur only if the decomposed bootstrap, `scantxoutset "start"`, and block-hash confirmation graph
+passes the lost-response, cancellation, concurrent-scan, delayed-reissue, bounded-work/result, and
+provider-cost cases, or after a separate keyed work-executor and audited status-read contract is
+accepted. The generic runtime is unchanged.
 
 ### EVM transaction qualification
 
@@ -4063,8 +4063,8 @@ these schemas or prototype evidence in place.
 This closure is not physical production-HA qualification. Real WAL/backup lineage, commit-error
 ambiguity under process or network loss, an independently non-rollback generation fence,
 stale/sibling-writer exclusion across failure domains, destination-owner coverage, and the
-promotion procedure remain production-rollout obligations. EVM qualification remains a later
-domain gate over the already proven generic contract.
+promotion procedure remain production-rollout obligations. EVM mutation qualification remains a
+later domain gate over the already proven generic contract.
 
 ## Security and Redaction
 
@@ -4312,8 +4312,8 @@ H(domain, value) =
 The annex owns every exact versioned `mfm.*.v1` domain constant and value schema. The value is
 schema-validated and float-free before hashing. Prefix concatenation, NUL separation, length
 prefixes, raw noncanonical JSON, and compatibility decoding are forbidden. The composite-planner
-prototype's former `domain || NUL || JCS(value)` derivation must be regenerated under this
-envelope; the executor's local helper becomes the shared `mfm-canonical` implementation.
+prototype's former `domain || NUL || JCS(value)` derivation was regenerated under this envelope,
+and the executor's local helper was replaced by the shared `mfm-canonical` implementation.
 
 Plain content integrity is deliberately distinct:
 
@@ -4329,17 +4329,17 @@ provider-controlled content.
 
 ## Canonical Schema and Golden-Vector Gate
 
-Gate status: **closed for the recoverability v1 target** by the fixed commit-2 artifact set:
+Gate status: **closed for the implemented recoverability v1 core** by the fixed commit-2 artifact
+set:
 
 - `contracts/recoverability/v1/annex.json` — the normative machine-readable schema registry;
 - `contracts/recoverability/v1/corpus.json` — the shared positive/negative canonical-vector
   corpus; and
 - `contracts/recoverability/v1/README.md` — the non-normative artifact index and consumer guide.
 
-The artifacts are not current implementation authority: memory, PostgreSQL, runtime, replay, app,
-CLI, and REST continue to follow the current design until the atomic cutover. The frozen artifacts
-instead prohibit later implementation packages from changing bytes, identities, tags, or
-semantics without a new version.
+The artifacts are the byte-level authority consumed by the current memory, PostgreSQL, runtime,
+replay, app, CLI, and REST implementation. They prohibit later changes to bytes, identities, tags,
+or semantics without a new version.
 
 Exact artifact metadata derived from the final commit-2 bytes is:
 
@@ -4360,7 +4360,7 @@ corpus_total_case_count: 570
 corpus_schema_acceptance_case_count: 373
 ```
 
-The logical schemas in this RFC obtain their frozen target encoding only through the versioned
+The logical schemas in this RFC obtain their frozen current encoding only through the versioned
 canonical schema annex. Rust layout, serde defaults, database column order, and backend-specific
 representation are never hash contracts.
 
@@ -4399,12 +4399,13 @@ admission under a changed executable identity.
 Memory, PostgreSQL, runtime, replay, trace export, and the durable reference executor consume the
 same corpus and shared domain-free codec/digest/fold implementation.
 
-Schema freeze followed every contract-shaping prototype and inventory in the pre-cutover gate,
+Schema freeze followed every contract-shaping prototype and inventory retained as core-gate
+evidence,
 including framework/executor expansion, production reads, request totality, the durable reference
 executor/resource policies, fact selection, admission probes, evidence and fact consumers, legacy
 history export, and historical-executable isolation. Those results shaped the frozen schemas; later
-implementation work cannot silently add a field or reinterpret a tag. A deliberate
-persisted-contract change requires a new version and, under this pre-production cutover, explicit
+implementation changes cannot silently add a field or reinterpret a tag. A deliberate
+persisted-contract change requires a new version and, under this pre-production contract, explicit
 rejection rather than a compatibility reader.
 
 ## Store and Postgres Shape
@@ -4678,12 +4679,12 @@ separately authorized trace inspection may expose:
 - closure identity when terminal.
 
 The v1 public surface has no store-wide fact catalog/query/reference API and no cross-run run
-list/watch API. Delete the current CLI fact commands, `/v1/facts/*`, `GET /v1/runs`, and their app
-DTOs/services without a compatibility alias. Certified states consume same-run facts through graph
-edges and prior-run facts only through the reserved audited capability. Entry-point discovery may
-list exact entry-point/profile contracts because it exposes no run or fact history. Any future
-tenant-wide discovery or changefeed requires a separately scoped authority and contract; a
-run-bound `ReadPublic` grant cannot be broadened for it.
+list/watch API. The cutover deleted the CLI fact commands, `/v1/facts/*`, `GET /v1/runs`, and their
+app DTOs/services without a compatibility alias. Certified states consume same-run facts through
+graph edges and prior-run facts only through the reserved audited capability. Entry-point
+discovery may list exact entry-point/profile contracts because it exposes no run or fact history.
+Any future tenant-wide discovery or changefeed requires a separately scoped authority and
+contract; a run-bound `ReadPublic` grant cannot be broadened for it.
 
 External-access audit exposes safe statuses:
 
@@ -4721,16 +4722,16 @@ vault references.
 There is no generic manual “mark successful,” “mark not applied,” “abandon effect,” or
 evidence-submission endpoint.
 
-The app exposes `drive_once` directly or implements `drive_until_waiting` as a mechanical loop over
-it. CLI/REST may choose when to call that service and render `DriveOutcome`; they cannot select the
-next node, construct state requests, choose observations, install execution hooks, or interpret
-typed results.
+The app exposes only `drive_once`. A host may implement its own mechanical loop by calling that
+operation repeatedly, but the v1 app, CLI, and REST surface has no `drive_until_waiting`
+convenience. Transports render `DriveOutcome`; they cannot select the next node, construct state
+requests, choose observations, install execution hooks, or interpret typed results.
 
-## Complete Cutover and Deletion Scope
+## Implemented Cutover and Deletion Scope
 
 ### Program, spec, and certification
 
-Delete:
+The cutover deleted:
 
 - side-effect submit/verify node pairs;
 - generic saga and remediation roles/pairs/policies;
@@ -4742,7 +4743,7 @@ Delete:
 - synthetic completion and retention nodes; and
 - `mfm-manual-auth`.
 
-Add:
+The current replacements are:
 
 - complete transition input/output/evidence contracts;
 - one closed `StateExecution` contract with pure, read, and effect cases;
@@ -4766,7 +4767,7 @@ Add:
 
 ### Events and store
 
-Delete:
+The cutover deleted:
 
 - state worker attempt start/completed/interrupted/failed events;
 - standalone cell produced/skipped lifecycle events;
@@ -4784,7 +4785,7 @@ Delete:
   journal heads, commit envelopes, facts, and frontiers; and
 - projection-owned retention manifests.
 
-Add:
+The current replacements are:
 
 - the five-record journal algebra;
 - complete transition structural validation;
@@ -4798,7 +4799,7 @@ Add:
 
 ### Runtime and replay
 
-Delete:
+The cutover deleted:
 
 - worker attempt lifecycle and recovery;
 - side-effect phase drivers and recovery classifiers;
@@ -4815,7 +4816,7 @@ Delete:
 - framework completion and retention runners; and
 - copied runtime history/view maps.
 
-Add:
+The current replacements are:
 
 - one `drive_once` mutating entry point and one closed private next-action decision;
 - the minimal `Unstarted | AwaitingEffect | Terminal` phase algebra;
@@ -4838,39 +4839,41 @@ Add:
 
 ### App and binaries
 
-Delete generic saga, manual-resolution, worker-attempt, resource-lane, side-effect-phase,
+The cutover deleted generic saga, manual-resolution, worker-attempt, resource-lane,
+side-effect-phase,
 runner-factory, and adapter-lifecycle DTOs, commands, modes, and routes. App assembly supplies the
 compiled `StateCatalog` and `CapabilityCatalog` but owns no execution callbacks or framework-hook
-registry and cannot replace the reserved fact-selection binding. Delete public fact browse/query
-services and CLI/REST routes, plus cross-run run list/watch, with no v1 replacement.
+registry and cannot replace the reserved fact-selection binding. Public fact browse/query services
+and CLI/REST routes, plus cross-run run list/watch, have no v1 replacement.
 
-Add transition inspection, safe access-audit inspection, pending-effect status, and the one
-`drive_once` action plus an optional mechanical drive-until-waiting convenience. Gate admission,
-drive, replay, public read, trace, audit, object, and export services with the exact transient
-`RunAccessAuthority`; do not persist app principals or ACL state in the run journal.
+The current surface exposes transition inspection, safe access-audit inspection, pending-effect
+status, and the one `drive_once` action. Admission, drive, replay, public read, trace, audit, and
+export services are gated by the exact transient `RunAccessAuthority`; app principals and ACL
+state are not persisted in the run journal.
 
 ### Postgres
 
-Reset the pre-production schema baseline and reject old histories.
+The pre-production schema baseline was reset, and the current binary rejects old histories.
 Before resetting any deployment, complete and verify its export-or-destroy disposition from the
-versioned recoverability cutover inventory. The target binary never reads the old schema.
+versioned recoverability cutover inventory. The current binary never reads the old schema.
 
-Keep authoritative commits, records, object blobs/bindings, store metadata and protected tenant
-fact-order heads, current configuration, and only explicitly required operational cursor state.
+The current schema keeps authoritative commits, records, object blobs/bindings, store metadata,
+protected tenant fact-order heads, current configuration, and only explicitly required operational
+cursor state.
 
-Delete lifecycle mirrors, admission lanes/waiters, physical retention state, and redundant
-per-event or per-projection artifact-evidence mirrors after their fields move into the one
-hash-bound `commit_artifact_bindings` relation. Keep content-addressed blobs, artifact admission
-evidence, and the canonical commit-to-object binding; they are required to prove both existing
-inputs and newly admitted outputs.
+The cutover deleted lifecycle mirrors, admission lanes/waiters, physical retention state, and
+redundant per-event or per-projection artifact-evidence mirrors after their fields moved into the
+one hash-bound `commit_artifact_bindings` relation. The current schema keeps content-addressed
+blobs, artifact admission evidence, and the canonical commit-to-object binding; they are required
+to prove both existing inputs and newly admitted outputs.
 
-Replace the physical fact projection with the reserved capability's private targeted history scan
-initially. If measurements require a candidate index, add it only with a complete watermark and
-parity tests.
+The physical fact projection is replaced by the reserved capability's private targeted history
+scan. A future candidate index is permitted only if measurements require it and it includes a
+complete watermark and parity tests.
 
 ### Documentation
 
-Rewrite:
+The cutover rewrote:
 
 - `docs/design.md`;
 - `docs/architecture.md`;
@@ -4878,11 +4881,11 @@ Rewrite:
 - store, runtime, replay, app, CLI, and REST READMEs; and
 - EVM transaction and Bitcoin RPC routing documentation.
 
-Delete `docs/saga.md` after its honest guarantee losses are incorporated into the new design
-contract. Explicitly delete the `CertifiedFrameworkLifecycle`, framework public-output runner, and
-erased runner plan/factory. Rewrite the adapter taxonomy around its narrower private
-capability-to-transport binding responsibility; delete only adapter-owned lifecycle, reducer, and
-runner authority rather than the architectural role.
+It deleted `docs/saga.md` after incorporating its honest guarantee losses into the current design
+contract. It also deleted the `CertifiedFrameworkLifecycle`, framework public-output runner, and
+erased runner plan/factory. The current adapter taxonomy describes its narrower private
+capability-to-transport binding responsibility and retains the architectural role without
+adapter-owned lifecycle, reducer, or runner authority.
 
 ## Crash and Ambiguity Matrix
 
@@ -5007,8 +5010,8 @@ runner authority rather than the architectural role.
   occurrence, while a higher-priority settlement or local-work candidate elsewhere still wins;
   invalid evidence blocks before ranking without a no-op settlement loop.
 - Prove a newly committed pending/all-insufficient observation returns
-  `Waiting::RetryableEvidenceGap`, makes `drive_until_waiting` stop after at most that one live call,
-  and leaves retry timing/backoff to the next host invocation.
+  `Waiting::RetryableEvidenceGap`, makes an explicit host drive loop stop after at most that one
+  live call, and leaves retry timing/backoff to the next host invocation.
 - Exercise every private `drive_once` action and prove the public result is only advanced, waiting,
   or closed.
 - Prove `drive_once` retains no process semantic state and that another process can continue from
@@ -5076,9 +5079,9 @@ runner authority rather than the architectural role.
 - Cut EVM and Bitcoin balance collection into the specified audited state chains; inject
   cancellation and partial failure after every external operation and prove no sibling invocation
   disappears inside an aggregate result.
-- Qualify Bitcoin `scantxoutset "start"` as a read under lost response, cancellation, concurrent
-  scan, delayed reissue, bounded work/result, and provider-cost cases; otherwise keep production
-  Bitcoin collection unregistered.
+- Record the closed Bitcoin disposition under lost response, cancellation, concurrent scan,
+  delayed reissue, bounded work/result, and provider-cost cases; production Bitcoin collection
+  remains unregistered because `scantxoutset "start"` did not qualify as a repeat-work-safe read.
 - Prove provider/source validation that performs live IO occurs only in post-admission bootstrap
   read states.
 - Bind one immutable `routing_generation_ref` and reviewed source scope in every admitted read
@@ -5327,7 +5330,7 @@ runner authority rather than the architectural role.
 - Deduplicate a controller-launched correction through the same domain-derived admission identity.
 - Require typed equivalence evidence before publishing `compensated`.
 
-### EVM qualification
+### EVM mutation qualification
 
 - Keep transaction mutation unregistered before a keyed executor qualifies.
 - Test signer-account coordination across every process/deployment/actor and
@@ -5376,20 +5379,22 @@ runner authority rather than the architectural role.
 
 The versioned
 [recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md) is the closure
-record for repository-wide producer/consumer disposition. The target choices are fixed; an open
+record for repository-wide producer/consumer disposition. The current choices are fixed; an open
 gate cannot reintroduce an alternate lifecycle, schema, route fallback, public fact/list surface,
 or weaker capability.
 
-The schema- and implementation-shaping gates are closed for the frozen target. Their evidence
+The schema-, implementation-shaping, and core implementation-cutover gates are closed. Their
+evidence
 includes the program value-view/runtime-proof/store-permit vertical proof, exact
 routing-generation/bootstrap contracts, composite expansion prototypes, request totality,
 evidence/fact consumer disposal, reference-executor and resource-policy prototypes, tenant
 fact-frontier behavior, one retained historical executable reproducing in the selected
 OS-enforced capability-free boundary, and the canonical annex/vector corpus. The historical
 isolation gate demonstrated the implementation path without deciding the production retention
-horizon. An EVM or Bitcoin capability that misses its capability-specific qualification gate
-remains unregistered; it does not reopen the frozen core schema or block implementation of the
-otherwise complete core target.
+horizon. The EVM read qualification is closed and its decomposed read graph is registered.
+Bitcoin collection is deliberately unregistered under its closed disposition and is outside the
+fixed implementation sequence. Only the EVM mutation qualification boundary remains open; it does
+not reopen the frozen core schema or the implemented core cutover.
 
 The following are production-rollout gates, not schema-freeze gates:
 
@@ -5407,10 +5412,11 @@ Each deployment also inventories and either exports or explicitly discards legac
 its destructive schema reset. These rollout decisions block that deployment, not implementation,
 and cannot produce a compatibility reader or dual writer.
 
-## Pre-Cutover Gates and Work Packages
+## Core Cutover Closure and Work Packages
 
-The boundaries below are coherent landing boundaries, not sufficient implementation tasks.
-The vertical cutover does not begin until these gates close in order:
+The boundaries below record the coherent implementation structure that produced the current core.
+The first five steps of the fixed six-commit sequence are closed; only the separate EVM mutation
+qualification boundary remains open:
 
 1. **Contract decisions — closed:** the accepted choices are the per-operation audit unit, no
    baseline transport batch,
@@ -5430,16 +5436,17 @@ The vertical cutover does not begin until these gates close in order:
    retained historical executable in the selected OS-enforced capability-free isolation boundary.
    The versioned closure document records the repository inventory and target disposition for
    every generic evidence-bag producer/consumer, pre-admission semantic probe, fact consumer,
-   published entry point/profile, and retained legacy history/export requirement. Code-level
-   deletion remains part of the atomic cutover.
+   published entry point/profile, and retained legacy history/export requirement. The atomic
+   cutover completed the corresponding code-level deletion.
 3. **Identity and schema freeze — closed:** the commit-2 artifact set fixes node-occurrence
    derivation, terminal/dependency contracts, every canonical persisted schema, and the complete
    golden-vector corpus. Exact artifact hashes and counts are recorded in the searchable
    `COMMIT2_ARTIFACT_METADATA` ledger above.
-4. **Implementation package plan:** assign crate ownership, dependency order, deletion checkpoints,
-   focused verification, and final integration responsibility for every package below.
+4. **Implementation package plan — closed:** crate ownership, dependency order, deletion
+   checkpoints, focused verification, and final integration responsibility were assigned for every
+   package below.
 
-The implementation packages are:
+The implemented core packages were:
 
 ```text
 A  surviving committed-journal / private-fold / verified-view ownership
@@ -5463,11 +5470,9 @@ J  deletion of attempts, phases, saga, lanes, projections, adapter lifecycle/red
 ```
 
 Package B's frozen artifact set and the contract-closing prototypes define the contracts consumed
-by the later packages.
-Packages C
-through J may be developed and reviewed behind the cutover branch boundary, but they do not ship
-as a parallel lifecycle, dual writer, compatibility reader, or partially selectable runtime. The
-final producer/consumer/schema switch remains coherent and deletes the old path in the same landing.
+by the later packages. Packages C through J landed as the one current lifecycle, with no parallel
+lifecycle, dual writer, compatibility reader, or partially selectable runtime. The coherent
+producer/consumer/schema switch deleted the old path in the same landing.
 Package D owns persisted authorization/observation legality and returns the sealed permit only for
 a directly observed new authorization append. Package E consumes that permit into the shared
 affine authority and privately owns committed request/observation proofs and the generic audited
@@ -5476,47 +5481,51 @@ only read- and effect-specific orchestration over that one boundary.
 
 ## Coherent Landing Boundaries
 
-1. **Committed-journal ownership boundary — `use one committed journal across store runtime and
-   replay`**
+1. **Closed in sequence step 4: committed-journal ownership boundary — `use one committed journal
+   across store runtime and replay`**
 
-   Replace copied committed-stream, projection, artifact, runtime-history, and replay-map authority
-   with one native committed journal, one private fold, and one opaque verified view. Preserve the
-   current persisted behavior while deleting superseded in-memory representations. Land only APIs
-   that survive unchanged as package A; do not encode old attempt, saga, phase-ledger, or projection
+   This boundary replaced copied committed-stream, projection, artifact, runtime-history, and
+   replay-map authority with one native committed journal, one private fold, and one opaque
+   verified view. It preserved the then-current persisted behavior while deleting superseded
+   in-memory representations and did not encode old attempt, saga, phase-ledger, or projection
    concepts into the new public boundary.
 
-2. **Atomic vertical cutover boundary — `replace run lifecycle with complete audited
-   transitions`**
+2. **Closed in sequence step 5: atomic vertical cutover boundary — `replace run lifecycle with
+   complete audited transitions`**
 
-   Perform one inseparable vertical cutover across program, spec, certification, events, store,
-   runtime, replay, app, binaries, Postgres, tests, and documentation. Introduce complete transition
-   records, per-operation external-access authorization/observation, affine access authority, keyed
-   effect requests with immutable executor bindings, the durable reference executor,
+   This boundary performed one inseparable vertical cutover across program, spec, certification,
+   journal, store, runtime, replay, app, binaries, PostgreSQL, tests, and documentation. It
+   introduced complete transition records, per-operation external-access
+   authorization/observation, affine access authority, keyed effect requests with immutable
+   executor bindings, the durable reference executor,
    tenant-scoped admission and purpose-bound run access, domain-derived correction identity, the
    closed three-case `StateExecution`, program value views with runtime-private committed proofs,
    immutable read routing generations, `drive_once`, state/capability catalogs,
    exact executable/reproduction modes, certified composite planning-time framework/executor state
    injection, per-run heads, tenant fact frontiers, semantic closure with audit tails, and
-   transition facts. Delete worker attempts, custom runners, adapter-owned lifecycle/reducers,
+   transition facts. It deleted worker attempts, custom runners, adapter-owned lifecycle/reducers,
    replay brokers, phase ledgers, saga/manual resolution, resource lanes, universal projections,
    synthetic completion/retention, physical fact-projection authority, old events, and every
-   compatibility path, including public fact browsing and cross-run run list/watch. Cut fact
-   storage, selection, completeness replay, and transition emission
-   over in the final cutover change; use the reserved audited read capability and its private
-   history scan at the authorization's `TenantFactFrontier` with no dual fact reader.
+   compatibility path, including public fact browsing and cross-run run list/watch. It cut fact
+   storage, selection, completeness replay, and transition emission over together, using the
+   reserved audited read capability and its private history scan at the authorization's
+   `TenantFactFrontier` with no dual fact reader.
 
-3. **EVM qualification boundary — `qualify evm writes through a durable keyed executor`**
+3. **Open sequence step 6: EVM mutation qualification boundary — `qualify evm writes through a
+   durable keyed executor`**
 
    Add the reviewed wallet/relayer contract and conformance suite, then enable EVM transaction
    registration. Until this commit is possible, EVM mutation remains deliberately unavailable.
 
 The
 [fixed six-commit implementation sequence](docs/recoverability-cutover-gates-v1.md#fixed-implementation-commit-sequence)
-assigns packages A–J to internally coherent changes without compatibility paths, while preserving
-the three boundaries above as review and landing constraints. Each landed boundary updates its
-code, tests, design and architecture contracts, persisted/public surface inventory, and relevant
-API documentation. Inseparable producer/consumer/schema changes remain in the same commit. No
-intermediate compatibility or parallel lifecycle path is allowed.
+records packages A–J in internally coherent changes without compatibility paths. Its first five
+steps and the first two boundaries above are closed. Step 6 is reserved for EVM mutation
+qualification and remains open; registered production EVM reads are already part of the current
+core. Each landed boundary updated its code, tests, design and architecture contracts,
+persisted/public surface inventory, and relevant API documentation. Inseparable
+producer/consumer/schema changes remain in the same commit. No intermediate compatibility or
+parallel lifecycle path is allowed.
 
 ## Alternatives Rejected
 
@@ -5616,7 +5625,7 @@ instruments itself, and greatly expands the graph and journal. Ordinary telemetr
 driver spans and committed journal records. Anything whose delivery or value must affect the run
 is explicit typed workflow behavior, not telemetry.
 
-### Keep the current phase ledger and add transition manifests
+### Keep the former phase ledger and add transition manifests
 
 Rejected. It would add the desired trace while retaining every duplicated recovery and projection
 model. The phase ledger, generic attempts, and saga machinery are the carrying cost being removed.
@@ -5685,9 +5694,9 @@ equivalence claim.
 
 ## Normative Guarantee Change Ledger
 
-This table states the contract change relative to the current authoritative design. “Maintained”
-means the semantic guarantee survives, not that its current public type or lifecycle machinery
-survives.
+This table records the contract change relative to the superseded pre-cutover design. “Maintained”
+means the semantic guarantee survived, not that its former public type or lifecycle machinery
+survived.
 
 | Disposition | Guarantees |
 | --- | --- |
@@ -5699,7 +5708,7 @@ survives.
 
 ## Decision Summary
 
-The target core is an auditable, event-sourced typed state machine:
+The current core is an auditable, event-sourced typed state machine:
 
 - one stateless `drive_once` interpreter over closed pure, read, and effect contracts;
 - only `Unstarted`, `AwaitingEffect`, and `Terminal` semantic node phases;

@@ -21,11 +21,10 @@ thiserror = { workspace = true }
 
 mfm-bitcoin = { path = "../bitcoin" }
 mfm-canonical = { path = "../../kernel/canonical" }
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-certify = { path = "../../kernel/certify" }
 mfm-evm = { path = "../evm" }
-mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
+mfm-journal = { path = "../../kernel/journal" }
 mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-spec = { path = "../../kernel/spec" }
 mfm-values = { path = "../../kernel/values" }

@@ -1,99 +1,16 @@
 use std::marker::PhantomData;
 
-use mfm_ids::{
-    ArtifactId, ContentDigest, ContextRef, DigestAlgorithm, DigestBytes, SchemaId, SemanticTypeId,
-};
+use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, SchemaId, SemanticTypeId};
 use serde::de::{self, Deserializer};
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    framework_input_descriptor, framework_value_descriptor, skip_reason_shape,
-    EnumVariantDescriptor, FieldDescriptor, GenericArgumentDescriptor, MfmValue, Result,
-    SchemaDescriptor, SchemaShape, StateInput, ValueError, ValueTerminalPolicy,
+    framework_value_descriptor, skip_reason_shape, EnumVariantDescriptor, FieldDescriptor,
+    GenericArgumentDescriptor, MfmValue, Result, SchemaDescriptor, SchemaShape, ValueError,
+    ValueTerminalPolicy,
 };
 
-/// Typed value wrapper for a certified transition context reference.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContextRefValue {
-    value: ContextRef,
-}
-
-impl ContextRefValue {
-    /// Creates a context-ref value from a checked context ref.
-    pub const fn new(value: ContextRef) -> Self {
-        Self { value }
-    }
-
-    /// Parses a context-ref value from its persisted string form.
-    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
-        ContextRef::parse(value.as_ref())
-            .map(Self::new)
-            .map_err(|error| ValueError::Identity(error.to_string()))
-    }
-
-    /// Returns the checked context ref.
-    pub const fn as_context_ref(&self) -> &ContextRef {
-        &self.value
-    }
-
-    /// Returns the persisted string form.
-    pub fn as_str(&self) -> &str {
-        self.value.as_str()
-    }
-
-    /// Consumes the wrapper into the checked context ref.
-    pub fn into_context_ref(self) -> ContextRef {
-        self.value
-    }
-}
-
-impl From<ContextRef> for ContextRefValue {
-    fn from(value: ContextRef) -> Self {
-        Self::new(value)
-    }
-}
-
-impl Serialize for ContextRefValue {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for ContextRefValue {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(&value).map_err(de::Error::custom)
-    }
-}
-
-impl MfmValue for ContextRefValue {
-    fn schema_descriptor() -> Result<SchemaDescriptor> {
-        framework_value_descriptor(
-            Self::semantic_id()?,
-            "mfm.kernel.context_ref_value",
-            SchemaShape::String,
-            "mfm_values::ContextRefValue",
-        )
-    }
-
-    fn semantic_id() -> Result<SemanticTypeId> {
-        SemanticTypeId::new(
-            "mfm.kernel",
-            "context-ref-value",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x33; 32]),
-        )
-        .map_err(|error| ValueError::Identity(error.to_string()))
-    }
-}
 /// State-boundary optional value with explicit skip provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(
@@ -220,19 +137,6 @@ impl<'de, T: MfmValue> Deserialize<'de> for NonEmpty<T> {
     {
         let values = Vec::<T>::deserialize(deserializer)?;
         NonEmpty::try_from_vec(values).map_err(de::Error::custom)
-    }
-}
-
-impl<T: MfmValue> StateInput for NonEmpty<T> {
-    fn input_schema_descriptor() -> Result<SchemaDescriptor> {
-        framework_input_descriptor(
-            "mfm.kernel.state_input.non_empty",
-            SchemaShape::NonEmptyVec(Box::new(SchemaShape::ValueRef {
-                schema_id: T::schema_id()?,
-                semantic_type_id: T::semantic_id()?,
-            })),
-            "mfm_values::NonEmpty",
-        )
     }
 }
 

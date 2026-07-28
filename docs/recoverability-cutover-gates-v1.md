@@ -14,9 +14,9 @@ recoverability schema freeze. The frozen target artifacts are
 `contracts/recoverability/v1/README.md`; their exact metadata is recorded by the searchable
 `COMMIT2_ARTIFACT_METADATA` block in the RFC's
 [Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate).
-This is not a second runtime or persisted-data contract. Until the atomic vertical cutover lands,
-[`design.md`](design.md) and [`architecture.md`](architecture.md) remain authoritative for the
-current implementation.
+This is retained closure and deletion evidence, not a second runtime or persisted-data contract.
+[`design.md`](design.md) and [`architecture.md`](architecture.md) are authoritative for the current
+implementation.
 
 ## Fixed closure decisions
 
@@ -52,9 +52,9 @@ current implementation.
   use the fenced authoritative writer in v1. Offline bundle verification is separate. A replica
   cannot claim store-backed authority without a later applied-through-barrier and lineage
   qualification.
-- A portable export contains no digest of itself. The digest is SHA-256 over the final canonical
-  bytes and is returned externally as `PortableRunExport.digest` and exactly
-  `Mfm-Content-Digest`.
+- A portable export contains no digest of itself. `PortableRunExport` is the canonical bundle, not
+  a byte-wrapper DTO. SHA-256 over its final canonical bytes is returned only as external
+  transport metadata and exactly `Mfm-Content-Digest`.
 - The generic executor owns its keyed delivery/resource ledger contract; PostgreSQL is one
   possible backend, not the non-rollback or destination-convergence authority. Production requires
   an independently qualified executor/destination fence in addition to the MFM store's separate
@@ -142,8 +142,10 @@ Fact/closure evidence:
   consuming position;
 - portable source verification larger than one source/object/byte step completes from the exact
   DAG root, while missing, cyclic, or tampered material rejects; and
-- process loss discards the private consuming session/scratch state and deterministic restart
-  cannot mint partial response, completeness, source, or verified-view authority.
+- process loss discards the private consuming session/scratch state, leaves the abandoned
+  authorization audit-only, and requires a fresh current-head authorization; neither the abandoned
+  attempt nor deterministic restart can mint partial response, completeness, source, or
+  verified-view authority.
 
 The baseline also removes public `run list`/watch. A run-bound `ReadPublic` grant authorizes only
 that run; operational discovery or a tenant changefeed requires a later, separately scoped

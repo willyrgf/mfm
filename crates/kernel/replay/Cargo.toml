@@ -2,7 +2,7 @@
 name = "mfm-replay"
 version = "0.1.0"
 edition = "2021"
-description = "Typed replay brokers and verifier contracts for MFM certified execution specs"
+description = "Callback-free history verification, inspection, and portable export for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -18,20 +18,29 @@ path = "src/lib.rs"
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
-mfm-capabilities = { path = "../capabilities" }
-mfm-events = { path = "../events" }
-mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
+mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
-mfm-values = { path = "../values" }
-serde_json = { version = "1.0" }
-serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-mfm-certify = { path = "../certify" }
-mfm-program-derive = { path = "../program-derive" }
+mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
+mfm-runtime = { path = "../runtime" }
 mfm-store = { path = "../store", features = ["test-support"] }
-trybuild = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[[test]]
+name = "mfm-replay"
+path = "tests/mfm_replay.rs"
+
+[[test]]
+name = "mfm-trace-export"
+path = "tests/mfm_trace_export.rs"
+
+[[test]]
+name = "historical-executable-isolation"
+path = "tests/historical_executable_isolation.rs"

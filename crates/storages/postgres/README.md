@@ -1,155 +1,227 @@
 # mfm-storage-postgres
 
-PostgreSQL run-store implementation. This crate is the only owner of the MFM
-run-store PostgreSQL schema.
+PostgreSQL authority for the recoverability-v1 committed run journal.
 
-`PostgresStore` implements the doc-hidden `RunJournalBackend` SPI from
-`mfm-store`.
-The blanket implementation exposes the sealed permanent `RunJournalStore`
-surface, which is exactly one prepared-commit append and one committed-journal
-load. Application, runtime, replay, status, and public-output callers use that
-surface; they cannot mint journal authority from PostgreSQL rows or implement a
-parallel history loader.
+The public runtime entry point is `open_authoritative`. It consumes a writer
+pool and a deployment-owned `AuthoritativeWriterFence`, qualifies the exact
+database/schema/store lineage, and returns:
 
-The store persists append-only commits, canonical event payload bytes, artifact
-blobs/evidence, resource-lane transition authority, and observation cursor rows
-through `mfm-store`.
-It owns the PostgreSQL migrations, crate-local SQLx query metadata, and runtime
-schema contract checks for that store.
+```text
+(QualifiedPostgresStore, RunAccessAuthorityIssuer)
+```
 
-One committed-journal load uses one read-only `REPEATABLE READ` transaction for
-both the committed records and every exact retained object required by those
-records. It then consumes the backend-supplied `JournalLoadVerifier` to produce
-the opaque `CommittedRunJournal` before committing that read transaction. A
-concurrent append cannot split the record and object reads across snapshots.
-Only exact certified-spec binding can consume that journal to produce the
-non-cloneable `VerifiedRunView`; PostgreSQL rows and the separate temporary
-`CurrentProjectionStore` projections are not per-run read authority.
+The issuer is the sole non-cloneable issuer paired with that qualified store.
+The store may be cloned as a handle, but it exposes neither its pool nor a
+second issuer/bootstrap path. The blanket `RunJournalStore` implementation over
+its internal `RunJournalBackend` accepts only store-created append/load
+verifiers; PostgreSQL rows are not a generic reader or a way to mint run
+authority.
 
-## Runtime Contract
+## Destructive baseline
 
-Runtime connections validate the schema and do not create or alter tables. Apply
-the embedded migrations explicitly before starting CLI, REST, or library
-callers:
+`migrations/0001_store.sql` is the one current, destructive pre-production
+baseline. It contains only:
 
-```rust
-# async fn example() -> Result<(), mfm_storage_postgres::PostgresStoreError> {
-let database_url = "postgres://postgres:postgres@localhost/mfm";
-mfm_storage_postgres::PostgresSchema::migrate(database_url).await?;
-let authority = mfm_storage_postgres::PostgresSchema::validate(database_url).await?;
-let store = mfm_storage_postgres::PostgresStore::connect(database_url).await?;
-assert_eq!(store.store_authority(), &authority);
+- `store_identity`
+- `store_schema_metadata`
+- `tenant_fact_order_heads`
+- `journal_commits`
+- `journal_records`
+- `artifact_blobs`
+- `artifact_admissions`
+- `commit_object_authorities`
+- `commit_artifact_bindings`
+- `qualified_support_members`
+- `fact_scan_attestations`
+- `configured_values`
+
+The retired event, projection, global-order, admission-lane, lifecycle, fact
+query, and generic reader tables have no compatibility path. A database whose
+SQLx ledger has the old `0001` checksum, or whose catalog has missing or extra
+authority objects, is rejected. Export or reset that database; do not add an
+upgrade shim or a second migration to reinterpret the retired schema.
+
+Apply the baseline with an owner connection before opening the runtime store:
+
+```rust,no_run
+# async fn migrate() -> Result<(), mfm_storage_postgres::PostgresStoreError> {
+mfm_storage_postgres::PostgresSchema::migrate(
+    "postgresql://migration-owner@localhost/mfm",
+)
+.await?;
 # Ok(())
 # }
 ```
 
-`PostgresStore::connect` performs the same authority validation before returning
-a store. Authority validation checks that PostgreSQL is reachable, the SQLx
-migration ledger matches the compiled migrations, required schema objects are
-present with expected contracts, stale retired tables are absent, and the
-singleton `store_metadata` row contains the expected contract version and a
-valid store-owned scope id. These failures are reported through closed
-`PostgresStoreAuthorityError` categories and never include database URLs,
-credentials, schema object definitions, or row contents.
+## Writer qualification and fencing
+
+Local qualification proves that the connection is a writable primary, can
+assume the sealed application role, carries the exact migration checksum and
+closed catalog, preserves the immutable store scope/epoch, and has a valid
+dense tenant-fact history. Qualification probes those facts both before and
+after the external fence. Each full catalog validation pins its
+transaction-local search path to the schema named by the adjacent writer
+probe, so ambient state on another pooled connection cannot redirect
+validation to a different schema.
+
+Those local checks cannot prove that a promoted writer is the sole surviving
+lineage. The supplied `AuthoritativeWriterFence` must be implemented by the
+deployment system that owns promotion, WAL/backup ancestry, and stale-primary
+exclusion. Its success asserts, for the exact database OID, schema, store scope,
+and epoch, that:
+
+- stale and sibling writers are permanently fenced;
+- every published run suffix and tenant fact head is retained;
+- rollback to an older WAL/backup lineage cannot qualify.
+
+There is deliberately no production bypass, caught-up-replica mode, or fence
+implementation in this crate. `TestAuthoritativeWriterFence` exists only under
+tests or the `parity-tests` feature.
+
+`QualifiedPostgresStore::check_ready` is the bounded local readiness proof for
+an already qualified process capability. It opens one `READ COMMITTED`,
+`READ WRITE` transaction, installs a transaction-local quoted search path and
+statement/lock timeouts, and uses one row query to recheck the database name
+and OID, schema, recovery/read-only state, permission to assume the application
+role, `SELECT`/`INSERT` journal privileges, exact store scope/epoch, and the
+singleton schema metadata contract. It always rolls the transaction back.
+Connection and query failures remain bounded PostgreSQL error categories;
+writer-condition, retained-lineage, and singleton/schema failures are classified as
+`WriterRequired`, `WriterFenceRejected`, and `SchemaAuthorityMismatch`
+respectively.
+
+Readiness deliberately does not rerun the deployment fence or full catalog
+qualification, contact providers, resolve DNS, execute semantic callbacks,
+inspect run progress, or claim that any external dependency is healthy.
+
+## Transaction contract
+
+Append transactions run at `READ COMMITTED`. An admission first acquires its
+transaction-scoped logical-start advisory lock, resolves an existing run or
+selects the proposed run id, and then acquires that run's transaction-scoped
+advisory lock before loading any journal or object rows. It holds both locks
+through verification and transaction end. A successor acquires only the run
+lock; no path acquires the logical-start lock after a run lock.
+
+Each signed 64-bit lock key is computed in Rust from the first eight bytes of a
+SHA-256 digest over a domain-separated canonical object:
+
+- admission: tenant, entry-point operation, and invocation identity;
+- successor: run id.
+
+No PostgreSQL hash function, session lock, mutable run-head table, or application
+`UPDATE` privilege participates. A 64-bit collision can add contention but
+cannot merge authority because every logical key, idempotency key, predecessor,
+candidate digest, record, and object is rechecked after the lock.
+
+An idempotent retry reloads and verifies the complete authoritative prefix; a
+matching request id alone is not treated as proof. A successor reloads the
+complete current journal and reachable object closure inside the locked
+transaction and invokes the store-owned physical and semantic fold before
+assignment. Stale predecessors and closed runs are classified by that sole
+fold.
+
+Object authority is keyed by the full canonical `ValueRef`, including producer
+binding and evidence-contract reference. A content-deduplicated payload may
+therefore carry several distinct logical authorities. Each commit persists the
+complete recursive admission-intent closure in `commit_object_authorities`;
+record field roots remain in `commit_artifact_bindings`. Loads reconstruct and
+verify both sets rather than inferring authority from a content digest or an
+artifact/evidence tuple.
+
+Raw content-addressed blobs may be staged before the locked append. Staged bytes
+grant no authority and an abandoned staging row is unreachable. Exact object
+admissions are verified inside the append transaction before the tenant
+allocator is called. The protected tenant head is the final serialization
+point; the commit, records, complete object authority, field bindings, fact
+routing, optional fact-scan attestation, and tenant-head advance either all
+commit or all roll back.
+
+An I/O, protocol, or connection loss while acknowledging `COMMIT` returns
+`AppendOutcome::OutcomeUnknown`. Retrying the same append request is the only
+safe way to resolve visibility. An already committed authorization never
+recreates live execution authority.
+
+Authorized loads use one read-only `REPEATABLE READ` transaction for the
+complete immutable commit/record graph and every reachable exact object. The
+store-owned verifier rederives the physical journal before returning an opaque
+`CommittedRunJournal`.
+
+## Support, configured values, and facts
+
+`SupportStore::admit_support_graph` binds a producer-free qualified graph to one
+sealed deployment authority. Admission is serialized by qualification scope
+and atomically admits or verifies the complete exact field-path keyset, full
+producer-bound references, and bytes. A retained graph cannot be extended,
+trimmed, or repointed by a later retry.
+
+Admission-source verification accepts only the store-created affine verifier.
+For each pending same-store, same-tenant source coordinate, PostgreSQL uses the
+same exact-run `REPEATABLE READ` load path described above, then returns the
+physically verified journal to the store-owned recursive closure verifier.
+Callers cannot supply an arbitrary source load, skip a recursively discovered
+run, or turn a source run id into read authority.
+
+Configured values are immutable deployment inputs keyed by:
+
+```text
+(store_scope_id, tenant_scope_id, entry_point_id, target)
+```
+
+The runtime has no publish, update, target-only lookup, list, or export API.
+Deployment tooling provisions the full canonical `ConfiguredValueBinding`,
+producer-bound `ValueRef`, and admitted bytes through a migration-owner path.
+The application role has `SELECT` only. Runtime resolution is available solely
+through `ConfiguredValueStore` with an exact `RunAccessAuthority<Admit>` and
+certified `RetainedValueContract`; the verifier rederives the key, producer,
+contract, and byte identity before returning a sealed value.
+
+Fact selection pages use one read-only `REPEATABLE READ` snapshot and scan the
+dense tenant publication coordinate range fixed by the store verifier. Each
+route reloads and verifies its complete producer run and object closure.
+Publication and fact budgets include the consuming run even when policy makes
+that run unselectable. A returned fact observation persists its authorization,
+full attestation authority, observation, and containing journal head in the
+same append transaction. Replay loads and revalidates those exact links.
+
+## Roles and mutation
+
+Migrations create non-login `mfm_store_owner` and `mfm_store_application`
+roles. Runtime transactions assume the application role. Immutable identity,
+schema metadata, journal, blob, admission, authority, binding, support, fact
+attestation, and configured-value rows are protected by privileges and
+mutation triggers. The application role has no direct `UPDATE`, `DELETE`, or
+`TRUNCATE` path for authority rows, no `INSERT` path for configured values, and
+no direct mutation path for `tenant_fact_order_heads`; only the sealed
+security-definer allocator may advance or read that head for a coordinate.
+The application role has `SELECT`-only access to `_sqlx_migrations` so every
+authoritative open can validate the compiled migration checksum. That
+operational ledger remains outside run/fact authority catalog semantics and
+cannot be mutated by the application role.
 
 ## Verification
 
-For repeated iteration, keep a disposable caller-managed PostgreSQL process
-running and use a package/test filter in Cargo's incremental target:
+Use a disposable PostgreSQL schema. Direct Cargo commands must run inside the
+default Nix development shell:
 
 ```sh
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm_test \
-  nix develop -c cargo test -p mfm-storage-postgres --features parity-tests \
-    <test-filter> -- --nocapture
+DATABASE_URL=postgresql://postgres@127.0.0.1:5432/postgres \
+  nix develop . -c cargo test -p mfm-storage-postgres \
+    --features parity-tests --test recoverability-v1
 ```
 
-For a one-off managed check, run the smallest Nixfied leaf that covers the
-change:
+The dedicated `recoverability-v1` target runs every shared corpus vector through
+a physical blob round trip. Package tests cover the closed catalog,
+qualification, privileges, rollback/head integrity, advisory-lock behavior,
+idempotency, and backend parity.
+
+When SQL, the authoritative schema model, or SQLx query metadata changes, run
+the repository-owned narrow task. It performs the online SQLx check and proves
+that runtime validation rejects a hostile mutation of the migrated schema:
 
 ```sh
-nix run .#run -- --task parity-postgres-state-events
 nix run .#run -- --task postgres-sqlx-check
 ```
 
-These current internal task ids start only their declared PostgreSQL service
-and avoid the unrelated CLI/REST parity leaves. When a change affects this
-crate's schema, queries, SQLx metadata, store behavior, or DB gate composition,
-close it with the repository DB boundary gate:
-
-```sh
-nix run .#test-db
-```
-
-That gate starts managed Postgres, applies this crate's migrations, verifies
-checked SQLx metadata against the migrated schema, and then runs the
-Postgres-backed parity tests. The plain `nix run .#test` gate intentionally
-remains service-free.
-
-## SQLx Metadata
-
-With `DATABASE_URL` pointing at a disposable local Postgres database, apply this
-crate's migrations and regenerate metadata from the crate directory:
-
-```sh
-export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/mfm_test"
-nix develop -c cargo sqlx migrate run --source crates/storages/postgres/migrations
-nix develop -c bash -lc \
-  'cd crates/storages/postgres && cargo sqlx prepare -- --all-targets --features parity-tests'
-```
-
-After regenerating metadata, run `nix run .#test-db`.
-
-## Local Database Baseline
-
-This crate owns the certified Postgres run-store schema. Use a fresh database or
-drop/recreate the existing local schema before applying migrations.
-
-There is no downgrade migration. Rollback means rolling code back to the target
-branch and resetting the database or schema to that branch's expected baseline.
-Filesystem artifact roots outside this store are not read or migrated.
-
-## Operational Constraints
-
-Run this store in a dedicated MFM database tenancy and avoid sharing the
-Postgres transaction horizon with unrelated long-lived workloads. Observation
-pages order committed changes by the store-owned `commits.store_commit_order`
-coordinate, so the frontier advances only when an append transaction commits.
-The coordinate is storage-private and is not exposed by public cursors.
-
-Authority and cursor tables are protected by no-update/no-delete/no-truncate
-triggers in the v1 schema. `admission_lane` and `admission_waiter` are the
-normal-operation mutable exception, and they are operational coordination only.
-Execution claims coordinate the current active driver for base work identity
-(`certified_spec_hash` plus `store_scope_id`) and store the concrete holder run
-id separately. Resource-admission waiters order attempts before a
-`ResourceLaneClaimed` event exists; resource ownership remains event-derived
-from `ResourceLaneClaimed`/`ResourceLaneReleased` and transition rows.
-`store_metadata.store_scope_id` is generated by the baseline migration,
-protected by the same mutation guard, and read through the typed store contract
-for run identity derivation. V1 intentionally exposes no app, CLI, REST, or
-library maintenance endpoint for store-epoch reseed, cursor pruning, store scope
-reseed, or artifact sweeping.
-Those operations require a future design for Postgres roles, object ownership,
-credential separation, and restore/clone runbooks; do not implement them as
-helpers over ordinary runtime credentials.
-
-## Observation Cursors
-
-Run observation cursors are server-issued opaque tokens backed by
-`run_observation_cursors`. The table stores only token authority metadata; public
-`next_cursor` values do not expose append XIDs, sort keys, store epochs, or
-cursor versions.
-
-The v1 lifecycle is epoch-bound and has no wall-clock TTL or cursor garbage
-collection. A cursor remains valid only while its row, `cursor_version`, and
-`store_epoch` match the live `store_metadata` row. Unknown or pruned token rows
-and stale cursor formats are `InvalidCursor`. Store epoch mismatch is
-`CursorExpired`, including restore/clone/import/rollback situations; clients
-recover by listing again without a cursor.
-
-## Data Limits
-
-The backend stores event sequence and timestamp fields in PostgreSQL `BIGINT`
-columns. Event `u64` values above `i64::MAX` are unsupported by this backend and
-are rejected before write; negative persisted sequence or timestamp values are
-treated as storage corruption on read.
+Choose broader verification only when the affected boundary requires it, as
+described in `docs/build-and-verification.md`.

@@ -86,6 +86,10 @@ impl DecimalValue {
         }
     }
 
+    pub(super) fn add_assign(&mut self, other: &Self) {
+        *self = self.add(other);
+    }
+
     fn scaled_digits(&self, scale: u32) -> BigInt {
         if self.scale == scale {
             self.digits.clone()

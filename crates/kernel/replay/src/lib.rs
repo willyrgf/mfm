@@ -1,10 +1,39 @@
 #![warn(missing_docs)]
-//! Typed replay brokers and verifier contracts for MFM.
+//! Callback-free recorded-history verification and inspection for MFM.
 //!
-//! Replay is intentionally evidence-only. A [`v1::ReplayBroker`] is built from a
-//! the authoritative store-owned [`mfm_store::v1::VerifiedRunView`] plus explicit
-//! cross-run source evidence. It never constructs transports, SDK clients,
-//! or live capability handles.
+//! This crate consumes purpose-authorized, store-verified journal views. It
+//! traverses only committed canonical records and retained objects: it owns no
+//! runtime catalog, live capability, executor, transport, signer, append path,
+//! or replay broker. Recorded verification returns an affine session whose
+//! authoritative view remains private; non-verification modes consume that
+//! session while binding an explicit caller-held semantic portable export.
+//!
+//! ```
+//! use mfm_program::QualifiedProgramRegistry;
+//! use mfm_replay::trace_export::VerifiedPortableExport;
+//! use mfm_replay::v1::{
+//!     compare_current, verify_recorded_history, CanonicalReplayResult, Result,
+//!     VerifiedHistoryResult,
+//! };
+//! use mfm_store::v1::{FactSelectionStore, Replay, RunAccessAuthority};
+//!
+//! async fn verify<S: FactSelectionStore>(
+//!     store: &S,
+//!     authority: &RunAccessAuthority<Replay>,
+//! ) -> Result<VerifiedHistoryResult> {
+//!     verify_recorded_history(store, authority).await
+//! }
+//!
+//! fn compare(
+//!     historical: &VerifiedPortableExport,
+//!     registry: &QualifiedProgramRegistry,
+//! ) -> Result<CanonicalReplayResult> {
+//!     compare_current(historical, registry)
+//! }
+//! ```
 
-/// Versioned v1 typed replay contracts.
+/// Deterministic trace and portable-export canonicalization.
+pub mod trace_export;
+
+/// Recoverability-v1 replay and inspection contracts.
 pub mod v1;

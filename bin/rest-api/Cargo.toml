@@ -15,8 +15,7 @@ thiserror = { workspace = true }
 clap = { workspace = true }
 
 axum = "0.7"
-tower-http = { version = "0.6", features = ["request-id", "trace"] }
-http = "1"
+tower-http = { version = "0.6", features = ["trace"] }
 url = "2"
 
 mfm-app = { path = "../../crates/app" }
@@ -27,8 +26,8 @@ mfm-ids = { path = "../../crates/kernel/ids" }
 parity-tests = []
 
 [dev-dependencies]
+async-trait = { workspace = true }
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
-mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 tower = "0.5"
 
 [[bin]]

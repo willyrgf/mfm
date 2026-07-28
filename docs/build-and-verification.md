@@ -75,15 +75,16 @@ directly instead of its enclosing gate:
 
 ```bash
 nix run .#run -- --task cargo-metadata-contract
-nix run .#run -- --task parity-postgres-rest-api
+nix run .#run -- --task recoverability-postgres-v1
 nix run .#run -- --task parity-bitcoin-core
 ```
 
 The task invocation starts only its declared service requirements. Task ids
 come from `nixfied.nix`; the examples above run the metadata contract without a
-service, the REST parity target with managed PostgreSQL, and the Bitcoin parity
-target with managed Bitcoin Core. Direct task runs use the broad verification
-target and retain Nixfied evidence.
+service, the complete recoverability-v1 PostgreSQL corpus/conformance target
+with managed PostgreSQL, and the Bitcoin parity target with managed Bitcoin
+Core. Direct task runs use the broad verification target and retain Nixfied
+evidence.
 
 Leaf task ids are focused internal entry points, not stable public verbs.
 Confirm the current id in `nixfied.nix`. Selecting a leaf runs that leaf and its
@@ -170,15 +171,15 @@ nix develop -c cargo clean --target-dir target/verification
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled Nixfied model without running project tasks. |
 | `nix run .#check` | Run formatting, Clippy, architecture/Cargo metadata contracts, and offline SQLx checking. |
-| `nix run .#test` | Run main-workspace Nextest and doctests, including the pinned OS-isolation prototype, plus the locked nested authority-prototype tests and Clippy, without managed external services. |
-| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx schema metadata, run PostgreSQL parity and recoverability executor/HA prototype tests, and run the fenced executor PostgreSQL qualification matrix. |
+| `nix run .#test` | Run main-workspace Nextest and doctests without managed external services. |
+| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx metadata and the authoritative runtime schema model (including a hostile mutation probe), run the recoverability-v1 journal corpus/conformance target, and run the fenced executor PostgreSQL qualification matrix. |
 | `nix run .#ci` | Run the complete graph, including the component gates and feature-gated parity coverage. |
 
 The definitions in `nixfied.nix` are authoritative when individual tests or
 task counts evolve. `.#ci` composes `.#check`, `.#test`, and `.#test-db`, then
-adds keystore, Reth, and Bitcoin Core parity coverage before the closing source
-revision. Do not run the three component gates immediately before `.#ci` on the
-same revision: that repeats their work in separate Nixfied runs. Run a component
+adds keystore and Bitcoin Core parity coverage before the closing source revision.
+Do not run the three component gates immediately before `.#ci` on the same
+revision: that repeats their work in separate Nixfied runs. Run a component
 independently when it is the smallest sufficient boundary gate or when isolating
 a failure.
 
