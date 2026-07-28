@@ -18,13 +18,26 @@ hash with `requireCanonical: true`, and final confirmation resolves the initial
 block number to a hash.
 
 After the app admits its one complete support graph, the sealed EVM
-qualification artifacts verify the executable, shared 12-component
-qualification, and exact adapter semantic/callback/implementation tuple. The
+qualification artifacts verify the executable, shared 14-component
+qualification, and exact read-adapter plus wallet-executor
+semantic/callback/implementation tuples. The
 qualified factory borrows those artifacts and returns a closed six-entry typed
 dispatch table for the sole program registry. All entries share one binding,
 component implementation, routing catalog, and aggregate adapter. Qualification
 also proves the safe classifier and failure contracts, reviewed source scope,
 the routing catalog, and every immutable generation before registration.
 
-No transaction/effect state, Bitcoin state, replay reducer, aggregate reader,
-or mutation lifecycle is registered.
+The durable wallet executor uses the same transport for five one-exchange target operations:
+
+- `eth_sendRawTransaction`
+- `eth_getTransactionByHash`
+- `eth_getTransactionReceipt`
+- `eth_getBlockByNumber("finalized", false)`
+- `eth_getBlockByNumber(inclusion_number, false)`
+
+Every broadcast is signed transiently behind the exact generation guard only after sender/nonce
+allocation and immediately before durable target authorization. Hash, receipt, finality, and
+canonical-inclusion recovery use retained public candidate descriptors without reopening the
+signer. Raw signed bytes are zeroized and never enter executor evidence.
+
+No Bitcoin state, replay reducer, aggregate reader, or special mutation lifecycle is registered.

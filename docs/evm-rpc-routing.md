@@ -178,8 +178,10 @@ routing generation, opens HTTP, reads current routing config, or appends.
 `ReadPublic` exposes only certified portfolio output. Exact EVM requests, observations, safe
 diagnostics, and facts require separately authorized trace, audit, replay, or export access.
 
-## Mutation Exclusion
+## Mutation Separation
 
-This routing/read graph grants no transaction, signer, nonce, or raw-broadcast authority. Product
-EVM mutation is unregistered until the durable keyed executor qualification described in
-`docs/evm-transactions.md` lands.
+This routing/read graph by itself grants no transaction, signer, nonce, or raw-broadcast authority.
+The registered wallet effect reuses only the exact-generation stateless transport. Its target-entry
+authority, sender/nonce ownership, guarded signer, delivery audit, replacement policy, and terminal
+evidence come from the separately qualified durable executor described in
+`docs/evm-transactions.md`.

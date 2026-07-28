@@ -3,7 +3,7 @@
 //! Encrypted key storage and keystore-backed signing for MFM.
 //!
 //! Raw private-key access stays inside this crate. Callers may import keys, inspect public
-//! metadata, delete entries, or bind the generic signing provider.
+//! metadata, delete entries, or bind the generation-guarded wallet signer.
 //!
 //! # Examples
 //!

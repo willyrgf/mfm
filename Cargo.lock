@@ -2291,12 +2291,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "mfm"
 version = "0.1.29"
 dependencies = [
- "alloy-primitives",
  "assert_cmd",
  "clap",
- "hex",
  "mfm-app",
- "mfm-evm",
  "mfm-ids",
  "predicates",
  "rand 0.9.5",
@@ -2323,6 +2320,7 @@ dependencies = [
  "mfm-certify",
  "mfm-evm",
  "mfm-evm-live",
+ "mfm-executor",
  "mfm-ids",
  "mfm-journal",
  "mfm-keystore",
@@ -2332,6 +2330,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-signing",
  "mfm-spec",
+ "mfm-storage-executor-postgres",
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-values",
@@ -2424,6 +2423,7 @@ dependencies = [
  "derive_more 1.0.0",
  "hex",
  "mfm-canonical",
+ "mfm-executor",
  "mfm-facts",
  "mfm-ids",
  "mfm-journal",
@@ -2437,6 +2437,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "trybuild",
+ "zeroize",
 ]
 
 [[package]]
@@ -2445,9 +2446,11 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "hex",
+ "k256",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-evm",
+ "mfm-executor",
  "mfm-ids",
  "mfm-journal",
  "mfm-program",
@@ -2476,6 +2479,7 @@ dependencies = [
  "mfm-values",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2714,6 +2718,8 @@ dependencies = [
  "mfm-ids",
  "serde",
  "thiserror",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

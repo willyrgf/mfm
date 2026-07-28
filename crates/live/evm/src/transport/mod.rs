@@ -823,6 +823,34 @@ impl EvmJsonRpcTransport {
     }
 }
 
+impl crate::wallet_rpc::EvmWalletRpcClient for EvmJsonRpcTransport {
+    fn exchange<'a>(
+        &'a self,
+        route_generation_ref: &'a ContentRef,
+        chain_id: u64,
+        method: &'static str,
+        params: Value,
+    ) -> crate::wallet_rpc::EvmWalletRpcFuture<'a> {
+        Box::pin(async move {
+            let generation =
+                EvmRoutingGenerationRef::from_content_ref(route_generation_ref.clone())
+                    .map_err(|_| crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced)?;
+            let route = self
+                .routes
+                .resolve(&generation)
+                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced)?;
+            if route.descriptor.chain_id != chain_id {
+                return Err(crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced);
+            }
+            let bytes = self
+                .raw_rpc_call(route, method, params)
+                .await
+                .map_err(wallet_boundary_failure)?;
+            parse_wallet_rpc_payload(&bytes)
+        })
+    }
+}
+
 impl fmt::Debug for EvmJsonRpcTransport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -830,6 +858,67 @@ impl fmt::Debug for EvmJsonRpcTransport {
             .field("routes", &self.routes)
             .field("http", &"<shared-redacted>")
             .finish()
+    }
+}
+
+fn wallet_boundary_failure(failure: BoundaryFailure) -> crate::wallet_rpc::EvmWalletRpcFailure {
+    match failure {
+        BoundaryFailure::DidNotEnter(EvmSafeFailure::RoutingGenerationUnavailable) => {
+            crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced
+        }
+        BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled) => {
+            crate::wallet_rpc::EvmWalletRpcFailure::AccessCancelled
+        }
+        BoundaryFailure::DidNotEnter(_) => {
+            crate::wallet_rpc::EvmWalletRpcFailure::UnavailableBeforeEntry
+        }
+        BoundaryFailure::Indeterminate(EvmSafeFailure::TransportFailed) => {
+            crate::wallet_rpc::EvmWalletRpcFailure::ResponseLost
+        }
+        BoundaryFailure::Indeterminate(
+            EvmSafeFailure::HttpStatus { .. } | EvmSafeFailure::JsonRpcError { .. },
+        ) => crate::wallet_rpc::EvmWalletRpcFailure::DestinationRejected,
+        BoundaryFailure::Indeterminate(_) => {
+            crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse
+        }
+    }
+}
+
+fn parse_wallet_rpc_payload(
+    bytes: &[u8],
+) -> Result<crate::wallet_rpc::EvmWalletRpcResponse, crate::wallet_rpc::EvmWalletRpcFailure> {
+    let body: Value = serde_json::from_slice(bytes)
+        .map_err(|_| crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
+    let object = body
+        .as_object()
+        .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || object.get("id").and_then(Value::as_u64) != Some(JSON_RPC_ID)
+    {
+        return Err(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse);
+    }
+    match (object.get("result"), object.get("error")) {
+        (Some(result), None) if object.len() == 3 => Ok(
+            crate::wallet_rpc::EvmWalletRpcResponse::Result(result.clone()),
+        ),
+        (None, Some(error)) if object.len() == 3 => {
+            let error = error
+                .as_object()
+                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
+            let code = error
+                .get("code")
+                .and_then(Value::as_i64)
+                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?
+                .to_owned();
+            Ok(crate::wallet_rpc::EvmWalletRpcResponse::Error(
+                crate::wallet_rpc::EvmWalletRpcError::new(code, message, error.len() == 2),
+            ))
+        }
+        _ => Err(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse),
     }
 }
 

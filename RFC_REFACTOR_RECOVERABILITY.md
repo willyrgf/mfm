@@ -1,8 +1,8 @@
 # RFC: Complete Transition Journal and Recoverable External Access
 
-Status: implemented current core contract — retained contract-shaping, identity, schema,
-golden-vector, and core implementation-cutover gates closed; EVM mutation qualification remains
-open and deployment rollout approval remains deployment-specific
+Status: implemented current contract — retained contract-shaping, identity, schema, golden-vector,
+core implementation-cutover, and EVM mutation qualification gates closed; deployment rollout
+approval remains deployment-specific
 
 Scope: typed state execution, certified specs, run journal, external-access audit, recoverability,
 replay, facts, framework enforcement, execution catalogs, and app status
@@ -15,9 +15,10 @@ authority, with repository evidence and remaining gate classification recorded i
 documents, code, schemas, and tests now implement this design together. The retained prototypes
 and inventories closed the contract-shaping evidence gate; the commit-2 annex and shared corpus
 closed the identity, schema, and golden-vector gate; and the atomic vertical cutover closed the
-core implementation gate. EVM mutation remains unregistered pending its separate qualification.
-Deployment rollout approvals remain deployment-specific and cannot create an alternate schema,
-compatibility reader, or optional audit mode.
+core implementation gate. The final qualification change registers EVM transaction submission only
+through the independently fenced durable wallet executor. Deployment rollout approvals remain
+deployment-specific and cannot create an alternate schema, compatibility reader, optional audit
+mode, or unfenced mutation path.
 
 ## Executive Decision
 
@@ -316,7 +317,7 @@ inside the source run.
 | The canonical semantic-state digest schema can be frozen independently of Rust layout. | The RFC defines its components but not final byte-level versioned schemas. | An implementation refactor could invalidate history or Postgres/memory parity. | Specify canonical test vectors for genesis and every transition variant before implementation cutover. |
 | All semantic live probes can move after `RunAdmitted`. | Current launch or routing paths may probe providers before a run exists. | The platform-wide audit claim would have an unjournaled prefix. | Inventory admission paths and model each necessary probe as a bootstrap read state; otherwise explicitly narrow the product claim before acceptance. |
 | Every logical start has a stable non-secret invocation identity. | Some callers may currently rely on server-generated run IDs and retry by starting again. | Admission acknowledgement loss could create another run and therefore another effect-key namespace for the same business request. | Require a caller-supplied or deterministically derived invocation identity at every admission API and test retry/attach across transport ambiguity. |
-| EVM can eventually be placed behind a durable keyed executor. | No wallet or relayer currently owns cross-process nonce selection, signing, rebroadcast, and terminal evidence. | EVM writes remain unavailable after the core cutover. | Keep EVM mutation unregistered until a reviewed executor and conformance suite qualify. |
+| EVM can be placed behind a durable keyed executor. | The core cutover had no wallet or relayer owning cross-process nonce selection, signing, rebroadcast, and terminal evidence. | An incomplete implementation would leave EVM writes unavailable or weaken resource/delivery guarantees. | Resolved by the final qualified wallet change: one typed account-sequence owner, guarded signer, finite candidate script, exact target audit, terminal evidence, independently fenced PostgreSQL ledger, and conformance suite now gate registration. |
 | One reusable keyed-executor ledger substrate fits the intended resource domains. | Nonce, UTXO, sequence, and inventory allocation have different domain state and fencing semantics, and not every external actor may use the selected owner. | A supposedly generic lock table could hide domain-specific unsafety or fail to exclude another mutator. | Prototype at least two materially different resource policies over the shared append/CAS substrate, require destination fencing or exclusive coordinated ownership by every mutator, and leave an executor unregistered when that cannot be established. |
 | Existing histories may be rejected. | MFM is pre-production, but deployments may contain useful evidence. | New binaries will not read old runs. | Inventory and export required evidence first, then reset the schema with explicit legacy rejection and no compatibility reader. |
 
@@ -3964,22 +3965,19 @@ accepted. The generic runtime is unchanged.
 
 ### EVM transaction qualification
 
-The current EVM transaction implementation does not qualify for keyed `ensure`.
-
-It has useful reusable primitives:
+The registered EVM transaction implementation qualifies for keyed `ensure`. It combines:
 
 - typed EIP-1559 intent and transaction construction;
 - deterministic signing-provider contracts;
 - expected transaction-hash derivation;
 - single-exchange transport with exact hash checking;
 - transaction lookup, receipt, and finality evidence; and
-- pure domain verification.
+- pure domain verification;
+- the shared immutable executor ledger and typed account-sequence resource policy;
+- a separately fenced PostgreSQL executor backend; and
+- one generation-guarded keystore signer whose public binding excludes direct-sign overlap.
 
-It currently stores signed bearer bytes only in a process-local cache and performs lookup-only
-recovery after uncertainty or restart. MFM-local sender lanes do not reserve nonces against another
-wallet, process, or deployment.
-
-The target is a durable wallet or relayer that atomically owns:
+The qualified durable wallet atomically owns:
 
 ```text
 effect key
@@ -3991,7 +3989,7 @@ effect key
   -> delivery and terminal evidence
 ```
 
-It may implement that policy over the shared keyed-executor substrate; it does not require an
+It implements that policy over the shared keyed-executor substrate; it does not require an
 EVM-specific MFM journal or a persistence API in the JSON-RPC transport. The durable resource stream
 owns sender/nonce allocation, while the transport remains stateless IO.
 
@@ -4010,8 +4008,8 @@ block, and assurance frontier, plus the declared proof/attestation basis for req
 correspondence. Raw signed transaction bytes remain absent from MFM journal, artifacts, public
 status, errors, and replay.
 
-`SubmitEvmTransactionState` is removed from registration in the core cutover and returns only in a
-later EVM qualification change after the executor passes:
+`SubmitEvmTransactionState` was removed in the core cutover and returns in the final qualification
+change after the executor passes:
 
 - same-key/different-request rejection;
 - concurrent and delayed ensure;
@@ -4025,7 +4023,7 @@ later EVM qualification change after the executor passes:
 - duplicate delivery cost review; and
 - no-secret/no-bearer persistence tests.
 
-EVM initially omits a generic not-applied terminal outcome. Lookup absence, timeout, mempool
+EVM omits a generic not-applied terminal outcome. Lookup absence, timeout, mempool
 absence, and nonce observation do not prove permanent non-executability.
 
 ### Durable reference-executor gate
@@ -4063,8 +4061,9 @@ these schemas or prototype evidence in place.
 This closure is not physical production-HA qualification. Real WAL/backup lineage, commit-error
 ambiguity under process or network loss, an independently non-rollback generation fence,
 stale/sibling-writer exclusion across failure domains, destination-owner coverage, and the
-promotion procedure remain production-rollout obligations. EVM mutation qualification remains a
-later domain gate over the already proven generic contract.
+promotion procedure remain production-rollout obligations. The separate EVM mutation domain gate
+over the already proven generic contract is closed by the qualified wallet executor; each concrete
+deployment must still satisfy those rollout obligations before it can supply the required fences.
 
 ## Security and Redaction
 
@@ -5332,7 +5331,8 @@ adapter-owned lifecycle, reducer, or runner authority.
 
 ### EVM mutation qualification
 
-- Keep transaction mutation unregistered before a keyed executor qualifies.
+- Prove transaction mutation registration is inseparable from the exact qualified keyed executor
+  binding and cannot be constructed through an unfenced or partial path.
 - Test signer-account coordination across every process/deployment/actor and
   same-key/different-request rejection.
 - Test restart, response loss, already-known transactions, rebroadcast, replacement policy,
@@ -5383,9 +5383,9 @@ record for repository-wide producer/consumer disposition. The current choices ar
 gate cannot reintroduce an alternate lifecycle, schema, route fallback, public fact/list surface,
 or weaker capability.
 
-The schema-, implementation-shaping, and core implementation-cutover gates are closed. Their
-evidence
-includes the program value-view/runtime-proof/store-permit vertical proof, exact
+The schema-, implementation-shaping, core implementation-cutover, and EVM mutation qualification
+gates are closed. Their evidence includes the program value-view/runtime-proof/store-permit
+vertical proof, exact
 routing-generation/bootstrap contracts, composite expansion prototypes, request totality,
 evidence/fact consumer disposal, reference-executor and resource-policy prototypes, tenant
 fact-frontier behavior, one retained historical executable reproducing in the selected
@@ -5393,8 +5393,8 @@ OS-enforced capability-free boundary, and the canonical annex/vector corpus. The
 isolation gate demonstrated the implementation path without deciding the production retention
 horizon. The EVM read qualification is closed and its decomposed read graph is registered.
 Bitcoin collection is deliberately unregistered under its closed disposition and is outside the
-fixed implementation sequence. Only the EVM mutation qualification boundary remains open; it does
-not reopen the frozen core schema or the implemented core cutover.
+fixed implementation sequence. The EVM wallet boundary closed without reopening the frozen core
+schema or the implemented core cutover.
 
 The following are production-rollout gates, not schema-freeze gates:
 
@@ -5414,9 +5414,8 @@ and cannot produce a compatibility reader or dual writer.
 
 ## Core Cutover Closure and Work Packages
 
-The boundaries below record the coherent implementation structure that produced the current core.
-The first five steps of the fixed six-commit sequence are closed; only the separate EVM mutation
-qualification boundary remains open:
+The boundaries below record the coherent implementation structure that produced the current
+contract. All six steps of the fixed sequence are closed:
 
 1. **Contract decisions — closed:** the accepted choices are the per-operation audit unit, no
    baseline transport batch,
@@ -5511,18 +5510,21 @@ only read- and effect-specific orchestration over that one boundary.
    reserved audited read capability and its private history scan at the authorization's
    `TenantFactFrontier` with no dual fact reader.
 
-3. **Open sequence step 6: EVM mutation qualification boundary — `qualify evm writes through a
+3. **Closed in sequence step 6: EVM mutation qualification boundary — `qualify evm writes through a
    durable keyed executor`**
 
-   Add the reviewed wallet/relayer contract and conformance suite, then enable EVM transaction
-   registration. Until this commit is possible, EVM mutation remains deliberately unavailable.
+   This boundary added the reviewed wallet contract and conformance suite, exact transaction state
+   and entry-point registration, generation-guarded signer, stateless five-operation JSON-RPC
+   target, typed sender/nonce allocation, separately fenced PostgreSQL executor backend, terminal
+   success/revert evidence, and production qualification/composition. It retained no signed bearer
+   bytes and added no runtime mutation phase or compatibility path.
 
 The
 [fixed six-commit implementation sequence](docs/recoverability-cutover-gates-v1.md#fixed-implementation-commit-sequence)
-records packages A–J in internally coherent changes without compatibility paths. Its first five
-steps and the first two boundaries above are closed. Step 6 is reserved for EVM mutation
-qualification and remains open; registered production EVM reads are already part of the current
-core. Each landed boundary updated its code, tests, design and architecture contracts,
+records packages A–J in internally coherent changes without compatibility paths. All six steps and
+the three boundaries above are closed; registered production EVM reads and the qualified wallet
+effect are both part of the current product. Each landed boundary updated its code, tests, design
+and architecture contracts,
 persisted/public surface inventory, and relevant API documentation. Inseparable
 producer/consumer/schema changes remain in the same commit. No intermediate compatibility or
 parallel lifecycle path is allowed.
@@ -5704,11 +5706,11 @@ survived.
 | Added | Complete transition before/input/evidence/result/output/after lineage; one authorization per independently meaningful external operation before access; one observation per surviving wrapper result; one frozen read intent per occurrence; immutable compatibility plus state-dependent consumability; keyed-convergent redelivery; stable tenant-scoped admission identity; per-run heads and tenant fact frontiers; exact whole-executable live-resume and reproduction gates; diagnostic cross-version comparison; deterministic composite framework/executor expansion; closed fan-out scheduling; immutable semantic closure; exact capability/executor binding; domain-derived at-most-once identity for correction entry points that claim it; purpose-bound run access and privileged trace/object access. |
 | Removed | Generic saga/remediation obligations; reverse compensation ordering; generic rollback/finally; manual terminalization; worker-attempt history; phase ledgers; FIFO waiters and resource lanes; store-global commit order; custom runner and adapter-owned lifecycle/reducer machinery; runtime pre/post hooks; universal projection authority; support for non-convergent writes; compatibility readers and dual writers. |
 | Delegated | Destination delivery and convergence, nonce/UTXO/sequence/resource ownership, and executor-internal delivery-attempt evidence move to the exact certified executor/domain binding over a reusable durable ledger substrate or destination-native equivalent. They are not a second MFM run-state model. |
-| Changed or restricted | Independent ready effects may begin after another node fails unless the certified graph/profile gates them; semantic closure may receive audit-only observations for pre-closure authorizations; unresolved effects may remain pending indefinitely; finite executor evidence-record/attempt/frontier bounds forbid another target attempt and can force permanent pending, with no baseline pagination; exact reproduction may be unavailable without historical executable bytes while recorded-history verification remains valid; EVM writes remain unavailable until qualification; cross-run sources and facts are same-tenant; fact-selection completeness is same-store, authoritative-writer-only, and portable bundles are inclusion-only; public fact browsing and cross-run run list/watch are removed; complete transition and audit traces are privileged rather than ordinary public output. |
+| Changed or restricted | Independent ready effects may begin after another node fails unless the certified graph/profile gates them; semantic closure may receive audit-only observations for pre-closure authorizations; unresolved effects may remain pending indefinitely; finite executor evidence-record/attempt/frontier bounds forbid another target attempt and can force permanent pending, with no baseline pagination; exact reproduction may be unavailable without historical executable bytes while recorded-history verification remains valid; EVM writes are available only through the qualified independently fenced wallet executor; cross-run sources and facts are same-tenant; fact-selection completeness is same-store, authoritative-writer-only, and portable bundles are inclusion-only; public fact browsing and cross-run run list/watch are removed; complete transition and audit traces are privileged rather than ordinary public output. |
 
 ## Decision Summary
 
-The current core is an auditable, event-sourced typed state machine:
+The current contract is an auditable, event-sourced typed state machine:
 
 - one stateless `drive_once` interpreter over closed pure, read, and effect contracts;
 - only `Unstarted`, `AwaitingEffect`, and `Terminal` semantic node phases;

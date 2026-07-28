@@ -20,8 +20,10 @@ hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+zeroize = "1.7"
 
 mfm-canonical = { path = "../../kernel/canonical" }
+mfm-executor = { path = "../../kernel/executor" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }

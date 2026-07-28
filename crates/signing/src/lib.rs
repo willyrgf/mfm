@@ -1,10 +1,13 @@
 #![warn(missing_docs)]
 //! Generic signer capability contracts.
 //!
-//! This crate defines the reusable signer-facing boundary for MFM runtime
-//! providers. Providers accept typed signing requests and return signatures
-//! plus public metadata. Private keys, passwords, endpoint paths, and provider
-//! runtime resolution remain outside persisted workflow config and values.
+//! This crate defines both the reusable unqualified signer-facing boundary and
+//! the separate generation-guarded deterministic wallet boundary. Qualified
+//! wallet providers fix one complete public binding and cannot be used through
+//! the general direct-sign trait. Their deployment guard is inseparable from
+//! each signing call. Private keys, passwords, endpoint paths, signatures,
+//! signed payloads, and provider runtime resolution remain outside persisted
+//! workflow config and values.
 //!
 //! ```rust
 //! use mfm_ids::DigestBytes;
@@ -37,6 +40,9 @@ use mfm_ids::{
     DigestAlgorithm, DigestBytes, LocalPublicId,
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+pub use mfm_ids::ContentRef;
 
 /// Result type for signer contracts.
 pub type Result<T> = std::result::Result<T, SigningError>;
@@ -44,9 +50,18 @@ pub type Result<T> = std::result::Result<T, SigningError>;
 /// Boxed future returned by signer providers.
 pub type SigningFuture<'a> = Pin<Box<dyn Future<Output = Result<SigningResult>> + Send + 'a>>;
 
-/// Future returned by an identity-bearing deterministic signing-provider binder.
-pub type DeterministicSigningProviderBindFuture =
-    Pin<Box<dyn Future<Output = Result<Arc<dyn DeterministicSigningProvider>>> + Send + 'static>>;
+/// Future returned by a guarded deterministic signing-provider binder.
+pub type GenerationGuardedDeterministicSigningProviderBindFuture = Pin<
+    Box<
+        dyn Future<Output = Result<Arc<dyn GenerationGuardedDeterministicSigningProvider>>>
+            + Send
+            + 'static,
+    >,
+>;
+
+/// Future returned by a deployment-supplied signer-generation guard.
+pub type SigningGenerationGuardFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<(), SigningGenerationGuardError>> + Send + 'a>>;
 
 const MAX_PUBLIC_KEY_LEN: usize = 4096;
 const MAX_SIGNATURE_LEN: usize = 4096;
@@ -55,11 +70,6 @@ const MAX_SIGNATURE_LEN: usize = 4096;
 pub const SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID: &str = "secp256k1.keccak256.recoverable";
 /// Deterministic RFC 6979, recoverable, low-s secp256k1 signing profile.
 pub const SECP256K1_RFC6979_LOW_S_PROFILE_ID: &str = "secp256k1.rfc6979.recoverable.low_s.v1";
-
-/// Manual-resolution signing domain id.
-pub const MANUAL_RESOLUTION_SIGNING_DOMAIN_ID: &str = "mfm.manual_resolution";
-/// Manual-resolution authorization signing purpose id.
-pub const MANUAL_RESOLUTION_SIGNING_PURPOSE_ID: &str = "mfm.manual_resolution.authorization.v1";
 
 /// Stable capability descriptor for signer providers.
 pub struct SigningCapability;
@@ -107,42 +117,84 @@ pub trait DeterministicSigningProvider: SigningProvider {
     fn deterministic_profile_id(&self) -> &'static str;
 }
 
-type BindDeterministicSigningProvider =
-    dyn Fn(SignerRef) -> DeterministicSigningProviderBindFuture + Send + Sync;
-
-/// Identity-bearing process-local binder for deterministic signing providers.
+/// Deterministic signer whose wallet generation and direct-sign exclusion are
+/// checked inseparably from every signing call.
 ///
-/// The binder identity is used for capability registration. Consumers must also compare it with
-/// the identity exposed by every returned provider before requesting a signature.
-#[derive(Clone)]
-pub struct DeterministicSigningProviderBinder {
-    implementation_id: LocalPublicId,
-    bind: Arc<BindDeterministicSigningProvider>,
+/// This is a separate contract from [`SigningProvider`]. A qualified wallet
+/// implementation must not expose its key through that unguarded trait.
+pub trait GenerationGuardedDeterministicSigningProvider: Send + Sync {
+    /// Returns the one exact public wallet/provider binding.
+    fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding;
+
+    /// Checks the mandatory deployment guard and signs the transient request.
+    ///
+    /// The implementation must reject an unexpected generation before
+    /// consulting the guard. The guard must then complete successfully
+    /// immediately before any key file, key handle, or private-key access.
+    fn sign_guarded<'a>(
+        &'a self,
+        expected_generation_ref: &'a ContentRef,
+        request: &'a SigningRequest,
+    ) -> SigningFuture<'a>;
 }
 
-impl DeterministicSigningProviderBinder {
-    /// Creates a binder with one checked concrete implementation identity.
-    pub fn new<B>(implementation_id: impl AsRef<str>, bind: B) -> Result<Self>
+/// Deployment guard for one exact wallet generation and access-control binding.
+///
+/// This contract does not grant signing authority by itself. It is injected
+/// into a concrete guarded provider, which invokes it inside
+/// [`GenerationGuardedDeterministicSigningProvider::sign_guarded`].
+pub trait SigningGenerationGuard: Send + Sync {
+    /// Proves that the bound generation is current, stale/sibling writers are
+    /// fenced, and the wallet key is excluded from general direct signing.
+    fn verify_current_and_exclusive<'a>(
+        &'a self,
+        binding: &'a VerifiedGenerationGuardedSignerBinding,
+    ) -> SigningGenerationGuardFuture<'a>;
+}
+
+type BindGenerationGuardedDeterministicSigningProvider =
+    dyn Fn() -> GenerationGuardedDeterministicSigningProviderBindFuture + Send + Sync;
+
+/// Process-local binder for one exact qualified wallet signer.
+///
+/// The binder owns the binding rather than accepting caller-selected signer
+/// material. It rejects a provider that returns any different public binding.
+#[derive(Clone)]
+pub struct GenerationGuardedDeterministicSigningProviderBinder {
+    binding: VerifiedGenerationGuardedSignerBinding,
+    bind: Arc<BindGenerationGuardedDeterministicSigningProvider>,
+}
+
+impl GenerationGuardedDeterministicSigningProviderBinder {
+    /// Creates a binder for one exact verified wallet binding.
+    pub fn new<B>(binding: VerifiedGenerationGuardedSignerBinding, bind: B) -> Self
     where
-        B: Fn(SignerRef) -> DeterministicSigningProviderBindFuture + Send + Sync + 'static,
+        B: Fn() -> GenerationGuardedDeterministicSigningProviderBindFuture + Send + Sync + 'static,
     {
-        Ok(Self {
-            implementation_id: checked_local_public_id(
-                SigningIdentifierKind::Implementation,
-                implementation_id,
-            )?,
+        Self {
+            binding,
             bind: Arc::new(bind),
+        }
+    }
+
+    /// Returns the exact wallet/provider binding fixed by this binder.
+    pub const fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding {
+        &self.binding
+    }
+
+    /// Resolves the exact guarded provider and rechecks its complete binding.
+    pub fn bind(&self) -> GenerationGuardedDeterministicSigningProviderBindFuture {
+        let expected = self.binding.clone();
+        let provider = (self.bind)();
+        Box::pin(async move {
+            let provider = provider.await?;
+            if provider.binding() != &expected {
+                return Err(SigningError::Provider {
+                    reason: SigningProviderError::BindingMismatch,
+                });
+            }
+            Ok(provider)
         })
-    }
-
-    /// Returns the checked concrete implementation identity used for registration.
-    pub const fn implementation_id(&self) -> &LocalPublicId {
-        &self.implementation_id
-    }
-
-    /// Binds one exact signer reference to a deterministic provider.
-    pub fn bind(&self, signer_ref: SignerRef) -> DeterministicSigningProviderBindFuture {
-        (self.bind)(signer_ref)
     }
 }
 
@@ -376,42 +428,32 @@ impl From<SigningPurposeId> for String {
     }
 }
 
-/// Returns the manual-resolution signing domain id.
-pub fn manual_resolution_signing_domain_id() -> Result<SigningDomainId> {
-    SigningDomainId::new(MANUAL_RESOLUTION_SIGNING_DOMAIN_ID)
-}
-
-/// Returns the manual-resolution authorization signing purpose id.
-pub fn manual_resolution_signing_purpose_id() -> Result<SigningPurposeId> {
-    SigningPurposeId::new(MANUAL_RESOLUTION_SIGNING_PURPOSE_ID)
-}
-
-/// Builds a manual-resolution signing request over an already canonical claim digest.
-pub fn manual_resolution_signing_request(
-    signer_ref: SignerRef,
-    algorithm: SigningAlgorithmId,
-    profile: SigningProfileId,
-    digest: DigestBytes,
-) -> Result<SigningRequest> {
-    Ok(SigningRequest::from_digest(
-        signer_ref,
-        algorithm,
-        profile,
-        manual_resolution_signing_domain_id()?,
-        manual_resolution_signing_purpose_id()?,
-        digest,
-    ))
-}
-
-/// Transient signing request. This type is intentionally not serializable.
-#[derive(Clone, PartialEq, Eq)]
+/// Transient signing request.
+///
+/// The request is intentionally neither serializable nor cloneable, and its
+/// signing digest is zeroized when the request is dropped.
+///
+/// ```compile_fail
+/// use mfm_signing::SigningRequest;
+///
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<SigningRequest>();
+/// ```
+///
+/// ```compile_fail
+/// use mfm_signing::SigningRequest;
+///
+/// fn require_serialize<T: serde::Serialize>() {}
+/// require_serialize::<SigningRequest>();
+/// ```
+#[derive(PartialEq, Eq)]
 pub struct SigningRequest {
     signer_ref: SignerRef,
     algorithm: SigningAlgorithmId,
     profile: SigningProfileId,
     domain: SigningDomainId,
     purpose: SigningPurposeId,
-    digest: DigestBytes,
+    digest: Zeroizing<[u8; 32]>,
     expected_identity: Option<ExpectedSignerIdentity>,
 }
 
@@ -431,7 +473,7 @@ impl SigningRequest {
             profile,
             domain,
             purpose,
-            digest,
+            digest: Zeroizing::new(*digest.as_bytes()),
             expected_identity: None,
         }
     }
@@ -468,7 +510,7 @@ impl SigningRequest {
     }
 
     /// Returns the domain-separated digest providers must sign.
-    pub fn digest(&self) -> &DigestBytes {
+    pub fn digest(&self) -> &[u8; 32] {
         &self.digest
     }
 
@@ -575,6 +617,16 @@ impl ExpectedSignerIdentity {
         })
     }
 
+    /// Returns the expected public key, when one is fixed.
+    pub fn public_key_ref(&self) -> Option<&PublicKeyBytes> {
+        self.public_key.as_ref()
+    }
+
+    /// Returns the expected public account identifier, when one is fixed.
+    pub fn account_id_ref(&self) -> Option<&str> {
+        self.account_id.as_ref().map(LocalPublicId::as_str)
+    }
+
     /// Verifies public provider identity metadata.
     pub fn verify(&self, signer_ref: &SignerRef, actual: &PublicSigningIdentity) -> Result<()> {
         if let Some(expected) = &self.public_key {
@@ -592,6 +644,124 @@ impl ExpectedSignerIdentity {
                     field: "account_id",
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn matches_exactly(&self, actual: &PublicSigningIdentity) -> bool {
+        self.public_key_ref() == actual.public_key() && self.account_id_ref() == actual.account_id()
+    }
+}
+
+/// Fully validated public identity and generation binding for one guarded signer.
+///
+/// The binding contains no private key, unlock source, endpoint, credential,
+/// signature, or signed payload. Its three content references fix the wallet's
+/// durable generation, deployment fence evidence, and provider/ACL proof that
+/// excludes the key from general direct-sign access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedGenerationGuardedSignerBinding {
+    signer_ref: SignerRef,
+    provider_implementation_id: LocalPublicId,
+    algorithm: SigningAlgorithmId,
+    profile: SigningProfileId,
+    expected_public_identity: PublicSigningIdentity,
+    durable_generation_ref: ContentRef,
+    fence_attestation_ref: ContentRef,
+    direct_sign_exclusion_ref: ContentRef,
+}
+
+impl VerifiedGenerationGuardedSignerBinding {
+    /// Validates and fixes one complete guarded signer binding.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify(
+        signer_ref: SignerRef,
+        provider_implementation_id: impl AsRef<str>,
+        algorithm: SigningAlgorithmId,
+        profile: SigningProfileId,
+        expected_public_identity: PublicSigningIdentity,
+        durable_generation_ref: ContentRef,
+        fence_attestation_ref: ContentRef,
+        direct_sign_exclusion_ref: ContentRef,
+    ) -> Result<Self> {
+        if expected_public_identity.algorithm() != &algorithm {
+            return Err(SigningError::PublicIdentityMismatch {
+                signer_ref,
+                field: "algorithm",
+            });
+        }
+        if expected_public_identity.account_id().is_none() {
+            return Err(SigningError::InvalidRequest {
+                reason: SigningRequestError::MissingAccountIdentity,
+            });
+        }
+        Ok(Self {
+            signer_ref,
+            provider_implementation_id: checked_local_public_id(
+                SigningIdentifierKind::Implementation,
+                provider_implementation_id,
+            )?,
+            algorithm,
+            profile,
+            expected_public_identity,
+            durable_generation_ref,
+            fence_attestation_ref,
+            direct_sign_exclusion_ref,
+        })
+    }
+
+    /// Returns the exact process-local signer reference.
+    pub const fn signer_ref(&self) -> &SignerRef {
+        &self.signer_ref
+    }
+
+    /// Returns the concrete provider implementation identity.
+    pub const fn provider_implementation_id(&self) -> &LocalPublicId {
+        &self.provider_implementation_id
+    }
+
+    /// Returns the exact signing algorithm.
+    pub const fn algorithm(&self) -> &SigningAlgorithmId {
+        &self.algorithm
+    }
+
+    /// Returns the exact deterministic signing profile.
+    pub const fn profile(&self) -> &SigningProfileId {
+        &self.profile
+    }
+
+    /// Returns the expected public signer identity, including its account id.
+    pub const fn expected_public_identity(&self) -> &PublicSigningIdentity {
+        &self.expected_public_identity
+    }
+
+    /// Returns the independently durable wallet/executor generation.
+    pub const fn durable_generation_ref(&self) -> &ContentRef {
+        &self.durable_generation_ref
+    }
+
+    /// Returns the deployment fence-attestation identity.
+    pub const fn fence_attestation_ref(&self) -> &ContentRef {
+        &self.fence_attestation_ref
+    }
+
+    /// Returns the provider/ACL direct-sign-exclusion identity.
+    pub const fn direct_sign_exclusion_ref(&self) -> &ContentRef {
+        &self.direct_sign_exclusion_ref
+    }
+
+    /// Verifies that a transient request exactly matches this wallet binding.
+    pub fn verify_request(&self, request: &SigningRequest) -> Result<()> {
+        if request.signer_ref() != self.signer_ref()
+            || request.algorithm() != self.algorithm()
+            || request.profile() != self.profile()
+            || !request
+                .expected_identity()
+                .is_some_and(|expected| expected.matches_exactly(&self.expected_public_identity))
+        {
+            return Err(SigningError::Provider {
+                reason: SigningProviderError::BindingMismatch,
+            });
         }
         Ok(())
     }
@@ -619,12 +789,30 @@ impl PublicKeyBytes {
 }
 
 /// Signature bytes returned by a signer provider.
-#[derive(Clone, PartialEq, Eq)]
-pub struct SignatureBytes(Vec<u8>);
+///
+/// Signature bytes are transient bearer material. They are intentionally
+/// neither serializable nor cloneable and are zeroized when dropped.
+///
+/// ```compile_fail
+/// use mfm_signing::SignatureBytes;
+///
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<SignatureBytes>();
+/// ```
+///
+/// ```compile_fail
+/// use mfm_signing::SignatureBytes;
+///
+/// fn require_serialize<T: serde::Serialize>() {}
+/// require_serialize::<SignatureBytes>();
+/// ```
+#[derive(PartialEq, Eq)]
+pub struct SignatureBytes(Zeroizing<Vec<u8>>);
 
 impl SignatureBytes {
     /// Creates checked signature bytes.
     pub fn new(bytes: Vec<u8>) -> Result<Self> {
+        let bytes = Zeroizing::new(bytes);
         validate_bytes_len(
             bytes.len(),
             MAX_SIGNATURE_LEN,
@@ -646,7 +834,24 @@ impl fmt::Debug for SignatureBytes {
 }
 
 /// Signing result returned by a provider.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The result owns transient signature bearer material and is intentionally
+/// neither serializable nor cloneable.
+///
+/// ```compile_fail
+/// use mfm_signing::SigningResult;
+///
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<SigningResult>();
+/// ```
+///
+/// ```compile_fail
+/// use mfm_signing::SigningResult;
+///
+/// fn require_serialize<T: serde::Serialize>() {}
+/// require_serialize::<SigningResult>();
+/// ```
+#[derive(PartialEq, Eq)]
 pub struct SigningResult {
     signer_ref: SignerRef,
     algorithm: SigningAlgorithmId,
@@ -771,6 +976,8 @@ pub enum SigningValidationError {
 pub enum SigningRequestError {
     /// Public identity did not contain any public identifier.
     MissingPublicIdentity,
+    /// A guarded wallet binding omitted its required public account id.
+    MissingAccountIdentity,
     /// Public key bytes were empty or too large.
     InvalidPublicKey,
     /// Signature bytes were empty or too large.
@@ -782,6 +989,30 @@ pub enum SigningRequestError {
 pub enum SigningProviderError {
     /// Provider failed without exposing path, endpoint, or secret details.
     Failed,
+    /// The provider, request, or binder used a different public wallet binding.
+    BindingMismatch,
+    /// The caller expected a different durable wallet generation.
+    GenerationMismatch,
+    /// The deployment generation guard could not establish its verdict.
+    GenerationGuardUnavailable,
+    /// The deployment guard rejected a stale or sibling wallet generation.
+    GenerationFenced,
+    /// The deployment guard found another direct-sign path to the wallet key.
+    DirectSigningOverlap,
+}
+
+/// Closed deployment-generation guard failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SigningGenerationGuardError {
+    /// The guard could not establish an authoritative current verdict.
+    #[error("signer generation guard is unavailable")]
+    Unavailable,
+    /// The wallet generation was stale or conflicted with a sibling writer.
+    #[error("signer generation is fenced")]
+    Fenced,
+    /// The wallet key was also reachable through a direct-sign path.
+    #[error("signer direct-sign exclusion failed")]
+    DirectSigningOverlap,
 }
 
 /// Redaction-safe signing contract error.
@@ -873,7 +1104,40 @@ fn validation_reason(reason: SigningValidationError) -> &'static str {
 fn request_reason(reason: SigningRequestError) -> &'static str {
     match reason {
         SigningRequestError::MissingPublicIdentity => "public signer identity is missing",
+        SigningRequestError::MissingAccountIdentity => {
+            "guarded signer public account identity is missing"
+        }
         SigningRequestError::InvalidPublicKey => "public key bytes are invalid",
         SigningRequestError::InvalidSignature => "signature bytes are invalid",
     }
+}
+
+#[cfg(test)]
+mod zeroization_tests {
+    use super::*;
+    use zeroize::Zeroize;
+
+    #[test]
+    fn secret_and_signature_buffers_use_zeroizing_storage() {
+        let mut request = SigningRequest::from_digest(
+            SignerRef::new("test-signer").expect("signer"),
+            SigningAlgorithmId::new("test.algorithm").expect("algorithm"),
+            SigningProfileId::new("test.profile").expect("profile"),
+            SigningDomainId::new("test.domain").expect("domain"),
+            SigningPurposeId::new("test.purpose").expect("purpose"),
+            DigestBytes::from_array([0x42; 32]),
+        );
+        assert_zeroizing_digest(&request.digest);
+        request.digest.zeroize();
+        assert_eq!(request.digest(), &[0; 32]);
+
+        let mut signature = SignatureBytes::new(vec![0x24; 65]).expect("signature");
+        assert_zeroizing_signature(&signature.0);
+        signature.0.zeroize();
+        assert!(signature.as_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    fn assert_zeroizing_digest(_: &Zeroizing<[u8; 32]>) {}
+
+    fn assert_zeroizing_signature(_: &Zeroizing<Vec<u8>>) {}
 }

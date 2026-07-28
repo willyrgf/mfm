@@ -2,14 +2,108 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use mfm_evm::EvmWalletReference;
+use mfm_executor::{
+    ExecutorContractDescriptor, ExecutorDeployment, ResourceOwnership, ResourcePolicyBinding,
+};
 use mfm_ids::{RunId, StoreScopeId, TenantScopeId};
+use mfm_signing::{
+    SigningGenerationGuard, VerifiedGenerationGuardedSignerBinding,
+    SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
+};
+use sqlx::PgPool;
 
 use crate::{
     AccessAuditPage, AccessTarget, AdmitRunRequest, AdmitRunResponse, DriveResponse,
-    EntryPointContract, ExportRequest, ExportedRunBytes, PageRequest, PublicError, PublicRunView,
-    ReplayRequest, ReplayResponse, RunAccessGrant, RunAccessPolicy, SecretCredential,
-    TransitionTracePage,
+    EntryPointContract, ErrorClass, ExportRequest, ExportedRunBytes, PageRequest, PublicError,
+    PublicRunView, ReplayRequest, ReplayResponse, RunAccessGrant, RunAccessPolicy,
+    SecretCredential, TransitionTracePage,
 };
+
+/// Deployment-owned inputs for the qualified EVM wallet executor.
+///
+/// This value contains no key material, unlock secret, RPC credential, or
+/// signed transaction. Runtime paths remain in the separately parsed runtime
+/// configuration, and the injected signing guard is checked on every transient
+/// signing call.
+pub struct EvmWalletDeployment {
+    executor_pool: PgPool,
+    executor_contract: ExecutorContractDescriptor,
+    executor_deployment: ExecutorDeployment,
+    resource_ownership: ResourceOwnership,
+    resource_policy_binding: ResourcePolicyBinding,
+    wallet_signer_binding_ref: EvmWalletReference,
+    signer_binding: VerifiedGenerationGuardedSignerBinding,
+    signer_generation_guard: Arc<dyn SigningGenerationGuard>,
+}
+
+impl EvmWalletDeployment {
+    /// Constructs one exact wallet deployment before executable qualification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        executor_pool: PgPool,
+        executor_contract: ExecutorContractDescriptor,
+        executor_deployment: ExecutorDeployment,
+        resource_ownership: ResourceOwnership,
+        resource_policy_binding: ResourcePolicyBinding,
+        wallet_signer_binding_ref: EvmWalletReference,
+        signer_binding: VerifiedGenerationGuardedSignerBinding,
+        signer_generation_guard: Arc<dyn SigningGenerationGuard>,
+    ) -> Result<Self, PublicError> {
+        let ownership_ref = resource_ownership
+            .reference()
+            .map_err(|_| wallet_deployment_invalid())?;
+        if executor_deployment.resource_ownership_ref() != Some(&ownership_ref)
+            || executor_deployment.durable_ledger_generation_ref()
+                != resource_ownership.durable_ledger_generation_ref()
+            || signer_binding.durable_generation_ref()
+                != executor_deployment.durable_ledger_generation_ref()
+            || resource_ownership.destination_fencing_authority_ref()
+                != Some(signer_binding.fence_attestation_ref())
+            || signer_binding.provider_implementation_id().as_str()
+                != mfm_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID
+            || signer_binding.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID
+            || signer_binding.profile().as_str() != SECP256K1_RFC6979_LOW_S_PROFILE_ID
+            || wallet_signer_binding_ref.to_content_ref().is_err()
+        {
+            return Err(wallet_deployment_invalid());
+        }
+        Ok(Self {
+            executor_pool,
+            executor_contract,
+            executor_deployment,
+            resource_ownership,
+            resource_policy_binding,
+            wallet_signer_binding_ref,
+            signer_binding,
+            signer_generation_guard,
+        })
+    }
+
+    pub(crate) fn into_parts(self) -> EvmWalletDeploymentParts {
+        EvmWalletDeploymentParts {
+            executor_pool: self.executor_pool,
+            executor_contract: self.executor_contract,
+            executor_deployment: self.executor_deployment,
+            resource_ownership: self.resource_ownership,
+            resource_policy_binding: self.resource_policy_binding,
+            wallet_signer_binding_ref: self.wallet_signer_binding_ref,
+            signer_binding: self.signer_binding,
+            signer_generation_guard: self.signer_generation_guard,
+        }
+    }
+}
+
+pub(crate) struct EvmWalletDeploymentParts {
+    pub(crate) executor_pool: PgPool,
+    pub(crate) executor_contract: ExecutorContractDescriptor,
+    pub(crate) executor_deployment: ExecutorDeployment,
+    pub(crate) resource_ownership: ResourceOwnership,
+    pub(crate) resource_policy_binding: ResourcePolicyBinding,
+    pub(crate) wallet_signer_binding_ref: EvmWalletReference,
+    pub(crate) signer_binding: VerifiedGenerationGuardedSignerBinding,
+    pub(crate) signer_generation_guard: Arc<dyn SigningGenerationGuard>,
+}
 
 /// Opaque run-facing application facade used by process transports.
 ///
@@ -444,26 +538,39 @@ impl ApplicationBackend for TestApplicationBackend {
     }
 }
 
-/// Connects a production application using one deployment-supplied access policy.
+/// Connects a production application using independently fenced run and wallet authorities.
 ///
 /// Production exact reproduction is deliberately unavailable in this cutover. `reproduce`
 /// returns the frozen `unavailable` result and never falls back to live runtime capabilities.
-pub async fn connect_production_application<F>(
+pub async fn connect_production_application<RunFence, ExecutorFence>(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
     policy: Arc<dyn RunAccessPolicy>,
-    deployment_writer_fence: F,
+    deployment_writer_fence: RunFence,
+    wallet: EvmWalletDeployment,
+    executor_writer_fence: ExecutorFence,
 ) -> Result<Application, PublicError>
 where
-    F: mfm_storage_postgres::AuthoritativeWriterFence + 'static,
+    RunFence: mfm_storage_postgres::AuthoritativeWriterFence + 'static,
+    ExecutorFence: mfm_storage_executor_postgres::ExecutorWriterGenerationFence + 'static,
 {
     crate::production::connect(
         database_url,
         runtime_config_path,
         policy,
         deployment_writer_fence,
+        wallet,
+        executor_writer_fence,
     )
     .await
+}
+
+fn wallet_deployment_invalid() -> PublicError {
+    PublicError::backend(
+        ErrorClass::ServiceUnavailable,
+        "EvmWalletDeploymentInvalid",
+        "The qualified EVM wallet deployment is invalid",
+    )
 }
 
 #[cfg(test)]

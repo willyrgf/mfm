@@ -115,10 +115,6 @@ fn test_keystore_help_surfaces() {
             vec!["keystore", "delete", "--help"],
             vec!["Delete a key from the keystore", "--by-label", "--yes"],
         ),
-        (
-            vec!["keystore", "tx-sign", "--help"],
-            vec!["--out", "--overwrite"],
-        ),
     ] {
         let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
         cmd.args(args);
@@ -132,6 +128,20 @@ fn test_keystore_help_surfaces() {
             );
         }
     }
+
+    let mut command = Command::cargo_bin("mfm_cli").unwrap();
+    command
+        .args(["keystore", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tx-sign").not());
+
+    let mut removed = Command::cargo_bin("mfm_cli").unwrap();
+    removed
+        .args(["keystore", "tx-sign"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]

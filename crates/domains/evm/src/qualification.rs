@@ -1,6 +1,7 @@
-//! Package-owned callback-surface identities for the production EVM read graph.
+//! Package-owned callback-surface identities for production EVM graphs.
 
 use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_executor::RequiredPlanExpansion;
 use mfm_ids::{ContentRef, DigestAlgorithm, FieldPath, SemanticTypeId, StableId};
 use mfm_program::{
     boundary_content_ref, mfm_value_contract, state_input_value_contract,
@@ -16,6 +17,7 @@ use mfm_spec::{
 use mfm_values::{MfmValue, RetainedValueContract, StateInput};
 use serde::Serialize;
 
+use crate::wallet_state::submit_transaction_execution;
 use crate::{
     state::{
         aggregate_execution, balance_fact_descriptor_canonical, balance_fact_descriptor_ref,
@@ -30,13 +32,15 @@ use crate::{
     EvmBalanceSnapshotFact, EvmBalanceSource, EvmBlockResponse, EvmBootstrapInput,
     EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCheckedSource, EvmInitialAnchorInput,
     EvmLatestAnchorRequest, EvmNativeBalanceRequest, EvmNetworkBinding, EvmQuantityResponse,
-    EvmReadFailure, EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsInput,
-    EvmTokenDecimalsRequest, EvmTokenDecimalsResponse, ReadEvmInitialAnchorState,
-    ReadEvmNativeBalanceState, ReadEvmTokenBalanceState, ReadEvmTokenDecimalsState,
-    EVM_BALANCE_COLLECTION_SOURCE_LIMIT, EVM_CHAIN_ID_OPERATION_ID,
-    EVM_CONFIRM_ANCHOR_OPERATION_ID, EVM_LATEST_ANCHOR_OPERATION_ID,
-    EVM_NATIVE_BALANCE_OPERATION_ID, EVM_TOKEN_BALANCE_OPERATION_ID,
-    EVM_TOKEN_DECIMALS_OPERATION_ID,
+    EvmReadFailure, EvmSafeFailure, EvmSubmitTransactionFailure, EvmSubmitTransactionInput,
+    EvmSubmitTransactionRequest, EvmSubmitTransactionSelector, EvmTokenBalanceRequest,
+    EvmTokenDecimalsInput, EvmTokenDecimalsRequest, EvmTokenDecimalsResponse,
+    EvmTransactionOutcome, EvmWalletAttemptResult, EvmWalletTerminalEvidence,
+    ReadEvmInitialAnchorState, ReadEvmNativeBalanceState, ReadEvmTokenBalanceState,
+    ReadEvmTokenDecimalsState, SubmitEvmTransactionState, EVM_BALANCE_COLLECTION_SOURCE_LIMIT,
+    EVM_CHAIN_ID_OPERATION_ID, EVM_CONFIRM_ANCHOR_OPERATION_ID, EVM_LATEST_ANCHOR_OPERATION_ID,
+    EVM_NATIVE_BALANCE_OPERATION_ID, EVM_SUBMIT_TRANSACTION_OPERATION_ID,
+    EVM_TOKEN_BALANCE_OPERATION_ID, EVM_TOKEN_DECIMALS_OPERATION_ID,
 };
 
 /// Exact version of every package-owned EVM state callback-surface descriptor.
@@ -58,6 +62,10 @@ impl EvmStateCallbackSurface {
 
     fn pure<S: State>(state_name: &'static str) -> Result<Self> {
         Self::new::<S>(state_name, &["apply"], None)
+    }
+
+    fn effect<S: State>(state_name: &'static str, operation_id: &'static str) -> Result<Self> {
+        Self::new::<S>(state_name, &["request", "settle"], Some(operation_id))
     }
 
     fn new<S: State>(
@@ -1122,6 +1130,243 @@ fn field_path(value: impl AsRef<str>) -> Result<FieldPath> {
 
 const fn identity<T>(value: &T) -> &T {
     value
+}
+
+/// Returns the exact callback surface of the one EVM wallet effect state.
+pub fn evm_submit_transaction_callback_surface() -> Result<EvmStateCallbackSurface> {
+    EvmStateCallbackSurface::effect::<SubmitEvmTransactionState>(
+        "submit_transaction",
+        EVM_SUBMIT_TRANSACTION_OPERATION_ID,
+    )
+}
+
+/// Builds the executor contract's leaf expansion for EVM wallet submission.
+pub fn evm_submit_transaction_leaf_expansion(
+    expansion_contract_ref: ContentRef,
+) -> Result<RequiredPlanExpansion> {
+    RequiredPlanExpansion::new(
+        EVM_SUBMIT_TRANSACTION_OPERATION_ID,
+        evm_submit_transaction_callback_surface()?
+            .content_ref()
+            .clone(),
+        expansion_contract_ref,
+    )
+    .map_err(|error| ProgramError::Registry(error.to_string()))
+}
+
+/// Closed retained-value inventory for the EVM transaction effect boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmSubmitTransactionValueContracts {
+    request: RetainedValueContract,
+    selector: RetainedValueContract,
+    input: RetainedValueContract,
+    outcome: RetainedValueContract,
+    failure: RetainedValueContract,
+    attempt_result: RetainedValueContract,
+    terminal_evidence: RetainedValueContract,
+}
+
+impl EvmSubmitTransactionValueContracts {
+    /// Returns the immutable semantic-request contract.
+    pub const fn request(&self) -> &RetainedValueContract {
+        &self.request
+    }
+
+    /// Returns the public selector contract.
+    pub const fn selector(&self) -> &RetainedValueContract {
+        &self.selector
+    }
+
+    /// Returns the state input contract.
+    pub const fn input(&self) -> &RetainedValueContract {
+        &self.input
+    }
+
+    /// Returns the finalized outcome contract.
+    pub const fn outcome(&self) -> &RetainedValueContract {
+        &self.outcome
+    }
+
+    /// Returns the uninhabited semantic-failure contract.
+    pub const fn failure(&self) -> &RetainedValueContract {
+        &self.failure
+    }
+
+    /// Returns the closed five-variant attempt-result contract.
+    pub const fn attempt_result(&self) -> &RetainedValueContract {
+        &self.attempt_result
+    }
+
+    /// Returns the state-owned terminal domain-evidence contract.
+    pub const fn terminal_evidence(&self) -> &RetainedValueContract {
+        &self.terminal_evidence
+    }
+}
+
+/// Builds all domain-owned wallet retained-value contracts.
+pub fn evm_submit_transaction_value_contracts(
+    object_evidence_contract_ref: ContentRef,
+) -> Result<EvmSubmitTransactionValueContracts> {
+    Ok(EvmSubmitTransactionValueContracts {
+        request: value_contract::<EvmSubmitTransactionRequest>(
+            "mfm.evm.wallet.request",
+            object_evidence_contract_ref.clone(),
+        )?,
+        selector: value_contract::<EvmSubmitTransactionSelector>(
+            "mfm.evm.wallet.selector",
+            object_evidence_contract_ref.clone(),
+        )?,
+        input: input_contract::<EvmSubmitTransactionInput>(
+            "submit-transaction",
+            object_evidence_contract_ref.clone(),
+        )?,
+        outcome: value_contract::<EvmTransactionOutcome>(
+            "mfm.evm.wallet.outcome",
+            object_evidence_contract_ref.clone(),
+        )?,
+        failure: value_contract::<EvmSubmitTransactionFailure>(
+            "mfm.evm.wallet.failure",
+            object_evidence_contract_ref.clone(),
+        )?,
+        attempt_result: value_contract::<EvmWalletAttemptResult>(
+            "mfm.evm.wallet.attempt-result",
+            object_evidence_contract_ref.clone(),
+        )?,
+        terminal_evidence: value_contract::<EvmWalletTerminalEvidence>(
+            "mfm.evm.wallet.terminal-evidence",
+            object_evidence_contract_ref,
+        )?,
+    })
+}
+
+/// Product-owned identities required to qualify the wallet effect state.
+pub struct EvmSubmitTransactionStateArtifacts {
+    object_evidence_contract_ref: ContentRef,
+    unit_config_contract: RetainedValueContract,
+    executor_contract_ref: ContentRef,
+    executor_binding_ref: ContentRef,
+    ensure_result_contract: RetainedValueContract,
+    terminal_effect_evidence_contract: RetainedValueContract,
+    implementation: ComponentImplementationDescriptor,
+}
+
+impl EvmSubmitTransactionStateArtifacts {
+    /// Constructs and validates the exact wallet-state artifact set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        object_evidence_contract_ref: ContentRef,
+        unit_config_contract: RetainedValueContract,
+        executor_contract_ref: ContentRef,
+        executor_binding_ref: ContentRef,
+        ensure_result_contract: RetainedValueContract,
+        terminal_effect_evidence_contract: RetainedValueContract,
+        implementation: ComponentImplementationDescriptor,
+    ) -> Result<Self> {
+        let expected_unit_config = unit_config_value_contract(
+            unit_config_contract.role().clone(),
+            object_evidence_contract_ref.clone(),
+        )?;
+        let surface = evm_submit_transaction_callback_surface()?;
+        if unit_config_contract != expected_unit_config
+            || implementation.component_kind() != ComponentKind::State
+            || implementation.semantic_contract_ref() != surface.state_contract_ref()
+            || implementation.callback_surface_ref() != surface.content_ref()
+        {
+            return Err(ProgramError::Registry(
+                "EVM wallet state artifacts differ from the exact package contract".to_owned(),
+            ));
+        }
+        Ok(Self {
+            object_evidence_contract_ref,
+            unit_config_contract,
+            executor_contract_ref,
+            executor_binding_ref,
+            ensure_result_contract,
+            terminal_effect_evidence_contract,
+            implementation,
+        })
+    }
+}
+
+/// Qualified registration for the one EVM wallet effect state.
+pub struct QualifiedEvmSubmitTransactionState {
+    registration: QualifiedStateRegistration<SubmitEvmTransactionState>,
+}
+
+impl QualifiedEvmSubmitTransactionState {
+    /// Registers the wallet state into one product registry.
+    pub fn register_into(
+        self,
+        registry: &mut QualifiedProgramRegistryBuilder,
+    ) -> Result<&mut QualifiedProgramRegistryBuilder> {
+        registry.register_state(self.registration)
+    }
+
+    /// Returns the exact qualified registration.
+    pub const fn registration(&self) -> &QualifiedStateRegistration<SubmitEvmTransactionState> {
+        &self.registration
+    }
+}
+
+/// Qualifies the one EVM wallet effect state and all typed boundary contracts.
+pub fn qualify_evm_submit_transaction_state(
+    artifacts: EvmSubmitTransactionStateArtifacts,
+) -> Result<QualifiedEvmSubmitTransactionState> {
+    let contracts = evm_submit_transaction_value_contracts(artifacts.object_evidence_contract_ref)?;
+    let settlement = settlement_contract(
+        contracts.outcome.clone(),
+        contracts.failure.clone(),
+        Vec::new(),
+    )?;
+    let certified_execution = CertifiedStateExecution::Effect {
+        executor_operation_id: stable_id(EVM_SUBMIT_TRANSACTION_OPERATION_ID)?,
+        executor_binding_ref: artifacts.executor_binding_ref.clone(),
+        request_contract: contracts.request.clone(),
+        ensure_result_contract: artifacts.ensure_result_contract.clone(),
+        terminal_evidence_contract: artifacts.terminal_effect_evidence_contract.clone(),
+        domain_result_contract: contracts.attempt_result.clone(),
+    };
+    let contract = QualifiedStateContract::new(
+        SubmitEvmTransactionState::state_contract_ref()?,
+        artifacts.unit_config_contract,
+        None,
+        contracts.input,
+        vec![
+            ordinary_input("request", contracts.request.clone())?,
+            ordinary_input("selector", contracts.selector)?,
+        ],
+        vec![QualifiedOutputSourceContract::new(
+            0,
+            QualifiedSourceContract::new(contracts.outcome.clone(), Vec::new())?,
+        )],
+        certified_execution,
+        settlement,
+    )?;
+    let execution = submit_transaction_execution(
+        artifacts.executor_contract_ref,
+        artifacts.executor_binding_ref,
+        contracts.request,
+        artifacts.ensure_result_contract,
+        artifacts.terminal_effect_evidence_contract,
+        contracts.attempt_result,
+    )?;
+    let codecs = QualifiedSettlementCodecs::new(
+        vec![QualifiedOutputProjector::new(
+            0,
+            field_path("value")?,
+            CanonicalCodec::mfm_value(contracts.outcome)?,
+            identity::<EvmTransactionOutcome>,
+        )],
+        Some(CanonicalCodec::mfm_value(contracts.failure)?),
+    )?;
+    Ok(QualifiedEvmSubmitTransactionState {
+        registration: QualifiedStateRegistration::new(
+            contract,
+            artifacts.implementation,
+            execution,
+            codecs,
+        )?,
+    })
 }
 
 #[cfg(test)]

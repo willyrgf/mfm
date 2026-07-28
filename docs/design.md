@@ -7,8 +7,8 @@ canonical recoverability schemas and identities are frozen in
 `contracts/recoverability/v1/annex.json` and `contracts/recoverability/v1/corpus.json`. Where this
 document summarizes a frozen encoding, the annex is authoritative.
 The typed-core cutover is implemented and no pre-cutover lifecycle remains. Production EVM reads
-are current audited graph nodes; EVM mutation remains unregistered pending its separate durable
-executor qualification.
+are current audited graph nodes. EVM transaction submission is a registered recoverable effect
+only through the qualified durable wallet executor and its independent deployment fence.
 
 The central rule is:
 
@@ -712,7 +712,23 @@ fixed implementation sequence. Its evaluated graph was bootstrap `getblockchaini
 repeat-work-safe read qualification described in `docs/btc-rpc-routing.md`. Any future
 registration is separately scoped and cannot add another runtime mode.
 
-The product registers no EVM mutation until the later durable-executor qualification commit.
+Production EVM transaction submission is one ordinary effect state:
+
+```text
+immutable configured transaction request
+  -> typed sender/nonce allocation in the executor resource stream
+  -> guarded deterministic signing before each authorized broadcast
+  -> exact-hash transaction and receipt lookup without signer access
+  -> finalized-head and canonical-inclusion evidence
+  -> terminal success or revert evidence and tombstone
+```
+
+The executor PostgreSQL ledger is a separate logical authority from the run journal and uses an
+independent writer-generation fence. Every candidate preserves the request, sender, nonce,
+destination, value, calldata semantics, access list, gas limit, and signing profile; only the
+finite qualified fee schedule may change. A missing transaction, timeout, or observed nonce is
+never promoted to a generic not-applied terminal result. Raw signed bytes and signatures remain
+transient and zeroizing inside the broadcast target.
 
 ## Application And Public Surface
 

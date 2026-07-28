@@ -1,16 +1,24 @@
-//! Deterministic EVM balance-read graph authoring.
+//! Deterministic EVM read and transaction graph authoring.
 
-use mfm_ids::StableId;
+use mfm_ids::{ContentRef, StableId};
 use mfm_journal::v1::ValueRef;
 use mfm_program::{AuthoredHandle, AuthoredProgramBuilder, Operation, StateBindings};
+use mfm_spec::{
+    AuthoredSourceSelector, CanonicalAuthoredProgram, CanonicalJsonValue, EntryPointContract,
+    EntryPointId, PlanningProfile,
+};
+use mfm_values::{MfmValue as _, PublicOutputDescriptor};
 
 use crate::state::{
     AggregateEvmBalancesState, BootstrapEvmSourceState, ConfirmEvmAnchorState, EvmBalanceAsset,
     EvmBalanceCollection, EvmBalanceCollectionConfig, EvmBalanceSource, ReadEvmInitialAnchorState,
     ReadEvmNativeBalanceState, ReadEvmTokenBalanceState, ReadEvmTokenDecimalsState,
 };
-
-use crate::EvmNetworkBinding;
+use crate::{
+    EvmNetworkBinding, EvmSubmitTransactionPublicOutputs, EvmSubmitTransactionRequest,
+    EvmSubmitTransactionSelector, EvmTransactionOutcome, SubmitEvmTransactionState,
+    EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID, EVM_SUBMIT_TRANSACTION_OPERATION_ID,
+};
 
 /// Stable internal operation identity for a reusable EVM collection graph.
 pub const EVM_BALANCE_COLLECTION_OPERATION_ID: &str = "mfm.evm/balance-collection";
@@ -166,6 +174,121 @@ impl Operation for EvmBalanceCollectionOperation {
             collection: aggregate.into_output(),
         })
     }
+}
+
+/// Validator-selected inputs consumed by the one-state wallet effect graph.
+pub struct EvmSubmitTransactionAuthoringInputs {
+    unit_config_ref: ValueRef,
+    request: AuthoredHandle<EvmSubmitTransactionRequest>,
+    selector: AuthoredHandle<EvmSubmitTransactionSelector>,
+}
+
+impl EvmSubmitTransactionAuthoringInputs {
+    /// Binds an immutable configured request to the public value-only selector.
+    pub fn new(
+        unit_config_ref: ValueRef,
+        request: AuthoredHandle<EvmSubmitTransactionRequest>,
+        selector: AuthoredHandle<EvmSubmitTransactionSelector>,
+    ) -> Self {
+        Self {
+            unit_config_ref,
+            request,
+            selector,
+        }
+    }
+}
+
+/// Typed output handle for one submitted transaction.
+pub struct EvmSubmitTransactionOutputs {
+    /// Finalized success or revert.
+    pub outcome: AuthoredHandle<EvmTransactionOutcome>,
+}
+
+/// Reusable one-state EVM transaction submission operation.
+pub struct EvmSubmitTransactionOperation {
+    inputs: EvmSubmitTransactionAuthoringInputs,
+}
+
+impl EvmSubmitTransactionOperation {
+    /// Creates one exact transaction submission graph.
+    pub const fn new(inputs: EvmSubmitTransactionAuthoringInputs) -> Self {
+        Self { inputs }
+    }
+}
+
+impl Operation for EvmSubmitTransactionOperation {
+    type Output = EvmSubmitTransactionOutputs;
+
+    fn author(&self, builder: &mut AuthoredProgramBuilder) -> mfm_program::Result<Self::Output> {
+        let state = builder.state::<SubmitEvmTransactionState>(
+            stable_id(EVM_SUBMIT_TRANSACTION_OPERATION_ID)?,
+            StateBindings::new(self.inputs.unit_config_ref.clone(), None),
+        )?;
+        builder.connect_to(&self.inputs.request, &state, 0)?;
+        builder.connect_to(&self.inputs.selector, &state, 1)?;
+        builder.required_success(state.output())?;
+        Ok(EvmSubmitTransactionOutputs {
+            outcome: state.into_output(),
+        })
+    }
+}
+
+pub(crate) fn evm_submit_transaction_authored_program(
+    unit_config_ref: ValueRef,
+) -> mfm_program::Result<CanonicalAuthoredProgram> {
+    let mut builder = AuthoredProgramBuilder::new(stable_id(EVM_SUBMIT_TRANSACTION_OPERATION_ID)?);
+    let state = builder.state::<SubmitEvmTransactionState>(
+        stable_id(EVM_SUBMIT_TRANSACTION_OPERATION_ID)?,
+        StateBindings::new(unit_config_ref, None),
+    )?;
+    builder.bind_input_source(
+        &state,
+        0,
+        AuthoredSourceSelector::Config {
+            source_field_path: None,
+        },
+    )?;
+    builder.bind_input_source(
+        &state,
+        1,
+        AuthoredSourceSelector::RunAdmission {
+            source_field_path: None,
+        },
+    )?;
+    builder.required_success(state.output())?;
+    builder.public_output(stable_id("outcome")?, state.output())?;
+    builder.finish()
+}
+
+/// Builds the exact empty-framework-policy profile for wallet submission.
+pub fn evm_submit_transaction_planning_profile(
+    planner_contract_ref: ContentRef,
+    planner_implementation_ref: ContentRef,
+) -> mfm_spec::Result<PlanningProfile> {
+    PlanningProfile::new(
+        planner_contract_ref,
+        planner_implementation_ref,
+        Vec::new(),
+        CanonicalJsonValue::new(serde_json::json!({}))?,
+    )
+}
+
+/// Builds the qualified EVM transaction entry-point contract.
+pub fn evm_submit_transaction_entry_point_contract(
+    planner_contract_ref: ContentRef,
+    planner_implementation_ref: ContentRef,
+) -> mfm_spec::Result<EntryPointContract> {
+    EntryPointContract::new(
+        EntryPointId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
+            .map_err(|error| mfm_spec::SpecError::Contract(error.to_string()))?,
+        StableId::new(EVM_SUBMIT_TRANSACTION_OPERATION_ID)
+            .map_err(|error| mfm_spec::SpecError::Contract(error.to_string()))?,
+        evm_submit_transaction_planning_profile(planner_contract_ref, planner_implementation_ref)?,
+        EvmSubmitTransactionSelector::schema_id()
+            .map_err(|error| mfm_spec::SpecError::Contract(error.to_string()))?,
+        EvmSubmitTransactionPublicOutputs::public_schema_id()
+            .map_err(|error| mfm_spec::SpecError::Contract(error.to_string()))?,
+    )
 }
 
 fn indexed_key(prefix: &str, index: usize) -> mfm_program::Result<StableId> {

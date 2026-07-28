@@ -28,6 +28,7 @@ mfm-canonical = { path = "../kernel/canonical" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-evm = { path = "../domains/evm" }
 mfm-evm-live = { path = "../live/evm" }
+mfm-executor = { path = "../kernel/executor" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-journal = { path = "../kernel/journal" }
 mfm-portfolio = { path = "../domains/portfolio" }
@@ -39,6 +40,7 @@ mfm-keystore = { path = "../keystore" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
 mfm-storage-postgres = { path = "../storages/postgres" }
+mfm-storage-executor-postgres = { path = "../storages/executor-postgres" }
 mfm-values = { path = "../kernel/values" }
 toml = "0.8"
 url = { workspace = true }

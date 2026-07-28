@@ -3,7 +3,7 @@ error[E0451]: fields `bytes` and `transaction_hash` of struct `TransientSignedEi
   |
 5 |     let _payload = TransientSignedEip1559Envelope {
   |                    ------------------------------ in this type
-6 |         bytes: vec![0x01],
+6 |         bytes: vec![0x01].into(),
   |         ^^^^^ private field
 7 |         transaction_hash: B256::ZERO,
   |         ^^^^^^^^^^^^^^^^ private field

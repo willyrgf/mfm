@@ -5,27 +5,35 @@ use mfm_evm_live::transport::{
     EvmJsonRpcTransport, EvmRoutingCatalogBuilder, EvmRpcAuthorization, EvmRpcEndpoint,
 };
 use mfm_portfolio::{EvmRoutingBinding, PortfolioRoutingManifest};
+use mfm_signing::SignerRef;
 
 use crate::{runtime_config, ErrorClass, PublicError};
 
 pub(super) struct EvmDeployment {
     pub(super) transport: Arc<EvmJsonRpcTransport>,
     pub(super) routing_manifest: PortfolioRoutingManifest,
+    pub(super) signer: runtime_config::ResolvedSignerBinding,
 }
 
 pub(super) async fn load_evm_deployment(
     runtime_config_path: Option<&Path>,
+    signer_ref: SignerRef,
 ) -> Result<EvmDeployment, PublicError> {
     let path = runtime_config_path
         .map(Path::to_path_buf)
         .ok_or_else(runtime_config_required)?;
-    tokio::task::spawn_blocking(move || load_evm_deployment_sync(path))
+    tokio::task::spawn_blocking(move || load_evm_deployment_sync(path, &signer_ref))
         .await
         .map_err(|_| runtime_config_invalid())?
 }
 
-fn load_evm_deployment_sync(path: PathBuf) -> Result<EvmDeployment, PublicError> {
+fn load_evm_deployment_sync(
+    path: PathBuf,
+    signer_ref: &SignerRef,
+) -> Result<EvmDeployment, PublicError> {
     let routes = runtime_config::load_evm_routes(&path).map_err(|_| runtime_config_invalid())?;
+    let signer = runtime_config::load_signer_binding(&path, signer_ref)
+        .map_err(|_| runtime_config_invalid())?;
     let mut catalog = EvmRoutingCatalogBuilder::new();
     let mut bindings = Vec::with_capacity(routes.len());
     for route in routes {
@@ -59,6 +67,7 @@ fn load_evm_deployment_sync(path: PathBuf) -> Result<EvmDeployment, PublicError>
     Ok(EvmDeployment {
         transport: Arc::new(transport),
         routing_manifest,
+        signer,
     })
 }
 
@@ -83,10 +92,13 @@ mod tests {
 
     #[tokio::test]
     async fn absent_runtime_configuration_has_the_reviewed_public_contract() {
-        let error = match load_evm_deployment(None).await {
-            Ok(_) => panic!("runtime configuration is required"),
-            Err(error) => error,
-        };
+        let error =
+            match load_evm_deployment(None, SignerRef::new("test-signer").expect("signer ref"))
+                .await
+            {
+                Ok(_) => panic!("runtime configuration is required"),
+                Err(error) => error,
+            };
         assert_eq!(error.class, ErrorClass::BadRequest);
         assert_eq!(error.code, "RuntimeConfigRequired");
         assert!(!error.message.contains("DATABASE_URL"));

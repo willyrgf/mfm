@@ -15,7 +15,6 @@ mod production;
 mod render;
 mod runtime_config;
 mod surface;
-mod transaction_signing;
 
 pub use self::access::{
     AccessPolicyError, AccessTarget, AuthorizedTenant, RunAccessGrant, RunAccessPolicy,
@@ -23,7 +22,7 @@ pub use self::access::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use self::application::{application_for_test, TestApplicationMode};
-pub use self::application::{connect_production_application, Application};
+pub use self::application::{connect_production_application, Application, EvmWalletDeployment};
 pub use self::errors::{ErrorClass, PublicError};
 #[cfg(any(test, feature = "test-support"))]
 pub use self::keystore_services::initialize_insecure_keystore_for_test;
@@ -35,10 +34,6 @@ pub use self::keystore_services::{
 };
 pub use self::render::PublicJsonResponse;
 pub use self::surface::*;
-pub use self::transaction_signing::{
-    sign_evm_transaction_command, EvmTransactionSigningEnvelopeInput,
-    EvmTransactionSigningMetadata, EvmTransactionSigningRequest, SignedEvmTransaction,
-};
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;

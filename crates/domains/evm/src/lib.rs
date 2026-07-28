@@ -1,16 +1,18 @@
 #![warn(missing_docs)]
-//! Pure EVM protocol, signing, audited-read state, and graph contracts.
+//! Pure EVM protocol, signing, audited-read, and recoverable wallet-effect contracts.
 //!
-//! Production mutation lifecycle and aggregate capability surfaces are
-//! intentionally absent. Signing and transaction models remain reusable
-//! protocol primitives for a future qualified executor.
+//! The package owns deterministic state and graph semantics. Live RPC, guarded
+//! signing, durable delivery, and recovery remain adapter responsibilities.
 
 mod capability;
 mod model;
 mod operation;
+mod product;
 mod qualification;
 mod signing;
 mod state;
+mod wallet;
+mod wallet_state;
 
 pub use capability::{
     EvmAnchorConfirmationRequest, EvmAnchoredSource, EvmBlockResponse, EvmChainIdentityRequest,
@@ -26,20 +28,31 @@ pub use capability::{
 };
 pub use model::{EvmBlockAnchor, EvmBlockAnchorError};
 pub use operation::{
+    evm_submit_transaction_entry_point_contract, evm_submit_transaction_planning_profile,
     EvmBalanceCollectionAuthoringInputs, EvmBalanceCollectionOperation,
-    EvmBalanceCollectionOutputs, EVM_BALANCE_COLLECTION_OPERATION_ID,
+    EvmBalanceCollectionOutputs, EvmSubmitTransactionAuthoringInputs,
+    EvmSubmitTransactionOperation, EvmSubmitTransactionOutputs,
+    EVM_BALANCE_COLLECTION_OPERATION_ID,
+};
+pub use product::{
+    evm_submit_transaction_entry_point_registration,
+    evm_submit_transaction_unit_config_member_path, EvmSubmitTransactionEntryPointArtifacts,
+    EVM_SUBMIT_TRANSACTION_UNIT_CONFIG_MEMBER_PATH,
 };
 pub use qualification::{
     evm_balance_collection_callback_surfaces, evm_balance_collection_value_contracts,
     evm_balance_fact_support_objects, evm_read_value_contracts,
-    qualify_evm_balance_collection_states, EvmBalanceCollectionCallbackSurfaces,
+    evm_submit_transaction_callback_surface, evm_submit_transaction_leaf_expansion,
+    evm_submit_transaction_value_contracts, qualify_evm_balance_collection_states,
+    qualify_evm_submit_transaction_state, EvmBalanceCollectionCallbackSurfaces,
     EvmBalanceCollectionStateArtifacts, EvmBalanceCollectionStateImplementations,
     EvmBalanceCollectionValueContracts, EvmBalanceFactSupportObjects, EvmReadValueContracts,
-    EvmStateCallbackSurface, QualifiedEvmBalanceCollectionStates,
-    EVM_STATE_CALLBACK_SURFACE_VERSION,
+    EvmStateCallbackSurface, EvmSubmitTransactionStateArtifacts,
+    EvmSubmitTransactionValueContracts, QualifiedEvmBalanceCollectionStates,
+    QualifiedEvmSubmitTransactionState, EVM_STATE_CALLBACK_SURFACE_VERSION,
 };
 pub use signing::{
-    sign_eip1559, Eip1559QuantityField, EvmSignatureError, EvmSigningError,
+    sign_eip1559, sign_eip1559_guarded, Eip1559QuantityField, EvmSignatureError, EvmSigningError,
     TransientSignedEip1559Envelope, UnsignedEip1559Envelope,
 };
 pub use state::{
@@ -54,6 +67,28 @@ pub use state::{
     ReadEvmInitialAnchorState, ReadEvmNativeBalanceState, ReadEvmTokenBalanceState,
     ReadEvmTokenDecimalsState, EVM_BALANCE_COLLECTION_NODE_LIMIT,
     EVM_BALANCE_COLLECTION_SOURCE_LIMIT, EVM_BALANCE_COLLECTION_TOKEN_LIMIT,
+};
+pub use wallet::{
+    EvmSubmitTransactionFailure, EvmSubmitTransactionInput, EvmSubmitTransactionPublicOutputs,
+    EvmSubmitTransactionRequest, EvmSubmitTransactionSelector, EvmTransactionOutcome,
+    EvmTransactionTarget, EvmWalletAccessListEntry, EvmWalletAttemptResult,
+    EvmWalletBroadcastStatus, EvmWalletConvergencePlan, EvmWalletError, EvmWalletFeeCandidate,
+    EvmWalletObservedTransaction, EvmWalletPolicy, EvmWalletReceipt, EvmWalletReceiptLog,
+    EvmWalletReceiptStatus, EvmWalletReference, EvmWalletReplacementPolicy,
+    EvmWalletTerminalEvidence, EvmWalletTransactionAction, EvmWalletTransactionCandidate,
+    EvmWalletTransactionPlacement, EvmWalletTransactionTemplate,
+    EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID, EVM_SUBMIT_TRANSACTION_OPERATION_ID,
+    EVM_WALLET_ACCESS_LIST_MAX_ENTRIES, EVM_WALLET_ACCESS_LIST_MAX_STORAGE_KEYS,
+    EVM_WALLET_BROADCAST_OPERATION_ID, EVM_WALLET_DATA_MAX_BYTES,
+    EVM_WALLET_EXECUTOR_RECORD_OVERHEAD_BYTES, EVM_WALLET_FINALITY_TAG,
+    EVM_WALLET_FINALIZED_HEAD_OPERATION_ID, EVM_WALLET_INCLUSION_BLOCK_OPERATION_ID,
+    EVM_WALLET_RECEIPT_LOG_DATA_MAX_BYTES, EVM_WALLET_RECEIPT_LOG_LIMIT,
+    EVM_WALLET_RECEIPT_LOOKUP_OPERATION_ID, EVM_WALLET_REPLACEMENT_LIMIT,
+    EVM_WALLET_TRANSACTION_LOOKUP_OPERATION_ID, EVM_WALLET_TRANSACTION_TYPE,
+};
+pub use wallet_state::{
+    SubmitEvmTransactionState, EVM_WALLET_REVERTED_TERMINAL_OUTCOME,
+    EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
 };
 
 #[cfg(test)]

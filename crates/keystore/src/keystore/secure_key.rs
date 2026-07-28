@@ -48,9 +48,7 @@ impl SecureKey {
         &self,
         hash: &[u8; 32],
     ) -> Result<PrimitiveSignature, KeystoreError> {
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(self.key_bytes.as_ref());
-        let key = EthereumPrivateKey::from_secret_bytes(key_bytes)
+        let key = EthereumPrivateKey::from_secret_bytes(&self.key_bytes)
             .map_err(keystore_error_from_ethereum_key)?;
         key.sign_hash_recoverable(hash)
             .map_err(keystore_error_from_ethereum_key)
@@ -73,7 +71,7 @@ impl SecureKey {
 impl ZeroizeOnDrop for SecureKey {}
 
 pub(super) fn ethereum_address_from_key_bytes(key_bytes: &[u8]) -> Result<Address, KeystoreError> {
-    let key_bytes: [u8; 32] = key_bytes
+    let key_bytes: &[u8; 32] = key_bytes
         .try_into()
         .map_err(|_| KeystoreError::InvalidPrivateKey)?;
     let key = EthereumPrivateKey::from_secret_bytes(key_bytes)

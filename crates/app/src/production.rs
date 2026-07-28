@@ -4,11 +4,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_certify::CompositeCertificationFactory;
+use mfm_executor::KeyedExecutorLedger;
 use mfm_ids::{AppendRequestId, RunId, StableId, TenantScopeId};
-use mfm_program::{QualifiedPlannerRegistration, QualifiedProgramRegistry};
+use mfm_keystore::KeystoreSignerProvider;
+use mfm_program::{
+    QualifiedExecutorExpansion, QualifiedPlannerRegistration, QualifiedProgramRegistry,
+};
 use mfm_runtime::Runtime;
+use mfm_signing::{
+    GenerationGuardedDeterministicSigningProvider,
+    GenerationGuardedDeterministicSigningProviderBinder,
+};
 use mfm_spec::{CertifiedJournalProtocolContracts, EntryPointContract};
+use mfm_storage_executor_postgres::{
+    open_executor_store, ExecutorWriterGenerationFence, QualifiedPostgresExecutorStore,
+};
 use mfm_storage_postgres::{open_authoritative, AuthoritativeWriterFence, QualifiedPostgresStore};
 use mfm_store::{
     AdmissionMaterial, AdmissionSourceStore, AppendOutcome, AppendRejection, ConfiguredValueStore,
@@ -22,7 +34,9 @@ use self::qualification::{
     ProductComponentImplementations, QualifiedProductDeployment,
 };
 use self::routes::{load_evm_deployment, EvmDeployment};
-use crate::application::{ApplicationBackend, AuthorizedRunCall};
+use crate::application::{
+    ApplicationBackend, AuthorizedRunCall, EvmWalletDeployment, EvmWalletDeploymentParts,
+};
 use crate::executable_identity::{current_executable_identity, CurrentExecutableIdentity};
 use crate::{
     complete_access_audit_page, complete_transition_trace_page, decode_access_audit_page_request,
@@ -37,6 +51,7 @@ mod routes;
 
 struct ProductionBackend {
     store: QualifiedPostgresStore,
+    executor_store: QualifiedPostgresExecutorStore,
     issuer: RunAccessAuthorityIssuer,
     registry: Arc<QualifiedProgramRegistry>,
     runtime: Runtime<QualifiedPostgresStore>,
@@ -53,14 +68,17 @@ impl mfm_replay::v1::ReproductionResolver for UnavailableReproductionResolver {
     }
 }
 
-pub(super) async fn connect<F>(
+pub(super) async fn connect<RunFence, ExecutorFence>(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
     policy: Arc<dyn RunAccessPolicy>,
-    deployment_writer_fence: F,
+    deployment_writer_fence: RunFence,
+    wallet: EvmWalletDeployment,
+    executor_writer_fence: ExecutorFence,
 ) -> Result<Application, PublicError>
 where
-    F: AuthoritativeWriterFence + 'static,
+    RunFence: AuthoritativeWriterFence + 'static,
+    ExecutorFence: ExecutorWriterGenerationFence + 'static,
 {
     let database_url = production_database_url(database_url)?;
     let pool = PgPoolOptions::new()
@@ -68,16 +86,26 @@ where
         .await
         .map_err(|_| run_store_unavailable())?;
     let (store, issuer) = open_authoritative(pool, deployment_writer_fence).await?;
+    let wallet = wallet.into_parts();
+    let signer_ref = wallet.signer_binding.signer_ref().clone();
     let (executable, evm) = tokio::try_join!(
         current_executable_identity(),
-        load_evm_deployment(runtime_config_path)
+        load_evm_deployment(runtime_config_path, signer_ref)
     )?;
-    let (registry, entry_points) =
-        assemble_program_registry(&store, &issuer, &executable, evm).await?;
+    let (registry, entry_points, executor_store) = assemble_program_registry(
+        &store,
+        &issuer,
+        &executable,
+        evm,
+        wallet,
+        executor_writer_fence,
+    )
+    .await?;
     let store_scope_id = store.store_scope_id().clone();
     let runtime = Runtime::new(store.clone(), Arc::clone(&registry));
     let backend = ProductionBackend {
         store,
+        executor_store,
         issuer,
         registry,
         runtime,
@@ -90,21 +118,51 @@ where
     ))
 }
 
-async fn assemble_program_registry(
+async fn assemble_program_registry<ExecutorFence>(
     store: &QualifiedPostgresStore,
     issuer: &RunAccessAuthorityIssuer,
     executable: &CurrentExecutableIdentity,
     evm: EvmDeployment,
-) -> Result<(Arc<QualifiedProgramRegistry>, Vec<EntryPointContract>), PublicError> {
+    wallet: EvmWalletDeploymentParts,
+    executor_writer_fence: ExecutorFence,
+) -> Result<
+    (
+        Arc<QualifiedProgramRegistry>,
+        Vec<EntryPointContract>,
+        QualifiedPostgresExecutorStore,
+    ),
+    PublicError,
+>
+where
+    ExecutorFence: ExecutorWriterGenerationFence,
+{
     let EvmDeployment {
         transport,
         routing_manifest,
+        signer: resolved_signer,
     } = evm;
+    let EvmWalletDeploymentParts {
+        executor_pool,
+        executor_contract,
+        executor_deployment,
+        resource_ownership,
+        resource_policy_binding,
+        wallet_signer_binding_ref,
+        signer_binding,
+        signer_generation_guard,
+    } = wallet;
     let product = qualify_product_components(
         executable.content_ref().clone(),
         executable.descriptor_bytes(),
+        &executor_contract,
     )?;
-    let live = qualify_evm_live_support(&transport, &product)?;
+    let live = qualify_evm_live_support(
+        &transport,
+        &product,
+        executor_contract,
+        executor_deployment,
+        resource_ownership,
+    )?;
     let deployment = assemble_qualified_product_deployment(product, live, &routing_manifest)?;
     let QualifiedProductDeployment {
         object_evidence_contract_ref,
@@ -113,6 +171,7 @@ async fn assemble_program_registry(
         implementations,
         read_capability_binding,
         read_capability_binding_ref,
+        executor_binding,
         unit_config_contract,
         state_manifest: _state_manifest,
         state_manifest_ref: _state_manifest_ref,
@@ -125,11 +184,50 @@ async fn assemble_program_registry(
     let admitted_support = store
         .admit_support_graph(&deployment_authority, support_graph)
         .await?;
+    let executor_store = open_executor_store(
+        executor_pool,
+        executor_binding.clone(),
+        executor_writer_fence,
+    )
+    .await
+    .map_err(|_| wallet_executor_unavailable())?;
+    let ledger = KeyedExecutorLedger::new(executor_store.clone(), executor_binding.clone())
+        .map_err(|_| production_registry_invalid())?;
+    let (entry_id, keystore_path, unlock_file_path) = resolved_signer.into_parts();
+    let provider_binding = signer_binding.clone();
+    let provider_generation_guard = Arc::clone(&signer_generation_guard);
+    let signer_binder =
+        GenerationGuardedDeterministicSigningProviderBinder::new(signer_binding, move || {
+            let provider = KeystoreSignerProvider::new(
+                provider_binding.clone(),
+                entry_id,
+                keystore_path.clone(),
+                unlock_file_path.clone(),
+                Arc::clone(&provider_generation_guard),
+            );
+            Box::pin(async move {
+                provider.map(|provider| {
+                    Arc::new(provider) as Arc<dyn GenerationGuardedDeterministicSigningProvider>
+                })
+            })
+        });
+    let wallet_signer =
+        mfm_evm_live::EvmWalletSignerBinding::new(wallet_signer_binding_ref, signer_binder)
+            .map_err(|_| production_registry_invalid())?;
+    let wallet_executor = mfm_evm_live::EvmWalletExecutor::new(
+        ledger,
+        transport.as_ref().clone(),
+        wallet_signer,
+        resource_policy_binding,
+    )
+    .map_err(|_| production_registry_invalid())?;
     let ProductComponentImplementations {
         planner,
         portfolio,
         evm: evm_states,
+        evm_submit_transaction,
         evm_read_adapter: _evm_read_adapter,
+        evm_wallet_executor,
     } = implementations;
     let planner_contract_ref = planner.semantic_contract_ref().clone();
     let planner_implementation_ref = planner
@@ -139,8 +237,19 @@ async fn assemble_program_registry(
         QualifiedPlannerRegistration::new(planner, Arc::new(CompositeCertificationFactory))
             .map_err(|_| production_registry_invalid())?;
 
-    let entry_point = mfm_portfolio::portfolio_snapshot_entry_point_registration(
+    let portfolio_entry_point = mfm_portfolio::portfolio_snapshot_entry_point_registration(
         mfm_portfolio::PortfolioSnapshotEntryPointArtifacts::new(
+            planner_contract_ref.clone(),
+            planner_implementation_ref.clone(),
+            object_evidence_contract_ref.clone(),
+            unit_config_contract.clone(),
+        )
+        .map_err(|_| production_registry_invalid())?,
+    )
+    .map_err(|_| production_registry_invalid())?;
+    let published_portfolio_entry_point = portfolio_entry_point.entry_point().clone();
+    let wallet_entry_point = mfm_evm::evm_submit_transaction_entry_point_registration(
+        mfm_evm::EvmSubmitTransactionEntryPointArtifacts::new(
             planner_contract_ref,
             planner_implementation_ref,
             object_evidence_contract_ref.clone(),
@@ -149,7 +258,7 @@ async fn assemble_program_registry(
         .map_err(|_| production_registry_invalid())?,
     )
     .map_err(|_| production_registry_invalid())?;
-    let published_entry_point = entry_point.entry_point().clone();
+    let published_wallet_entry_point = wallet_entry_point.entry_point().clone();
     let portfolio_states = mfm_portfolio::qualify_portfolio_snapshot_states(
         mfm_portfolio::PortfolioSnapshotStateArtifacts::new(
             object_evidence_contract_ref.clone(),
@@ -162,11 +271,45 @@ async fn assemble_program_registry(
     let evm_states = mfm_evm::qualify_evm_balance_collection_states(
         mfm_evm::EvmBalanceCollectionStateArtifacts::new(
             object_evidence_contract_ref.clone(),
-            unit_config_contract,
+            unit_config_contract.clone(),
             read_capability_binding_ref,
             evm_states,
         )
         .map_err(|_| production_registry_invalid())?,
+    )
+    .map_err(|_| production_registry_invalid())?;
+    let executor_contract_ref = executor_binding
+        .contract()
+        .reference()
+        .map_err(|_| production_registry_invalid())?;
+    let executor_binding_ref = executor_binding.binding_ref().as_content_ref().clone();
+    let retained = executor_binding.contract().retained_closure_contract();
+    let wallet_state = mfm_evm::qualify_evm_submit_transaction_state(
+        mfm_evm::EvmSubmitTransactionStateArtifacts::new(
+            object_evidence_contract_ref.clone(),
+            unit_config_contract.clone(),
+            executor_contract_ref.clone(),
+            executor_binding_ref,
+            retained.ensure_result_contract().clone(),
+            retained.terminal_evidence_contract().clone(),
+            evm_submit_transaction,
+        )
+        .map_err(|_| production_registry_invalid())?,
+    )
+    .map_err(|_| production_registry_invalid())?;
+    let operation_contract = executor_binding
+        .contract()
+        .required_plan_expansions()
+        .first()
+        .cloned()
+        .ok_or_else(production_registry_invalid)?;
+    let effect = mfm_runtime::qualify_effect_executor(
+        StableId::new(mfm_evm::EVM_SUBMIT_TRANSACTION_OPERATION_ID)
+            .map_err(|_| production_registry_invalid())?,
+        executor_binding,
+        operation_contract,
+        evm_wallet_executor,
+        wallet_executor,
     )
     .map_err(|_| production_registry_invalid())?;
     let read_qualification = mfm_evm_live::EvmReadQualificationArtifacts::new(
@@ -191,7 +334,9 @@ async fn assemble_program_registry(
         journal_protocols,
     );
     builder
-        .register_entry_point(entry_point)
+        .register_entry_point(portfolio_entry_point)
+        .map_err(|_| production_registry_invalid())?
+        .register_entry_point(wallet_entry_point)
         .map_err(|_| production_registry_invalid())?;
     portfolio_states
         .register_into(&mut builder)
@@ -199,11 +344,28 @@ async fn assemble_program_registry(
     evm_states
         .register_into(&mut builder)
         .map_err(|_| production_registry_invalid())?;
+    wallet_state
+        .register_into(&mut builder)
+        .map_err(|_| production_registry_invalid())?;
     reads
         .register_into(&mut builder)
         .map_err(|_| production_registry_invalid())?;
+    builder
+        .register_executor(QualifiedExecutorExpansion::Leaf {
+            executor_contract_ref,
+        })
+        .map_err(|_| production_registry_invalid())?
+        .register_effect(effect)
+        .map_err(|_| production_registry_invalid())?;
     let registry = Arc::new(builder.build().map_err(|_| production_registry_invalid())?);
-    Ok((registry, vec![published_entry_point]))
+    Ok((
+        registry,
+        vec![
+            published_portfolio_entry_point,
+            published_wallet_entry_point,
+        ],
+        executor_store,
+    ))
 }
 
 impl ProductionBackend {
@@ -211,7 +373,16 @@ impl ProductionBackend {
         self.store
             .check_ready()
             .await
-            .map_err(|_| run_store_unavailable())
+            .map_err(|_| run_store_unavailable())?;
+        let readiness = self
+            .executor_store
+            .readiness()
+            .await
+            .map_err(|_| wallet_executor_unavailable())?;
+        if !readiness.ledger_ready() || !readiness.fence_ready() {
+            return Err(wallet_executor_unavailable());
+        }
+        Ok(())
     }
 
     async fn admit(
@@ -220,17 +391,44 @@ impl ProductionBackend {
         entry_point: EntryPointContract,
         request: AdmitRunRequest,
     ) -> Result<AdmitRunResponse, PublicError> {
-        let selector: mfm_portfolio::PortfolioSnapshotSelector =
-            serde_json::from_value(request.input().as_json().clone()).map_err(|_| {
-                PublicError::bad_request(
-                    "AdmissionRequestInvalid",
-                    "Admission request does not match the published entry-point input",
-                )
-            })?;
-        let configured_target = StableId::new(selector.target().as_str())
-            .map_err(|_| production_admission_invalid())?;
+        let (configured_target, wallet_selector) = if entry_point.entry_point_id().as_str()
+            == mfm_portfolio::PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID
+        {
+            let selector: mfm_portfolio::PortfolioSnapshotSelector =
+                serde_json::from_value(request.input().as_json().clone()).map_err(|_| {
+                    PublicError::bad_request(
+                        "AdmissionRequestInvalid",
+                        "Admission request does not match the published entry-point input",
+                    )
+                })?;
+            (
+                StableId::new(selector.target().as_str())
+                    .map_err(|_| production_admission_invalid())?,
+                None,
+            )
+        } else if entry_point.entry_point_id().as_str()
+            == mfm_evm::EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID
+        {
+            let selector: mfm_evm::EvmSubmitTransactionSelector =
+                serde_json::from_value(request.input().as_json().clone()).map_err(|_| {
+                    PublicError::bad_request(
+                        "AdmissionRequestInvalid",
+                        "Admission request does not match the published entry-point input",
+                    )
+                })?;
+            (
+                StableId::new(selector.target().as_str())
+                    .map_err(|_| production_admission_invalid())?,
+                Some(selector),
+            )
+        } else {
+            return Err(PublicError::bad_request(
+                "AdmissionRequestInvalid",
+                "Admission request does not match the published entry-point input",
+            ));
+        };
         let authority = self.issuer.authorize_admit(
-            tenant_scope_id,
+            tenant_scope_id.clone(),
             entry_point.entry_point_id().clone(),
             entry_point.entry_point_operation_id().clone(),
             request.invocation_identity().clone(),
@@ -251,6 +449,28 @@ impl ProductionBackend {
                     .root_contract(),
             )
             .await?;
+        if let Some(selector) = wallet_selector {
+            let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(configured.bytes())
+                .map_err(|_| {
+                    PublicError::backend(
+                        ErrorClass::Internal,
+                        "ConfiguredTransactionInvalid",
+                        "The configured transaction does not match its qualified contract",
+                    )
+                })?;
+            let configured_request =
+                mfm_program::decode_boundary::<mfm_evm::EvmSubmitTransactionRequest>(&canonical)
+                    .map_err(|_| production_admission_invalid())?;
+            if configured_request
+                .policy()
+                .tenant_scope_id()
+                .map_err(|_| production_admission_invalid())?
+                != tenant_scope_id
+                || configured_request.template().target() != selector.target()
+            {
+                return Err(production_admission_invalid());
+            }
+        }
         let artifacts = self
             .registry
             .author_and_certify_verified_parts(
@@ -596,6 +816,14 @@ fn run_store_unavailable() -> PublicError {
         ErrorClass::ServiceUnavailable,
         "RunStoreUnavailable",
         "The authoritative run store is unavailable",
+    )
+}
+
+fn wallet_executor_unavailable() -> PublicError {
+    PublicError::backend(
+        ErrorClass::ServiceUnavailable,
+        "EvmWalletExecutorUnavailable",
+        "The qualified EVM wallet executor is unavailable",
     )
 }
 

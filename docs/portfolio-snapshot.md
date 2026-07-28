@@ -1,6 +1,6 @@
 # Portfolio Snapshot
 
-MFM publishes exactly one product entry point:
+The portfolio product entry point is:
 
 ```text
 entry_point_id           = "mfm.portfolio/snapshot@1"

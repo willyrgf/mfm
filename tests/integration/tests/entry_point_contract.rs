@@ -6,12 +6,16 @@ use mfm_app::{
     application_for_test, AccessPolicyError, AccessTarget, AdmitRunRequest, AuthorizedTenant,
     PublicJsonResponse, RunAccessGrant, RunAccessPolicy, SecretCredential, TestApplicationMode,
 };
+use mfm_evm::{
+    evm_submit_transaction_entry_point_contract, EvmSubmitTransactionPublicOutputs,
+    EvmSubmitTransactionSelector,
+};
 use mfm_ids::{ContentDigest, ContentRef, SchemaId};
 use mfm_portfolio::{
     portfolio_snapshot_entry_point_contract, portfolio_snapshot_public_output_schema_id,
     PortfolioSnapshotSelector,
 };
-use mfm_values::MfmValue;
+use mfm_values::{MfmValue, PublicOutputDescriptor};
 
 struct CountingPolicy {
     calls: AtomicUsize,
@@ -31,18 +35,23 @@ impl RunAccessPolicy for CountingPolicy {
 }
 
 #[test]
-fn composed_application_caches_one_exact_entry_point_without_policy_work() {
-    let expected = portfolio_snapshot_entry_point_contract(
-        content_ref("planner-contract", '1'),
-        content_ref("planner-implementation", '2'),
+fn composed_application_caches_two_exact_entry_points_without_policy_work() {
+    let planner_contract = content_ref("planner-contract", '1');
+    let planner_implementation = content_ref("planner-implementation", '2');
+    let portfolio = portfolio_snapshot_entry_point_contract(
+        planner_contract.clone(),
+        planner_implementation.clone(),
     )
     .expect("portfolio entry-point contract");
+    let wallet =
+        evm_submit_transaction_entry_point_contract(planner_contract, planner_implementation)
+            .expect("wallet entry-point contract");
     let policy = Arc::new(CountingPolicy {
         calls: AtomicUsize::new(0),
     });
     let application = application_for_test(
         policy.clone(),
-        vec![expected],
+        vec![portfolio, wallet],
         TestApplicationMode::Sentinel,
     );
 
@@ -65,7 +74,7 @@ fn composed_application_caches_one_exact_entry_point_without_policy_work() {
         0,
         "discovery must perform no authorization"
     );
-    assert_eq!(entries.len(), 1, "v1 publishes exactly one entry point");
+    assert_eq!(entries.len(), 2, "v1 publishes exactly two entry points");
 
     let entry = &entries[0];
     assert_eq!(entry.entry_point_id().as_str(), "mfm.portfolio/snapshot@1");
@@ -97,12 +106,33 @@ fn composed_application_caches_one_exact_entry_point_without_policy_work() {
         &portfolio_snapshot_public_output_schema_id().expect("portfolio public-output schema")
     );
 
-    let rendered = entries.public_json().expect("render entry-point contracts");
-    assert_eq!(rendered[0]["version"], "mfm.entry-point-contract.v1");
+    let entry = &entries[1];
     assert_eq!(
-        rendered[0]["planning_profile"]["version"],
-        "mfm.planning-profile.v1"
+        entry.entry_point_id().as_str(),
+        "mfm.evm/submit-transaction@1"
     );
+    assert_eq!(
+        entry.entry_point_operation_id().as_str(),
+        "mfm.evm/submit-transaction"
+    );
+    assert_eq!(
+        entry.input_schema_id(),
+        &EvmSubmitTransactionSelector::schema_id().expect("wallet selector schema")
+    );
+    assert_eq!(
+        entry.public_output_schema_id(),
+        &EvmSubmitTransactionPublicOutputs::public_schema_id()
+            .expect("wallet public-output schema")
+    );
+
+    let rendered = entries.public_json().expect("render entry-point contracts");
+    for entry in rendered.as_array().expect("entry-point array") {
+        assert_eq!(entry["version"], "mfm.entry-point-contract.v1");
+        assert_eq!(
+            entry["planning_profile"]["version"],
+            "mfm.planning-profile.v1"
+        );
+    }
 }
 
 fn content_ref(name: &str, digest_byte: char) -> ContentRef {

@@ -32,11 +32,12 @@ use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B256, U256};
 use mfm_signing::{
-    DeterministicSigningProvider, ExpectedSignerIdentity, SignerRef, SigningAlgorithmId,
-    SigningDomainId, SigningError, SigningProfileId, SigningPurposeId, SigningRequest,
-    SigningResult, SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID,
-    SECP256K1_RFC6979_LOW_S_PROFILE_ID,
+    ContentRef, DeterministicSigningProvider, ExpectedSignerIdentity,
+    GenerationGuardedDeterministicSigningProvider, SignerRef, SigningAlgorithmId, SigningDomainId,
+    SigningError, SigningProfileId, SigningPurposeId, SigningRequest, SigningResult,
+    SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
+use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, EvmSigningError>;
 
@@ -194,7 +195,7 @@ impl UnsignedEip1559Envelope {
             return Err(EvmSigningError::SignedHashMismatch);
         }
         Ok(TransientSignedEip1559Envelope {
-            bytes,
+            bytes: Zeroizing::new(bytes),
             transaction_hash,
         })
     }
@@ -222,7 +223,7 @@ impl fmt::Debug for UnsignedEip1559Envelope {
 /// may cross only an explicit submission or user-selected output boundary.
 #[derive(PartialEq, Eq)]
 pub struct TransientSignedEip1559Envelope {
-    bytes: Vec<u8>,
+    bytes: Zeroizing<Vec<u8>>,
     transaction_hash: B256,
 }
 
@@ -259,6 +260,34 @@ pub async fn sign_eip1559(
     }
     let request = envelope.signing_request(signer_ref, expected_sender)?;
     let result = provider.sign(&request).await?;
+    envelope.finalize_signed(&request, expected_sender, &result)
+}
+
+/// Signs one checked envelope through the wallet-only generation-guarded boundary.
+///
+/// The exact public binding is verified before the provider performs its
+/// mandatory generation guard. Qualified wallet providers do not implement
+/// the general direct-sign trait, so this path cannot bypass the deployment
+/// fence.
+pub async fn sign_eip1559_guarded(
+    envelope: &UnsignedEip1559Envelope,
+    signer_ref: SignerRef,
+    expected_sender: Address,
+    expected_generation_ref: &ContentRef,
+    provider: &dyn GenerationGuardedDeterministicSigningProvider,
+) -> Result<TransientSignedEip1559Envelope> {
+    let binding = provider.binding();
+    if binding.durable_generation_ref() != expected_generation_ref {
+        return Err(SigningError::Provider {
+            reason: mfm_signing::SigningProviderError::BindingMismatch,
+        }
+        .into());
+    }
+    let request = envelope.signing_request(signer_ref, expected_sender)?;
+    binding.verify_request(&request)?;
+    let result = provider
+        .sign_guarded(expected_generation_ref, &request)
+        .await?;
     envelope.finalize_signed(&request, expected_sender, &result)
 }
 

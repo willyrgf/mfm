@@ -24,6 +24,7 @@ zeroize = "1.7"
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-evm = { path = "../../domains/evm" }
+mfm-executor = { path = "../../kernel/executor" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-program = { path = "../../kernel/program" }
@@ -34,6 +35,7 @@ mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]
+k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
 static_assertions = "1"
 tokio = { workspace = true, features = ["test-util"] }

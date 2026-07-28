@@ -437,11 +437,15 @@ Current domain product placement:
 - `mfm-evm-live` owns reusable JSON-RPC transport plus private audited adapters.
 - EVM portfolio reads use decomposed bootstrap, anchor, per-call fan-out, confirmation, and pure
   aggregation nodes.
+- EVM transaction submission uses the same stateless transport behind a durable wallet executor;
+  the domain owns immutable request/evidence semantics, while guarded signing, sender/nonce
+  allocation, target attempts, and terminal convergence remain executor responsibilities.
 - `mfm-bitcoin` and `mfm-bitcoin-live` may retain reusable pure/transport foundations, but Bitcoin
   collection is not in the production catalog.
 - `mfm-portfolio` owns aggregate configuration, graph planning, same-run typed dataflow, snapshot,
   and report projection.
-- The product catalog exposes only `mfm.portfolio/snapshot@1`.
+- The product catalog exposes `mfm.portfolio/snapshot@1` and
+  `mfm.evm/submit-transaction@1`.
 
 ## App And Binary Boundary
 
@@ -453,14 +457,15 @@ Current domain product placement:
 - the entry-point/planning-profile catalog;
 - sole `QualifiedProgramRegistry` assembly, including admitted support, deterministic callbacks,
   semantic read/effect entries, and process-private live invokers;
-- the one content-scoped `52 + N` portfolio/EVM support graph, its single store admission, and
+- the one content-scoped `61 + N` portfolio/EVM support graph, its single store admission, and
   transfer of that non-cloneable admitted graph into the sole registry;
-- the qualified PostgreSQL store;
+- the qualified PostgreSQL run store and separately fenced PostgreSQL executor store;
+- exact wallet executor, resource-owner, signer-generation, and target binding composition;
 - current-configuration resolution for admission;
 - exact run services and reviewed DTOs; and
 - public-output, trace, audit, replay, and export reader composition.
 
-For the current portfolio product, `N` is the exact configured EVM routing-generation count in
+For the current product, `N` is the exact configured EVM routing-generation count in
 `1..=4096`. The support scope hashes the complete field-path-ordered member identities and retained
 contracts. Private endpoints, credentials, transports, caller configuration, and per-run
 artifacts never enter that graph. Runtime and the private application backend borrow one shared
@@ -527,7 +532,8 @@ Before merging, verify:
 - replay constructs no live semantic capability;
 - typed/persisted/public data contains no secrets or floats;
 - Bitcoin remains absent unless its qualification passes;
-- product mutation remains absent until its executor qualification passes;
+- every registered product mutation has its exact qualified executor, resource owner, and
+  independent deployment fence;
 - app and binaries expose only the exact granted surface; and
 - tests enforce negative boundaries as well as successful behavior.
 
@@ -539,6 +545,6 @@ Before merging, verify:
 - `docs/portfolio-snapshot.md`: published product objective
 - `docs/evm-rpc-routing.md`: EVM routing generation and audited read graph
 - `docs/btc-rpc-routing.md`: unregistered Bitcoin qualification target
-- `docs/evm-transactions.md`: generic effect seam and deferred EVM mutation qualification
+- `docs/evm-transactions.md`: qualified EVM wallet effect and deployment contract
 - `docs/code-quality.md`: mandatory contribution policy
 - `docs/build-and-verification.md`: scope-driven verification workflow
