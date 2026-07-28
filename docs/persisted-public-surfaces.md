@@ -25,6 +25,14 @@ Authority roles:
 - `public output`: data intentionally returned to users by CLI/REST. It must not contain secrets and
   is not a substitute for strict authority unless the command explicitly verifies strict rows first.
 
+## Executor Qualification Surfaces
+
+| Surface | Location | Secret Boundary | Authority Role | Notes |
+| --- | --- | --- | --- | --- |
+| Executor delivery and typed-resource checkpoints | `MemoryLedgerCheckpoint`, `MemoryDestinationCheckpoint`, and immutable snapshots in `mfm-storage-executor-file` | No secrets allowed. Retained values are exact canonical request/result, content identities, safe failure tuples, policy/configuration refs, resource allocation values, attempts, observations, and tombstones. Credentials, provider messages/bodies, endpoints, paths, signed bearer bytes, and arbitrary debug strings are forbidden. | qualification authority only | Checksums, bounded hostile decode, strict refold, generation matching, cumulative evidence bounds, and exact policy-pair revalidation qualify the kernel contract. The file backend rejects symlink/non-regular targets and greatest-snapshot corruption without ancestor fallback. These bytes have no production freshness, anti-rollback, or split-brain authority. |
+| Executor terminal claim objects | `ExecutorTerminalClaim` returned by the reference executor | No secrets allowed. Contains the exact effect identity, complete delivery audit, tombstone and ref, exact-attempt terminal proof, safe canonical result, assurance-policy ref, and non-collapsed proof provenance. | evidence only | Verification binds the claim to the exact tenant/binding, committed request, reference contract, bounds, result schema, observation, tombstone, and evidence authority. It is a pre-journal object bundle: it contains no producer-bound `ValueRef` and cannot append a run event. The admitting journal creates and binds retained object references. |
+| Reference safe failures | Executor delivery observations and request-conflict result objects | No secrets allowed. Contains one closed stable code/class/boundary-stage tuple, an optional reviewed coarse-size class, and only a reviewed diagnostic identity when its selected typed contract permits one. | strict executor evidence | Provider text, URLs, paths, bodies, credentials, and unreviewed diagnostics are discarded below the target boundary. The selected safe-failure contract validates the complete tuple before retention. |
+
 ## Postgres Storage
 
 | Surface | Location | Secret Boundary | Authority Role | Notes |

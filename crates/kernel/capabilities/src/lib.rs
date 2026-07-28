@@ -32,8 +32,12 @@ use mfm_ids::{DigestAlgorithm, EffectKind, EffectVersion, NameToken};
 pub use provider_diagnostic::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
+pub use safe_failure::{
+    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureCode, SafeFailureError,
+};
 
 mod provider_diagnostic;
+mod safe_failure;
 
 #[cfg(test)]
 mod tests;
