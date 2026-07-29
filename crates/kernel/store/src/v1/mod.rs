@@ -61,9 +61,8 @@ pub use self::errors::{StoreError, StoreErrorInspection};
 pub use self::fact_scan::{
     CompletedFactScan, FactAttestationLoadVerifier, FactScanBackend, FactScanPage,
     FactScanPageVerifier, FactScanPermit, FactSelectionAuthorizationOutcome, FactSelectionStore,
-    PendingFactScanAttestation, PersistedFactScanAttestation, VerifiedFactPublication,
-    VerifiedFactSelectionCompleteness, FACT_SCAN_STEP_FACTS, FACT_SCAN_STEP_PUBLICATIONS,
-    FACT_SOURCE_CLOSURE_MAX_REFERENCES,
+    PendingFactScanAttestation, PersistedFactScanAttestation, VerifiedFactSelectionCompleteness,
+    FACT_SCAN_STEP_FACTS, FACT_SCAN_STEP_PUBLICATIONS, FACT_SOURCE_CLOSURE_MAX_REFERENCES,
 };
 pub use self::journal::{
     derive_initial_run_state_digest, verify_offline_recorded_history,

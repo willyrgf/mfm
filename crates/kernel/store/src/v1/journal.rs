@@ -1358,6 +1358,26 @@ impl FoldState {
                 }
             }
         }
+        let mut outputs_by_ordinal = BTreeMap::new();
+        for binding in outputs {
+            let ordinal = binding.fields()?.output_ordinal;
+            if outputs_by_ordinal.insert(ordinal, binding).is_some() {
+                return Err(StoreError::TransitionFoldMismatch {
+                    field: "binding_delta_entry",
+                });
+            }
+        }
+        let outputs = outputs_by_ordinal.into_values().collect::<Vec<_>>();
+        let mut facts_by_ordinal = BTreeMap::new();
+        for emission in facts {
+            let ordinal = emission.fields()?.emission_ordinal;
+            if facts_by_ordinal.insert(ordinal, emission).is_some() {
+                return Err(StoreError::TransitionFoldMismatch {
+                    field: "binding_delta_entry",
+                });
+            }
+        }
+        let facts = facts_by_ordinal.into_values().collect::<Vec<_>>();
         if phase_changes != 1 || outputs != expected_outputs || facts != expected_facts {
             return Err(StoreError::TransitionFoldMismatch {
                 field: "binding_delta_exact_body",
@@ -5656,6 +5676,15 @@ fn verify_physical_journal(
         }
         let payloads = normalize_commit(commit)?;
         let purpose = batch_purpose(&payloads)?;
+        let defers_fact_import_authority = match &payloads {
+            NormalizedBatch::Observation(observation) => observation
+                .fields()?
+                .fact_selection_scan_attestation_ref
+                .is_some(),
+            NormalizedBatch::Admission(_)
+            | NormalizedBatch::Transition { .. }
+            | NormalizedBatch::Authorization(_) => false,
+        };
         verify_batch_coordinate(
             tenant_scope_id,
             &payloads,
@@ -5667,6 +5696,12 @@ fn verify_physical_journal(
             candidates.len(),
         )?;
         verify_object_bindings(&candidates, &envelope.core.ordered_object_bindings)?;
+        let bound_object_keys = envelope
+            .core
+            .ordered_object_bindings
+            .iter()
+            .map(|binding| ObjectAuthorityKey::from_value_ref(&binding.fields()?.value_ref))
+            .collect::<Result<BTreeSet<_>>>()?;
         for intent in &envelope.core.artifact_admission_intents {
             let fields = intent.fields()?;
             let key = ObjectAuthorityKey::from_value_ref(&fields.value_ref)?;
@@ -5681,9 +5716,17 @@ fn verify_physical_journal(
                     fields.value_ref.fields()?.producer_binding.kind()?,
                     ProducerBindingKind::QualifiedSupport | ProducerBindingKind::ConfiguredValue
                 );
+            let defers_this_fact_import =
+                defers_fact_import_authority && !bound_object_keys.contains(&key);
             match fields.mode {
+                // A single-run physical replay cannot reprove cross-run existence. Only an
+                // unbound attested fact-observation import is deferred: semantic replay must
+                // exact-close it before constructing a view, while live backends still enforce
+                // global RequireExisting authority.
                 ArtifactAdmissionMode::RequireExisting
-                    if !seen_objects.contains(&key) && !admission_prerequisite =>
+                    if !seen_objects.contains(&key)
+                        && !admission_prerequisite
+                        && !defers_this_fact_import =>
                 {
                     return Err(StoreError::MissingObjectAuthority {
                         artifact_id: key.artifact_id().clone(),

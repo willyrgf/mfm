@@ -310,6 +310,13 @@ structural value validator, and the one producer-independent `RetainedValueContr
 diagnostic `SchemaIdentity`. `mfm-journal` owns the frozen five-record schemas, producer-bound
 `ValueRef`, and journal references. `mfm-store` owns legal append and verified read authority.
 
+Successful transition bodies preserve output and fact bindings in semantic ordinal order.
+`mfm-store` privately assembles the redundant binding delta by canonical-byte sorting repeated
+output and fact groups independently after variant-group precedence is fixed. Its fold alone
+reindexes both groups by semantic ordinal, rejects duplicate ordinals, and compares/applies the
+semantic vectors. `mfm-journal` remains the strict already-ordered wire-value validator; it does
+not choose semantic order.
+
 Stores own:
 
 - native per-run commits and records;
@@ -408,7 +415,11 @@ policy. Replay rechecks the persisted grouping and certified multiplicity contra
 
 The store privately scans the authoritative writer's dense publication prefix through that
 barrier. Only complete coverage mints `FactSelectionResponse`; private scan continuation cannot be
-persisted or resumed as public authority.
+persisted or resumed as public authority. `FactScanPageVerifier` solely owns the private
+`(fact_order, fact_ordinal)` cursor or explicit terminal state, the 4,096-publication and
+8,192-emission step budgets, and each logical emission range. Memory and PostgreSQL adapters only
+load ordered complete publications and submit them; a publication continued within its emissions
+is reloaded and fully verified before the next range is consumed.
 
 The fresh authorization result owns the sole affine live-scan permit. Scan pages include every
 dense publication through the barrier, including unselectable publications from the consuming run.
@@ -425,6 +436,14 @@ a transport-only wrapper and stops traversal because the incoming content refere
 semantic edge. Bounded insertion and cycle rejection apply to the traversed semantic closure.
 Transport-only objects accompany the generic observation append but never enter ordered semantic
 object references.
+
+Selected producer and transport authorities enter the consuming observation as unbound
+`RequireExisting` imports; only its response and attestation are bound `AdmitOrVerifyExact`
+products. The physical journal verifier may provisionally admit first-use authority only for
+unbound imports in an attested fact observation. The semantic observation fold must consume that
+entire import set and exact-close it against the selected facts and attested digest before
+`VerifiedRunView` exists. Durable backends independently retain the live global
+`RequireExisting` check at append time.
 
 The completed affine scan derives its sealed authorization while consuming itself into generic
 observation material. The reserved observation and its private attestation-routing row are assigned

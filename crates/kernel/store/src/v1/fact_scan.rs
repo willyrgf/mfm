@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use mfm_canonical::{RecoverabilityContractV2, ReferenceTerminalKindV2};
@@ -175,6 +176,56 @@ impl CompletedFactScan {
             completed_scan: Box::new(self),
         }))
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn verify_three_fact_completion(
+    completed: &CompletedFactScan,
+    producing_transition_ref: &TransitionRef,
+) -> Result<()> {
+    let fields = completed.response.fields()?;
+    let [result] = fields.results.as_slice() else {
+        return Err(StoreError::FactScanBindingMismatch);
+    };
+    let selected = result.fields()?.selected;
+    if selected.len() != 3 || completed.sources.roots.len() != 3 {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    for fact in &selected {
+        if fact.fields()?.producing_transition_ref != *producing_transition_ref {
+            return Err(StoreError::FactScanBindingMismatch);
+        }
+    }
+    let contract = RecoverabilityContractV2::embedded()?;
+    let selected_roots = selected
+        .into_iter()
+        .map(|fact| {
+            let fields = fact.fields()?;
+            Ok((
+                canonical_content_ref_key(contract, &fields.descriptor_ref)?,
+                fields.subject_ref.as_bytes().to_vec(),
+                fields.response_ref.as_bytes().to_vec(),
+            ))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    let retained_roots = completed
+        .sources
+        .roots
+        .iter()
+        .map(|root| {
+            canonical_content_ref_key(contract, &root.descriptor_ref).map(|descriptor| {
+                (
+                    descriptor,
+                    root.subject_ref.as_bytes().to_vec(),
+                    root.response_ref.as_bytes().to_vec(),
+                )
+            })
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    if selected_roots != retained_roots {
+        return Err(StoreError::InvalidSourceClosure);
+    }
+    Ok(())
 }
 
 /// Same-store fact completeness established against one exact verified run view.
@@ -1178,8 +1229,9 @@ fn validate_external_observation_binding(
 
 struct FactScanSession {
     permit: FactScanPermit,
-    next_fact_order: u64,
+    position: FactScanPosition,
     accumulators: Vec<FactTopK<ScannedFact>>,
+    step_limits: FactScanStepLimits,
 }
 
 enum FactScanStep {
@@ -1187,10 +1239,153 @@ enum FactScanStep {
     Complete(Box<CompletedFactScan>),
 }
 
-/// One fully verified fact-publication commit loaded by a backend scan step.
-///
-/// Construction is possible only through [`FactScanPageVerifier::verify_publication`].
-pub struct VerifiedFactPublication {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FactScanPosition {
+    fact_order: u64,
+    fact_ordinal: u32,
+}
+
+impl FactScanPosition {
+    const INITIAL: Self = Self {
+        fact_order: 1,
+        fact_ordinal: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FactScanCursor {
+    Position(FactScanPosition),
+    Complete,
+}
+
+#[derive(Clone, Copy)]
+struct FactScanStepLimits {
+    publications: usize,
+    facts: usize,
+}
+
+impl FactScanStepLimits {
+    const PRODUCTION: Self = Self {
+        publications: FACT_SCAN_STEP_PUBLICATIONS,
+        facts: FACT_SCAN_STEP_FACTS,
+    };
+
+    fn new(publications: usize, facts: usize) -> Result<Self> {
+        if publications == 0 || facts == 0 {
+            return Err(StoreError::FactScanBindingMismatch);
+        }
+        Ok(Self {
+            publications,
+            facts,
+        })
+    }
+}
+
+struct AcceptedFactRange {
+    emissions: Range<usize>,
+    page_full: bool,
+}
+
+struct FactScanPageAssembly {
+    cursor: FactScanCursor,
+    frontier_fact_order: u64,
+    limits: FactScanStepLimits,
+    publication_count: usize,
+    fact_count: usize,
+}
+
+impl FactScanPageAssembly {
+    fn new(
+        position: FactScanPosition,
+        frontier_fact_order: u64,
+        limits: FactScanStepLimits,
+    ) -> Result<Self> {
+        if position.fact_order == 0 || position.fact_order > frontier_fact_order {
+            return Err(StoreError::FactScanBindingMismatch);
+        }
+        Ok(Self {
+            cursor: FactScanCursor::Position(position),
+            frontier_fact_order,
+            limits,
+            publication_count: 0,
+            fact_count: 0,
+        })
+    }
+
+    fn position(&self) -> Result<FactScanPosition> {
+        match self.cursor {
+            FactScanCursor::Position(position) => Ok(position),
+            FactScanCursor::Complete => Err(StoreError::FactScanBindingMismatch),
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        matches!(self.cursor, FactScanCursor::Complete)
+            || self.publication_count == self.limits.publications
+            || self.fact_count == self.limits.facts
+    }
+
+    fn accept_publication(
+        &mut self,
+        fact_order: u64,
+        emission_count: usize,
+    ) -> Result<AcceptedFactRange> {
+        if self.is_full() || emission_count == 0 {
+            return Err(StoreError::CorruptFactHistory);
+        }
+        let position = self.position()?;
+        if fact_order != position.fact_order || fact_order > self.frontier_fact_order {
+            return Err(StoreError::CorruptFactHistory);
+        }
+        let start =
+            usize::try_from(position.fact_ordinal).map_err(|_| StoreError::CorruptFactHistory)?;
+        if start >= emission_count {
+            return Err(StoreError::CorruptFactHistory);
+        }
+        let remaining = self
+            .limits
+            .facts
+            .checked_sub(self.fact_count)
+            .ok_or(StoreError::SequenceOverflow)?;
+        let end = start
+            .checked_add(remaining)
+            .map_or(emission_count, |candidate| candidate.min(emission_count));
+        let accepted = end
+            .checked_sub(start)
+            .ok_or(StoreError::CorruptFactHistory)?;
+        self.fact_count = self
+            .fact_count
+            .checked_add(accepted)
+            .ok_or(StoreError::SequenceOverflow)?;
+        self.publication_count = self
+            .publication_count
+            .checked_add(1)
+            .ok_or(StoreError::SequenceOverflow)?;
+
+        self.cursor = if end < emission_count {
+            FactScanCursor::Position(FactScanPosition {
+                fact_order,
+                fact_ordinal: u32::try_from(end).map_err(|_| StoreError::CorruptFactHistory)?,
+            })
+        } else if fact_order == self.frontier_fact_order {
+            FactScanCursor::Complete
+        } else {
+            FactScanCursor::Position(FactScanPosition {
+                fact_order: fact_order
+                    .checked_add(1)
+                    .ok_or(StoreError::CorruptFactHistory)?,
+                fact_ordinal: 0,
+            })
+        };
+
+        Ok(AcceptedFactRange {
+            emissions: start..end,
+            page_full: self.is_full(),
+        })
+    }
+}
+
+struct VerifiedFactPublication {
     fact_order: u64,
     selectable: bool,
     producer_view: VerifiedRunView,
@@ -1200,34 +1395,6 @@ pub struct VerifiedFactPublication {
 }
 
 impl VerifiedFactPublication {
-    /// Returns the exact dense tenant publication order.
-    pub const fn fact_order(&self) -> u64 {
-        self.fact_order
-    }
-
-    /// Returns the verified producer run.
-    pub fn producer_run_id(&self) -> &RunId {
-        self.producer_view.run_id()
-    }
-
-    /// Returns whether this publication belongs to another run and may be selected.
-    ///
-    /// The consuming run's own publications remain in the dense verified prefix
-    /// but are never eligible for the reserved other-run selection contract.
-    pub const fn is_selectable(&self) -> bool {
-        self.selectable
-    }
-
-    /// Returns the exact producing transition.
-    pub const fn transition_ref(&self) -> &TransitionRef {
-        &self.transition_ref
-    }
-
-    /// Returns every emission in exact callback order.
-    pub fn emissions(&self) -> &[FactEmission] {
-        &self.emissions
-    }
-
     fn retained_value(&self, value_ref: &ValueRef) -> Result<&CommittedObject> {
         let key = ObjectAuthorityKey::from_value_ref(value_ref)?;
         self.source_objects
@@ -1251,9 +1418,12 @@ impl VerifiedFactPublication {
             .ok_or(StoreError::CorruptFactHistory)
     }
 
-    fn rehydrate_candidates(&self) -> Result<Vec<FactCandidate<ScannedFact>>> {
-        if !self.selectable {
-            return Ok(Vec::new());
+    fn rehydrate_candidates(
+        &self,
+        emission_range: Range<usize>,
+    ) -> Result<Vec<FactCandidate<ScannedFact>>> {
+        if emission_range.start >= emission_range.end || emission_range.end > self.emissions.len() {
+            return Err(StoreError::CorruptFactHistory);
         }
         let publication = Arc::clone(&self.source_objects);
         let transition = self
@@ -1298,8 +1468,8 @@ impl VerifiedFactPublication {
         }) {
             return Err(StoreError::CorruptFactHistory);
         }
-        let mut candidates = Vec::with_capacity(self.emissions.len());
-        for emission in &self.emissions {
+        let mut candidates = Vec::with_capacity(emission_range.len());
+        for (emission_index, emission) in self.emissions.iter().enumerate() {
             let emission = emission.fields()?;
             let slot = usize::try_from(emission.fact_slot_ordinal)
                 .ok()
@@ -1377,24 +1547,26 @@ impl VerifiedFactPublication {
                 &claim.response_ref,
                 &content_identity,
             )?;
-            let descriptor_ref = emission.fact_descriptor_ref.clone();
-            candidates.push(FactCandidate::new(
-                emission.fact_descriptor_ref,
-                subject,
-                content_identity,
-                logical_identity,
-                self.fact_order,
-                ScannedFact {
-                    selected,
-                    source: Arc::new(CandidateFactSource {
-                        descriptor_ref,
-                        claim_ref: emission.claim_ref,
-                        subject_ref: claim.subject_ref,
-                        response_ref: claim.response_ref,
-                        publication: Arc::clone(&publication),
-                    }),
-                },
-            ));
+            if self.selectable && emission_range.contains(&emission_index) {
+                let descriptor_ref = emission.fact_descriptor_ref.clone();
+                candidates.push(FactCandidate::new(
+                    emission.fact_descriptor_ref,
+                    subject,
+                    content_identity,
+                    logical_identity,
+                    self.fact_order,
+                    ScannedFact {
+                        selected,
+                        source: Arc::new(CandidateFactSource {
+                            descriptor_ref,
+                            claim_ref: emission.claim_ref,
+                            subject_ref: claim.subject_ref,
+                            response_ref: claim.response_ref,
+                            publication: Arc::clone(&publication),
+                        }),
+                    },
+                ));
+            }
         }
         Ok(candidates)
     }
@@ -1457,33 +1629,52 @@ fn validate_fact_component(
 
 /// Store-created verifier for one private dense keyset page.
 ///
-/// A backend may inspect the requested range, but can return a page only by
-/// passing every producer journal through this verifier.
+/// A backend loads ordered full producer publications and submits each one
+/// here. This verifier alone owns step budgets, logical emission ranges, and
+/// continuation advancement.
 pub struct FactScanPageVerifier {
     store_identity: StoreIdentity,
     tenant_scope_id: TenantScopeId,
     consuming_run_id: RunId,
-    next_fact_order: u64,
-    frontier_fact_order: u64,
+    load_start_fact_order: u64,
+    assembly: FactScanPageAssembly,
+    candidates: Vec<FactCandidate<ScannedFact>>,
 }
 
 impl FactScanPageVerifier {
-    pub(super) fn new(
+    fn new(
         store_identity: StoreIdentity,
         tenant_scope_id: TenantScopeId,
         consuming_run_id: RunId,
-        next_fact_order: u64,
+        position: FactScanPosition,
         frontier_fact_order: u64,
     ) -> Result<Self> {
-        if next_fact_order == 0 || next_fact_order > frontier_fact_order {
-            return Err(StoreError::FactScanBindingMismatch);
-        }
+        Self::new_with_limits(
+            store_identity,
+            tenant_scope_id,
+            consuming_run_id,
+            position,
+            frontier_fact_order,
+            FactScanStepLimits::PRODUCTION,
+        )
+    }
+
+    fn new_with_limits(
+        store_identity: StoreIdentity,
+        tenant_scope_id: TenantScopeId,
+        consuming_run_id: RunId,
+        position: FactScanPosition,
+        frontier_fact_order: u64,
+        limits: FactScanStepLimits,
+    ) -> Result<Self> {
+        let load_start_fact_order = position.fact_order;
         Ok(Self {
             store_identity,
             tenant_scope_id,
             consuming_run_id,
-            next_fact_order,
-            frontier_fact_order,
+            load_start_fact_order,
+            assembly: FactScanPageAssembly::new(position, frontier_fact_order, limits)?,
+            candidates: Vec::new(),
         })
     }
 
@@ -1502,28 +1693,38 @@ impl FactScanPageVerifier {
         &self.consuming_run_id
     }
 
-    /// Returns the first dense publication order required by this page.
+    /// Returns the first dense publication order the backend must load.
     pub const fn next_fact_order(&self) -> u64 {
-        self.next_fact_order
+        self.load_start_fact_order
     }
 
     /// Returns the inclusive frozen authorization frontier.
     pub const fn frontier_fact_order(&self) -> u64 {
-        self.frontier_fact_order
+        self.assembly.frontier_fact_order
     }
 
-    /// Verifies one complete producer run and selects its exact publication.
+    /// Returns the maximum number of ordered publication routes to load.
     ///
-    /// Durable backends call this with native producer rows and the exact
-    /// reachable object closure loaded from the authoritative writer.
-    pub fn verify_publication(
-        &self,
+    /// This is a verifier-owned work bound, not a total-prefix validity limit.
+    pub const fn publication_load_limit(&self) -> usize {
+        self.assembly.limits.publications
+    }
+
+    /// Verifies and submits one complete producer publication.
+    ///
+    /// The complete publication is validated even when this page consumes only
+    /// a logical suffix or prefix of its emissions. The returned flag is true
+    /// when the backend must stop loading routes and finalize this page.
+    pub fn submit_publication(
+        &mut self,
         fact_order: u64,
         producer_run_id: RunId,
         commits: Vec<CommittedJournalCommit>,
         objects: Vec<CommittedObject>,
-    ) -> Result<VerifiedFactPublication> {
-        if fact_order < self.next_fact_order || fact_order > self.frontier_fact_order {
+    ) -> Result<bool> {
+        if fact_order != self.assembly.position()?.fact_order
+            || fact_order > self.assembly.frontier_fact_order
+        {
             return Err(StoreError::FactScanBindingMismatch);
         }
         let selectable = producer_run_id != self.consuming_run_id;
@@ -1578,49 +1779,32 @@ impl FactScanPageVerifier {
         {
             return Err(StoreError::CorruptFactHistory);
         }
-        let source_objects = publication_prefix_objects(&view, &containing_head)?;
-        Ok(VerifiedFactPublication {
+        let publication = VerifiedFactPublication {
             fact_order,
             selectable,
-            source_objects,
+            source_objects: publication_prefix_objects(&view, &containing_head)?,
             transition_ref,
             emissions,
             producer_view: view,
-        })
+        };
+        let accepted = self
+            .assembly
+            .accept_publication(fact_order, publication.emissions.len())?;
+        self.candidates
+            .extend(publication.rehydrate_candidates(accepted.emissions)?);
+        Ok(accepted.page_full)
     }
 
-    /// Completes one bounded contiguous page.
-    pub fn complete(self, publications: Vec<VerifiedFactPublication>) -> Result<FactScanPage> {
-        if publications.is_empty() || publications.len() > FACT_SCAN_STEP_PUBLICATIONS {
+    /// Finalizes one verifier-owned bounded contiguous page.
+    ///
+    /// A backend cannot finalize an empty or prematurely truncated route set.
+    pub fn complete(self) -> Result<FactScanPage> {
+        if self.assembly.publication_count == 0 || !self.assembly.is_full() {
             return Err(StoreError::CorruptFactHistory);
         }
-        let mut expected_order = self.next_fact_order;
-        let mut fact_count = 0usize;
-        for publication in &publications {
-            if publication.fact_order != expected_order
-                || publication.fact_order > self.frontier_fact_order
-            {
-                return Err(StoreError::CorruptFactHistory);
-            }
-            fact_count = fact_count.checked_add(publication.emissions.len()).ok_or(
-                StoreError::FactOrderOverflow {
-                    tenant_scope_id: self.tenant_scope_id.clone(),
-                },
-            )?;
-            if fact_count > FACT_SCAN_STEP_FACTS {
-                return Err(StoreError::FactSelectionLimitExceeded);
-            }
-            expected_order =
-                expected_order
-                    .checked_add(1)
-                    .ok_or(StoreError::FactOrderOverflow {
-                        tenant_scope_id: self.tenant_scope_id.clone(),
-                    })?;
-        }
         Ok(FactScanPage {
-            publications,
-            next_fact_order: expected_order,
-            frontier_fact_order: self.frontier_fact_order,
+            candidates: self.candidates,
+            cursor: self.assembly.cursor,
         })
     }
 }
@@ -1668,36 +1852,36 @@ fn journal_prefix_objects(
 
 /// One private verified scan page.
 pub struct FactScanPage {
-    publications: Vec<VerifiedFactPublication>,
-    next_fact_order: u64,
-    frontier_fact_order: u64,
+    candidates: Vec<FactCandidate<ScannedFact>>,
+    cursor: FactScanCursor,
 }
 
 impl FactScanPage {
-    pub(super) fn into_parts(self) -> (Vec<VerifiedFactPublication>, u64, bool) {
-        let complete = self.next_fact_order > self.frontier_fact_order;
-        (self.publications, self.next_fact_order, complete)
+    fn into_parts(self) -> (Vec<FactCandidate<ScannedFact>>, FactScanCursor) {
+        (self.candidates, self.cursor)
     }
 }
 
 impl FactScanSession {
-    fn new(permit: FactScanPermit) -> Self {
+    fn new_with_limits(permit: FactScanPermit, step_limits: FactScanStepLimits) -> Self {
         let accumulators = fact_accumulators(permit.request());
         Self {
             permit,
-            next_fact_order: 1,
+            position: FactScanPosition::INITIAL,
             accumulators,
+            step_limits,
         }
     }
 
     fn consume_page(mut self, page: FactScanPage) -> Result<FactScanStep> {
-        let (publications, next_fact_order, complete) = page.into_parts();
-        consume_fact_publications(&mut self.accumulators, publications)?;
-        self.next_fact_order = next_fact_order;
-        if complete {
-            self.finish().map(Box::new).map(FactScanStep::Complete)
-        } else {
-            Ok(FactScanStep::More(Box::new(self)))
+        let (candidates, cursor) = page.into_parts();
+        consume_fact_candidates(&mut self.accumulators, candidates);
+        match cursor {
+            FactScanCursor::Complete => self.finish().map(Box::new).map(FactScanStep::Complete),
+            FactScanCursor::Position(position) => {
+                self.position = position;
+                Ok(FactScanStep::More(Box::new(self)))
+            }
         }
     }
 
@@ -1724,18 +1908,15 @@ fn fact_accumulators(request: &FactSelectionRequest) -> Vec<FactTopK<ScannedFact
         .collect()
 }
 
-fn consume_fact_publications(
+fn consume_fact_candidates(
     accumulators: &mut [FactTopK<ScannedFact>],
-    publications: Vec<VerifiedFactPublication>,
-) -> Result<()> {
-    for publication in publications {
-        for candidate in publication.rehydrate_candidates()? {
-            for accumulator in &mut *accumulators {
-                accumulator.consider(candidate.clone());
-            }
+    candidates: Vec<FactCandidate<ScannedFact>>,
+) {
+    for candidate in candidates {
+        for accumulator in &mut *accumulators {
+            accumulator.consider(candidate.clone());
         }
     }
-    Ok(())
 }
 
 fn finish_fact_response(
@@ -1789,24 +1970,117 @@ async fn scan_verified_fact_response<B: FactScanBackend>(
         return finish_fact_response(request, frontier, accumulators).map_err(B::Error::from);
     }
 
-    let mut next_fact_order = 1;
+    let mut position = FactScanPosition::INITIAL;
     loop {
         let verifier = FactScanPageVerifier::new(
             store_identity.clone(),
             tenant_scope_id.clone(),
             consuming_run_id.clone(),
-            next_fact_order,
+            position,
             frontier_fact_order,
         )
         .map_err(B::Error::from)?;
         let page = store.backend_fact_scan_page(verifier).await?;
-        let (publications, next, complete) = page.into_parts();
-        consume_fact_publications(&mut accumulators, publications).map_err(B::Error::from)?;
-        if complete {
-            return finish_fact_response(request, frontier, accumulators).map_err(B::Error::from);
+        let (candidates, cursor) = page.into_parts();
+        consume_fact_candidates(&mut accumulators, candidates);
+        match cursor {
+            FactScanCursor::Complete => {
+                return finish_fact_response(request, frontier, accumulators)
+                    .map_err(B::Error::from);
+            }
+            FactScanCursor::Position(next) => position = next,
         }
-        next_fact_order = next;
     }
+}
+
+async fn drive_fact_scan_with_limits<B: FactScanBackend>(
+    store: &B,
+    permit: FactScanPermit,
+    step_limits: FactScanStepLimits,
+) -> std::result::Result<CompletedFactScan, B::Error> {
+    let frontier = permit
+        .frontier()
+        .fields()
+        .map_err(StoreError::from)
+        .map_err(B::Error::from)?
+        .fact_order;
+    let mut session = FactScanSession::new_with_limits(permit, step_limits);
+    if frontier == 0 {
+        return session.finish().map_err(B::Error::from);
+    }
+    loop {
+        let verifier = FactScanPageVerifier::new_with_limits(
+            session.permit.store_identity().clone(),
+            session.permit.tenant_scope_id().clone(),
+            session.permit.consuming_run_id().clone(),
+            session.position,
+            frontier,
+            session.step_limits,
+        )
+        .map_err(B::Error::from)?;
+        let page = store.backend_fact_scan_page(verifier).await?;
+        match session.consume_page(page).map_err(B::Error::from)? {
+            FactScanStep::More(next) => session = *next,
+            FactScanStep::Complete(completed) => return Ok(*completed),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn abandon_fact_scan_after_first_page<B: FactScanBackend>(
+    store: &B,
+    permit: FactScanPermit,
+    fact_limit: usize,
+    expected_fact_order: u64,
+    expected_fact_ordinal: u32,
+) -> std::result::Result<(), B::Error> {
+    let frontier = permit
+        .frontier()
+        .fields()
+        .map_err(StoreError::from)
+        .map_err(B::Error::from)?
+        .fact_order;
+    if frontier == 0 {
+        return Err(B::Error::from(StoreError::FactScanBindingMismatch));
+    }
+    let limits =
+        FactScanStepLimits::new(FACT_SCAN_STEP_PUBLICATIONS, fact_limit).map_err(B::Error::from)?;
+    let session = FactScanSession::new_with_limits(permit, limits);
+    let verifier = FactScanPageVerifier::new_with_limits(
+        session.permit.store_identity().clone(),
+        session.permit.tenant_scope_id().clone(),
+        session.permit.consuming_run_id().clone(),
+        session.position,
+        frontier,
+        limits,
+    )
+    .map_err(B::Error::from)?;
+    let page = store.backend_fact_scan_page(verifier).await?;
+    match session.consume_page(page).map_err(B::Error::from)? {
+        FactScanStep::More(next)
+            if next.position
+                == (FactScanPosition {
+                    fact_order: expected_fact_order,
+                    fact_ordinal: expected_fact_ordinal,
+                }) =>
+        {
+            Ok(())
+        }
+        FactScanStep::More(_) | FactScanStep::Complete(_) => {
+            Err(B::Error::from(StoreError::FactScanBindingMismatch))
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn scan_fact_selection_with_fact_limit<B: FactScanBackend>(
+    store: &B,
+    permit: FactScanPermit,
+    fact_limit: usize,
+) -> std::result::Result<CompletedFactScan, B::Error> {
+    let limits =
+        FactScanStepLimits::new(FACT_SCAN_STEP_PUBLICATIONS, fact_limit).map_err(B::Error::from)?;
+    drive_fact_scan_with_limits(store, permit, limits).await
 }
 
 /// Immutable private routing row coupled atomically to a reserved observation.
@@ -2057,20 +2331,7 @@ async fn verify_fact_selection_rows<B: FactScanBackend>(
             &recorded.frontier,
         )
         .await?;
-        if expected.response.as_bytes() != recorded.response.as_bytes() {
-            return Err(B::Error::from(StoreError::FactScanBindingMismatch));
-        }
-        let closure = derive_response_closure(
-            view,
-            &recorded.authorization_ref,
-            &recorded.response_ref,
-            recorded.response.as_bytes(),
-            &expected.sources,
-        )
-        .map_err(B::Error::from)?;
-        if closure.digest != recorded.response_closure_digest {
-            return Err(B::Error::from(StoreError::InvalidSourceClosure));
-        }
+        compare_recorded_fact_selection(view, &recorded, &expected).map_err(B::Error::from)?;
         let (observation_ref, _, _) = entry
             .observation()
             .ok_or(StoreError::FactScanBindingMismatch)
@@ -2092,6 +2353,82 @@ async fn verify_fact_selection_rows<B: FactScanBackend>(
         return Err(B::Error::from(StoreError::FactScanBindingMismatch));
     }
     Ok(verified_by_observation)
+}
+
+fn compare_recorded_fact_selection(
+    view: &VerifiedRunView,
+    recorded: &RecordedFactSelection,
+    expected: &FactScanEvaluation,
+) -> Result<()> {
+    if expected.response.as_bytes() != recorded.response.as_bytes() {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    let closure = derive_response_closure(
+        view,
+        &recorded.authorization_ref,
+        &recorded.response_ref,
+        recorded.response.as_bytes(),
+        &expected.sources,
+    )?;
+    if closure.digest != recorded.response_closure_digest {
+        return Err(StoreError::InvalidSourceClosure);
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) async fn verify_middle_fact_omission_rejected<B: FactScanBackend>(
+    store: &B,
+    view: &VerifiedRunView,
+) -> std::result::Result<(), B::Error> {
+    let rows = store
+        .backend_load_fact_attestations(FactAttestationLoadVerifier::new(
+            view.store_identity().clone(),
+            view.tenant_scope_id().clone(),
+            view.run_id().clone(),
+        ))
+        .await?;
+    let [row] = rows.as_slice() else {
+        return Err(B::Error::from(StoreError::FactScanBindingMismatch));
+    };
+    let mut recorded = validate_recorded_fact_selection(view, row).map_err(B::Error::from)?;
+    let expected = scan_verified_fact_response(
+        store,
+        view.store_identity(),
+        view.tenant_scope_id(),
+        view.run_id(),
+        &recorded.request,
+        &recorded.frontier,
+    )
+    .await?;
+    let fields = recorded
+        .response
+        .fields()
+        .map_err(StoreError::from)
+        .map_err(B::Error::from)?;
+    let [result] = fields.results.as_slice() else {
+        return Err(B::Error::from(StoreError::FactScanBindingMismatch));
+    };
+    let result = result
+        .fields()
+        .map_err(StoreError::from)
+        .map_err(B::Error::from)?;
+    let [first, _, third] = result.selected.as_slice() else {
+        return Err(B::Error::from(StoreError::FactScanBindingMismatch));
+    };
+    let hostile_result =
+        FactSelectionResult::new(result.query_ordinal, &[first.clone(), third.clone()])
+            .map_err(StoreError::from)
+            .map_err(B::Error::from)?;
+    recorded.response =
+        FactSelectionResponse::new(&fields.request_digest, &fields.frontier, &[hostile_result])
+            .map_err(StoreError::from)
+            .map_err(B::Error::from)?;
+    match compare_recorded_fact_selection(view, &recorded, &expected) {
+        Err(StoreError::FactScanBindingMismatch) => Ok(()),
+        Err(error) => Err(B::Error::from(error)),
+        Ok(()) => Err(B::Error::from(StoreError::FactScanBindingMismatch)),
+    }
 }
 
 /// Dedicated same-store fact-selection operations.
@@ -2199,33 +2536,11 @@ impl<B: FactScanBackend> FactSelectionStore for B {
         &'a self,
         permit: FactScanPermit,
     ) -> AsyncStoreFuture<'a, CompletedFactScan, <Self as RunJournalBackend>::Error> {
-        Box::pin(async move {
-            let frontier = permit
-                .frontier()
-                .fields()
-                .map_err(StoreError::from)
-                .map_err(B::Error::from)?
-                .fact_order;
-            let mut session = FactScanSession::new(permit);
-            if frontier == 0 {
-                return session.finish().map_err(B::Error::from);
-            }
-            loop {
-                let verifier = FactScanPageVerifier::new(
-                    session.permit.store_identity().clone(),
-                    session.permit.tenant_scope_id().clone(),
-                    session.permit.consuming_run_id().clone(),
-                    session.next_fact_order,
-                    frontier,
-                )
-                .map_err(B::Error::from)?;
-                let page = self.backend_fact_scan_page(verifier).await?;
-                match session.consume_page(page).map_err(B::Error::from)? {
-                    FactScanStep::More(next) => session = *next,
-                    FactScanStep::Complete(completed) => return Ok(*completed),
-                }
-            }
-        })
+        Box::pin(drive_fact_scan_with_limits(
+            self,
+            permit,
+            FactScanStepLimits::PRODUCTION,
+        ))
     }
 
     fn verify_drive_fact_selection_observations<'a>(

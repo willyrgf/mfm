@@ -19,7 +19,6 @@ use super::{
     JournalLoadVerifier, ObjectAuthorityKey, PersistedFactScanAttestation, PreparedAppendKind,
     RunAccessAuthorityIssuer, StoreAuthorityContext, StoreError, StoreIdentity, SupportBackend,
     SupportGraphAdmissionVerifier, VerifiedAdmissionSources, VerifiedConfiguredValue,
-    FACT_SCAN_STEP_FACTS, FACT_SCAN_STEP_PUBLICATIONS,
 };
 
 #[derive(Clone)]
@@ -611,7 +610,7 @@ impl ConfiguredValueBackend for AsyncInMemoryRunStore {
 impl FactScanBackend for AsyncInMemoryRunStore {
     fn backend_fact_scan_page<'a>(
         &'a self,
-        verifier: FactScanPageVerifier,
+        mut verifier: FactScanPageVerifier,
     ) -> AsyncStoreFuture<'a, FactScanPage, Self::Error> {
         Box::pin(async move {
             if verifier.store_identity() != self.authority.store_identity() {
@@ -653,29 +652,20 @@ impl FactScanBackend for AsyncInMemoryRunStore {
             }
             routes.sort_by_key(|(fact_order, _)| *fact_order);
 
-            let mut publications = Vec::new();
-            let mut facts = 0usize;
-            for (fact_order, run_id) in routes {
-                if publications.len() == FACT_SCAN_STEP_PUBLICATIONS {
-                    break;
-                }
+            let publication_load_limit = verifier.publication_load_limit();
+            for (fact_order, run_id) in routes.into_iter().take(publication_load_limit) {
                 let run = guard.runs.get(&run_id).ok_or(StoreError::RunNotFound)?;
-                let publication = verifier.verify_publication(
+                let page_full = verifier.submit_publication(
                     fact_order,
                     run_id,
                     run.commits.clone(),
                     reachable_objects(&guard, run)?,
                 )?;
-                let next_facts = facts
-                    .checked_add(publication.emissions().len())
-                    .ok_or(StoreError::SequenceOverflow)?;
-                if !publications.is_empty() && next_facts > FACT_SCAN_STEP_FACTS {
+                if page_full {
                     break;
                 }
-                facts = next_facts;
-                publications.push(publication);
             }
-            verifier.complete(publications)
+            verifier.complete()
         })
     }
 

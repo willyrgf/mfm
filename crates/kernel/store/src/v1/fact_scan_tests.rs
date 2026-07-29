@@ -315,3 +315,183 @@ fn semantic_reference_bound_allows_exact_limit_and_rejects_one_more() {
         Err(StoreError::InvalidSourceClosure)
     ));
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct PageAssemblyTrace {
+    publication_count: usize,
+    fact_count: usize,
+    cursor: FactScanCursor,
+    ranges: Vec<(u64, Range<usize>)>,
+}
+
+fn assemble_publication_counts(
+    emission_counts: &[usize],
+    limits: FactScanStepLimits,
+) -> Vec<PageAssemblyTrace> {
+    let frontier_fact_order = u64::try_from(emission_counts.len()).expect("fixture frontier");
+    let mut cursor = FactScanCursor::Position(FactScanPosition::INITIAL);
+    let mut pages = Vec::new();
+    while let FactScanCursor::Position(position) = cursor {
+        let mut assembly =
+            FactScanPageAssembly::new(position, frontier_fact_order, limits).expect("page");
+        let mut ranges = Vec::new();
+        loop {
+            let current = assembly.position().expect("active page position");
+            let index = usize::try_from(current.fact_order - 1).expect("publication index");
+            let accepted = assembly
+                .accept_publication(current.fact_order, emission_counts[index])
+                .expect("accepted publication");
+            ranges.push((current.fact_order, accepted.emissions));
+            if accepted.page_full {
+                break;
+            }
+        }
+        cursor = assembly.cursor;
+        pages.push(PageAssemblyTrace {
+            publication_count: assembly.publication_count,
+            fact_count: assembly.fact_count,
+            cursor,
+            ranges,
+        });
+    }
+    pages
+}
+
+#[test]
+fn exact_publication_and_fact_step_boundaries_reach_the_frontier() {
+    let limits = FactScanStepLimits::new(FACT_SCAN_STEP_PUBLICATIONS, FACT_SCAN_STEP_FACTS)
+        .expect("production limits");
+
+    let publication_limited =
+        assemble_publication_counts(&vec![1; FACT_SCAN_STEP_PUBLICATIONS + 1], limits);
+    assert_eq!(publication_limited.len(), 2);
+    assert_eq!(
+        (
+            publication_limited[0].publication_count,
+            publication_limited[0].fact_count,
+            publication_limited[0].cursor,
+        ),
+        (
+            FACT_SCAN_STEP_PUBLICATIONS,
+            FACT_SCAN_STEP_PUBLICATIONS,
+            FactScanCursor::Position(FactScanPosition {
+                fact_order: 4_097,
+                fact_ordinal: 0,
+            }),
+        )
+    );
+    assert_eq!(publication_limited[1].publication_count, 1);
+    assert_eq!(publication_limited[1].fact_count, 1);
+    assert_eq!(publication_limited[1].cursor, FactScanCursor::Complete);
+
+    let exact_both = assemble_publication_counts(&vec![2; FACT_SCAN_STEP_PUBLICATIONS], limits);
+    assert_eq!(exact_both.len(), 1);
+    assert_eq!(exact_both[0].publication_count, 4_096);
+    assert_eq!(exact_both[0].fact_count, 8_192);
+    assert_eq!(exact_both[0].cursor, FactScanCursor::Complete);
+
+    let both_with_successor =
+        assemble_publication_counts(&vec![2; FACT_SCAN_STEP_PUBLICATIONS + 1], limits);
+    assert_eq!(both_with_successor.len(), 2);
+    assert_eq!(both_with_successor[0].publication_count, 4_096);
+    assert_eq!(both_with_successor[0].fact_count, 8_192);
+    assert_eq!(
+        both_with_successor[0].cursor,
+        FactScanCursor::Position(FactScanPosition {
+            fact_order: 4_097,
+            fact_ordinal: 0,
+        })
+    );
+    assert_eq!(both_with_successor[1].publication_count, 1);
+    assert_eq!(both_with_successor[1].fact_count, 2);
+    assert_eq!(both_with_successor[1].cursor, FactScanCursor::Complete);
+}
+
+#[test]
+fn fact_budget_continues_within_publication_without_duplication() {
+    let limits = FactScanStepLimits::new(FACT_SCAN_STEP_PUBLICATIONS, FACT_SCAN_STEP_FACTS)
+        .expect("production limits");
+    let pages = assemble_publication_counts(&vec![3; FACT_SCAN_STEP_PUBLICATIONS + 1], limits);
+
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].publication_count, 2_731);
+    assert_eq!(pages[0].fact_count, 8_192);
+    assert_eq!(
+        pages[0].cursor,
+        FactScanCursor::Position(FactScanPosition {
+            fact_order: 2_731,
+            fact_ordinal: 2,
+        })
+    );
+    assert_eq!(pages[0].ranges.last(), Some(&(2_731, 0..2)));
+
+    assert_eq!(pages[1].publication_count, 1_367);
+    assert_eq!(pages[1].fact_count, 4_099);
+    assert_eq!(pages[1].ranges.first(), Some(&(2_731, 2..3)));
+    assert_eq!(pages[1].cursor, FactScanCursor::Complete);
+    assert_eq!(
+        pages.iter().map(|page| page.fact_count).sum::<usize>(),
+        12_291
+    );
+
+    let restarted = assemble_publication_counts(&vec![3; FACT_SCAN_STEP_PUBLICATIONS + 1], limits);
+    assert_eq!(restarted, pages);
+}
+
+#[test]
+fn terminal_cursor_does_not_increment_the_maximum_fact_order() {
+    let limits = FactScanStepLimits::new(1, 1).expect("one-item limits");
+    let mut assembly = FactScanPageAssembly::new(
+        FactScanPosition {
+            fact_order: u64::MAX,
+            fact_ordinal: 0,
+        },
+        u64::MAX,
+        limits,
+    )
+    .expect("maximum-order page");
+
+    let accepted = assembly
+        .accept_publication(u64::MAX, 1)
+        .expect("terminal publication");
+    assert_eq!(accepted.emissions, 0..1);
+    assert!(accepted.page_full);
+    assert_eq!(assembly.cursor, FactScanCursor::Complete);
+}
+
+#[tokio::test]
+async fn memory_three_fact_scan_restarts_and_replays_with_nonempty_attestation() {
+    let namespace =
+        super::super::test_support::LegalAdmissionFixture::new(70).expect("fixture namespace");
+    let fixture = super::super::test_support::FactScanConformanceFixture::new(
+        namespace.store_identity().clone(),
+        namespace.tenant_scope_id().clone(),
+        71,
+        72,
+        73,
+    )
+    .expect("fact scan fixture");
+    fixture
+        .producer()
+        .certified_artifacts()
+        .expect("producer certified artifacts");
+    let (store, issuer) =
+        super::super::AsyncInMemoryRunStore::new(namespace.store_identity().clone());
+    fixture
+        .producer()
+        .provision_in_memory(&store)
+        .expect("producer configured value");
+    fixture
+        .late_producer()
+        .provision_in_memory(&store)
+        .expect("late producer configured value");
+    fixture
+        .consumer()
+        .provision_in_memory(&store)
+        .expect("consumer configured value");
+
+    fixture
+        .verify_on(&store, &issuer)
+        .await
+        .expect("memory fact scan conformance");
+}

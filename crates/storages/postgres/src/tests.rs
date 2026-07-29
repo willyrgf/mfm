@@ -16,7 +16,9 @@ use mfm_journal::v1::{
 };
 use mfm_qualified_run_test_support::QualifiedRunFixture;
 use mfm_spec::v1::RetainedValueContract;
-use mfm_store::v1::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
+use mfm_store::v1::test_support::{
+    FactScanConformanceFixture, LegalAdmissionFixture, PreparedLegalAdmission,
+};
 use mfm_store::v1::{
     AdmissionSourceStore, AppendOutcome, ConfiguredValueStore, ExistingRunAppendMaterial,
     NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
@@ -784,6 +786,46 @@ async fn qualified_run_fixture_admits_loads_qualifies_and_prepares_a_frame() {
     assert_eq!(frame.config().bytes(), fixture.configured_bytes());
     assert_eq!(frame.input().bytes(), b"{}");
     assert!(frame.context().is_none());
+
+    drop(store);
+    drop(issuer);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn fact_scan_continuation_attestation_and_replay_match_memory() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("fact_scan_continuation").await;
+    let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
+        .await
+        .expect("qualify fact-scan store");
+    let namespace = LegalAdmissionFixture::for_store(store.store_identity().clone(), 70)
+        .expect("fact-scan namespace");
+    let fixture = FactScanConformanceFixture::new(
+        store.store_identity().clone(),
+        namespace.tenant_scope_id().clone(),
+        71,
+        72,
+        73,
+    )
+    .expect("fact-scan fixture");
+    for run in [
+        fixture.producer(),
+        fixture.late_producer(),
+        fixture.consumer(),
+    ] {
+        provision_configured_value(
+            &database.pool,
+            run.configured_binding(),
+            run.configured_bytes(),
+        )
+        .await;
+    }
+
+    fixture
+        .verify_on(&store, &issuer)
+        .await
+        .expect("PostgreSQL fact-scan conformance");
 
     drop(store);
     drop(issuer);

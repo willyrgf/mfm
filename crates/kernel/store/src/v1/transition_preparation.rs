@@ -552,12 +552,20 @@ fn append_settlement_delta(
         node_id,
         NodePhase::Terminal,
     )?);
-    for binding in &settlement.output_bindings {
-        entries.push(BindingDeltaEntry::output_binding(binding)?);
-    }
-    for emission in &settlement.fact_emissions {
-        entries.push(BindingDeltaEntry::fact_binding(emission)?);
-    }
+    let mut output_entries = settlement
+        .output_bindings
+        .iter()
+        .map(BindingDeltaEntry::output_binding)
+        .collect::<mfm_journal::v1::Result<Vec<_>>>()?;
+    output_entries.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    entries.extend(output_entries);
+    let mut fact_entries = settlement
+        .fact_emissions
+        .iter()
+        .map(BindingDeltaEntry::fact_binding)
+        .collect::<mfm_journal::v1::Result<Vec<_>>>()?;
+    fact_entries.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    entries.extend(fact_entries);
     Ok(())
 }
 

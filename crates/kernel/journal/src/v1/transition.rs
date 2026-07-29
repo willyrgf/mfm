@@ -681,7 +681,10 @@ impl TransitionBody {
 }
 
 impl BindingDelta {
-    /// Constructs and validates a non-empty ordered binding delta.
+    /// Validates and constructs a non-empty binding delta already in canonical wire order.
+    ///
+    /// This constructor does not reorder repeated variant groups or assign semantic ordinal
+    /// meaning to their wire positions.
     pub fn new(entries: &[BindingDeltaEntry]) -> Result<Self> {
         Self::from_canonical_value(cv_array(
             entries.iter().map(|value| value.canonical_value()),
