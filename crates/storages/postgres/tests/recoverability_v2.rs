@@ -16,7 +16,7 @@ use recoverability_v2::{
 };
 
 const CONSUMER: &str = "mfm-storage-postgres";
-const TOTAL_VECTOR_COUNT: usize = 576;
+const TOTAL_VECTOR_COUNT: usize = 578;
 const OWNER_VECTOR_COUNT: usize = 116;
 static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

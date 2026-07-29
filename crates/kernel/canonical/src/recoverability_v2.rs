@@ -3150,17 +3150,13 @@ fn validate_shape_definition(
                 "array schema node",
             )?;
             validate_collection_bounds(object)?;
-            validate_ordering_contract(required_string(
-                object,
-                "ordering",
-                RecoverabilityErrorCode::InvalidAnnex,
-            )?)?;
+            let ordering =
+                required_string(object, "ordering", RecoverabilityErrorCode::InvalidAnnex)?;
+            validate_ordering_contract(ordering)?;
             required_bool(object, "unique", RecoverabilityErrorCode::InvalidAnnex)?;
-            validate_shape_definition(
-                required_value(object, "items", RecoverabilityErrorCode::InvalidAnnex)?,
-                schemas,
-                depth + 1,
-            )?;
+            let items = required_value(object, "items", RecoverabilityErrorCode::InvalidAnnex)?;
+            validate_shape_definition(items, schemas, depth + 1)?;
+            validate_ordering_item_fields(ordering, items, schemas, depth + 1)?;
         }
         "object" => {
             require_exact_keys(
@@ -3515,6 +3511,75 @@ fn validate_ordering_contract(ordering: &str) -> std::result::Result<(), Recover
             RecoverabilityErrorCode::InvalidAnnex,
             "array schema uses an unknown ordering contract",
         ))
+    }
+}
+
+fn validate_ordering_item_fields(
+    ordering: &str,
+    items: &Value,
+    schemas: &BTreeMap<String, SchemaDefinition>,
+    depth: usize,
+) -> std::result::Result<(), RecoverabilityError> {
+    let fields = if let Some(field) = ordering.strip_prefix("field:") {
+        vec![field]
+    } else if let Some(fields) = ordering.strip_prefix("tuple:") {
+        fields.split(',').collect()
+    } else {
+        return Ok(());
+    };
+    let item_object = resolve_ordering_item_object(items, schemas, depth)?;
+    let item_fields = required_array(item_object, "fields", RecoverabilityErrorCode::InvalidAnnex)?;
+    for ordering_field in fields {
+        let required = item_fields.iter().any(|field| {
+            field.as_object().is_some_and(|field| {
+                field.get("name").and_then(Value::as_str) == Some(ordering_field)
+                    && field.get("presence").and_then(Value::as_str) == Some("required")
+            })
+        });
+        if !required {
+            return Err(RecoverabilityError::new(
+                RecoverabilityErrorCode::InvalidAnnex,
+                "array ordering field is absent or optional in its item schema",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_ordering_item_object<'a>(
+    shape: &'a Value,
+    schemas: &'a BTreeMap<String, SchemaDefinition>,
+    depth: usize,
+) -> std::result::Result<&'a Map<String, Value>, RecoverabilityError> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(RecoverabilityError::new(
+            RecoverabilityErrorCode::InvalidAnnex,
+            "array ordering item resolution exceeds its bound",
+        ));
+    }
+    let object = shape.as_object().ok_or_else(|| {
+        RecoverabilityError::new(
+            RecoverabilityErrorCode::InvalidAnnex,
+            "array ordering item schema is not an object",
+        )
+    })?;
+    match required_string(object, "kind", RecoverabilityErrorCode::InvalidAnnex)? {
+        "object" => Ok(object),
+        "reference" => {
+            let contract =
+                required_string(object, "contract", RecoverabilityErrorCode::InvalidAnnex)?;
+            let target = schemas.get(contract).ok_or_else(|| {
+                RecoverabilityError::new(
+                    RecoverabilityErrorCode::InvalidAnnex,
+                    "array ordering item reference is not registered",
+                )
+            })?;
+            resolve_ordering_item_object(&target.shape, schemas, depth + 1)
+        }
+        _ => Err(RecoverabilityError::new(
+            RecoverabilityErrorCode::InvalidAnnex,
+            "array field ordering does not resolve to an object item schema",
+        )),
     }
 }
 

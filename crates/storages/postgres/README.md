@@ -210,7 +210,7 @@ DATABASE_URL=postgresql://postgres@127.0.0.1:5432/postgres \
     --features parity-tests --test recoverability-v2
 ```
 
-The dedicated `recoverability-v2` target runs all 576 shared corpus vectors through
+The dedicated `recoverability-v2` target runs all 578 shared corpus vectors through
 a physical blob round trip. Package tests cover the closed catalog,
 qualification, privileges, rollback/head integrity, advisory-lock behavior,
 idempotency, and backend parity.

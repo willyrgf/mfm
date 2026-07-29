@@ -476,6 +476,47 @@ fn hostile_candidate_and_value_text_never_enters_public_errors() {
 }
 
 #[test]
+fn annex_rejects_ordering_fields_absent_from_referenced_item_objects() {
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
+    let mut candidate: Value =
+        serde_json::from_slice(contract.annex_bytes()).expect("annex candidate");
+    let descriptor = candidate["schemas"]
+        .as_array_mut()
+        .expect("schemas")
+        .iter_mut()
+        .find(|schema| schema["contract"] == "mfm.certified-settlement-contract.v1")
+        .expect("certified settlement schema");
+    let fact_slots = descriptor["shape"]["fields"]
+        .as_array_mut()
+        .expect("settlement fields")
+        .iter_mut()
+        .find(|field| field["name"] == "fact_slots")
+        .expect("fact slots");
+    fact_slots["type"]["ordering"] = Value::String("field:emission_ordinal".to_owned());
+
+    let mut descriptor_preimage = descriptor.clone();
+    descriptor_preimage
+        .as_object_mut()
+        .expect("schema descriptor")
+        .remove("schema_id");
+    let descriptor_preimage = contract
+        .strict_decode(
+            "mfm.schema-descriptor.v1",
+            &canonical_value_bytes(&descriptor_preimage),
+        )
+        .expect("mutated schema descriptor preimage");
+    let mutated_schema_id = contract
+        .derive_schema_id(&descriptor_preimage)
+        .expect("mutated schema identity");
+    descriptor["schema_id"] = Value::String(mutated_schema_id.to_string());
+
+    let error =
+        RecoverabilityContractV2::validate_annex_candidate(&canonical_value_bytes(&candidate))
+            .expect_err("ordering field absent from referenced item object");
+    assert_eq!(error.code(), RecoverabilityErrorCode::InvalidAnnex);
+}
+
+#[test]
 fn candidate_annex_rejects_every_noncanonical_reference_cycle() {
     let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let mut candidate: Value =

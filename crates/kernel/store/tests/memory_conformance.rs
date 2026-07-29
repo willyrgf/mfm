@@ -8,11 +8,11 @@ use recoverability_v2_support::{
 };
 
 const CONSUMER: &str = "mfm-store-memory";
-const TOTAL_VECTOR_COUNT: usize = 576;
+const TOTAL_VECTOR_COUNT: usize = 578;
 const OWNER_VECTOR_COUNT: usize = 116;
 
 #[test]
-fn memory_store_executes_all_576_frozen_recoverability_vectors() {
+fn memory_store_executes_all_578_frozen_recoverability_vectors() {
     let mut vector_ids = BTreeSet::new();
     for_each_vector(|vector| {
         assert_store_vector_binding(vector);

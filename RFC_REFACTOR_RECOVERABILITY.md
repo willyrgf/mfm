@@ -4360,8 +4360,8 @@ provider-controlled content.
 
 ## Canonical Schema and Golden-Vector Gate
 
-Gate status: **closed for the implemented recoverability v2 core** by the current C11 artifact
-set:
+Gate status: **closed for the implemented recoverability v2 core** by the corrected
+recoverability v2 artifact set:
 
 - `contracts/recoverability/v2/annex.json` — the normative machine-readable schema registry;
 - `contracts/recoverability/v2/corpus.json` — the shared positive/negative canonical-vector
@@ -4372,26 +4372,37 @@ The artifacts are the byte-level authority consumed by the current memory, Postg
 replay, app, CLI, and REST implementation. They prohibit later changes to bytes, identities, tags,
 or semantics without a new version.
 
-Exact artifact metadata derived from the current C11 bytes is:
+The initial C11 v2 ledger is superseded because its certified-settlement schema named the absent
+`emission_ordinal` item field as the ordering key for `fact_slots`, rejecting every nonempty
+`fact_slots` value. That v2 artifact set existed only in a local, unpublished commit and no v2 data
+had been persisted, so the correction is an in-place v2 re-freeze rather than a v3 or compatibility
+path. The corrected bytes below are the sole frozen v2 authority; v1 remains byte-identical.
+
+Exact artifact metadata derived from the corrected bytes is:
 
 ```text
-C11_ARTIFACT_METADATA
-annex_sha256: d6ef3644581094b1d08812f71a6a05fdaa935972a8b63ab0af818ef4179a0ba4
-corpus_sha256: b41900112b6bb90c350c25897cbc24ba81977da77eb892c32519042c1647fe32
-readme_sha256: 15fc5de051356936180db26927dc7d7b44341f774c9b1b46395741f3bf96085a
-annex_byte_count: 223651
-corpus_byte_count: 1709958
+RECOVERABILITY_V2_ARTIFACT_METADATA
+annex_sha256: bf1065f32a8249f69b9a82f19be2a221d1db5b683fa439ec6f701c42666b3ff8
+corpus_sha256: a2b249e054e7c6e85edfd91a6f3c6c9fc9588f65a9f3dfbfe0eac08f9f0be7a9
+readme_sha256: 2adb381aca75c126746fdca28b2b84105dee5144c4e49c35cef6e899d9fc5217
+annex_byte_count: 223652
+corpus_byte_count: 1728876
 annex_domain_count: 26
 annex_schema_count: 258
 annex_invariant_clause_count: 233
-corpus_positive_case_count: 433
-corpus_negative_case_count: 59
+corpus_positive_case_count: 434
+corpus_negative_case_count: 60
 corpus_relational_case_count: 84
-corpus_total_case_count: 576
-corpus_schema_acceptance_case_count: 379
-corpus_codec_rejection_case_count: 27
+corpus_total_case_count: 578
+corpus_schema_acceptance_case_count: 380
+corpus_codec_rejection_case_count: 28
 corpus_relational_rejection_case_count: 32
 ```
+
+The corrected corpus includes the ordered
+`schema/mfm.certified-settlement-contract.v1/nonempty-fact-slots` positive vector and the reversed
+`codec/invalid-order/certified-fact-slots` rejection. Both execute through all nine mandatory
+consumers.
 
 The logical schemas in this RFC obtain their frozen current encoding only through the versioned
 canonical schema annex. Rust layout, serde defaults, database column order, and backend-specific
@@ -4433,7 +4444,7 @@ advancement; publication without facts; fact emission without publication order;
 mismatch; candidate exclusion and final commit-digest inclusion of assigned coordinates; and
 admission under a changed executable identity.
 Canonical, ids, certifier, executor, memory store, PostgreSQL store, runtime, replay, and trace
-export execute all 576 vectors through the same corpus and shared domain-free
+export execute all 578 vectors through the same corpus and shared domain-free
 codec/digest/fold implementation.
 
 Schema freeze followed every contract-shaping prototype and inventory retained as core-gate
@@ -4442,8 +4453,8 @@ including framework/executor expansion, production reads, request totality, the 
 executor/resource policies, fact selection, admission probes, evidence and fact consumers, legacy
 history export, and historical-executable isolation. Those results shaped the frozen schemas; later
 implementation changes cannot silently add a field or reinterpret a tag. A deliberate
-persisted-contract change requires a new version and, under this pre-production contract, explicit
-rejection rather than a compatibility reader.
+persisted-contract change after this corrective unpublished re-freeze requires a new version and,
+under this pre-production contract, explicit rejection rather than a compatibility reader.
 
 ## Store and Postgres Shape
 
@@ -5487,7 +5498,7 @@ contract. All six steps of the fixed sequence are closed:
 3. **Identity and schema freeze — closed:** the commit-2 artifact set fixes node-occurrence
    derivation, terminal/dependency contracts, every canonical persisted schema, and the complete
    golden-vector corpus. Exact artifact hashes and counts are recorded in the searchable
-   `C11_ARTIFACT_METADATA` ledger above.
+   `RECOVERABILITY_V2_ARTIFACT_METADATA` ledger above.
 4. **Implementation package plan — closed:** crate ownership, dependency order, deletion
    checkpoints, focused verification, and final integration responsibility were assigned for every
    package below.

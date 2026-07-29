@@ -1505,7 +1505,7 @@ fn credentials_injected_below_target_entry_never_reach_retained_surfaces() {
 }
 
 #[test]
-fn all_576_frozen_vectors_are_consumed_by_the_shared_authority() {
+fn all_578_frozen_vectors_are_consumed_by_the_shared_authority() {
     recoverability_v2::run_consumer("mfm-executor", |owner| {
         recoverability_v2::assert_lower_layer_owner_vector(owner);
         assert_executor_owner_vector(owner);

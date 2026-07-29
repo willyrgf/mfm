@@ -7,12 +7,12 @@ use serde_json::Value;
 
 const ANNEX_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v2/annex.json");
 const CORPUS_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v2/corpus.json");
-const ANNEX_BYTE_LENGTH: usize = 223_651;
-const CORPUS_BYTE_LENGTH: usize = 1_709_958;
-const ANNEX_SHA256_HEX: &str = "d6ef3644581094b1d08812f71a6a05fdaa935972a8b63ab0af818ef4179a0ba4";
-const CORPUS_SHA256_HEX: &str = "b41900112b6bb90c350c25897cbc24ba81977da77eb892c32519042c1647fe32";
-const POSITIVE_VECTOR_COUNT: usize = 433;
-const NEGATIVE_VECTOR_COUNT: usize = 59;
+const ANNEX_BYTE_LENGTH: usize = 223_652;
+const CORPUS_BYTE_LENGTH: usize = 1_728_876;
+const ANNEX_SHA256_HEX: &str = "bf1065f32a8249f69b9a82f19be2a221d1db5b683fa439ec6f701c42666b3ff8";
+const CORPUS_SHA256_HEX: &str = "a2b249e054e7c6e85edfd91a6f3c6c9fc9588f65a9f3dfbfe0eac08f9f0be7a9";
+const POSITIVE_VECTOR_COUNT: usize = 434;
+const NEGATIVE_VECTOR_COUNT: usize = 60;
 const RELATIONAL_VECTOR_COUNT: usize = 84;
 const TOTAL_VECTOR_COUNT: usize =
     POSITIVE_VECTOR_COUNT + NEGATIVE_VECTOR_COUNT + RELATIONAL_VECTOR_COUNT;
@@ -77,7 +77,7 @@ impl<'a> CorpusVector<'a> {
     }
 }
 
-/// Visits all 576 frozen vector objects without filtering or copying corpus authority.
+/// Visits all 578 frozen vector objects without filtering or copying corpus authority.
 ///
 /// This optional visitor is used by consumers that must persist every corpus
 /// object; the generic executor below does not require a second traversal.
