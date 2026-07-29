@@ -88,10 +88,11 @@ wrapper result are mandatory, never optional.
 
 Within one run the journal is totally ordered, while the certified graph remains a partial order.
 Strict dependencies are sequential; independent ready siblings may have external calls in flight
-concurrently under different drivers. One closed scheduler rule first settles usable committed
-evidence, then commits ready local work, then authorizes the access-eligible occurrence having the
-fewest committed authorizations. This preserves fan-out without claims, lanes, leases, or hidden
-runtime policy.
+concurrently under different drivers. One closed scheduler rule first blocks on integrity, reports
+an existing closure, and rejects the impossible open/all-terminal fold before it settles usable
+committed evidence, commits ready local work, or authorizes the access-eligible occurrence having
+the fewest committed authorizations. Operational blocks and ordinary waiting follow those open-run
+actions. This preserves fan-out without claims, lanes, leases, or hidden runtime policy.
 
 Framework and executor pre/post semantics do not add a runtime envelope. An exact entry-point
 profile performs one deterministic expansion before certification. It may inject ordinary
@@ -331,9 +332,10 @@ evidence, and previous journal head.
 : The canonical before/input/execution/result/after representation of one semantic transition.
 
 **Commit batch**
-: One atomic store append having exactly one legal purpose: run admission, one semantic transition
-with optional structural closure, one access authorization, or one access observation. Each purpose
-may bind its required or newly admitted immutable objects.
+: One atomic store append carrying exactly one of the eight frozen `BatchPurpose` tags. Each tag
+projects onto one of four structural variants: run admission, one semantic transition with optional
+structural closure, one access authorization, or one access observation. Each purpose may bind its
+required or newly admitted immutable objects.
 
 **Transition input manifest**
 : The exact typed bindings consumed by a state, including source lineage, config, context, selected
@@ -1204,11 +1206,15 @@ effect settlement:
   + RunClosed?                         # when this transition terminalizes the run
 ```
 
-`effect request` and `effect settlement` are typed cases of the one semantic-transition shape, not
-additional batch purposes. There is exactly one top-level record except when `RunClosed` follows
-the terminal transition. A batch never combines an authorization or observation with a semantic
-transition, another audit record, admission, or closure. Observation therefore commits before the
-pure reducer constructs a consuming transition.
+The eight frozen `BatchPurpose` tags are `run_admission`, `pure_settlement`, `read_settlement`,
+`dependency_skip`, `external_access_authorization`, `external_access_observation`,
+`effect_request`, and `effect_settlement`. They project onto four exhaustive
+`LegalCommitBatchFields` structural variants: `RunAdmission`, `Transition`, `Authorization`, and
+`Observation`. Effect request and effect settlement are typed transition-body cases and distinct
+frozen batch-purpose tags, but both use the `Transition` structural variant. There is exactly one
+top-level record except when `RunClosed` follows the terminal transition. A batch never combines
+an authorization or observation with a semantic transition, another audit record, admission, or
+closure. Observation therefore commits before the pure reducer constructs a consuming transition.
 
 The admission batch has an explicit genesis predecessor, establishes the deterministic initial
 state digest, and contains no audit or closure record. `RunClosed` is legal only because closure is
@@ -1456,7 +1462,7 @@ Ownership is exhaustive:
 | Composite planning, graph typing, expansion applicability, terminal/dependency totality | Certifier executes the exact pure planner and mints `CertifiedTypedSpec`. | Verify retained certificate, graph, references, and hashes; do not rerun the planner during append. |
 | Request authorship, observation acceptance, domain failure, reduction, evidence semantics, outputs, and facts | Runtime invokes the selected callback under the exact executable/catalog gate and seals its result. | Verify the sealed proof binds exact predecessor, spec, executable/component references, manifest, request/observation, candidate bytes, and result digests; do not execute domain callbacks. |
 | Read readiness and intent | Runtime authors the first request and seals `VerifiedReadIntentCandidate`; later retries load the frozen intent. | Rederive structural readiness and exact selected contracts; atomically establish the first `FrozenReadIntent` or require exact equality thereafter. |
-| Observation selection and evidence-gap retry | Runtime scans the complete predecessor-visible structurally consumable sequence through the exact callback. It seals every verdict through the first settlement or invalid evidence; only a complete scan with no settlement authors another access. | Rederive the ordered structural sequence, callback-input-kind legality, frozen-intent equality, access eligibility, current-head compare-and-swap, and the proof's exact coverage; never decide sufficiency or invalidity. |
+| Observation selection and evidence-gap retry | Runtime scans the complete predecessor-visible structurally consumable sequence through the exact callback and seals every verdict. It remembers the first settlement without replacing it with a later settlement; any invalid evidence anywhere, including after the remembered settlement, blocks. Only a complete all-insufficient scan authors another access. | Rederive the ordered structural sequence, callback-input-kind legality, frozen-intent equality, access eligibility, current-head compare-and-swap, and the proof's exact coverage; never decide sufficiency or invalidity. |
 | Effect request and settlement | Runtime authors the request or verifies terminal evidence and seals the exact transition candidate. | Require the legal node slot, immutable request/binding/key, compatible observation chain, one settlement, and structural fold. |
 | Executor delivery frontier, downstream evidence, and resource ownership | The qualified executor supplies its append-only delivery suffix; runtime invokes the admitted pure verifier and settler for the exact binding and terminal evidence. | Verify retained suffix hashes, predecessor continuity, finite bounds, effect/request/binding/resource identities, terminal tombstone shape, and sealed-verifier binding; never query mutable executor state or infer destination finality. |
 | Dependency failure, skip, and semantic closure | Runtime seals the callback-owned terminal result and any transition candidate; no callback is invoked for a structurally skipped node. | Rederive dependency truth-table consequences, deterministic skip reason, terminality of every occurrence, pending-effect exclusion, closure digest, and post-closure audit-tail legality. |
@@ -1945,13 +1951,15 @@ authorizations for the occurrence to share one frontier.
 Compatibility is immutable. Audit-only interleaving, another node's transition, or another
 compatible observation does not erase it. A settlement, skip, or semantic closure makes it
 structurally non-consumable at later heads but does not retroactively alter its status at an earlier
-transition predecessor. Runtime scans structurally consumable observations in journal order through
-the certified callback. The first one producing `Settlement` wins; `InvalidEvidence` blocks under
-the exact state contract.
+transition predecessor. Runtime evaluates the complete structurally consumable observation suffix
+in journal order through the certified callback. It remembers the first `Settlement` and continues;
+a later `Settlement` cannot replace it, and `InvalidEvidence` anywhere in the suffix, including
+after that remembered settlement, blocks under the exact state contract.
 `InsufficientEvidence` does not make that observation stale and does not block examining a later
 compatible observation. All observations not consumed by the winning transition remain immutable
 audit-only history. The winning settlement and latest-head compare-and-swap, not the original
-authorization head, perform consumption.
+authorization head, perform consumption. Only a complete all-`InsufficientEvidence` suffix may
+authorize another access.
 
 Live derivation evaluates `structurally_consumable_at` at the currently loaded head. Store append
 validation uses the candidate transition's exact `before.journal_head`. Recorded-history
@@ -1959,11 +1967,11 @@ verification uses that same historical prefix for each consuming transition rath
 evaluating every observation against the final or closed run.
 
 The sealed runtime semantic proof binds the complete ordered list of predecessor-visible,
-compatible, structurally consumable observations and the callback verdict for every element through
-the chosen one. It proves that every earlier element was `InsufficientEvidence`, that none was
-omitted, and that the recorded consumed observation was the first `Settlement`; an
-`InvalidEvidence` verdict cannot be skipped. The store rederives the complete structural list and
-checks this binding without executing the callback.
+compatible, structurally consumable observations and every callback verdict. It proves that no
+element was omitted, every element before the recorded consumed observation was
+`InsufficientEvidence`, the recorded consumed observation was the first `Settlement`, later
+settlements did not replace it, and no `InvalidEvidence` occurred anywhere. The store rederives the
+complete structural list and checks this binding without executing the callback.
 
 The store rejects cross-run, cross-node, cross-capability, cross-`capability_operation_id`,
 cross-request, wrong-schema, incompatible, structurally non-consumable, callback-unaccepted, and
@@ -1991,10 +1999,12 @@ Rules:
 - Exactly one state-authored request exists for the node occurrence. The first authorization
   freezes it; every retry reuses that committed intent and creates a distinct authorization.
 - The state contract examines currently structurally consumable observations in journal order. The
-  first `Settlement` fixes the exact consumed observation. If every such observation returns
-  `InsufficientEvidence`, `drive_once` authorizes another call with the same request instead of
-  repeatedly retrying a no-op settlement. After persistence, runtime consults only immutable
-  journal order—not wall-clock arrival time, retry count, or worker identity—to order candidates.
+  complete suffix is evaluated, the first `Settlement` is remembered as the exact consumed
+  observation, no later settlement replaces it, and any `InvalidEvidence` anywhere blocks. If every
+  such observation returns `InsufficientEvidence`, `drive_once` authorizes another call with the
+  same request instead of repeatedly retrying a no-op settlement. After persistence, runtime
+  consults only immutable journal order—not wall-clock arrival time, retry count, or worker
+  identity—to order candidates.
 - `Returned` evidence may settle the state only after the state verifier accepts it.
 - `DidNotEnter` and `Indeterminate` may settle only through the certified typed failure policy.
   Unmatched authorizations never produce state output.
@@ -2053,11 +2063,12 @@ single owner of its `delivery_audit_ref`. The state-owned pure verifier checks i
 original inputs, immutable request, certified executor binding, provenance, external identity, and
 assurance/finality policy. Only then may a semantic transition settle the node.
 
-Compatible terminal observations are scanned in journal order. The first `Settlement` fixes the
-consumed observation. `InvalidEvidence` is an integrity failure and returns `Waiting` without
-trying another observation or inventing a domain result. If every terminal observation is
-`InsufficientEvidence`, recovery creates a fresh authorization and calls `ensure` again with the
-same effect key and request digest. Access-record identity is never used as the effect key.
+Compatible terminal observations are scanned completely in journal order. The first `Settlement`
+is remembered as the consumed observation while the scan continues; a later settlement cannot
+replace it, and `InvalidEvidence` anywhere in the suffix is an integrity failure. If every terminal
+observation is `InsufficientEvidence`, recovery creates a fresh authorization and calls `ensure`
+again with the same effect key and request digest. Access-record identity is never used as the
+effect key.
 
 An audit record never:
 
@@ -2905,17 +2916,17 @@ DriveOutcome =
 5. appends against the exact per-run journal head; and
 6. returns without retaining semantic process state.
 
-One audited operation may append its authorization and observation as two distinct journal
-commits. The “one action” bound is one new live operation, not one physical store append.
+One live-access drive may append its authorization and observation as two distinct journal commits.
+Once the observation commits, that invocation returns `Advanced` at the observation head without
+committing a settlement or performing a second live operation. The “one action” bound is therefore
+one new live operation, not one physical store append.
 
-After committing an observation, `drive_once` purely scans the retained structurally consumable
-observations. It returns `Advanced` only when a settlement candidate now exists.
-`Returned(Pending { .. })`
-or all-`InsufficientEvidence` returns `Waiting::RetryableEvidenceGap` after preserving the audit
-record; invalid evidence returns `Waiting::IntegrityBlock`. A later host call may retry according to
-its backoff and budget, but an explicit host drive loop stops on this result and never hot-loops
-another live call. Missing capabilities and other operational prerequisites return
-`Waiting::OperationalBlock`.
+The next independent `drive_once` reloads the resulting journal and performs the complete-suffix
+decision. Invalid evidence anywhere returns `Waiting::IntegrityBlock`; otherwise a remembered
+first settlement selects `SettleRead` or `SettleEffect`. If the complete suffix is all insufficient
+and the occurrence remains access-eligible, that invocation may authorize exactly one further live
+access. Missing capabilities and other operational prerequisites return
+`Waiting::OperationalBlock`; ordinary waiting follows when no action or block exists.
 
 The crate-private action algebra is:
 
@@ -2944,45 +2955,60 @@ reject each one; no wall-clock timestamp or worker policy is consulted after com
 Next-action derivation closes the insufficient-evidence case:
 
 ```text
-scan structurally consumable observations in journal order
-  first Settlement     -> SettleRead | SettleEffect with that observation
-  InvalidEvidence      -> Blocked integrity failure
+scan the complete structurally consumable observation suffix in journal order
+  remember the first Settlement and continue
+  never replace it with a later Settlement
+  any InvalidEvidence anywhere -> Blocked integrity failure
+after the complete scan:
+  remembered Settlement -> SettleRead | SettleEffect with that observation
   all insufficient:
-    read               -> CallRead with the identical authored request
-    effect             -> CallEnsure with the committed effect request
+    read                 -> CallRead with the identical authored request
+    effect               -> CallEnsure with the committed effect request
 ```
 
 The scan is pure and may repeat. `SettleRead` and `SettleEffect` are selected only when they can
 construct a settlement candidate, so `drive_once` cannot livelock on the same insufficient
-observation. The next later `drive_once` after a retryable wait may derive `CallRead` or
-`CallEnsure`; the automatic loop cannot do so in the same drive-until-waiting call.
+observation. A live-access invocation returns after its one live operation and committed
+observation; only a later independent invocation may freshly derive `SettleRead`, `SettleEffect`,
+`CallRead`, or `CallEnsure` from that observation head.
 
 Runtime derives the one legal candidate, if any, for every nonterminal occurrence from the same
-`VerifiedRunView`, then ranks those candidates. Across all occurrences, the normative action
-priority is:
+`VerifiedRunView`, then applies this normative action priority across the fold and all occurrences:
 
 ```text
-1. settle a structurally consumable committed observation or terminal evidence
-     order: certified node order;
-            within one occurrence, scan observations in journal order
+1. block on any complete-suffix or other integrity finding
+     order: certified node order, then observation order
 
-2. commit ready local semantic work
+2. report Closed when the verified fold already contains the committed closure
+
+3. block as an integrity failure when the fold is open but every occurrence is terminal
+
+4. settle a structurally consumable committed observation or terminal evidence
+     order: certified node order;
+            within one occurrence, use the first remembered settlement
+
+5. commit ready local semantic work
      CommitPure | CommitEffectRequest | CommitDependencySkip
      order: certified node order
 
-3. authorize one live access for an access-eligible occurrence
+6. authorize one live access for an access-eligible occurrence
      order: fewest committed authorizations for that occurrence,
             then certified node order
 
-4. derive Closed only when every occurrence is terminal
+7. report an operational block when a required operational prerequisite is unavailable
+
+8. otherwise report waiting
 ```
 
-An integrity or verified-view failure returns `Blocked` before candidate ranking. The authorization
-count includes matched and unmatched authorizations for the exact occurrence and its
+Verified-view construction fails before action selection, and complete-suffix integrity findings
+block before an existing closure or any open-run candidate ranking. An existing closure is only
+reported; it is not derived as a new action. An open/all-terminal fold is impossible and blocks
+instead of scheduling closure. The authorization count includes matched and unmatched
+authorizations for the exact occurrence and its
 `FrozenReadIntent` or committed `EffectRequested` binding, but is only a derived operational
 scheduling input. It may choose only among already legal live actions; it is absent from semantic
 state and hashes and cannot change readiness, request/evidence compatibility, callback acceptance,
-output construction, state-digest rules, or replay legality. Step three causes every untouched
+output construction, state-digest rules, or replay legality. The access step causes every untouched
 access-eligible sibling to receive its first call before a repeatedly ambiguous sibling receives
 another one. It is not a fairness lease or correctness authority; hosts remain responsible for
 bounded concurrency, backoff, and capacity.
@@ -3012,9 +3038,12 @@ serially. No node head, worker lane, FIFO waiter, or persisted in-flight phase i
 On stale compare-and-swap, runtime reloads. Pure work may be recomputed. A committed observation is
 reused and no live access is repeated merely because transition append lost the race.
 
-The deterministic scheduler still emits dependency skips in certified order. Closure waits until
-every occurrence is terminal. A missing deployment capability, corrupt evidence, or operational
-prerequisite returns `Waiting`; it appends no semantic truth.
+The deterministic scheduler still emits dependency skips in certified order. The store attaches
+closure only to the semantic transition that terminalizes the final occurrence; runtime never
+derives or commits standalone closure. An open/all-terminal fold is an integrity block. A missing
+deployment capability or other operational prerequisite is an operational block, corrupt evidence
+is an integrity block, and the absence of any action or block is ordinary waiting. None appends
+semantic truth.
 
 No worker attempt, execution claim, or lease is required for correctness. A host may repeatedly
 call `drive_once` and choose wakeups, backoff, budgets, or leases, but those operational choices
@@ -3799,11 +3828,12 @@ With that exact artifact, reproduction:
    sequence at `authorization.semantic_anchor.journal_head` and reruns the admitted callback; every
    element must reproduce as `InsufficientEvidence` (or the sequence must be empty), because a
    prior `Settlement` or `InvalidEvidence` would have outranked and forbidden that live call;
-5. for every recorded read/effect settlement that consumes an observation, reconstructs the complete
-   `structurally_consumable_at(observation, occurrence, transition.before.journal_head)` sequence
-   in journal order and reruns the admitted callback over each element through the recorded
-   winner: every earlier verdict must be `InsufficientEvidence`, an earlier `InvalidEvidence`
-   returns `Mismatch`, and the recorded consumed observation must be the first `Settlement`;
+5. for every recorded read/effect settlement that consumes an observation, reconstructs the
+   complete `structurally_consumable_at(observation, occurrence,
+   transition.before.journal_head)` sequence in journal order and reruns the admitted callback over
+   every element: every verdict before the recorded consumed observation must be
+   `InsufficientEvidence`, the recorded observation must be the first `Settlement`, later
+   settlements cannot replace it, and any `InvalidEvidence` anywhere returns `Mismatch`;
 6. reruns read reduction and terminal-evidence verification/settlement only after the request and
    callback-input schemas match, then compares every settlement, output, fact, binding delta, and
    after-state digest with the journal; and
@@ -4829,8 +4859,8 @@ The current replacements are:
 - generic typed read-response materialization of content-addressed value references;
 - committed-observation-only reduction;
 - keyed `ensure`;
-- the closed settlement/local-work/live-call scheduler priority with authorization-count fan-out
-  balancing;
+- the integrity- and closure-gated settlement/local-work/live-call scheduler priority with
+  authorization-count fan-out balancing and distinct operational-block/wait outcomes;
 - callback-free recorded-history verification, exact admitted-executable reproduction, and
   non-authoritative cross-version comparison;
 - exact executable/catalog gates for live resume;
@@ -4940,7 +4970,7 @@ adapter-owned lifecycle, reducer, or runner authority.
 | Executor returns terminal evidence | Record it, verify purely, then attempt atomic settlement. |
 | Settlement acknowledgement is lost | Reload the transition journal and return the settled result. |
 | Delayed ensure arrives after settlement | Executor tombstone returns compatible evidence without another mutation. |
-| Key/digest conflict or invalid evidence | Fail closed; keep the effect pending and surface a redacted operational incident. |
+| Key/digest conflict or invalid evidence | Fail closed; keep the effect pending and surface a redacted integrity incident. |
 | Lease expiry, shutdown, or cancellation | Does not revoke a call, prove non-application, or authorize a different request. |
 
 ## Acceptance Tests
@@ -4981,7 +5011,8 @@ adapter-owned lifecycle, reducer, or runner authority.
   prove readiness, skip legality, public output, and success/failure are uniquely derived.
 - Prove output and fact identities derive non-circularly from the committed transition and ordinal.
 - Compare full-fold and incremental-fold results.
-- Accept only the four exhaustive batch purposes and reject observation-plus-transition,
+- Accept only the eight exhaustive frozen `BatchPurpose` tags projected onto the four exhaustive
+  `LegalCommitBatchFields` structural variants, and reject observation-plus-transition,
   authorization-plus-closure, reordered closure, and every multi-audit combination.
 - Prove an effect-request batch binds both its input manifest and semantic request atomically.
 - Prove one semantic transition per batch and whole-batch atomicity.
@@ -5007,10 +5038,11 @@ adapter-owned lifecycle, reducer, or runner authority.
 - Prove `InsufficientEvidence` appends no transition and cannot change a request.
 - Prove all-insufficient observations create a `CallRead`/`CallEnsure` candidate for that
   occurrence, while a higher-priority settlement or local-work candidate elsewhere still wins;
-  invalid evidence blocks before ranking without a no-op settlement loop.
-- Prove a newly committed pending/all-insufficient observation returns
-  `Waiting::RetryableEvidenceGap`, makes an explicit host drive loop stop after at most that one
-  live call, and leaves retry timing/backoff to the next host invocation.
+  preserve the first settlement across later settlements, and prove invalid evidence anywhere in
+  the complete suffix blocks before ranking without a no-op settlement loop.
+- Prove an invocation that commits an observation returns `Advanced` at that observation head
+  without a settlement or second live operation, and that only a later independent invocation
+  reloads the journal and freshly rederives the complete-suffix decision.
 - Exercise every private `drive_once` action and prove the public result is only advanced, waiting,
   or closed.
 - Prove `drive_once` retains no process semantic state and that another process can continue from
@@ -5020,11 +5052,13 @@ adapter-owned lifecycle, reducer, or runner authority.
 - Prove `A -> B -> C` never authorizes or settles B before A produces its required output.
 - For `Root -> {A, B, C} -> Join`, exercise overlapping calls and the legal
   `authorize A; authorize B; observe B; settle B; observe A; settle A` history.
-- Property-test settlement-before-local-work-before-live-call priority; certified-node ties;
-  first authorization for every ready sibling before any second authorization; counting of
-  unmatched and matched-insufficient authorizations; and reload/re-ranking by a compare-and-swap
-  loser. Prove the count never changes readiness, request, evidence selection, state digest, or
-  replay legality.
+- Property-test complete-suffix integrity before existing closure, existing closure before the
+  impossible open/all-terminal integrity block, and then
+  settlement-before-local-work-before-live-call priority for open runs; cover operational
+  block/wait, certified-node ties, first authorization for every ready sibling before any second
+  authorization, counting of unmatched and matched-insufficient authorizations, and
+  reload/re-ranking by a compare-and-swap loser. Prove the count never changes readiness, request,
+  evidence selection, state digest, or replay legality.
 - Run live and exact semantic reproduction through the same admitted state callbacks and canonical
   output; prove recorded-history verification invokes none.
 - Reject whole-executable mismatch before any live callback or capability access, while proving
@@ -5206,9 +5240,10 @@ adapter-owned lifecycle, reducer, or runner authority.
   structurally-consumable observation sequence and require it to be empty or all insufficient;
   any prior settlement or invalid evidence makes that authorization a mismatch.
 - For every reproduced read/effect settlement consuming an observation, rerun the complete
-  predecessor-visible structurally-consumable sequence in journal order; require every earlier
-  verdict to be insufficient, stop on invalid evidence, and require the recorded observation to be
-  the first settlement.
+  predecessor-visible structurally-consumable sequence in journal order; evaluate every verdict,
+  require every verdict before the recorded observation to be insufficient, require the recorded
+  observation to be the first settlement, preserve it across later settlements, and report a
+  mismatch for invalid evidence anywhere.
 - Reauthor and exactly match the historical request before passing retained evidence to either an
   exact or candidate callback; a mismatch stops that transition without cross-request evidence
   reuse.
@@ -5745,8 +5780,10 @@ The current contract is an auditable, event-sourced typed state machine:
   validation, with no framework lifecycle in runtime;
 - semantic framework-outer and executor-inner pre/post behavior injected as ordinary typed states
   during one deterministic plan expansion and independently verified by certification;
-- a closed scheduler that settles usable evidence, then commits local work, then balances live
-  calls by per-occurrence authorization count while preserving strict graph dependencies;
+- a closed scheduler that blocks on complete-suffix or other integrity findings, reports an
+  existing closure, rejects an impossible open/all-terminal fold, then for an open run settles
+  usable evidence, commits local work, or balances live calls by per-occurrence authorization
+  count, followed by distinct operational-block and waiting outcomes;
 - spec-resolved cross-run source roles that cannot bypass an effective post output;
 - one immutable tenant scope per admitted run and transient purpose-bound authority at every run
   access surface;
