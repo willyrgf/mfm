@@ -12,7 +12,7 @@ use mfm_spec::v1::{
 
 use super::frame_preparation::validate_historical_bindings;
 use super::objects::validate_value_contract;
-use super::{Result, StoreError, VerifiedObservedAccess, VerifiedRunView};
+use super::{Result, SafeFailureMetadata, StoreError, VerifiedObservedAccess, VerifiedRunView};
 
 const READ_RESULT_PATH: &str = "outcome.result_ref";
 const READ_FAILURE_PATH: &str = "outcome.safe_failure.diagnostic_ref";
@@ -113,10 +113,28 @@ impl VerifiedComparisonStateFrame {
 pub enum VerifiedComparisonReadOutcome {
     /// The operation returned a verified value.
     Returned(VerifiedComparisonValue),
-    /// The operation proved it did not enter and retained a typed diagnostic.
-    DidNotEnter(VerifiedComparisonValue),
-    /// The operation could not determine entry and retained a typed diagnostic.
-    Indeterminate(VerifiedComparisonValue),
+    /// The operation proved it did not enter.
+    DidNotEnter(VerifiedComparisonSafeFailure),
+    /// The operation could not determine entry or outcome.
+    Indeterminate(VerifiedComparisonSafeFailure),
+}
+
+/// Exact generic safe-failure metadata and optional typed diagnostic for replay comparison.
+pub struct VerifiedComparisonSafeFailure {
+    metadata: SafeFailureMetadata,
+    diagnostic: Option<VerifiedComparisonValue>,
+}
+
+impl VerifiedComparisonSafeFailure {
+    /// Returns the classifier-approved generic metadata.
+    pub const fn metadata(&self) -> &SafeFailureMetadata {
+        &self.metadata
+    }
+
+    /// Returns the optional exact typed diagnostic.
+    pub const fn diagnostic(&self) -> Option<&VerifiedComparisonValue> {
+        self.diagnostic.as_ref()
+    }
 }
 
 /// Exact structurally verified terminal effect material.
@@ -805,21 +823,31 @@ fn safe_failure_value(
     authorization_ref: &AuthorizationRef,
     safe_failure: mfm_journal::v1::SafeFailure,
     contract: &RetainedValueContract,
-) -> Result<VerifiedComparisonValue> {
+) -> Result<VerifiedComparisonSafeFailure> {
     let fields = safe_failure.fields()?;
-    if fields.safe_failure_contract_ref != *contract.evidence_contract_ref() {
-        return Err(comparison_mismatch("comparison_safe_failure"));
-    }
-    let diagnostic_ref = fields
+    let metadata = SafeFailureMetadata::new(
+        fields.safe_failure_contract_ref,
+        fields.stable_code,
+        fields.failure_class,
+        fields.boundary_stage,
+        fields.coarse_size_class,
+    );
+    let diagnostic = fields
         .diagnostic_ref
-        .ok_or_else(|| comparison_mismatch("comparison_safe_failure"))?;
-    observed_value(
-        view,
-        authorization_ref,
-        READ_FAILURE_PATH,
-        diagnostic_ref,
-        contract,
-    )
+        .map(|diagnostic_ref| {
+            observed_value(
+                view,
+                authorization_ref,
+                READ_FAILURE_PATH,
+                diagnostic_ref,
+                contract,
+            )
+        })
+        .transpose()?;
+    Ok(VerifiedComparisonSafeFailure {
+        metadata,
+        diagnostic,
+    })
 }
 
 fn observed_value(

@@ -20,12 +20,11 @@ use mfm_program::{
 };
 use mfm_spec::{CertifiedNodeContract, CertifiedStateExecution, RetainedValueContract};
 use mfm_store::{
-    AppendOutcome, AppendRejection, AuthorizationMaterial, Drive, EffectPromotionMaterial,
-    ExistingRunAppendMaterial, FactSelectionAuthorizationOutcome, FactSelectionStore,
-    NewlyAppended, NodeTerminalOutcome, ObjectGraphProposal, ObservationMaterial, PreparedFrame,
-    PreparedJournalAppend, ProducedObjectRoot, ReadObservationMaterial, RunAccessAuthority,
-    RunJournalStore, TransitionMaterial, VerifiedNodeAccessHistory, VerifiedRunView,
-    FACT_SELECTION_OPERATION_ID,
+    AppendOutcome, AppendRejection, AuthorizationMaterial, Drive, ExistingRunAppendMaterial,
+    FactSelectionAuthorizationOutcome, FactSelectionStore, NewlyAppended, NodeTerminalOutcome,
+    ObjectGraphProposal, ObservationMaterial, PreparedFrame, PreparedJournalAppend,
+    ProducedObjectRoot, ReadObservationMaterial, RunAccessAuthority, RunJournalStore,
+    TransitionMaterial, VerifiedNodeAccessHistory, VerifiedRunView, FACT_SELECTION_OPERATION_ID,
 };
 
 use crate::append_id::append_request_id;
@@ -168,11 +167,11 @@ struct EncodedReadObservation {
 enum EncodedReadOutcome {
     Returned(ProducedObjectRoot),
     DidNotEnter {
-        failure: ProducedObjectRoot,
+        diagnostic: Option<ProducedObjectRoot>,
         metadata: mfm_store::SafeFailureMetadata,
     },
     Indeterminate {
-        failure: ProducedObjectRoot,
+        diagnostic: Option<ProducedObjectRoot>,
         metadata: mfm_store::SafeFailureMetadata,
     },
 }
@@ -183,18 +182,20 @@ impl EncodedReadObservation {
             EncodedReadOutcome::Returned(returned_root) => ReadObservationMaterial::Returned {
                 returned_root: returned_root.clone(),
             },
-            EncodedReadOutcome::DidNotEnter { failure, metadata } => {
-                ReadObservationMaterial::DidNotEnter {
-                    typed_failure_root: failure.clone(),
-                    metadata: metadata.clone(),
-                }
-            }
-            EncodedReadOutcome::Indeterminate { failure, metadata } => {
-                ReadObservationMaterial::Indeterminate {
-                    typed_failure_root: failure.clone(),
-                    metadata: metadata.clone(),
-                }
-            }
+            EncodedReadOutcome::DidNotEnter {
+                diagnostic,
+                metadata,
+            } => ReadObservationMaterial::DidNotEnter {
+                diagnostic_root: diagnostic.clone(),
+                metadata: metadata.clone(),
+            },
+            EncodedReadOutcome::Indeterminate {
+                diagnostic,
+                metadata,
+            } => ReadObservationMaterial::Indeterminate {
+                diagnostic_root: diagnostic.clone(),
+                metadata: metadata.clone(),
+            },
         }
     }
 }
@@ -1097,6 +1098,7 @@ where
         ) else {
             return Err(RuntimeError::CatalogSelection);
         };
+        let safe_failure_contract_ref = entry.binding().fields()?.safe_failure_contract_ref;
         let invoker = RuntimeReadInvoker::from_entry(entry)?;
         let observation = invoker
             .call(
@@ -1109,10 +1111,7 @@ where
                     input_manifest_ref,
                     frozen_read_intent_ref,
                     routing_generation_ref,
-                    safe_failure_contract_ref: action
-                        .safe_failure_contract
-                        .evidence_contract_ref()
-                        .clone(),
+                    safe_failure_contract_ref,
                 },
                 action.request,
             )
@@ -1164,23 +1163,41 @@ where
                     proposed.canonical().clone(),
                 ))
             }
-            ErasedReadOutcome::DidNotEnter { failure, metadata } => {
-                let proposed = callbacks.encode_read_failure(failure.as_ref())?;
+            ErasedReadOutcome::DidNotEnter {
+                diagnostic,
+                metadata,
+            } => {
+                let diagnostic = diagnostic
+                    .as_ref()
+                    .map(|diagnostic| {
+                        let proposed = callbacks.encode_read_diagnostic(diagnostic.as_ref())?;
+                        Ok::<_, RuntimeError>(ProducedObjectRoot::new(
+                            safe_failure_contract.clone(),
+                            proposed.canonical().clone(),
+                        ))
+                    })
+                    .transpose()?;
                 EncodedReadOutcome::DidNotEnter {
-                    failure: ProducedObjectRoot::new(
-                        safe_failure_contract.clone(),
-                        proposed.canonical().clone(),
-                    ),
+                    diagnostic,
                     metadata,
                 }
             }
-            ErasedReadOutcome::Indeterminate { failure, metadata } => {
-                let proposed = callbacks.encode_read_failure(failure.as_ref())?;
+            ErasedReadOutcome::Indeterminate {
+                diagnostic,
+                metadata,
+            } => {
+                let diagnostic = diagnostic
+                    .as_ref()
+                    .map(|diagnostic| {
+                        let proposed = callbacks.encode_read_diagnostic(diagnostic.as_ref())?;
+                        Ok::<_, RuntimeError>(ProducedObjectRoot::new(
+                            safe_failure_contract.clone(),
+                            proposed.canonical().clone(),
+                        ))
+                    })
+                    .transpose()?;
                 EncodedReadOutcome::Indeterminate {
-                    failure: ProducedObjectRoot::new(
-                        safe_failure_contract.clone(),
-                        proposed.canonical().clone(),
-                    ),
+                    diagnostic,
                     metadata,
                 }
             }
@@ -1345,9 +1362,7 @@ where
                 ExistingRunAppendMaterial::Observation(Box::new(
                     ObservationMaterial::EnsureEffect {
                         authorization_ref: observation.authorization_ref.clone(),
-                        promotion: Box::new(EffectPromotionMaterial::new(
-                            observation.result.clone(),
-                        )),
+                        outcome: Box::new(observation.outcome.clone()),
                     },
                 )),
             )?;

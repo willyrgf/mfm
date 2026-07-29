@@ -13,6 +13,8 @@ mod fact_scan;
 mod frame_preparation;
 mod journal;
 mod objects;
+#[cfg(test)]
+mod observation_verification_tests;
 mod preparation;
 mod public_read;
 mod support;
@@ -48,8 +50,8 @@ pub use self::comparison::{
     ComparisonEvidenceKind, ComparisonSettlementKind, ComparisonTransitionKind,
     RecordedEvidenceVerdict, VerifiedComparisonEvidence, VerifiedComparisonFact,
     VerifiedComparisonFrame, VerifiedComparisonFrameReader, VerifiedComparisonOutput,
-    VerifiedComparisonReadOutcome, VerifiedComparisonSettlement, VerifiedComparisonStateFrame,
-    VerifiedComparisonTerminalEffect, VerifiedComparisonValue,
+    VerifiedComparisonReadOutcome, VerifiedComparisonSafeFailure, VerifiedComparisonSettlement,
+    VerifiedComparisonStateFrame, VerifiedComparisonTerminalEffect, VerifiedComparisonValue,
 };
 pub use self::configured_value::{
     ConfiguredValueBackend, ConfiguredValueResolveVerifier, ConfiguredValueStore,
@@ -78,10 +80,10 @@ pub use self::objects::{
     UntrustedObjectPayload,
 };
 pub use self::preparation::{
-    AdmissionMaterial, AuthorizationMaterial, EffectPromotionMaterial, ExistingRunAppendMaterial,
-    ObjectGraphMember, ObjectGraphProposal, ObservationMaterial, PreparedFrame, PreparedValue,
-    ProducedObjectRoot, ProducedOutputSlot, ProposedAdmissionInput, ReadObservationMaterial,
-    SafeFailureMetadata, SettlementMaterial, TransitionMaterial, VerifiedAdmissionSources,
+    AdmissionMaterial, AuthorizationMaterial, ExistingRunAppendMaterial, ObjectGraphMember,
+    ObjectGraphProposal, ObservationMaterial, PreparedFrame, PreparedValue, ProducedObjectRoot,
+    ProducedOutputSlot, ProposedAdmissionInput, ReadObservationMaterial, SafeFailureMetadata,
+    SettlementMaterial, TransitionMaterial, VerifiedAdmissionSources,
 };
 pub use self::public_read::VerifiedPublicRunView;
 pub use self::support::{

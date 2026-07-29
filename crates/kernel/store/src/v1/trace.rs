@@ -739,19 +739,21 @@ fn read_evidence(
         ),
         ObservationOutcomeFields::DidNotEnter { safe_failure }
         | ObservationOutcomeFields::Indeterminate { safe_failure } => {
-            let diagnostic_ref = safe_failure
+            let values = safe_failure
                 .fields()?
                 .diagnostic_ref
-                .ok_or_else(|| trace_mismatch("trace_read_diagnostic"))?;
-            (
-                vec![named_observation_value(
-                    view,
-                    observed.audit().authorization_ref(),
-                    diagnostic_ref,
-                    "outcome.safe_failure.diagnostic_ref",
-                )?],
-                false,
-            )
+                .map(|diagnostic_ref| {
+                    named_observation_value(
+                        view,
+                        observed.audit().authorization_ref(),
+                        diagnostic_ref,
+                        "outcome.safe_failure.diagnostic_ref",
+                    )
+                })
+                .transpose()?
+                .into_iter()
+                .collect();
+            (values, false)
         }
     };
     if let Some(attestation_ref) = observation.fact_selection_scan_attestation_ref {

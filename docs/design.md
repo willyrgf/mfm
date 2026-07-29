@@ -278,6 +278,15 @@ closed code, failure class, boundary stage, optional coarse size class, and opti
 diagnostic reference. Provider text, URLs, credentials, bodies, paths, and source chains are
 discarded below the journal boundary.
 
+The admitted classifier embeds the optional complete diagnostic `SchemaIdentity`. Candidate
+append, committed load, and recorded-history replay invoke no state, capability, adapter, or
+classifier callback: they strictly decode that descriptor, derive its schema id, and validate
+diagnostic canonical bytes against its complete `SchemaShape`. The same structural path verifies
+every observation object's full `ValueRef`, exact producer path, and frozen object intent. It also
+reconstructs exact pending and terminal effect-retained closure and the authoritative fact-scan
+response, attestation, selected-source closure, and evidence dependencies before granting
+observation authority.
+
 ### `RunClosed`
 
 Closure names the independently hashed final semantic transition and its terminal semantic-state
@@ -780,9 +789,12 @@ Secrets include passwords, mnemonics, private keys, raw signing material, creden
 authorization headers, unlock material, signed bearer payloads, and secret-bearing paths. They
 remain below typed semantic and diagnostic boundaries.
 
-Capability classifiers discard provider-controlled text and retain only schema-validated safe
-values. Public errors are closed redaction-safe codes. A record id, run id, value reference,
-content digest, cursor, or portable manifest grants no access.
+Capability classifiers discard provider-controlled text and retain only safe values that satisfy
+the classifier-bound complete diagnostic identity and structural shape. Append, load, and replay
+then recheck that identity and shape, full producer-qualified `ValueRef`s, frozen object intents,
+effect-retained closure, and fact-source closure without invoking callbacks. Public errors are
+closed redaction-safe codes. A record id, run id, value reference, content digest, cursor, or
+portable manifest grants no access.
 
 ## Documentation Update Rules
 

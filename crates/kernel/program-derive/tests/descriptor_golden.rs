@@ -20,6 +20,44 @@ struct PricedAsset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.test",
+    name = "unit_field",
+    version = "1",
+    schema = "mfm.test.unit_field"
+)]
+struct UnitField {
+    value: (),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[mfm(
+    namespace = "mfm.test",
+    name = "variant_field_rename",
+    version = "1",
+    schema = "mfm.test.variant_field_rename"
+)]
+enum VariantFieldRename {
+    MultiWord {
+        some_field: bool,
+        #[serde(rename = "explicit-field")]
+        explicitly_renamed: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.test",
+    name = "default_variant_name",
+    version = "1",
+    schema = "mfm.test.default_variant_name"
+)]
+enum DefaultVariantName {
+    MixedCase { some_field: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(try_from = "String", into = "String")]
 #[mfm(
     namespace = "mfm.test",
@@ -50,7 +88,7 @@ impl From<AccountId> for String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(transparent)]
 #[mfm(
     namespace = "mfm.test",
@@ -61,6 +99,14 @@ impl From<AccountId> for String {
 )]
 struct PublicMetadata {
     entries: BTreeMap<String, String>,
+}
+
+impl mfm_values::MfmDefault for PublicMetadata {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmConfig)]
+struct InlineDefaultConfig {
+    #[serde(default)]
+    metadata: PublicMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmConfig)]
@@ -157,6 +203,55 @@ fn generated_value_descriptor_is_stable() {
 }
 
 #[test]
+fn empty_rust_tuple_uses_the_exact_null_unit_shape() {
+    let descriptor = UnitField::schema_descriptor().expect("descriptor");
+    let SchemaShape::Struct { fields } = &descriptor.identity.shape else {
+        panic!("expected struct shape");
+    };
+    assert_eq!(fields[0].shape, SchemaShape::Unit);
+    let value = serde_json::to_vec(&UnitField { value: () }).expect("unit value");
+    descriptor
+        .identity
+        .validate_canonical_value(&value)
+        .expect("unit value matches descriptor");
+    assert_eq!(value, br#"{"value":null}"#);
+}
+
+#[test]
+fn enum_rename_all_changes_variants_but_not_named_variant_fields() {
+    let descriptor = VariantFieldRename::schema_descriptor().expect("descriptor");
+    let value = VariantFieldRename::MultiWord {
+        some_field: true,
+        explicitly_renamed: false,
+    };
+    let canonical = serde_json::to_vec(&value).expect("enum value");
+    assert_eq!(
+        canonical,
+        br#"{"kind":"multiWord","some_field":true,"explicit-field":false}"#
+    );
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+        std::str::from_utf8(&canonical).expect("UTF-8"),
+    )
+    .expect("canonicalized enum value");
+    descriptor
+        .identity
+        .validate_canonical_value(canonical.as_bytes())
+        .expect("enum value matches descriptor");
+}
+
+#[test]
+fn absent_enum_rename_all_preserves_the_rust_variant_wire_name() {
+    let descriptor = DefaultVariantName::schema_descriptor().expect("descriptor");
+    let value = DefaultVariantName::MixedCase { some_field: true };
+    let canonical = serde_json::to_vec(&value).expect("enum value");
+    assert_eq!(canonical, br#"{"MixedCase":{"some_field":true}}"#);
+    descriptor
+        .identity
+        .validate_canonical_value(&canonical)
+        .expect("enum value matches descriptor");
+}
+
+#[test]
 fn transparent_string_value_descriptor_uses_string_shape() {
     let descriptor = AccountId::schema_descriptor().expect("descriptor");
 
@@ -201,7 +296,38 @@ fn transparent_map_value_descriptor_uses_map_shape() {
 }
 
 #[test]
-fn generated_config_descriptor_resolves_wire_names_and_value_refs() {
+fn inline_custom_default_is_an_exact_omission_contract() {
+    let descriptor = InlineDefaultConfig::schema_descriptor().expect("descriptor");
+    let SchemaShape::Struct { fields } = &descriptor.identity.shape else {
+        panic!("expected struct shape");
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].default, FieldDefaultPolicy::MfmDefault);
+    assert!(matches!(fields[0].shape, SchemaShape::InlineValue { .. }));
+
+    descriptor
+        .identity
+        .validate_canonical_value(br#"{}"#)
+        .expect("omitted custom default");
+    let decoded: InlineDefaultConfig =
+        serde_json::from_slice(br#"{}"#).expect("typed default decode");
+    assert_eq!(decoded.metadata, PublicMetadata::default());
+
+    descriptor
+        .identity
+        .validate_canonical_value(br#"{"metadata":{"source":"fixture"}}"#)
+        .expect("present inline value");
+    assert!(
+        descriptor
+            .identity
+            .validate_canonical_value(br#"{"metadata":false}"#)
+            .is_err(),
+        "a present custom default must still match its exact inline shape"
+    );
+}
+
+#[test]
+fn generated_config_descriptor_resolves_wire_names_and_inline_value_shapes() {
     let descriptor = PortfolioRequest::schema_descriptor().expect("descriptor");
     assert_eq!(descriptor.identity.schema_kind, SchemaKind::PlanningConfig);
 
@@ -222,6 +348,36 @@ fn generated_config_descriptor_resolves_wire_names_and_value_refs() {
             ("weights", FieldDefaultPolicy::Required),
         ]
     );
+
+    let assets = fields
+        .iter()
+        .find(|field| field.name == "assets")
+        .expect("assets field");
+    let SchemaShape::Vec(element) = &assets.shape else {
+        panic!("expected vector shape");
+    };
+    let SchemaShape::InlineValue {
+        schema_id,
+        semantic_type_id,
+        serialized_shape,
+    } = element.as_ref()
+    else {
+        panic!("expected inline value shape");
+    };
+    let priced_asset = PricedAsset::schema_descriptor().expect("priced asset descriptor");
+    assert_eq!(
+        schema_id,
+        &priced_asset.schema_id().expect("priced asset schema id")
+    );
+    assert_eq!(
+        semantic_type_id,
+        priced_asset
+            .identity
+            .semantic_type_id
+            .as_ref()
+            .expect("priced asset semantic id")
+    );
+    assert_eq!(serialized_shape.as_ref(), &priced_asset.identity.shape);
 }
 
 #[test]

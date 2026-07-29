@@ -531,6 +531,94 @@ pub struct VerifiedEnsureResult {
     retained_closure: VerifiedExecutorRetainedClosure,
 }
 
+/// Closed surviving outcome of one audited executor `ensure` invocation.
+///
+/// Integrity failures and unresolved append ambiguity remain typed errors. Every reviewed
+/// returned or safe boundary failure is instead an observation-bearing value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectExecutorOutcome {
+    kind: EffectExecutorOutcomeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EffectExecutorOutcomeKind {
+    Returned(VerifiedEnsureResult),
+    DidNotEnter(crate::ReferenceSafeFailure),
+    Indeterminate(crate::ReferenceSafeFailure),
+}
+
+/// Borrowed closed view of one surviving executor outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectExecutorOutcomeView<'a> {
+    /// The executor returned one binding-verified pending or terminal result.
+    Returned(&'a VerifiedEnsureResult),
+    /// The executor proved that target boundary entry did not occur.
+    DidNotEnter(&'a crate::ReferenceSafeFailure),
+    /// Target boundary entry or the terminal outcome remains indeterminate.
+    Indeterminate(&'a crate::ReferenceSafeFailure),
+}
+
+impl EffectExecutorOutcome {
+    /// Wraps one binding-verified returned executor result.
+    pub const fn returned(result: VerifiedEnsureResult) -> Self {
+        Self {
+            kind: EffectExecutorOutcomeKind::Returned(result),
+        }
+    }
+
+    /// Constructs one outcome-specific proven-not-entered failure.
+    pub fn did_not_enter(failure: crate::ReferenceSafeFailure) -> Result<Self> {
+        DeliveryAttemptOutcome::did_not_enter(failure.clone())?;
+        Ok(Self {
+            kind: EffectExecutorOutcomeKind::DidNotEnter(failure),
+        })
+    }
+
+    /// Constructs one outcome-specific indeterminate failure.
+    pub fn indeterminate(failure: crate::ReferenceSafeFailure) -> Result<Self> {
+        DeliveryAttemptOutcome::indeterminate(failure.clone())?;
+        Ok(Self {
+            kind: EffectExecutorOutcomeKind::Indeterminate(failure),
+        })
+    }
+
+    /// Returns the borrowed closed outcome.
+    pub const fn view(&self) -> EffectExecutorOutcomeView<'_> {
+        match &self.kind {
+            EffectExecutorOutcomeKind::Returned(result) => {
+                EffectExecutorOutcomeView::Returned(result)
+            }
+            EffectExecutorOutcomeKind::DidNotEnter(failure) => {
+                EffectExecutorOutcomeView::DidNotEnter(failure)
+            }
+            EffectExecutorOutcomeKind::Indeterminate(failure) => {
+                EffectExecutorOutcomeView::Indeterminate(failure)
+            }
+        }
+    }
+
+    /// Splits the outcome into a returned result or one validated safe-failure tuple.
+    pub fn into_parts(
+        self,
+    ) -> std::result::Result<
+        VerifiedEnsureResult,
+        (
+            mfm_capabilities::SafeFailureOutcome,
+            crate::ReferenceSafeFailure,
+        ),
+    > {
+        match self.kind {
+            EffectExecutorOutcomeKind::Returned(result) => Ok(result),
+            EffectExecutorOutcomeKind::DidNotEnter(failure) => {
+                Err((mfm_capabilities::SafeFailureOutcome::DidNotEnter, failure))
+            }
+            EffectExecutorOutcomeKind::Indeterminate(failure) => {
+                Err((mfm_capabilities::SafeFailureOutcome::Indeterminate, failure))
+            }
+        }
+    }
+}
+
 impl VerifiedEnsureResult {
     /// Returns the exact immutable effect identity.
     pub const fn identity(&self) -> &EffectIdentity {

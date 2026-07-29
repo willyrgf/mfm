@@ -64,20 +64,28 @@ pub(crate) fn committed_read_observation(
             )?)
         }
         ObservationOutcomeFields::DidNotEnter { safe_failure } => {
-            VerifiedReadOutcome::DidNotEnter(verified_safe_failure(
+            let (metadata, diagnostic) = verified_safe_failure(
                 view,
                 audit.authorization_ref(),
                 &safe_failure,
                 safe_failure_contract,
-            )?)
+            )?;
+            VerifiedReadOutcome::DidNotEnter {
+                metadata,
+                diagnostic,
+            }
         }
         ObservationOutcomeFields::Indeterminate { safe_failure } => {
-            VerifiedReadOutcome::Indeterminate(verified_safe_failure(
+            let (metadata, diagnostic) = verified_safe_failure(
                 view,
                 audit.authorization_ref(),
                 &safe_failure,
                 safe_failure_contract,
-            )?)
+            )?;
+            VerifiedReadOutcome::Indeterminate {
+                metadata,
+                diagnostic,
+            }
         }
     };
     Ok(CommittedObservation::new(observation_ref.clone(), outcome))
@@ -88,17 +96,28 @@ fn verified_safe_failure(
     authorization_ref: &AuthorizationRef,
     failure: &mfm_journal::v1::SafeFailure,
     contract: &RetainedValueContract,
-) -> Result<VerifiedValueMaterial> {
+) -> Result<(
+    mfm_store::SafeFailureMetadata,
+    Option<VerifiedValueMaterial>,
+)> {
     let fields = failure.fields()?;
-    let diagnostic_ref = fields
-        .diagnostic_ref
-        .ok_or(RuntimeError::InvalidCallbackResult)?;
-    if fields.safe_failure_contract_ref != *contract.evidence_contract_ref() {
-        return Err(RuntimeError::InvalidCallbackResult);
-    }
+    let metadata = mfm_store::SafeFailureMetadata::new(
+        fields.safe_failure_contract_ref,
+        fields.stable_code,
+        fields.failure_class,
+        fields.boundary_stage,
+        fields.coarse_size_class,
+    );
     let path = FieldPath::new("outcome.safe_failure.diagnostic_ref")
         .map_err(mfm_ids::IdentityError::from)?;
-    verified_observation_value(view, authorization_ref, &path, &diagnostic_ref, contract)
+    let diagnostic = fields
+        .diagnostic_ref
+        .as_ref()
+        .map(|diagnostic_ref| {
+            verified_observation_value(view, authorization_ref, &path, diagnostic_ref, contract)
+        })
+        .transpose()?;
+    Ok((metadata, diagnostic))
 }
 
 pub(crate) fn verified_observation_value(

@@ -367,7 +367,8 @@ fn digest_array_literal(seed: &str) -> proc_macro2::TokenStream {
 
 fn apply_rename_all(value: &str, rename_all: Option<&str>) -> String {
     match rename_all {
-        Some("snake_case") | None => snake_case(value),
+        None => value.to_owned(),
+        Some("snake_case") => snake_case(value),
         Some("kebab-case") => snake_case(value).replace('_', "-"),
         Some("camelCase") => {
             let snake = snake_case(value);

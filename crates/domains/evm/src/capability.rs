@@ -637,15 +637,38 @@ impl EvmCoarseSizeClass {
     }
 }
 
-/// Closed redaction-safe access failure retained in audited observations.
+/// Closed redaction-safe diagnostic retained only for value-bearing safe failures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "diagnostic", rename_all = "snake_case", deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
-    name = "safe-failure",
+    name = "safe-diagnostic",
     version = "1",
-    schema = "mfm.evm.safe_failure"
+    schema = "mfm.evm.safe_diagnostic"
 )]
+pub enum EvmSafeDiagnostic {
+    /// Reviewed HTTP status only.
+    HttpStatus {
+        /// Numeric status; no body or header material.
+        status: u16,
+    },
+    /// Reviewed JSON-RPC numeric code only.
+    JsonRpcError {
+        /// Numeric JSON-RPC error code; no provider message/data.
+        code: i64,
+    },
+    /// Reviewed response-invalid category only.
+    ResponseInvalid {
+        /// Exact invalid-response category admitted by the classifier rule.
+        kind: EvmResponseInvalidKind,
+    },
+}
+
+/// Transient closed EVM transport failure projected into safe metadata and an optional diagnostic.
+///
+/// This transport value is never persisted. The adapter maps it totally to the generic
+/// safe-failure envelope plus an optional [`EvmSafeDiagnostic`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvmSafeFailure {
     /// The exact immutable local generation was unavailable.
     RoutingGenerationUnavailable,

@@ -471,10 +471,10 @@ pub trait State: Send + Sync + Sized + 'static {
     /// Its codec belongs to the selected execution case, so annex-owned
     /// observation types do not need a second local descriptor.
     type Observation: Send + Sync + 'static;
-    /// Reviewed redaction-safe access failure value.
+    /// Reviewed optional redaction-safe diagnostic for a safe access failure.
     ///
     /// Pure states use [`NoBoundaryValue`].
-    type AccessFailure: Send + Sync + 'static;
+    type SafeDiagnostic: Send + Sync + 'static;
 
     /// Returns the exact semantic state contract.
     fn state_contract_ref() -> Result<ContentRef>;
@@ -566,9 +566,53 @@ pub enum ObservationOutcome<R, F> {
     /// One schema-valid typed value returned.
     Returned(R),
     /// The wrapper proved that the boundary was not entered.
-    DidNotEnter(F),
+    DidNotEnter(ObservedSafeFailure<F>),
     /// Entry or outcome remains indeterminate.
-    Indeterminate(F),
+    Indeterminate(ObservedSafeFailure<F>),
+}
+
+/// Opaque value-only safe-failure evidence supplied to a read callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedSafeFailure<D> {
+    metadata: mfm_store::SafeFailureMetadata,
+    diagnostic: Option<D>,
+}
+
+impl<D> ObservedSafeFailure<D> {
+    pub(crate) const fn new(
+        metadata: mfm_store::SafeFailureMetadata,
+        diagnostic: Option<D>,
+    ) -> Self {
+        Self {
+            metadata,
+            diagnostic,
+        }
+    }
+
+    /// Returns the stable failure code selected by the admitted classifier.
+    pub const fn stable_code(&self) -> &mfm_ids::StableId {
+        self.metadata.stable_code()
+    }
+
+    /// Returns the universal reviewed failure class.
+    pub const fn failure_class(&self) -> mfm_executor::FailureClass {
+        self.metadata.failure_class()
+    }
+
+    /// Returns the reviewed external-boundary stage.
+    pub const fn boundary_stage(&self) -> mfm_executor::BoundaryStage {
+        self.metadata.boundary_stage()
+    }
+
+    /// Returns the optional reviewed coarse source-envelope size.
+    pub const fn coarse_size_class(&self) -> Option<mfm_executor::CoarseSizeClass> {
+        self.metadata.coarse_size_class()
+    }
+
+    /// Returns the optional typed diagnostic value.
+    pub const fn diagnostic(&self) -> Option<&D> {
+        self.diagnostic.as_ref()
+    }
 }
 
 /// Borrowed value-only view of an exact committed request.
@@ -607,7 +651,6 @@ impl<'a, T> RequestView<'a, T> {
 #[derive(Debug)]
 pub struct ObservationView<'a, R, F> {
     outcome: &'a ObservationOutcome<R, F>,
-    value_ref: &'a ValueRef,
 }
 
 impl<R, F> Copy for ObservationView<'_, R, F> {}
@@ -620,18 +663,13 @@ impl<R, F> Clone for ObservationView<'_, R, F> {
 
 impl<'a, R, F> ObservationView<'a, R, F> {
     /// Borrows an observation without runtime authority.
-    pub const fn new(outcome: &'a ObservationOutcome<R, F>, value_ref: &'a ValueRef) -> Self {
-        Self { outcome, value_ref }
+    pub const fn new(outcome: &'a ObservationOutcome<R, F>) -> Self {
+        Self { outcome }
     }
 
     /// Returns the typed audited outcome.
     pub const fn outcome(self) -> &'a ObservationOutcome<R, F> {
         self.outcome
-    }
-
-    /// Returns the exact immutable observation reference.
-    pub const fn value_ref(self) -> &'a ValueRef {
-        self.value_ref
     }
 }
 
@@ -742,7 +780,7 @@ pub type RequestAuthor<S> = for<'a> fn(StateFrame<'a, S>) -> <S as State>::Reque
 /// Read observation reduction callback.
 pub type ReadApply<S> = for<'a> fn(
     StateFrame<'a, S>,
-    ObservationView<'a, <S as State>::Observation, <S as State>::AccessFailure>,
+    ObservationView<'a, <S as State>::Observation, <S as State>::SafeDiagnostic>,
 ) -> EvidenceVerdict<Settlement<S>>;
 /// Effect terminal-evidence settlement callback.
 pub type EffectSettle<S> =
@@ -765,7 +803,7 @@ pub struct ReadExecution<S: State> {
     operation: CapabilityOperation,
     request_codec: CanonicalCodec<S::Request>,
     observation_codec: CanonicalCodec<S::Observation>,
-    access_failure_codec: CanonicalCodec<S::AccessFailure>,
+    diagnostic_codec: CanonicalCodec<S::SafeDiagnostic>,
     request: RequestAuthor<S>,
     apply: ReadApply<S>,
 }
@@ -787,8 +825,8 @@ impl<S: State> ReadExecution<S> {
     }
 
     /// Returns the exact safe-access-failure codec.
-    pub const fn access_failure_codec(&self) -> &CanonicalCodec<S::AccessFailure> {
-        &self.access_failure_codec
+    pub const fn diagnostic_codec(&self) -> &CanonicalCodec<S::SafeDiagnostic> {
+        &self.diagnostic_codec
     }
 
     /// Returns the total request author.
@@ -872,7 +910,7 @@ impl<S: State> StateExecution<S> {
         operation: CapabilityOperation,
         request_codec: CanonicalCodec<S::Request>,
         observation_codec: CanonicalCodec<S::Observation>,
-        access_failure_codec: CanonicalCodec<S::AccessFailure>,
+        diagnostic_codec: CanonicalCodec<S::SafeDiagnostic>,
         request: RequestAuthor<S>,
         apply: ReadApply<S>,
     ) -> Self {
@@ -880,7 +918,7 @@ impl<S: State> StateExecution<S> {
             operation,
             request_codec,
             observation_codec,
-            access_failure_codec,
+            diagnostic_codec,
             request,
             apply,
         })

@@ -281,14 +281,14 @@ pub struct QualifiedReadEntry {
     definition: Arc<QualifiedReadDefinition>,
     request_type: TypeId,
     returned_type: TypeId,
-    failure_type: TypeId,
+    diagnostic_type: TypeId,
     invoker_identity: TypeId,
     invoker: Arc<dyn Any + Send + Sync>,
 }
 
 impl QualifiedReadEntry {
     /// Qualifies one typed process invoker against its complete semantic entry.
-    pub fn new<Request, Returned, Failure, Invoker>(
+    pub fn new<Request, Returned, Diagnostic, Invoker>(
         binding: ReadCapabilityBinding,
         operation: QualifiedReadOperationContract,
         component_descriptor: ComponentImplementationDescriptor,
@@ -297,7 +297,7 @@ impl QualifiedReadEntry {
     where
         Request: Send + Sync + 'static,
         Returned: Send + Sync + 'static,
-        Failure: Send + Sync + 'static,
+        Diagnostic: Send + Sync + 'static,
         Invoker: Any + Send + Sync,
     {
         let binding_ref = binding
@@ -323,7 +323,7 @@ impl QualifiedReadEntry {
             }),
             request_type: TypeId::of::<Request>(),
             returned_type: TypeId::of::<Returned>(),
-            failure_type: TypeId::of::<Failure>(),
+            diagnostic_type: TypeId::of::<Diagnostic>(),
             invoker_identity: TypeId::of::<Invoker>(),
             invoker: Arc::new(invoker),
         })
@@ -359,9 +359,9 @@ impl QualifiedReadEntry {
         self.returned_type
     }
 
-    /// Returns the concrete redaction-safe failure type identity.
-    pub const fn failure_type(&self) -> TypeId {
-        self.failure_type
+    /// Returns the concrete optional safe-diagnostic type identity.
+    pub const fn diagnostic_type(&self) -> TypeId {
+        self.diagnostic_type
     }
 
     /// Returns the private process invoker wrapper identity.
@@ -3180,7 +3180,7 @@ fn validate_registered_state_execution(
                 != entry.operation().operation_contract_ref()
                 || state.callbacks().request_type() != entry.request_type()
                 || state.callbacks().observation_type() != entry.returned_type()
-                || state.callbacks().access_failure_type() != entry.failure_type()
+                || state.callbacks().diagnostic_type() != entry.diagnostic_type()
                 || request_contract != entry.operation().request_contract()
                 || returned_contract != entry.operation().returned_contract()
                 || safe_failure_contract != entry.operation().safe_failure_contract()
@@ -4154,7 +4154,7 @@ fn validate_state_execution<S: State>(
                 && callbacks.operation().binding_ref() == capability_binding_ref
                 && callbacks.request_codec().value_contract() == request_contract
                 && callbacks.observation_codec().value_contract() == returned_contract
-                && callbacks.access_failure_codec().value_contract() == safe_failure_contract
+                && callbacks.diagnostic_codec().value_contract() == safe_failure_contract
         }
         (
             StateExecution::Effect(callbacks),

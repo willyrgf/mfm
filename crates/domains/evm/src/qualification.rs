@@ -32,7 +32,7 @@ use crate::{
     EvmBalanceSnapshotFact, EvmBalanceSource, EvmBlockResponse, EvmBootstrapInput,
     EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCheckedSource, EvmInitialAnchorInput,
     EvmLatestAnchorRequest, EvmNativeBalanceRequest, EvmNetworkBinding, EvmQuantityResponse,
-    EvmReadFailure, EvmSafeFailure, EvmSubmitTransactionFailure, EvmSubmitTransactionInput,
+    EvmReadFailure, EvmSafeDiagnostic, EvmSubmitTransactionFailure, EvmSubmitTransactionInput,
     EvmSubmitTransactionRequest, EvmSubmitTransactionSelector, EvmTokenBalanceRequest,
     EvmTokenDecimalsInput, EvmTokenDecimalsRequest, EvmTokenDecimalsResponse,
     EvmTransactionOutcome, EvmWalletAttemptResult, EvmWalletTerminalEvidence,
@@ -453,7 +453,7 @@ pub fn evm_read_value_contracts(
             "mfm.evm.read.request.anchor-confirmation",
             object_evidence_contract_ref.clone(),
         )?,
-        safe_failure: value_contract::<EvmSafeFailure>(
+        safe_failure: value_contract::<EvmSafeDiagnostic>(
             "mfm.evm.failure.safe-read",
             object_evidence_contract_ref,
         )?,

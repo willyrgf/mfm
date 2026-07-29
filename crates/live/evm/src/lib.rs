@@ -16,7 +16,6 @@ pub use adapter::{
     evm_safe_classifier_contract_ref, evm_safe_classifier_support_contract,
     qualify_evm_read_entries, EvmReadAdapter, EvmReadQualificationArtifacts,
     QualifiedEvmReadEntries, EVM_ADAPTER_CALLBACK_SURFACE_VERSION,
-    EVM_SAFE_CLASSIFIER_DESCRIPTOR_VERSION,
 };
 pub use wallet_executor::EvmWalletExecutor;
 pub use wallet_rpc::{

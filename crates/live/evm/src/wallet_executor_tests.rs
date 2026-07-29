@@ -15,8 +15,8 @@ use mfm_evm::{
 use mfm_executor::{
     CommittedEffectRequest, Ensure, EvidenceBounds, ExecutorBinding, ExecutorContractDescriptor,
     ExecutorDeployment, ExecutorError, ExecutorRetainedClosureContract, KeyedExecutorLedger,
-    MemoryExecutorStore, ResourceOwnership, ResourcePolicyBinding, SchemaQualifiedCanonicalValue,
-    VerifiedEnsureResult, VerifiedExecutorBinding,
+    MemoryExecutorStore, ReferenceFailureCode, ResourceOwnership, ResourcePolicyBinding,
+    SchemaQualifiedCanonicalValue, VerifiedEnsureResult, VerifiedExecutorBinding,
 };
 use mfm_ids::{
     ContentRef, DigestAlgorithm, NodeId, RunId, SchemaId, SemanticTypeId, StableId, StoreScopeId,
@@ -761,6 +761,9 @@ async fn drive_to_terminal(
             .drive(committed)
             .await
             .unwrap_or_else(|error| panic!("wallet drive {error:?}; calls={:?}", client.calls()));
+        let result = result
+            .into_parts()
+            .unwrap_or_else(|failure| panic!("unexpected safe failure: {failure:?}"));
         if matches!(result.outcome(), Ensure::Terminal { .. }) {
             return result;
         }
@@ -785,8 +788,14 @@ async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_subst
         fixture.executor.drive(&fixture.committed),
         fixture.executor.drive(&fixture.committed)
     );
-    let left = left.expect("left drive");
-    let right = right.expect("right drive");
+    let left = left
+        .expect("left drive")
+        .into_parts()
+        .expect("left returned outcome");
+    let right = right
+        .expect("right drive")
+        .into_parts()
+        .expect("right returned outcome");
     assert_eq!(fixture.client.operation_count("eth_sendRawTransaction"), 1);
     assert!(
         left.delivery_audit().attempt_count() <= 2 && right.delivery_audit().attempt_count() <= 2
@@ -814,7 +823,9 @@ async fn response_loss_restart_recovers_by_hash_without_persisting_bearer_materi
         .executor
         .drive(&fixture.committed)
         .await
-        .expect("lost response");
+        .expect("lost response")
+        .into_parts()
+        .expect("returned pending outcome");
     assert!(matches!(pending.outcome(), Ensure::Pending { .. }));
     assert_eq!(pending.delivery_audit().attempt_count(), 1);
 
@@ -939,13 +950,17 @@ async fn bounded_rebroadcast_then_replacement_preserves_nonce_and_semantic_reque
 async fn signer_unavailability_never_creates_a_delivery_authorization() {
     let fixture = Fixture::new(Scenario::Succeeded);
     fixture.signer_available.store(false, Ordering::SeqCst);
+    let (outcome, failure) = fixture
+        .executor
+        .drive(&fixture.committed)
+        .await
+        .expect("safe signer failure")
+        .into_parts()
+        .expect_err("signer failure must not return an ensure result");
+    assert_eq!(outcome, mfm_capabilities::SafeFailureOutcome::DidNotEnter);
     assert_eq!(
-        fixture
-            .executor
-            .drive(&fixture.committed)
-            .await
-            .expect_err("unavailable signer"),
-        ExecutorError::DurableBackendUnavailable
+        failure.stable_code(),
+        &ReferenceFailureCode::DestinationUnavailable
     );
     assert_eq!(fixture.client.call_count(), 0);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 1);

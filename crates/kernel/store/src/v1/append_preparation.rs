@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV1};
-use mfm_executor::{Ensure, ExecutorRetainedValueRelation, ProofBasis, VerifiedEnsureResult};
+use mfm_capabilities::SafeFailureOutcome;
+use mfm_executor::{
+    EffectExecutorOutcome, Ensure, ExecutorRetainedValueRelation, ProofBasis, SafeFailureCode,
+    VerifiedEnsureResult,
+};
 use mfm_ids::{AppendRequestId, ContentRef, FieldPath, RequestDigest, StableId};
 use mfm_journal::v1::{
     AuthorizationRef, AuthorizationScope, AuthorizationScopeFields, CapabilityBindingRef,
@@ -14,8 +18,8 @@ use mfm_spec::v1::CertifiedStateExecution;
 use super::fact_scan::prepare_fact_selection_observation;
 use super::objects::{derive_value_ref, PreparedAuthority};
 use super::preparation::{
-    AuthorizationMaterial, EffectPromotionMaterial, ExistingRunAppendMaterial, ObservationMaterial,
-    PreparedFrameParts, ProducedObjectRoot, ReadObservationMaterial, SafeFailureMetadata,
+    AuthorizationMaterial, ExistingRunAppendMaterial, ObservationMaterial, PreparedFrameParts,
+    ProducedObjectRoot, ReadObservationMaterial, SafeFailureMetadata,
 };
 use super::{
     AuthorizeExternalAccess, ObserveExternalAccess, PreparedJournalAppend, PreparedObjectGraph,
@@ -263,8 +267,8 @@ fn prepare_observation(
         } => prepare_read_observation(view, append_request_id, &authorization_ref, *outcome),
         ObservationMaterial::EnsureEffect {
             authorization_ref,
-            promotion,
-        } => prepare_effect_observation(view, append_request_id, &authorization_ref, *promotion),
+            outcome,
+        } => prepare_effect_observation(view, append_request_id, &authorization_ref, *outcome),
         ObservationMaterial::FactSelection { completed_scan } => {
             let (observation, objects, pending) =
                 prepare_fact_selection_observation(view, *completed_scan)?;
@@ -315,21 +319,21 @@ fn prepare_read_observation(
             )
         }
         ReadObservationMaterial::DidNotEnter {
-            typed_failure_root,
+            diagnostic_root,
             metadata,
         } => prepare_safe_failure(
             authorization_ref,
-            typed_failure_root,
+            diagnostic_root,
             metadata,
             &frozen.safe_failure_contract,
             false,
         )?,
         ReadObservationMaterial::Indeterminate {
-            typed_failure_root,
+            diagnostic_root,
             metadata,
         } => prepare_safe_failure(
             authorization_ref,
-            typed_failure_root,
+            diagnostic_root,
             metadata,
             &frozen.safe_failure_contract,
             true,
@@ -345,31 +349,31 @@ fn prepare_read_observation(
 
 fn prepare_safe_failure(
     authorization_ref: &AuthorizationRef,
-    typed_failure_root: ProducedObjectRoot,
+    diagnostic_root: Option<ProducedObjectRoot>,
     metadata: SafeFailureMetadata,
     frozen_contract: &mfm_spec::v1::RetainedValueContract,
     indeterminate: bool,
 ) -> Result<(ObservationOutcome, Vec<PreparedAuthority>)> {
-    if typed_failure_root.value_contract() != frozen_contract
-        || metadata.safe_failure_contract_ref() != frozen_contract.evidence_contract_ref()
+    if diagnostic_root
+        .as_ref()
+        .is_some_and(|root| root.value_contract() != frozen_contract)
     {
         return Err(StoreError::InvalidPreparedAppend {
             purpose: "read_observation",
             message: "safe failure does not match the frozen read intent",
         });
     }
-    let diagnostic_ref = observation_value_ref(
-        authorization_ref,
-        OBSERVATION_FAILURE_PATH,
-        &typed_failure_root,
-    )?;
+    let diagnostic_ref = diagnostic_root
+        .as_ref()
+        .map(|root| observation_value_ref(authorization_ref, OBSERVATION_FAILURE_PATH, root))
+        .transpose()?;
     let failure = SafeFailure::new(
         metadata.safe_failure_contract_ref(),
         metadata.stable_code(),
         metadata.failure_class(),
         metadata.boundary_stage(),
         metadata.coarse_size_class(),
-        Some(&diagnostic_ref),
+        diagnostic_ref.as_ref(),
     )?;
     let outcome = if indeterminate {
         ObservationOutcome::indeterminate(&failure)?
@@ -378,10 +382,14 @@ fn prepare_safe_failure(
     };
     Ok((
         outcome,
-        vec![PreparedAuthority::produced(
-            diagnostic_ref,
-            typed_failure_root.canonical().to_vec(),
-        )?],
+        diagnostic_ref
+            .zip(diagnostic_root)
+            .map(|(reference, root)| {
+                PreparedAuthority::produced(reference, root.canonical().to_vec())
+            })
+            .transpose()?
+            .into_iter()
+            .collect(),
     ))
 }
 
@@ -389,7 +397,66 @@ fn prepare_effect_observation(
     view: &VerifiedRunView,
     append_request_id: AppendRequestId,
     authorization_ref: &AuthorizationRef,
-    promotion: EffectPromotionMaterial,
+    outcome: EffectExecutorOutcome,
+) -> Result<ObserveExternalAccess> {
+    unobserved_entry(view, authorization_ref)?;
+    match outcome.into_parts() {
+        Ok(result) => {
+            prepare_returned_effect_observation(view, append_request_id, authorization_ref, result)
+        }
+        Err((outcome, failure)) => prepare_effect_safe_failure_observation(
+            view,
+            append_request_id,
+            authorization_ref,
+            failure,
+            outcome,
+        ),
+    }
+}
+
+fn prepare_effect_safe_failure_observation(
+    view: &VerifiedRunView,
+    append_request_id: AppendRequestId,
+    authorization_ref: &AuthorizationRef,
+    failure: mfm_executor::ReferenceSafeFailure,
+    outcome: SafeFailureOutcome,
+) -> Result<ObserveExternalAccess> {
+    let stable_code = StableId::new(failure.stable_code().as_str())?;
+    mfm_executor::verify_reference_safe_failure_tuple(
+        failure.safe_failure_contract_ref().clone(),
+        &stable_code,
+        outcome,
+        failure.failure_class(),
+        failure.boundary_stage(),
+        failure.coarse_size_class(),
+        failure.diagnostic_ref().is_some(),
+    )
+    .map_err(|_| StoreError::AuthorizationNotEligible)?;
+    let failure = SafeFailure::new(
+        failure.safe_failure_contract_ref(),
+        &stable_code,
+        failure.failure_class(),
+        failure.boundary_stage(),
+        failure.coarse_size_class(),
+        None,
+    )?;
+    let outcome = match outcome {
+        SafeFailureOutcome::DidNotEnter => ObservationOutcome::did_not_enter(&failure)?,
+        SafeFailureOutcome::Indeterminate => ObservationOutcome::indeterminate(&failure)?,
+    };
+    let observation = ExternalAccessObserved::new(authorization_ref, &outcome, None)?;
+    let objects = PreparedObjectGraph::prepare_for_record_values(
+        &[observation.canonical_value()?],
+        Vec::new(),
+    )?;
+    ObserveExternalAccess::new(view, append_request_id, observation, objects, None)
+}
+
+fn prepare_returned_effect_observation(
+    view: &VerifiedRunView,
+    append_request_id: AppendRequestId,
+    authorization_ref: &AuthorizationRef,
+    result: VerifiedEnsureResult,
 ) -> Result<ObserveExternalAccess> {
     let entry = unobserved_entry(view, authorization_ref)?;
     let authorization = entry.authorization().fields()?;
@@ -404,7 +471,6 @@ fn prepare_effect_observation(
         .into_iter()
         .find(|pending| pending.request_transition_ref() == &effect_request_transition_ref)
         .ok_or(StoreError::AuthorizationNotEligible)?;
-    let result = promotion.into_verified_result();
     validate_effect_identity(view, &pending, &result)?;
     let node = view
         .certified_spec()

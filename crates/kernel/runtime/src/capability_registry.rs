@@ -7,7 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_executor::{
-    CanonicalExecutorRequest, CommittedEffectRequest, RequiredPlanExpansion, VerifiedEnsureResult,
+    CanonicalExecutorRequest, CommittedEffectRequest, EffectExecutorOutcome,
+    EffectExecutorOutcomeView, RequiredPlanExpansion, VerifiedEnsureResult,
     VerifiedExecutorBinding,
 };
 use mfm_ids::{
@@ -46,7 +47,7 @@ where
     QualifiedReadEntry::new::<
         Request,
         Capability::Response,
-        Capability::AccessFailure,
+        Capability::SafeDiagnostic,
         RuntimeReadInvoker,
     >(
         binding,
@@ -133,11 +134,11 @@ impl RoutedReadRequest {
 pub(crate) enum ErasedReadOutcome {
     Returned(Box<dyn Any + Send + Sync>),
     DidNotEnter {
-        failure: Box<dyn Any + Send + Sync>,
+        diagnostic: Option<Box<dyn Any + Send + Sync>>,
         metadata: mfm_store::SafeFailureMetadata,
     },
     Indeterminate {
-        failure: Box<dyn Any + Send + Sync>,
+        diagnostic: Option<Box<dyn Any + Send + Sync>>,
         metadata: mfm_store::SafeFailureMetadata,
     },
 }
@@ -193,7 +194,7 @@ where
     ) -> Result<RoutedReadRequest> {
         if entry.request_type() != TypeId::of::<Request>()
             || entry.returned_type() != TypeId::of::<Capability::Response>()
-            || entry.failure_type() != TypeId::of::<Capability::AccessFailure>()
+            || entry.diagnostic_type() != TypeId::of::<Capability::SafeDiagnostic>()
             || request.request_type() != TypeId::of::<Request>()
         {
             return Err(RuntimeError::CatalogSelection);
@@ -255,21 +256,29 @@ where
                 ReadCapabilityOutcome::Returned(value) => {
                     ErasedReadOutcome::Returned(Box::new(value))
                 }
-                ReadCapabilityOutcome::DidNotEnter { failure, metadata } => {
+                ReadCapabilityOutcome::DidNotEnter {
+                    diagnostic,
+                    metadata,
+                } => {
                     if metadata.safe_failure_contract_ref() != &context.safe_failure_contract_ref {
                         return Err(RuntimeError::InvalidCallbackResult);
                     }
                     ErasedReadOutcome::DidNotEnter {
-                        failure: Box::new(failure),
+                        diagnostic: diagnostic
+                            .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>),
                         metadata,
                     }
                 }
-                ReadCapabilityOutcome::Indeterminate { failure, metadata } => {
+                ReadCapabilityOutcome::Indeterminate {
+                    diagnostic,
+                    metadata,
+                } => {
                     if metadata.safe_failure_contract_ref() != &context.safe_failure_contract_ref {
                         return Err(RuntimeError::InvalidCallbackResult);
                     }
                     ErasedReadOutcome::Indeterminate {
-                        failure: Box::new(failure),
+                        diagnostic: diagnostic
+                            .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>),
                         metadata,
                     }
                 }
@@ -317,7 +326,7 @@ pub(crate) struct EffectInvocationContext {
 
 pub(crate) struct ErasedEnsureObservation {
     pub(crate) authorization_ref: AuthorizationRef,
-    pub(crate) result: VerifiedEnsureResult,
+    pub(crate) outcome: EffectExecutorOutcome,
 }
 
 type ErasedEnsureFuture<'a> =
@@ -448,17 +457,31 @@ where
                 &expected_request_ref,
                 committed,
             )?;
-            let (authorization_ref, result) = call_ensure(&self.executor, access).await?;
-            if result.identity().executor_binding_ref() != context.binding.binding_ref()
-                || result.retained_closure().executor_binding_ref() != context.binding.binding_ref()
-                || result.retained_closure().contract()
-                    != context.binding.contract().retained_closure_contract()
-            {
-                return Err(RuntimeError::EffectIdentityMismatch);
+            let (authorization_ref, outcome) = call_ensure(&self.executor, access).await?;
+            match outcome.view() {
+                EffectExecutorOutcomeView::Returned(result) => {
+                    if result.identity().executor_binding_ref() != context.binding.binding_ref()
+                        || result.retained_closure().executor_binding_ref()
+                            != context.binding.binding_ref()
+                        || result.retained_closure().contract()
+                            != context.binding.contract().retained_closure_contract()
+                    {
+                        return Err(RuntimeError::EffectIdentityMismatch);
+                    }
+                }
+                EffectExecutorOutcomeView::DidNotEnter(failure)
+                | EffectExecutorOutcomeView::Indeterminate(failure)
+                    if failure.safe_failure_contract_ref()
+                        != context.binding.contract().safe_failure_contract_ref() =>
+                {
+                    return Err(RuntimeError::EffectIdentityMismatch);
+                }
+                EffectExecutorOutcomeView::DidNotEnter(_)
+                | EffectExecutorOutcomeView::Indeterminate(_) => {}
             }
             Ok(ErasedEnsureObservation {
                 authorization_ref,
-                result,
+                outcome,
             })
         })
     }

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use super::EvmTransportOutcome;
 use alloy_primitives::{Address, B256, U256};
 use mfm_evm::{
     EvmAnchorConfirmationRequest, EvmAnchoredSource, EvmBlockAnchor, EvmChainIdentityRequest,
@@ -7,7 +8,6 @@ use mfm_evm::{
     EvmRoutingGenerationRef, EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest,
 };
 use mfm_ids::StableId;
-use mfm_program::ObservationOutcome;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -196,7 +196,7 @@ async fn six_typed_methods_issue_exactly_one_protocol_call_each() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(binding.clone()))
             .await,
-        ObservationOutcome::Returned(response)
+        EvmTransportOutcome::Returned(response)
             if response.chain_id == 1
     ));
     let checked = EvmCheckedSource::new(binding, "mfm.evm.json-rpc", JSON_RPC_IMPLEMENTATION_ID)
@@ -205,7 +205,7 @@ async fn six_typed_methods_issue_exactly_one_protocol_call_each() {
         transport
             .latest_anchor(&EvmLatestAnchorRequest::new(checked.clone()))
             .await,
-        ObservationOutcome::Returned(_)
+        EvmTransportOutcome::Returned(_)
     ));
     let anchored = EvmAnchoredSource::new(checked, EvmBlockAnchor::new(U256::from(42), BLOCK_HASH))
         .expect("anchor");
@@ -216,7 +216,7 @@ async fn six_typed_methods_issue_exactly_one_protocol_call_each() {
                 ACCOUNT,
             ))
             .await,
-        ObservationOutcome::Returned(response)
+        EvmTransportOutcome::Returned(response)
             if response.quantity().expect("quantity") == U256::from(2)
     ));
     assert!(matches!(
@@ -226,7 +226,7 @@ async fn six_typed_methods_issue_exactly_one_protocol_call_each() {
                 TOKEN,
             ))
             .await,
-        ObservationOutcome::Returned(response)
+        EvmTransportOutcome::Returned(response)
             if response.decimals == 6
     ));
     assert!(matches!(
@@ -237,14 +237,14 @@ async fn six_typed_methods_issue_exactly_one_protocol_call_each() {
                 TOKEN,
             ))
             .await,
-        ObservationOutcome::Returned(response)
+        EvmTransportOutcome::Returned(response)
             if response.quantity().expect("quantity") == U256::from(3)
     ));
     assert!(matches!(
         transport
             .confirm_anchor(&EvmAnchorConfirmationRequest::new(anchored))
             .await,
-        ObservationOutcome::Returned(_)
+        EvmTransportOutcome::Returned(_)
     ));
 
     let requests = server.finish().await;
@@ -303,7 +303,7 @@ async fn unavailable_or_mismatched_generation_never_enters_transport() {
         unavailable_transport
             .chain_identity(&EvmChainIdentityRequest::new(missing))
             .await,
-        ObservationOutcome::DidNotEnter(EvmSafeFailure::RoutingGenerationUnavailable)
+        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RoutingGenerationUnavailable)
     );
 
     let (transport, binding) = transport("http://127.0.0.1:9");
@@ -317,7 +317,7 @@ async fn unavailable_or_mismatched_generation_never_enters_transport() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(wrong_network))
             .await,
-        ObservationOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
+        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
     );
     let wrong_chain = EvmNetworkBinding::new(
         "ethereum-mainnet",
@@ -329,7 +329,7 @@ async fn unavailable_or_mismatched_generation_never_enters_transport() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(wrong_chain))
             .await,
-        ObservationOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
+        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
     );
     let mismatched = EvmCheckedSource::new(binding, "different-source", JSON_RPC_IMPLEMENTATION_ID)
         .expect("source");
@@ -337,7 +337,7 @@ async fn unavailable_or_mismatched_generation_never_enters_transport() {
         transport
             .latest_anchor(&EvmLatestAnchorRequest::new(mismatched))
             .await,
-        ObservationOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
+        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
     );
 }
 
@@ -354,7 +354,7 @@ async fn closed_semaphore_is_classified_as_pre_entry_cancellation() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        ObservationOutcome::DidNotEnter(EvmSafeFailure::AccessCancelled)
+        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::AccessCancelled)
     );
 }
 
@@ -400,7 +400,7 @@ async fn destination_and_invalid_response_failures_are_closed_and_single_call() 
             transport
                 .chain_identity(&EvmChainIdentityRequest::new(binding))
                 .await,
-            ObservationOutcome::Indeterminate(expected)
+            EvmTransportOutcome::Indeterminate(expected)
         );
         assert_eq!(server.finish().await.len(), 1);
     }
@@ -420,7 +420,7 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         redirect_transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        ObservationOutcome::Indeterminate(EvmSafeFailure::HttpStatus { status: 307 })
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::HttpStatus { status: 307 })
     );
     assert_eq!(redirect.finish().await.len(), 1);
 
@@ -433,7 +433,7 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        ObservationOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
             size_class: EvmCoarseSizeClass::UpTo1Mib,
         })
     );

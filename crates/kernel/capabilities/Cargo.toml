@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
+mfm-values = { path = "../values" }
 
 [dev-dependencies]
 trybuild = "1.0"

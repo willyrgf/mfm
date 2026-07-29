@@ -1,6 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1};
+use mfm_canonical::{CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1};
+use mfm_capabilities::{SafeFailureClassifierDescriptor, SafeFailureOutcome};
+use mfm_executor::{
+    verify_ensure_result, verify_reference_safe_failure_tuple, CommittedEffectRequest,
+    DeliveryAuditFrontierRef, EffectIdentity, ExecutorBinding, ExecutorBindingRef,
+    ExecutorContractDescriptor, ExecutorDeployment, ExecutorEnsureResultClaim,
+    ExecutorRetainedClosureClaim, ExecutorRetainedValue, ExecutorRetainedValueRelation,
+    ExecutorTerminalEvidenceClaim, ProofBasis, ResourceOwnership, SchemaQualifiedCanonicalValue,
+    TerminalTombstoneRef, VerifiedExecutorBinding,
+};
+use mfm_facts::FactSelectionRequest;
 use mfm_ids::{
     ContentRef, EffectKey, EntryPointId, FieldPath, JournalRecordHash, NodeId, RecordId, RunId,
     RunSemanticStateDigest, SemanticTypeId, StableId, TenantScopeId,
@@ -12,25 +22,32 @@ use mfm_journal::v1::{
     CapabilityBindingRef, ClosureRef, CommitCandidatePreimage, CommitDigestPreimage,
     CommitEnvelope, ConfigManifest, ConfiguredValueBinding, ConfiguredValueKey, ContextManifest,
     CrossRunSourceManifest, CrossRunSourceRef, CrossRunSourceRefFields, ExecutorEnsureResult,
-    ExecutorEnsureResultFields, ExternalAccessAuthorized, ExternalAccessObserved,
-    FactClaimEnvelope, FactEmission, InitialBinding, InputManifest, InputManifestRef, JournalHead,
-    JournalPredecessor, JournalPredecessorFields, LegalCommitBatch, NodePhase, NodeSemanticState,
-    NodeTerminalOutcome as JournalNodeTerminalOutcome, ObjectPathBinding, ObservationOutcomeFields,
-    ObservationRef, OutputBinding, OutputRef, PendingEffectState as JournalPendingEffectState,
-    ProducerBindingFields, ProducerBindingKind, RecordHashPreimage, RecordIdPreimage, RecordRef,
+    ExecutorEnsureResultFields, ExecutorProofBasisFields, ExternalAccessAuthorized,
+    ExternalAccessObserved, FactClaimEnvelope, FactContentIdentityPreimage, FactEmission, FactRef,
+    FactSelectionResponse, FactSelectionScanAttestation, FactSelectionScanContract,
+    FactValueComponent, FrozenReadIntent, InitialBinding, InputManifest, InputManifestRef,
+    InputSource, JournalHead, JournalPredecessor, JournalPredecessorFields, LegalCommitBatch,
+    NodePhase, NodeSemanticState, NodeTerminalOutcome as JournalNodeTerminalOutcome,
+    ObjectPathBinding, ObservationOutcomeFields, ObservationRef, OutputBinding, OutputRef,
+    PendingEffectState as JournalPendingEffectState, ProducerBinding, ProducerBindingFields,
+    ProducerBindingKind, ReadCapabilityBinding, RecordHashPreimage, RecordIdPreimage, RecordRef,
     RunAdmitted, RunJournalRecordFields, RunPhase, RunSemanticStatePreimage, SafeFailure,
     SeedManifest, SemanticBinding, SemanticClosureCoordinate, SettlementFields,
-    StateTransitionCommitted, TenantFactCoordinateFields, TerminalEffectEvidence, TransitionAfter,
-    TransitionBefore, TransitionBody, TransitionBodyFields, TransitionRef, TransitionSlot,
-    ValueRef,
+    StateTransitionCommitted, TenantFactCoordinateFields, TenantFactFrontier,
+    TerminalEffectEvidence, TransitionAfter, TransitionBefore, TransitionBody,
+    TransitionBodyFields, TransitionRef, TransitionSlot, ValueRef,
 };
 use mfm_spec::v1::{
-    CapabilityBindingManifest, Certificate, CertifiedNodeContract, CertifiedSourceSelector,
-    CertifiedStateExecution, ExpandedCertifiedSpec, RetainedValueContract,
+    CapabilityBindingManifest, Certificate, CertifiedFrameBinding, CertifiedNodeContract,
+    CertifiedSourceSelector, CertifiedStateExecution, ExpandedCertifiedSpec, RetainedValueContract,
     StateImplementationManifest,
 };
 
-use super::objects::validate_object_envelope;
+use super::frame_preparation::{
+    insert_json_path, select_canonical, select_manifest_value, CONFIGURED_VALUE_PATH,
+    RUN_ADMISSION_INPUT_PATH,
+};
+use super::objects::{derive_value_ref, validate_object_envelope, validate_value_contract};
 use super::{
     CommittedObject, ObjectAuthorityKey, Result, StoreError, StoreIdentity, UntrustedObjectPayload,
     FACT_SELECTION_OPERATION_ID,
@@ -348,7 +365,7 @@ impl CommittedRunJournal {
                 &context_manifest,
                 &cross_run_source_manifest,
             )?;
-        let fold = FoldEngine::replay(&self, &admission, &spec)?;
+        let fold = FoldEngine::replay(&self, &admission, &spec, &capability_binding_manifest)?;
         Ok(VerifiedRunView {
             journal: self,
             admission,
@@ -839,8 +856,9 @@ impl FoldEngine {
         journal: &CommittedRunJournal,
         admission: &RunAdmitted,
         spec: &ExpandedCertifiedSpec,
+        capability_binding_manifest: &CapabilityBindingManifest,
     ) -> Result<FoldState> {
-        FoldState::rebuild(journal, admission, spec)
+        FoldState::rebuild(journal, admission, spec, capability_binding_manifest)
     }
 
     fn preview_transition(
@@ -921,6 +939,7 @@ impl FoldState {
         journal: &CommittedRunJournal,
         admission: &RunAdmitted,
         spec: &ExpandedCertifiedSpec,
+        capability_binding_manifest: &CapabilityBindingManifest,
     ) -> Result<Self> {
         let admission_fields = admission.fields()?;
         if spec.spec_hash()? != admission_fields.spec_hash {
@@ -969,7 +988,7 @@ impl FoldState {
             .zip(&journal.normalized_batches)
             .skip(1)
         {
-            fold.apply_commit(commit, batch, spec, journal)?;
+            fold.apply_commit(commit, batch, spec, capability_binding_manifest, journal)?;
         }
         if fold
             .node_phases
@@ -1027,6 +1046,7 @@ impl FoldState {
         commit: &CommittedJournalCommit,
         batch: &NormalizedBatch,
         spec: &ExpandedCertifiedSpec,
+        capability_binding_manifest: &CapabilityBindingManifest,
         journal: &CommittedRunJournal,
     ) -> Result<()> {
         let envelope_fields = commit.envelope.fields()?;
@@ -1065,6 +1085,8 @@ impl FoldState {
                     envelope_fields.core.run_sequence,
                     commit,
                     observation.clone(),
+                    spec,
+                    capability_binding_manifest,
                     journal,
                 )?;
             }
@@ -1578,19 +1600,38 @@ impl FoldState {
         run_sequence: u64,
         commit: &CommittedJournalCommit,
         observation: ExternalAccessObserved,
+        spec: &ExpandedCertifiedSpec,
+        capability_binding_manifest: &CapabilityBindingManifest,
         journal: &CommittedRunJournal,
     ) -> Result<()> {
         let fields = observation.fields()?;
         let key = fields.authorization_ref.as_bytes();
-        let authorization = self
+        let authorization_index = self
             .authorizations
-            .iter_mut()
-            .find(|entry| entry.entry.authorization_ref.as_bytes() == key)
+            .iter()
+            .position(|entry| entry.entry.authorization_ref.as_bytes() == key)
             .ok_or(StoreError::UnknownAuthorization)?;
-        if authorization.entry.observation.is_some() {
+        if self.authorizations[authorization_index]
+            .entry
+            .observation
+            .is_some()
+        {
             return Err(StoreError::ObservationAlreadyCommitted);
         }
-        validate_observation_outcome(&authorization.entry.authorization, &observation)?;
+        verify_observation_semantics(
+            self,
+            journal,
+            None,
+            run_sequence,
+            spec,
+            capability_binding_manifest,
+            &self.authorizations[authorization_index]
+                .entry
+                .authorization_ref,
+            &self.authorizations[authorization_index].entry.authorization,
+            &observation,
+        )?;
+        let authorization = &mut self.authorizations[authorization_index];
         let record = commit.records.first().ok_or(StoreError::EmptyJournal)?;
         let observation_ref = ObservationRef::new(&record.record_ref(run_id, run_sequence)?)?;
         let (status, failure, returned_ref) = audit_outcome_fields(&observation)?;
@@ -1754,7 +1795,14 @@ impl FoldState {
         }
     }
 
-    fn validate_observation_candidate(&self, observation: &ExternalAccessObserved) -> Result<()> {
+    fn validate_observation_candidate(
+        &self,
+        journal: &CommittedRunJournal,
+        objects: &super::PreparedObjectGraph,
+        spec: &ExpandedCertifiedSpec,
+        capability_binding_manifest: &CapabilityBindingManifest,
+        observation: &ExternalAccessObserved,
+    ) -> Result<()> {
         let fields = observation.fields()?;
         let entry = self
             .authorizations
@@ -1764,7 +1812,17 @@ impl FoldState {
         if entry.entry.observation.is_some() {
             return Err(StoreError::ObservationAlreadyCommitted);
         }
-        validate_observation_outcome(&entry.entry.authorization, observation)
+        verify_observation_semantics(
+            self,
+            journal,
+            Some(objects),
+            u64::try_from(journal.commits.len()).map_err(|_| StoreError::SequenceOverflow)?,
+            spec,
+            capability_binding_manifest,
+            &entry.entry.authorization_ref,
+            &entry.entry.authorization,
+            observation,
+        )
     }
 }
 
@@ -2205,27 +2263,1942 @@ fn consume_observation(
     Ok(())
 }
 
-fn validate_observation_outcome(
+const READ_REQUEST_PATH: &str = "request_ref";
+const FROZEN_READ_INTENT_PATH: &str = "frozen_read_intent_ref";
+const READ_RESULT_PATH: &str = "outcome.result_ref";
+const READ_DIAGNOSTIC_PATH: &str = "outcome.safe_failure.diagnostic_ref";
+const EFFECT_REQUEST_PATH: &str = "body.semantic_request_ref";
+const ENSURE_RESULT_PATH: &str = "executor.ensure_result";
+const TERMINAL_EVIDENCE_PATH: &str = "executor.terminal_evidence";
+const REQUEST_PREIMAGE_SCHEMA: &str = "mfm.request-digest-preimage.v1";
+
+struct ObservationObjectResolver<'a> {
+    journal: &'a CommittedRunJournal,
+    prepared: Option<&'a super::PreparedObjectGraph>,
+    visible_run_sequence: u64,
+}
+
+impl ObservationObjectResolver<'_> {
+    fn value_bytes(&self, value_ref: &ValueRef) -> Result<Vec<u8>> {
+        if let Some(prepared) = self.prepared {
+            match prepared.bytes_for(value_ref) {
+                Ok(bytes) => return Ok(bytes.to_vec()),
+                Err(StoreError::ObjectNotReachable) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let object = retained_value_in_journal(self.journal, value_ref)?;
+        if !self.committed_value_visible(value_ref)? {
+            return Err(StoreError::ObjectNotReachable);
+        }
+        Ok(object.bytes().to_vec())
+    }
+
+    fn content_bytes(&self, content_ref: &ContentRef) -> Result<Vec<u8>> {
+        let mut matched: Option<Vec<u8>> = None;
+        let mut accept = |schema_id: &mfm_ids::SchemaId,
+                          digest: &mfm_ids::ContentDigest,
+                          bytes: &[u8]|
+         -> Result<()> {
+            if schema_id == content_ref.schema_id() && digest == content_ref.content_digest() {
+                if matched.as_ref().is_some_and(|existing| existing != bytes) {
+                    return Err(observation_mismatch("observation_content_identity"));
+                }
+                matched = Some(bytes.to_vec());
+            }
+            Ok(())
+        };
+        if let Some(prepared) = self.prepared {
+            for payload in prepared.payloads() {
+                accept(
+                    payload.schema_id(),
+                    payload.content_digest(),
+                    payload.bytes(),
+                )?;
+            }
+        }
+        for object in self.journal.objects.values() {
+            if !self.committed_value_visible(object.value_ref())? {
+                continue;
+            }
+            let fields = object.value_ref().fields()?;
+            accept(&fields.schema_id, &fields.content_digest, object.bytes())?;
+        }
+        matched.ok_or(StoreError::ObjectNotReachable)
+    }
+
+    fn produced_values(
+        &self,
+        authorization_ref: &AuthorizationRef,
+    ) -> Result<Vec<(ValueRef, Vec<u8>)>> {
+        let mut exact = BTreeMap::<Vec<u8>, (ValueRef, Vec<u8>)>::new();
+        let mut accept = |value_ref: &ValueRef, bytes: &[u8]| -> Result<()> {
+            let ProducerBindingFields::ExternalObservation {
+                authorization_ref: producer,
+                ..
+            } = value_ref.fields()?.producer_binding.fields()?
+            else {
+                return Ok(());
+            };
+            if &producer != authorization_ref {
+                return Ok(());
+            }
+            match exact.entry(value_ref.as_bytes().to_vec()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((value_ref.clone(), bytes.to_vec()));
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get().1.as_slice() == bytes => {}
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(observation_mismatch("observation_producer_identity"));
+                }
+            }
+            Ok(())
+        };
+        if let Some(prepared) = self.prepared {
+            for payload in prepared.payloads() {
+                for value_ref in payload.value_refs() {
+                    accept(value_ref, payload.bytes())?;
+                }
+            }
+        }
+        for object in self.journal.objects.values() {
+            if self.committed_value_visible(object.value_ref())? {
+                accept(object.value_ref(), object.bytes())?;
+            }
+        }
+        Ok(exact.into_values().collect())
+    }
+
+    fn committed_value_visible(&self, value_ref: &ValueRef) -> Result<bool> {
+        let target = ObjectAuthorityKey::from_value_ref(value_ref)?;
+        for commit in self.journal.commits.iter().take(
+            usize::try_from(self.visible_run_sequence).map_err(|_| StoreError::SequenceOverflow)?,
+        ) {
+            let fields = commit.envelope.fields()?;
+            for intent in fields.core.artifact_admission_intents {
+                if ObjectAuthorityKey::from_value_ref(&intent.fields()?.value_ref)? == target {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn verify_observation_semantics(
+    fold: &FoldState,
+    journal: &CommittedRunJournal,
+    prepared: Option<&super::PreparedObjectGraph>,
+    visible_run_sequence: u64,
+    spec: &ExpandedCertifiedSpec,
+    capability_binding_manifest: &CapabilityBindingManifest,
+    expected_authorization_ref: &AuthorizationRef,
     authorization: &ExternalAccessAuthorized,
     observation: &ExternalAccessObserved,
 ) -> Result<()> {
+    let resolver = ObservationObjectResolver {
+        journal,
+        prepared,
+        visible_run_sequence,
+    };
     let authorization_fields = authorization.fields()?;
     let observation_fields = observation.fields()?;
-    match observation_fields.outcome.fields()? {
-        ObservationOutcomeFields::Returned { result_ref } => {
-            if result_ref.fields()?.producer_binding.kind()?
-                != mfm_journal::v1::ProducerBindingKind::ExternalObservation
-            {
-                return Err(StoreError::ObservationNotConsumable);
-            }
-        }
-        ObservationOutcomeFields::DidNotEnter { .. }
-        | ObservationOutcomeFields::Indeterminate { .. } => {}
+    if &observation_fields.authorization_ref != expected_authorization_ref
+        || authorization_fields.capability_operation_id.is_empty()
+    {
+        return Err(observation_mismatch("observation_authorization"));
     }
-    if authorization_fields.capability_operation_id.is_empty() {
-        return Err(StoreError::ObservationNotConsumable);
+    let anchor = authorization_fields.semantic_anchor.fields()?;
+    let node = certified_node(spec, &anchor.node_id)?;
+    let admitted = capability_binding_manifest
+        .entries()
+        .iter()
+        .find(|entry| entry.operation_id == authorization_fields.capability_operation_id)
+        .ok_or_else(|| observation_mismatch("observation_capability_manifest"))?;
+    let binding_ref = authorization_fields.capability_binding_ref.fields()?;
+    if admitted.binding_ref != binding_ref {
+        return Err(observation_mismatch("observation_capability_manifest"));
+    }
+
+    if authorization_fields.capability_operation_id.as_str() == FACT_SELECTION_OPERATION_ID {
+        return verify_fact_selection_observation(
+            fold,
+            journal,
+            &resolver,
+            spec,
+            node,
+            expected_authorization_ref,
+            &authorization_fields,
+            &observation_fields,
+        );
+    }
+    if observation_fields
+        .fact_selection_scan_attestation_ref
+        .is_some()
+    {
+        return Err(observation_mismatch("observation_scan_attestation"));
+    }
+
+    match (node.execution(), authorization_fields.scope.fields()?) {
+        (
+            CertifiedStateExecution::Read {
+                capability_operation_id,
+                capability_binding_ref,
+                request_contract,
+                returned_contract,
+                safe_failure_contract,
+            },
+            AuthorizationScopeFields::Read { input_manifest_ref },
+        ) => verify_read_observation(
+            fold,
+            journal,
+            &resolver,
+            spec,
+            node,
+            &observation_fields.authorization_ref,
+            &authorization_fields,
+            &input_manifest_ref,
+            capability_operation_id,
+            capability_binding_ref,
+            request_contract,
+            returned_contract,
+            safe_failure_contract,
+            &observation_fields.outcome.fields()?,
+        ),
+        (
+            CertifiedStateExecution::Effect {
+                executor_operation_id,
+                executor_binding_ref,
+                request_contract,
+                ensure_result_contract,
+                terminal_evidence_contract,
+                ..
+            },
+            AuthorizationScopeFields::EnsureEffect {
+                effect_request_transition_ref,
+            },
+        ) => verify_effect_observation(
+            fold,
+            journal,
+            &resolver,
+            spec,
+            node,
+            &observation_fields.authorization_ref,
+            &authorization_fields,
+            &effect_request_transition_ref,
+            executor_operation_id,
+            executor_binding_ref,
+            request_contract,
+            ensure_result_contract,
+            terminal_evidence_contract,
+            &observation_fields.outcome.fields()?,
+        ),
+        _ => Err(observation_mismatch("observation_execution_kind")),
+    }
+}
+
+fn verify_fact_selection_observation(
+    fold: &FoldState,
+    journal: &CommittedRunJournal,
+    resolver: &ObservationObjectResolver<'_>,
+    spec: &ExpandedCertifiedSpec,
+    node: &CertifiedNodeContract,
+    authorization_ref: &AuthorizationRef,
+    authorization: &mfm_journal::v1::ExternalAccessAuthorizedFields,
+    observation: &mfm_journal::v1::ExternalAccessObservedFields,
+) -> Result<()> {
+    let CertifiedStateExecution::Read {
+        capability_operation_id,
+        capability_binding_ref,
+        request_contract,
+        returned_contract,
+        safe_failure_contract,
+    } = node.execution()
+    else {
+        return Err(StoreError::FactScanBindingMismatch);
+    };
+    let AuthorizationScopeFields::Read { input_manifest_ref } = authorization.scope.fields()?
+    else {
+        return Err(StoreError::FactScanBindingMismatch);
+    };
+    if capability_operation_id.as_str() != FACT_SELECTION_OPERATION_ID
+        || capability_binding_ref != &authorization.capability_binding_ref.fields()?
+    {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+
+    let frozen_ref = authorization
+        .frozen_read_intent_ref
+        .as_ref()
+        .ok_or(StoreError::FactScanBindingMismatch)?;
+    let source_visible_sequence = verify_frozen_read_retry(
+        fold,
+        journal,
+        node,
+        authorization_ref,
+        authorization,
+        frozen_ref,
+    )
+    .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    verify_input_manifest_identity(
+        fold,
+        spec,
+        journal,
+        node,
+        &input_manifest_ref,
+        authorization_ref,
+        source_visible_sequence,
+    )
+    .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    let authorization_sequence = authorization_ref.fields()?.run_sequence;
+    let authorization_resolver = ObservationObjectResolver {
+        journal,
+        prepared: None,
+        visible_run_sequence: authorization_sequence,
+    };
+
+    let binding_bytes = authorization_resolver.content_bytes(capability_binding_ref)?;
+    let binding = ReadCapabilityBinding::strict_decode(&binding_bytes)?;
+    if binding.content_ref()? != *capability_binding_ref {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    let binding = binding.fields()?;
+    let scan_contract_bytes =
+        authorization_resolver.content_bytes(&binding.capability_contract_ref)?;
+    let scan_contract = FactSelectionScanContract::strict_decode(&scan_contract_bytes)?;
+    if scan_contract.content_ref()? != binding.capability_contract_ref {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    let scan = scan_contract.fields()?;
+    if scan.capability_operation_id != *capability_operation_id
+        || scan.request_contract != *request_contract
+        || scan.response_contract != *returned_contract
+    {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    for reference in [
+        &binding.admitted_implementation_ref,
+        &binding.safe_classifier_contract_ref,
+        &binding.safe_failure_contract_ref,
+        &binding.reviewed_source_scope_ref,
+        &binding.routing_catalog_ref,
+    ] {
+        authorization_resolver
+            .content_bytes(reference)
+            .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    }
+
+    validate_value_contract(
+        spec.journal_protocol_contracts()
+            .frozen_read_intent_contract(),
+        frozen_ref,
+    )
+    .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    validate_this_record_producer(frozen_ref, FROZEN_READ_INTENT_PATH)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    let frozen = FrozenReadIntent::strict_decode(&authorization_resolver.value_bytes(frozen_ref)?)?;
+    let frozen = frozen.fields()?;
+    if frozen.node_id != *node.node_id()
+        || frozen.input_manifest_ref != input_manifest_ref
+        || frozen.state_contract_ref != *node.state_contract_ref()
+        || frozen.capability_binding_ref != authorization.capability_binding_ref
+        || frozen.capability_operation_id != authorization.capability_operation_id
+        || frozen.routing_generation_ref != binding.routing_catalog_ref
+        || frozen.request_ref != authorization.request_ref
+        || frozen.request_contract != *request_contract
+        || frozen.returned_contract != *returned_contract
+        || frozen.safe_failure_contract != *safe_failure_contract
+    {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+
+    validate_value_contract(request_contract, &authorization.request_ref)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    validate_this_record_producer(&authorization.request_ref, READ_REQUEST_PATH)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    let request_bytes = authorization_resolver.value_bytes(&authorization.request_ref)?;
+    let request = FactSelectionRequest::from_canonical_json(&request_bytes)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    if request
+        .content_ref()
+        .map_err(|_| StoreError::FactScanBindingMismatch)?
+        != content_ref_for_value(&authorization.request_ref)?
+    {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    let canonical_request = PlainCanonicalJsonBytes::from_canonical_json_slice(&request_bytes)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    if derive_observation_request_digest(request_contract.schema_id().as_str(), &canonical_request)?
+        != frozen.request_digest
+    {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+
+    let ObservationOutcomeFields::Returned { result_ref } = observation.outcome.fields()? else {
+        return Err(StoreError::FactScanBindingMismatch);
+    };
+    let attestation_ref = observation
+        .fact_selection_scan_attestation_ref
+        .as_ref()
+        .ok_or(StoreError::FactScanBindingMismatch)?;
+    validate_external_observation_producer(&result_ref, authorization_ref, READ_RESULT_PATH)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    validate_value_contract(&scan.response_contract, &result_ref)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    let response_bytes = resolver.value_bytes(&result_ref)?;
+    let response = FactSelectionResponse::strict_decode(&response_bytes)?;
+    response
+        .validate_request(&request)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    let frontier = observation_fact_frontier(journal, authorization_ref)?;
+    if response.fields()?.frontier != frontier {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    validate_external_observation_producer(
+        attestation_ref,
+        authorization_ref,
+        "fact_selection_scan_attestation_ref",
+    )
+    .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    validate_value_contract(&scan.scan_attestation_contract, attestation_ref)
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    let attestation =
+        FactSelectionScanAttestation::strict_decode(&resolver.value_bytes(attestation_ref)?)?;
+    let attestation = attestation.fields()?;
+    let request_digest = request
+        .request_digest()
+        .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    if attestation.store_scope_id != *journal.store_identity().store_scope_id()
+        || attestation.store_epoch != journal.store_identity().store_epoch()
+        || attestation.tenant_scope_id != *journal.tenant_scope_id()
+        || attestation.authorization_ref != *authorization_ref
+        || attestation.request_digest != request_digest
+        || attestation.frontier != frontier
+        || attestation.response_ref != result_ref
+    {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+
+    verify_exact_observation_values(
+        resolver,
+        authorization_ref,
+        &[&result_ref, attestation_ref],
+        true,
+    )
+    .map_err(|_| StoreError::FactScanBindingMismatch)?;
+    let observation_graph =
+        observation_graph_objects(resolver, ArtifactAdmissionMode::RequireExisting)?;
+    let consumer_prefix = observation_prefix_objects(journal, authorization_sequence)?;
+    let roots = recorded_fact_source_roots(&response, &observation_graph)?;
+    let closure_digest = super::fact_scan::derive_recorded_response_closure_digest(
+        &result_ref,
+        &response_bytes,
+        roots,
+        &observation_graph,
+        &consumer_prefix,
+    )?;
+    if closure_digest != attestation.response_closure_digest {
+        return Err(StoreError::InvalidSourceClosure);
     }
     Ok(())
+}
+
+fn observation_fact_frontier(
+    journal: &CommittedRunJournal,
+    authorization_ref: &AuthorizationRef,
+) -> Result<TenantFactFrontier> {
+    let sequence = authorization_ref.fields()?.run_sequence;
+    let index = usize::try_from(
+        sequence
+            .checked_sub(1)
+            .ok_or(StoreError::SequenceOverflow)?,
+    )
+    .map_err(|_| StoreError::SequenceOverflow)?;
+    let commit = journal
+        .commits
+        .get(index)
+        .ok_or(StoreError::FactScanBindingMismatch)?;
+    let coordinate = commit.envelope.fields()?.core.tenant_fact_coordinate;
+    let (tenant_scope_id, fact_order) = match coordinate.fields()? {
+        TenantFactCoordinateFields::FactSelectionBarrier {
+            tenant_scope_id,
+            frontier_fact_order,
+        } => (tenant_scope_id, frontier_fact_order),
+        TenantFactCoordinateFields::None | TenantFactCoordinateFields::FactPublication { .. } => {
+            return Err(StoreError::FactScanBindingMismatch);
+        }
+    };
+    if tenant_scope_id != *journal.tenant_scope_id() {
+        return Err(StoreError::FactScanBindingMismatch);
+    }
+    TenantFactFrontier::new(
+        journal.store_identity().store_scope_id(),
+        journal.store_identity().store_epoch(),
+        journal.tenant_scope_id(),
+        fact_order,
+    )
+    .map_err(Into::into)
+}
+
+fn observation_graph_objects(
+    resolver: &ObservationObjectResolver<'_>,
+    expected_mode: ArtifactAdmissionMode,
+) -> Result<Vec<CommittedObject>> {
+    let intents = if let Some(prepared) = resolver.prepared {
+        prepared.admission_intents().to_vec()
+    } else {
+        let index = usize::try_from(
+            resolver
+                .visible_run_sequence
+                .checked_sub(1)
+                .ok_or(StoreError::SequenceOverflow)?,
+        )
+        .map_err(|_| StoreError::SequenceOverflow)?;
+        resolver
+            .journal
+            .commits
+            .get(index)
+            .ok_or(StoreError::EmptyJournal)?
+            .envelope
+            .fields()?
+            .core
+            .artifact_admission_intents
+    };
+    intents
+        .into_iter()
+        .filter_map(|intent| match intent.fields() {
+            Ok(fields) if fields.mode == expected_mode => Some(Ok(fields.value_ref)),
+            Ok(_) => None,
+            Err(error) => Some(Err(StoreError::from(error))),
+        })
+        .map(|value_ref| {
+            let value_ref = value_ref?;
+            CommittedObject::from_persisted(value_ref.clone(), resolver.value_bytes(&value_ref)?)
+        })
+        .collect()
+}
+
+fn observation_prefix_objects(
+    journal: &CommittedRunJournal,
+    visible_run_sequence: u64,
+) -> Result<Vec<CommittedObject>> {
+    let take = usize::try_from(visible_run_sequence).map_err(|_| StoreError::SequenceOverflow)?;
+    let mut keys = BTreeSet::new();
+    for commit in journal.commits.iter().take(take) {
+        for intent in commit.envelope.fields()?.core.artifact_admission_intents {
+            keys.insert(ObjectAuthorityKey::from_value_ref(
+                &intent.fields()?.value_ref,
+            )?);
+        }
+    }
+    keys.into_iter()
+        .map(|key| {
+            journal
+                .objects
+                .get(&key)
+                .cloned()
+                .ok_or(StoreError::ObjectNotReachable)
+        })
+        .collect()
+}
+
+fn recorded_fact_source_roots(
+    response: &FactSelectionResponse,
+    observation_graph: &[CommittedObject],
+) -> Result<Vec<super::fact_scan::RecordedFactSourceRoot>> {
+    let claim_contract = FactClaimEnvelope::retained_contract()?;
+    let mut roots = Vec::new();
+    for result in response.fields()?.results {
+        for selected in result.fields()?.selected {
+            let selected = selected.fields()?;
+            let fact = selected.fact_ref.fields()?;
+            if fact.transition_ref != selected.producing_transition_ref {
+                return Err(StoreError::InvalidSourceClosure);
+            }
+            let producer_run_id = fact.transition_ref.fields()?.run_id;
+            let mut claims = observation_graph.iter().filter_map(|object| {
+                let producer = object
+                    .value_ref()
+                    .fields()
+                    .ok()?
+                    .producer_binding
+                    .fields()
+                    .ok()?;
+                let ProducerBindingFields::TransitionFact {
+                    run_id,
+                    emission_ordinal,
+                    component: FactValueComponent::Claim,
+                    ..
+                } = producer
+                else {
+                    return None;
+                };
+                if run_id != producer_run_id || emission_ordinal != fact.emission_ordinal {
+                    return None;
+                }
+                let claim = FactClaimEnvelope::strict_decode(object.bytes()).ok()?;
+                let fields = claim.fields().ok()?;
+                if fields.fact_descriptor_ref != selected.descriptor_ref
+                    || fields.subject_ref != selected.subject_ref
+                    || fields.response_ref != selected.response_ref
+                    || validate_value_contract(&claim_contract, object.value_ref()).is_err()
+                {
+                    return None;
+                }
+                Some(object.value_ref().clone())
+            });
+            let claim_ref = claims.next().ok_or(StoreError::InvalidSourceClosure)?;
+            if claims.next().is_some()
+                || FactContentIdentityPreimage::new(
+                    &selected.descriptor_ref,
+                    &selected.subject_ref,
+                    &selected.response_ref,
+                )?
+                .fact_content_identity()?
+                    != selected.content_identity
+            {
+                return Err(StoreError::InvalidSourceClosure);
+            }
+            roots.push(super::fact_scan::RecordedFactSourceRoot {
+                descriptor_ref: selected.descriptor_ref,
+                claim_ref,
+                subject_ref: selected.subject_ref,
+                response_ref: selected.response_ref,
+            });
+        }
+    }
+    Ok(roots)
+}
+
+fn verify_exact_observation_values(
+    resolver: &ObservationObjectResolver<'_>,
+    authorization_ref: &AuthorizationRef,
+    expected: &[&ValueRef],
+    allow_preexisting: bool,
+) -> Result<()> {
+    let expected_count = expected.len();
+    let expected = expected
+        .iter()
+        .map(|value_ref| value_ref.as_bytes().to_vec())
+        .collect::<BTreeSet<_>>();
+    let actual = resolver
+        .produced_values(authorization_ref)?
+        .into_iter()
+        .map(|(value_ref, _)| value_ref.as_bytes().to_vec())
+        .collect::<BTreeSet<_>>();
+    let graph_produced =
+        observation_graph_objects(resolver, ArtifactAdmissionMode::AdmitOrVerifyExact)?
+            .into_iter()
+            .map(|object| object.value_ref().as_bytes().to_vec())
+            .collect::<BTreeSet<_>>();
+    let has_preexisting =
+        !observation_graph_objects(resolver, ArtifactAdmissionMode::RequireExisting)?.is_empty();
+    if expected.len() != expected_count
+        || expected != actual
+        || expected != graph_produced
+        || (!allow_preexisting && has_preexisting)
+    {
+        return Err(observation_mismatch("observation_produced_values"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_read_observation(
+    fold: &FoldState,
+    journal: &CommittedRunJournal,
+    resolver: &ObservationObjectResolver<'_>,
+    spec: &ExpandedCertifiedSpec,
+    node: &CertifiedNodeContract,
+    authorization_ref: &AuthorizationRef,
+    authorization: &mfm_journal::v1::ExternalAccessAuthorizedFields,
+    input_manifest_ref: &InputManifestRef,
+    capability_operation_id: &StableId,
+    capability_binding_ref: &ContentRef,
+    request_contract: &RetainedValueContract,
+    returned_contract: &RetainedValueContract,
+    safe_failure_contract: &RetainedValueContract,
+    outcome: &ObservationOutcomeFields,
+) -> Result<()> {
+    if authorization.capability_operation_id != *capability_operation_id
+        || authorization.capability_binding_ref.fields()? != *capability_binding_ref
+    {
+        return Err(observation_mismatch("read_operation_binding"));
+    }
+    let frozen_ref = authorization
+        .frozen_read_intent_ref
+        .as_ref()
+        .ok_or_else(|| observation_mismatch("read_frozen_intent"))?;
+    let source_visible_sequence = verify_frozen_read_retry(
+        fold,
+        journal,
+        node,
+        authorization_ref,
+        authorization,
+        frozen_ref,
+    )?;
+    verify_input_manifest_identity(
+        fold,
+        spec,
+        journal,
+        node,
+        input_manifest_ref,
+        authorization_ref,
+        source_visible_sequence,
+    )?;
+    validate_value_contract(
+        spec.journal_protocol_contracts()
+            .frozen_read_intent_contract(),
+        frozen_ref,
+    )?;
+    validate_this_record_producer(frozen_ref, FROZEN_READ_INTENT_PATH)?;
+    let frozen =
+        mfm_journal::v1::FrozenReadIntent::strict_decode(&resolver.value_bytes(frozen_ref)?)?;
+    let frozen = frozen.fields()?;
+    if frozen.node_id != *node.node_id()
+        || frozen.input_manifest_ref != *input_manifest_ref
+        || frozen.state_contract_ref != *node.state_contract_ref()
+        || frozen.capability_binding_ref != authorization.capability_binding_ref
+        || frozen.capability_operation_id != authorization.capability_operation_id
+        || frozen.request_ref != authorization.request_ref
+        || frozen.request_contract != *request_contract
+        || frozen.returned_contract != *returned_contract
+        || frozen.safe_failure_contract != *safe_failure_contract
+    {
+        return Err(observation_mismatch("read_frozen_intent"));
+    }
+    validate_value_contract(request_contract, &authorization.request_ref)?;
+    validate_this_record_producer(&authorization.request_ref, READ_REQUEST_PATH)?;
+    let request_bytes = resolver.value_bytes(&authorization.request_ref)?;
+    let request = PlainCanonicalJsonBytes::from_canonical_json_slice(&request_bytes)
+        .map_err(|_| observation_mismatch("read_request_bytes"))?;
+    if derive_observation_request_digest(request_contract.schema_id().as_str(), &request)?
+        != frozen.request_digest
+    {
+        return Err(observation_mismatch("read_request_digest"));
+    }
+
+    let binding =
+        ReadCapabilityBinding::strict_decode(&resolver.content_bytes(capability_binding_ref)?)?;
+    if binding.content_ref()? != *capability_binding_ref {
+        return Err(observation_mismatch("read_binding"));
+    }
+    let binding = binding.fields()?;
+    if binding.safe_classifier_contract_ref.schema_id()
+        != &SafeFailureClassifierDescriptor::schema_id()
+            .map_err(|_| observation_mismatch("read_classifier_schema"))?
+    {
+        return Err(observation_mismatch("read_classifier_schema"));
+    }
+    let classifier = SafeFailureClassifierDescriptor::strict_decode(
+        &resolver.content_bytes(&binding.safe_classifier_contract_ref)?,
+    )
+    .map_err(|_| observation_mismatch("read_classifier"))?;
+    let diagnostic_schema_matches = match classifier.diagnostic_schema_identity() {
+        Some(identity) => {
+            identity
+                .schema_id()
+                .map_err(|_| observation_mismatch("read_classifier"))?
+                == *safe_failure_contract.schema_id()
+                && identity.semantic_type_id.as_ref()
+                    == Some(safe_failure_contract.semantic_type_id())
+                && safe_failure_contract.media_type() == "application/json"
+        }
+        None => true,
+    };
+    if classifier
+        .content_ref()
+        .map_err(|_| observation_mismatch("read_classifier"))?
+        != binding.safe_classifier_contract_ref
+        || classifier.safe_failure_contract_ref() != &binding.safe_failure_contract_ref
+        || !diagnostic_schema_matches
+    {
+        return Err(observation_mismatch("read_classifier"));
+    }
+    resolver.content_bytes(&frozen.routing_generation_ref)?;
+    if !observation_content_ref_reachable(
+        resolver,
+        &binding.routing_catalog_ref,
+        &frozen.routing_generation_ref,
+    )? {
+        return Err(observation_mismatch("read_routing_generation"));
+    }
+
+    match outcome {
+        ObservationOutcomeFields::Returned { result_ref } => {
+            validate_value_contract(returned_contract, result_ref)?;
+            validate_external_observation_producer(
+                result_ref,
+                authorization_ref,
+                READ_RESULT_PATH,
+            )?;
+            PlainCanonicalJsonBytes::from_canonical_json_slice(&resolver.value_bytes(result_ref)?)
+                .map_err(|_| observation_mismatch("read_returned_bytes"))?;
+            verify_exact_observation_values(
+                resolver,
+                authorization_ref,
+                std::slice::from_ref(&result_ref),
+                false,
+            )?;
+        }
+        ObservationOutcomeFields::DidNotEnter { safe_failure } => {
+            verify_read_safe_failure(
+                resolver,
+                authorization_ref,
+                safe_failure_contract,
+                &classifier,
+                safe_failure,
+                SafeFailureOutcome::DidNotEnter,
+            )?;
+        }
+        ObservationOutcomeFields::Indeterminate { safe_failure } => {
+            verify_read_safe_failure(
+                resolver,
+                authorization_ref,
+                safe_failure_contract,
+                &classifier,
+                safe_failure,
+                SafeFailureOutcome::Indeterminate,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_read_safe_failure(
+    resolver: &ObservationObjectResolver<'_>,
+    authorization_ref: &AuthorizationRef,
+    diagnostic_contract: &RetainedValueContract,
+    classifier: &SafeFailureClassifierDescriptor,
+    safe_failure: &SafeFailure,
+    outcome: SafeFailureOutcome,
+) -> Result<()> {
+    let fields = safe_failure.fields()?;
+    let diagnostic = fields
+        .diagnostic_ref
+        .as_ref()
+        .map(|diagnostic_ref| {
+            validate_value_contract(diagnostic_contract, diagnostic_ref)?;
+            validate_external_observation_producer(
+                diagnostic_ref,
+                authorization_ref,
+                READ_DIAGNOSTIC_PATH,
+            )?;
+            let bytes = resolver.value_bytes(diagnostic_ref)?;
+            Ok::<_, StoreError>((diagnostic_ref.fields()?.schema_id, bytes))
+        })
+        .transpose()?;
+    classifier
+        .verify(
+            &fields.safe_failure_contract_ref,
+            &fields.stable_code,
+            outcome,
+            fields.failure_class,
+            fields.boundary_stage,
+            fields.coarse_size_class,
+            diagnostic
+                .as_ref()
+                .map(|(schema_id, bytes)| (schema_id, bytes.as_slice())),
+        )
+        .map_err(|_| observation_mismatch("read_safe_failure"))?;
+    let expected = fields
+        .diagnostic_ref
+        .as_ref()
+        .into_iter()
+        .collect::<Vec<_>>();
+    verify_exact_observation_values(resolver, authorization_ref, &expected, false)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_effect_observation(
+    fold: &FoldState,
+    journal: &CommittedRunJournal,
+    resolver: &ObservationObjectResolver<'_>,
+    spec: &ExpandedCertifiedSpec,
+    node: &CertifiedNodeContract,
+    authorization_ref: &AuthorizationRef,
+    authorization: &mfm_journal::v1::ExternalAccessAuthorizedFields,
+    effect_request_transition_ref: &TransitionRef,
+    executor_operation_id: &StableId,
+    executor_binding_ref: &ContentRef,
+    request_contract: &RetainedValueContract,
+    ensure_result_contract: &RetainedValueContract,
+    terminal_evidence_contract: &RetainedValueContract,
+    outcome: &ObservationOutcomeFields,
+) -> Result<()> {
+    if authorization.capability_operation_id != *executor_operation_id
+        || authorization.capability_binding_ref.fields()? != *executor_binding_ref
+    {
+        return Err(observation_mismatch("effect_operation_binding"));
+    }
+    let request_transition = fold
+        .transitions
+        .iter()
+        .find(|entry| &entry.transition_ref == effect_request_transition_ref)
+        .ok_or_else(|| observation_mismatch("effect_request_transition"))?;
+    let request_transition_fields = request_transition.transition.fields()?;
+    let TransitionBodyFields::EffectRequested {
+        input_manifest_ref,
+        effect_key,
+        semantic_request_ref,
+        request_digest,
+        executor_binding_ref: retained_binding_ref,
+    } = request_transition_fields.body.fields()?
+    else {
+        return Err(observation_mismatch("effect_request_transition"));
+    };
+    if request_transition_fields.node_id != *node.node_id()
+        || retained_binding_ref != authorization.capability_binding_ref
+        || semantic_request_ref != authorization.request_ref
+    {
+        return Err(observation_mismatch("effect_request_transition"));
+    }
+    let source_visible_sequence = request_transition_fields
+        .before
+        .fields()?
+        .journal_head
+        .fields()?
+        .run_sequence;
+    verify_input_manifest_identity(
+        fold,
+        spec,
+        journal,
+        node,
+        &input_manifest_ref,
+        authorization_ref,
+        source_visible_sequence,
+    )?;
+
+    validate_value_contract(request_contract, &semantic_request_ref)?;
+    validate_this_record_producer(&semantic_request_ref, EFFECT_REQUEST_PATH)?;
+    let request_bytes = resolver.value_bytes(&semantic_request_ref)?;
+    let request_value = SchemaQualifiedCanonicalValue::new(
+        semantic_request_ref.fields()?.schema_id,
+        &request_bytes,
+    )
+    .map_err(|_| observation_mismatch("effect_request_bytes"))?;
+
+    let binding_bytes = resolver.content_bytes(executor_binding_ref)?;
+    let binding = ExecutorBinding::strict_decode(&binding_bytes)
+        .map_err(|_| observation_mismatch("effect_binding"))?;
+    let typed_binding_ref = ExecutorBindingRef::from_content_ref(executor_binding_ref.clone())
+        .map_err(|_| observation_mismatch("effect_binding"))?;
+    if binding
+        .reference()
+        .map_err(|_| observation_mismatch("effect_binding"))?
+        != typed_binding_ref
+    {
+        return Err(observation_mismatch("effect_binding"));
+    }
+    let contract = ExecutorContractDescriptor::strict_decode(
+        &resolver.content_bytes(binding.executor_contract_ref())?,
+    )
+    .map_err(|_| observation_mismatch("effect_contract"))?;
+    let deployment = ExecutorDeployment::strict_decode(
+        &resolver.content_bytes(binding.executor_deployment_ref().as_content_ref())?,
+    )
+    .map_err(|_| observation_mismatch("effect_deployment"))?;
+    let ownership = deployment
+        .resource_ownership_ref()
+        .map(|reference| {
+            ResourceOwnership::strict_decode(&resolver.content_bytes(reference.as_content_ref())?)
+                .map_err(|_| observation_mismatch("effect_resource_ownership"))
+        })
+        .transpose()?;
+    let verified_binding = VerifiedExecutorBinding::verify(
+        binding,
+        contract,
+        deployment,
+        ownership,
+        journal.tenant_scope_id(),
+    )
+    .map_err(|_| observation_mismatch("effect_binding"))?;
+    let closure_contract = verified_binding.contract().retained_closure_contract();
+    if verified_binding.contract().semantic_request_contract() != request_contract
+        || closure_contract.ensure_result_contract() != ensure_result_contract
+        || closure_contract.terminal_evidence_contract() != terminal_evidence_contract
+    {
+        return Err(observation_mismatch("effect_certified_contracts"));
+    }
+    let committed_request = CommittedEffectRequest::new(
+        typed_binding_ref,
+        journal.tenant_scope_id().clone(),
+        journal.store_identity().store_scope_id(),
+        journal.run_id(),
+        node.node_id(),
+        request_value,
+    )
+    .map_err(|_| observation_mismatch("effect_identity"))?;
+    let (identity, _) = committed_request.into_parts();
+    if identity.effect_key() != &effect_key || identity.request_digest() != &request_digest {
+        return Err(observation_mismatch("effect_identity"));
+    }
+
+    match outcome {
+        ObservationOutcomeFields::DidNotEnter { safe_failure } => verify_effect_safe_failure(
+            resolver,
+            authorization_ref,
+            &verified_binding,
+            safe_failure,
+            SafeFailureOutcome::DidNotEnter,
+        ),
+        ObservationOutcomeFields::Indeterminate { safe_failure } => verify_effect_safe_failure(
+            resolver,
+            authorization_ref,
+            &verified_binding,
+            safe_failure,
+            SafeFailureOutcome::Indeterminate,
+        ),
+        ObservationOutcomeFields::Returned { result_ref } => verify_effect_returned(
+            resolver,
+            authorization_ref,
+            &verified_binding,
+            identity,
+            result_ref,
+            ensure_result_contract,
+            terminal_evidence_contract,
+        ),
+    }
+}
+
+fn verify_effect_safe_failure(
+    resolver: &ObservationObjectResolver<'_>,
+    authorization_ref: &AuthorizationRef,
+    binding: &VerifiedExecutorBinding,
+    safe_failure: &SafeFailure,
+    outcome: SafeFailureOutcome,
+) -> Result<()> {
+    let fields = safe_failure.fields()?;
+    if &fields.safe_failure_contract_ref != binding.contract().safe_failure_contract_ref()
+        || fields.diagnostic_ref.is_some()
+        || fields.coarse_size_class.is_some()
+    {
+        return Err(observation_mismatch("effect_safe_failure"));
+    }
+    verify_reference_safe_failure_tuple(
+        fields.safe_failure_contract_ref,
+        &fields.stable_code,
+        outcome,
+        fields.failure_class,
+        fields.boundary_stage,
+        fields.coarse_size_class,
+        false,
+    )
+    .map_err(|_| observation_mismatch("effect_safe_failure"))?;
+    verify_exact_observation_values(resolver, authorization_ref, &[], false)?;
+    Ok(())
+}
+
+fn verify_effect_returned(
+    resolver: &ObservationObjectResolver<'_>,
+    authorization_ref: &AuthorizationRef,
+    binding: &VerifiedExecutorBinding,
+    identity: EffectIdentity,
+    result_ref: &ValueRef,
+    ensure_result_contract: &RetainedValueContract,
+    terminal_evidence_contract: &RetainedValueContract,
+) -> Result<()> {
+    validate_value_contract(ensure_result_contract, result_ref)?;
+    validate_external_observation_producer(result_ref, authorization_ref, ENSURE_RESULT_PATH)?;
+    let ensure_result = ExecutorEnsureResult::strict_decode(&resolver.value_bytes(result_ref)?)?;
+    let (claim, terminal_evidence_ref, required_closure_refs) = match ensure_result.fields()? {
+        ExecutorEnsureResultFields::Pending { delivery_audit_ref } => {
+            validate_effect_retained_ref(
+                &delivery_audit_ref,
+                authorization_ref,
+                binding
+                    .contract()
+                    .retained_closure_contract()
+                    .delivery_audit_contract(),
+                "executor.delivery_audit",
+            )?;
+            (
+                ExecutorEnsureResultClaim::pending(
+                    DeliveryAuditFrontierRef::from_content_ref(content_ref_for_value(
+                        &delivery_audit_ref,
+                    )?)
+                    .map_err(|_| observation_mismatch("effect_delivery_audit"))?,
+                ),
+                None,
+                vec![delivery_audit_ref],
+            )
+        }
+        ExecutorEnsureResultFields::Terminal { evidence_ref } => {
+            validate_value_contract(terminal_evidence_contract, &evidence_ref)?;
+            validate_external_observation_producer(
+                &evidence_ref,
+                authorization_ref,
+                TERMINAL_EVIDENCE_PATH,
+            )?;
+            let evidence =
+                TerminalEffectEvidence::strict_decode(&resolver.value_bytes(&evidence_ref)?)?;
+            let fields = evidence.fields()?;
+            let contracts = binding.contract().retained_closure_contract();
+            validate_effect_retained_ref(
+                &fields.delivery_audit_ref,
+                authorization_ref,
+                contracts.delivery_audit_contract(),
+                "executor.delivery_audit",
+            )?;
+            validate_effect_retained_ref(
+                &fields.terminal_tombstone_ref,
+                authorization_ref,
+                contracts.terminal_tombstone_contract(),
+                "executor.terminal_tombstone",
+            )?;
+            validate_effect_retained_ref(
+                &fields.domain_evidence_ref,
+                authorization_ref,
+                contracts.domain_evidence_contract(),
+                "executor.domain_evidence",
+            )?;
+            if fields.executor_binding_ref.fields()?
+                != *identity.executor_binding_ref().as_content_ref()
+                || fields.effect_key != *identity.effect_key()
+                || fields.request_digest != *identity.request_digest()
+            {
+                return Err(observation_mismatch("effect_terminal_identity"));
+            }
+            let proof_basis = match fields.proof_basis.fields()? {
+                ExecutorProofBasisFields::SelfAuthenticatingProof => {
+                    ProofBasis::SelfAuthenticatingProof
+                }
+                ExecutorProofBasisFields::ExecutorAttestation {
+                    evidence_authority_ref,
+                } => ProofBasis::ExecutorAttestation {
+                    evidence_authority_ref,
+                },
+                ExecutorProofBasisFields::TrustedObserver {
+                    evidence_authority_ref,
+                } => ProofBasis::TrustedObserver {
+                    evidence_authority_ref,
+                },
+            };
+            let evidence = ExecutorTerminalEvidenceClaim::new(
+                identity.clone(),
+                DeliveryAuditFrontierRef::from_content_ref(content_ref_for_value(
+                    &fields.delivery_audit_ref,
+                )?)
+                .map_err(|_| observation_mismatch("effect_delivery_audit"))?,
+                TerminalTombstoneRef::from_content_ref(content_ref_for_value(
+                    &fields.terminal_tombstone_ref,
+                )?)
+                .map_err(|_| observation_mismatch("effect_terminal_tombstone"))?,
+                fields.external_operation_identity.as_str(),
+                fields.terminal_outcome.as_str(),
+                fields.assurance_policy_ref,
+                proof_basis,
+                content_ref_for_value(&fields.domain_evidence_ref)?,
+            )
+            .map_err(|_| observation_mismatch("effect_terminal_evidence"))?;
+            (
+                ExecutorEnsureResultClaim::terminal(evidence),
+                Some(evidence_ref),
+                vec![
+                    fields.delivery_audit_ref,
+                    fields.terminal_tombstone_ref,
+                    fields.domain_evidence_ref,
+                ],
+            )
+        }
+    };
+    let produced = resolver.produced_values(authorization_ref)?;
+    if required_closure_refs.iter().any(|required| {
+        !produced
+            .iter()
+            .any(|(produced_ref, _)| produced_ref == required)
+    }) {
+        return Err(observation_mismatch("effect_retained_closure"));
+    }
+    let closure = reconstruct_effect_closure(
+        resolver,
+        authorization_ref,
+        binding,
+        result_ref,
+        terminal_evidence_ref.as_ref(),
+    )?;
+    let verified = verify_ensure_result(identity, binding, claim, closure)
+        .map_err(|_| observation_mismatch("effect_retained_closure"))?;
+    if verified.retained_closure().contract() != binding.contract().retained_closure_contract() {
+        return Err(observation_mismatch("effect_retained_closure"));
+    }
+    let produced = produced
+        .into_iter()
+        .map(|(value_ref, _)| value_ref)
+        .collect::<Vec<_>>();
+    let expected = produced.iter().collect::<Vec<_>>();
+    verify_exact_observation_values(resolver, authorization_ref, &expected, false)?;
+    Ok(())
+}
+
+fn validate_effect_retained_ref(
+    value_ref: &ValueRef,
+    authorization_ref: &AuthorizationRef,
+    contract: &RetainedValueContract,
+    path_prefix: &str,
+) -> Result<()> {
+    validate_value_contract(contract, value_ref)?;
+    let reference = content_ref_for_value(value_ref)?;
+    validate_external_observation_producer(
+        value_ref,
+        authorization_ref,
+        &format!("{path_prefix}.{}", reference.content_digest().digest()),
+    )
+    .map_err(|_| observation_mismatch("effect_retained_relation"))
+}
+
+fn reconstruct_effect_closure(
+    resolver: &ObservationObjectResolver<'_>,
+    authorization_ref: &AuthorizationRef,
+    binding: &VerifiedExecutorBinding,
+    result_ref: &ValueRef,
+    terminal_evidence_ref: Option<&ValueRef>,
+) -> Result<ExecutorRetainedClosureClaim> {
+    let contracts = binding.contract().retained_closure_contract();
+    let mut members = Vec::new();
+    for (value_ref, bytes) in resolver.produced_values(authorization_ref)? {
+        if value_ref.as_bytes() == result_ref.as_bytes() {
+            continue;
+        }
+        let ProducerBindingFields::ExternalObservation { field_path, .. } =
+            value_ref.fields()?.producer_binding.fields()?
+        else {
+            return Err(observation_mismatch("effect_retained_producer"));
+        };
+        if terminal_evidence_ref.is_some_and(|expected| expected.as_bytes() == value_ref.as_bytes())
+        {
+            continue;
+        }
+        let (relation, contract, prefix) = effect_closure_relation(field_path.as_str(), contracts)?;
+        validate_value_contract(contract, &value_ref)?;
+        let reference = content_ref_for_value(&value_ref)?;
+        if field_path.as_str() != format!("{prefix}.{}", reference.content_digest().digest()) {
+            return Err(observation_mismatch("effect_retained_path"));
+        }
+        let value = SchemaQualifiedCanonicalValue::new(value_ref.fields()?.schema_id, &bytes)
+            .map_err(|_| observation_mismatch("effect_retained_bytes"))?;
+        if value
+            .reference()
+            .map_err(|_| observation_mismatch("effect_retained_bytes"))?
+            != reference
+        {
+            return Err(observation_mismatch("effect_retained_bytes"));
+        }
+        members.push(
+            ExecutorRetainedValue::new(relation, contract.clone(), value)
+                .map_err(|_| observation_mismatch("effect_retained_contract"))?,
+        );
+    }
+    ExecutorRetainedClosureClaim::new(members)
+        .map_err(|_| observation_mismatch("effect_retained_closure"))
+}
+
+fn effect_closure_relation<'a>(
+    path: &str,
+    contracts: &'a mfm_executor::ExecutorRetainedClosureContract,
+) -> Result<(
+    ExecutorRetainedValueRelation,
+    &'a RetainedValueContract,
+    &'static str,
+)> {
+    let relation = if path.starts_with("executor.delivery_audit.") {
+        (
+            ExecutorRetainedValueRelation::DeliveryAudit,
+            contracts.delivery_audit_contract(),
+            "executor.delivery_audit",
+        )
+    } else if path.starts_with("executor.frontier.") {
+        (
+            ExecutorRetainedValueRelation::ExecutorFrontier,
+            contracts.executor_frontier_contract(),
+            "executor.frontier",
+        )
+    } else if path.starts_with("executor.terminal_tombstone.") {
+        (
+            ExecutorRetainedValueRelation::TerminalTombstone,
+            contracts.terminal_tombstone_contract(),
+            "executor.terminal_tombstone",
+        )
+    } else if path.starts_with("executor.terminal_proof.") {
+        (
+            ExecutorRetainedValueRelation::TerminalProof,
+            contracts.terminal_proof_contract(),
+            "executor.terminal_proof",
+        )
+    } else if path.starts_with("executor.domain_evidence.") {
+        (
+            ExecutorRetainedValueRelation::DomainEvidence,
+            contracts.domain_evidence_contract(),
+            "executor.domain_evidence",
+        )
+    } else {
+        return Err(observation_mismatch("effect_retained_path"));
+    };
+    Ok(relation)
+}
+
+fn verify_frozen_read_retry(
+    fold: &FoldState,
+    journal: &CommittedRunJournal,
+    node: &CertifiedNodeContract,
+    authorization_ref: &AuthorizationRef,
+    authorization: &mfm_journal::v1::ExternalAccessAuthorizedFields,
+    frozen_read_intent_ref: &ValueRef,
+) -> Result<u64> {
+    let current_sequence = authorization_ref.fields()?.run_sequence;
+    let current_resolver = ObservationObjectResolver {
+        journal,
+        prepared: None,
+        visible_run_sequence: current_sequence,
+    };
+    let current_frozen = current_resolver.value_bytes(frozen_read_intent_ref)?;
+    let first = fold
+        .authorizations
+        .iter()
+        .filter_map(|candidate| {
+            let candidate_ref = candidate.entry.authorization_ref.fields().ok()?;
+            if candidate_ref.run_sequence > current_sequence {
+                return None;
+            }
+            let fields = candidate.entry.authorization.fields().ok()?;
+            let anchor = fields.semantic_anchor.fields().ok()?;
+            if anchor.node_id != *node.node_id()
+                || !matches!(
+                    fields.scope.fields(),
+                    Ok(AuthorizationScopeFields::Read { .. })
+                )
+            {
+                return None;
+            }
+            Some((candidate_ref.run_sequence, candidate))
+        })
+        .min_by_key(|(sequence, _)| *sequence)
+        .map(|(_, candidate)| candidate)
+        .ok_or_else(|| observation_mismatch("read_retry_history"))?;
+    let first_fields = first.entry.authorization.fields()?;
+    let first_frozen_ref = first_fields
+        .frozen_read_intent_ref
+        .as_ref()
+        .ok_or_else(|| observation_mismatch("read_retry_frozen_intent"))?;
+    let first_sequence = first.entry.authorization_ref.fields()?.run_sequence;
+    let first_resolver = ObservationObjectResolver {
+        journal,
+        prepared: None,
+        visible_run_sequence: first_sequence,
+    };
+    if first_fields.request_ref != authorization.request_ref
+        || first_resolver.value_bytes(first_frozen_ref)? != current_frozen
+    {
+        return Err(observation_mismatch("read_retry_frozen_intent"));
+    }
+    first_fields
+        .semantic_anchor
+        .fields()?
+        .journal_head
+        .fields()
+        .map(|fields| fields.run_sequence)
+        .map_err(Into::into)
+}
+
+fn verify_input_manifest_identity(
+    fold: &FoldState,
+    spec: &ExpandedCertifiedSpec,
+    journal: &CommittedRunJournal,
+    node: &CertifiedNodeContract,
+    input_manifest_ref: &InputManifestRef,
+    authorization_ref: &AuthorizationRef,
+    source_visible_sequence: u64,
+) -> Result<()> {
+    let authorization_sequence = authorization_ref.fields()?.run_sequence;
+    let resolver = ObservationObjectResolver {
+        journal,
+        prepared: None,
+        visible_run_sequence: authorization_sequence,
+    };
+    let producer = ProducerBinding::input_assembly(journal.run_id(), node.node_id())?;
+    let manifest_ref = input_manifest_ref.value_ref()?;
+    let manifest_contract = spec.journal_protocol_contracts().input_manifest_contract();
+    validate_value_contract(manifest_contract, &manifest_ref)?;
+    validate_input_assembly_producer(&manifest_ref, journal.run_id(), node.node_id())?;
+    let manifest_bytes = resolver.value_bytes(&manifest_ref)?;
+    let manifest = InputManifest::strict_decode(&manifest_bytes)?;
+    if derive_value_ref(manifest_contract, &producer, &manifest_bytes)? != manifest_ref {
+        return Err(observation_mismatch("observation_input_manifest"));
+    }
+    let fields = manifest.fields()?;
+    if fields.input_schema_id != *node.input_contract().schema_id()
+        || fields.bindings.len() != node.input_bindings().len()
+    {
+        return Err(observation_mismatch("observation_input_manifest"));
+    }
+
+    let config_ref = fields
+        .config_ref
+        .as_ref()
+        .ok_or_else(|| observation_mismatch("observation_input_config"))?;
+    verify_frame_binding_value(
+        &resolver,
+        journal,
+        fold,
+        source_visible_sequence,
+        node.config_binding(),
+        config_ref,
+        &producer,
+    )?;
+    match (node.context_binding(), fields.context_ref.as_ref()) {
+        (Some(binding), Some(context_ref)) => verify_frame_binding_value(
+            &resolver,
+            journal,
+            fold,
+            source_visible_sequence,
+            binding,
+            context_ref,
+            &producer,
+        )?,
+        (None, None) => {}
+        _ => return Err(observation_mismatch("observation_input_context")),
+    }
+
+    let mut reconstructed = serde_json::Value::Object(serde_json::Map::new());
+    for (recorded, certified) in fields.bindings.iter().zip(node.input_bindings()) {
+        let recorded = recorded.fields()?;
+        if recorded.field_path != *certified.destination_field_path() {
+            return Err(observation_mismatch("observation_input_destination"));
+        }
+        let selected = certified
+            .ordered_sources()
+            .iter()
+            .map(|selector| {
+                resolve_observation_source(
+                    &resolver,
+                    journal,
+                    fold,
+                    source_visible_sequence,
+                    selector,
+                )
+            })
+            .find_map(|source| match source {
+                Ok(Some(source)) => Some(Ok(source)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .transpose()?
+            .ok_or_else(|| observation_mismatch("observation_input_source"))?;
+        if recorded.source != selected.source
+            || recorded.value_ref != selected.root_ref
+            || recorded.source_field_path != selected.source_field_path
+        {
+            return Err(observation_mismatch("observation_input_source"));
+        }
+        if recorded.source_field_path.is_none() {
+            validate_value_contract(certified.value_contract(), &recorded.value_ref)?;
+        }
+        insert_json_path(
+            &mut reconstructed,
+            certified.destination_field_path(),
+            serde_json::from_slice(selected.selected_bytes.as_bytes())
+                .map_err(|_| observation_mismatch("observation_input_source"))?,
+        )
+        .map_err(|_| observation_mismatch("observation_input_assembly"))?;
+    }
+    let reconstructed = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&reconstructed)
+            .map_err(|_| observation_mismatch("observation_input_assembly"))?,
+    )
+    .map_err(|_| observation_mismatch("observation_input_assembly"))?;
+    let expected_root =
+        derive_value_ref(node.input_contract(), &producer, reconstructed.as_bytes())?;
+    if fields.root_input_ref != expected_root
+        || resolver.value_bytes(&fields.root_input_ref)? != reconstructed.as_bytes()
+    {
+        return Err(observation_mismatch("observation_input_assembly"));
+    }
+    Ok(())
+}
+
+fn verify_frame_binding_value(
+    resolver: &ObservationObjectResolver<'_>,
+    journal: &CommittedRunJournal,
+    fold: &FoldState,
+    source_visible_sequence: u64,
+    binding: &CertifiedFrameBinding,
+    actual_ref: &ValueRef,
+    producer: &ProducerBinding,
+) -> Result<()> {
+    let source = resolve_observation_source(
+        resolver,
+        journal,
+        fold,
+        source_visible_sequence,
+        binding.source(),
+    )?
+    .ok_or_else(|| observation_mismatch("observation_frame_source"))?;
+    let expected_ref = if source.source_field_path.is_none() {
+        validate_value_contract(binding.value_contract(), &source.root_ref)?;
+        source.root_ref
+    } else {
+        derive_value_ref(
+            binding.value_contract(),
+            producer,
+            source.selected_bytes.as_bytes(),
+        )?
+    };
+    if actual_ref != &expected_ref
+        || resolver.value_bytes(actual_ref)? != source.selected_bytes.as_bytes()
+    {
+        return Err(observation_mismatch("observation_frame_value"));
+    }
+    Ok(())
+}
+
+struct ObservationResolvedSource {
+    source: InputSource,
+    root_ref: ValueRef,
+    selected_bytes: PlainCanonicalJsonBytes,
+    source_field_path: Option<FieldPath>,
+}
+
+fn resolve_observation_source(
+    resolver: &ObservationObjectResolver<'_>,
+    journal: &CommittedRunJournal,
+    fold: &FoldState,
+    visible_run_sequence: u64,
+    selector: &CertifiedSourceSelector,
+) -> Result<Option<ObservationResolvedSource>> {
+    let admission = match journal.normalized_batches.first() {
+        Some(NormalizedBatch::Admission(admission)) => admission,
+        _ => return Err(StoreError::EmptyJournal),
+    };
+    let admission_fields = admission.fields()?;
+    match selector {
+        CertifiedSourceSelector::RunAdmission { source_field_path } => {
+            let root_ref = observation_initial_binding(
+                &admission_fields.initial_bindings,
+                RUN_ADMISSION_INPUT_PATH,
+            )?;
+            let record_ref = journal
+                .commits
+                .first()
+                .and_then(|commit| commit.records.first())
+                .ok_or(StoreError::EmptyJournal)?
+                .record_ref(journal.run_id(), 1)?;
+            observation_resolved(
+                resolver,
+                InputSource::run_admission(&record_ref)?,
+                root_ref,
+                source_field_path.clone(),
+            )
+            .map(Some)
+        }
+        CertifiedSourceSelector::Config { source_field_path } => {
+            let root_ref = observation_initial_binding(
+                &admission_fields.initial_bindings,
+                CONFIGURED_VALUE_PATH,
+            )?;
+            observation_resolved(
+                resolver,
+                InputSource::config(&root_ref)?,
+                root_ref,
+                source_field_path.clone(),
+            )
+            .map(Some)
+        }
+        CertifiedSourceSelector::QualifiedSupport {
+            member_path,
+            source_field_path,
+        } => {
+            let root_ref = observation_initial_binding(
+                &admission_fields.initial_bindings,
+                member_path.as_str(),
+            )?;
+            observation_resolved(
+                resolver,
+                InputSource::qualified_support(member_path, &root_ref)?,
+                root_ref,
+                source_field_path.clone(),
+            )
+            .map(Some)
+        }
+        CertifiedSourceSelector::Seed { source_field_path } => {
+            let manifest = SeedManifest::strict_decode(
+                &resolver.content_bytes(&admission_fields.seed_manifest_ref)?,
+            )?;
+            let entries = manifest
+                .entries()?
+                .into_iter()
+                .map(|entry| Ok((entry.field_path()?, entry.value_ref()?)))
+                .collect::<std::result::Result<Vec<_>, mfm_journal::v1::JournalError>>()?;
+            let (entry_path, root_ref, nested) =
+                select_manifest_value(entries, source_field_path.as_ref())?;
+            observation_require_initial_binding(
+                &admission_fields.initial_bindings,
+                &format!("seed.{}", entry_path.as_str()),
+                &root_ref,
+            )?;
+            observation_resolved(resolver, InputSource::seed(&root_ref)?, root_ref, nested)
+                .map(Some)
+        }
+        CertifiedSourceSelector::Context { source_field_path } => {
+            let manifest = ContextManifest::strict_decode(
+                &resolver.content_bytes(&admission_fields.context_manifest_ref)?,
+            )?;
+            let entries = manifest
+                .entries()?
+                .into_iter()
+                .map(|entry| Ok((entry.field_path()?, entry.value_ref()?)))
+                .collect::<std::result::Result<Vec<_>, mfm_journal::v1::JournalError>>()?;
+            let (entry_path, root_ref, nested) =
+                select_manifest_value(entries, source_field_path.as_ref())?;
+            observation_require_initial_binding(
+                &admission_fields.initial_bindings,
+                &format!("context.{}", entry_path.as_str()),
+                &root_ref,
+            )?;
+            observation_resolved(resolver, InputSource::context(&root_ref)?, root_ref, nested)
+                .map(Some)
+        }
+        CertifiedSourceSelector::NodeOutput {
+            producer_node_id,
+            output_ordinal,
+            source_field_path,
+        } => {
+            let Some((transition_ref, value_ref)) = observation_transition_output(
+                fold,
+                visible_run_sequence,
+                producer_node_id,
+                *output_ordinal,
+            )?
+            else {
+                return Ok(None);
+            };
+            let output_ref = OutputRef::new(&transition_ref, *output_ordinal)?;
+            observation_resolved(
+                resolver,
+                InputSource::transition_output(journal.run_id(), &transition_ref, &output_ref)?,
+                value_ref,
+                source_field_path.clone(),
+            )
+            .map(Some)
+        }
+        CertifiedSourceSelector::NodeFact {
+            producer_node_id,
+            emission_ordinal,
+        } => {
+            let Some((transition_ref, value_ref)) = observation_transition_fact(
+                fold,
+                visible_run_sequence,
+                producer_node_id,
+                *emission_ordinal,
+            )?
+            else {
+                return Ok(None);
+            };
+            let fact_ref = FactRef::new(&transition_ref, *emission_ordinal)?;
+            observation_resolved(
+                resolver,
+                InputSource::transition_fact(journal.run_id(), &transition_ref, &fact_ref)?,
+                value_ref,
+                None,
+            )
+            .map(Some)
+        }
+        CertifiedSourceSelector::CrossRunEffectiveOutput { source_field_path } => {
+            resolve_observation_cross_run(
+                resolver,
+                &admission_fields,
+                source_field_path.as_ref(),
+                None,
+            )
+        }
+        CertifiedSourceSelector::CrossRunEvidence {
+            source_field_path,
+            certified_evidence_role_ref,
+        } => resolve_observation_cross_run(
+            resolver,
+            &admission_fields,
+            source_field_path.as_ref(),
+            Some(certified_evidence_role_ref),
+        ),
+    }
+}
+
+fn resolve_observation_cross_run(
+    resolver: &ObservationObjectResolver<'_>,
+    admission: &mfm_journal::v1::RunAdmittedFields,
+    selected_path: Option<&FieldPath>,
+    evidence_role: Option<&ContentRef>,
+) -> Result<Option<ObservationResolvedSource>> {
+    let manifest = CrossRunSourceManifest::strict_decode(
+        &resolver.content_bytes(&admission.cross_run_source_manifest_ref)?,
+    )?;
+    let mut entries = Vec::new();
+    for entry in manifest.entries()? {
+        let source = entry.source()?;
+        let role_matches = match (source.fields()?, evidence_role) {
+            (CrossRunSourceRefFields::EffectiveOutput { .. }, None) => true,
+            (
+                CrossRunSourceRefFields::EvidenceOnly {
+                    certified_evidence_role_ref,
+                    ..
+                },
+                Some(expected),
+            ) => certified_evidence_role_ref == *expected,
+            _ => false,
+        };
+        if role_matches {
+            entries.push((entry.field_path()?, source));
+        }
+    }
+    let (entry_path, source, nested) = select_manifest_value(entries, selected_path)?;
+    let root_ref = observation_initial_binding(
+        &admission.initial_bindings,
+        &format!("cross_run.{}", entry_path.as_str()),
+    )?;
+    observation_resolved(resolver, InputSource::cross_run(&source)?, root_ref, nested).map(Some)
+}
+
+fn observation_resolved(
+    resolver: &ObservationObjectResolver<'_>,
+    source: InputSource,
+    root_ref: ValueRef,
+    source_field_path: Option<FieldPath>,
+) -> Result<ObservationResolvedSource> {
+    let selected_bytes = select_canonical(
+        &resolver.value_bytes(&root_ref)?,
+        source_field_path.as_ref(),
+    )?;
+    Ok(ObservationResolvedSource {
+        source,
+        root_ref,
+        selected_bytes,
+        source_field_path,
+    })
+}
+
+fn observation_initial_binding(bindings: &[InitialBinding], path: &str) -> Result<ValueRef> {
+    let path = FieldPath::new(path)?;
+    bindings
+        .iter()
+        .map(InitialBinding::fields)
+        .collect::<std::result::Result<Vec<_>, mfm_journal::v1::JournalError>>()?
+        .into_iter()
+        .find(|binding| binding.field_path == path)
+        .map(|binding| binding.value_ref)
+        .ok_or_else(|| observation_mismatch("observation_initial_binding"))
+}
+
+fn observation_require_initial_binding(
+    bindings: &[InitialBinding],
+    path: &str,
+    expected: &ValueRef,
+) -> Result<()> {
+    if observation_initial_binding(bindings, path)? == *expected {
+        Ok(())
+    } else {
+        Err(observation_mismatch("observation_initial_binding"))
+    }
+}
+
+fn observation_transition_output(
+    fold: &FoldState,
+    visible_run_sequence: u64,
+    producer_node_id: &NodeId,
+    output_ordinal: u32,
+) -> Result<Option<(TransitionRef, ValueRef)>> {
+    for entry in &fold.transitions {
+        if entry.containing_journal_head.fields()?.run_sequence > visible_run_sequence {
+            continue;
+        }
+        let transition = entry.transition.fields()?;
+        if transition.node_id != *producer_node_id {
+            continue;
+        }
+        let settlement = match transition.body.fields()? {
+            TransitionBodyFields::PureSettled { settlement, .. }
+            | TransitionBodyFields::ReadSettled { settlement, .. }
+            | TransitionBodyFields::EffectSettled { settlement, .. } => settlement,
+            TransitionBodyFields::EffectRequested { .. }
+            | TransitionBodyFields::DependencySkipped { .. } => continue,
+        };
+        let SettlementFields::Succeeded {
+            output_bindings, ..
+        } = settlement.fields()?
+        else {
+            continue;
+        };
+        if let Some(output) = output_bindings.iter().find(|output| {
+            output
+                .fields()
+                .is_ok_and(|fields| fields.output_ordinal == output_ordinal)
+        }) {
+            return Ok(Some((
+                entry.transition_ref.clone(),
+                output.fields()?.value_ref,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn observation_transition_fact(
+    fold: &FoldState,
+    visible_run_sequence: u64,
+    producer_node_id: &NodeId,
+    emission_ordinal: u32,
+) -> Result<Option<(TransitionRef, ValueRef)>> {
+    for entry in &fold.transitions {
+        if entry.containing_journal_head.fields()?.run_sequence > visible_run_sequence {
+            continue;
+        }
+        let transition = entry.transition.fields()?;
+        if transition.node_id != *producer_node_id {
+            continue;
+        }
+        let settlement = match transition.body.fields()? {
+            TransitionBodyFields::PureSettled { settlement, .. }
+            | TransitionBodyFields::ReadSettled { settlement, .. }
+            | TransitionBodyFields::EffectSettled { settlement, .. } => settlement,
+            TransitionBodyFields::EffectRequested { .. }
+            | TransitionBodyFields::DependencySkipped { .. } => continue,
+        };
+        let SettlementFields::Succeeded { fact_emissions, .. } = settlement.fields()? else {
+            continue;
+        };
+        if let Some(fact) = fact_emissions.iter().find(|fact| {
+            fact.fields()
+                .is_ok_and(|fields| fields.emission_ordinal == emission_ordinal)
+        }) {
+            return Ok(Some((
+                entry.transition_ref.clone(),
+                fact.fields()?.claim_ref,
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_this_record_producer(value_ref: &ValueRef, expected_path: &str) -> Result<()> {
+    let ProducerBindingFields::ThisRecord { field_path } =
+        value_ref.fields()?.producer_binding.fields()?
+    else {
+        return Err(observation_mismatch("observation_producer"));
+    };
+    if field_path.as_str() != expected_path {
+        return Err(observation_mismatch("observation_producer"));
+    }
+    Ok(())
+}
+
+fn validate_input_assembly_producer(
+    value_ref: &ValueRef,
+    run_id: &RunId,
+    node_id: &NodeId,
+) -> Result<()> {
+    match value_ref.fields()?.producer_binding.fields()? {
+        ProducerBindingFields::InputAssembly {
+            run_id: producer_run,
+            node_id: producer_node,
+        } if producer_run == *run_id && producer_node == *node_id => Ok(()),
+        _ => Err(observation_mismatch("observation_input_producer")),
+    }
+}
+
+fn validate_external_observation_producer(
+    value_ref: &ValueRef,
+    authorization_ref: &AuthorizationRef,
+    expected_path: &str,
+) -> Result<()> {
+    match value_ref.fields()?.producer_binding.fields()? {
+        ProducerBindingFields::ExternalObservation {
+            authorization_ref: producer,
+            field_path,
+        } if producer == *authorization_ref && field_path.as_str() == expected_path => Ok(()),
+        _ => Err(observation_mismatch("observation_producer")),
+    }
+}
+
+fn content_ref_for_value(value_ref: &ValueRef) -> Result<ContentRef> {
+    let fields = value_ref.fields()?;
+    ContentRef::new(fields.schema_id, fields.content_digest).map_err(Into::into)
+}
+
+fn derive_observation_request_digest(
+    request_schema_id: &str,
+    request: &PlainCanonicalJsonBytes,
+) -> Result<mfm_ids::RequestDigest> {
+    let request_value: serde_json::Value = serde_json::from_slice(request.as_bytes())
+        .map_err(|_| observation_mismatch("observation_request"))?;
+    let preimage = serde_json::json!({
+        "request_schema_id": request_schema_id,
+        "request_value": request_value,
+    });
+    let canonical = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&preimage)
+            .map_err(|_| observation_mismatch("observation_request"))?,
+    )
+    .map_err(|_| observation_mismatch("observation_request"))?;
+    let contract = RecoverabilityContractV1::embedded()?;
+    let validated = contract.strict_decode(REQUEST_PREIMAGE_SCHEMA, canonical.as_bytes())?;
+    contract
+        .derive_request_digest(&validated)
+        .map_err(Into::into)
+}
+
+fn observation_content_ref_reachable(
+    resolver: &ObservationObjectResolver<'_>,
+    root: &ContentRef,
+    target: &ContentRef,
+) -> Result<bool> {
+    let mut queue = std::collections::VecDeque::from([root.clone()]);
+    let mut visited = BTreeSet::new();
+    while let Some(reference) = queue.pop_front() {
+        if !visited.insert(reference.clone()) {
+            continue;
+        }
+        if &reference == target {
+            return Ok(true);
+        }
+        if visited.len() > 4_096 {
+            return Err(observation_mismatch("read_routing_catalog"));
+        }
+        let bytes = resolver.content_bytes(&reference)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| observation_mismatch("read_routing_catalog"))?;
+        collect_observation_content_refs(&value, &mut queue);
+    }
+    Ok(false)
+}
+
+fn collect_observation_content_refs(
+    value: &serde_json::Value,
+    output: &mut std::collections::VecDeque<ContentRef>,
+) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if let Ok(reference) = serde_json::from_value::<ContentRef>(value.clone()) {
+                output.push_back(reference);
+            } else {
+                for nested in fields.values() {
+                    collect_observation_content_refs(nested, output);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_observation_content_refs(nested, output);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+const fn observation_mismatch(field: &'static str) -> StoreError {
+    StoreError::PersistedMismatch { field }
 }
 
 fn authorization_effect_key(
@@ -3435,6 +5408,7 @@ impl VerifiedRunView {
     pub(super) fn validate_prepared_observation(
         &self,
         candidate: &CommitCandidatePreimage,
+        objects: &super::PreparedObjectGraph,
     ) -> Result<()> {
         self.validate_candidate_predecessor(candidate)?;
         let fields = candidate.fields()?;
@@ -3455,7 +5429,13 @@ impl VerifiedRunView {
                 message: "prepared payload is not an observation batch",
             });
         };
-        self.fold.validate_observation_candidate(&observation)
+        self.fold.validate_observation_candidate(
+            &self.journal,
+            objects,
+            &self.certified_spec,
+            &self.capability_binding_manifest,
+            &observation,
+        )
     }
 
     fn validate_candidate_predecessor(&self, candidate: &CommitCandidatePreimage) -> Result<()> {

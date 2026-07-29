@@ -80,10 +80,7 @@ impl PublicOutputDescriptor for ExamplePublicOutput {
                 schema_version("1")?,
                 SchemaShape::named_struct(vec![FieldDescriptor::required(
                     "artifact",
-                    SchemaShape::ValueRef {
-                        schema_id: ExampleValue::schema_id()?,
-                        semantic_type_id: ExampleValue::semantic_id()?,
-                    },
+                    SchemaShape::inline_value::<ExampleValue>()?,
                 )])?,
             )?,
             SchemaAudit::__derive_generated(
@@ -118,7 +115,10 @@ fn descriptor_identity_has_golden_canonical_json_and_schema_id() {
         }
     );
     assert_eq!(
-        descriptor.identity_canonical_json().as_str(),
+        descriptor
+            .identity_canonical_json()
+            .expect("canonical identity")
+            .as_str(),
         "{\"canonicalization\":\"sha256-jcs-v1\",\"persisted_surface\":{\"numbers\":\"no_floats\",\"secrets\":\"no_secrets\"},\"schema_kind\":\"value\",\"schema_name\":\"mfm.test.example_value\",\"schema_version\":\"1\",\"semantic_type_id\":\"semantic:mfm.test:example-value:1:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"shape\":{\"fields\":[{\"default\":\"required\",\"name\":\"amount\",\"shape\":{\"kind\":\"decimal_string\",\"scale\":{\"kind\":\"variable\"}}},{\"default\":\"required\",\"name\":\"label\",\"shape\":{\"kind\":\"string\"}}],\"kind\":\"struct\"},\"versioning\":\"manual_version\"}"
     );
     assert_eq!(
@@ -127,6 +127,20 @@ fn descriptor_identity_has_golden_canonical_json_and_schema_id() {
             .as_str(),
         "schema:mfm.test.example_value:1:sha256-jcs-v1:a8d99e06027b3fbad4b15248550d1fe2fe899091c629f48af1a3e267f7bd3379"
     );
+}
+
+#[test]
+fn every_schema_identity_encoder_rejects_mutated_oversized_shape() {
+    let mut descriptor = ExampleValue::schema_descriptor().expect("example descriptor");
+    descriptor.identity.shape = SchemaShape::named_struct(
+        (0..1_500)
+            .map(|index| FieldDescriptor::required(format!("field_{index:04}"), SchemaShape::Bool))
+            .collect(),
+    )
+    .expect("oversized shape");
+
+    assert!(descriptor.identity_canonical_json().is_err());
+    assert!(serde_json::to_vec(&descriptor.identity).is_err());
 }
 
 #[test]
@@ -158,7 +172,7 @@ fn framework_generic_descriptors_have_golden_schema_ids() {
         MaybeValue::<ExampleValue>::schema_id()
             .expect("maybe schema id")
             .as_str(),
-        "schema:mfm.kernel.maybe_value:1:sha256-jcs-v1:2f50c16c5cbfd672799334a6749c9f1438184782e6ef794d30cd9fa5934e2a95"
+        "schema:mfm.kernel.maybe_value:1:sha256-jcs-v1:38eab156404c9bf41fb9c57498468fd0139ffa1a2b8f9bc3cc2a50cf6cb345f0"
     );
     assert_eq!(
         ArtifactRef::<ExampleValue>::schema_id()

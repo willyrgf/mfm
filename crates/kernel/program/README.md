@@ -6,9 +6,11 @@ Typed state callbacks and deterministic operation-authoring contracts.
 This crate is framework-owned and must remain domain-free.
 
 Every `State` selects exactly one closed `StateExecution`: pure, audited read, or recoverable
-effect. Callbacks receive borrowed typed values plus their full immutable journal `ValueRef`s;
-append and live-access authority remain private to runtime. Successful `Settlement` values carry
-an ordered `FactSet`.
+effect. Callbacks receive borrowed verified value views; read reducers additionally receive an
+opaque value-only `ObservationView` containing a typed returned outcome or classifier-approved
+safe-failure metadata with an optional typed diagnostic, not the observation's journal
+`ValueRef`. Append and live-access authority remain private to runtime. Successful `Settlement`
+values carry an ordered `FactSet`.
 
 `AuthoredProgramBuilder` records canonical state occurrences, nested-child composition, typed
 edges, bridges, required-success nodes, and public outputs. `connect_many` authors conjunctive

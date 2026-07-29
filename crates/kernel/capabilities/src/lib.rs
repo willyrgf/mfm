@@ -33,7 +33,11 @@ pub use provider_diagnostic::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
 pub use safe_failure::{
-    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureCode, SafeFailureError,
+    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureClassifierDescriptor,
+    SafeFailureClassifierError, SafeFailureClassifierRule, SafeFailureCode,
+    SafeFailureDiagnosticConstraint, SafeFailureDiagnosticRule, SafeFailureError,
+    SafeFailureOutcome, SafeFailureSizeRule, MAX_SAFE_FAILURE_DIAGNOSTIC_BYTES,
+    SAFE_FAILURE_CLASSIFIER_DESCRIPTOR_VERSION,
 };
 
 mod provider_diagnostic;
