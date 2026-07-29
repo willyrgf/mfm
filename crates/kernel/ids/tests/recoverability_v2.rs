@@ -4,8 +4,8 @@ use mfm_ids::{
     StoreScopeId, TenantScopeId,
 };
 
-#[path = "../../../../tests/support/recoverability_v1.rs"]
-mod recoverability_v1_support;
+#[path = "../../../../tests/support/recoverability_v2.rs"]
+mod recoverability_v2_support;
 
 const DIGEST_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -25,8 +25,8 @@ fn schema_id() -> SchemaId {
 
 #[test]
 fn ids_execute_every_frozen_recoverability_vector() {
-    recoverability_v1_support::run_consumer("mfm-ids", |vector| {
-        recoverability_v1_support::assert_lower_layer_owner_vector(vector);
+    recoverability_v2_support::run_consumer("mfm-ids", |vector| {
+        recoverability_v2_support::assert_lower_layer_owner_vector(vector);
     });
 }
 

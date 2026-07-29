@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! HTTP transport for the recoverability-v1 application facade.
+//! HTTP transport for the recoverability-v2 application facade.
 //!
 //! Every protected route accepts only one `Authorization: Bearer` credential and delegates a
 //! purpose-specific call to [`mfm_app::Application`]. Entry-point discovery and health/readiness
@@ -17,19 +17,20 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, MethodRouter};
 use axum::{Json, Router};
+use futures_util::TryStreamExt;
 use mfm_app::{
     AdmissionStatus, Application, ErrorClass, ExportKind, ExportRequest, PublicError,
-    PublicJsonResponse, ReplayRequest, SecretCredential,
+    PublicJsonResponse, ReplayMode, ReplayRequest, SecretCredential,
 };
-use mfm_ids::{ContentRef, RunId};
+use mfm_ids::{ContentDigest, ContentRef, RunId};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio_util::io::{ReaderStream, StreamReader};
 use tower_http::trace::TraceLayer;
 use tracing::instrument;
 
 const MAX_BEARER_BYTES: usize = mfm_app::MAX_SECRET_CREDENTIAL_BYTES;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_REPLAY_REQUEST_BODY_BYTES: usize = 22_373_718;
 const MFM_CONTENT_DIGEST: HeaderName = HeaderName::from_static("mfm-content-digest");
 
 /// Thin HTTP adapter around the shared redaction-safe application error.
@@ -245,33 +246,26 @@ async fn read_public_run(
     public_json_response(StatusCode::OK, &response)
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "mode", deny_unknown_fields)]
-enum ReplayBody {
-    #[serde(rename = "verify")]
-    Verify {},
-    #[serde(rename = "reproduce")]
-    Reproduce {
-        portable_export_ref: ContentRef,
-        portable_export_base64url: String,
-    },
-    #[serde(rename = "compare_current")]
-    CompareCurrent {
-        portable_export_ref: ContentRef,
-        portable_export_base64url: String,
-    },
-}
-
 async fn replay_run(
     State(state): State<AppState>,
     path: Result<Path<String>, PathRejection>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
     let credential = bearer_credential(&headers)?;
     let run_id = run_id_path(path)?;
-    let body = replay_request_body(body).await?;
-    let request = decode_replay_body(&body)?;
+    let mode = decode_replay_query(query.as_deref())?;
+    let request = match mode {
+        ReplayMode::Verify => {
+            let body = request_body(body, MAX_REQUEST_BODY_BYTES).await?;
+            require_empty_body(&body)?;
+            ReplayRequest::Verify
+        }
+        ReplayMode::Reproduce | ReplayMode::CompareCurrent => {
+            replay_stream_request(mode, &headers, body)?
+        }
+    };
     let response = state
         .application
         .replay_run(credential, run_id, request)
@@ -374,7 +368,9 @@ async fn export_run(
     let digest = HeaderValue::from_str(export.digest().as_str()).map_err(|_| {
         PublicError::internal("ExportDigestInvalid", "Export digest could not be rendered")
     })?;
-    let mut response = Response::new(Body::from(export.bytes().to_vec()));
+    let body = ReaderStream::new(export.into_reader())
+        .map_err(|_| std::io::Error::other("export stream unavailable"));
+    let mut response = Response::new(Body::from_stream(body));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
     response.headers_mut().insert(MFM_CONTENT_DIGEST, digest);
@@ -429,15 +425,6 @@ fn bearer_credential(headers: &HeaderMap) -> Result<SecretCredential, ApiError> 
 
 async fn request_body(body: Body, max_bytes: usize) -> Result<axum::body::Bytes, ApiError> {
     request_body_with_limit(body, max_bytes, request_body_too_large).await
-}
-
-async fn replay_request_body(body: Body) -> Result<axum::body::Bytes, ApiError> {
-    request_body_with_limit(
-        body,
-        MAX_REPLAY_REQUEST_BODY_BYTES,
-        PublicError::replay_artifact_too_large,
-    )
-    .await
 }
 
 async fn request_body_with_limit(
@@ -495,38 +482,79 @@ fn decode_body<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, ApiError
         .map_err(Into::into)
 }
 
-fn decode_replay_body(bytes: &[u8]) -> Result<ReplayRequest, ApiError> {
-    let body: ReplayBody = serde_json::from_slice(bytes).map_err(|error| {
-        use serde_json::error::Category;
-
-        match error.classify() {
-            Category::Data => PublicError::replay_artifact_invalid(),
-            Category::Io | Category::Syntax | Category::Eof => {
-                PublicError::bad_request("InvalidJson", "Request JSON is invalid")
+fn decode_replay_query(query: Option<&str>) -> Result<ReplayMode, ApiError> {
+    let mut mode = None;
+    for (name, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        match name.as_ref() {
+            "mode" if mode.is_none() => mode = Some(ReplayMode::parse(&value)?),
+            "mode" => {
+                return Err(PublicError::bad_request(
+                    "InvalidQuery",
+                    "Query parameters must not be repeated",
+                )
+                .into())
+            }
+            _ => {
+                return Err(PublicError::bad_request(
+                    "InvalidQuery",
+                    "The query contains an unknown parameter",
+                )
+                .into())
             }
         }
-    })?;
-    match body {
-        ReplayBody::Verify {} => Ok(ReplayRequest::Verify),
-        ReplayBody::Reproduce {
-            portable_export_ref,
-            portable_export_base64url,
-        } => mfm_app::PortableExportInput::decode_base64url(
-            portable_export_ref,
-            portable_export_base64url,
-        )
-        .map(ReplayRequest::Reproduce)
-        .map_err(Into::into),
-        ReplayBody::CompareCurrent {
-            portable_export_ref,
-            portable_export_base64url,
-        } => mfm_app::PortableExportInput::decode_base64url(
-            portable_export_ref,
-            portable_export_base64url,
-        )
-        .map(ReplayRequest::CompareCurrent)
-        .map_err(Into::into),
     }
+    mode.ok_or_else(|| {
+        PublicError::bad_request(
+            "ReplayModeInvalid",
+            "Replay mode query parameter is required",
+        )
+        .into()
+    })
+}
+
+fn replay_stream_request(
+    mode: ReplayMode,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<ReplayRequest, ApiError> {
+    if exactly_one_header(headers, CONTENT_TYPE)
+        .filter(|value| value.as_bytes() == mfm_replay_media_type().as_bytes())
+        .is_none()
+    {
+        return Err(PublicError::replay_artifact_invalid().into());
+    }
+    let digest = exactly_one_header(headers, MFM_CONTENT_DIGEST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| ContentDigest::parse(value).ok())
+        .ok_or_else(PublicError::replay_artifact_invalid)?;
+    let schema_id = mfm_canonical::RecoverabilityContractV2::embedded()
+        .and_then(|contract| contract.schema_id("mfm.portable-run-export-stream.v1"))
+        .map_err(|_| {
+            PublicError::internal(
+                "RecoverabilityContractUnavailable",
+                "The recoverability contract is unavailable",
+            )
+        })?
+        .clone();
+    let content_ref =
+        ContentRef::new(schema_id, digest).map_err(|_| PublicError::replay_artifact_invalid())?;
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let input =
+        mfm_app::ExportStreamInput::from_reader(content_ref, Box::pin(StreamReader::new(stream)))?;
+    match mode {
+        ReplayMode::Reproduce => Ok(ReplayRequest::Reproduce(input)),
+        ReplayMode::CompareCurrent => Ok(ReplayRequest::CompareCurrent(input)),
+        ReplayMode::Verify => Err(PublicError::replay_artifact_invalid().into()),
+    }
+}
+
+fn exactly_one_header(headers: &HeaderMap, name: HeaderName) -> Option<&HeaderValue> {
+    let mut values = headers.get_all(name).iter();
+    values.next().filter(|_| values.next().is_none())
+}
+
+fn mfm_replay_media_type() -> &'static str {
+    mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE
 }
 
 fn decode_page_query(query: Option<&str>) -> Result<PageQuery, ApiError> {

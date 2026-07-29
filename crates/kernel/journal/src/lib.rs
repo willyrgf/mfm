@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
-//! Frozen recoverability-v1 journal values.
+//! Frozen recoverability-v2 journal values.
 //!
 //! Every public persisted value in this crate is backed by
-//! [`mfm_canonical::ValidatedCanonicalValueV1`]. Construction and decoding
+//! [`mfm_canonical::ValidatedCanonicalValueV2`]. Construction and decoding
 //! always use the embedded recoverability annex; Rust serialization is not a
 //! second wire authority.
 //!
@@ -19,5 +19,5 @@
 //! use mfm_journal::v1::StateAttemptStarted;
 //! ```
 
-/// Frozen recoverability-v1 journal values and codecs.
+/// Frozen recoverability-v2 journal values and codecs.
 pub mod v1;

@@ -1,16 +1,19 @@
+use std::pin::Pin;
+
 use mfm_canonical::{
-    CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1,
-    ValidatedCanonicalValueV1,
+    CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
+    ValidatedCanonicalValueV2,
 };
 use mfm_ids::{ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId};
 use mfm_journal::v1::JournalHead;
-pub use mfm_replay::trace_export::ExportKind;
+pub use mfm_replay::trace_export::{ExportKind, PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE};
 pub use mfm_replay::v1::{
     AccessAuditEntry, CanonicalReplayResult as ReplayResponse, CanonicalTransitionTrace,
 };
 pub use mfm_spec::{EntryPointContract, PlanningProfile};
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::io::AsyncRead;
 
 use crate::{ErrorClass, PublicError};
 
@@ -30,13 +33,9 @@ pub const ADMIT_RUN_REQUEST_VERSION: &str = "mfm.admit-run-request.v1";
 pub const DEFAULT_PAGE_LIMIT: u16 = 100;
 /// Maximum number of entries returned by trace and audit inspection.
 pub const MAX_PAGE_LIMIT: u16 = 500;
-/// Maximum decoded canonical portable-export bytes accepted by a replay request.
-pub const MAX_REPLAY_PORTABLE_EXPORT_BYTES: usize = 16 * 1024 * 1024;
-/// Maximum unpadded base64url characters accepted before portable-export decoding.
-pub const MAX_REPLAY_PORTABLE_EXPORT_BASE64URL_CHARACTERS: usize = 22_369_622;
 
-fn recoverability_contract() -> Result<&'static RecoverabilityContractV1, PublicError> {
-    RecoverabilityContractV1::embedded().map_err(|_| {
+fn recoverability_contract() -> Result<&'static RecoverabilityContractV2, PublicError> {
+    RecoverabilityContractV2::embedded().map_err(|_| {
         PublicError::internal(
             "RecoverabilityContractUnavailable",
             "The recoverability contract is unavailable",
@@ -62,7 +61,7 @@ fn checked_value(
     value: CanonicalValue,
     code: &'static str,
     message: &'static str,
-) -> Result<ValidatedCanonicalValueV1, PublicError> {
+) -> Result<ValidatedCanonicalValueV2, PublicError> {
     recoverability_contract()?
         .encode(contract, &value)
         .map_err(|_| invalid_request(code, message))
@@ -430,7 +429,7 @@ fn page_cursor_encoding_failed() -> PublicError {
 /// and invalid checked identities before authorization.
 #[derive(Clone)]
 pub struct AdmitRunRequest {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
     entry_point_id: EntryPointId,
     invocation_identity: InvocationIdentity,
     input: mfm_spec::CanonicalJsonValue,
@@ -617,7 +616,7 @@ macro_rules! canonical_response {
         #[doc = $description]
         #[derive(Clone, PartialEq, Eq)]
         pub struct $name {
-            validated: ValidatedCanonicalValueV1,
+            validated: ValidatedCanonicalValueV2,
         }
 
         impl $name {
@@ -865,44 +864,39 @@ impl ReplayMode {
     }
 }
 
-/// Checked caller-held semantic portable export used by non-verify replay modes.
+/// Affine asynchronous reader used for portable export streams.
+pub type ExportAsyncReader = Pin<Box<dyn AsyncRead + Send + Unpin + 'static>>;
+
+/// Caller-held semantic portable export stream used by non-verify replay modes.
 ///
-/// Construction enforces the annex byte bound and canonical unpadded base64url spelling before
-/// retaining decoded bytes. Full schema, digest, store, tenant, run, head, and closure validation
-/// happens under separate replay and semantic-export authority.
-#[derive(Clone, PartialEq, Eq)]
-pub struct PortableExportInput {
+/// Construction does not poll the reader. Full framing, digest, store, tenant, run, head, and
+/// closure validation happens only after separate replay and same-run export authorization.
+pub struct ExportStreamInput {
     content_ref: ContentRef,
-    bytes: Vec<u8>,
+    reader: ExportAsyncReader,
 }
 
-impl PortableExportInput {
-    /// Moves one bounded caller-held canonical portable export into the replay request.
-    pub fn from_bytes(content_ref: ContentRef, bytes: Vec<u8>) -> Result<Self, PublicError> {
-        if bytes.is_empty() {
-            return Err(PublicError::replay_artifact_invalid());
-        }
-        if bytes.len() > MAX_REPLAY_PORTABLE_EXPORT_BYTES {
-            return Err(PublicError::replay_artifact_too_large());
-        }
-        Ok(Self { content_ref, bytes })
-    }
-
-    /// Decodes one bounded canonical unpadded-base64url portable export.
-    pub fn decode_base64url(
+impl ExportStreamInput {
+    /// Binds one exact content reference to an unpolled caller-held stream.
+    pub fn from_reader(
         content_ref: ContentRef,
-        encoded: impl Into<String>,
+        reader: ExportAsyncReader,
     ) -> Result<Self, PublicError> {
-        let encoded = encoded.into();
-        if encoded.is_empty() {
+        let expected_schema = recoverability_contract()?
+            .schema_id("mfm.portable-run-export-stream.v1")
+            .map_err(|_| {
+                PublicError::internal(
+                    "RecoverabilityContractUnavailable",
+                    "The recoverability contract is unavailable",
+                )
+            })?;
+        if content_ref.schema_id() != expected_schema {
             return Err(PublicError::replay_artifact_invalid());
         }
-        if encoded.len() > MAX_REPLAY_PORTABLE_EXPORT_BASE64URL_CHARACTERS {
-            return Err(PublicError::replay_artifact_too_large());
-        }
-        let decoded = CanonicalBytes::from_base64url_no_pad(encoded)
-            .map_err(|_| PublicError::replay_artifact_invalid())?;
-        Self::from_bytes(content_ref, decoded.into_bytes())
+        Ok(Self {
+            content_ref,
+            reader,
+        })
     }
 
     /// Returns the caller-supplied exact export identity.
@@ -910,31 +904,29 @@ impl PortableExportInput {
         &self.content_ref
     }
 
-    /// Returns the decoded canonical portable-export bytes.
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub(crate) fn into_parts(self) -> (ContentRef, ExportAsyncReader) {
+        (self.content_ref, self.reader)
     }
 }
 
-impl std::fmt::Debug for PortableExportInput {
+impl std::fmt::Debug for ExportStreamInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PortableExportInput")
+            .debug_struct("ExportStreamInput")
             .field("content_ref", &self.content_ref)
-            .field("byte_len", &self.bytes.len())
             .finish_non_exhaustive()
     }
 }
 
 /// Checked replay request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ReplayRequest {
     /// Verify recorded history without any supplied export.
     Verify,
     /// Validate caller-held semantic export evidence before exact reproduction.
-    Reproduce(PortableExportInput),
+    Reproduce(ExportStreamInput),
     /// Validate caller-held semantic export evidence before current-candidate comparison.
-    CompareCurrent(PortableExportInput),
+    CompareCurrent(ExportStreamInput),
 }
 
 impl ReplayRequest {
@@ -947,11 +939,8 @@ impl ReplayRequest {
         }
     }
 
-    pub(crate) const fn portable_export(&self) -> Option<&PortableExportInput> {
-        match self {
-            Self::Verify => None,
-            Self::Reproduce(input) | Self::CompareCurrent(input) => Some(input),
-        }
+    pub(crate) const fn requires_export_authorization(&self) -> bool {
+        !matches!(self, Self::Verify)
     }
 }
 
@@ -973,42 +962,67 @@ impl ExportRequest {
     }
 }
 
-/// App wrapper around final canonical portable-export bytes.
+/// App-owned metadata and affine reader for one complete portable export stream.
 ///
-/// This is deliberately distinct from the annex `mfm.portable-run-export.v1` value carried
-/// inside. It has no constructor from arbitrary bytes.
-pub struct ExportedRunBytes {
-    export: mfm_replay::trace_export::PortableRunExport,
+/// The reader is backed by private application storage and cannot be constructed from arbitrary
+/// response bytes.
+pub struct ExportedRun {
+    content_ref: ContentRef,
+    reader: ExportAsyncReader,
 }
 
-impl ExportedRunBytes {
-    pub(crate) const fn from_portable(export: mfm_replay::trace_export::PortableRunExport) -> Self {
-        Self { export }
+impl ExportedRun {
+    pub(crate) fn from_parts(
+        metadata: mfm_replay::trace_export::PortableRunExportMetadata,
+        reader: ExportAsyncReader,
+    ) -> Self {
+        Self {
+            content_ref: metadata.content_ref().clone(),
+            reader,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) const fn for_test(content_ref: ContentRef, reader: ExportAsyncReader) -> Self {
+        Self {
+            content_ref,
+            reader,
+        }
     }
 
     /// Returns the exact response media type.
     pub fn media_type(&self) -> &'static str {
-        self.export.media_type()
+        PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE
     }
 
-    /// Returns the external digest over final canonical bytes.
+    /// Returns the external digest over every exact stream byte.
     pub const fn digest(&self) -> &mfm_ids::ContentDigest {
-        self.export.digest()
+        self.content_ref.content_digest()
     }
 
-    /// Returns the final canonical bundle bytes.
-    pub fn bytes(&self) -> &[u8] {
-        self.export.as_bytes()
+    /// Returns the annex-derived stream schema identity.
+    pub const fn schema_id(&self) -> &SchemaId {
+        self.content_ref.schema_id()
     }
 
     /// Returns the exact interpretation-and-byte identity written beside a CLI export.
-    pub fn content_ref(&self) -> Result<ContentRef, PublicError> {
-        self.export.content_ref().map_err(Into::into)
+    pub const fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
     }
 
-    /// Moves out the canonical portable export.
-    pub fn into_portable(self) -> mfm_replay::trace_export::PortableRunExport {
-        self.export
+    /// Moves out the complete export stream reader.
+    pub fn into_reader(self) -> ExportAsyncReader {
+        self.reader
+    }
+}
+
+impl std::fmt::Debug for ExportedRun {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExportedRun")
+            .field("content_ref", self.content_ref())
+            .field("media_type", &self.media_type())
+            .finish_non_exhaustive()
     }
 }
 
@@ -1023,15 +1037,15 @@ mod tests {
 
     use super::{
         decode_access_audit_page_request, decode_transition_trace_page_request,
-        encode_inspection_cursor, AdmissionStatus, AdmitRunRequest, AdmitRunResponse,
-        CanonicalBytes, ContentRef, DriveResponse, InspectionPurpose, PageRequest,
-        PortableExportInput, PublicError, PublicRunView, RecoverabilityContractV1, ReplayMode,
-        ReplayRequest, RunId, DEFAULT_PAGE_LIMIT, INSPECTION_CURSOR_PREFIX,
-        MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_LIMIT, MAX_REPLAY_PORTABLE_EXPORT_BASE64URL_CHARACTERS,
-        MAX_REPLAY_PORTABLE_EXPORT_BYTES,
+        encode_inspection_cursor, AdmissionStatus, AdmitRunRequest, AdmitRunResponse, ContentRef,
+        DriveResponse, ExportStreamInput, ExportedRun, InspectionPurpose, PageRequest,
+        PublicRunView, RecoverabilityContractV2, ReplayMode, ReplayRequest, RunId,
+        DEFAULT_PAGE_LIMIT, INSPECTION_CURSOR_PREFIX, MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_LIMIT,
     };
 
-    assert_not_impl_any!(ReplayRequest: Copy);
+    assert_not_impl_any!(ExportStreamInput: Clone, Copy);
+    assert_not_impl_any!(ExportedRun: Clone, Copy);
+    assert_not_impl_any!(ReplayRequest: Clone, Copy);
 
     #[derive(Deserialize)]
     struct Corpus {
@@ -1048,7 +1062,7 @@ mod tests {
     fn app_owned_wire_values_round_trip_the_frozen_corpus_bytes() {
         let corpus: Corpus = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v1/corpus.json"
+            "/../../contracts/recoverability/v2/corpus.json"
         )))
         .expect("frozen corpus");
 
@@ -1240,36 +1254,49 @@ mod tests {
     }
 
     #[test]
-    fn portable_replay_input_requires_canonical_bounded_base64url() {
-        let contract = RecoverabilityContractV1::embedded().expect("annex");
-        let bytes = br#"{"portable":"evidence"}"#;
+    fn portable_replay_input_binds_an_unpolled_affine_reader() {
+        let contract = RecoverabilityContractV2::embedded().expect("annex");
         let content_ref = ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export.v1")
+                .schema_id("mfm.portable-run-export-stream.v1")
                 .expect("portable schema")
                 .clone(),
-            contract.raw_content_digest(bytes),
+            contract.raw_content_digest(b"stream"),
         )
         .expect("content ref");
-        let encoded = CanonicalBytes::new(bytes.to_vec()).encoded().to_owned();
         let input =
-            PortableExportInput::decode_base64url(content_ref.clone(), encoded).expect("input");
+            ExportStreamInput::from_reader(content_ref.clone(), Box::pin(tokio::io::empty()))
+                .expect("stream input");
         assert_eq!(input.content_ref(), &content_ref);
-        assert_eq!(input.bytes(), bytes);
+        assert_eq!(
+            ReplayRequest::CompareCurrent(input).mode(),
+            ReplayMode::CompareCurrent
+        );
 
-        for invalid in ["", "AA==", "AA+_", "A"] {
-            let error = PortableExportInput::decode_base64url(content_ref.clone(), invalid)
-                .expect_err("invalid base64url");
-            assert_eq!(error, PublicError::replay_artifact_invalid(), "{invalid:?}");
-        }
-        assert_eq!(MAX_REPLAY_PORTABLE_EXPORT_BYTES, 16_777_216);
-        assert_eq!(MAX_REPLAY_PORTABLE_EXPORT_BASE64URL_CHARACTERS, 22_369_622);
-        let error = PortableExportInput::from_bytes(
-            content_ref,
-            vec![0; MAX_REPLAY_PORTABLE_EXPORT_BYTES + 1],
+        let wrong_ref = ContentRef::new(
+            contract
+                .schema_id("mfm.content-ref.v1")
+                .expect("other schema")
+                .clone(),
+            contract.raw_content_digest(b"stream"),
         )
-        .expect_err("oversized decoded export");
-        assert_eq!(error, PublicError::replay_artifact_too_large());
+        .expect("wrong content ref");
+        let error = ExportStreamInput::from_reader(wrong_ref, Box::pin(tokio::io::empty()))
+            .expect_err("wrong stream schema");
+        assert_eq!(error.code, "ReplayArtifactInvalid");
+
+        let input =
+            ExportStreamInput::from_reader(content_ref.clone(), Box::pin(tokio::io::empty()))
+                .expect("debug input");
+        let debug = format!("{input:?}");
+        assert!(debug.contains(content_ref.content_digest().as_str()));
+        assert!(!debug.contains("reader"));
+        assert!(!debug.contains("path"));
+
+        let export = ExportedRun::for_test(content_ref, Box::pin(tokio::io::empty()));
+        let debug = format!("{export:?}");
+        assert!(!debug.contains("reader"));
+        assert!(!debug.contains("path"));
     }
 
     #[test]
@@ -1288,7 +1315,7 @@ mod tests {
     fn drive_response_rejects_the_superseded_outcome_discriminator() {
         let corpus: Corpus = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v1/corpus.json"
+            "/../../contracts/recoverability/v2/corpus.json"
         )))
         .expect("frozen corpus");
         let canonical = vector_bytes(&corpus, "schema/mfm.drive-response.v1/minimum");

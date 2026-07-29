@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1,
+    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2,
 };
 use mfm_executor::{
     verify_ensure_result, AccountSequencePolicy, AccountSequenceRequest, AllocationOutcome,
@@ -26,7 +26,7 @@ use tempfile::TempDir;
 
 const CORPUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../contracts/recoverability/v1/corpus.json"
+    "/../../../contracts/recoverability/v2/corpus.json"
 ));
 const WORKER_ROOT: &str = "MFM_EXECUTOR_FILE_WORKER_ROOT";
 const WORKER_COUNT: usize = 8;
@@ -39,8 +39,8 @@ struct Fixture {
     destination_domain_ref: ContentRef,
 }
 
-fn contract() -> &'static RecoverabilityContractV1 {
-    RecoverabilityContractV1::embedded().expect("contract")
+fn contract() -> &'static RecoverabilityContractV2 {
+    RecoverabilityContractV2::embedded().expect("contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {
@@ -759,7 +759,7 @@ fn file_snapshots_never_retain_below_boundary_credentials() {
     }
 }
 
-fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV1 {
+fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV2 {
     let corpus: serde_json::Value = serde_json::from_str(CORPUS).expect("corpus");
     let vector = corpus["positive_vectors"]
         .as_array()

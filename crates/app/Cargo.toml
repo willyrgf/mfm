@@ -44,11 +44,11 @@ mfm-storage-executor-postgres = { path = "../storages/executor-postgres" }
 mfm-values = { path = "../kernel/values" }
 toml = "0.8"
 url = { workspace = true }
+tempfile = "3.0"
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
-tempfile = "3.0"
 trybuild = "1.0"
 static_assertions = "1"

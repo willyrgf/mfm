@@ -1,7 +1,7 @@
-//! Authoritative legal recoverability-v1 fixtures for backend and runtime conformance tests.
+//! Authoritative legal recoverability-v2 fixtures for backend and runtime conformance tests.
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1,
+    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
 };
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, FieldPath, InvocationIdentity,
@@ -883,7 +883,7 @@ fn retained_contract(
     discriminator: u8,
 ) -> Result<RetainedValueContract> {
     RetainedValueContract::new(
-        RecoverabilityContractV1::embedded()?
+        RecoverabilityContractV2::embedded()?
             .schema_id("mfm.primitive-canonical_value.v1")?
             .clone(),
         semantic_type(semantic_name, discriminator)?,
@@ -910,7 +910,7 @@ fn semantic_type(name: &str, discriminator: u8) -> Result<SemanticTypeId> {
 fn content_ref(contract: &RetainedValueContract, bytes: &[u8]) -> Result<ContentRef> {
     ContentRef::new(
         contract.schema_id().clone(),
-        RecoverabilityContractV1::embedded()?.raw_content_digest(bytes),
+        RecoverabilityContractV2::embedded()?.raw_content_digest(bytes),
     )
     .map_err(Into::into)
 }
@@ -920,7 +920,7 @@ fn derive_value_ref(
     producer: &ProducerBinding,
     bytes: &[u8],
 ) -> Result<ValueRef> {
-    let recoverability = RecoverabilityContractV1::embedded()?;
+    let recoverability = RecoverabilityContractV2::embedded()?;
     let content_digest = recoverability.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         contract.schema_id(),
@@ -994,7 +994,7 @@ const fn fixture_error(message: &'static str) -> StoreError {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use mfm_canonical::{CanonicalJsonBytes, PlainCanonicalJsonBytes, RecoverabilityContractV1};
+    use mfm_canonical::{CanonicalJsonBytes, PlainCanonicalJsonBytes, RecoverabilityContractV2};
     use mfm_ids::TenantScopeId;
 
     use super::{LegalAdmissionFixture, PreparedLegalAdmission, OUTPUT_PATH};
@@ -1244,7 +1244,7 @@ mod tests {
         );
         assert_eq!(
             projected_public_output["value_digest"],
-            RecoverabilityContractV1::embedded()
+            RecoverabilityContractV2::embedded()
                 .expect("recoverability contract")
                 .raw_content_digest(output.as_bytes())
                 .as_str()
@@ -1397,7 +1397,7 @@ mod tests {
         assert_eq!(beta["name"], "beta");
         assert_eq!(beta["value"], serde_json::json!([1, 2]));
 
-        let contract = RecoverabilityContractV1::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
         let alpha_bytes =
             PlainCanonicalJsonBytes::from_json_str(r#"{"value":"one"}"#).expect("alpha bytes");
         let beta_bytes = PlainCanonicalJsonBytes::from_json_str("[1,2]").expect("beta bytes");

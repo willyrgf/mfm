@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV2};
 use mfm_ids::{ArtifactId, ContentDigest, ContentRef, FieldPath, ObjectEvidenceDigest, SchemaId};
 use mfm_journal::v1::{
     ArtifactAdmissionIntent, ArtifactAdmissionMode, ArtifactIdPreimage, AuthorityUse,
@@ -116,7 +116,7 @@ fn validate_retained_object(value_ref: &ValueRef, bytes: &[u8]) -> Result<Object
         u64::try_from(bytes.len()).map_err(|_| StoreError::ObjectContentMismatch {
             artifact_id: fields.artifact_id.clone(),
         })?;
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let content_digest = contract.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         &fields.schema_id,
@@ -160,7 +160,7 @@ pub(super) fn derive_value_ref(
         u64::try_from(bytes.len()).map_err(|_| StoreError::InvalidObjectAuthority {
             message: "retained object byte length cannot be represented",
         })?;
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let content_digest = contract.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         value_contract.schema_id(),
@@ -238,7 +238,7 @@ impl UntrustedObjectPayload {
     pub fn new(
         schema_id: SchemaId,
         content_digest: ContentDigest,
-        bytes: Vec<u8>,
+        bytes: Arc<[u8]>,
         value_refs: Vec<ValueRef>,
     ) -> Result<Self> {
         if value_refs.is_empty()
@@ -262,7 +262,7 @@ impl UntrustedObjectPayload {
         Ok(Self {
             schema_id,
             content_digest,
-            bytes: Arc::from(bytes),
+            bytes,
             value_refs,
         })
     }

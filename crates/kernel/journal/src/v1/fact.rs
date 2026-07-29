@@ -519,7 +519,7 @@ impl SelectedFact {
 /// Closed reason that a fact-selection result carries no completeness upgrade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactSelectionUnverifiedReason {
-    /// The response was restored from a portable bundle.
+    /// The response was restored from a portable stream.
     PortableBundle,
     /// The authoritative store prefix could not be verified.
     PrefixVerificationUnavailable,

@@ -2,7 +2,7 @@ use mfm_ids::{ArtifactId, RunId, SemanticDigest, TenantScopeId};
 
 use mfm_journal::v1::JournalHead;
 
-/// Error returned by the recoverability-v1 store contract.
+/// Error returned by the recoverability-v2 store contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
     /// No committed journal exists for the requested authorized run.

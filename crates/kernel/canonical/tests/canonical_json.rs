@@ -92,6 +92,37 @@ fn parses_and_rejects_base64url_bytes() {
 }
 
 #[test]
+fn incremental_raw_content_hashing_matches_the_one_shot_contract() {
+    let contract = mfm_canonical::RecoverabilityContractV2::embedded()
+        .expect("embedded recoverability contract");
+    let fixture = b"portable export stream digest fixture";
+
+    for split in 0..=fixture.len() {
+        let mut incremental = contract.raw_content_digest_hasher();
+        incremental.update(&fixture[..split]);
+        incremental.update(&fixture[split..]);
+        assert_eq!(
+            incremental.finalize(),
+            contract.raw_content_digest(fixture),
+            "split {split}"
+        );
+    }
+
+    let mut empty = contract.raw_content_digest_hasher();
+    empty.update(b"");
+    assert_eq!(empty.finalize(), contract.raw_content_digest(b""));
+
+    let mut segments = contract.raw_content_digest_hasher();
+    for segment in [b"portable ".as_slice(), b"export ", b"stream"] {
+        segments.update(segment);
+    }
+    assert_eq!(
+        segments.finalize(),
+        contract.raw_content_digest(b"portable export stream")
+    );
+}
+
+#[test]
 fn canonical_bytes_can_transfer_decoded_ownership_without_changing_bytes() {
     let bytes = CanonicalBytes::from_base64url_no_pad("AAE-_w").expect("base64url no padding");
     assert_eq!(bytes.into_bytes(), vec![0, 1, 62, 255]);

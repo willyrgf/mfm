@@ -9,14 +9,14 @@ pub type Result<T> = std::result::Result<T, ReplayError>;
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
     /// The frozen canonical contract rejected a replay or export value.
-    #[error("recoverability-v1 canonical replay value is invalid")]
+    #[error("recoverability-v2 canonical replay value is invalid")]
     Recoverability {
         /// Source-preserving codec failure.
         #[source]
         source: RecoverabilityError,
     },
     /// An annex-backed journal value could not be projected.
-    #[error("recoverability-v1 journal value is invalid")]
+    #[error("recoverability-v2 journal value is invalid")]
     Journal {
         /// Source-preserving journal failure.
         #[source]
@@ -46,6 +46,13 @@ pub enum ReplayError {
     /// Portable-export material was incomplete or non-deterministic.
     #[error("portable run export is invalid")]
     InvalidExport,
+    /// An explicit portable export stream read, write, flush, or rewind failed.
+    #[error("portable run export stream I/O failed")]
+    ExportStreamIo {
+        /// Source-preserving I/O failure for internal diagnostics.
+        #[source]
+        source: std::io::Error,
+    },
     /// A required source run was not authorized for export.
     #[error("a required source run is not authorized for export")]
     SourceRunExportDenied,
@@ -65,6 +72,7 @@ impl ReplayError {
             Self::AuthorityMismatch => ReplayErrorKind::AuthorityMismatch,
             Self::InvalidPage => ReplayErrorKind::InvalidPage,
             Self::InvalidExport => ReplayErrorKind::InvalidExport,
+            Self::ExportStreamIo { .. } => ReplayErrorKind::ExportStreamIo,
             Self::SourceRunExportDenied => ReplayErrorKind::SourceRunExportDenied,
         }
     }
@@ -119,8 +127,10 @@ pub enum ReplayErrorKind {
     AuthorityMismatch,
     /// A fixed-head page request is invalid.
     InvalidPage,
-    /// An export bundle or its complete closure is invalid.
+    /// An export stream or its complete closure is invalid.
     InvalidExport,
+    /// An explicit portable export stream I/O operation failed.
+    ExportStreamIo,
     /// Export authority is absent for a required source run.
     SourceRunExportDenied,
 }
@@ -137,6 +147,7 @@ impl ReplayErrorKind {
             Self::AuthorityMismatch => "MFM_REPLAY_AUTHORITY_MISMATCH",
             Self::InvalidPage => "MFM_REPLAY_PAGE_INVALID",
             Self::InvalidExport => "MFM_REPLAY_EXPORT_INVALID",
+            Self::ExportStreamIo => "MFM_REPLAY_EXPORT_STREAM_IO_FAILED",
             Self::SourceRunExportDenied => "MFM_REPLAY_SOURCE_EXPORT_DENIED",
         }
     }

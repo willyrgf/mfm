@@ -1,19 +1,19 @@
-# Recoverability App, CLI, and REST Surface v1
+# Recoverability App, CLI, and REST Surface v2
 
 Status: implemented schema-frozen current contract established by the atomic cutover described by
 [`RFC_REFACTOR_RECOVERABILITY.md`](../RFC_REFACTOR_RECOVERABILITY.md)
 
-Contract id: `mfm.recoverability-app-surface.v1`
+Contract id: `mfm.recoverability-app-surface.v2`
 
-This document records the frozen minimal application and transport surface for recoverability v1.
+This document records the frozen minimal application and transport surface for recoverability v2.
 Its current encodings and vectors are fixed by
-`contracts/recoverability/v1/annex.json`, `contracts/recoverability/v1/corpus.json`, and
-`contracts/recoverability/v1/README.md`; exact artifact hashes and counts are recorded by
-`COMMIT2_ARTIFACT_METADATA` in the RFC's
+`contracts/recoverability/v2/annex.json`, `contracts/recoverability/v2/corpus.json`, and
+`contracts/recoverability/v2/README.md`; exact artifact hashes and counts are recorded by
+`C11_ARTIFACT_METADATA` in the RFC's
 [Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate).
 It is the exact current application and transport contract. The retained pre-cutover inventory and
 gate evidence live in
-[`recoverability-cutover-gates-v1.md`](recoverability-cutover-gates-v1.md). No compatibility
+[`recoverability-cutover-gates-v2.md`](recoverability-cutover-gates-v2.md). No compatibility
 commands, routes, DTOs, or readers survive.
 
 ## Canonical annex boundary
@@ -25,11 +25,11 @@ rules below are fixed. The frozen canonical schema annex owns:
 - canonical bytes and content addresses of planning profiles and other hashed structures;
 - the transport representation of retained typed values that are not already reviewed JSON;
 - opaque page-cursor bytes; and
-- the media type, byte encoding, manifest encoding, and external digest-value encoding of portable
-  exports.
+- the portable-stream media type, record framing, closed frame union, frame and chunk bounds,
+  deterministic ordering, and external digest-value encoding.
 
 This contract refers to those values by their logical types and does not invent provisional byte
-encodings. A cursor, identifier, digest, or export manifest is never bearer authority.
+encodings. A cursor, identifier, digest, stream header, or frame is never bearer authority.
 
 Every semantic identity uses the one universal hash derivation:
 
@@ -130,7 +130,7 @@ For a cross-run trace source, the app performs a separate exact `InspectTrace` p
 mints a separate source-run authority. `GrantDenied` or a wrong-tenant decision supplies no source
 authority and remains redacted; `AuthenticationRequired` is fatal for the request. A portable
 semantic export performs a separate exact `Export` decision for every dependency run and fails
-rather than emitting a bundle that claims complete verification without its required proof
+rather than emitting a stream that claims complete verification without its required proof
 closure.
 
 Authentication failures use these public classifications:
@@ -146,7 +146,7 @@ diagnostics.
 
 ## Published entry points and planning profiles
 
-V1 publishes exactly two entry points:
+Recoverability v2 publishes exactly two entry points:
 
 | Entry point id | Stable operation id | Configured root | Public output |
 | --- | --- | --- | --- |
@@ -259,7 +259,7 @@ read_public_run(credential, run_id) -> PublicRunView
 replay_run(credential, run_id, ReplayRequest) -> ReplayResponse
 read_transition_trace(credential, run_id, PageRequest) -> TransitionTracePage
 read_access_audit(credential, run_id, PageRequest) -> AccessAuditPage
-export_run(credential, run_id, ExportRequest) -> PortableRunExport
+export_run(credential, run_id, ExportRequest) -> ExportedRun
 ```
 
 There is no public fact service, cross-run run list/watch, generic stream reader, resume service,
@@ -391,7 +391,8 @@ DriveResponse =
     }
 ```
 
-V1 has no drive-until-waiting transport convenience. A host repeats `drive` explicitly.
+The current surface has no drive-until-waiting transport convenience. A host repeats `drive`
+explicitly.
 `drive_once` performs at most one semantic transition or one audited application-protocol
 operation.
 
@@ -470,33 +471,37 @@ timestamps are absent.
 
 ```text
 ReplayRequest =
-    { mode: "verify" }
-  | {
-        mode: "reproduce",
-        portable_export_ref: ContentRef,
-        portable_export_base64url,
-    }
-  | {
-        mode: "compare_current",
-        portable_export_ref: ContentRef,
-        portable_export_base64url,
-    }
+    Verify
+  | Reproduce(ExportStreamInput)
+  | CompareCurrent(ExportStreamInput)
+
+ExportStreamInput {
+    content_ref: ContentRef,
+    reader: ExportAsyncReader,
+}
 ```
 
-`portable_export_base64url` is canonical unpadded base64url. Its encoded length is at most
-22,369,622 characters and its decoded canonical export is at most 16,777,216 bytes. Padding,
-noncanonical base64url, an audit export, a wrong schema or raw-byte digest, or a bundle bound to a
-different store, tenant, run, semantic head, or closure is rejected before any resolver callback.
-The two portable-export fields are required for `reproduce` and `compare_current` and forbidden for
-`verify`. The complete REST replay body is bounded to 22,373,718 bytes. The CLI reads the export
-incrementally and bounds its strictly canonical `ContentRef` sidecar to 4,096 bytes.
+Construction verifies that `content_ref.schema_id` is the current annex-derived
+`mfm.portable-run-export-stream.v1` schema without polling the affine reader. The stream is not
+cloneable and can be consumed only once. Framing, canonical frames, and decoded chunks are
+individually bounded: one frame contains at most 16,777,216 canonical JSON bytes and one chunk
+carries at most 65,536 decoded bytes. Total frames, sources, objects, authorities, bytes, steps,
+and elapsed time have no validity ceiling.
 
-Malformed, noncanonical, missing, forbidden, digest-mismatched, or store/tenant/run/head/closure
-binding-mismatched caller artifacts return `400 ReplayArtifactInvalid` with the exact safe message
-`The replay artifact is invalid.` Any encoded, decoded, sidecar, or complete replay-body limit
-violation returns `400 ReplayArtifactTooLarge` with
-`The replay artifact exceeds the allowed size.` These caller errors are distinct from an
-authenticated store or recorded-history integrity failure, which returns the fixed internal
+REST requires exactly `?mode=verify|reproduce|compare_current`. Verify requires an empty body.
+Either non-verify mode requires the raw stream body, an exact parameter-free
+`Content-Type: application/vnd.mfm.run-export-stream.v1+json-seq`, and exactly one syntactically
+valid `Mfm-Content-Digest`; the adapter derives the current stream schema rather than accepting a
+caller-supplied schema id. CLI non-verify modes open the export lazily and require a strictly
+canonical current-stream `ContentRef` sidecar bounded to 4,096 bytes.
+
+Malformed, noncanonical, missing, forbidden, digest-mismatched, legacy-schema, or
+store/tenant/run/head/closure-binding-mismatched caller streams return
+`400 ReplayArtifactInvalid` with the exact safe message `The replay artifact is invalid.` A CLI
+sidecar over 4,096 bytes returns `ReplayArtifactTooLarge` with
+`The replay artifact exceeds the allowed size.` Stream I/O failures return only the fixed internal
+`ExportStreamIoFailed` contract. These errors are distinct from an authenticated store or
+recorded-history integrity failure, which returns the fixed internal
 `500 ReplayVerificationFailed` contract.
 Candidate recorded-history, execution, and comparison-integrity failures collapse into that same
 fixed response. A missing sealed current candidate instead returns
@@ -505,10 +510,11 @@ distinct from an unavailable exact historical executable, which remains a succes
 `reproduced` result with `result: "unavailable"`.
 
 Non-verify replay independently requires both `Replay` and same-run `Export` policy decisions.
-The supplied bytes must have been obtained through an explicit semantic export; replay never
-fetches, generates, or silently upgrades authority to obtain a bundle. `compare_current` always
-self-attests the serving executable and catalog. A caller can supply evidence bytes but cannot
-name, label, upload, or supply an executable.
+Both decisions and callback-free recorded-history verification complete before the reader is
+polled or a private input spool is created. The supplied stream must have been obtained through an
+explicit semantic export; replay never fetches, generates, or silently upgrades authority to
+obtain one. `compare_current` always self-attests the serving executable and catalog. A caller can
+supply evidence bytes but cannot name, label, upload, or supply an executable.
 
 The current production composition has no historical executable resolver or isolated sandbox. Its
 `reproduce` result is therefore the annex `unavailable` variant, with no live-runtime fallback.
@@ -936,46 +942,65 @@ ExportRequest =
   | { kind: "audit" }
 ```
 
-`PortableRunExport` is the canonical bundle itself, not a byte-wrapper DTO:
+`ExportedRun` is app-owned metadata plus one affine asynchronous reader:
 
 ```text
-PortableRunExport {
-    version: "mfm.portable-run-export.v1",
-    media_type,
-    manifest,
-    members,
+ExportedRun {
+    content_ref: ContentRef,
+    reader: ExportAsyncReader,
 }
 ```
 
-The canonical schema annex freezes the bundle, manifest, member, media-type, byte, and external
-digest-value encodings. The REST response is the canonical serialization of this object, not a
-base64 field inside the JSON success envelope. The canonical bytes contain no digest of themselves
-in the manifest or a nested member. Once the final bytes exist, the app computes
-`SHA-256(exact final canonical bytes)`. That external value is transport metadata, not a field of
-`PortableRunExport`; REST returns it only in the exact `Mfm-Content-Digest` header and sets
-`Content-Type` from the bundle's `media_type`. There is no separate manifest digest, bundle
-digest, domain-hashed export identity, compatibility checksum, or second serialized byte-wrapper.
+The canonical schema annex freezes `mfm.portable-run-export-stream.v1` as a JSON text sequence.
+Every record is exact byte `0x1e`, one canonical
+`mfm.portable-run-export-frame.v1` JSON value, and byte `0x0a`. The first frame is `header`; the
+last is `end` followed immediately by EOF. Between them, runs are root first and then dependencies
+by canonical `RunId`; journals are dense; commit and record payloads are emitted in journal order;
+object payloads are ordered by schema and digest and transferred once; and every logical
+`ValueRef` authority follows its payload in canonical order. The closed frame kinds are `header`,
+`run_begin`, `commit_begin`, `record_begin`, `object_begin`, `chunk`, `object_authority`,
+`object_end`, `run_end`, and `end`.
+
+No frame contains a stream digest. Once the final byte is written, the app returns
+`SHA-256(every record separator, canonical frame byte, and line feed)` in the stream
+`ContentRef`. That external value is transport metadata, not a frame field. REST returns it only
+in the exact `Mfm-Content-Digest` header and uses the exact
+`application/vnd.mfm.run-export-stream.v1+json-seq` content type. There is no manifest, member
+path, internal digest, domain-hashed export identity, compatibility checksum, base64 wrapper, or
+second serialized byte-wrapper.
+
+The app recursively authorizes and verifies the complete dependency closure before creating or
+writing the private spool. It creates an unnamed secure temporary file on a blocking worker,
+streams the kernel writer into it without a total-byte cap, flushes and rewinds it, then consumes
+the writable spool into a read-only `FinalizedSpool`. Cancellation or failure drops the spool.
+Neither `ExportedRun` nor its debug representation exposes or retains a filesystem path, and the
+reader cannot be cloned or rewound by the caller.
+
 The CLI requires:
 
 ```text
 mfm run export RUN_ID --kind semantic|audit --output PATH --ref-output PATH
 ```
 
-It preflights both new paths, then atomically writes each file: the exact canonical bundle bytes to
-`--output` and the bundle's strict canonical JSON `ContentRef` object to `--ref-output`. Neither
-path is overwritten. It never renders the bundle through normal JSON/text output.
+It preflights both distinct new paths before the app call, rejects aliases and target or parent
+symlinks, and never overwrites either path. It streams the exact framed bytes and strict canonical
+stream `ContentRef` into secure mode-0600 same-directory temporary files, flushes and synchronizes
+both, publishes each without overwrite, and synchronizes their parent directories. Copy failure,
+cancellation, or a race on either final path removes temporary material and rolls back a first
+published target. It never renders the stream through normal JSON/text output.
 
 A semantic export is fixed at the current semantic head, or the closure coordinate for a closed
 run. An audit export is complete only as of its recorded journal head and records the greatest
-delivery-audit head committed to the MFM journal for each effect at that head. The manifest records
-the store scope, tenant scope, run id, export kind, exact coordinate, dependency-run identities,
-and closure membership, but contains no digest of itself and grants no later access.
+delivery-audit head committed to the MFM journal for each effect at that head. The header records
+the store scope, tenant scope, root run id, export kind, and exact coordinate; the ordered run
+frames and their verified contents establish dependency identities and closure membership. No
+frame grants later access.
 
 A missing root returns the ordinary tenant-indistinguishable `RunNotFound`. A dependency
 `AuthenticationRequired` decision, including revocation during recursive authorization, is fatal
 and returns `AuthenticationRequired`. A denied or wrong-tenant dependency returns
 `SourceRunExportDenied` before any source authority is minted; the app does not emit an
-unverifiable partial semantic bundle. Once an exact dependency has been separately authorized, any
+unverifiable partial semantic stream. Once an exact dependency has been separately authorized, any
 absence of that source run named by verified append-only history is an integrity failure and
 returns the fixed `ReplayVerificationFailed` response rather than `RunNotFound`, both during
 recursive dependency discovery and final export. The sealed exporter rejects missing, duplicate,
@@ -1045,7 +1070,7 @@ The current contract tests prove:
 - export bytes match the canonical annex, contain no internal/circular digest, return their one
   raw-byte SHA-256 value as external transport metadata and `Mfm-Content-Digest`, bind exact
   semantic/audit coordinates, and do not overstate delivery-audit qualification;
-- offline bundle verification confers no live access;
+- offline stream verification confers no live access;
 - deleted commands and routes are rejected, including public facts, list/watch, manual resolution,
   generic stream, and arbitrary object reads; and
 - compile-fail tests prevent authority construction, cloning, serialization, and grant

@@ -14,6 +14,7 @@ mod keystore_services;
 mod production;
 mod render;
 mod runtime_config;
+mod stream_spool;
 mod surface;
 
 pub use self::access::{
@@ -21,7 +22,9 @@ pub use self::access::{
     SecretCredential, SecretCredentialError, MAX_SECRET_CREDENTIAL_BYTES,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use self::application::{application_for_test, TestApplicationMode};
+pub use self::application::{
+    application_for_test, application_with_export_for_test, TestApplicationMode,
+};
 pub use self::application::{connect_production_application, Application, EvmWalletDeployment};
 pub use self::errors::{ErrorClass, PublicError};
 #[cfg(any(test, feature = "test-support"))]

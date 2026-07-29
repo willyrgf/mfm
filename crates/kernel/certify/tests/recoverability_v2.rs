@@ -1,18 +1,18 @@
-#[path = "../../../../tests/support/recoverability_v1.rs"]
-mod recoverability_v1_support;
+#[path = "../../../../tests/support/recoverability_v2.rs"]
+mod recoverability_v2_support;
 
-use mfm_canonical::RecoverabilityContractV1;
+use mfm_canonical::RecoverabilityContractV2;
 use mfm_spec::{CanonicalExpansionPath, CanonicalExpansionStep};
-use recoverability_v1_support::{
+use recoverability_v2_support::{
     assert_lower_layer_owner_vector, for_each_vector, hex_field, run_consumer, string,
     CorpusVector, OwnerVector,
 };
 
 #[test]
-fn certify_executes_all_570_frozen_recoverability_vectors() {
+fn certify_executes_all_576_frozen_recoverability_vectors() {
     let mut visited = 0;
     for_each_vector(|_| visited += 1);
-    assert_eq!(visited, 570);
+    assert_eq!(visited, 576);
 
     run_consumer("mfm-certify", |vector| {
         assert_lower_layer_owner_vector(vector);
@@ -69,7 +69,7 @@ fn assert_certify_owner_vector(owner: OwnerVector<'_>) {
 
 #[test]
 fn correction_identity_is_a_private_conformance_fixture_only() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let mut matched = 0;
     for_each_vector(|vector| {
         let CorpusVector::Positive(value) = vector else {

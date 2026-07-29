@@ -10,7 +10,7 @@
 //!
 //! ```
 //! use mfm_program::QualifiedProgramRegistry;
-//! use mfm_replay::trace_export::VerifiedPortableExport;
+//! use mfm_replay::trace_export::VerifiedExportStream;
 //! use mfm_replay::v1::{
 //!     compare_current, verify_recorded_history, CanonicalReplayResult, Result,
 //!     VerifiedHistoryResult,
@@ -25,7 +25,7 @@
 //! }
 //!
 //! fn compare(
-//!     historical: &VerifiedPortableExport,
+//!     historical: &VerifiedExportStream,
 //!     registry: &QualifiedProgramRegistry,
 //! ) -> Result<CanonicalReplayResult> {
 //!     compare_current(historical, registry)

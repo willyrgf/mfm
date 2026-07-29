@@ -1,6 +1,6 @@
 # mfm-storage-postgres
 
-PostgreSQL authority for the recoverability-v1 committed run journal.
+PostgreSQL authority for the recoverability-v2 committed run journal.
 
 The public runtime entry point is `open_authoritative`. It consumes a writer
 pool and a deployment-owned `AuthoritativeWriterFence`, qualifies the exact
@@ -207,10 +207,10 @@ default Nix development shell:
 ```sh
 DATABASE_URL=postgresql://postgres@127.0.0.1:5432/postgres \
   nix develop . -c cargo test -p mfm-storage-postgres \
-    --features parity-tests --test recoverability-v1
+    --features parity-tests --test recoverability-v2
 ```
 
-The dedicated `recoverability-v1` target runs every shared corpus vector through
+The dedicated `recoverability-v2` target runs all 576 shared corpus vectors through
 a physical blob round trip. Package tests cover the closed catalog,
 qualification, privileges, rollback/head integrity, advisory-lock behavior,
 idempotency, and backend parity.

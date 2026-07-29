@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2};
 use mfm_ids::{ContentRef, RunId, SchemaId};
 use mfm_journal::v1::{
     FactSelectionCompleteness, JournalHead, PersistedJournalValue, TransitionRef,
@@ -27,7 +27,9 @@ use mfm_store::v1::{
     VerifiedRunView,
 };
 
-use crate::trace_export::VerifiedPortableExport;
+use tokio::io::AsyncRead;
+
+use crate::trace_export::{verify_portable_run_export_stream, VerifiedExportStream};
 
 use super::{ReplayError, Result};
 
@@ -56,11 +58,11 @@ pub trait ReproductionResolver: Send + Sync {
 /// Canonical callback input for one exact historical reproduction.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ExactReproductionPlan {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
 }
 
 impl ExactReproductionPlan {
-    pub(crate) fn from_verified_export(portable_export: &VerifiedPortableExport) -> Result<Self> {
+    pub(crate) fn from_verified_export(portable_export: &VerifiedExportStream) -> Result<Self> {
         let view = portable_export.verified_view();
         let admission = view.admission().fields()?;
         let semantic_head = view.semantic_head().clone();
@@ -96,14 +98,14 @@ impl ExactReproductionPlan {
                 CanonicalValue::Array(ordered_transition_refs),
             ),
         ])?;
-        let validated = RecoverabilityContractV1::embedded()?
+        let validated = RecoverabilityContractV2::embedded()?
             .encode(EXACT_REPRODUCTION_PLAN_CONTRACT, &value)?;
         Ok(Self { validated })
     }
 
     /// Strictly decodes exact canonical sandbox-plan bytes.
     pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
-        let validated = RecoverabilityContractV1::embedded()?
+        let validated = RecoverabilityContractV2::embedded()?
             .strict_decode(EXACT_REPRODUCTION_PLAN_CONTRACT, bytes)?;
         Ok(Self { validated })
     }
@@ -135,7 +137,7 @@ impl std::fmt::Debug for ExactReproductionPlan {
 
 #[derive(Clone, PartialEq, Eq)]
 struct CandidateComparisonPlan {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
 }
 
 impl CandidateComparisonPlan {
@@ -171,7 +173,7 @@ impl CandidateComparisonPlan {
                 content_ref(candidate.capability_binding_manifest_ref())?,
             ),
         ])?;
-        let validated = RecoverabilityContractV1::embedded()?
+        let validated = RecoverabilityContractV2::embedded()?
             .encode(CANDIDATE_COMPARISON_PLAN_CONTRACT, &value)?;
         Ok(Self { validated })
     }
@@ -183,7 +185,7 @@ impl CandidateComparisonPlan {
 
 fn validate_candidate_plan<'history>(
     plan: &CandidateComparisonPlan,
-    historical: &'history VerifiedPortableExport,
+    historical: &'history VerifiedExportStream,
     candidate: &QualifiedCandidateIdentity,
 ) -> Result<&'history VerifiedRunView> {
     let view = historical.verified_view();
@@ -198,7 +200,7 @@ fn validate_candidate_plan<'history>(
 }
 
 fn recorded_candidate_contracts(
-    historical: &VerifiedPortableExport,
+    historical: &VerifiedExportStream,
     view: &VerifiedRunView,
 ) -> Result<(EntryPointContract, CanonicalAuthoredProgram)> {
     let admission = view
@@ -333,7 +335,7 @@ fn certified_execution_semantics_match(
 /// comparison invokes no live capability, executor, provider, filesystem, signer, or append
 /// surface, and candidate outputs never become inputs to later transition comparisons.
 pub fn compare_current(
-    historical: &VerifiedPortableExport,
+    historical: &VerifiedExportStream,
     registry: &QualifiedProgramRegistry,
 ) -> Result<CanonicalReplayResult> {
     let view = historical.verified_view();
@@ -780,7 +782,7 @@ fn candidate_error(error: CandidateCertificationError) -> ReplayError {
 /// The resolver receives only the frozen canonical plan bytes. A mismatched portable-export
 /// token or resolver result fails before a positive canonical result can be returned.
 pub async fn reproduce_exact(
-    historical: &VerifiedPortableExport,
+    historical: &VerifiedExportStream,
     resolver: &dyn ReproductionResolver,
 ) -> Result<CanonicalReplayResult> {
     let view = historical.verified_view();
@@ -808,20 +810,20 @@ pub async fn reproduce_exact(
 /// only from the embedded annex codec.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CanonicalReplayResult {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
 }
 
 impl CanonicalReplayResult {
     fn encode(value: &CanonicalValue) -> Result<Self> {
         let validated =
-            RecoverabilityContractV1::embedded()?.encode(REPLAY_RESULT_CONTRACT, value)?;
+            RecoverabilityContractV2::embedded()?.encode(REPLAY_RESULT_CONTRACT, value)?;
         Ok(Self { validated })
     }
 
     /// Strictly decodes exact canonical replay-result bytes.
     pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
         let validated =
-            RecoverabilityContractV1::embedded()?.strict_decode(REPLAY_RESULT_CONTRACT, bytes)?;
+            RecoverabilityContractV2::embedded()?.strict_decode(REPLAY_RESULT_CONTRACT, bytes)?;
         Ok(Self { validated })
     }
 
@@ -887,13 +889,17 @@ impl VerifiedHistoryResult {
         &self.fact_selections
     }
 
-    /// Consumes this affine verified session and binds one caller-held semantic export.
-    pub fn verify_portable_export(
+    /// Consumes this affine verified session and binds one caller-held semantic export stream.
+    pub async fn verify_export_stream<R>(
         self,
-        bytes: &[u8],
+        reader: R,
         expected_ref: &ContentRef,
-    ) -> Result<VerifiedPortableExport> {
-        VerifiedPortableExport::verify(bytes, expected_ref, self.view)
+    ) -> Result<VerifiedExportStream>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let verified = verify_portable_run_export_stream(reader, expected_ref).await?;
+        VerifiedExportStream::bind(verified, expected_ref.clone(), self.view)
     }
 
     /// Encodes the frozen `verified` replay-result variant.

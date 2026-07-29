@@ -7,17 +7,17 @@ use mfm_storage_postgres::{open_authoritative, TestAuthoritativeWriterFence};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool, Row};
 
-#[path = "../../../../tests/support/recoverability_v1.rs"]
-mod recoverability_v1;
+#[path = "../../../../tests/support/recoverability_v2.rs"]
+mod recoverability_v2;
 
-use recoverability_v1::{
+use recoverability_v2::{
     array, assert_lower_layer_owner_vector, for_each_vector, run_consumer, string, CorpusVector,
     OwnerVector,
 };
 
 const CONSUMER: &str = "mfm-storage-postgres";
-const TOTAL_VECTOR_COUNT: usize = 570;
-const OWNER_VECTOR_COUNT: usize = 117;
+const TOTAL_VECTOR_COUNT: usize = 576;
+const OWNER_VECTOR_COUNT: usize = 116;
 static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

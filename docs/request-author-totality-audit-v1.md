@@ -3,7 +3,7 @@
 Contract id: `mfm.request-author-totality-audit.v1`
 
 This is retained pre-cutover evidence for the original
-[`mfm.portfolio/snapshot@1`](recoverability-cutover-gates-v1.md#published-entry-points-and-planning-profiles)
+[`mfm.portfolio/snapshot@1`](recoverability-cutover-gates-v2.md#published-entry-points-and-planning-profiles)
 schema-freeze gate closed by the commit-2 annex and corpus. It does not change the current runtime,
 registry, admission API, or authoritative design. The atomic vertical cutover deletes the
 aggregate readers and carries forward only the qualified frozen shapes recorded here.
@@ -91,7 +91,7 @@ mfm.portfolio/snapshot@1
 ```
 
 The entry-point identities match the
-[`mfm.recoverability-app-surface.v1`](recoverability-app-surface-v1.md#published-entry-point-and-planning-profile)
+[`mfm.recoverability-app-surface.v2`](recoverability-app-surface-v2.md#published-entry-points-and-planning-profiles)
 contract for that mapping: the versioned start id, stable slash-form operation id, and dot-form
 Rust operation name cannot substitute for one another. The current application additionally
 publishes the independently qualified `mfm.evm/submit-transaction@1` mapping described by the same

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use mfm_canonical::{RecoverabilityContractV1, ReferenceTerminalKindV1};
+use mfm_canonical::{RecoverabilityContractV2, ReferenceTerminalKindV2};
 use mfm_facts::{FactCandidate, FactSelectionRequest, FactSubject, FactTopK};
 use mfm_ids::{ContentRef, FieldPath, RunId, SemanticDigest, TenantScopeId};
 use mfm_journal::v1::{
@@ -302,7 +302,7 @@ struct VerifiedClosureMaterial {
 }
 
 struct PrefixClosureWalker<'a> {
-    contract: &'static RecoverabilityContractV1,
+    contract: &'static RecoverabilityContractV2,
     available_values: BTreeMap<Vec<u8>, &'a CommittedObject>,
     available_content: BTreeMap<Vec<u8>, Vec<&'a CommittedObject>>,
     dependencies: BTreeMap<Vec<u8>, ContentRef>,
@@ -314,7 +314,7 @@ struct PrefixClosureWalker<'a> {
 
 impl<'a> PrefixClosureWalker<'a> {
     fn new(available_objects: &'a [CommittedObject]) -> Result<Self> {
-        let contract = RecoverabilityContractV1::embedded()?;
+        let contract = RecoverabilityContractV2::embedded()?;
         let mut available_values = BTreeMap::<Vec<u8>, &'a CommittedObject>::new();
         let mut available_content = BTreeMap::<Vec<u8>, Vec<&'a CommittedObject>>::new();
         for object in available_objects {
@@ -479,18 +479,18 @@ impl<'a> PrefixClosureWalker<'a> {
 
     fn payload_reference_frames(
         &self,
-        value: &mfm_canonical::ValidatedCanonicalValueV1,
+        value: &mfm_canonical::ValidatedCanonicalValueV2,
     ) -> Result<Vec<ClosureVisitFrame>> {
         self.contract
             .reference_edges(value)?
             .into_iter()
             .map(|edge| match edge.terminal_kind() {
-                ReferenceTerminalKindV1::ContentRef => {
+                ReferenceTerminalKindV2::ContentRef => {
                     serde_json::from_slice::<ContentRef>(edge.value().as_bytes())
                         .map(ClosureVisitFrame::EnterContent)
                         .map_err(|_| StoreError::InvalidSourceClosure)
                 }
-                ReferenceTerminalKindV1::ValueRef => {
+                ReferenceTerminalKindV2::ValueRef => {
                     ValueRef::strict_decode(edge.value().as_bytes())
                         .map(ClosureVisitFrame::EnterValue)
                         .map_err(Into::into)
@@ -539,7 +539,7 @@ impl<'a> PrefixClosureWalker<'a> {
 }
 
 fn canonical_content_ref_key(
-    contract: &RecoverabilityContractV1,
+    contract: &RecoverabilityContractV2,
     reference: &ContentRef,
 ) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(reference).map_err(|_| StoreError::InvalidSourceClosure)?;
@@ -556,7 +556,7 @@ fn value_payload_content_ref(value_ref: &ValueRef) -> Result<ContentRef> {
 fn verify_selected_fact_sources(
     candidates: &[Arc<CandidateFactSource>],
 ) -> Result<VerifiedFactSources> {
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let mut roots = BTreeMap::<Vec<Vec<u8>>, VerifiedFactSourceRoots>::new();
     let mut dependencies = BTreeMap::<Vec<u8>, ContentRef>::new();
     let mut objects = BTreeMap::<Vec<u8>, CommittedObject>::new();
@@ -611,7 +611,7 @@ fn insert_bounded_dependency(
     objects: &BTreeMap<Vec<u8>, CommittedObject>,
     reference: ContentRef,
 ) -> Result<()> {
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let key = canonical_content_ref_key(contract, &reference)?;
     if dependencies.contains_key(&key) {
         return Ok(());
@@ -691,7 +691,7 @@ fn derive_response_closure_from_material(
         std::slice::from_ref(&response_fields.evidence_contract_ref),
     )?;
     CommittedObject::from_persisted(response_ref.clone(), response_bytes.to_vec())?;
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let response_value =
         contract.strict_decode_schema_id(&response_fields.schema_id, response_bytes)?;
 
@@ -728,7 +728,7 @@ fn derive_response_closure_from_material(
     }
     for edge in contract.reference_edges(&response_value)? {
         match edge.terminal_kind() {
-            ReferenceTerminalKindV1::ContentRef => {
+            ReferenceTerminalKindV2::ContentRef => {
                 let reference = serde_json::from_slice::<ContentRef>(edge.value().as_bytes())
                     .map_err(|_| StoreError::InvalidSourceClosure)?;
                 let key = canonical_content_ref_key(contract, &reference)?;
@@ -736,7 +736,7 @@ fn derive_response_closure_from_material(
                     return Err(StoreError::InvalidSourceClosure);
                 }
             }
-            ReferenceTerminalKindV1::ValueRef => {
+            ReferenceTerminalKindV2::ValueRef => {
                 let reference = ValueRef::strict_decode(edge.value().as_bytes())?;
                 if !objects.contains_key(reference.as_bytes()) {
                     return Err(StoreError::InvalidSourceClosure);
@@ -786,7 +786,7 @@ pub(super) fn derive_recorded_response_closure_digest(
     observation_graph: &[CommittedObject],
     consumer_prefix: &[CommittedObject],
 ) -> Result<SemanticDigest> {
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let mut unique = BTreeMap::<Vec<Vec<u8>>, VerifiedFactSourceRoots>::new();
     for root in roots {
         unique.insert(

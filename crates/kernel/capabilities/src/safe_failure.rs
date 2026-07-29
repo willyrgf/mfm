@@ -40,7 +40,7 @@ pub enum FailureClass {
 }
 
 impl FailureClass {
-    /// Returns the frozen recoverability-v1 spelling.
+    /// Returns the frozen recoverability-v2 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Authorization => "authorization",
@@ -70,7 +70,7 @@ pub enum BoundaryStage {
 }
 
 impl BoundaryStage {
-    /// Returns the frozen recoverability-v1 spelling.
+    /// Returns the frozen recoverability-v2 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BeforeBoundaryEntry => "before_boundary_entry",
@@ -622,7 +622,7 @@ pub enum SafeFailureClassifierError {
 }
 
 impl CoarseSizeClass {
-    /// Returns the frozen recoverability-v1 spelling.
+    /// Returns the frozen recoverability-v2 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Zero => "zero",
@@ -742,7 +742,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use mfm_canonical::{CanonicalValue, RecoverabilityContractV1};
+    use mfm_canonical::{CanonicalValue, RecoverabilityContractV2};
     use mfm_ids::{DigestBytes, SchemaVersion, SemanticTypeId};
     use mfm_values::{FieldDescriptor, SchemaShape};
 
@@ -777,7 +777,7 @@ mod tests {
     }
 
     fn reviewed_ref() -> ContentRef {
-        let contract = RecoverabilityContractV1::embedded().expect("contract");
+        let contract = RecoverabilityContractV2::embedded().expect("contract");
         let value = contract
             .encode(
                 "mfm.primitive-stable_id.v1",

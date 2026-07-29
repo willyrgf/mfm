@@ -6,7 +6,7 @@ use mfm_ids::{ContentDigest, DigestAlgorithm, FieldPath, SemanticTypeId, StableI
 use super::*;
 
 fn retained_contract() -> RetainedValueContract {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
     let schema_id = contract
         .schema_id("mfm.primitive-stable_id.v1")
         .expect("fixture schema")
@@ -72,7 +72,7 @@ fn shared_objects(bytes: &[u8]) -> (Vec<ValueRef>, Vec<CommittedObject>) {
     let payload = UntrustedObjectPayload::new(
         fields.schema_id,
         fields.content_digest,
-        bytes.to_vec(),
+        Arc::<[u8]>::from(bytes),
         value_refs.clone(),
     )
     .expect("shared untrusted payload");
@@ -118,7 +118,7 @@ fn shared_payload_rejects_mismatched_metadata() {
     let retained_contract = retained_contract();
     let valid_ref = value_ref(&retained_contract, "payload.valid", bytes);
     let fields = valid_ref.fields().expect("fixture value fields");
-    let contract = RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
 
     let wrong_length = rewritten_value_ref(
         &valid_ref,
@@ -165,7 +165,7 @@ fn shared_payload_rejects_mismatched_metadata() {
         UntrustedObjectPayload::new(
             fields.schema_id,
             fields.content_digest,
-            bytes.to_vec(),
+            Arc::<[u8]>::from(bytes.as_slice()),
             vec![other_ref],
         ),
         Err(StoreError::InvalidObjectAuthority { .. })

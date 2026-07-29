@@ -118,7 +118,7 @@ pub trait RunJournalBackend: Send + Sync {
         verifier: JournalLoadVerifier,
     ) -> AsyncStoreFuture<'a, super::CommittedRunJournal, Self::Error>;
 }
-/// Purpose-authorized recoverability-v1 run-journal surface.
+/// Purpose-authorized recoverability-v2 run-journal surface.
 ///
 /// This trait is implemented for every trusted [`RunJournalBackend`]. Callers cannot bypass its
 /// authority target checks or construct load/append verifiers.

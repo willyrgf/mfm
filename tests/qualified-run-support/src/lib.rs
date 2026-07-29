@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV1};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV2};
 use mfm_certify::CompositeCertificationFactory;
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, FieldPath, InvocationIdentity,
@@ -1233,7 +1233,7 @@ fn component_object_evidence_ref() -> Result<ContentRef, QualifiedRunFixtureErro
 }
 
 fn primitive_canonical_schema() -> Result<SchemaId, QualifiedRunFixtureError> {
-    Ok(RecoverabilityContractV1::embedded()?
+    Ok(RecoverabilityContractV2::embedded()?
         .schema_id("mfm.primitive-canonical_value.v1")?
         .clone())
 }
@@ -1317,7 +1317,7 @@ fn derive_value_ref(
     producer: &ProducerBinding,
     bytes: &[u8],
 ) -> Result<ValueRef, QualifiedRunFixtureError> {
-    let recoverability = RecoverabilityContractV1::embedded()?;
+    let recoverability = RecoverabilityContractV2::embedded()?;
     let content_digest = recoverability.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         contract.schema_id(),

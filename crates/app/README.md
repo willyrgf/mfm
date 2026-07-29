@@ -1,13 +1,13 @@
 # mfm-app
 
-`mfm-app` is the purpose-authorized application boundary for recoverability v1. Process
+`mfm-app` is the purpose-authorized application boundary for recoverability v2. Process
 transports receive one opaque `Application`; journal storage, authority issuance, planning,
 certification, runtime catalogs, replay readers, and live capabilities remain private to
 application composition.
 
 The frozen contract is documented in
-[`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md) and encoded
-by `contracts/recoverability/v1/annex.json`. There are no compatibility run, fact, stream, manual
+[`docs/recoverability-app-surface-v2.md`](../../docs/recoverability-app-surface-v2.md) and encoded
+by `contracts/recoverability/v2/annex.json`. There are no compatibility run, fact, stream, manual
 resolution, or arbitrary object APIs.
 
 ## Public run facade
@@ -33,7 +33,7 @@ decision, and mints one store-bound, purpose-specific authority. Credentials are
 not cloneable, serializable, or formattable; empty values and values larger than 64 KiB are
 rejected at this boundary.
 
-V1 publishes exactly `mfm.portfolio/snapshot@1` and
+Recoverability v2 publishes exactly `mfm.portfolio/snapshot@1` and
 `mfm.evm/submit-transaction@1`. Admission accepts a caller-generated canonical UUIDv4 invocation
 identity and `{ "target": "..." }`. Portfolio targets resolve a `PortfolioConfig`; transaction
 targets resolve an immutable `EvmSubmitTransactionRequest` whose tenant and target must match the
@@ -48,17 +48,20 @@ converts only its sealed `VerifiedPublicRunView` projection. It does not load a 
 assemble status and outputs through separate readers. Privileged trace and audit readers inline
 reviewed retained values. Replay verification is callback-free. Production exact reproduction is
 deliberately `unavailable` in this cutover; no historical resolver or sandbox is composed, and
-there is never a live-runtime fallback. Reproduction and current-candidate comparison accept only
-caller-held semantic export bytes bounded to 16,777,216 bytes with their exact `ContentRef`,
-require a separate same-run `Export` decision, and verify the complete store/tenant/run/head/closure
-binding before any callback. The REST base64url representation is bounded to 22,369,622
-characters. Replay never generates or fetches a replacement bundle. Portable export contains the
-complete authorized proof closure and returns exact canonical bytes plus the raw-byte digest.
+there is never a live-runtime fallback. Reproduction and current-candidate comparison accept one
+affine caller-held semantic export reader with its exact stream `ContentRef`, require a separate
+same-run `Export` decision before polling it, and verify the complete
+store/tenant/run/head/closure binding before any callback. Framing, frames, and decoded chunks are
+individually bounded, while total frames, sources, objects, authorities, bytes, steps, and elapsed
+time have no validity ceiling. Replay never generates or fetches a replacement stream. Portable
+export contains the complete authorized proof closure and returns one private-spool-backed affine
+reader plus its external raw-byte identity.
 
 Malformed, noncanonical, missing, forbidden, digest-mismatched, or run-binding-mismatched caller
-artifacts return `ReplayArtifactInvalid` with `The replay artifact is invalid.` Any encoded,
-decoded, sidecar, or complete replay-body size violation returns `ReplayArtifactTooLarge` with
-`The replay artifact exceeds the allowed size.` Authenticated store or recorded-history integrity
+streams return `ReplayArtifactInvalid` with `The replay artifact is invalid.` A CLI `ContentRef`
+sidecar over 4,096 bytes returns `ReplayArtifactTooLarge` with
+`The replay artifact exceeds the allowed size.` Export-stream I/O failures return only the fixed
+internal `ExportStreamIoFailed` contract. Authenticated store or recorded-history integrity
 failures remain the distinct internal `ReplayVerificationFailed` contract.
 Candidate recorded-history, callback/certification, and comparison-integrity failures use that
 same fixed 500 response. Absence of the sealed current candidate uses

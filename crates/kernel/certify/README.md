@@ -1,6 +1,6 @@
 # mfm-certify
 
-The sole deterministic composite planner and offline certifier for recoverability-v1 graphs.
+The sole deterministic composite planner and offline certifier for recoverability-v2 graphs.
 
 The private composite planner expands child composition first, framework policy outside the
 protected state, and executor support inside it. Final canonical paths are complete before node ids

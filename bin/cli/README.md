@@ -30,7 +30,7 @@ The file is bounded to 64 KiB. The CLI removes at most one final LF or CRLF and 
 remaining opaque bytes in a consuming, zeroizing credential. There is no raw token argument,
 tenant option, tenant environment variable, cookie, or session.
 
-## Recoverability-v1 commands
+## Recoverability-v2 commands
 
 Entry-point discovery itself requires no credential:
 
@@ -66,16 +66,20 @@ PostgreSQL writable-lineage probe; the CLI does not substitute an EVM, DNS, prov
 callback check.
 
 Place `--access-token-file` before or after the subcommand as allowed by clap. Admission requires a
-caller-generated lower-case, hyphenated UUIDv4; the CLI never invents one. Non-verify replay reads
-one caller-held semantic export bounded to 16,777,216 bytes and a strictly canonical JSON
-`ContentRef` sidecar bounded to 4,096 bytes; both flags are forbidden for verify. Export preflights
-both new paths and atomically creates each canonical bundle and `ContentRef` sidecar file without
-overwriting either path. It emits no success payload that could be mistaken for the exported
-canonical bytes.
+caller-generated lower-case, hyphenated UUIDv4; the CLI never invents one. Non-verify replay opens
+one caller-held semantic export as an affine reader without a total-byte cap and reads a strictly
+canonical current-stream `ContentRef` sidecar bounded to 4,096 bytes; both flags are forbidden for
+verify. Export preflights both distinct new paths before calling the app, rejects target or parent
+symlinks and path aliases, then streams the response into secure mode-0600 same-directory
+temporary files. It flushes and synchronizes both files, publishes each without overwrite, and
+synchronizes both parent directories. Copy failure, cancellation, or a race on either target
+removes temporary files and rolls back any first published target. It emits no success payload
+that could be mistaken for the exported stream.
 
-Missing or forbidden replay-artifact flags and malformed, noncanonical, or mismatched artifact
-input return `ReplayArtifactInvalid`. An export or sidecar limit violation returns
-`ReplayArtifactTooLarge`.
+Missing or forbidden replay-artifact flags and malformed, noncanonical, legacy-schema, or
+mismatched artifact input return `ReplayArtifactInvalid`. A sidecar limit violation returns
+`ReplayArtifactTooLarge`; stream read/write and durability failures return the fixed
+`ExportWriteFailed` contract without exposing a path or backend diagnostic.
 Candidate recorded-history, execution, and comparison-integrity failures return the single
 `ReplayVerificationFailed` contract. An unavailable sealed current candidate returns
 `RuntimeCatalogUnavailable`; a missing exact historical executable remains a successful
@@ -112,4 +116,4 @@ files. Do not place private keys, mnemonics, passphrases, bearer credentials, or
 authorization values in command arguments, logs, configured values, or runtime configuration.
 
 The exact application/transport contract is
-[`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md).
+[`docs/recoverability-app-surface-v2.md`](../../docs/recoverability-app-surface-v2.md).

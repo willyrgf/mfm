@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV1};
+use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV2};
 use mfm_capabilities::SafeFailureOutcome;
 use mfm_executor::{
     EffectExecutorOutcome, Ensure, ExecutorRetainedValueRelation, ProofBasis, SafeFailureCode,
@@ -711,7 +711,7 @@ fn derive_request_digest(
         &serde_json::to_string(&preimage).map_err(|_| StoreError::JournalContract)?,
     )
     .map_err(|_| StoreError::JournalContract)?;
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let validated = contract.strict_decode(REQUEST_PREIMAGE_SCHEMA, canonical.as_bytes())?;
     contract
         .derive_request_digest(&validated)

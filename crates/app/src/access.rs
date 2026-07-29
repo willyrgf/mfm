@@ -50,7 +50,7 @@ pub enum RunAccessGrant {
     InspectTrace,
     /// Inspect the safe access audit.
     InspectAudit,
-    /// Export one portable run bundle.
+    /// Export one portable run stream.
     Export,
 }
 

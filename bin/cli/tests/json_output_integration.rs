@@ -42,9 +42,9 @@ fn every_run_command_requires_the_global_credential_file() {
             "--kind",
             "semantic",
             "--output",
-            "unused.bundle",
+            "unused.stream",
             "--ref-output",
-            "unused.bundle.ref",
+            "unused.stream.ref",
         ],
     ];
 
@@ -76,9 +76,9 @@ fn run_ids_and_page_limits_are_validated_before_process_composition() {
     let credential = directory.path().join("access-token");
     std::fs::write(&credential, b"opaque\n").expect("credential file");
     let credential = credential.to_str().expect("credential path");
-    let output = directory.path().join("unused.bundle");
+    let output = directory.path().join("unused.stream");
     let output = output.to_str().expect("output path");
-    let ref_output = directory.path().join("unused.bundle.ref");
+    let ref_output = directory.path().join("unused.stream.ref");
     let ref_output = ref_output.to_str().expect("ref output path");
 
     for args in [
@@ -201,9 +201,9 @@ fn replay_portable_export_flags_are_required_only_for_non_verify_modes() {
         "--mode",
         "verify",
         "--portable-export",
-        "unused.bundle",
+        "unused.stream",
         "--portable-export-ref-file",
-        "unused.bundle.ref",
+        "unused.stream.ref",
     ]);
     assert_eq!(forbidden.error.code, "ReplayArtifactInvalid");
     assert_eq!(forbidden.error.message, "The replay artifact is invalid.");

@@ -1,5 +1,5 @@
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1,
+    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, SemanticTypeId, StableId};
 use mfm_values::{
@@ -7,8 +7,8 @@ use mfm_values::{
     RetainedValueContract,
 };
 
-fn contract() -> &'static RecoverabilityContractV1 {
-    RecoverabilityContractV1::embedded().expect("embedded recoverability contract")
+fn contract() -> &'static RecoverabilityContractV2 {
+    RecoverabilityContractV2::embedded().expect("embedded recoverability contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {

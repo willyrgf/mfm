@@ -96,5 +96,5 @@ pub use self::trace::{
     VerifiedTransitionTracePage,
 };
 
-/// Result type for recoverability-v1 store operations.
+/// Result type for recoverability-v2 store operations.
 pub type Result<T> = std::result::Result<T, StoreError>;

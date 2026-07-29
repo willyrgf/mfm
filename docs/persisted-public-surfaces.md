@@ -192,15 +192,18 @@ access; resume resolves the exact admitted generation without fallback.
 | Replay response | Frozen verified, reproduced, or candidate-comparison result. Reproduction `unavailable` has no reason field. |
 | Transition trace | Separately authorized exact transition lineage and retained values; cross-run denial uses redacted lineage. |
 | Access audit | Separately authorized safe authorization/observation chronology. |
-| Portable export | Canonical `PortableRunExport` bundle: version, media type, manifest, members. |
+| Portable export | Framed `mfm.portable-run-export-stream.v1` JSON text sequence plus one external `ContentRef`. |
 
-`PortableRunExport` contains no self-digest. REST serializes that canonical bundle directly and
-returns SHA-256 of the exact final bytes only as external `Mfm-Content-Digest` metadata. CLI writes
-the same bytes to the explicit output path.
+The portable stream begins with one header, emits root-first run material and deduplicated object
+payloads with every logical `ValueRef` authority, and ends with one terminal frame followed by
+EOF. It contains no self-digest. REST streams those exact bytes and returns SHA-256 over every
+record separator, canonical frame byte, and line feed only as external `Mfm-Content-Digest`
+metadata. CLI streams the same bytes to a secure same-directory temporary file and publishes it
+with its exact canonical `ContentRef` sidecar only after both files are durable.
 
 The public transport surface is limited to entry-point discovery and exact-run admit, drive, show,
-replay, trace, audit, and export operations. A run id, record ref, value ref, digest, cursor, or
-export manifest is not bearer authority.
+replay, trace, audit, and export operations. A run id, record ref, value ref, digest, cursor,
+portable stream, or export content reference is not bearer authority.
 
 ## Operational Surfaces
 

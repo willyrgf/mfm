@@ -1,18 +1,18 @@
-# Recoverability Cutover Gate and Inventory v1
+# Recoverability Cutover Gate and Inventory v2
 
 Status: contract-closure and schema-freeze evidence for
 [`RFC_REFACTOR_RECOVERABILITY.md`](../RFC_REFACTOR_RECOVERABILITY.md)
 
-Contract id: `mfm.recoverability-cutover-gates.v1`
+Contract id: `mfm.recoverability-cutover-gates.v2`
 
 Companion app and transport contract:
-[`recoverability-app-surface-v1.md`](recoverability-app-surface-v1.md)
+[`recoverability-app-surface-v2.md`](recoverability-app-surface-v2.md)
 
 This document records the repository inventory and fixed disposition that closed before the
 recoverability schema freeze. The frozen target artifacts are
-`contracts/recoverability/v1/annex.json`, `contracts/recoverability/v1/corpus.json`, and
-`contracts/recoverability/v1/README.md`; their exact metadata is recorded by the searchable
-`COMMIT2_ARTIFACT_METADATA` block in the RFC's
+`contracts/recoverability/v2/annex.json`, `contracts/recoverability/v2/corpus.json`, and
+`contracts/recoverability/v2/README.md`; their exact metadata is recorded by the searchable
+`C11_ARTIFACT_METADATA` block in the RFC's
 [Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate).
 This is retained closure and deletion evidence, not a second runtime or persisted-data contract.
 [`design.md`](design.md) and [`architecture.md`](architecture.md) are authoritative for the current
@@ -49,12 +49,14 @@ implementation.
   typed terminal read-validation failure; and invariant or unrepresentable-response evidence
   yields `InvalidEvidence`.
 - All authority-bearing admission, journal, object, and fact-completeness reads, and all writes,
-  use the fenced authoritative writer in v1. Offline bundle verification is separate. A replica
+  use the fenced authoritative writer in recoverability v2. Offline stream verification is
+  separate. A replica
   cannot claim store-backed authority without a later applied-through-barrier and lineage
   qualification.
-- A portable export contains no digest of itself. `PortableRunExport` is the canonical bundle, not
-  a byte-wrapper DTO. SHA-256 over its final canonical bytes is returned only as external
-  transport metadata and exactly `Mfm-Content-Digest`.
+- A portable export is the framed `mfm.portable-run-export-stream.v1` JSON text sequence, not a
+  DTO or byte wrapper. It contains no digest of itself. SHA-256 over every record separator,
+  canonical frame byte, and line feed is returned only as its external `ContentRef` and exactly
+  `Mfm-Content-Digest`.
 - The generic executor owns its keyed delivery/resource ledger contract; PostgreSQL is one
   possible backend, not the non-rollback or destination-convergence authority. Production requires
   an independently qualified executor/destination fence in addition to the MFM store's separate
@@ -132,7 +134,7 @@ Closure evidence:
 | Bitcoin/EVM read settlement through `RunnerOutputBuilder::record_read_fact` | Emits standalone `FactRecorded` events beside attempt output. | Facts become typed emissions inside the producing transition. |
 | `crates/live/portfolio/src/lib.rs` and `crates/domains/portfolio/src/state/holding_read.rs` | Uses `FactQueryStore` as indirect state wiring and may select an equivalent fact from another run. | Same-run data uses graph edges. Explicit prior-run selection is an ordinary audited read through `mfm.journal.fact-selection.v1`. |
 | `crates/kernel/store/src/v1/mod.rs` — `FactQueryStore`, memory implementation, and PostgreSQL fact query/projection modules | Provides store-global query and projection authority. | Delete the trait and physical authority. The reserved capability consumes one affine authorization in a private deterministic scan session over contiguous authoritative-writer steps. Only exact-frontier completion constructs a response; no public/persisted continuation, total-prefix validity cap, or alternate fact store remains. |
-| `crates/kernel/replay/src/v1` fact broker/evidence paths | Rebuilds fact events and auxiliary query receipts. | Verify transition fact emissions and recorded selection responses from one verified journal view. Portable bundles report inclusion only. |
+| `crates/kernel/replay/src/v1` fact broker/evidence paths | Rebuilds fact events and auxiliary query receipts. | Verify transition fact emissions and recorded selection responses from one verified journal view. Portable streams report inclusion only. |
 | `crates/app/src/public_facts`, `bin/cli/src/commands/facts.rs`, and `/v1/facts/*` | Public store-wide fact browse/query/reference surface. | Delete without a v1 replacement. Facts remain reachable only through certified state dataflow or separately authorized trace/audit/export closure. |
 
 Fact/closure evidence:
@@ -187,7 +189,7 @@ empty ordered policy list, executor-contract selection, and byte-identical indep
 
 ### Legacy histories, export, and schema rejection
 
-The current store has no portable run export. Its internal
+The inventoried pre-cutover store had no portable run export. Its internal
 `CommittedRunJournal`/`VerifiedRunView` authority is deliberately non-serializable and does not by
 itself carry cross-run source closure, deployment metadata, or historical executable bytes. The
 current PostgreSQL v1 authority is concentrated in
@@ -277,16 +279,16 @@ derived telemetry.
   parity.
 - Generic retained-object fact-response materialization plus deterministic fact-scan and portable
   source-closure continuation evidence in
-  [`recoverability-predicate-owners-v1.md`](recoverability-predicate-owners-v1.md#retained-contract-shaping-evidence).
+  [`recoverability-predicate-owners-v2.md`](recoverability-predicate-owners-v2.md#retained-contract-shaping-evidence).
   The gate requires prefixes/closures larger than one work step to complete without total-size
   rejection, and requires discarded scratch to restart without minting partial authority.
 - One retained historical executable reproducing in the selected OS-enforced capability-free
   boundary with network and writable host access denied. This closes the implementation-path gate
   before schema freeze without deciding the production retention horizon.
 - Canonical schema annex and shared positive/negative golden vectors, frozen in
-  `contracts/recoverability/v1/annex.json` and `contracts/recoverability/v1/corpus.json` and indexed
-  by `contracts/recoverability/v1/README.md`. Exact artifact hashes and counts are recorded in the
-  RFC's `COMMIT2_ARTIFACT_METADATA` ledger.
+  `contracts/recoverability/v2/annex.json` and `contracts/recoverability/v2/corpus.json` and indexed
+  by `contracts/recoverability/v2/README.md`. Exact artifact hashes and counts are recorded in the
+  RFC's `C11_ARTIFACT_METADATA` ledger.
 - EVM read and wallet-mutation capability conformance, plus explicit absence of the unqualified
   Bitcoin registration.
 
@@ -302,7 +304,7 @@ derived telemetry.
 - Capacity approval for initially indefinite retention.
 - Availability approval for fail-closed audit authorization.
 - Qualification of the authoritative-writer and HA/WAL promotion fence; replicas remain
-  non-authoritative in v1.
+  non-authoritative in recoverability v2.
 - For every registered mutation executor, qualification of its preserved ledger generation,
   stale/sibling-writer fence, destination convergence/resource fence, backup/restore lineage, and
   promotion procedure. Co-location with the MFM PostgreSQL deployment does not merge these

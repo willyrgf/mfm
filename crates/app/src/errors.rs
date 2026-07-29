@@ -294,6 +294,10 @@ impl From<mfm_replay::v1::ReplayError> for PublicError {
             ),
             ReplayErrorKind::SourceRunExportDenied => Self::source_run_export_denied(),
             ReplayErrorKind::CandidateUnavailable => Self::runtime_catalog_unavailable(),
+            ReplayErrorKind::ExportStreamIo => Self::internal(
+                "ExportStreamIoFailed",
+                "The export stream could not be processed",
+            ),
             ReplayErrorKind::InvalidRecordedHistory
             | ReplayErrorKind::CandidateExecutionFailed
             | ReplayErrorKind::ComparisonIntegrityFailed
