@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use mfm_canonical::{
     sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV1,
@@ -83,6 +84,23 @@ const EVM_RESOURCE_OWNERSHIP_PATH: &str = "capability.evm_wallet.resource_owners
 const EVM_RESOURCE_OWNERSHIP_ROLE: &str = "mfm.qualification.evm-wallet.resource-ownership";
 const EVM_EXECUTOR_BINDING_PATH: &str = "capability.evm_wallet.executor_binding";
 const EVM_EXECUTOR_BINDING_ROLE: &str = "mfm.qualification.evm-wallet.executor-binding";
+const EVM_WALLET_SIGNER_BINDING_PATH: &str = "capability.evm_wallet.signer_binding";
+const EVM_WALLET_SIGNER_BINDING_ROLE: &str = "mfm.qualification.evm-wallet.signer-binding";
+const EVM_WALLET_NONCE_POLICY_PATH: &str = "capability.evm_wallet.nonce_policy";
+const EVM_WALLET_NONCE_POLICY_ROLE: &str = "mfm.qualification.evm-wallet.nonce-policy";
+const EVM_WALLET_INITIAL_NONCE_PATH: &str = "capability.evm_wallet.initial_nonce";
+const EVM_WALLET_INITIAL_NONCE_ROLE: &str = "mfm.qualification.evm-wallet.initial-nonce";
+const EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_PATH: &str =
+    "capability.evm_wallet.already_known_classifier";
+const EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_ROLE: &str =
+    "mfm.qualification.evm-wallet.already-known-classifier";
+const EVM_WALLET_FINALITY_POLICY_PATH: &str = "capability.evm_wallet.finality_policy";
+const EVM_WALLET_FINALITY_POLICY_ROLE: &str = "mfm.qualification.evm-wallet.finality-policy";
+const EVM_WALLET_ASSURANCE_POLICY_PATH: &str = "capability.evm_wallet.assurance_policy";
+const EVM_WALLET_ASSURANCE_POLICY_ROLE: &str = "mfm.qualification.evm-wallet.assurance-policy";
+const EVM_WALLET_REQUEST_QUALIFICATION_PATH: &str = "capability.evm_wallet.request_qualification";
+const EVM_WALLET_REQUEST_QUALIFICATION_ROLE: &str =
+    "mfm.qualification.evm-wallet.request-qualification";
 
 const EVM_ROUTING_CATALOG_PATH: &str = "capability.evm_live.routing_catalog";
 const EVM_ROUTING_CATALOG_ROLE: &str = "mfm.qualification.evm-live.routing-catalog";
@@ -101,7 +119,7 @@ const EVM_REVIEWED_SOURCE_SCOPE_SEMANTIC_NAME: &str = "reviewed-source-scope";
 const EVM_REVIEWED_SOURCE_SCOPE_VERSION: &str = "mfm.evm-live.reviewed-source-scope.v1";
 const EVM_READ_CAPABILITY_BINDING_SEMANTIC_NAME: &str = "read-capability-binding";
 const MAX_EVM_ROUTING_GENERATIONS: usize = 4_096;
-const EVM_LIVE_FIXED_SUPPORT_MEMBER_COUNT: usize = 8;
+const EVM_LIVE_FIXED_SUPPORT_MEMBER_COUNT: usize = 15;
 
 const UNIT_CONFIG_ROLE: &str = "mfm.product.framework.unit-config";
 const STATE_IMPLEMENTATION_MANIFEST_PATH: &str = "manifests.state_implementation";
@@ -114,8 +132,8 @@ const EVM_BALANCE_FACT_SUBJECT_EVIDENCE_ROLE: &str =
 const EVM_BALANCE_FACT_RESPONSE_EVIDENCE_PATH: &str = "facts.evm_balance.response_evidence";
 const EVM_BALANCE_FACT_RESPONSE_EVIDENCE_ROLE: &str =
     "mfm.product.fact.evm-balance.response-evidence-contract";
-const PRODUCT_DEPLOYMENT_SUPPORT_MEMBER_COUNT_WITHOUT_GENERATIONS: usize = 61;
-const PRODUCT_ADDITIONAL_SUPPORT_MEMBER_COUNT: usize = 10;
+const PRODUCT_DEPLOYMENT_SUPPORT_MEMBER_COUNT_WITHOUT_GENERATIONS: usize = 68;
+const PRODUCT_ADDITIONAL_SUPPORT_MEMBER_COUNT: usize = 17;
 
 const QUALIFIED_SUPPORT_SCOPE_DOMAIN: &str = "mfm.product.qualified-support-scope.v1";
 const QUALIFIED_SUPPORT_SCOPE_VERSION: &str =
@@ -297,6 +315,7 @@ pub(super) struct EvmLiveQualification {
     pub(super) read_capability_binding: ReadCapabilityBinding,
     pub(super) read_capability_binding_ref: ContentRef,
     pub(super) executor_binding: VerifiedExecutorBinding,
+    pub(super) wallet_request_qualification: Arc<mfm_evm_live::EvmWalletRequestQualification>,
     pub(super) support_members: Vec<QualifiedSupportMember>,
 }
 
@@ -309,6 +328,7 @@ pub(super) struct QualifiedProductDeployment {
     pub(super) read_capability_binding: ReadCapabilityBinding,
     pub(super) read_capability_binding_ref: ContentRef,
     pub(super) executor_binding: VerifiedExecutorBinding,
+    pub(super) wallet_request_qualification: Arc<mfm_evm_live::EvmWalletRequestQualification>,
     pub(super) unit_config_contract: RetainedValueContract,
     pub(super) state_manifest: StateImplementationManifest,
     pub(super) state_manifest_ref: ContentRef,
@@ -633,12 +653,16 @@ pub(super) fn qualify_product_components(
 }
 
 /// Builds the exact deployment-dependent EVM support closure.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn qualify_evm_live_support(
     transport: &mfm_evm_live::transport::EvmJsonRpcTransport,
     product: &ProductQualification,
     executor_contract: ExecutorContractDescriptor,
     executor_deployment: ExecutorDeployment,
     resource_ownership: ResourceOwnership,
+    route_generation_ref: mfm_evm::EvmRoutingGenerationRef,
+    initial_nonce_descriptor: mfm_evm::EvmWalletInitialNonceDescriptor,
+    signer_binding: &mfm_signing::VerifiedGenerationGuardedSignerBinding,
 ) -> Result<EvmLiveQualification, PublicError> {
     let evidence_contract_ref = product.object_evidence_contract_ref.clone();
     let (mut support_members, routing_catalog_ref, reviewed_source_scope_ref) =
@@ -702,11 +726,6 @@ pub(super) fn qualify_evm_live_support(
         )?,
     )?;
 
-    validate_evm_wallet_executor_contract(
-        &executor_contract,
-        &resource_ownership,
-        &evidence_contract_ref,
-    )?;
     let executor_contract_ref = executor_contract
         .reference()
         .map_err(|_| invalid_qualification())?;
@@ -733,6 +752,17 @@ pub(super) fn qualify_evm_live_support(
         &admitted_tenant_scope_id,
     )
     .map_err(|_| invalid_qualification())?;
+    let wallet_request_qualification = Arc::new(
+        mfm_evm_live::EvmWalletRequestQualification::qualify(
+            transport,
+            route_generation_ref,
+            executor_binding.clone(),
+            signer_binding,
+            initial_nonce_descriptor,
+            evidence_contract_ref.clone(),
+        )
+        .map_err(|_| invalid_qualification())?,
+    );
     let executor_deployment_member = executor_support_member(
         EVM_EXECUTOR_DEPLOYMENT_PATH,
         EVM_EXECUTOR_DEPLOYMENT_ROLE,
@@ -764,6 +794,97 @@ pub(super) fn qualify_evm_live_support(
             .map_err(|_| invalid_qualification())?,
         evidence_contract_ref.clone(),
     )?;
+    let signer_descriptor_member = wallet_support_member(
+        EVM_WALLET_SIGNER_BINDING_PATH,
+        EVM_WALLET_SIGNER_BINDING_ROLE,
+        "mfm.signing",
+        "generation-guarded-signer-descriptor",
+        PlainCanonicalJsonBytes::from_canonical_json_slice(
+            wallet_request_qualification
+                .signer_descriptor()
+                .canonical()
+                .as_bytes(),
+        )
+        .map_err(|_| invalid_qualification())?,
+        wallet_request_qualification
+            .signer_descriptor()
+            .reference()
+            .clone(),
+        evidence_contract_ref.clone(),
+    )?;
+    let nonce_policy_member = wallet_support_member(
+        EVM_WALLET_NONCE_POLICY_PATH,
+        EVM_WALLET_NONCE_POLICY_ROLE,
+        "mfm.evm",
+        "nonce-policy",
+        mfm_evm::evm_wallet_nonce_policy_canonical().map_err(|_| invalid_qualification())?,
+        wallet_request_qualification
+            .resource_policy_binding()
+            .policy_ref()
+            .clone(),
+        evidence_contract_ref.clone(),
+    )?;
+    let initial_nonce_member = wallet_support_member(
+        EVM_WALLET_INITIAL_NONCE_PATH,
+        EVM_WALLET_INITIAL_NONCE_ROLE,
+        "mfm.evm",
+        "initial-nonce",
+        wallet_request_qualification
+            .initial_nonce_descriptor()
+            .canonical()
+            .map_err(|_| invalid_qualification())?,
+        wallet_request_qualification
+            .resource_policy_binding()
+            .policy_configuration_ref()
+            .clone(),
+        evidence_contract_ref.clone(),
+    )?;
+    let already_known_classifier_member = wallet_support_member(
+        EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_PATH,
+        EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_ROLE,
+        "mfm.evm-live",
+        "already-known-classifier",
+        mfm_evm_live::evm_already_known_classifier_canonical()
+            .map_err(|_| invalid_qualification())?,
+        wallet_request_qualification
+            .already_known_classifier_ref()
+            .to_content_ref()
+            .map_err(|_| invalid_qualification())?,
+        evidence_contract_ref.clone(),
+    )?;
+    let finality_policy_member = wallet_support_member(
+        EVM_WALLET_FINALITY_POLICY_PATH,
+        EVM_WALLET_FINALITY_POLICY_ROLE,
+        "mfm.evm",
+        "finality-policy",
+        mfm_evm::evm_wallet_finality_policy_canonical().map_err(|_| invalid_qualification())?,
+        wallet_request_qualification
+            .finality_policy_ref()
+            .to_content_ref()
+            .map_err(|_| invalid_qualification())?,
+        evidence_contract_ref.clone(),
+    )?;
+    let assurance_policy_member = wallet_support_member(
+        EVM_WALLET_ASSURANCE_POLICY_PATH,
+        EVM_WALLET_ASSURANCE_POLICY_ROLE,
+        "mfm.evm",
+        "assurance-policy",
+        mfm_evm::evm_wallet_assurance_policy_canonical().map_err(|_| invalid_qualification())?,
+        wallet_request_qualification
+            .assurance_policy_ref()
+            .to_content_ref()
+            .map_err(|_| invalid_qualification())?,
+        evidence_contract_ref.clone(),
+    )?;
+    let request_qualification_member = wallet_support_member(
+        EVM_WALLET_REQUEST_QUALIFICATION_PATH,
+        EVM_WALLET_REQUEST_QUALIFICATION_ROLE,
+        "mfm.evm-live",
+        "request-qualification",
+        wallet_request_qualification.canonical().clone(),
+        wallet_request_qualification.reference().clone(),
+        evidence_contract_ref.clone(),
+    )?;
 
     support_members.extend([
         safe_failure_member,
@@ -772,6 +893,13 @@ pub(super) fn qualify_evm_live_support(
         executor_deployment_member,
         resource_ownership_member,
         executor_binding_member,
+        signer_descriptor_member,
+        nonce_policy_member,
+        initial_nonce_member,
+        already_known_classifier_member,
+        finality_policy_member,
+        assurance_policy_member,
+        request_qualification_member,
     ]);
     validate_evm_live_support_closure(
         transport,
@@ -780,6 +908,7 @@ pub(super) fn qualify_evm_live_support(
         &admitted_implementation_ref,
         &evidence_contract_ref,
         &executor_binding,
+        wallet_request_qualification.as_ref(),
         &support_members,
     )?;
 
@@ -787,11 +916,12 @@ pub(super) fn qualify_evm_live_support(
         read_capability_binding,
         read_capability_binding_ref,
         executor_binding,
+        wallet_request_qualification,
         support_members,
     })
 }
 
-/// Assembles the exact `61 + N` product support graph and derives its content-bound scope.
+/// Assembles the exact `68 + N` product support graph and derives its content-bound scope.
 pub(super) fn assemble_qualified_product_deployment(
     product: ProductQualification,
     live: EvmLiveQualification,
@@ -904,6 +1034,7 @@ pub(super) fn assemble_qualified_product_deployment(
         read_capability_binding,
         read_capability_binding_ref,
         executor_binding,
+        wallet_request_qualification,
         support_members: live_support_members,
     } = live;
     all_support_members.extend(live_support_members);
@@ -924,6 +1055,7 @@ pub(super) fn assemble_qualified_product_deployment(
         &capability_manifest_ref,
         &fact_objects,
         &executor_binding,
+        wallet_request_qualification.as_ref(),
     )?;
     let qualification_scope_id = qualified_support_scope_id(&all_support_members)?;
     let support_graph = QualifiedSupportGraph::new(qualification_scope_id, all_support_members)
@@ -937,6 +1069,7 @@ pub(super) fn assemble_qualified_product_deployment(
         read_capability_binding,
         read_capability_binding_ref,
         executor_binding,
+        wallet_request_qualification,
         unit_config_contract,
         state_manifest,
         state_manifest_ref,
@@ -987,6 +1120,7 @@ fn product_capability_manifest(
     CapabilityBindingManifest::new(entries).map_err(|_| invalid_qualification())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_product_deployment_support_closure(
     support_members: &[QualifiedSupportMember],
     generation_count: usize,
@@ -995,6 +1129,7 @@ fn validate_product_deployment_support_closure(
     capability_manifest_ref: &ContentRef,
     fact_objects: &mfm_evm::EvmBalanceFactSupportObjects,
     executor_binding: &VerifiedExecutorBinding,
+    wallet_request_qualification: &mfm_evm_live::EvmWalletRequestQualification,
 ) -> Result<(), PublicError> {
     if !(1..=MAX_EVM_ROUTING_GENERATIONS).contains(&generation_count)
         || support_members.len()
@@ -1044,6 +1179,28 @@ fn validate_product_deployment_support_closure(
         (EVM_EXECUTOR_DEPLOYMENT_PATH, EVM_EXECUTOR_DEPLOYMENT_ROLE),
         (EVM_RESOURCE_OWNERSHIP_PATH, EVM_RESOURCE_OWNERSHIP_ROLE),
         (EVM_EXECUTOR_BINDING_PATH, EVM_EXECUTOR_BINDING_ROLE),
+        (
+            EVM_WALLET_SIGNER_BINDING_PATH,
+            EVM_WALLET_SIGNER_BINDING_ROLE,
+        ),
+        (EVM_WALLET_NONCE_POLICY_PATH, EVM_WALLET_NONCE_POLICY_ROLE),
+        (EVM_WALLET_INITIAL_NONCE_PATH, EVM_WALLET_INITIAL_NONCE_ROLE),
+        (
+            EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_PATH,
+            EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_ROLE,
+        ),
+        (
+            EVM_WALLET_FINALITY_POLICY_PATH,
+            EVM_WALLET_FINALITY_POLICY_ROLE,
+        ),
+        (
+            EVM_WALLET_ASSURANCE_POLICY_PATH,
+            EVM_WALLET_ASSURANCE_POLICY_ROLE,
+        ),
+        (
+            EVM_WALLET_REQUEST_QUALIFICATION_PATH,
+            EVM_WALLET_REQUEST_QUALIFICATION_ROLE,
+        ),
     ];
     if expected_paths_and_roles.len() != PRODUCT_ADDITIONAL_SUPPORT_MEMBER_COUNT {
         return Err(invalid_qualification());
@@ -1102,6 +1259,9 @@ fn validate_product_deployment_support_closure(
             support_members,
             EVM_EXECUTOR_BINDING_PATH,
         )?)? != executor_binding.binding_ref().as_content_ref().clone()
+        || wallet_request_qualification.executor_binding() != executor_binding
+        || wallet_request_qualification.object_evidence_contract_ref() != evidence_contract_ref
+        || !wallet_support_members_match(support_members, wallet_request_qualification)?
         || support_members
             .iter()
             .filter(|member| {
@@ -1208,6 +1368,7 @@ fn evm_routing_support_members(
     Ok((members, catalog_ref, reviewed_source_scope_ref))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_evm_live_support_closure(
     transport: &mfm_evm_live::transport::EvmJsonRpcTransport,
     binding: &ReadCapabilityBinding,
@@ -1215,6 +1376,7 @@ fn validate_evm_live_support_closure(
     admitted_implementation_ref: &ContentRef,
     evidence_contract_ref: &ContentRef,
     executor_binding: &VerifiedExecutorBinding,
+    wallet_request_qualification: &mfm_evm_live::EvmWalletRequestQualification,
     support_members: &[QualifiedSupportMember],
 ) -> Result<(), PublicError> {
     let generation_count = transport
@@ -1256,6 +1418,28 @@ fn validate_evm_live_support_closure(
         (EVM_EXECUTOR_DEPLOYMENT_PATH, EVM_EXECUTOR_DEPLOYMENT_ROLE),
         (EVM_RESOURCE_OWNERSHIP_PATH, EVM_RESOURCE_OWNERSHIP_ROLE),
         (EVM_EXECUTOR_BINDING_PATH, EVM_EXECUTOR_BINDING_ROLE),
+        (
+            EVM_WALLET_SIGNER_BINDING_PATH,
+            EVM_WALLET_SIGNER_BINDING_ROLE,
+        ),
+        (EVM_WALLET_NONCE_POLICY_PATH, EVM_WALLET_NONCE_POLICY_ROLE),
+        (EVM_WALLET_INITIAL_NONCE_PATH, EVM_WALLET_INITIAL_NONCE_ROLE),
+        (
+            EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_PATH,
+            EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_ROLE,
+        ),
+        (
+            EVM_WALLET_FINALITY_POLICY_PATH,
+            EVM_WALLET_FINALITY_POLICY_ROLE,
+        ),
+        (
+            EVM_WALLET_ASSURANCE_POLICY_PATH,
+            EVM_WALLET_ASSURANCE_POLICY_ROLE,
+        ),
+        (
+            EVM_WALLET_REQUEST_QUALIFICATION_PATH,
+            EVM_WALLET_REQUEST_QUALIFICATION_ROLE,
+        ),
     ];
     for (path, role) in expected_paths_and_roles {
         if support_member_at(support_members, path)?
@@ -1326,6 +1510,14 @@ fn validate_evm_live_support_closure(
             support_members,
             EVM_EXECUTOR_BINDING_PATH,
         )?)? != executor_binding.binding_ref().as_content_ref().clone()
+        || wallet_request_qualification.executor_binding() != executor_binding
+        || wallet_request_qualification.object_evidence_contract_ref() != evidence_contract_ref
+        || wallet_request_qualification.routing_catalog_ref()
+            != &support_content_ref(support_member_at(
+                support_members,
+                EVM_ROUTING_CATALOG_PATH,
+            )?)?
+        || !wallet_support_members_match(support_members, wallet_request_qualification)?
     {
         return Err(invalid_qualification());
     }
@@ -1737,47 +1929,75 @@ fn evm_wallet_executor_surface_support_members(
     Ok((semantic_member, callback_member))
 }
 
-fn validate_evm_wallet_executor_contract(
-    executor_contract: &ExecutorContractDescriptor,
-    resource_ownership: &ResourceOwnership,
-    object_evidence_contract_ref: &ContentRef,
-) -> Result<(), PublicError> {
-    let value_contracts =
-        mfm_evm::evm_submit_transaction_value_contracts(object_evidence_contract_ref.clone())
-            .map_err(|_| invalid_qualification())?;
-    let target_callback_ref = mfm_evm_live::evm_wallet_target_callback_surface_ref()
-        .map_err(|_| invalid_qualification())?;
-    let expected_expansion =
-        mfm_evm::evm_submit_transaction_leaf_expansion(target_callback_ref.clone())
-            .map_err(|_| invalid_qualification())?;
-    let retained = executor_contract.retained_closure_contract();
-    let retained_contracts = [
-        executor_contract.semantic_request_contract(),
-        executor_contract.safe_failure_value_contract(),
-        retained.ensure_result_contract(),
-        retained.delivery_audit_contract(),
-        retained.executor_frontier_contract(),
-        retained.terminal_evidence_contract(),
-        retained.terminal_tombstone_contract(),
-        retained.terminal_proof_contract(),
-        retained.domain_evidence_contract(),
-    ];
-    if executor_contract.semantic_request_contract() != value_contracts.request()
-        || retained.domain_evidence_contract() != value_contracts.attempt_result()
-        || executor_contract.downstream_convergence_contract_ref() != &target_callback_ref
-        || executor_contract.required_plan_expansions() != [expected_expansion]
-        || executor_contract.resource_domain_requirement()
-            != Some(resource_ownership.external_resource_domain_ref())
-        || resource_ownership
-            .destination_fencing_authority_ref()
-            .is_none()
-        || retained_contracts
-            .into_iter()
-            .any(|contract| contract.evidence_contract_ref() != object_evidence_contract_ref)
-    {
+fn wallet_support_member(
+    path: &str,
+    role: &str,
+    semantic_namespace: &str,
+    semantic_name: &str,
+    canonical: PlainCanonicalJsonBytes,
+    expected_ref: ContentRef,
+    object_evidence_contract_ref: ContentRef,
+) -> Result<QualifiedSupportMember, PublicError> {
+    let member = support_member(
+        path,
+        canonical,
+        retained_contract_in(
+            expected_ref.schema_id().clone(),
+            semantic_namespace,
+            semantic_name,
+            role,
+            object_evidence_contract_ref,
+        )?,
+    )?;
+    if support_content_ref(&member)? != expected_ref {
         return Err(invalid_qualification());
     }
-    Ok(())
+    Ok(member)
+}
+
+fn wallet_support_members_match(
+    support_members: &[QualifiedSupportMember],
+    qualification: &mfm_evm_live::EvmWalletRequestQualification,
+) -> Result<bool, PublicError> {
+    Ok(support_content_ref(support_member_at(
+        support_members,
+        EVM_WALLET_SIGNER_BINDING_PATH,
+    )?)? == *qualification.signer_descriptor().reference()
+        && support_content_ref(support_member_at(
+            support_members,
+            EVM_WALLET_NONCE_POLICY_PATH,
+        )?)? == *qualification.resource_policy_binding().policy_ref()
+        && support_content_ref(support_member_at(
+            support_members,
+            EVM_WALLET_INITIAL_NONCE_PATH,
+        )?)? == *qualification
+            .resource_policy_binding()
+            .policy_configuration_ref()
+        && support_content_ref(support_member_at(
+            support_members,
+            EVM_WALLET_ALREADY_KNOWN_CLASSIFIER_PATH,
+        )?)? == qualification
+            .already_known_classifier_ref()
+            .to_content_ref()
+            .map_err(|_| invalid_qualification())?
+        && support_content_ref(support_member_at(
+            support_members,
+            EVM_WALLET_FINALITY_POLICY_PATH,
+        )?)? == qualification
+            .finality_policy_ref()
+            .to_content_ref()
+            .map_err(|_| invalid_qualification())?
+        && support_content_ref(support_member_at(
+            support_members,
+            EVM_WALLET_ASSURANCE_POLICY_PATH,
+        )?)? == qualification
+            .assurance_policy_ref()
+            .to_content_ref()
+            .map_err(|_| invalid_qualification())?
+        && support_content_ref(support_member_at(
+            support_members,
+            EVM_WALLET_REQUEST_QUALIFICATION_PATH,
+        )?)? == *qualification.reference())
 }
 
 fn executor_support_member(
@@ -2029,693 +2249,5 @@ fn invalid_qualification() -> PublicError {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::Value;
-
-    use super::*;
-
-    #[test]
-    fn frozen_foundation_objects_keep_exact_bytes_and_identities() {
-        let (evidence, evidence_ref) = object_evidence_contract().expect("evidence contract");
-        assert_eq!(
-            evidence.canonical(),
-            &mfm_values::component_object_evidence_contract_canonical()
-                .expect("shared evidence canonical")
-        );
-        assert_eq!(
-            evidence_ref,
-            mfm_values::component_object_evidence_contract_ref().expect("shared evidence ref")
-        );
-        assert_eq!(
-            evidence.value_contract().semantic_type_id().as_str(),
-            "semantic:mfm.product:component-object-evidence-contract:1:sha256-jcs-v1:4b996fbc61b28b6cb505cad6fe32a7f87f39b20ba3275306c31df064d36b57b6"
-        );
-        assert_eq!(
-            evidence.value_contract().evidence_contract_ref(),
-            &evidence_ref
-        );
-
-        let (profile, profile_ref) =
-            qualification_profile(evidence_ref.clone()).expect("qualification profile");
-        assert_eq!(
-            profile.canonical().as_str(),
-            r#"{"version":"mfm.component-qualification-profile.v1"}"#
-        );
-        assert_eq!(
-            profile_ref.schema_id(),
-            &annex_schema_id(QUALIFICATION_PROFILE_CONTRACT).expect("profile schema")
-        );
-        assert_eq!(
-            profile_ref.content_digest().as_str(),
-            "content:sha256-v1:e384b0ed353d7e9e115d7238feae1b6517bbd5d2cfbbe88ddb655633afa03d30"
-        );
-        assert_eq!(
-            profile.value_contract().semantic_type_id().as_str(),
-            "semantic:mfm.product:component-qualification-profile:1:sha256-jcs-v1:c15789545f01147d9c45488411d4a14a5b3cafb5150fe75f82a37e7a1dda1abd"
-        );
-        assert_eq!(
-            profile.value_contract().evidence_contract_ref(),
-            &evidence_ref
-        );
-
-        let planner_surface =
-            mfm_program::CompositePlannerSurface::current().expect("planner surface");
-        let (planner_contract, planner_callbacks) =
-            planner_surface_support_members(&planner_surface, evidence_ref.clone())
-                .expect("planner support members");
-        assert_eq!(
-            planner_contract.field_path().as_str(),
-            PLANNER_SEMANTIC_PATH
-        );
-        assert_eq!(
-            planner_contract.value_contract().role().as_str(),
-            PLANNER_SEMANTIC_SUPPORT_ROLE
-        );
-        assert_eq!(
-            planner_contract.canonical(),
-            planner_surface.semantic_contract_canonical()
-        );
-        assert_eq!(
-            support_content_ref(&planner_contract).expect("semantic support ref"),
-            *planner_surface.semantic_contract_ref()
-        );
-        assert_eq!(
-            planner_contract.value_contract().evidence_contract_ref(),
-            &evidence_ref
-        );
-
-        assert_eq!(
-            planner_callbacks.field_path().as_str(),
-            PLANNER_CALLBACK_PATH
-        );
-        assert_eq!(
-            planner_callbacks.value_contract().role().as_str(),
-            PLANNER_CALLBACK_SUPPORT_ROLE
-        );
-        assert_eq!(
-            planner_callbacks.canonical(),
-            planner_surface.callback_surface_canonical()
-        );
-        assert_eq!(
-            support_content_ref(&planner_callbacks).expect("callback support ref"),
-            *planner_surface.callback_surface_ref()
-        );
-        assert_eq!(
-            planner_callbacks.value_contract().evidence_contract_ref(),
-            &evidence_ref
-        );
-    }
-
-    #[test]
-    fn product_qualification_is_one_acyclic_fourteen_component_bijection() {
-        let (executable, executable_bytes) = test_executable();
-        let (executor_contract, _, _) = test_executor_material();
-        let product = qualify_product_components(
-            executable.clone(),
-            executable_bytes.as_bytes(),
-            &executor_contract,
-        )
-        .expect("product qualification");
-
-        assert_eq!(
-            product.implementations.ordered().len(),
-            PRODUCT_COMPONENT_COUNT
-        );
-        assert!(product
-            .implementations
-            .ordered()
-            .iter()
-            .all(|descriptor| descriptor.qualification_ref() == &product.qualification_ref));
-        assert_eq!(product.support_members.len(), PRODUCT_SUPPORT_MEMBER_COUNT);
-
-        let qualification_member = product
-            .support_members
-            .iter()
-            .find(|member| member.field_path().as_str() == QUALIFICATION_PATH)
-            .expect("qualification member");
-        let decoded: Value = serde_json::from_slice(qualification_member.canonical().as_bytes())
-            .expect("qualification JSON");
-        assert_eq!(decoded["version"], QUALIFICATION_VERSION);
-        assert_eq!(
-            decoded["executable_identity_ref"],
-            serde_json::to_value(executable).expect("executable ref JSON")
-        );
-        let components = decoded["components"]
-            .as_array()
-            .expect("component inventory");
-        assert_eq!(components.len(), PRODUCT_COMPONENT_COUNT);
-        assert_eq!(
-            components
-                .iter()
-                .filter(|component| component["component_kind"] == "planner")
-                .count(),
-            1
-        );
-        assert_eq!(
-            components
-                .iter()
-                .filter(|component| { component["component_kind"] == "executor_client_verifier" })
-                .count(),
-            1
-        );
-        assert_eq!(
-            components
-                .iter()
-                .filter(|component| component["component_kind"] == "state")
-                .count(),
-            STATE_COMPONENT_COUNT
-        );
-        assert_eq!(
-            components
-                .iter()
-                .filter(|component| {
-                    component["component_kind"] == "read_capability_adapter_verifier"
-                })
-                .count(),
-            1
-        );
-        assert!(!qualification_member
-            .canonical()
-            .as_str()
-            .contains("implementation"));
-    }
-
-    #[test]
-    fn component_support_closure_paths_and_roles_are_frozen() {
-        let (executable, executable_bytes) = test_executable();
-        let (executor_contract, _, _) = test_executor_material();
-        let product =
-            qualify_product_components(executable, executable_bytes.as_bytes(), &executor_contract)
-                .expect("product qualification");
-        let paths = component_support_paths();
-        let expected_component_paths = paths
-            .iter()
-            .flat_map(|paths| {
-                [
-                    paths.semantic_path,
-                    paths.callback_path,
-                    paths.implementation_path,
-                ]
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            expected_component_paths.len(),
-            COMPONENT_SUPPORT_MEMBER_COUNT
-        );
-        let actual_component_paths = product
-            .support_members
-            .iter()
-            .map(|member| member.field_path().as_str())
-            .filter(|path| expected_component_paths.contains(path))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(actual_component_paths, expected_component_paths);
-
-        for paths in paths {
-            let semantic_member = support_member_at(&product.support_members, paths.semantic_path)
-                .expect("semantic support member");
-            let callback_member = support_member_at(&product.support_members, paths.callback_path)
-                .expect("callback support member");
-            let implementation_member =
-                support_member_at(&product.support_members, paths.implementation_path)
-                    .expect("implementation support member");
-            assert_eq!(
-                semantic_member.value_contract().role().as_str(),
-                paths.semantic_role
-            );
-            assert_eq!(
-                callback_member.value_contract().role().as_str(),
-                paths.callback_role
-            );
-            assert_eq!(
-                implementation_member.value_contract().role().as_str(),
-                paths.implementation_role
-            );
-            assert_eq!(
-                implementation_member
-                    .value_contract()
-                    .semantic_type_id()
-                    .as_str(),
-                "semantic:mfm.product:component-implementation-descriptor:1:sha256-jcs-v1:2fe4bed438b858b7f0b52da9263a0c69ddf580092d5a116155e853b0e24252dc"
-            );
-        }
-    }
-
-    #[test]
-    fn evm_live_support_keeps_exact_catalog_order_paths_roles_and_sources() {
-        let transport = test_evm_transport();
-        let evidence_ref =
-            mfm_values::component_object_evidence_contract_ref().expect("evidence ref");
-        let (members, catalog_ref, reviewed_source_ref) =
-            evm_routing_support_members(&transport, evidence_ref.clone()).expect("routing support");
-
-        assert_eq!(members.len(), 4);
-        assert_eq!(
-            support_content_ref(
-                support_member_at(&members, EVM_ROUTING_CATALOG_PATH).expect("catalog member")
-            )
-            .expect("catalog ref"),
-            catalog_ref
-        );
-        assert_eq!(
-            support_member_at(&members, EVM_ROUTING_CATALOG_PATH)
-                .expect("catalog member")
-                .value_contract()
-                .role()
-                .as_str(),
-            EVM_ROUTING_CATALOG_ROLE
-        );
-
-        for (index, (_, descriptor)) in transport.routing_generation_descriptors().enumerate() {
-            let member = support_member_at(
-                &members,
-                &evm_routing_generation_path(index).expect("generation path"),
-            )
-            .expect("generation member");
-            assert_eq!(
-                support_content_ref(member).expect("generation ref"),
-                descriptor.content_ref().expect("descriptor ref")
-            );
-            assert_eq!(
-                member.value_contract().role().as_str(),
-                EVM_ROUTING_GENERATION_ROLE
-            );
-            assert_eq!(
-                member.value_contract().evidence_contract_ref(),
-                &evidence_ref
-            );
-        }
-
-        let reviewed =
-            support_member_at(&members, EVM_REVIEWED_SOURCE_SCOPE_PATH).expect("reviewed scope");
-        assert_eq!(
-            reviewed.canonical().as_str(),
-            r#"{"source_refs":["primary","secondary"],"version":"mfm.evm-live.reviewed-source-scope.v1"}"#
-        );
-        assert_eq!(
-            support_content_ref(reviewed).expect("reviewed source ref"),
-            reviewed_source_ref
-        );
-        assert_eq!(
-            reviewed.value_contract().role().as_str(),
-            EVM_REVIEWED_SOURCE_SCOPE_ROLE
-        );
-        assert!(members
-            .iter()
-            .all(|member| !member.field_path().as_str().contains("operation_catalog")));
-        for member in &members {
-            for forbidden in [
-                "127.0.0.1",
-                "sentinel-secret",
-                "authorization",
-                "endpoint",
-                "rpc_url",
-            ] {
-                assert!(
-                    !member.canonical().as_str().contains(forbidden),
-                    "support member {} exposed {forbidden}",
-                    member.field_path().as_str()
-                );
-            }
-        }
-        assert_eq!(
-            evm_routing_generation_path(MAX_EVM_ROUTING_GENERATIONS - 1)
-                .expect("last generation path"),
-            "capability.evm_live.routing_generation.4095"
-        );
-        assert!(evm_routing_generation_path(MAX_EVM_ROUTING_GENERATIONS).is_err());
-    }
-
-    #[test]
-    fn evm_live_binding_closes_over_the_one_fixed_adapter_and_dynamic_contracts() {
-        let (executable, executable_bytes) = test_executable();
-        let (executor_contract, executor_deployment, resource_ownership) = test_executor_material();
-        let product =
-            qualify_product_components(executable, executable_bytes.as_bytes(), &executor_contract)
-                .expect("product qualification");
-        let transport = test_evm_transport();
-        let live = qualify_evm_live_support(
-            &transport,
-            &product,
-            executor_contract,
-            executor_deployment,
-            resource_ownership,
-        )
-        .expect("live EVM qualification");
-
-        assert_eq!(
-            live.support_members.len(),
-            EVM_LIVE_FIXED_SUPPORT_MEMBER_COUNT + 2
-        );
-        let fields = live
-            .read_capability_binding
-            .fields()
-            .expect("binding fields");
-        assert_eq!(
-            fields.capability_contract_ref,
-            mfm_evm::evm_read_capability_contract_ref().expect("capability ref")
-        );
-        assert_eq!(
-            fields.admitted_implementation_ref,
-            product
-                .implementations
-                .evm_read_adapter
-                .content_ref()
-                .expect("adapter implementation ref")
-        );
-        assert_eq!(
-            support_content_ref(
-                support_member_at(&live.support_members, EVM_READ_CAPABILITY_BINDING_PATH)
-                    .expect("binding member")
-            )
-            .expect("binding ref"),
-            live.read_capability_binding_ref
-        );
-        assert_eq!(
-            support_member_at(&live.support_members, EVM_READ_CAPABILITY_BINDING_PATH)
-                .expect("binding member")
-                .value_contract()
-                .role()
-                .as_str(),
-            EVM_READ_CAPABILITY_BINDING_ROLE
-        );
-        assert_eq!(
-            support_content_ref(
-                support_member_at(&live.support_members, EVM_EXECUTOR_BINDING_PATH)
-                    .expect("executor binding member")
-            )
-            .expect("executor binding ref"),
-            live.executor_binding.binding_ref().as_content_ref().clone()
-        );
-    }
-
-    #[test]
-    fn support_scope_is_order_independent_and_binds_every_member_tuple() {
-        let (executable, executable_bytes) = test_executable();
-        let (executor_contract, executor_deployment, resource_ownership) = test_executor_material();
-        let product =
-            qualify_product_components(executable, executable_bytes.as_bytes(), &executor_contract)
-                .expect("product qualification");
-        let live = qualify_evm_live_support(
-            &test_evm_transport(),
-            &product,
-            executor_contract,
-            executor_deployment,
-            resource_ownership,
-        )
-        .expect("live EVM qualification");
-        let mut members = product.support_members.clone();
-        members.extend(live.support_members);
-
-        let expected = qualified_support_scope_id(&members).expect("support scope");
-        members.reverse();
-        assert_eq!(
-            qualified_support_scope_id(&members).expect("reordered support scope"),
-            expected
-        );
-
-        let changed_path = members[0].field_path().clone();
-        let changed_contract = members[0].value_contract().clone();
-        members[0] = QualifiedSupportMember::new(
-            changed_path,
-            PlainCanonicalJsonBytes::from_json_str("{}").expect("changed canonical"),
-            changed_contract,
-        );
-        assert_ne!(
-            qualified_support_scope_id(&members).expect("changed support scope"),
-            expected
-        );
-
-        members.push(QualifiedSupportMember::new(
-            members[0].field_path().clone(),
-            members[0].canonical().clone(),
-            members[0].value_contract().clone(),
-        ));
-        assert!(qualified_support_scope_id(&members).is_err());
-    }
-
-    #[test]
-    fn product_deployment_graph_has_exact_sixty_one_plus_generation_closure() {
-        let (executable, executable_bytes) = test_executable();
-        let (executor_contract, executor_deployment, resource_ownership) = test_executor_material();
-        let product =
-            qualify_product_components(executable, executable_bytes.as_bytes(), &executor_contract)
-                .expect("product qualification");
-        let transport = test_evm_transport();
-        let routing_manifest = test_routing_manifest(&transport);
-        let live = qualify_evm_live_support(
-            &transport,
-            &product,
-            executor_contract,
-            executor_deployment,
-            resource_ownership,
-        )
-        .expect("live qualification");
-        let deployment = assemble_qualified_product_deployment(product, live, &routing_manifest)
-            .expect("product deployment");
-
-        assert_eq!(
-            deployment.support_graph.members().len(),
-            PRODUCT_DEPLOYMENT_SUPPORT_MEMBER_COUNT_WITHOUT_GENERATIONS + 2
-        );
-        assert_eq!(
-            deployment.state_manifest.entries().len(),
-            STATE_COMPONENT_COUNT
-        );
-        assert_eq!(
-            deployment.capability_manifest.entries().len(),
-            mfm_evm::EVM_READ_OPERATION_IDS.len() + 1
-        );
-        assert!(deployment
-            .capability_manifest
-            .entries()
-            .iter()
-            .filter(|entry| {
-                entry.operation_id.as_str() != mfm_evm::EVM_SUBMIT_TRANSACTION_OPERATION_ID
-            })
-            .all(|entry| entry.binding_ref == deployment.read_capability_binding_ref));
-        assert_eq!(
-            deployment
-                .capability_manifest
-                .entries()
-                .iter()
-                .find(|entry| {
-                    entry.operation_id.as_str() == mfm_evm::EVM_SUBMIT_TRANSACTION_OPERATION_ID
-                })
-                .expect("wallet capability entry")
-                .binding_ref,
-            deployment
-                .executor_binding
-                .binding_ref()
-                .as_content_ref()
-                .clone()
-        );
-        assert_eq!(
-            support_content_ref(
-                deployment
-                    .support_graph
-                    .members()
-                    .get(
-                        &FieldPath::new(STATE_IMPLEMENTATION_MANIFEST_PATH)
-                            .expect("state manifest path")
-                    )
-                    .expect("state manifest member")
-            )
-            .expect("state manifest ref"),
-            deployment.state_manifest_ref
-        );
-        assert_eq!(
-            support_content_ref(
-                deployment
-                    .support_graph
-                    .members()
-                    .get(
-                        &FieldPath::new(CAPABILITY_BINDING_MANIFEST_PATH)
-                            .expect("capability manifest path")
-                    )
-                    .expect("capability manifest member")
-            )
-            .expect("capability manifest ref"),
-            deployment.capability_manifest_ref
-        );
-        assert!(deployment
-            .support_graph
-            .members()
-            .values()
-            .all(|member| member.value_contract().evidence_contract_ref()
-                == &deployment.object_evidence_contract_ref));
-    }
-
-    fn test_executor_material() -> (
-        ExecutorContractDescriptor,
-        ExecutorDeployment,
-        ResourceOwnership,
-    ) {
-        let evidence_ref =
-            mfm_values::component_object_evidence_contract_ref().expect("object evidence ref");
-        let value_contracts = mfm_evm::evm_submit_transaction_value_contracts(evidence_ref.clone())
-            .expect("wallet value contracts");
-        let retained = mfm_executor::ExecutorRetainedClosureContract::new(
-            test_executor_retained(
-                "ensure-result",
-                "mfm.executor-ensure-result.v1",
-                evidence_ref.clone(),
-            ),
-            test_executor_retained(
-                "delivery-audit",
-                "mfm.executor-delivery-frontier.v1",
-                evidence_ref.clone(),
-            ),
-            test_executor_retained(
-                "executor-frontier",
-                "mfm.executor-delivery-frontier.v1",
-                evidence_ref.clone(),
-            ),
-            test_executor_retained(
-                "terminal-evidence",
-                "mfm.terminal-effect-evidence.v1",
-                evidence_ref.clone(),
-            ),
-            test_executor_retained(
-                "terminal-tombstone",
-                "mfm.executor-terminal-tombstone.v1",
-                evidence_ref.clone(),
-            ),
-            test_executor_retained(
-                "terminal-proof",
-                "mfm.executor-reference-terminal-proof.v1",
-                evidence_ref.clone(),
-            ),
-            value_contracts.attempt_result().clone(),
-        )
-        .expect("executor retained closure");
-        let resource_domain_ref = test_content_ref("wallet-domain");
-        let target_surface =
-            mfm_evm_live::evm_wallet_target_callback_surface_ref().expect("target surface");
-        let contract = ExecutorContractDescriptor::new(
-            test_content_ref("ensure-contract"),
-            value_contracts.request().clone(),
-            test_executor_retained("safe-failure", "mfm.safe-failure.v1", evidence_ref),
-            retained,
-            test_content_ref("safe-failure-contract"),
-            target_surface.clone(),
-            mfm_executor::EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024)
-                .expect("evidence bounds"),
-            Some(resource_domain_ref.clone()),
-            vec![
-                mfm_evm::evm_submit_transaction_leaf_expansion(target_surface)
-                    .expect("leaf expansion"),
-            ],
-        )
-        .expect("executor contract");
-        let generation_ref = test_content_ref("wallet-generation");
-        let ownership = ResourceOwnership::new(
-            test_content_ref("wallet-coordination"),
-            resource_domain_ref,
-            generation_ref.clone(),
-            Some(test_content_ref("wallet-generation-fence")),
-        )
-        .expect("resource ownership");
-        let tenant_scope_id =
-            mfm_ids::TenantScopeId::new("mfm.tenant_scope.v1:00000000000000000000000000000061")
-                .expect("tenant");
-        let deployment = ExecutorDeployment::new(
-            test_content_ref("executor-namespace"),
-            generation_ref,
-            tenant_scope_id,
-            test_content_ref("evidence-authority"),
-            Some(ownership.reference().expect("ownership ref")),
-        )
-        .expect("executor deployment");
-        (contract, deployment, ownership)
-    }
-
-    fn test_executor_retained(
-        label: &str,
-        schema_contract: &str,
-        evidence_ref: ContentRef,
-    ) -> RetainedValueContract {
-        let role = format!("mfm.test.evm-wallet.{label}");
-        retained_contract(
-            annex_schema_id(schema_contract).expect("annex schema"),
-            label,
-            &role,
-            evidence_ref,
-        )
-        .expect("retained contract")
-    }
-
-    fn test_content_ref(label: &str) -> ContentRef {
-        let canonical = PlainCanonicalJsonBytes::from_json_str(
-            &serde_json::json!({"label": label}).to_string(),
-        )
-        .expect("canonical test content");
-        exact_ref(
-            descriptor_schema_id("mfm.test.evm-wallet-content").expect("test schema"),
-            &canonical,
-        )
-        .expect("test content ref")
-    }
-
-    fn test_executable() -> (ContentRef, PlainCanonicalJsonBytes) {
-        let canonical = annex_canonical_bytes(
-            EXECUTABLE_DESCRIPTOR_CONTRACT,
-            br#"{"contract":"mfm.executable-bytes.v1","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
-        )
-        .expect("test executable descriptor");
-        let reference = exact_ref(
-            annex_schema_id(EXECUTABLE_DESCRIPTOR_CONTRACT).expect("executable schema"),
-            &canonical,
-        )
-        .expect("test executable ref");
-        (reference, canonical)
-    }
-
-    fn test_evm_transport() -> mfm_evm_live::transport::EvmJsonRpcTransport {
-        use mfm_evm_live::transport::{
-            EvmJsonRpcTransport, EvmRoutingCatalogBuilder, EvmRpcAuthorization, EvmRpcEndpoint,
-        };
-        use zeroize::Zeroizing;
-
-        let mut catalog = EvmRoutingCatalogBuilder::new();
-        catalog
-            .insert(
-                "z-network",
-                "secondary",
-                2,
-                StableId::new("generation-secondary").expect("secondary generation"),
-                EvmRpcEndpoint::new("http://127.0.0.1:9").expect("secondary endpoint"),
-                None,
-            )
-            .expect("secondary route");
-        catalog
-            .insert(
-                "a-network",
-                "primary",
-                1,
-                StableId::new("generation-primary").expect("primary generation"),
-                EvmRpcEndpoint::new("http://127.0.0.1:9").expect("primary endpoint"),
-                Some(
-                    EvmRpcAuthorization::new(Zeroizing::new("Bearer sentinel-secret".to_owned()))
-                        .expect("primary authorization"),
-                ),
-            )
-            .expect("primary route");
-        EvmJsonRpcTransport::new(catalog.build().expect("catalog")).expect("transport")
-    }
-
-    fn test_routing_manifest(
-        transport: &mfm_evm_live::transport::EvmJsonRpcTransport,
-    ) -> mfm_portfolio::PortfolioRoutingManifest {
-        let bindings = transport
-            .routing_generation_descriptors()
-            .map(|(generation_ref, descriptor)| {
-                mfm_portfolio::EvmRoutingBinding::new(
-                    descriptor.network_id(),
-                    generation_ref.clone(),
-                )
-                .expect("routing binding")
-            })
-            .collect();
-        mfm_portfolio::PortfolioRoutingManifest::new(bindings).expect("routing manifest")
-    }
-}
+#[path = "qualification_tests.rs"]
+mod tests;

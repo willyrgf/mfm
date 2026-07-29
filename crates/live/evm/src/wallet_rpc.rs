@@ -4,6 +4,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use alloy_primitives::{Address, TxKind, B256, U256};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -30,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use zeroize::Zeroizing;
 
-use crate::transport::EvmJsonRpcTransport;
+use crate::{transport::EvmJsonRpcTransport, EvmWalletRequestQualification};
 
 /// Exact already-known classifier descriptor version.
 pub const EVM_ALREADY_KNOWN_CLASSIFIER_VERSION: &str = "mfm.evm-live.already-known-classifier.v1";
@@ -107,54 +108,6 @@ pub trait EvmWalletRpcClient: Clone + Send + Sync + 'static {
         method: &'static str,
         params: Value,
     ) -> EvmWalletRpcFuture<'a>;
-}
-
-/// Qualified process-local guarded signer binding.
-#[derive(Clone)]
-pub struct EvmWalletSignerBinding {
-    binding_ref: EvmWalletReference,
-    binder: GenerationGuardedDeterministicSigningProviderBinder,
-}
-
-impl EvmWalletSignerBinding {
-    /// Binds the opaque admitted signer identity to its guarded provider binder.
-    pub fn new(
-        binding_ref: EvmWalletReference,
-        binder: GenerationGuardedDeterministicSigningProviderBinder,
-    ) -> Result<Self, EvmWalletLiveError> {
-        binding_ref
-            .to_content_ref()
-            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        Ok(Self {
-            binding_ref,
-            binder,
-        })
-    }
-
-    /// Returns the admitted signer-binding identity.
-    pub const fn binding_ref(&self) -> &EvmWalletReference {
-        &self.binding_ref
-    }
-
-    /// Returns the one durable generation accepted by guarded signing and target entry.
-    pub fn durable_generation_ref(&self) -> &ContentRef {
-        self.binder.binding().durable_generation_ref()
-    }
-
-    /// Returns the deployment fence checked by every guarded signing call.
-    pub fn fence_attestation_ref(&self) -> &ContentRef {
-        self.binder.binding().fence_attestation_ref()
-    }
-}
-
-impl fmt::Debug for EvmWalletSignerBinding {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EvmWalletSignerBinding")
-            .field("binding_ref", &self.binding_ref)
-            .field("binder", &"<guarded>")
-            .finish()
-    }
 }
 
 /// Redaction-safe local wallet target failure.
@@ -573,8 +526,8 @@ where
     Client: EvmWalletRpcClient,
 {
     client: Client,
-    signer: EvmWalletSignerBinding,
-    safe_failure_contract_ref: ContentRef,
+    signer: GenerationGuardedDeterministicSigningProviderBinder,
+    qualification: Arc<EvmWalletRequestQualification>,
 }
 
 impl<Client> EvmWalletJsonRpcTarget<Client>
@@ -584,19 +537,28 @@ where
     /// Constructs a target without performing signer or provider IO.
     pub fn new(
         client: Client,
-        signer: EvmWalletSignerBinding,
-        safe_failure_contract_ref: ContentRef,
-    ) -> Self {
-        Self {
+        signer: GenerationGuardedDeterministicSigningProviderBinder,
+        qualification: Arc<EvmWalletRequestQualification>,
+    ) -> Result<Self, EvmWalletLiveError> {
+        let signer_descriptor = signer
+            .binding()
+            .public_descriptor()
+            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+        if signer_descriptor != *qualification.signer_descriptor() {
+            return Err(EvmWalletLiveError::InvalidContract);
+        }
+        Ok(Self {
             client,
             signer,
-            safe_failure_contract_ref,
-        }
+            qualification,
+        })
     }
 
     /// Returns the generation required by both guarded signing and target entry.
     pub fn durable_generation_ref(&self) -> &ContentRef {
-        self.signer.durable_generation_ref()
+        self.qualification
+            .signer_descriptor()
+            .durable_generation_ref()
     }
 
     /// Guardedly prepares one exact candidate before durable authorization.
@@ -606,20 +568,16 @@ where
         allocated_nonce: u64,
         fee_ordinal: u16,
     ) -> Result<PreparedEvmWalletBroadcast, EvmWalletLiveError> {
-        validate_request_binding(request, &self.signer)?;
+        self.qualification.verify_request(request)?;
         let envelope = request
             .unsigned_envelope(allocated_nonce, fee_ordinal)
             .map_err(|_| EvmWalletLiveError::InvalidContract)?;
         let provider = self
             .signer
-            .binder
             .bind()
             .await
             .map_err(|_| EvmWalletLiveError::SignerUnavailable)?;
-        let expected_sender = request
-            .policy()
-            .sender_address()
-            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+        let expected_sender = self.qualification.sender();
         let generation_ref = provider.binding().durable_generation_ref().clone();
         let signed = sign_eip1559_guarded(
             &envelope,
@@ -652,24 +610,21 @@ where
         request: &EvmSubmitTransactionRequest,
         prepared: PreparedEvmWalletBroadcast,
     ) -> Result<EvmWalletBroadcastReturn, EvmWalletLiveError> {
+        self.qualification.verify_request(request)?;
         let PreparedEvmWalletBroadcast {
             descriptor,
             candidate,
             signed,
         } = prepared;
-        require_target_entry(
-            &authority,
-            &descriptor,
-            self.signer.durable_generation_ref(),
-        )?;
+        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
         require_candidate_request(request, &candidate)?;
         if descriptor.operation_id() != EVM_WALLET_BROADCAST_OPERATION_ID
             || format!("{:#x}", signed.transaction_hash()) != candidate.transaction_hash()
         {
             return Err(EvmWalletLiveError::InvalidContract);
         }
-        let route = request
-            .policy()
+        let route = self
+            .qualification
             .route_generation_ref()
             .to_content_ref()
             .map_err(|_| EvmWalletLiveError::InvalidContract)?;
@@ -678,7 +633,7 @@ where
             .client
             .exchange(
                 &route,
-                request.policy().chain_id(),
+                self.qualification.chain_id(),
                 "eth_sendRawTransaction",
                 json!([raw_transaction.as_str()]),
             )
@@ -705,7 +660,7 @@ where
             Ok(EvmWalletRpcResponse::Error(error))
                 if error.is_exact_already_known()
                     && request.policy().already_known_classifier_ref()
-                        == &evm_already_known_classifier_ref()? =>
+                        == self.qualification.already_known_classifier_ref() =>
             {
                 self.returned(
                     request,
@@ -737,13 +692,10 @@ where
         request: &EvmSubmitTransactionRequest,
         candidate: &EvmWalletTransactionCandidate,
     ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
+        self.qualification.verify_request(request)?;
         require_candidate_request(request, candidate)?;
         let descriptor = EvmWalletTargetEntryDescriptor::transaction_lookup(request, candidate)?;
-        require_target_entry(
-            &authority,
-            &descriptor,
-            self.signer.durable_generation_ref(),
-        )?;
+        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
         let response = self
             .exchange_hash(request, "eth_getTransactionByHash", candidate)
             .await;
@@ -780,13 +732,10 @@ where
         request: &EvmSubmitTransactionRequest,
         candidate: &EvmWalletTransactionCandidate,
     ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
+        self.qualification.verify_request(request)?;
         require_candidate_request(request, candidate)?;
         let descriptor = EvmWalletTargetEntryDescriptor::receipt_lookup(request, candidate)?;
-        require_target_entry(
-            &authority,
-            &descriptor,
-            self.signer.durable_generation_ref(),
-        )?;
+        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
         let response = self
             .exchange_hash(request, "eth_getTransactionReceipt", candidate)
             .await;
@@ -822,13 +771,10 @@ where
         request: &EvmSubmitTransactionRequest,
         candidate: &EvmWalletTransactionCandidate,
     ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
+        self.qualification.verify_request(request)?;
         require_candidate_request(request, candidate)?;
         let descriptor = EvmWalletTargetEntryDescriptor::finalized_head(request, candidate)?;
-        require_target_entry(
-            &authority,
-            &descriptor,
-            self.signer.durable_generation_ref(),
-        )?;
+        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
         let response = self
             .exchange(request, "eth_getBlockByNumber", json!(["finalized", false]))
             .await;
@@ -854,17 +800,14 @@ where
         inclusion_number: U256,
         terminal_candidate: Option<EvmWalletTerminalEvidence>,
     ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
+        self.qualification.verify_request(request)?;
         require_candidate_request(request, candidate)?;
         let descriptor = EvmWalletTargetEntryDescriptor::canonical_inclusion(
             request,
             candidate,
             inclusion_number,
         )?;
-        require_target_entry(
-            &authority,
-            &descriptor,
-            self.signer.durable_generation_ref(),
-        )?;
+        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
         let response = self
             .exchange(
                 request,
@@ -917,13 +860,16 @@ where
         method: &'static str,
         params: Value,
     ) -> Result<EvmWalletRpcResponse, EvmWalletRpcFailure> {
-        let route = request
-            .policy()
+        self.qualification
+            .verify_request(request)
+            .map_err(|_| EvmWalletRpcFailure::GenerationFenced)?;
+        let route = self
+            .qualification
             .route_generation_ref()
             .to_content_ref()
             .map_err(|_| EvmWalletRpcFailure::GenerationFenced)?;
         self.client
-            .exchange(&route, request.policy().chain_id(), method, params)
+            .exchange(&route, self.qualification.chain_id(), method, params)
             .await
     }
 
@@ -991,9 +937,17 @@ where
                 false,
             ),
         };
-        let failure =
-            reference_safe_failure(self.safe_failure_contract_ref.clone(), code, class, stage)
-                .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+        let failure = reference_safe_failure(
+            self.qualification
+                .executor_binding()
+                .contract()
+                .safe_failure_contract_ref()
+                .clone(),
+            code,
+            class,
+            stage,
+        )
+        .map_err(|_| EvmWalletLiveError::InvalidContract)?;
         if did_not_enter {
             DeliveryAttemptOutcome::did_not_enter(failure)
         } else {
@@ -1093,23 +1047,6 @@ fn require_target_entry(
 ) -> Result<(), EvmWalletLiveError> {
     if authority.target_operation_ref() != &descriptor.content_ref()?
         || authority.durable_ledger_generation_ref() != guarded_generation_ref
-    {
-        return Err(EvmWalletLiveError::InvalidContract);
-    }
-    Ok(())
-}
-
-fn validate_request_binding(
-    request: &EvmSubmitTransactionRequest,
-    signer: &EvmWalletSignerBinding,
-) -> Result<(), EvmWalletLiveError> {
-    if request.policy().signer_binding_ref() != signer.binding_ref()
-        || signer
-            .binder
-            .binding()
-            .expected_public_identity()
-            .account_id()
-            != Some(request.policy().sender())
     {
         return Err(EvmWalletLiveError::InvalidContract);
     }

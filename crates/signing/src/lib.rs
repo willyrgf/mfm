@@ -33,11 +33,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_canonical::sha256_digest_bytes;
+use mfm_canonical::{sha256_digest_bytes, CanonicalBytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_capabilities::{CapabilityError, CapabilitySpec, SupportRole};
 use mfm_ids::{
-    CapabilityKind, CapabilityVersion, CheckedStringError, CheckedStringErrorReason,
-    DigestAlgorithm, DigestBytes, LocalPublicId,
+    CapabilityKind, CapabilityVersion, CheckedStringError, CheckedStringErrorReason, ContentDigest,
+    DigestAlgorithm, DigestBytes, LocalPublicId, SchemaId,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -65,6 +65,10 @@ pub type SigningGenerationGuardFuture<'a> =
 
 const MAX_PUBLIC_KEY_LEN: usize = 4096;
 const MAX_SIGNATURE_LEN: usize = 4096;
+const GENERATION_GUARDED_SIGNER_DESCRIPTOR_SCHEMA_NAME: &str =
+    "mfm.signing.generation-guarded-signer-descriptor";
+const GENERATION_GUARDED_SIGNER_DESCRIPTOR_VERSION: &str =
+    "mfm.signing.generation-guarded-signer-descriptor.v1";
 
 /// Recoverable secp256k1 signature over a Keccak-256 digest.
 pub const SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID: &str = "secp256k1.keccak256.recoverable";
@@ -750,6 +754,23 @@ impl VerifiedGenerationGuardedSignerBinding {
         &self.direct_sign_exclusion_ref
     }
 
+    /// Derives the complete secret-free descriptor of this guarded signer.
+    ///
+    /// ```
+    /// use mfm_signing::{
+    ///     GenerationGuardedSignerDescriptor, VerifiedGenerationGuardedSignerBinding,
+    /// };
+    ///
+    /// fn retained_descriptor(
+    ///     binding: &VerifiedGenerationGuardedSignerBinding,
+    /// ) -> mfm_signing::Result<GenerationGuardedSignerDescriptor> {
+    ///     binding.public_descriptor()
+    /// }
+    /// ```
+    pub fn public_descriptor(&self) -> Result<GenerationGuardedSignerDescriptor> {
+        GenerationGuardedSignerDescriptor::from_verified(self)
+    }
+
     /// Verifies that a transient request exactly matches this wallet binding.
     pub fn verify_request(&self, request: &SigningRequest) -> Result<()> {
         if request.signer_ref() != self.signer_ref()
@@ -764,6 +785,159 @@ impl VerifiedGenerationGuardedSignerBinding {
             });
         }
         Ok(())
+    }
+}
+
+/// Canonical secret-free descriptor derived from one verified guarded signer.
+///
+/// This value has no caller-selected field constructor. It is derived from
+/// [`VerifiedGenerationGuardedSignerBinding`] so its content reference fixes
+/// every public signer, provider, identity, generation, fence, and
+/// direct-sign-exclusion field together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationGuardedSignerDescriptor {
+    signer_ref: SignerRef,
+    provider_implementation_id: LocalPublicId,
+    algorithm: SigningAlgorithmId,
+    profile: SigningProfileId,
+    expected_public_identity: PublicSigningIdentity,
+    durable_generation_ref: ContentRef,
+    fence_attestation_ref: ContentRef,
+    direct_sign_exclusion_ref: ContentRef,
+    canonical: CanonicalJsonBytes,
+    reference: ContentRef,
+}
+
+impl GenerationGuardedSignerDescriptor {
+    fn from_verified(binding: &VerifiedGenerationGuardedSignerBinding) -> Result<Self> {
+        let identity = binding.expected_public_identity();
+        let public_key = identity
+            .public_key()
+            .map(|value| CanonicalValue::Bytes(CanonicalBytes::new(value.as_bytes().to_vec())))
+            .unwrap_or(CanonicalValue::Null);
+        let account_id = identity
+            .account_id()
+            .map(|value| CanonicalValue::String(value.to_owned()))
+            .unwrap_or(CanonicalValue::Null);
+        let public_identity =
+            CanonicalValue::object([("account_id", account_id), ("public_key", public_key)])
+                .map_err(|_| invalid_public_descriptor())?;
+        let canonical = CanonicalJsonBytes::from_value(
+            &CanonicalValue::object([
+                (
+                    "algorithm",
+                    CanonicalValue::String(binding.algorithm().as_str().to_owned()),
+                ),
+                (
+                    "direct_sign_exclusion_ref",
+                    content_ref_value(binding.direct_sign_exclusion_ref())?,
+                ),
+                (
+                    "durable_generation_ref",
+                    content_ref_value(binding.durable_generation_ref())?,
+                ),
+                ("expected_public_identity", public_identity),
+                (
+                    "fence_attestation_ref",
+                    content_ref_value(binding.fence_attestation_ref())?,
+                ),
+                (
+                    "profile",
+                    CanonicalValue::String(binding.profile().as_str().to_owned()),
+                ),
+                (
+                    "provider_implementation_id",
+                    CanonicalValue::String(
+                        binding.provider_implementation_id().as_str().to_owned(),
+                    ),
+                ),
+                (
+                    "signer_ref",
+                    CanonicalValue::String(binding.signer_ref().as_str().to_owned()),
+                ),
+                (
+                    "version",
+                    CanonicalValue::String(GENERATION_GUARDED_SIGNER_DESCRIPTOR_VERSION.to_owned()),
+                ),
+            ])
+            .map_err(|_| invalid_public_descriptor())?,
+        );
+        let schema_id = SchemaId::new(
+            GENERATION_GUARDED_SIGNER_DESCRIPTOR_SCHEMA_NAME,
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(
+                format!("schema:{GENERATION_GUARDED_SIGNER_DESCRIPTOR_SCHEMA_NAME}:1").as_bytes(),
+            ),
+        )
+        .map_err(|_| invalid_public_descriptor())?;
+        let reference = ContentRef::new(
+            schema_id,
+            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),
+        )
+        .map_err(|_| invalid_public_descriptor())?;
+        Ok(Self {
+            signer_ref: binding.signer_ref().clone(),
+            provider_implementation_id: binding.provider_implementation_id().clone(),
+            algorithm: binding.algorithm().clone(),
+            profile: binding.profile().clone(),
+            expected_public_identity: binding.expected_public_identity().clone(),
+            durable_generation_ref: binding.durable_generation_ref().clone(),
+            fence_attestation_ref: binding.fence_attestation_ref().clone(),
+            direct_sign_exclusion_ref: binding.direct_sign_exclusion_ref().clone(),
+            canonical,
+            reference,
+        })
+    }
+
+    /// Returns the exact process-local signer reference.
+    pub const fn signer_ref(&self) -> &SignerRef {
+        &self.signer_ref
+    }
+
+    /// Returns the concrete provider implementation identity.
+    pub const fn provider_implementation_id(&self) -> &LocalPublicId {
+        &self.provider_implementation_id
+    }
+
+    /// Returns the exact signing algorithm.
+    pub const fn algorithm(&self) -> &SigningAlgorithmId {
+        &self.algorithm
+    }
+
+    /// Returns the exact deterministic signing profile.
+    pub const fn profile(&self) -> &SigningProfileId {
+        &self.profile
+    }
+
+    /// Returns the expected public signer identity.
+    pub const fn expected_public_identity(&self) -> &PublicSigningIdentity {
+        &self.expected_public_identity
+    }
+
+    /// Returns the independently durable wallet/executor generation.
+    pub const fn durable_generation_ref(&self) -> &ContentRef {
+        &self.durable_generation_ref
+    }
+
+    /// Returns the destination fence-attestation identity.
+    pub const fn fence_attestation_ref(&self) -> &ContentRef {
+        &self.fence_attestation_ref
+    }
+
+    /// Returns the provider/ACL direct-sign-exclusion identity.
+    pub const fn direct_sign_exclusion_ref(&self) -> &ContentRef {
+        &self.direct_sign_exclusion_ref
+    }
+
+    /// Returns exact canonical descriptor bytes.
+    pub const fn canonical(&self) -> &CanonicalJsonBytes {
+        &self.canonical
+    }
+
+    /// Returns the exact content identity of the canonical descriptor.
+    pub const fn reference(&self) -> &ContentRef {
+        &self.reference
     }
 }
 
@@ -982,6 +1156,8 @@ pub enum SigningRequestError {
     InvalidPublicKey,
     /// Signature bytes were empty or too large.
     InvalidSignature,
+    /// A guarded signer's public descriptor could not be encoded exactly.
+    InvalidPublicDescriptor,
 }
 
 /// Closed redaction-safe provider failure reasons.
@@ -1064,6 +1240,26 @@ fn checked_local_public_id(
     LocalPublicId::new(value).map_err(|error| signing_identifier_error(kind, error))
 }
 
+fn content_ref_value(reference: &ContentRef) -> Result<CanonicalValue> {
+    CanonicalValue::object([
+        (
+            "content_digest",
+            CanonicalValue::String(reference.content_digest().as_str().to_owned()),
+        ),
+        (
+            "schema_id",
+            CanonicalValue::String(reference.schema_id().as_str().to_owned()),
+        ),
+    ])
+    .map_err(|_| invalid_public_descriptor())
+}
+
+fn invalid_public_descriptor() -> SigningError {
+    SigningError::InvalidRequest {
+        reason: SigningRequestError::InvalidPublicDescriptor,
+    }
+}
+
 fn signing_identifier_error(
     kind: SigningIdentifierKind,
     error: CheckedStringError,
@@ -1109,6 +1305,9 @@ fn request_reason(reason: SigningRequestError) -> &'static str {
         }
         SigningRequestError::InvalidPublicKey => "public key bytes are invalid",
         SigningRequestError::InvalidSignature => "signature bytes are invalid",
+        SigningRequestError::InvalidPublicDescriptor => {
+            "guarded signer public descriptor is invalid"
+        }
     }
 }
 

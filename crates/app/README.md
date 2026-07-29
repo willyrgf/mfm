@@ -82,8 +82,8 @@ instead fails the request.
 - a deployment-supplied run-journal `AuthoritativeWriterFence`;
 - an authoritative PostgreSQL store;
 - an `EvmWalletDeployment` containing the exact executor contract/deployment/resource owner,
-  account-sequence policy binding, public signer binding, generation guard, and dedicated
-  PostgreSQL executor pool;
+  selected route-generation reference, content-addressed initial-nonce descriptor, verified
+  guarded signer binding, generation guard, and dedicated PostgreSQL executor pool;
 - a separate deployment-supplied `ExecutorWriterGenerationFence`; and
 - exact current executable, planning, state, and capability identities; and
 - explicit runtime configuration for any live EVM routes.
@@ -99,7 +99,8 @@ public `SignerRef`. Its keystore and unlock paths remain indirect runtime values
 support members, configured transaction bytes, retained evidence, or public diagnostics. The
 verified signer binding fixes the keystore implementation, secp256k1 recoverable algorithm,
 RFC6979 low-s profile, expected account, durable executor generation, destination-fence
-attestation, and direct-sign exclusion proof.
+attestation, and direct-sign exclusion proof. Qualification derives its public signer-descriptor
+identity; deployment cannot supply a separate signer-binding reference.
 
 For TOML, the selected process-local entries have this strict shape:
 
@@ -118,22 +119,27 @@ unlock_file_path = { direct = "/run/mfm/wallet.unlock" }
 reviewed runtime value-source forms; the unlock value itself belongs in the referenced protected
 file, never in configuration.
 
-Bootstrap assembles one exact qualified support graph with `61 + N` members, where `N` is the
+Bootstrap assembles one exact qualified support graph with `68 + N` members, where `N` is the
 configured generation count in `1..=4096`. The fixed closure contains the executable-bound
 14-component qualification; the aggregate catalog, every generation, reviewed source scope,
 failure contract, classifier, and read binding; the exact wallet executor contract,
 implementation, deployment, resource ownership, target callback surface, and verified executor
-binding; framework unit configuration and product routing; state and capability manifests; and
-the EVM balance fact descriptor and evidence contracts. The graph scope is derived from the
-complete field-path-ordered member identities and contracts, so any executable, route, executor,
-resource-owner, or support-contract change selects a new scope. The scope preimage is not itself
-retained.
+binding; the derived guarded-signer descriptor, nonce policy, initial-nonce descriptor,
+already-known classifier, finality policy, assurance policy, and sealed wallet-request
+qualification; framework unit configuration and product routing; state and capability manifests;
+and the EVM balance fact descriptor and evidence contracts. The live EVM closure is exactly
+`15 + N`; the seven wallet leaves raise the product closure from `61 + N` to `68 + N`. The graph
+scope is derived from the complete field-path-ordered member identities and contracts, so any
+executable, route, executor, resource-owner, wallet-policy, or support-contract change selects a
+new scope. The scope preimage is not itself retained.
 
 The app admits that graph once and moves the resulting non-cloneable authority into one
-`QualifiedProgramRegistry`. The private application backend and runtime share only the same
-registry `Arc`; neither constructs a second registry or support graph. Endpoint, authorization,
-transport, configured portfolio, per-run input, certificate, fact, and output material are not
-support members.
+`QualifiedProgramRegistry`. The private application admission backend and wallet executor also
+share the one live-owned `Arc<EvmWalletRequestQualification>` created before that admission; they
+cannot reconstruct or weaken its predicate. A configured wallet request must match it before
+certification or any journal append, and the executor rechecks it before effect binding or nonce
+allocation. Endpoint, authorization, transport, configured portfolio, per-run input, certificate,
+fact, and output material are not support members.
 
 Neither writer fence is a boolean or command-line switch. The run-store fence proves that this
 process is the sole authoritative writer for the journal lineage. The executor fence independently

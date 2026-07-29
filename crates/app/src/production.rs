@@ -55,6 +55,7 @@ struct ProductionBackend {
     issuer: RunAccessAuthorityIssuer,
     registry: Arc<QualifiedProgramRegistry>,
     runtime: Runtime<QualifiedPostgresStore>,
+    wallet_request_qualification: Arc<mfm_evm_live::EvmWalletRequestQualification>,
 }
 
 struct UnavailableReproductionResolver;
@@ -92,15 +93,16 @@ where
         current_executable_identity(),
         load_evm_deployment(runtime_config_path, signer_ref)
     )?;
-    let (registry, entry_points, executor_store) = assemble_program_registry(
-        &store,
-        &issuer,
-        &executable,
-        evm,
-        wallet,
-        executor_writer_fence,
-    )
-    .await?;
+    let (registry, entry_points, executor_store, wallet_request_qualification) =
+        assemble_program_registry(
+            &store,
+            &issuer,
+            &executable,
+            evm,
+            wallet,
+            executor_writer_fence,
+        )
+        .await?;
     let store_scope_id = store.store_scope_id().clone();
     let runtime = Runtime::new(store.clone(), Arc::clone(&registry));
     let backend = ProductionBackend {
@@ -109,6 +111,7 @@ where
         issuer,
         registry,
         runtime,
+        wallet_request_qualification,
     };
     Ok(Application::new(
         store_scope_id,
@@ -130,6 +133,7 @@ async fn assemble_program_registry<ExecutorFence>(
         Arc<QualifiedProgramRegistry>,
         Vec<EntryPointContract>,
         QualifiedPostgresExecutorStore,
+        Arc<mfm_evm_live::EvmWalletRequestQualification>,
     ),
     PublicError,
 >
@@ -146,8 +150,8 @@ where
         executor_contract,
         executor_deployment,
         resource_ownership,
-        resource_policy_binding,
-        wallet_signer_binding_ref,
+        route_generation_ref,
+        initial_nonce_descriptor,
         signer_binding,
         signer_generation_guard,
     } = wallet;
@@ -162,6 +166,9 @@ where
         executor_contract,
         executor_deployment,
         resource_ownership,
+        route_generation_ref,
+        initial_nonce_descriptor,
+        &signer_binding,
     )?;
     let deployment = assemble_qualified_product_deployment(product, live, &routing_manifest)?;
     let QualifiedProductDeployment {
@@ -172,6 +179,7 @@ where
         read_capability_binding,
         read_capability_binding_ref,
         executor_binding,
+        wallet_request_qualification,
         unit_config_contract,
         state_manifest: _state_manifest,
         state_manifest_ref: _state_manifest_ref,
@@ -211,14 +219,11 @@ where
                 })
             })
         });
-    let wallet_signer =
-        mfm_evm_live::EvmWalletSignerBinding::new(wallet_signer_binding_ref, signer_binder)
-            .map_err(|_| production_registry_invalid())?;
     let wallet_executor = mfm_evm_live::EvmWalletExecutor::new(
         ledger,
         transport.as_ref().clone(),
-        wallet_signer,
-        resource_policy_binding,
+        signer_binder,
+        Arc::clone(&wallet_request_qualification),
     )
     .map_err(|_| production_registry_invalid())?;
     let ProductComponentImplementations {
@@ -365,6 +370,7 @@ where
             published_wallet_entry_point,
         ],
         executor_store,
+        wallet_request_qualification,
     ))
 }
 
@@ -450,26 +456,12 @@ impl ProductionBackend {
             )
             .await?;
         if let Some(selector) = wallet_selector {
-            let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(configured.bytes())
-                .map_err(|_| {
-                    PublicError::backend(
-                        ErrorClass::Internal,
-                        "ConfiguredTransactionInvalid",
-                        "The configured transaction does not match its qualified contract",
-                    )
-                })?;
-            let configured_request =
-                mfm_program::decode_boundary::<mfm_evm::EvmSubmitTransactionRequest>(&canonical)
-                    .map_err(|_| production_admission_invalid())?;
-            if configured_request
-                .policy()
-                .tenant_scope_id()
-                .map_err(|_| production_admission_invalid())?
-                != tenant_scope_id
-                || configured_request.template().target() != selector.target()
-            {
-                return Err(production_admission_invalid());
-            }
+            qualify_wallet_admission_request(
+                self.wallet_request_qualification.as_ref(),
+                &tenant_scope_id,
+                &selector,
+                configured.bytes(),
+            )?;
         }
         let artifacts = self
             .registry
@@ -671,6 +663,37 @@ impl ProductionBackend {
         .await?;
         Ok(ExportedRunBytes::from_portable(export))
     }
+}
+
+fn qualify_wallet_admission_request(
+    qualification: &mfm_evm_live::EvmWalletRequestQualification,
+    tenant_scope_id: &TenantScopeId,
+    selector: &mfm_evm::EvmSubmitTransactionSelector,
+    configured_bytes: &[u8],
+) -> Result<(), PublicError> {
+    let canonical =
+        PlainCanonicalJsonBytes::from_canonical_json_slice(configured_bytes).map_err(|_| {
+            PublicError::backend(
+                ErrorClass::Internal,
+                "ConfiguredTransactionInvalid",
+                "The configured transaction does not match its qualified contract",
+            )
+        })?;
+    let request = mfm_program::decode_boundary::<mfm_evm::EvmSubmitTransactionRequest>(&canonical)
+        .map_err(|_| production_admission_invalid())?;
+    qualification
+        .verify_request(&request)
+        .map_err(|_| production_admission_invalid())?;
+    if request
+        .policy()
+        .tenant_scope_id()
+        .map_err(|_| production_admission_invalid())?
+        != *tenant_scope_id
+        || request.template().target() != selector.target()
+    {
+        return Err(production_admission_invalid());
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]

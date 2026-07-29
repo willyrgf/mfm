@@ -2,15 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mfm_evm::EvmWalletReference;
-use mfm_executor::{
-    ExecutorContractDescriptor, ExecutorDeployment, ResourceOwnership, ResourcePolicyBinding,
-};
+use mfm_evm::{EvmRoutingGenerationRef, EvmWalletInitialNonceDescriptor};
+use mfm_executor::{ExecutorContractDescriptor, ExecutorDeployment, ResourceOwnership};
 use mfm_ids::{RunId, StoreScopeId, TenantScopeId};
-use mfm_signing::{
-    SigningGenerationGuard, VerifiedGenerationGuardedSignerBinding,
-    SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
-};
+use mfm_signing::{SigningGenerationGuard, VerifiedGenerationGuardedSignerBinding};
 use sqlx::PgPool;
 
 use crate::{
@@ -31,8 +26,8 @@ pub struct EvmWalletDeployment {
     executor_contract: ExecutorContractDescriptor,
     executor_deployment: ExecutorDeployment,
     resource_ownership: ResourceOwnership,
-    resource_policy_binding: ResourcePolicyBinding,
-    wallet_signer_binding_ref: EvmWalletReference,
+    route_generation_ref: EvmRoutingGenerationRef,
+    initial_nonce_descriptor: EvmWalletInitialNonceDescriptor,
     signer_binding: VerifiedGenerationGuardedSignerBinding,
     signer_generation_guard: Arc<dyn SigningGenerationGuard>,
 }
@@ -45,26 +40,13 @@ impl EvmWalletDeployment {
         executor_contract: ExecutorContractDescriptor,
         executor_deployment: ExecutorDeployment,
         resource_ownership: ResourceOwnership,
-        resource_policy_binding: ResourcePolicyBinding,
-        wallet_signer_binding_ref: EvmWalletReference,
+        route_generation_ref: EvmRoutingGenerationRef,
+        initial_nonce_descriptor: EvmWalletInitialNonceDescriptor,
         signer_binding: VerifiedGenerationGuardedSignerBinding,
         signer_generation_guard: Arc<dyn SigningGenerationGuard>,
     ) -> Result<Self, PublicError> {
-        let ownership_ref = resource_ownership
-            .reference()
-            .map_err(|_| wallet_deployment_invalid())?;
-        if executor_deployment.resource_ownership_ref() != Some(&ownership_ref)
-            || executor_deployment.durable_ledger_generation_ref()
-                != resource_ownership.durable_ledger_generation_ref()
-            || signer_binding.durable_generation_ref()
-                != executor_deployment.durable_ledger_generation_ref()
-            || resource_ownership.destination_fencing_authority_ref()
-                != Some(signer_binding.fence_attestation_ref())
-            || signer_binding.provider_implementation_id().as_str()
-                != mfm_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID
-            || signer_binding.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID
-            || signer_binding.profile().as_str() != SECP256K1_RFC6979_LOW_S_PROFILE_ID
-            || wallet_signer_binding_ref.to_content_ref().is_err()
+        if signer_binding.provider_implementation_id().as_str()
+            != mfm_keystore::KEYSTORE_SIGNING_IMPLEMENTATION_ID
         {
             return Err(wallet_deployment_invalid());
         }
@@ -73,8 +55,8 @@ impl EvmWalletDeployment {
             executor_contract,
             executor_deployment,
             resource_ownership,
-            resource_policy_binding,
-            wallet_signer_binding_ref,
+            route_generation_ref,
+            initial_nonce_descriptor,
             signer_binding,
             signer_generation_guard,
         })
@@ -86,8 +68,8 @@ impl EvmWalletDeployment {
             executor_contract: self.executor_contract,
             executor_deployment: self.executor_deployment,
             resource_ownership: self.resource_ownership,
-            resource_policy_binding: self.resource_policy_binding,
-            wallet_signer_binding_ref: self.wallet_signer_binding_ref,
+            route_generation_ref: self.route_generation_ref,
+            initial_nonce_descriptor: self.initial_nonce_descriptor,
             signer_binding: self.signer_binding,
             signer_generation_guard: self.signer_generation_guard,
         }
@@ -99,8 +81,8 @@ pub(crate) struct EvmWalletDeploymentParts {
     pub(crate) executor_contract: ExecutorContractDescriptor,
     pub(crate) executor_deployment: ExecutorDeployment,
     pub(crate) resource_ownership: ResourceOwnership,
-    pub(crate) resource_policy_binding: ResourcePolicyBinding,
-    pub(crate) wallet_signer_binding_ref: EvmWalletReference,
+    pub(crate) route_generation_ref: EvmRoutingGenerationRef,
+    pub(crate) initial_nonce_descriptor: EvmWalletInitialNonceDescriptor,
     pub(crate) signer_binding: VerifiedGenerationGuardedSignerBinding,
     pub(crate) signer_generation_guard: Arc<dyn SigningGenerationGuard>,
 }

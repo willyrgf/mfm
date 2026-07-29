@@ -40,7 +40,7 @@ callback can interpret certified terminal evidence and settle the node.
 
 The registered wallet executor qualifies:
 
-- immutable request/effect identity;
+- immutable request/effect identity and the complete wallet policy before admission or allocation;
 - exact tenant and executor-deployment generation binding;
 - non-rollback delivery ledger;
 - permanent stale/sibling-writer exclusion;
@@ -52,6 +52,19 @@ The registered wallet executor qualifies:
 - bounded cumulative delivery evidence and terminal tombstone;
 - exact-attempt target receipt linkage; and
 - complete no-secret retained evidence.
+
+One live-owned `EvmWalletRequestQualification` is the sole cross-field predicate. It is built from
+the sealed transport catalog, verified executor binding, product object-evidence contract, derived
+guarded-signer descriptor, selected route generation, and initial-nonce descriptor. Construction
+derives and binds the complete ordered route-generation-to-chain map and verifies the executor's
+exact request/result contracts, wallet leaf expansion, target callback, resource domain/fence,
+safe-failure contract, and evidence-contract closure. The application admission path and executor
+share the same `Arc`; neither accepts an independently supplied signer reference, resource-policy
+pair, route descriptor, or duplicate validator.
+
+Valid replacement schedules and convergence plans remain request-owned semantic fields. They may
+vary between admitted requests while fitting the exact qualified evidence bounds; the deployment
+qualification deliberately does not pin either field to one deployment value.
 
 The production backend is `mfm-storage-executor-postgres`, opened only after the complete product
 support graph is admitted and only with an `ExecutorWriterGenerationFence`. That fence is
@@ -68,10 +81,13 @@ mutation.
 The registered entry point resolves one immutable EIP-1559 request whose semantic identity
 includes:
 
-- semantic network and non-zero chain id;
-- expected sender;
-- signer/executor binding references;
-- deterministic signing profile;
+- exact tenant, wallet domain, selected catalog-member route generation, and its non-zero chain
+  id;
+- expected canonical non-zero sender and the derived guarded-signer descriptor reference;
+- exact nonce-policy reference, deployment-attested initial nonce, and complete initial-nonce
+  descriptor reference;
+- exact already-known classifier, finalized-tag finality policy, and terminal assurance policy;
+- exact executor evidence bounds;
 - one closed direct `Create` or ordinary `Call` action;
 - value, calldata/init code, and access list;
 - checked fee and gas policy; and
@@ -110,9 +126,12 @@ resource_domain = "evm-wallet-domain-" + sha256(
 )
 ```
 
-The first allocation uses the deployment-attested initial nonce. A sender cannot advance to the
-next permanent allocation until the prior effect has immutable terminal evidence. Allocated
-nonces are never reassigned to unrelated requests.
+The first allocation uses the deployment-attested initial nonce. Its content-addressed descriptor
+binds the nonce, public source-attestation reference, wallet domain, chain, sender, and durable
+generation. The account-sequence policy reference is derived from the canonical EVM nonce policy;
+deployment cannot supply either half of the policy/configuration pair independently. A sender
+cannot advance to the next permanent allocation until the prior effect has immutable terminal
+evidence. Allocated nonces are never reassigned to unrelated requests.
 
 ## Target Entry And Observation
 
@@ -191,12 +210,20 @@ public selector.
 
 Deployment must provide:
 
-- the exact executor contract, deployment, resource ownership, and account-sequence binding;
+- the exact executor contract, deployment, and resource ownership;
 - a dedicated executor PostgreSQL pool and independent writer-generation fence;
-- the public wallet signer-binding reference and verified keystore signer binding;
+- the selected immutable EVM route-generation reference and complete initial-nonce descriptor;
+- the verified keystore signer binding, from which the public signer-descriptor reference is
+  derived;
 - a signing-generation guard covering the executor generation, destination fence, and direct-sign
-  exclusion; and
-- an exact immutable EVM route generation.
+  exclusion.
+
+Bootstrap rejects any route/catalog, chain, signer, sender, generation, fence, wallet-domain,
+nonce, classifier, finality, assurance, evidence-bound, executor-semantic, or object-evidence
+mismatch before support admission. Configured request admission repeats the exact sealed
+predicate before certification and journal append. Executor entry repeats it before effect binding
+and nonce allocation; a rejected request creates no signer call, RPC call, effect record, or
+resource allocation.
 
 The conformance suite covers same-key/different-request rejection, concurrent ensure, stale-plan
 authorization, restart from durable bytes, response loss and signer-free hash recovery,

@@ -1,6 +1,7 @@
 //! Durable keyed-executor orchestration for one qualified EVM wallet.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_evm::{
@@ -17,15 +18,16 @@ use mfm_executor::{
     EffectEntryView, EffectExecutorOutcome, ExecutorEnsureResultClaim, ExecutorError,
     ExecutorLedgerStore, ExecutorRetainedClosureClaim, ExecutorTerminalEvidenceClaim, FailureClass,
     FencingRef, KeyedExecutorLedger, ProofBasis, ReferenceFailureCode, ReferenceTerminalProof,
-    ResourcePolicyBinding, ReturnedOutcome, TerminalTombstone, VerifiedEnsureResult,
+    ReturnedOutcome, TerminalTombstone, VerifiedEnsureResult,
 };
 use mfm_ids::{AttemptId, ContentRef};
 use mfm_program::decode_boundary;
 use mfm_runtime::{AuthorizedEnsureAccess, RecoverableEffectExecutor};
+use mfm_signing::GenerationGuardedDeterministicSigningProviderBinder;
 use mfm_values::MfmValue;
 
 use crate::{
-    EvmWalletJsonRpcTarget, EvmWalletLiveError, EvmWalletRpcClient, EvmWalletSignerBinding,
+    EvmWalletJsonRpcTarget, EvmWalletLiveError, EvmWalletRequestQualification, EvmWalletRpcClient,
     EvmWalletTargetEntryDescriptor,
 };
 
@@ -38,8 +40,7 @@ where
 {
     ledger: KeyedExecutorLedger<Store>,
     target: EvmWalletJsonRpcTarget<Client>,
-    resource_policy_binding: ResourcePolicyBinding,
-    generation_fence_ref: ContentRef,
+    qualification: Arc<EvmWalletRequestQualification>,
 }
 
 enum WalletDriveError {
@@ -62,32 +63,18 @@ where
     pub fn new(
         ledger: KeyedExecutorLedger<Store>,
         client: Client,
-        signer: EvmWalletSignerBinding,
-        resource_policy_binding: ResourcePolicyBinding,
+        signer: GenerationGuardedDeterministicSigningProviderBinder,
+        qualification: Arc<EvmWalletRequestQualification>,
     ) -> mfm_executor::Result<Self> {
-        let binding = ledger.exact_binding();
-        let ownership = binding
-            .resource_ownership()
-            .ok_or(ExecutorError::ResourceOwnershipRequired)?;
-        let generation_fence_ref = ownership
-            .destination_fencing_authority_ref()
-            .cloned()
-            .ok_or(ExecutorError::DestinationGenerationFenced)?;
-        if signer.durable_generation_ref() != binding.deployment().durable_ledger_generation_ref()
-            || signer.fence_attestation_ref() != &generation_fence_ref
-        {
+        if qualification.executor_binding() != ledger.exact_binding() {
             return Err(ExecutorError::LedgerGenerationMismatch);
         }
-        let target = EvmWalletJsonRpcTarget::new(
-            client,
-            signer,
-            binding.contract().safe_failure_contract_ref().clone(),
-        );
+        let target = EvmWalletJsonRpcTarget::new(client, signer, Arc::clone(&qualification))
+            .map_err(map_live_error)?;
         Ok(Self {
             ledger,
             target,
-            resource_policy_binding,
-            generation_fence_ref,
+            qualification,
         })
     }
 
@@ -124,9 +111,11 @@ where
         committed: &mfm_executor::CommittedEffectRequest<EvmSubmitTransactionRequest>,
     ) -> Result<VerifiedEnsureResult, WalletDriveError> {
         let request = committed.request();
-        self.validate_request(request)?;
+        self.qualification
+            .verify_request(request)
+            .map_err(map_live_error)?;
         let identity = committed.identity();
-        let allocation = self.allocate_nonce(identity, request).await?;
+        let allocation = self.allocate_nonce(identity).await?;
         let mut view = self
             .ledger
             .effect_view(identity)
@@ -135,7 +124,7 @@ where
         if view.terminal_tombstone().is_some() {
             return Ok(self.terminal_return(view)?);
         }
-        if let Some(terminal) = terminal_attempt(&view, request, self.exact_binding())? {
+        if let Some(terminal) = terminal_attempt(&view, request, self.qualification.as_ref())? {
             view = self.append_terminal(identity, terminal).await?;
             return Ok(self.terminal_return(view)?);
         }
@@ -143,14 +132,8 @@ where
         let history = self
             .load_history(&view, request, allocation.sequence())
             .await?;
-        let Some(plan) = history.next_plan(
-            request,
-            allocation.sequence(),
-            self.exact_binding()
-                .deployment()
-                .durable_ledger_generation_ref(),
-            &self.generation_fence_ref,
-        )?
+        let Some(plan) =
+            history.next_plan(request, allocation.sequence(), self.qualification.as_ref())?
         else {
             return Ok(pending_return(view, self.exact_binding())?);
         };
@@ -169,51 +152,18 @@ where
         if view.terminal_tombstone().is_some() {
             return Ok(self.terminal_return(view)?);
         }
-        if let Some(terminal) = terminal_attempt(&view, request, self.exact_binding())? {
+        if let Some(terminal) = terminal_attempt(&view, request, self.qualification.as_ref())? {
             let view = self.append_terminal(identity, terminal).await?;
             return Ok(self.terminal_return(view)?);
         }
         Ok(pending_return(view, self.exact_binding())?)
     }
 
-    fn validate_request(&self, request: &EvmSubmitTransactionRequest) -> mfm_executor::Result<()> {
-        let binding = self.exact_binding();
-        let policy = request.policy();
-        let wallet_domain_ref = policy
-            .wallet_domain_ref()
-            .to_content_ref()
-            .map_err(|_| ExecutorError::TargetOperationMismatch)?;
-        let nonce_attestation_ref = policy
-            .initial_nonce_attestation_ref()
-            .to_content_ref()
-            .map_err(|_| ExecutorError::TargetOperationMismatch)?;
-        if policy
-            .tenant_scope_id()
-            .map_err(|_| ExecutorError::TenantScopeMismatch)?
-            != *binding.deployment().tenant_scope_id()
-            || policy.evidence_bounds() != binding.contract().evidence_bounds()
-            || binding.contract().resource_domain_requirement() != Some(&wallet_domain_ref)
-            || binding
-                .resource_ownership()
-                .map(|ownership| ownership.external_resource_domain_ref())
-                != Some(&wallet_domain_ref)
-            || self.resource_policy_binding.policy_configuration_ref() != &nonce_attestation_ref
-        {
-            return Err(ExecutorError::TargetOperationMismatch);
-        }
-        Ok(())
-    }
-
     async fn allocate_nonce(
         &self,
         identity: &mfm_executor::EffectIdentity,
-        request: &EvmSubmitTransactionRequest,
     ) -> mfm_executor::Result<AccountSequenceAllocation> {
-        let policy = request.policy();
-        let wallet_domain_ref = policy
-            .wallet_domain_ref()
-            .to_content_ref()
-            .map_err(|_| ExecutorError::TargetOperationMismatch)?;
+        let wallet_domain_ref = self.qualification.wallet_domain_ref();
         let resource_domain_preimage = format!(
             "{}:{}",
             wallet_domain_ref.schema_id().as_str(),
@@ -222,8 +172,8 @@ where
         let resource_request = AccountSequenceRequest::new(
             format!(
                 "eip155-{}-{}",
-                policy.chain_id(),
-                policy.sender().trim_start_matches("0x")
+                self.qualification.chain_id(),
+                format!("{:#x}", self.qualification.sender()).trim_start_matches("0x")
             ),
             format!(
                 "evm-wallet-domain-{}",
@@ -232,11 +182,14 @@ where
         )
         .map_err(ExecutorError::ResourcePolicy)?;
         let sequence_policy = AccountSequencePolicy::new(
-            self.resource_policy_binding.clone(),
-            policy
+            self.qualification.resource_policy_binding().clone(),
+            self.qualification
+                .initial_nonce_descriptor()
                 .initial_nonce()
                 .map_err(|_| ExecutorError::TargetOperationMismatch)?,
-            Some(FencingRef::from_reviewed(self.generation_fence_ref.clone())),
+            Some(FencingRef::from_reviewed(
+                self.qualification.generation_fence_ref().clone(),
+            )),
         );
         let resource_key =
             mfm_executor::TypedResourcePolicy::resource_key(&sequence_policy, &resource_request)
@@ -264,7 +217,7 @@ where
             } => (allocation, evidence),
         };
         if evidence.fencing_ref().map(FencingRef::as_content_ref)
-            != Some(&self.generation_fence_ref)
+            != Some(self.qualification.generation_fence_ref())
         {
             return Err(ExecutorError::ResourcePolicyNotRevalidated);
         }
@@ -286,14 +239,7 @@ where
         let mut history = WalletHistory::default();
         for (attempt_id, outcome) in attempts {
             let expected = history
-                .next_plan(
-                    request,
-                    allocated_nonce,
-                    self.exact_binding()
-                        .deployment()
-                        .durable_ledger_generation_ref(),
-                    &self.generation_fence_ref,
-                )?
+                .next_plan(request, allocated_nonce, self.qualification.as_ref())?
                 .ok_or(ExecutorError::TargetOperationMismatch)?;
             let value = self
                 .ledger
@@ -354,7 +300,7 @@ where
                         identity,
                         expected_head,
                         descriptor.canonical().clone(),
-                        Some(&self.resource_policy_binding),
+                        Some(self.qualification.resource_policy_binding()),
                     )
                     .await?
                 else {
@@ -382,7 +328,7 @@ where
                         identity,
                         expected_head,
                         descriptor.canonical().clone(),
-                        Some(&self.resource_policy_binding),
+                        Some(self.qualification.resource_policy_binding()),
                     )
                     .await?
                 else {
@@ -696,8 +642,7 @@ impl WalletHistory {
         &self,
         request: &EvmSubmitTransactionRequest,
         allocated_nonce: u64,
-        executor_generation_ref: &ContentRef,
-        generation_fence_ref: &ContentRef,
+        qualification: &EvmWalletRequestQualification,
     ) -> mfm_executor::Result<Option<WalletPlan>> {
         if self
             .attempts
@@ -747,12 +692,16 @@ impl WalletHistory {
                             finalized_head,
                             receipt.block().clone(),
                             mfm_evm::EvmWalletReference::from_content_ref(
-                                executor_generation_ref.clone(),
+                                qualification
+                                    .executor_binding()
+                                    .deployment()
+                                    .durable_ledger_generation_ref()
+                                    .clone(),
                             ),
                             mfm_evm::EvmWalletReference::from_content_ref(
-                                generation_fence_ref.clone(),
+                                qualification.generation_fence_ref().clone(),
                             ),
-                            request.policy().assurance_policy_ref().clone(),
+                            qualification.assurance_policy_ref().clone(),
                         )
                         .map_err(|_| ExecutorError::TargetOperationMismatch)?;
                         return Ok(Some(WalletPlan {
@@ -993,7 +942,7 @@ struct TerminalAttempt {
 fn terminal_attempt(
     view: &EffectEntryView,
     request: &EvmSubmitTransactionRequest,
-    binding: &mfm_executor::VerifiedExecutorBinding,
+    qualification: &EvmWalletRequestQualification,
 ) -> mfm_executor::Result<Option<TerminalAttempt>> {
     for attempt in view.delivery_audit().attempts()?.into_iter().rev() {
         let Some(returned) = attempt
@@ -1009,24 +958,7 @@ fn terminal_attempt(
         else {
             continue;
         };
-        if evidence.request() != request
-            || evidence
-                .executor_generation_ref()
-                .to_content_ref()
-                .ok()
-                .as_ref()
-                != Some(binding.deployment().durable_ledger_generation_ref())
-            || evidence
-                .generation_fence_ref()
-                .to_content_ref()
-                .ok()
-                .as_ref()
-                != binding
-                    .resource_ownership()
-                    .and_then(|ownership| ownership.destination_fencing_authority_ref())
-        {
-            return Err(ExecutorError::TerminalProofMismatch);
-        }
+        validate_terminal_binding(evidence, request, qualification)?;
         let outcome = match evidence
             .outcome()
             .map_err(|_| ExecutorError::TerminalProofMismatch)?
@@ -1045,6 +977,37 @@ fn terminal_attempt(
         }));
     }
     Ok(None)
+}
+
+/// Verifies the qualification-owned terminal generation, fence, and assurance tuple.
+pub(crate) fn validate_terminal_binding(
+    evidence: &EvmWalletTerminalEvidence,
+    request: &EvmSubmitTransactionRequest,
+    qualification: &EvmWalletRequestQualification,
+) -> mfm_executor::Result<()> {
+    if evidence.request() != request
+        || evidence
+            .executor_generation_ref()
+            .to_content_ref()
+            .ok()
+            .as_ref()
+            != Some(
+                qualification
+                    .executor_binding()
+                    .deployment()
+                    .durable_ledger_generation_ref(),
+            )
+        || evidence
+            .generation_fence_ref()
+            .to_content_ref()
+            .ok()
+            .as_ref()
+            != Some(qualification.generation_fence_ref())
+        || evidence.assurance_policy_ref() != qualification.assurance_policy_ref()
+    {
+        return Err(ExecutorError::TerminalProofMismatch);
+    }
+    Ok(())
 }
 
 fn terminal_result(attempt: &WalletAttempt) -> Option<&EvmWalletTerminalEvidence> {

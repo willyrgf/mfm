@@ -49,15 +49,46 @@ fn guarded_binding(
     implementation_id: &str,
     generation_seed: u8,
 ) -> VerifiedGenerationGuardedSignerBinding {
-    VerifiedGenerationGuardedSignerBinding::verify(
-        signer_ref(),
+    guarded_binding_fields(
+        "deployer",
         implementation_id,
-        algorithm(),
-        profile(),
-        PublicSigningIdentity::new(algorithm(), None, Some("0x1111".to_owned())).expect("identity"),
+        "mfm.signing.test",
+        "mfm.signing.test.deterministic.v1",
+        "0x1111",
+        None,
+        generation_seed,
+        generation_seed.wrapping_add(1),
+        generation_seed.wrapping_add(2),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn guarded_binding_fields(
+    signer: &str,
+    implementation_id: &str,
+    algorithm_id: &str,
+    profile_id: &str,
+    account_id: &str,
+    public_key_seed: Option<u8>,
+    generation_seed: u8,
+    fence_seed: u8,
+    exclusion_seed: u8,
+) -> VerifiedGenerationGuardedSignerBinding {
+    let algorithm = SigningAlgorithmId::new(algorithm_id).expect("algorithm");
+    VerifiedGenerationGuardedSignerBinding::verify(
+        SignerRef::new(signer).expect("signer"),
+        implementation_id,
+        algorithm.clone(),
+        SigningProfileId::new(profile_id).expect("profile"),
+        PublicSigningIdentity::new(
+            algorithm,
+            public_key_seed.map(|seed| PublicKeyBytes::new(vec![seed; 33]).expect("public key")),
+            Some(account_id.to_owned()),
+        )
+        .expect("identity"),
         content_ref(generation_seed),
-        content_ref(generation_seed.wrapping_add(1)),
-        content_ref(generation_seed.wrapping_add(2)),
+        content_ref(fence_seed),
+        content_ref(exclusion_seed),
     )
     .expect("binding")
 }
@@ -165,6 +196,120 @@ fn guarded_binding_fixes_every_wallet_identity_and_exclusion_field() {
             reason: SigningProviderError::BindingMismatch
         }
     );
+}
+
+#[test]
+fn guarded_signer_descriptor_content_identity_fixes_every_public_field() {
+    let base = guarded_binding("mfm.test.guarded-signer", 0x40)
+        .public_descriptor()
+        .expect("base descriptor");
+    let variants = [
+        guarded_binding_fields(
+            "alternate",
+            "mfm.test.guarded-signer",
+            "mfm.signing.test",
+            "mfm.signing.test.deterministic.v1",
+            "0x1111",
+            None,
+            0x40,
+            0x41,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.alternate-signer",
+            "mfm.signing.test",
+            "mfm.signing.test.deterministic.v1",
+            "0x1111",
+            None,
+            0x40,
+            0x41,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.guarded-signer",
+            "mfm.signing.alternate",
+            "mfm.signing.test.deterministic.v1",
+            "0x1111",
+            None,
+            0x40,
+            0x41,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.guarded-signer",
+            "mfm.signing.test",
+            "mfm.signing.alternate.deterministic.v1",
+            "0x1111",
+            None,
+            0x40,
+            0x41,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.guarded-signer",
+            "mfm.signing.test",
+            "mfm.signing.test.deterministic.v1",
+            "0x2222",
+            None,
+            0x40,
+            0x41,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.guarded-signer",
+            "mfm.signing.test",
+            "mfm.signing.test.deterministic.v1",
+            "0x1111",
+            Some(0x05),
+            0x40,
+            0x41,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.guarded-signer",
+            "mfm.signing.test",
+            "mfm.signing.test.deterministic.v1",
+            "0x1111",
+            None,
+            0x43,
+            0x41,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.guarded-signer",
+            "mfm.signing.test",
+            "mfm.signing.test.deterministic.v1",
+            "0x1111",
+            None,
+            0x40,
+            0x44,
+            0x42,
+        ),
+        guarded_binding_fields(
+            "deployer",
+            "mfm.test.guarded-signer",
+            "mfm.signing.test",
+            "mfm.signing.test.deterministic.v1",
+            "0x1111",
+            None,
+            0x40,
+            0x41,
+            0x45,
+        ),
+    ];
+
+    for variant in variants {
+        let variant = variant.public_descriptor().expect("variant descriptor");
+        assert_ne!(variant.reference(), base.reference());
+        assert_ne!(variant.canonical(), base.canonical());
+    }
 }
 
 #[test]
