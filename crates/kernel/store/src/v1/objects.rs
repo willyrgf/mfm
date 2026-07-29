@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use mfm_canonical::{CanonicalValue, RecoverabilityContractV1};
 use mfm_ids::{ArtifactId, ContentDigest, ContentRef, FieldPath, ObjectEvidenceDigest, SchemaId};
@@ -90,44 +91,7 @@ pub(super) struct StagedObject {
 impl StagedObject {
     /// Verifies exact byte identity and complete retained-value metadata.
     pub(super) fn new(value_ref: ValueRef, bytes: Vec<u8>) -> Result<Self> {
-        let fields = value_ref.fields()?;
-        let byte_length =
-            u64::try_from(bytes.len()).map_err(|_| StoreError::ObjectContentMismatch {
-                artifact_id: fields.artifact_id.clone(),
-            })?;
-        let contract = RecoverabilityContractV1::embedded()?;
-        let content_digest = contract.raw_content_digest(&bytes);
-        let artifact_id = ArtifactIdPreimage::new(
-            &fields.schema_id,
-            &fields.content_digest,
-            &fields.semantic_type_id,
-        )?
-        .artifact_id()?;
-        let evidence_hash = ObjectEvidencePreimage::new(
-            &fields.artifact_id,
-            &fields.content_digest,
-            &fields.schema_id,
-            fields.byte_length,
-            &fields.media_type,
-            &fields.evidence_contract_ref,
-        )?
-        .evidence_hash()?;
-        if byte_length != fields.byte_length
-            || content_digest != fields.content_digest
-            || artifact_id != fields.artifact_id
-            || evidence_hash != fields.evidence_hash
-        {
-            return Err(StoreError::ObjectContentMismatch {
-                artifact_id: fields.artifact_id,
-            });
-        }
-        let key = ObjectAuthorityKey::new(
-            fields.artifact_id,
-            fields.content_digest,
-            fields.evidence_hash,
-            fields.evidence_contract_ref,
-            value_ref.as_bytes().to_vec(),
-        );
+        let key = validate_retained_object(&value_ref, &bytes)?;
         Ok(Self {
             value_ref,
             bytes,
@@ -144,6 +108,47 @@ impl StagedObject {
     pub(super) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+}
+
+fn validate_retained_object(value_ref: &ValueRef, bytes: &[u8]) -> Result<ObjectAuthorityKey> {
+    let fields = value_ref.fields()?;
+    let byte_length =
+        u64::try_from(bytes.len()).map_err(|_| StoreError::ObjectContentMismatch {
+            artifact_id: fields.artifact_id.clone(),
+        })?;
+    let contract = RecoverabilityContractV1::embedded()?;
+    let content_digest = contract.raw_content_digest(bytes);
+    let artifact_id = ArtifactIdPreimage::new(
+        &fields.schema_id,
+        &fields.content_digest,
+        &fields.semantic_type_id,
+    )?
+    .artifact_id()?;
+    let evidence_hash = ObjectEvidencePreimage::new(
+        &fields.artifact_id,
+        &fields.content_digest,
+        &fields.schema_id,
+        fields.byte_length,
+        &fields.media_type,
+        &fields.evidence_contract_ref,
+    )?
+    .evidence_hash()?;
+    if byte_length != fields.byte_length
+        || content_digest != fields.content_digest
+        || artifact_id != fields.artifact_id
+        || evidence_hash != fields.evidence_hash
+    {
+        return Err(StoreError::ObjectContentMismatch {
+            artifact_id: fields.artifact_id,
+        });
+    }
+    Ok(ObjectAuthorityKey::new(
+        fields.artifact_id,
+        fields.content_digest,
+        fields.evidence_hash,
+        fields.evidence_contract_ref,
+        value_ref.as_bytes().to_vec(),
+    ))
 }
 
 pub(super) fn derive_value_ref(
@@ -211,7 +216,7 @@ pub(super) fn validate_value_contract(
 pub struct CommittedObject {
     key: ObjectAuthorityKey,
     value_ref: ValueRef,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
 }
 
 /// Untrusted portable bytes plus every full logical authority over that one content payload.
@@ -224,7 +229,7 @@ pub struct CommittedObject {
 pub struct UntrustedObjectPayload {
     schema_id: SchemaId,
     content_digest: ContentDigest,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     value_refs: Vec<ValueRef>,
 }
 
@@ -252,12 +257,12 @@ impl UntrustedObjectPayload {
                     message: "portable object authority disagrees with shared payload identity",
                 });
             }
-            StagedObject::new(value_ref.clone(), bytes.clone())?;
+            validate_retained_object(value_ref, &bytes)?;
         }
         Ok(Self {
             schema_id,
             content_digest,
-            bytes,
+            bytes: Arc::from(bytes),
             value_refs,
         })
     }
@@ -283,9 +288,12 @@ impl UntrustedObjectPayload {
     }
 
     pub(super) fn into_committed(self) -> Result<Vec<CommittedObject>> {
-        self.value_refs
+        let Self {
+            bytes, value_refs, ..
+        } = self;
+        value_refs
             .into_iter()
-            .map(|value_ref| CommittedObject::from_persisted(value_ref, self.bytes.clone()))
+            .map(|value_ref| CommittedObject::from_shared_persisted(value_ref, Arc::clone(&bytes)))
             .collect()
     }
 }
@@ -294,11 +302,15 @@ impl CommittedObject {
     /// Reconstructs and verifies one exact immutable object loaded by a durable backend.
     #[doc(hidden)]
     pub fn from_persisted(value_ref: ValueRef, bytes: Vec<u8>) -> Result<Self> {
-        let staged = StagedObject::new(value_ref, bytes)?;
+        Self::from_shared_persisted(value_ref, Arc::from(bytes))
+    }
+
+    fn from_shared_persisted(value_ref: ValueRef, bytes: Arc<[u8]>) -> Result<Self> {
+        let key = validate_retained_object(&value_ref, &bytes)?;
         Ok(Self {
-            key: staged.key,
-            value_ref: staged.value_ref,
-            bytes: staged.bytes,
+            key,
+            value_ref,
+            bytes,
         })
     }
 
@@ -779,12 +791,13 @@ impl ObjectAuthorityState {
     }
 
     pub(super) fn apply(&mut self, prepared: &PreparedObjectGraph) -> Result<()> {
-        let mut payloads = BTreeMap::<ObjectAuthorityKey, (&ValueRef, &[u8])>::new();
+        let mut payloads = BTreeMap::<ObjectAuthorityKey, (&ValueRef, Arc<[u8]>)>::new();
         for payload in &prepared.payloads {
+            let bytes = Arc::<[u8]>::from(payload.bytes());
             for value_ref in payload.value_refs() {
                 payloads.insert(
                     ObjectAuthorityKey::from_value_ref(value_ref)?,
-                    (value_ref, payload.bytes()),
+                    (value_ref, Arc::clone(&bytes)),
                 );
             }
         }
@@ -792,17 +805,15 @@ impl ObjectAuthorityState {
             let fields = intent.fields()?;
             let value_fields = fields.value_ref.fields()?;
             let key = ObjectAuthorityKey::from_value_ref(&fields.value_ref)?;
-            let candidate =
-                payloads
-                    .get(&key)
-                    .copied()
-                    .ok_or(StoreError::InvalidObjectAuthority {
-                        message: "object admission intent has no exact graph payload",
-                    })?;
+            let candidate = payloads
+                .get(&key)
+                .ok_or(StoreError::InvalidObjectAuthority {
+                    message: "object admission intent has no exact graph payload",
+                })?;
             match (fields.mode, self.objects.get(&key)) {
                 (ArtifactAdmissionMode::RequireExisting, Some(existing)) => {
                     if existing.value_ref.as_bytes() != candidate.0.as_bytes()
-                        || existing.bytes != candidate.1
+                        || existing.bytes.as_ref() != candidate.1.as_ref()
                     {
                         return Err(StoreError::ObjectAuthorityConflict {
                             artifact_id: value_fields.artifact_id,
@@ -815,7 +826,7 @@ impl ObjectAuthorityState {
                     });
                 }
                 (ArtifactAdmissionMode::AdmitOrVerifyExact, Some(existing)) => {
-                    if existing.bytes != candidate.1
+                    if existing.bytes.as_ref() != candidate.1.as_ref()
                         || existing.value_ref.as_bytes() != candidate.0.as_bytes()
                     {
                         return Err(StoreError::ObjectAuthorityConflict {
@@ -824,14 +835,11 @@ impl ObjectAuthorityState {
                     }
                 }
                 (ArtifactAdmissionMode::AdmitOrVerifyExact, None) => {
-                    self.objects.insert(
-                        key.clone(),
-                        CommittedObject {
-                            key,
-                            value_ref: candidate.0.clone(),
-                            bytes: candidate.1.to_vec(),
-                        },
-                    );
+                    let object = CommittedObject::from_shared_persisted(
+                        (*candidate.0).clone(),
+                        Arc::clone(&candidate.1),
+                    )?;
+                    self.objects.insert(key, object);
                 }
             }
         }
@@ -856,3 +864,7 @@ fn validate_canonical_order<'a>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "objects_tests.rs"]
+mod tests;
