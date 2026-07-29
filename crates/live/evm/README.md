@@ -40,6 +40,20 @@ allocation and immediately before durable target authorization. Hash, receipt, f
 canonical-inclusion recovery use retained public candidate descriptors without reopening the
 signer. Raw signed bytes are zeroized and never enter executor evidence.
 
+After request qualification and permanent nonce allocation, every initial, recovered,
+post-exchange, authorization/terminalization-conflict, pending, and terminal decision passes
+through one wallet-history fold. The fold reconstructs the deterministic plan at each attempt,
+validates the exact descriptor and typed result, derives terminal evidence only from that history,
+and requires any tombstone to name the exact operation, outcome, attempt, returned result, and
+returned observation. It reads immutable records in append order, freezes each plan when its
+authorization appears from the authorization-ordered evidence observed by then, and validates a
+later observation at its physical position without retroactively changing already authorized
+plans. Authorization order remains the logical result-reference order. The first valid terminal
+observation selects terminalization; every later observation, including one after the tombstone, is
+validation-only audit evidence. Invalid restored history performs no signing, RPC, target
+authorization/observation, or terminal append; replaying a valid terminal tombstone is likewise
+signer-, RPC-, and write-free.
+
 `EvmWalletRequestQualification` is the single sealed pre-admission and pre-allocation wallet
 predicate. It derives the complete ordered route-generation/chain map from the actual transport,
 closes the verified executor semantics and object-evidence contract, and binds the guarded-signer

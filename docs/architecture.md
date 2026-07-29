@@ -263,6 +263,20 @@ reference derives the attempt identity. The shared engine can resolve that descr
 attempt during recovery. This keeps candidate-specific public target input durable without
 retaining signatures, raw signed envelopes, credentials, or other bearer material.
 
+`mfm-evm-live` owns one wallet-specific history fold above that domain-free ledger. After request
+qualification and permanent allocation, every initial, restored, post-target,
+authorization/terminalization-conflict, pending, and terminal decision uses it before target
+authorization/observation, signing or target IO, terminal append, or return. The fold reconstructs
+each deterministic wallet plan, validates its exact descriptor/result transition, derives the
+complete terminal relation from the validated prefix, and accepts a tombstone only when its
+operation, outcome, attempt, returned result, and observation name that derived terminal attempt.
+The fold reads records in immutable append order and freezes each plan at authorization using
+authorization-ordered evidence whose observations are already present. A later observation is
+validated against that frozen plan without rewriting later authorizations. The first observed valid
+terminal is selected; subsequent observations, including legal post-tombstone observations, are
+validation-only audit evidence. No backend, RPC target, or return adapter duplicates or partially
+revalidates those rules.
+
 Every reopen strictly refolds the complete immutable effect/resource graph and exact executor-owned
 content inventory under the selected binding. Missing, extra, duplicate, mismatched, forked, or
 partially linked content fails closed. Backend transactions end before target IO.

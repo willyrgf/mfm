@@ -16,9 +16,10 @@ use mfm_executor::{
     reference_safe_failure, verify_ensure_result, AccountSequenceAllocation, AccountSequencePolicy,
     AccountSequenceRequest, AllocationOutcome, BoundaryStage, DeliveryAttemptOutcome,
     EffectEntryView, EffectExecutorOutcome, ExecutorEnsureResultClaim, ExecutorError,
-    ExecutorLedgerStore, ExecutorRetainedClosureClaim, ExecutorTerminalEvidenceClaim, FailureClass,
-    FencingRef, KeyedExecutorLedger, ProofBasis, ReferenceFailureCode, ReferenceTerminalProof,
-    ReturnedOutcome, TerminalTombstone, VerifiedEnsureResult,
+    ExecutorEvidenceRecord, ExecutorLedgerStore, ExecutorRetainedClosureClaim,
+    ExecutorTerminalEvidenceClaim, FailureClass, FencingRef, KeyedExecutorLedger, ProofBasis,
+    ReferenceFailureCode, ReferenceTerminalProof, ReturnedOutcome, TerminalTombstone,
+    VerifiedEnsureResult,
 };
 use mfm_ids::{AttemptId, ContentRef};
 use mfm_program::decode_boundary;
@@ -116,47 +117,45 @@ where
             .map_err(map_live_error)?;
         let identity = committed.identity();
         let allocation = self.allocate_nonce(identity).await?;
-        let mut view = self
-            .ledger
-            .effect_view(identity)
-            .await?
-            .ok_or(ExecutorError::EffectNotBound)?;
-        if view.terminal_tombstone().is_some() {
-            return Ok(self.terminal_return(view)?);
+        let mut verified = self
+            .load_verified_history(identity, request, allocation.sequence())
+            .await?;
+        if verified.view.terminal_tombstone().is_some() {
+            return Ok(self.terminal_return(verified)?);
         }
-        if let Some(terminal) = terminal_attempt(&view, request, self.qualification.as_ref())? {
-            view = self.append_terminal(identity, terminal).await?;
-            return Ok(self.terminal_return(view)?);
+        if let Some(terminal) = verified.history.terminal.as_ref() {
+            self.append_terminal(identity, terminal).await?;
+            verified = self
+                .load_verified_history(identity, request, allocation.sequence())
+                .await?;
+            return Ok(self.terminal_return(verified)?);
         }
 
-        let history = self
-            .load_history(&view, request, allocation.sequence())
-            .await?;
-        let Some(plan) =
-            history.next_plan(request, allocation.sequence(), self.qualification.as_ref())?
+        let Some(plan) = verified.history.next_plan(
+            request,
+            allocation.sequence(),
+            self.qualification.as_ref(),
+        )?
         else {
-            return Ok(pending_return(view, self.exact_binding())?);
+            return Ok(self.pending_return(verified)?);
         };
-        let expected_head = view.delivery_audit().head_ref()?;
-        let view = match self
-            .execute_plan(identity, request, &expected_head, plan)
-            .await?
-        {
-            Some(view) => view,
-            None => self
-                .ledger
-                .effect_view(identity)
-                .await?
-                .ok_or(ExecutorError::EffectNotBound)?,
-        };
-        if view.terminal_tombstone().is_some() {
-            return Ok(self.terminal_return(view)?);
+        let expected_head = verified.view.delivery_audit().head_ref()?;
+        self.execute_plan(identity, request, &expected_head, plan)
+            .await?;
+        verified = self
+            .load_verified_history(identity, request, allocation.sequence())
+            .await?;
+        if verified.view.terminal_tombstone().is_some() {
+            return Ok(self.terminal_return(verified)?);
         }
-        if let Some(terminal) = terminal_attempt(&view, request, self.qualification.as_ref())? {
-            let view = self.append_terminal(identity, terminal).await?;
-            return Ok(self.terminal_return(view)?);
+        if let Some(terminal) = verified.history.terminal.as_ref() {
+            self.append_terminal(identity, terminal).await?;
+            verified = self
+                .load_verified_history(identity, request, allocation.sequence())
+                .await?;
+            return Ok(self.terminal_return(verified)?);
         }
-        Ok(pending_return(view, self.exact_binding())?)
+        Ok(self.pending_return(verified)?)
     }
 
     async fn allocate_nonce(
@@ -224,48 +223,57 @@ where
         Ok(allocation)
     }
 
-    async fn load_history(
+    async fn load_verified_history(
         &self,
-        view: &EffectEntryView,
+        identity: &mfm_executor::EffectIdentity,
         request: &EvmSubmitTransactionRequest,
         allocated_nonce: u64,
-    ) -> mfm_executor::Result<WalletHistory> {
-        let attempts = view
-            .delivery_audit()
-            .attempts()?
-            .into_iter()
-            .map(|attempt| (attempt.attempt_id().clone(), attempt.outcome().cloned()))
-            .collect::<Vec<_>>();
+    ) -> mfm_executor::Result<VerifiedWalletHistory> {
+        let view = self
+            .ledger
+            .effect_view(identity)
+            .await?
+            .ok_or(ExecutorError::EffectNotBound)?;
         let mut history = WalletHistory::default();
-        for (attempt_id, outcome) in attempts {
-            let expected = history
-                .next_plan(request, allocated_nonce, self.qualification.as_ref())?
-                .ok_or(ExecutorError::TargetOperationMismatch)?;
-            let value = self
-                .ledger
-                .target_operation(view.identity(), &attempt_id)
-                .await?;
-            let descriptor =
-                EvmWalletTargetEntryDescriptor::strict_decode(&value).map_err(map_live_error)?;
-            let candidate = descriptor.candidate(request).map_err(map_live_error)?;
-            expected.validate_descriptor(&descriptor, &candidate, allocated_nonce)?;
-            let returned = outcome
-                .as_ref()
-                .and_then(DeliveryAttemptOutcome::returned_outcome)
-                .map(|returned| {
-                    decode_attempt_result(returned).and_then(|result| {
-                        expected.validate_result(&candidate, &result)?;
-                        Ok((returned.clone(), result))
-                    })
-                })
-                .transpose()?;
-            history.push(WalletAttempt {
-                descriptor,
-                candidate,
-                returned,
-            })?;
+        for frontier in view.delivery_audit().frontiers() {
+            for record in frontier.appended_records() {
+                match record {
+                    ExecutorEvidenceRecord::DeliveryAttemptAuthorized { attempt_id, .. } => {
+                        let plan = history
+                            .next_plan(request, allocated_nonce, self.qualification.as_ref())?
+                            .ok_or(ExecutorError::TargetOperationMismatch)?;
+                        let value = self.ledger.target_operation(identity, attempt_id).await?;
+                        let descriptor = EvmWalletTargetEntryDescriptor::strict_decode(&value)
+                            .map_err(map_live_error)?;
+                        let candidate = descriptor.candidate(request).map_err(map_live_error)?;
+                        plan.validate_descriptor(&descriptor, &candidate, allocated_nonce)?;
+                        history.push(WalletAttempt {
+                            attempt_id: attempt_id.clone(),
+                            plan,
+                            descriptor,
+                            candidate,
+                            observed: false,
+                            returned: None,
+                        })?;
+                    }
+                    ExecutorEvidenceRecord::DeliveryAttemptObserved {
+                        attempt_id,
+                        outcome,
+                    } => {
+                        let observation_ref = record
+                            .observed_content_ref()?
+                            .ok_or(ExecutorError::InvalidDeliveryObservation)?;
+                        history.observe(attempt_id, outcome, observation_ref)?;
+                    }
+                    ExecutorEvidenceRecord::TerminalTombstone(tombstone) => {
+                        validate_tombstone_relation(tombstone, history.terminal.as_ref())?;
+                    }
+                    ExecutorEvidenceRecord::EffectBound { .. }
+                    | ExecutorEvidenceRecord::ResourceAllocated(_) => {}
+                }
+            }
         }
-        Ok(history)
+        Ok(VerifiedWalletHistory { view, history })
     }
 
     async fn execute_plan(
@@ -274,7 +282,7 @@ where
         request: &EvmSubmitTransactionRequest,
         expected_head: &mfm_executor::DeliveryAuditFrontierRef,
         mut plan: WalletPlan,
-    ) -> Result<Option<EffectEntryView>, WalletDriveError> {
+    ) -> Result<(), WalletDriveError> {
         let receipt = match plan.kind {
             WalletPlanKind::Broadcast => {
                 let prepared = self
@@ -304,7 +312,7 @@ where
                     )
                     .await?
                 else {
-                    return Ok(None);
+                    return Ok(());
                 };
                 let returned = self
                     .target
@@ -332,7 +340,7 @@ where
                     )
                     .await?
                 else {
-                    return Ok(None);
+                    return Ok(());
                 };
                 match plan.kind {
                     WalletPlanKind::TransactionLookup => self
@@ -368,22 +376,19 @@ where
                 }
             }
         };
-        self.ledger
-            .observe_target(receipt)
-            .await
-            .map(Some)
-            .map_err(Into::into)
+        self.ledger.observe_target(receipt).await?;
+        Ok(())
     }
 
     async fn append_terminal(
         &self,
         identity: &mfm_executor::EffectIdentity,
-        terminal: TerminalAttempt,
-    ) -> mfm_executor::Result<EffectEntryView> {
+        terminal: &TerminalAttempt,
+    ) -> mfm_executor::Result<()> {
         let proof = ReferenceTerminalProof::new(
-            terminal.attempt_id,
-            terminal.returned,
-            terminal.observation_ref,
+            terminal.attempt_id.clone(),
+            terminal.returned.clone(),
+            terminal.observation_ref.clone(),
         )?;
         let tombstone =
             TerminalTombstone::new(EVM_SUBMIT_TRANSACTION_OPERATION_ID, terminal.outcome, proof)?;
@@ -392,29 +397,25 @@ where
             .append_terminal_tombstone(identity, tombstone)
             .await
         {
-            Ok(view) => Ok(view),
-            Err(ExecutorError::TerminalTombstoneConflict) => self
-                .ledger
-                .effect_view(identity)
-                .await?
-                .ok_or(ExecutorError::EffectNotBound),
+            Ok(_) | Err(ExecutorError::TerminalTombstoneConflict) => Ok(()),
             Err(error) => Err(error),
         }
     }
 
-    fn terminal_return(&self, view: EffectEntryView) -> mfm_executor::Result<VerifiedEnsureResult> {
+    fn terminal_return(
+        &self,
+        verified: VerifiedWalletHistory,
+    ) -> mfm_executor::Result<VerifiedEnsureResult> {
+        let VerifiedWalletHistory { view, history } = verified;
+        let terminal = history
+            .terminal
+            .ok_or(ExecutorError::TerminalEvidenceMissing)?;
         let (tombstone_ref, tombstone) = view
             .terminal_tombstone()
             .cloned()
             .ok_or(ExecutorError::TerminalEvidenceMissing)?;
-        let proof = tombstone.terminal_proof().clone();
         let audit = view.delivery_audit().clone();
-        let domain_evidence_ref = proof.returned_outcome().safe_result_ref().clone();
-        let attempt = decode_attempt_result(proof.returned_outcome())?;
-        let terminal = attempt
-            .terminal_evidence()
-            .map_err(|_| ExecutorError::TerminalProofMismatch)?
-            .ok_or(ExecutorError::TerminalEvidenceMissing)?;
+        let domain_evidence_ref = terminal.returned.safe_result_ref().clone();
         let claim = ExecutorTerminalEvidenceClaim::new(
             view.identity().clone(),
             audit.head_ref()?,
@@ -422,6 +423,7 @@ where
             tombstone.external_operation_identity(),
             tombstone.terminal_outcome(),
             terminal
+                .evidence
                 .assurance_policy_ref()
                 .to_content_ref()
                 .map_err(|_| ExecutorError::TerminalProofMismatch)?,
@@ -440,6 +442,25 @@ where
             view.identity().clone(),
             self.exact_binding(),
             ExecutorEnsureResultClaim::terminal(claim),
+            retained,
+        )
+    }
+
+    fn pending_return(
+        &self,
+        verified: VerifiedWalletHistory,
+    ) -> mfm_executor::Result<VerifiedEnsureResult> {
+        if verified.history.terminal.is_some() || verified.view.terminal_tombstone().is_some() {
+            return Err(ExecutorError::TerminalProofMismatch);
+        }
+        let audit = verified.view.delivery_audit().clone();
+        let head = audit.head_ref()?;
+        let retained =
+            ExecutorRetainedClosureClaim::from_delivery_audit(&audit, self.exact_binding())?;
+        verify_ensure_result(
+            verified.view.identity().clone(),
+            self.exact_binding(),
+            ExecutorEnsureResultClaim::pending(head),
             retained,
         )
     }
@@ -614,16 +635,27 @@ impl WalletPlan {
 struct WalletHistory {
     attempts: Vec<WalletAttempt>,
     candidates: BTreeMap<u16, EvmWalletTransactionCandidate>,
+    terminal: Option<TerminalAttempt>,
 }
 
 struct WalletAttempt {
+    attempt_id: AttemptId,
+    plan: WalletPlan,
     descriptor: EvmWalletTargetEntryDescriptor,
     candidate: EvmWalletTransactionCandidate,
+    observed: bool,
     returned: Option<(ReturnedOutcome, EvmWalletAttemptResult)>,
 }
 
 impl WalletHistory {
     fn push(&mut self, attempt: WalletAttempt) -> mfm_executor::Result<()> {
+        if self
+            .attempts
+            .iter()
+            .any(|existing| existing.attempt_id == attempt.attempt_id)
+        {
+            return Err(ExecutorError::AttemptIdentityMismatch);
+        }
         match self.candidates.entry(attempt.candidate.fee_ordinal()) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(attempt.candidate.clone());
@@ -638,17 +670,58 @@ impl WalletHistory {
         Ok(())
     }
 
+    fn observe(
+        &mut self,
+        attempt_id: &AttemptId,
+        outcome: &DeliveryAttemptOutcome,
+        observation_ref: ContentRef,
+    ) -> mfm_executor::Result<()> {
+        let terminal = {
+            let attempt = self
+                .attempts
+                .iter_mut()
+                .find(|attempt| &attempt.attempt_id == attempt_id)
+                .ok_or(ExecutorError::InvalidDeliveryObservation)?;
+            if attempt.observed {
+                return Err(ExecutorError::InvalidDeliveryObservation);
+            }
+            attempt.observed = true;
+            let Some(returned) = outcome.returned_outcome() else {
+                return Ok(());
+            };
+            let result = decode_attempt_result(returned)?;
+            attempt.plan.validate_result(&attempt.candidate, &result)?;
+            let terminal = result
+                .terminal_evidence()
+                .map_err(|_| ExecutorError::TargetOperationMismatch)?
+                .cloned()
+                .map(|evidence| {
+                    let outcome = terminal_outcome(&evidence)?;
+                    Ok(TerminalAttempt {
+                        attempt_id: attempt_id.clone(),
+                        returned: returned.clone(),
+                        observation_ref,
+                        outcome,
+                        evidence,
+                    })
+                })
+                .transpose()?;
+            attempt.returned = Some((returned.clone(), result));
+            terminal
+        };
+        if self.terminal.is_none() {
+            self.terminal = terminal;
+        }
+        Ok(())
+    }
+
     fn next_plan(
         &self,
         request: &EvmSubmitTransactionRequest,
         allocated_nonce: u64,
         qualification: &EvmWalletRequestQualification,
     ) -> mfm_executor::Result<Option<WalletPlan>> {
-        if self
-            .attempts
-            .iter()
-            .any(|attempt| terminal_result(attempt).is_some())
-        {
+        if self.terminal.is_some() {
             return Ok(None);
         }
         let convergence = request.policy().convergence();
@@ -932,89 +1005,48 @@ impl CandidateAttemptCounts {
     }
 }
 
+struct VerifiedWalletHistory {
+    view: EffectEntryView,
+    history: WalletHistory,
+}
+
 struct TerminalAttempt {
     attempt_id: AttemptId,
     returned: ReturnedOutcome,
     observation_ref: ContentRef,
     outcome: &'static str,
+    evidence: EvmWalletTerminalEvidence,
 }
 
-fn terminal_attempt(
-    view: &EffectEntryView,
-    request: &EvmSubmitTransactionRequest,
-    qualification: &EvmWalletRequestQualification,
-) -> mfm_executor::Result<Option<TerminalAttempt>> {
-    for attempt in view.delivery_audit().attempts()?.into_iter().rev() {
-        let Some(returned) = attempt
-            .outcome()
-            .and_then(DeliveryAttemptOutcome::returned_outcome)
-        else {
-            continue;
-        };
-        let result = decode_attempt_result(returned)?;
-        let Some(evidence) = result
-            .terminal_evidence()
-            .map_err(|_| ExecutorError::TerminalProofMismatch)?
-        else {
-            continue;
-        };
-        validate_terminal_binding(evidence, request, qualification)?;
-        let outcome = match evidence
-            .outcome()
-            .map_err(|_| ExecutorError::TerminalProofMismatch)?
-        {
-            EvmTransactionOutcome::Succeeded { .. } => EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
-            EvmTransactionOutcome::Reverted { .. } => EVM_WALLET_REVERTED_TERMINAL_OUTCOME,
-        };
-        return Ok(Some(TerminalAttempt {
-            attempt_id: attempt.attempt_id().clone(),
-            returned: returned.clone(),
-            observation_ref: attempt
-                .returned_observation_ref()
-                .cloned()
-                .ok_or(ExecutorError::TerminalProofMismatch)?,
-            outcome,
-        }));
-    }
-    Ok(None)
-}
-
-/// Verifies the qualification-owned terminal generation, fence, and assurance tuple.
-pub(crate) fn validate_terminal_binding(
-    evidence: &EvmWalletTerminalEvidence,
-    request: &EvmSubmitTransactionRequest,
-    qualification: &EvmWalletRequestQualification,
+fn validate_tombstone_relation(
+    tombstone: &TerminalTombstone,
+    terminal: Option<&TerminalAttempt>,
 ) -> mfm_executor::Result<()> {
-    if evidence.request() != request
-        || evidence
-            .executor_generation_ref()
-            .to_content_ref()
-            .ok()
-            .as_ref()
-            != Some(
-                qualification
-                    .executor_binding()
-                    .deployment()
-                    .durable_ledger_generation_ref(),
-            )
-        || evidence
-            .generation_fence_ref()
-            .to_content_ref()
-            .ok()
-            .as_ref()
-            != Some(qualification.generation_fence_ref())
-        || evidence.assurance_policy_ref() != qualification.assurance_policy_ref()
-    {
-        return Err(ExecutorError::TerminalProofMismatch);
+    match terminal {
+        None => Err(ExecutorError::TerminalEvidenceMissing),
+        Some(terminal) => {
+            let proof = tombstone.terminal_proof();
+            if tombstone.external_operation_identity() != EVM_SUBMIT_TRANSACTION_OPERATION_ID
+                || tombstone.terminal_outcome() != terminal.outcome
+                || proof.attempt_id() != &terminal.attempt_id
+                || proof.returned_outcome() != &terminal.returned
+                || proof.returned_observation_ref() != &terminal.observation_ref
+            {
+                return Err(ExecutorError::TerminalProofMismatch);
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
-fn terminal_result(attempt: &WalletAttempt) -> Option<&EvmWalletTerminalEvidence> {
-    attempt
-        .returned
-        .as_ref()
-        .and_then(|(_, result)| result.terminal_evidence().ok().flatten())
+fn terminal_outcome(evidence: &EvmWalletTerminalEvidence) -> mfm_executor::Result<&'static str> {
+    match evidence
+        .outcome()
+        .map_err(|_| ExecutorError::TerminalProofMismatch)?
+    {
+        EvmTransactionOutcome::Succeeded { .. } => Ok(EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME),
+        EvmTransactionOutcome::Reverted { .. } => Ok(EVM_WALLET_REVERTED_TERMINAL_OUTCOME),
+    }
 }
 
 fn decode_attempt_result(
@@ -1030,21 +1062,6 @@ fn decode_attempt_result(
     )
     .map_err(|_| ExecutorError::CanonicalEncoding)?;
     decode_boundary(&canonical).map_err(|_| ExecutorError::CanonicalEncoding)
-}
-
-fn pending_return(
-    view: EffectEntryView,
-    binding: &mfm_executor::VerifiedExecutorBinding,
-) -> mfm_executor::Result<VerifiedEnsureResult> {
-    let audit = view.delivery_audit().clone();
-    let head = audit.head_ref()?;
-    let retained = ExecutorRetainedClosureClaim::from_delivery_audit(&audit, binding)?;
-    verify_ensure_result(
-        view.identity().clone(),
-        binding,
-        ExecutorEnsureResultClaim::pending(head),
-        retained,
-    )
 }
 
 fn map_live_error(error: EvmWalletLiveError) -> ExecutorError {
