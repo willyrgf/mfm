@@ -163,9 +163,12 @@ The reusable EVM transport owns:
 - direct exact-capacity request encoding into owner-backed zeroizing bodies;
 - non-empty valid authorization values bounded to 16 KiB and consumed into sensitive owner-backed
   headers;
-- a 512 KiB signed-envelope limit checked after encoding and again before HTTP, plus one
-  preallocated zeroizing 1 MiB response buffer;
-- exact HTTP `200` acceptance;
+- a 512 KiB signed-envelope limit checked after encoding and again before HTTP;
+- non-`200` responses classified solely by numeric status, without polling, decoding, hashing, or
+  retaining their provider bodies;
+- exact HTTP `200` responses with a declared `Content-Length` above 1 MiB rejected from the headers
+  before response-owner construction or body polling; otherwise, each body chunk is polled at most
+  once into one preallocated zeroizing 1 MiB buffer and any streamed overrun is rejected;
 - redirects and implicit retries disabled;
 - strict borrowed JSON-RPC 2.0 envelope/id/result-or-error validation, including semantic duplicate
   detection across escaped key aliases and trailing-input rejection;
