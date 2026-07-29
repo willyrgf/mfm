@@ -12,12 +12,12 @@ use mfm_evm::{
     EVM_WALLET_TRANSACTION_LOOKUP_OPERATION_ID,
 };
 use mfm_executor::{
-    verify_ensure_result, AccountSequenceAllocation, AccountSequencePolicy, AccountSequenceRequest,
-    AllocationOutcome, DeliveryAttemptOutcome, EffectEntryView, ExecutorEnsureResultClaim,
-    ExecutorError, ExecutorLedgerStore, ExecutorRetainedClosureClaim,
-    ExecutorTerminalEvidenceClaim, FencingRef, KeyedExecutorLedger, ProofBasis,
-    ReferenceTerminalProof, ResourcePolicyBinding, ReturnedOutcome, TerminalTombstone,
-    VerifiedEnsureResult,
+    reference_safe_failure, verify_ensure_result, AccountSequenceAllocation, AccountSequencePolicy,
+    AccountSequenceRequest, AllocationOutcome, BoundaryStage, DeliveryAttemptOutcome,
+    EffectEntryView, EffectExecutorOutcome, ExecutorEnsureResultClaim, ExecutorError,
+    ExecutorLedgerStore, ExecutorRetainedClosureClaim, ExecutorTerminalEvidenceClaim, FailureClass,
+    FencingRef, KeyedExecutorLedger, ProofBasis, ReferenceFailureCode, ReferenceTerminalProof,
+    ResourcePolicyBinding, ReturnedOutcome, TerminalTombstone, VerifiedEnsureResult,
 };
 use mfm_ids::{AttemptId, ContentRef};
 use mfm_program::decode_boundary;
@@ -40,6 +40,17 @@ where
     target: EvmWalletJsonRpcTarget<Client>,
     resource_policy_binding: ResourcePolicyBinding,
     generation_fence_ref: ContentRef,
+}
+
+enum WalletDriveError {
+    SignerUnavailable,
+    Executor(ExecutorError),
+}
+
+impl From<ExecutorError> for WalletDriveError {
+    fn from(error: ExecutorError) -> Self {
+        Self::Executor(error)
+    }
 }
 
 impl<Store, Client> EvmWalletExecutor<Store, Client>
@@ -89,7 +100,29 @@ where
     pub async fn drive(
         &self,
         committed: &mfm_executor::CommittedEffectRequest<EvmSubmitTransactionRequest>,
-    ) -> mfm_executor::Result<VerifiedEnsureResult> {
+    ) -> mfm_executor::Result<EffectExecutorOutcome> {
+        match self.drive_result(committed).await {
+            Ok(result) => Ok(EffectExecutorOutcome::returned(result)),
+            Err(WalletDriveError::SignerUnavailable) => {
+                let failure = reference_safe_failure(
+                    self.exact_binding()
+                        .contract()
+                        .safe_failure_contract_ref()
+                        .clone(),
+                    ReferenceFailureCode::DestinationUnavailable,
+                    FailureClass::Transport,
+                    BoundaryStage::BeforeBoundaryEntry,
+                )?;
+                EffectExecutorOutcome::did_not_enter(failure)
+            }
+            Err(WalletDriveError::Executor(error)) => Err(error),
+        }
+    }
+
+    async fn drive_result(
+        &self,
+        committed: &mfm_executor::CommittedEffectRequest<EvmSubmitTransactionRequest>,
+    ) -> Result<VerifiedEnsureResult, WalletDriveError> {
         let request = committed.request();
         self.validate_request(request)?;
         let identity = committed.identity();
@@ -100,11 +133,11 @@ where
             .await?
             .ok_or(ExecutorError::EffectNotBound)?;
         if view.terminal_tombstone().is_some() {
-            return self.terminal_return(view);
+            return Ok(self.terminal_return(view)?);
         }
         if let Some(terminal) = terminal_attempt(&view, request, self.exact_binding())? {
             view = self.append_terminal(identity, terminal).await?;
-            return self.terminal_return(view);
+            return Ok(self.terminal_return(view)?);
         }
 
         let history = self
@@ -119,7 +152,7 @@ where
             &self.generation_fence_ref,
         )?
         else {
-            return pending_return(view, self.exact_binding());
+            return Ok(pending_return(view, self.exact_binding())?);
         };
         let expected_head = view.delivery_audit().head_ref()?;
         let view = match self
@@ -134,13 +167,13 @@ where
                 .ok_or(ExecutorError::EffectNotBound)?,
         };
         if view.terminal_tombstone().is_some() {
-            return self.terminal_return(view);
+            return Ok(self.terminal_return(view)?);
         }
         if let Some(terminal) = terminal_attempt(&view, request, self.exact_binding())? {
             let view = self.append_terminal(identity, terminal).await?;
-            return self.terminal_return(view);
+            return Ok(self.terminal_return(view)?);
         }
-        pending_return(view, self.exact_binding())
+        Ok(pending_return(view, self.exact_binding())?)
     }
 
     fn validate_request(&self, request: &EvmSubmitTransactionRequest) -> mfm_executor::Result<()> {
@@ -295,19 +328,24 @@ where
         request: &EvmSubmitTransactionRequest,
         expected_head: &mfm_executor::DeliveryAuditFrontierRef,
         mut plan: WalletPlan,
-    ) -> mfm_executor::Result<Option<EffectEntryView>> {
+    ) -> Result<Option<EffectEntryView>, WalletDriveError> {
         let receipt = match plan.kind {
             WalletPlanKind::Broadcast => {
                 let prepared = self
                     .target
                     .prepare_broadcast(request, plan.allocated_nonce, plan.fee_ordinal())
                     .await
-                    .map_err(map_live_error)?;
+                    .map_err(|error| match error {
+                        EvmWalletLiveError::SignerUnavailable => {
+                            WalletDriveError::SignerUnavailable
+                        }
+                        error => WalletDriveError::Executor(map_live_error(error)),
+                    })?;
                 if plan
                     .candidate()
                     .is_some_and(|candidate| candidate != prepared.candidate())
                 {
-                    return Err(ExecutorError::TargetOperationMismatch);
+                    return Err(ExecutorError::TargetOperationMismatch.into());
                 }
                 let descriptor = plan.descriptor(request, prepared.candidate())?;
                 let Some(authority) = self
@@ -379,12 +417,16 @@ where
                         .await
                         .map_err(map_live_error)?,
                     WalletPlanKind::Broadcast => {
-                        return Err(ExecutorError::TargetOperationMismatch);
+                        return Err(ExecutorError::TargetOperationMismatch.into());
                     }
                 }
             }
         };
-        self.ledger.observe_target(receipt).await.map(Some)
+        self.ledger
+            .observe_target(receipt)
+            .await
+            .map(Some)
+            .map_err(Into::into)
     }
 
     async fn append_terminal(
@@ -466,7 +508,7 @@ where
     fn ensure<'a>(
         &'a self,
         access: AuthorizedEnsureAccess<EvmSubmitTransactionRequest>,
-    ) -> mfm_executor::ExecutorFuture<'a, mfm_executor::Result<VerifiedEnsureResult>> {
+    ) -> mfm_executor::ExecutorFuture<'a, mfm_executor::Result<EffectExecutorOutcome>> {
         Box::pin(async move { self.drive(access.committed_request()).await })
     }
 }

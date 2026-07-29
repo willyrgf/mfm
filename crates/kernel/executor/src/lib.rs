@@ -37,11 +37,12 @@ pub use engine::{
     ExecutorStoreSnapshot, KeyedExecutorLedger,
 };
 pub use frontier::{
-    derive_attempt_id, reference_safe_failure, AdmitFrontier, DeliveryAttemptOutcome,
-    DeliveryAttemptView, DeliveryAudit, DeliveryAuditAccumulator, DeliveryAuditFrontier,
-    DeliveryAuditFrontierRef, EvidenceBounds, ExecutorEvidenceRecord, ExecutorLedgerRecordRef,
-    FrontierProof, ReferenceFailureCode, ReferenceSafeFailure, ReferenceTerminalProof,
-    ResourceAllocatedRecord, ReturnedOutcome, TerminalTombstone, TerminalTombstoneRef,
+    derive_attempt_id, reference_safe_failure, verify_reference_safe_failure_tuple, AdmitFrontier,
+    DeliveryAttemptOutcome, DeliveryAttemptView, DeliveryAudit, DeliveryAuditAccumulator,
+    DeliveryAuditFrontier, DeliveryAuditFrontierRef, EvidenceBounds, ExecutorEvidenceRecord,
+    ExecutorLedgerRecordRef, FrontierProof, ReferenceFailureCode, ReferenceSafeFailure,
+    ReferenceTerminalProof, ResourceAllocatedRecord, ReturnedOutcome, TerminalTombstone,
+    TerminalTombstoneRef,
 };
 pub use ledger::{
     AllocationOutcome, EffectEntryView, MemoryExecutorStore, MemoryLedgerCheckpoint,
@@ -65,8 +66,9 @@ pub use reference::{
 };
 pub use retained::{
     verify_ensure_result, verify_retained_delivery_audit, verify_retained_terminal_evidence,
-    Ensure, ExecutorEnsureResultClaim, ExecutorRetainedClosureClaim, ExecutorRetainedValue,
-    ExecutorRetainedValueRelation, ExecutorTerminalEvidenceClaim, ProofBasis, VerifiedEnsureResult,
+    EffectExecutorOutcome, EffectExecutorOutcomeView, Ensure, ExecutorEnsureResultClaim,
+    ExecutorRetainedClosureClaim, ExecutorRetainedValue, ExecutorRetainedValueRelation,
+    ExecutorTerminalEvidenceClaim, ProofBasis, VerifiedEnsureResult,
     VerifiedExecutorRetainedClosure, VerifiedTerminalEvidence,
 };
 

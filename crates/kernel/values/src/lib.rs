@@ -21,10 +21,12 @@
 
 use std::collections::BTreeMap;
 
-use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
+use mfm_canonical::{
+    CanonicalBytes, CanonicalJsonBytes, CanonicalValue, DecimalString, PlainCanonicalJsonBytes,
+};
 use mfm_ids::{DigestAlgorithm, NameToken, SchemaId, SchemaVersion, SemanticTypeId};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod generic_values;
 pub use self::generic_values::{ArtifactRef, MaybeValue, NonEmpty, SkipCode, SkipReason};
@@ -61,6 +63,9 @@ const SECRET_MARKERS: &[&str] = &[
     "authorization",
     "bearer ",
 ];
+const MAX_SCHEMA_IDENTITY_BYTES: usize = 65_536;
+/// Maximum recursive depth admitted by current schema identities and values.
+pub const MAX_SCHEMA_DEPTH: usize = 64;
 
 /// Result type for descriptor and value-contract operations.
 pub type Result<T> = std::result::Result<T, ValueError>;
@@ -74,6 +79,12 @@ pub enum ValueError {
     /// Identity parsing failed.
     #[error("identity error: {0}")]
     Identity(String),
+    /// A schema identity was not exact canonical descriptor material.
+    #[error("invalid schema identity")]
+    InvalidSchemaIdentity,
+    /// Canonical value bytes did not match the complete closed schema shape.
+    #[error("value does not match schema shape")]
+    SchemaShapeMismatch,
     /// Artifact reference identity does not match the expected value type.
     #[error("artifact reference {field} mismatch: expected {expected}, got {actual}")]
     ArtifactTypeMismatch {
@@ -303,21 +314,18 @@ impl SchemaDescriptor {
     }
 
     /// Returns canonical JSON bytes for the hash-defining identity only.
-    pub fn identity_canonical_json(&self) -> CanonicalJsonBytes {
-        CanonicalJsonBytes::from_value(&self.identity.to_canonical_value())
+    pub fn identity_canonical_json(&self) -> Result<CanonicalJsonBytes> {
+        self.identity.canonical_json()
+    }
+
+    /// Returns the complete hash-defining schema identity.
+    pub const fn identity(&self) -> &SchemaIdentity {
+        &self.identity
     }
 
     /// Derives the schema id from canonical identity bytes.
     pub fn schema_id(&self) -> Result<SchemaId> {
-        self.identity.validate()?;
-        let digest = self.identity_canonical_json().digest_bytes();
-        SchemaId::new(
-            self.identity.schema_name.as_str(),
-            self.identity.schema_version.as_str(),
-            DigestAlgorithm::Sha256JcsV1,
-            digest,
-        )
-        .map_err(|error| ValueError::Identity(error.to_string()))
+        self.identity.schema_id()
     }
 }
 
@@ -369,19 +377,75 @@ impl SchemaIdentity {
         Ok(identity)
     }
 
+    /// Strictly decodes exact canonical schema-identity bytes.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_SCHEMA_IDENTITY_BYTES {
+            return Err(ValueError::InvalidSchemaIdentity);
+        }
+        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+            .map_err(|_| ValueError::InvalidSchemaIdentity)?;
+        let identity: Self = serde_json::from_slice(canonical.as_bytes())
+            .map_err(|_| ValueError::InvalidSchemaIdentity)?;
+        identity
+            .validate()
+            .map_err(|_| ValueError::InvalidSchemaIdentity)?;
+        if identity.canonical_json()?.as_bytes() != bytes {
+            return Err(ValueError::InvalidSchemaIdentity);
+        }
+        Ok(identity)
+    }
+
+    /// Returns exact canonical JSON for this hash-defining identity.
+    pub fn canonical_json(&self) -> Result<CanonicalJsonBytes> {
+        self.validate()?;
+        Ok(self.canonical_json_unchecked())
+    }
+
+    /// Derives the schema id from this complete identity.
+    pub fn schema_id(&self) -> Result<SchemaId> {
+        let digest = self.canonical_json()?.digest_bytes();
+        SchemaId::new(
+            self.schema_name.as_str(),
+            self.schema_version.as_str(),
+            DigestAlgorithm::Sha256JcsV1,
+            digest,
+        )
+        .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+
+    /// Verifies exact canonical value bytes against this identity's complete closed shape.
+    pub fn validate_canonical_value(&self, bytes: &[u8]) -> Result<()> {
+        self.validate()?;
+        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+            .map_err(|_| ValueError::SchemaShapeMismatch)?;
+        let value: serde_json::Value = serde_json::from_slice(canonical.as_bytes())
+            .map_err(|_| ValueError::SchemaShapeMismatch)?;
+        self.shape
+            .validate_json_value(&value, 0)
+            .map_err(|_| ValueError::SchemaShapeMismatch)
+    }
+
     fn validate(&self) -> Result<()> {
+        if self.canonicalization != DigestAlgorithm::Sha256JcsV1
+            || self.versioning != SchemaVersioningPolicy::ManualVersion
+            || self.persisted_surface != PersistedSurfacePolicy::strict()
+        {
+            return Err(ValueError::Descriptor(
+                "schema identity uses an unsupported fixed policy".to_owned(),
+            ));
+        }
         match (self.schema_kind, self.semantic_type_id.as_ref()) {
-            (SchemaKind::Value, Some(_)) => Ok(()),
+            (SchemaKind::Value, Some(_)) => {}
             (SchemaKind::Value, None) => Err(ValueError::Descriptor(
                 "value schema identities must include a semantic type id".to_owned(),
-            )),
+            ))?,
             (
                 SchemaKind::PlanningConfig
                 | SchemaKind::StateInput
                 | SchemaKind::OperationOutput
                 | SchemaKind::PublicOutput,
                 None,
-            ) => Ok(()),
+            ) => {}
             (
                 SchemaKind::PlanningConfig
                 | SchemaKind::StateInput
@@ -390,8 +454,19 @@ impl SchemaIdentity {
                 Some(_),
             ) => Err(ValueError::Descriptor(
                 "non-value schema identities must not include a semantic type id".to_owned(),
-            )),
+            ))?,
         }
+        self.shape.validate_descriptor(0)?;
+        if self.canonical_json_unchecked().as_bytes().len() > MAX_SCHEMA_IDENTITY_BYTES {
+            return Err(ValueError::Descriptor(
+                "schema identity exceeds the canonical byte bound".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn canonical_json_unchecked(&self) -> CanonicalJsonBytes {
+        CanonicalJsonBytes::from_value(&self.to_canonical_value())
     }
 
     fn to_canonical_value(&self) -> CanonicalValue {
@@ -645,12 +720,14 @@ pub enum SchemaShape {
         /// Value shape.
         value: Box<SchemaShape>,
     },
-    /// Reference to another value schema.
-    ValueRef {
-        /// Referenced schema id.
+    /// Inline serialized shape of another value schema.
+    InlineValue {
+        /// Inlined value schema id.
         schema_id: SchemaId,
-        /// Referenced semantic type id.
+        /// Inlined value semantic type id.
         semantic_type_id: SemanticTypeId,
+        /// Complete serialized shape of the inlined value.
+        serialized_shape: Box<SchemaShape>,
     },
     /// Framework-owned generic constructor shape.
     Generic {
@@ -664,6 +741,24 @@ pub enum SchemaShape {
 }
 
 impl SchemaShape {
+    /// Builds the complete inline shape of one nested [`MfmValue`].
+    pub fn inline_value<T: MfmValue>() -> Result<Self> {
+        let descriptor = T::schema_descriptor()?;
+        let semantic_type_id = T::semantic_id()?;
+        if descriptor.identity.semantic_type_id.as_ref() != Some(&semantic_type_id) {
+            return Err(ValueError::Descriptor(
+                "nested value descriptor semantic identity does not match its value type"
+                    .to_owned(),
+            ));
+        }
+        let schema_id = descriptor.schema_id()?;
+        Ok(Self::InlineValue {
+            schema_id,
+            semantic_type_id,
+            serialized_shape: Box::new(descriptor.identity.shape.clone()),
+        })
+    }
+
     /// Builds a named struct shape, rejecting duplicate field names.
     pub fn named_struct(mut fields: Vec<FieldDescriptor>) -> Result<Self> {
         reject_duplicate_names(
@@ -699,6 +794,205 @@ impl SchemaShape {
         )?;
         variants.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(Self::Enum { tagging, variants })
+    }
+
+    fn validate_descriptor(&self, depth: usize) -> Result<()> {
+        if depth > MAX_SCHEMA_DEPTH {
+            return Err(ValueError::Descriptor(
+                "schema shape exceeds the recursive depth bound".to_owned(),
+            ));
+        }
+        match self {
+            Self::Unit | Self::Bool | Self::String | Self::Bytes => Ok(()),
+            Self::SignedInteger { bits } | Self::UnsignedInteger { bits } => {
+                if matches!(bits, 8 | 16 | 32 | 64) {
+                    Ok(())
+                } else {
+                    Err(ValueError::Descriptor(
+                        "integer shape uses an unsupported bit width".to_owned(),
+                    ))
+                }
+            }
+            Self::DecimalString { .. } => Ok(()),
+            Self::Option(value)
+            | Self::Vec(value)
+            | Self::NonEmptyVec(value)
+            | Self::BTreeMapString { value } => value.validate_descriptor(depth + 1),
+            Self::Tuple(values) => {
+                for value in values {
+                    value.validate_descriptor(depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::Struct { fields } => {
+                if !fields.windows(2).all(|pair| pair[0].name < pair[1].name)
+                    || fields.iter().any(|field| field.name.is_empty())
+                {
+                    return Err(ValueError::Descriptor(
+                        "struct fields must be nonempty, unique, and strictly ordered".to_owned(),
+                    ));
+                }
+                for field in fields {
+                    field.shape.validate_descriptor(depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::Enum { tagging, variants } => {
+                tagging.validate()?;
+                if variants.is_empty()
+                    || !variants.windows(2).all(|pair| pair[0].name < pair[1].name)
+                    || variants.iter().any(|variant| variant.name.is_empty())
+                {
+                    return Err(ValueError::Descriptor(
+                        "enum variants must be nonempty, unique, and strictly ordered".to_owned(),
+                    ));
+                }
+                for variant in variants {
+                    match tagging {
+                        EnumTagging::Internal { tag } => match &variant.shape {
+                            Self::Unit => {}
+                            Self::Struct { fields } => {
+                                if fields.iter().any(|field| &field.name == tag) {
+                                    return Err(ValueError::Descriptor(
+                                        "internal enum tag collides with a variant field"
+                                            .to_owned(),
+                                    ));
+                                }
+                            }
+                            _ => {
+                                return Err(ValueError::Descriptor(
+                                    "internally tagged variants must be unit or struct shaped"
+                                        .to_owned(),
+                                ));
+                            }
+                        },
+                        EnumTagging::External | EnumTagging::Adjacent { .. } => {}
+                    }
+                    variant.shape.validate_descriptor(depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::InlineValue {
+                serialized_shape, ..
+            }
+            | Self::Generic {
+                serialized_shape, ..
+            } => {
+                if let Self::Generic {
+                    constructor,
+                    arguments,
+                    ..
+                } = self
+                {
+                    if !valid_generic_constructor(constructor) || arguments.is_empty() {
+                        return Err(ValueError::Descriptor(
+                            "generic schema metadata is malformed".to_owned(),
+                        ));
+                    }
+                }
+                serialized_shape.validate_descriptor(depth + 1)
+            }
+        }
+    }
+
+    fn validate_json_value(&self, value: &serde_json::Value, depth: usize) -> Result<()> {
+        if depth > MAX_SCHEMA_DEPTH {
+            return Err(ValueError::SchemaShapeMismatch);
+        }
+        match self {
+            Self::Unit => require(value.is_null()),
+            Self::Bool => require(value.is_boolean()),
+            Self::String => require(
+                value
+                    .as_str()
+                    .is_some_and(|value| !string_contains_secret_marker(value)),
+            ),
+            Self::Bytes => require(value.as_str().is_some_and(|value| {
+                CanonicalBytes::from_base64url_no_pad(value.to_owned()).is_ok()
+            })),
+            Self::SignedInteger { bits } => {
+                let Some(value) = value.as_i64() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                require(signed_integer_in_range(value, *bits))
+            }
+            Self::UnsignedInteger { bits } => {
+                let Some(value) = value.as_u64() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                require(unsigned_integer_in_range(value, *bits))
+            }
+            Self::DecimalString { scale } => {
+                let Some(value) = value.as_str() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                let valid = match scale {
+                    DecimalScale::Variable => DecimalString::new_variable(value.to_owned()).is_ok(),
+                    DecimalScale::Fixed(scale) => {
+                        DecimalString::new_fixed(value.to_owned(), usize::from(*scale)).is_ok()
+                    }
+                };
+                require(valid)
+            }
+            Self::Option(element) => {
+                if value.is_null() {
+                    Ok(())
+                } else {
+                    element.validate_json_value(value, depth + 1)
+                }
+            }
+            Self::Vec(element) | Self::NonEmptyVec(element) => {
+                let Some(values) = value.as_array() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                if matches!(self, Self::NonEmptyVec(_)) && values.is_empty() {
+                    return Err(ValueError::SchemaShapeMismatch);
+                }
+                for value in values {
+                    element.validate_json_value(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::Tuple(elements) => {
+                let Some(values) = value.as_array() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                if values.len() != elements.len() {
+                    return Err(ValueError::SchemaShapeMismatch);
+                }
+                for (element, value) in elements.iter().zip(values) {
+                    element.validate_json_value(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::Struct { fields } => {
+                let Some(object) = value.as_object() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                validate_struct_value(fields, object, None, depth + 1)
+            }
+            Self::Enum { tagging, variants } => {
+                validate_enum_value(tagging, variants, value, depth + 1)
+            }
+            Self::BTreeMapString { value: element } => {
+                let Some(object) = value.as_object() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                for (key, value) in object {
+                    if string_contains_secret_marker(key) {
+                        return Err(ValueError::SchemaShapeMismatch);
+                    }
+                    element.validate_json_value(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::InlineValue {
+                serialized_shape, ..
+            }
+            | Self::Generic {
+                serialized_shape, ..
+            } => serialized_shape.validate_json_value(value, depth + 1),
+        }
     }
 
     fn to_canonical_value(&self) -> CanonicalValue {
@@ -768,13 +1062,15 @@ impl SchemaShape {
                 ("kind", string("btree_map")),
                 ("value", value.to_canonical_value()),
             ]),
-            Self::ValueRef {
+            Self::InlineValue {
                 schema_id,
                 semantic_type_id,
+                serialized_shape,
             } => canonical_object([
-                ("kind", string("value_ref")),
+                ("kind", string("inline_value")),
                 ("schema_id", string(schema_id.as_str())),
                 ("semantic_type_id", string(semantic_type_id.as_str())),
+                ("serialized_shape", serialized_shape.to_canonical_value()),
             ]),
             Self::Generic {
                 constructor,
@@ -903,26 +1199,50 @@ impl EnumVariantDescriptor {
 }
 
 /// Supported enum tagging policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EnumTagging {
     /// Externally tagged enum.
     External,
     /// Internally tagged enum for struct-like variants.
     Internal {
         /// Tag field name.
-        tag: &'static str,
+        tag: String,
     },
     /// Adjacently tagged enum.
     Adjacent {
         /// Tag field name.
-        tag: &'static str,
+        tag: String,
         /// Content field name.
-        content: &'static str,
+        content: String,
     },
 }
 
 impl EnumTagging {
-    fn to_canonical_value(self) -> CanonicalValue {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::External => Ok(()),
+            Self::Internal { tag } => {
+                if valid_wire_name(tag) {
+                    Ok(())
+                } else {
+                    Err(ValueError::Descriptor(
+                        "internal enum tag is malformed".to_owned(),
+                    ))
+                }
+            }
+            Self::Adjacent { tag, content } => {
+                if valid_wire_name(tag) && valid_wire_name(content) && tag != content {
+                    Ok(())
+                } else {
+                    Err(ValueError::Descriptor(
+                        "adjacent enum tag/content metadata is malformed".to_owned(),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn to_canonical_value(&self) -> CanonicalValue {
         match self {
             Self::External => canonical_object([("kind", string("external"))]),
             Self::Internal { tag } => {
@@ -935,6 +1255,162 @@ impl EnumTagging {
             ]),
         }
     }
+}
+
+fn validate_struct_value(
+    fields: &[FieldDescriptor],
+    object: &serde_json::Map<String, serde_json::Value>,
+    extra_field: Option<&str>,
+    depth: usize,
+) -> Result<()> {
+    if object
+        .keys()
+        .any(|name| extra_field != Some(name.as_str()) && !fields.iter().any(|f| f.name == *name))
+    {
+        return Err(ValueError::SchemaShapeMismatch);
+    }
+    for field in fields {
+        match object.get(&field.name) {
+            Some(value) => field.shape.validate_json_value(value, depth)?,
+            None if field.default == FieldDefaultPolicy::MfmDefault => {}
+            None => return Err(ValueError::SchemaShapeMismatch),
+        }
+    }
+    Ok(())
+}
+
+fn validate_enum_value(
+    tagging: &EnumTagging,
+    variants: &[EnumVariantDescriptor],
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<()> {
+    match tagging {
+        EnumTagging::External => match value {
+            serde_json::Value::String(name) => {
+                let variant = find_enum_variant(variants, name)?;
+                require(matches!(variant.shape, SchemaShape::Unit))
+            }
+            serde_json::Value::Object(object) if object.len() == 1 => {
+                let (name, payload) = object
+                    .iter()
+                    .next()
+                    .ok_or(ValueError::SchemaShapeMismatch)?;
+                let variant = find_enum_variant(variants, name)?;
+                if matches!(variant.shape, SchemaShape::Unit) {
+                    return Err(ValueError::SchemaShapeMismatch);
+                }
+                validate_enum_payload(&variant.shape, payload, depth)
+            }
+            _ => Err(ValueError::SchemaShapeMismatch),
+        },
+        EnumTagging::Internal { tag } => {
+            let object = value.as_object().ok_or(ValueError::SchemaShapeMismatch)?;
+            let name = object
+                .get(tag)
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ValueError::SchemaShapeMismatch)?;
+            let variant = find_enum_variant(variants, name)?;
+            match &variant.shape {
+                SchemaShape::Unit => require(object.len() == 1),
+                SchemaShape::Struct { fields } => {
+                    validate_struct_value(fields, object, Some(tag), depth)
+                }
+                _ => Err(ValueError::SchemaShapeMismatch),
+            }
+        }
+        EnumTagging::Adjacent { tag, content } => {
+            let object = value.as_object().ok_or(ValueError::SchemaShapeMismatch)?;
+            let name = object
+                .get(tag)
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ValueError::SchemaShapeMismatch)?;
+            let variant = find_enum_variant(variants, name)?;
+            if matches!(variant.shape, SchemaShape::Unit) {
+                return require(object.len() == 1 && !object.contains_key(content));
+            }
+            if object.len() != 2 {
+                return Err(ValueError::SchemaShapeMismatch);
+            }
+            let payload = object.get(content).ok_or(ValueError::SchemaShapeMismatch)?;
+            validate_enum_payload(&variant.shape, payload, depth)
+        }
+    }
+}
+
+fn validate_enum_payload(
+    shape: &SchemaShape,
+    payload: &serde_json::Value,
+    depth: usize,
+) -> Result<()> {
+    match shape {
+        SchemaShape::Tuple(elements) if elements.len() == 1 => {
+            elements[0].validate_json_value(payload, depth)
+        }
+        _ => shape.validate_json_value(payload, depth),
+    }
+}
+
+fn find_enum_variant<'a>(
+    variants: &'a [EnumVariantDescriptor],
+    name: &str,
+) -> Result<&'a EnumVariantDescriptor> {
+    variants
+        .binary_search_by(|variant| variant.name.as_str().cmp(name))
+        .ok()
+        .map(|index| &variants[index])
+        .ok_or(ValueError::SchemaShapeMismatch)
+}
+
+fn signed_integer_in_range(value: i64, bits: u16) -> bool {
+    match bits {
+        8 => i8::try_from(value).is_ok(),
+        16 => i16::try_from(value).is_ok(),
+        32 => i32::try_from(value).is_ok(),
+        64 => true,
+        _ => false,
+    }
+}
+
+fn unsigned_integer_in_range(value: u64, bits: u16) -> bool {
+    match bits {
+        8 => u8::try_from(value).is_ok(),
+        16 => u16::try_from(value).is_ok(),
+        32 => u32::try_from(value).is_ok(),
+        64 => true,
+        _ => false,
+    }
+}
+
+fn require(condition: bool) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(ValueError::SchemaShapeMismatch)
+    }
+}
+
+fn valid_wire_name(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+fn valid_generic_constructor(value: &str) -> bool {
+    if value.is_empty() || value.len() > 256 {
+        return false;
+    }
+    let mut segments = value.split('/');
+    let Some(namespace) = segments.next() else {
+        return false;
+    };
+    let Some(name) = segments.next() else {
+        return false;
+    };
+    segments.next().is_none()
+        && !namespace.is_empty()
+        && !name.is_empty()
+        && namespace.chars().chain(name.chars()).all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
 }
 
 /// Generic schema argument identity.
@@ -960,6 +1436,458 @@ impl GenericArgumentDescriptor {
             ("schema_id", string(self.schema_id.as_str())),
             ("semantic_type_id", string(self.semantic_type_id.as_str())),
         ])
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SchemaIdentityWire {
+    canonicalization: String,
+    persisted_surface: PersistedSurfaceWire,
+    schema_kind: String,
+    schema_name: String,
+    schema_version: String,
+    semantic_type_id: Option<String>,
+    shape: SchemaShapeWire,
+    versioning: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedSurfaceWire {
+    numbers: String,
+    secrets: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum SchemaShapeWire {
+    Unit,
+    Bool,
+    String,
+    Bytes,
+    SignedInteger {
+        bits: u16,
+    },
+    UnsignedInteger {
+        bits: u16,
+    },
+    DecimalString {
+        scale: DecimalScaleWire,
+    },
+    Option {
+        element: Box<SchemaShapeWire>,
+    },
+    Vec {
+        element: Box<SchemaShapeWire>,
+    },
+    NonEmptyVec {
+        element: Box<SchemaShapeWire>,
+    },
+    Tuple {
+        elements: Vec<SchemaShapeWire>,
+    },
+    Struct {
+        fields: Vec<FieldDescriptorWire>,
+    },
+    Enum {
+        tagging: EnumTaggingWire,
+        variants: Vec<EnumVariantDescriptorWire>,
+    },
+    #[serde(rename = "btree_map")]
+    BTreeMap {
+        key: String,
+        value: Box<SchemaShapeWire>,
+    },
+    InlineValue {
+        schema_id: String,
+        semantic_type_id: String,
+        serialized_shape: Box<SchemaShapeWire>,
+    },
+    Generic {
+        arguments: Vec<GenericArgumentDescriptorWire>,
+        constructor: String,
+        serialized_shape: Box<SchemaShapeWire>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DecimalScaleWire {
+    Variable,
+    Fixed { scale: u16 },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldDescriptorWire {
+    default: String,
+    name: String,
+    shape: SchemaShapeWire,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnumVariantDescriptorWire {
+    name: String,
+    shape: SchemaShapeWire,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum EnumTaggingWire {
+    External,
+    Internal { tag: String },
+    Adjacent { content: String, tag: String },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenericArgumentDescriptorWire {
+    schema_id: String,
+    semantic_type_id: String,
+}
+
+impl Serialize for SchemaIdentity {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        SchemaIdentityWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaIdentity {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SchemaIdentityWire::deserialize(deserializer)?;
+        Self::try_from(wire).map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<&SchemaIdentity> for SchemaIdentityWire {
+    fn from(identity: &SchemaIdentity) -> Self {
+        Self {
+            canonicalization: identity.canonicalization.as_str().to_owned(),
+            persisted_surface: PersistedSurfaceWire {
+                numbers: match identity.persisted_surface.numbers {
+                    NumberPolicy::NoFloats => "no_floats".to_owned(),
+                },
+                secrets: match identity.persisted_surface.secrets {
+                    SecretPolicy::NoSecrets => "no_secrets".to_owned(),
+                },
+            },
+            schema_kind: identity.schema_kind.as_str().to_owned(),
+            schema_name: identity.schema_name.as_str().to_owned(),
+            schema_version: identity.schema_version.as_str().to_owned(),
+            semantic_type_id: identity.semantic_type_id.as_ref().map(ToString::to_string),
+            shape: SchemaShapeWire::from(&identity.shape),
+            versioning: match identity.versioning {
+                SchemaVersioningPolicy::ManualVersion => "manual_version".to_owned(),
+            },
+        }
+    }
+}
+
+impl TryFrom<SchemaIdentityWire> for SchemaIdentity {
+    type Error = ValueError;
+
+    fn try_from(wire: SchemaIdentityWire) -> Result<Self> {
+        if wire.canonicalization != DigestAlgorithm::Sha256JcsV1.as_str()
+            || wire.versioning != "manual_version"
+            || wire.persisted_surface.numbers != "no_floats"
+            || wire.persisted_surface.secrets != "no_secrets"
+        {
+            return Err(ValueError::InvalidSchemaIdentity);
+        }
+        let schema_kind = match wire.schema_kind.as_str() {
+            "value" => SchemaKind::Value,
+            "planning_config" => SchemaKind::PlanningConfig,
+            "state_input" => SchemaKind::StateInput,
+            "operation_output" => SchemaKind::OperationOutput,
+            "public_output" => SchemaKind::PublicOutput,
+            _ => return Err(ValueError::InvalidSchemaIdentity),
+        };
+        let semantic_type_id = wire
+            .semantic_type_id
+            .map(|value| value.parse().map_err(|_| ValueError::InvalidSchemaIdentity))
+            .transpose()?;
+        let identity = Self {
+            schema_kind,
+            semantic_type_id,
+            schema_name: NameToken::new(&wire.schema_name)
+                .map_err(|_| ValueError::InvalidSchemaIdentity)?,
+            schema_version: SchemaVersion::new(&wire.schema_version)
+                .map_err(|_| ValueError::InvalidSchemaIdentity)?,
+            shape: SchemaShape::try_from(wire.shape)?,
+            canonicalization: DigestAlgorithm::Sha256JcsV1,
+            versioning: SchemaVersioningPolicy::ManualVersion,
+            persisted_surface: PersistedSurfacePolicy::strict(),
+        };
+        identity
+            .validate()
+            .map_err(|_| ValueError::InvalidSchemaIdentity)?;
+        Ok(identity)
+    }
+}
+
+impl From<&SchemaShape> for SchemaShapeWire {
+    fn from(shape: &SchemaShape) -> Self {
+        match shape {
+            SchemaShape::Unit => Self::Unit,
+            SchemaShape::Bool => Self::Bool,
+            SchemaShape::String => Self::String,
+            SchemaShape::Bytes => Self::Bytes,
+            SchemaShape::SignedInteger { bits } => Self::SignedInteger { bits: *bits },
+            SchemaShape::UnsignedInteger { bits } => Self::UnsignedInteger { bits: *bits },
+            SchemaShape::DecimalString { scale } => Self::DecimalString {
+                scale: DecimalScaleWire::from(*scale),
+            },
+            SchemaShape::Option(element) => Self::Option {
+                element: Box::new(Self::from(element.as_ref())),
+            },
+            SchemaShape::Vec(element) => Self::Vec {
+                element: Box::new(Self::from(element.as_ref())),
+            },
+            SchemaShape::NonEmptyVec(element) => Self::NonEmptyVec {
+                element: Box::new(Self::from(element.as_ref())),
+            },
+            SchemaShape::Tuple(elements) => Self::Tuple {
+                elements: elements.iter().map(Self::from).collect(),
+            },
+            SchemaShape::Struct { fields } => Self::Struct {
+                fields: fields.iter().map(FieldDescriptorWire::from).collect(),
+            },
+            SchemaShape::Enum { tagging, variants } => Self::Enum {
+                tagging: EnumTaggingWire::from(tagging),
+                variants: variants
+                    .iter()
+                    .map(EnumVariantDescriptorWire::from)
+                    .collect(),
+            },
+            SchemaShape::BTreeMapString { value } => Self::BTreeMap {
+                key: "string".to_owned(),
+                value: Box::new(Self::from(value.as_ref())),
+            },
+            SchemaShape::InlineValue {
+                schema_id,
+                semantic_type_id,
+                serialized_shape,
+            } => Self::InlineValue {
+                schema_id: schema_id.to_string(),
+                semantic_type_id: semantic_type_id.to_string(),
+                serialized_shape: Box::new(Self::from(serialized_shape.as_ref())),
+            },
+            SchemaShape::Generic {
+                constructor,
+                arguments,
+                serialized_shape,
+            } => Self::Generic {
+                arguments: arguments
+                    .iter()
+                    .map(GenericArgumentDescriptorWire::from)
+                    .collect(),
+                constructor: constructor.clone(),
+                serialized_shape: Box::new(Self::from(serialized_shape.as_ref())),
+            },
+        }
+    }
+}
+
+impl TryFrom<SchemaShapeWire> for SchemaShape {
+    type Error = ValueError;
+
+    fn try_from(wire: SchemaShapeWire) -> Result<Self> {
+        Ok(match wire {
+            SchemaShapeWire::Unit => Self::Unit,
+            SchemaShapeWire::Bool => Self::Bool,
+            SchemaShapeWire::String => Self::String,
+            SchemaShapeWire::Bytes => Self::Bytes,
+            SchemaShapeWire::SignedInteger { bits } => Self::SignedInteger { bits },
+            SchemaShapeWire::UnsignedInteger { bits } => Self::UnsignedInteger { bits },
+            SchemaShapeWire::DecimalString { scale } => Self::DecimalString {
+                scale: DecimalScale::from(scale),
+            },
+            SchemaShapeWire::Option { element } => {
+                Self::Option(Box::new(Self::try_from(*element)?))
+            }
+            SchemaShapeWire::Vec { element } => Self::Vec(Box::new(Self::try_from(*element)?)),
+            SchemaShapeWire::NonEmptyVec { element } => {
+                Self::NonEmptyVec(Box::new(Self::try_from(*element)?))
+            }
+            SchemaShapeWire::Tuple { elements } => Self::Tuple(
+                elements
+                    .into_iter()
+                    .map(Self::try_from)
+                    .collect::<Result<_>>()?,
+            ),
+            SchemaShapeWire::Struct { fields } => Self::Struct {
+                fields: fields
+                    .into_iter()
+                    .map(FieldDescriptor::try_from)
+                    .collect::<Result<_>>()?,
+            },
+            SchemaShapeWire::Enum { tagging, variants } => Self::Enum {
+                tagging: EnumTagging::from(tagging),
+                variants: variants
+                    .into_iter()
+                    .map(EnumVariantDescriptor::try_from)
+                    .collect::<Result<_>>()?,
+            },
+            SchemaShapeWire::BTreeMap { key, value } => {
+                if key != "string" {
+                    return Err(ValueError::InvalidSchemaIdentity);
+                }
+                Self::BTreeMapString {
+                    value: Box::new(Self::try_from(*value)?),
+                }
+            }
+            SchemaShapeWire::InlineValue {
+                schema_id,
+                semantic_type_id,
+                serialized_shape,
+            } => Self::InlineValue {
+                schema_id: schema_id
+                    .parse()
+                    .map_err(|_| ValueError::InvalidSchemaIdentity)?,
+                semantic_type_id: semantic_type_id
+                    .parse()
+                    .map_err(|_| ValueError::InvalidSchemaIdentity)?,
+                serialized_shape: Box::new(Self::try_from(*serialized_shape)?),
+            },
+            SchemaShapeWire::Generic {
+                arguments,
+                constructor,
+                serialized_shape,
+            } => Self::Generic {
+                constructor,
+                arguments: arguments
+                    .into_iter()
+                    .map(GenericArgumentDescriptor::try_from)
+                    .collect::<Result<_>>()?,
+                serialized_shape: Box::new(Self::try_from(*serialized_shape)?),
+            },
+        })
+    }
+}
+
+impl From<DecimalScale> for DecimalScaleWire {
+    fn from(scale: DecimalScale) -> Self {
+        match scale {
+            DecimalScale::Variable => Self::Variable,
+            DecimalScale::Fixed(scale) => Self::Fixed { scale },
+        }
+    }
+}
+
+impl From<DecimalScaleWire> for DecimalScale {
+    fn from(scale: DecimalScaleWire) -> Self {
+        match scale {
+            DecimalScaleWire::Variable => Self::Variable,
+            DecimalScaleWire::Fixed { scale } => Self::Fixed(scale),
+        }
+    }
+}
+
+impl From<&FieldDescriptor> for FieldDescriptorWire {
+    fn from(field: &FieldDescriptor) -> Self {
+        Self {
+            default: match field.default {
+                FieldDefaultPolicy::Required => "required".to_owned(),
+                FieldDefaultPolicy::MfmDefault => "mfm_default".to_owned(),
+            },
+            name: field.name.clone(),
+            shape: SchemaShapeWire::from(&field.shape),
+        }
+    }
+}
+
+impl TryFrom<FieldDescriptorWire> for FieldDescriptor {
+    type Error = ValueError;
+
+    fn try_from(field: FieldDescriptorWire) -> Result<Self> {
+        let default = match field.default.as_str() {
+            "required" => FieldDefaultPolicy::Required,
+            "mfm_default" => FieldDefaultPolicy::MfmDefault,
+            _ => return Err(ValueError::InvalidSchemaIdentity),
+        };
+        Ok(Self {
+            name: field.name,
+            shape: SchemaShape::try_from(field.shape)?,
+            default,
+        })
+    }
+}
+
+impl From<&EnumVariantDescriptor> for EnumVariantDescriptorWire {
+    fn from(variant: &EnumVariantDescriptor) -> Self {
+        Self {
+            name: variant.name.clone(),
+            shape: SchemaShapeWire::from(&variant.shape),
+        }
+    }
+}
+
+impl TryFrom<EnumVariantDescriptorWire> for EnumVariantDescriptor {
+    type Error = ValueError;
+
+    fn try_from(variant: EnumVariantDescriptorWire) -> Result<Self> {
+        Ok(Self {
+            name: variant.name,
+            shape: SchemaShape::try_from(variant.shape)?,
+        })
+    }
+}
+
+impl From<&EnumTagging> for EnumTaggingWire {
+    fn from(tagging: &EnumTagging) -> Self {
+        match tagging {
+            EnumTagging::External => Self::External,
+            EnumTagging::Internal { tag } => Self::Internal { tag: tag.clone() },
+            EnumTagging::Adjacent { tag, content } => Self::Adjacent {
+                content: content.clone(),
+                tag: tag.clone(),
+            },
+        }
+    }
+}
+
+impl From<EnumTaggingWire> for EnumTagging {
+    fn from(tagging: EnumTaggingWire) -> Self {
+        match tagging {
+            EnumTaggingWire::External => Self::External,
+            EnumTaggingWire::Internal { tag } => Self::Internal { tag },
+            EnumTaggingWire::Adjacent { tag, content } => Self::Adjacent { tag, content },
+        }
+    }
+}
+
+impl From<&GenericArgumentDescriptor> for GenericArgumentDescriptorWire {
+    fn from(argument: &GenericArgumentDescriptor) -> Self {
+        Self {
+            schema_id: argument.schema_id.to_string(),
+            semantic_type_id: argument.semantic_type_id.to_string(),
+        }
+    }
+}
+
+impl TryFrom<GenericArgumentDescriptorWire> for GenericArgumentDescriptor {
+    type Error = ValueError;
+
+    fn try_from(argument: GenericArgumentDescriptorWire) -> Result<Self> {
+        Ok(Self {
+            schema_id: argument
+                .schema_id
+                .parse()
+                .map_err(|_| ValueError::InvalidSchemaIdentity)?,
+            semantic_type_id: argument
+                .semantic_type_id
+                .parse()
+                .map_err(|_| ValueError::InvalidSchemaIdentity)?,
+        })
     }
 }
 

@@ -14,13 +14,14 @@ use mfm_journal::v1::{
 use mfm_spec::v1::{
     AuthoredBaseKind, AuthoredInputBinding, AuthoredNode, AuthoredPublicOutputBinding,
     AuthoredSourceSelector, CanonicalAuthoredProgram, CanonicalExpansionPath,
-    CanonicalExpansionStep, CanonicalJsonValue, CapabilityBindingManifest, Certificate,
-    CertificateProofEntry, CertifiedAdmissionArtifacts, CertifiedFrameBinding,
-    CertifiedInputBinding, CertifiedInputDestination, CertifiedJournalProtocolContracts,
-    CertifiedNodeContract, CertifiedOutputBinding, CertifiedOutputSlot,
-    CertifiedSettlementContract, CertifiedSourceSelector, CertifiedStateExecution,
-    EntryPointContract, PlanningProfile, PublicOutputContract, RetainedValueContract,
-    RunTerminalContract, StateImplementationManifest, StateImplementationManifestEntry,
+    CanonicalExpansionStep, CanonicalJsonValue, CapabilityBindingManifest,
+    CapabilityBindingManifestEntry, Certificate, CertificateProofEntry,
+    CertifiedAdmissionArtifacts, CertifiedFrameBinding, CertifiedInputBinding,
+    CertifiedInputDestination, CertifiedJournalProtocolContracts, CertifiedNodeContract,
+    CertifiedOutputBinding, CertifiedOutputSlot, CertifiedSettlementContract,
+    CertifiedSourceSelector, CertifiedStateExecution, EntryPointContract, PlanningProfile,
+    PublicOutputContract, RetainedValueContract, RunTerminalContract, StateImplementationManifest,
+    StateImplementationManifestEntry,
 };
 
 use super::objects::validate_value_contract;
@@ -61,6 +62,27 @@ pub struct LegalAdmissionFixture {
     append_request_id: AppendRequestId,
     retry_append_request_id: AppendRequestId,
     successor_append_request_id: AppendRequestId,
+    read_execution: Option<FixtureReadExecution>,
+    effect_execution: Option<FixtureEffectExecution>,
+}
+
+pub(super) struct FixtureReadExecution {
+    pub(super) capability_operation_id: StableId,
+    pub(super) capability_binding_ref: ContentRef,
+    pub(super) request_contract: RetainedValueContract,
+    pub(super) returned_contract: RetainedValueContract,
+    pub(super) safe_failure_contract: RetainedValueContract,
+    pub(super) support_members: Vec<QualifiedSupportMember>,
+}
+
+pub(super) struct FixtureEffectExecution {
+    pub(super) executor_operation_id: StableId,
+    pub(super) executor_binding_ref: ContentRef,
+    pub(super) request_contract: RetainedValueContract,
+    pub(super) ensure_result_contract: RetainedValueContract,
+    pub(super) terminal_evidence_contract: RetainedValueContract,
+    pub(super) domain_result_contract: RetainedValueContract,
+    pub(super) support_members: Vec<QualifiedSupportMember>,
 }
 
 /// One store-prepared legal admission and the exact authority that prepared it.
@@ -168,7 +190,21 @@ impl LegalAdmissionFixture {
             append_request_id: append_request_id("fixture-admission", discriminator)?,
             retry_append_request_id: append_request_id("fixture-admission-retry", discriminator)?,
             successor_append_request_id: append_request_id("fixture-successor", discriminator)?,
+            read_execution: None,
+            effect_execution: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_read_execution(mut self, execution: FixtureReadExecution) -> Self {
+        self.read_execution = Some(execution);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_effect_execution(mut self, execution: FixtureEffectExecution) -> Self {
+        self.effect_execution = Some(execution);
+        self
     }
 
     /// Makes this fixture certify one whole effective-output source at `source`.
@@ -660,6 +696,29 @@ impl LegalAdmissionFixture {
         } else {
             Vec::new()
         };
+        let execution = match (&self.read_execution, &self.effect_execution) {
+            (Some(read), None) => CertifiedStateExecution::Read {
+                capability_operation_id: read.capability_operation_id.clone(),
+                capability_binding_ref: read.capability_binding_ref.clone(),
+                request_contract: read.request_contract.clone(),
+                returned_contract: read.returned_contract.clone(),
+                safe_failure_contract: read.safe_failure_contract.clone(),
+            },
+            (None, Some(effect)) => CertifiedStateExecution::Effect {
+                executor_operation_id: effect.executor_operation_id.clone(),
+                executor_binding_ref: effect.executor_binding_ref.clone(),
+                request_contract: effect.request_contract.clone(),
+                ensure_result_contract: effect.ensure_result_contract.clone(),
+                terminal_evidence_contract: effect.terminal_evidence_contract.clone(),
+                domain_result_contract: effect.domain_result_contract.clone(),
+            },
+            (None, None) => CertifiedStateExecution::Pure,
+            (Some(_), Some(_)) => {
+                return Err(fixture_error(
+                    "fixture cannot certify both read and effect execution",
+                ))
+            }
+        };
         let node = CertifiedNodeContract::new(
             path,
             state_contract.content_ref.clone(),
@@ -667,7 +726,7 @@ impl LegalAdmissionFixture {
             None,
             input_contract,
             input_bindings,
-            CertifiedStateExecution::Pure,
+            execution,
             settlement,
         )?;
         let node_id = node.node_id().clone();
@@ -703,7 +762,23 @@ impl LegalAdmissionFixture {
                 state_contract_ref: state_contract.content_ref.clone(),
                 component_implementation_ref: state_implementation.content_ref.clone(),
             }])?;
-        let capability_manifest = CapabilityBindingManifest::new(Vec::new())?;
+        let capability_manifest =
+            CapabilityBindingManifest::new(match (&self.read_execution, &self.effect_execution) {
+                (Some(read), None) => vec![CapabilityBindingManifestEntry {
+                    operation_id: read.capability_operation_id.clone(),
+                    binding_ref: read.capability_binding_ref.clone(),
+                }],
+                (None, Some(effect)) => vec![CapabilityBindingManifestEntry {
+                    operation_id: effect.executor_operation_id.clone(),
+                    binding_ref: effect.executor_binding_ref.clone(),
+                }],
+                (None, None) => Vec::new(),
+                (Some(_), Some(_)) => {
+                    return Err(fixture_error(
+                        "fixture cannot admit both read and effect bindings",
+                    ))
+                }
+            })?;
         let expanded_spec = mfm_spec::v1::ExpandedCertifiedSpec::new(
             authored_program.content_ref()?,
             entry_point.planning_profile_ref().clone(),
@@ -755,18 +830,23 @@ impl LegalAdmissionFixture {
             capability_manifest.canonical_json()?,
             CapabilityBindingManifest::retained_contract()?,
         );
-        let support = QualifiedSupportGraph::new(
-            self.qualification_scope_id.clone(),
-            [
-                planner_contract.member,
-                planner_implementation.member,
-                state_contract.member,
-                state_implementation.member,
-                executable_identity.member,
-                state_manifest_support,
-                capability_manifest_support,
-            ],
-        )?;
+        let mut support_members = vec![
+            planner_contract.member,
+            planner_implementation.member,
+            state_contract.member,
+            state_implementation.member,
+            executable_identity.member,
+            state_manifest_support,
+            capability_manifest_support,
+        ];
+        if let Some(read) = &self.read_execution {
+            support_members.extend(read.support_members.clone());
+        }
+        if let Some(effect) = &self.effect_execution {
+            support_members.extend(effect.support_members.clone());
+        }
+        let support =
+            QualifiedSupportGraph::new(self.qualification_scope_id.clone(), support_members)?;
         Ok(FixtureCertificationClosure { artifacts, support })
     }
 }

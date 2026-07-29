@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 
 use mfm_canonical::{
     CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1, RecoverabilityError,
@@ -301,6 +302,49 @@ impl ExecutorDeployment {
         Ok(deployment)
     }
 
+    /// Strictly reconstructs exact frozen executor-deployment bytes.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
+        let validated = recoverability_contract()?
+            .strict_decode(EXECUTOR_DEPLOYMENT_SCHEMA, bytes)
+            .map_err(contract_error)?;
+        let json: serde_json::Value = serde_json::from_slice(validated.as_bytes())
+            .map_err(|_| ExecutorError::CanonicalEncoding)?;
+        let resource_ownership_ref = match json
+            .get("resource_ownership_ref")
+            .ok_or(ExecutorError::CanonicalEncoding)?
+        {
+            serde_json::Value::Null => None,
+            value => Some(ResourceOwnershipRef::from_content_ref(decode_content_ref(
+                value,
+            )?)?),
+        };
+        let deployment = Self::new(
+            decode_content_ref(
+                json.get("executor_namespace_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            decode_content_ref(
+                json.get("durable_ledger_generation_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            TenantScopeId::from_str(
+                json.get("tenant_scope_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )
+            .map_err(|_| ExecutorError::CanonicalEncoding)?,
+            decode_content_ref(
+                json.get("evidence_authority_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            resource_ownership_ref,
+        )?;
+        if deployment.validated()? != validated {
+            return Err(ExecutorError::CanonicalEncoding);
+        }
+        Ok(deployment)
+    }
+
     /// Returns the executor ledger namespace.
     pub const fn executor_namespace_ref(&self) -> &ContentRef {
         &self.executor_namespace_ref
@@ -393,6 +437,41 @@ impl ResourceOwnership {
             destination_fencing_authority_ref,
         };
         ownership.validated()?;
+        Ok(ownership)
+    }
+
+    /// Strictly reconstructs exact frozen resource-ownership bytes.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
+        let validated = recoverability_contract()?
+            .strict_decode(RESOURCE_OWNERSHIP_SCHEMA, bytes)
+            .map_err(contract_error)?;
+        let json: serde_json::Value = serde_json::from_slice(validated.as_bytes())
+            .map_err(|_| ExecutorError::CanonicalEncoding)?;
+        let destination_fencing_authority_ref = match json
+            .get("destination_fencing_authority_ref")
+            .ok_or(ExecutorError::CanonicalEncoding)?
+        {
+            serde_json::Value::Null => None,
+            value => Some(decode_content_ref(value)?),
+        };
+        let ownership = Self::new(
+            decode_content_ref(
+                json.get("coordination_namespace_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            decode_content_ref(
+                json.get("external_resource_domain_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            decode_content_ref(
+                json.get("durable_ledger_generation_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            destination_fencing_authority_ref,
+        )?;
+        if ownership.validated()? != validated {
+            return Err(ExecutorError::CanonicalEncoding);
+        }
         Ok(ownership)
     }
 
@@ -699,6 +778,8 @@ fn retained_contract_error(error: ValueError) -> ExecutorError {
         ValueError::Recoverability(error) => contract_error(error),
         ValueError::Descriptor(_)
         | ValueError::Identity(_)
+        | ValueError::InvalidSchemaIdentity
+        | ValueError::SchemaShapeMismatch
         | ValueError::ArtifactTypeMismatch { .. }
         | ValueError::Config(_)
         | ValueError::RetainedValueContract => ExecutorError::CanonicalEncoding,
@@ -959,6 +1040,33 @@ impl ExecutorBinding {
             executor_deployment_ref,
         };
         binding.validated()?;
+        Ok(binding)
+    }
+
+    /// Strictly reconstructs exact frozen executor-binding bytes.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
+        let validated = recoverability_contract()?
+            .strict_decode(EXECUTOR_BINDING_SCHEMA, bytes)
+            .map_err(contract_error)?;
+        let json: serde_json::Value = serde_json::from_slice(validated.as_bytes())
+            .map_err(|_| ExecutorError::CanonicalEncoding)?;
+        let binding = Self::new(
+            decode_content_ref(
+                json.get("executor_contract_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            decode_content_ref(
+                json.get("admitted_implementation_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?,
+            ExecutorDeploymentRef::from_content_ref(decode_content_ref(
+                json.get("executor_deployment_ref")
+                    .ok_or(ExecutorError::CanonicalEncoding)?,
+            )?)?,
+        )?;
+        if binding.validated()? != validated {
+            return Err(ExecutorError::CanonicalEncoding);
+        }
         Ok(binding)
     }
 

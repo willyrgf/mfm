@@ -129,7 +129,7 @@ where
 }
 
 fn safe_failure_contract() -> RetainedValueContract {
-    mfm_value_contract::<EvmSafeFailure>(
+    mfm_value_contract::<EvmSafeDiagnostic>(
         StableId::new("mfm.test.safe-failure").expect("failure role"),
         test_evidence_ref(),
     )
@@ -157,8 +157,17 @@ fn safe_failure_matrix_is_exact_and_phase_checked() {
         DestinationRejected,
     }
 
-    fn assert_verdict(failure: EvmSafeFailure, entered: bool, expected: Expected) {
-        let verdict = failure_verdict::<BootstrapEvmSourceState>(&failure, entered);
+    fn assert_verdict(
+        stable_code: &str,
+        diagnostic: Option<EvmSafeDiagnostic>,
+        entered: bool,
+        expected: Expected,
+    ) {
+        let verdict = failure_verdict_projection::<BootstrapEvmSourceState>(
+            stable_code,
+            entered,
+            diagnostic.as_ref(),
+        );
         let matches = match expected {
             Expected::Invalid => matches!(verdict, EvidenceVerdict::InvalidEvidence),
             Expected::Insufficient => matches!(verdict, EvidenceVerdict::InsufficientEvidence),
@@ -171,47 +180,55 @@ fn safe_failure_matrix_is_exact_and_phase_checked() {
         };
         assert!(
             matches,
-            "unexpected verdict for {failure:?}, entered={entered}"
+            "unexpected verdict for {stable_code}, {diagnostic:?}, entered={entered}"
         );
     }
 
-    for failure in [
-        EvmSafeFailure::RoutingGenerationUnavailable,
-        EvmSafeFailure::ConfigurationInvalid,
-        EvmSafeFailure::RequestInvalid,
-        EvmSafeFailure::ResponseInvalid {
-            response_kind: crate::EvmResponseInvalidKind::MalformedEnvelope,
-            size_class: crate::EvmCoarseSizeClass::UpTo16Kib,
-        },
-        EvmSafeFailure::ResponseMissingResult {
-            size_class: crate::EvmCoarseSizeClass::Zero,
-        },
-        EvmSafeFailure::ResponseTooLarge {
-            size_class: crate::EvmCoarseSizeClass::Over1Mib,
-        },
+    for (stable_code, diagnostic) in [
+        ("routing_generation_unavailable", None),
+        ("configuration_invalid", None),
+        ("request_invalid", None),
+        (
+            "response_invalid",
+            Some(EvmSafeDiagnostic::ResponseInvalid {
+                kind: EvmResponseInvalidKind::MalformedEnvelope,
+            }),
+        ),
+        (
+            "response_invalid",
+            Some(EvmSafeDiagnostic::ResponseInvalid {
+                kind: EvmResponseInvalidKind::InvalidResult,
+            }),
+        ),
+        (
+            "response_missing_result",
+            Some(EvmSafeDiagnostic::ResponseInvalid {
+                kind: EvmResponseInvalidKind::MissingResult,
+            }),
+        ),
+        (
+            "response_too_large",
+            Some(EvmSafeDiagnostic::ResponseInvalid {
+                kind: EvmResponseInvalidKind::TooLarge,
+            }),
+        ),
     ] {
-        assert_verdict(failure.clone(), false, Expected::Invalid);
-        assert_verdict(failure, true, Expected::Invalid);
+        assert_verdict(stable_code, diagnostic.clone(), false, Expected::Invalid);
+        assert_verdict(stable_code, diagnostic, true, Expected::Invalid);
     }
 
-    assert_verdict(
-        EvmSafeFailure::AccessCancelled,
-        false,
-        Expected::Insufficient,
-    );
-    assert_verdict(EvmSafeFailure::AccessCancelled, true, Expected::Invalid);
-    for failure in [
-        EvmSafeFailure::TransportFailed,
-        EvmSafeFailure::UnclassifiedFailure,
-    ] {
-        assert_verdict(failure.clone(), false, Expected::Invalid);
-        assert_verdict(failure, true, Expected::Insufficient);
-    }
+    assert_verdict("access_cancelled", None, false, Expected::Insufficient);
+    assert_verdict("access_cancelled", None, true, Expected::Insufficient);
+    assert_verdict("transport_failed", None, false, Expected::Insufficient);
+    assert_verdict("transport_failed", None, true, Expected::Insufficient);
+    assert_verdict("unclassified_failure", None, false, Expected::Invalid);
+    assert_verdict("unclassified_failure", None, true, Expected::Insufficient);
 
     let insufficient_http = [408, 425, 429, 500, 502, 503, 504, 507];
     for status in u16::MIN..=u16::MAX {
         assert_verdict(
-            EvmSafeFailure::HttpStatus { status },
+            "http_status",
+            Some(EvmSafeDiagnostic::HttpStatus { status }),
             true,
             if insufficient_http.contains(&status) {
                 Expected::Insufficient
@@ -220,7 +237,8 @@ fn safe_failure_matrix_is_exact_and_phase_checked() {
             },
         );
         assert_verdict(
-            EvmSafeFailure::HttpStatus { status },
+            "http_status",
+            Some(EvmSafeDiagnostic::HttpStatus { status }),
             false,
             Expected::Invalid,
         );
@@ -229,7 +247,10 @@ fn safe_failure_matrix_is_exact_and_phase_checked() {
     let insufficient_json_rpc = [-32603, -32001, -32002, -32005];
     for json_rpc_code in -40_000_i64..=40_000 {
         assert_verdict(
-            EvmSafeFailure::JsonRpcError { json_rpc_code },
+            "json_rpc_error",
+            Some(EvmSafeDiagnostic::JsonRpcError {
+                code: json_rpc_code,
+            }),
             true,
             if insufficient_json_rpc.contains(&json_rpc_code) {
                 Expected::Insufficient
@@ -238,14 +259,20 @@ fn safe_failure_matrix_is_exact_and_phase_checked() {
             },
         );
         assert_verdict(
-            EvmSafeFailure::JsonRpcError { json_rpc_code },
+            "json_rpc_error",
+            Some(EvmSafeDiagnostic::JsonRpcError {
+                code: json_rpc_code,
+            }),
             false,
             Expected::Invalid,
         );
     }
     for json_rpc_code in [i64::MIN, i64::MAX] {
         assert_verdict(
-            EvmSafeFailure::JsonRpcError { json_rpc_code },
+            "json_rpc_error",
+            Some(EvmSafeDiagnostic::JsonRpcError {
+                code: json_rpc_code,
+            }),
             true,
             Expected::DestinationRejected,
         );

@@ -237,7 +237,7 @@ impl State for FixtureState {
     type Failure = FixtureFailure;
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         fixture_state_contract_ref().map_err(|error| ProgramError::Registry(error.to_string()))
@@ -252,7 +252,7 @@ impl State for IntegrityFailingFixtureState {
     type Failure = FixtureFailure;
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         fixture_state_contract_ref().map_err(|error| ProgramError::Registry(error.to_string()))
@@ -267,7 +267,7 @@ impl State for FixtureSecondState {
     type Failure = FixtureFailure;
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         fixture_second_state_contract_ref()

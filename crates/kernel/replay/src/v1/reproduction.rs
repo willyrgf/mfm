@@ -570,11 +570,17 @@ fn callback_read_outcome(evidence: &VerifiedComparisonEvidence) -> Result<Verifi
         VerifiedComparisonReadOutcome::Returned(value) => {
             Ok(VerifiedReadOutcome::Returned(callback_value(value)))
         }
-        VerifiedComparisonReadOutcome::DidNotEnter(value) => {
-            Ok(VerifiedReadOutcome::DidNotEnter(callback_value(value)))
+        VerifiedComparisonReadOutcome::DidNotEnter(failure) => {
+            Ok(VerifiedReadOutcome::DidNotEnter {
+                metadata: failure.metadata().clone(),
+                diagnostic: failure.diagnostic().map(callback_value),
+            })
         }
-        VerifiedComparisonReadOutcome::Indeterminate(value) => {
-            Ok(VerifiedReadOutcome::Indeterminate(callback_value(value)))
+        VerifiedComparisonReadOutcome::Indeterminate(failure) => {
+            Ok(VerifiedReadOutcome::Indeterminate {
+                metadata: failure.metadata().clone(),
+                diagnostic: failure.diagnostic().map(callback_value),
+            })
         }
     }
 }

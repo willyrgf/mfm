@@ -348,7 +348,7 @@ impl ObserveExternalAccess {
             vec![candidate],
             objects,
         )?;
-        view.validate_prepared_observation(&core.candidate_preimage)?;
+        view.validate_prepared_observation(&core.candidate_preimage, &core.objects)?;
         Ok(Self {
             core,
             observation,
@@ -610,7 +610,7 @@ impl JournalAppendVerifier {
                 view.validate_prepared_authorization(&core.candidate_preimage)
             }
             PreparedJournalAppend::ObserveExternalAccess(_) => {
-                view.validate_prepared_observation(&core.candidate_preimage)
+                view.validate_prepared_observation(&core.candidate_preimage, &core.objects)
             }
         }
     }

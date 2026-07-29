@@ -2393,6 +2393,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-ids",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2787,6 +2788,7 @@ dependencies = [
  "mfm-ids",
  "mfm-journal",
  "mfm-spec",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::{BoundaryStage, CoarseSizeClass, FailureClass};
-use mfm_executor::VerifiedEnsureResult;
+use mfm_executor::EffectExecutorOutcome;
 use mfm_facts::FactProposal;
 use mfm_ids::{ContentRef, EffectKey, FieldPath, NodeId, RequestDigest, StableId, TenantScopeId};
 use mfm_journal::v1::{
@@ -540,37 +540,18 @@ pub enum ReadObservationMaterial {
     },
     /// Boundary entry was proven not to have occurred.
     DidNotEnter {
-        /// Complete producer-free typed diagnostic.
-        typed_failure_root: ProducedObjectRoot,
+        /// Optional producer-free typed diagnostic.
+        diagnostic_root: Option<ProducedObjectRoot>,
         /// Reviewed redaction-safe classification.
         metadata: SafeFailureMetadata,
     },
     /// Boundary entry or terminal outcome remains indeterminate.
     Indeterminate {
-        /// Complete producer-free typed diagnostic.
-        typed_failure_root: ProducedObjectRoot,
+        /// Optional producer-free typed diagnostic.
+        diagnostic_root: Option<ProducedObjectRoot>,
         /// Reviewed redaction-safe classification.
         metadata: SafeFailureMetadata,
     },
-}
-
-/// Store-owned producer-free promotion of one binding-verified executor result.
-///
-/// Constructing this value consumes the affine verified executor result. The store re-derives the
-/// complete retained observation closure and every journal reference.
-pub struct EffectPromotionMaterial {
-    verified_result: VerifiedEnsureResult,
-}
-
-impl EffectPromotionMaterial {
-    /// Consumes one exact binding-verified executor result for journal promotion.
-    pub const fn new(verified_result: VerifiedEnsureResult) -> Self {
-        Self { verified_result }
-    }
-
-    pub(super) fn into_verified_result(self) -> VerifiedEnsureResult {
-        self.verified_result
-    }
 }
 
 /// Closed authorization material accepted by existing-run append preparation.
@@ -600,12 +581,12 @@ pub enum ObservationMaterial {
         /// Closed producer-free read result.
         outcome: Box<ReadObservationMaterial>,
     },
-    /// Promote one binding-verified executor result.
+    /// Observe one closed surviving executor outcome.
     EnsureEffect {
         /// Exact committed ensure authorization.
         authorization_ref: AuthorizationRef,
-        /// Complete producer-free verified promotion.
-        promotion: Box<EffectPromotionMaterial>,
+        /// Complete producer-free returned or safe-failure outcome.
+        outcome: Box<EffectExecutorOutcome>,
     },
     /// Retain the exact response of one completed authoritative fact scan.
     FactSelection {

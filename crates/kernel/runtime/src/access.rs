@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 
 use mfm_executor::{
-    CanonicalExecutorRequest, CommittedEffectRequest, ExecutorFuture, VerifiedEnsureResult,
+    CanonicalExecutorRequest, CommittedEffectRequest, EffectExecutorOutcome, ExecutorFuture,
 };
 use mfm_ids::{ContentRef, NodeId, StableId};
 use mfm_journal::v1::{
@@ -113,20 +113,20 @@ impl<T> AuthorizedEnsureAccess<T> {
 
 /// Closed result of one live audited read capability invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReadCapabilityOutcome<R, F> {
+pub enum ReadCapabilityOutcome<R, D> {
     /// One schema-valid typed response returned.
     Returned(R),
     /// Boundary entry was proven not to have occurred.
     DidNotEnter {
         /// Typed bounded diagnostic interpreted by the state callback.
-        failure: F,
+        diagnostic: Option<D>,
         /// Reviewed generic safe-failure classification.
         metadata: SafeFailureMetadata,
     },
     /// Boundary entry or terminal outcome remains indeterminate.
     Indeterminate {
         /// Typed bounded diagnostic interpreted by the state callback.
-        failure: F,
+        diagnostic: Option<D>,
         /// Reviewed generic safe-failure classification.
         metadata: SafeFailureMetadata,
     },
@@ -144,7 +144,7 @@ pub trait AuditedReadCapability<Request>: Send + Sync + 'static {
     /// Schema-valid returned response.
     type Response: Send + Sync + 'static;
     /// Reviewed safe-access failure.
-    type AccessFailure: Send + Sync + 'static;
+    type SafeDiagnostic: Send + Sync + 'static;
 
     /// Resolves the exact admitted routing generation for one validated typed request.
     ///
@@ -158,7 +158,7 @@ pub trait AuditedReadCapability<Request>: Send + Sync + 'static {
     fn call<'a>(
         &'a self,
         access: AuthorizedReadAccess<Request>,
-    ) -> ReadCapabilityFuture<'a, Self::Response, Self::AccessFailure>;
+    ) -> ReadCapabilityFuture<'a, Self::Response, Self::SafeDiagnostic>;
 }
 
 /// Runtime-facing boundary for one durable keyed effect executor.
@@ -174,7 +174,7 @@ where
     fn ensure<'a>(
         &'a self,
         access: AuthorizedEnsureAccess<Request>,
-    ) -> ExecutorFuture<'a, mfm_executor::Result<VerifiedEnsureResult>>;
+    ) -> ExecutorFuture<'a, mfm_executor::Result<EffectExecutorOutcome>>;
 }
 
 /// Sealed wrapper that can be converted into an observation append.
@@ -187,7 +187,7 @@ pub(crate) struct UncommittedAccessObservation<R, F> {
 pub(crate) async fn call_read<Request, Capability>(
     capability: &Capability,
     access: AuthorizedReadAccess<Request>,
-) -> UncommittedAccessObservation<Capability::Response, Capability::AccessFailure>
+) -> UncommittedAccessObservation<Capability::Response, Capability::SafeDiagnostic>
 where
     Request: Send + Sync + 'static,
     Capability: AuditedReadCapability<Request>,
@@ -204,7 +204,7 @@ where
 pub(crate) async fn call_ensure<Request, Executor>(
     executor: &Executor,
     access: AuthorizedEnsureAccess<Request>,
-) -> mfm_executor::Result<(AuthorizationRef, VerifiedEnsureResult)>
+) -> mfm_executor::Result<(AuthorizationRef, EffectExecutorOutcome)>
 where
     Request: CanonicalExecutorRequest + Send + Sync + 'static,
     Executor: RecoverableEffectExecutor<Request>,

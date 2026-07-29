@@ -1,6 +1,7 @@
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId};
+use mfm_values::MfmValue;
 
 use super::*;
 
@@ -42,20 +43,62 @@ fn network_binding_rejects_zero_chain_and_invalid_network() {
 }
 
 #[test]
-fn safe_failure_wire_contains_only_closed_reviewed_diagnostics() {
+fn safe_diagnostic_wire_contains_exactly_three_variants_and_four_invalid_kinds() {
     let cases = [
-        EvmSafeFailure::HttpStatus { status: 503 },
-        EvmSafeFailure::JsonRpcError {
-            json_rpc_code: -32005,
+        EvmSafeDiagnostic::HttpStatus { status: 503 },
+        EvmSafeDiagnostic::JsonRpcError { code: -32005 },
+        EvmSafeDiagnostic::ResponseInvalid {
+            kind: EvmResponseInvalidKind::MalformedEnvelope,
         },
-        EvmSafeFailure::ResponseInvalid {
-            response_kind: EvmResponseInvalidKind::MalformedEnvelope,
-            size_class: EvmCoarseSizeClass::UpTo16Kib,
+        EvmSafeDiagnostic::ResponseInvalid {
+            kind: EvmResponseInvalidKind::MissingResult,
+        },
+        EvmSafeDiagnostic::ResponseInvalid {
+            kind: EvmResponseInvalidKind::InvalidResult,
+        },
+        EvmSafeDiagnostic::ResponseInvalid {
+            kind: EvmResponseInvalidKind::TooLarge,
         },
     ];
-    let rendered = serde_json::to_string(&cases).expect("safe failures");
+    let identity = EvmSafeDiagnostic::schema_descriptor()
+        .expect("diagnostic descriptor")
+        .identity()
+        .clone();
+    for case in &cases {
+        let wire = serde_json::to_string(case).expect("diagnostic JSON");
+        let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&wire)
+            .expect("canonical diagnostic");
+        identity
+            .validate_canonical_value(canonical.as_bytes())
+            .expect("diagnostic matches its schema identity");
+    }
+    let rendered = serde_json::to_string(&cases).expect("safe diagnostics");
     assert!(rendered.contains("\"status\":503"));
-    assert!(rendered.contains("\"json_rpc_code\":-32005"));
+    assert!(rendered.contains("\"code\":-32005"));
+    assert_eq!(
+        rendered.matches("\"diagnostic\":\"http_status\"").count(),
+        1
+    );
+    assert_eq!(
+        rendered
+            .matches("\"diagnostic\":\"json_rpc_error\"")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rendered
+            .matches("\"diagnostic\":\"response_invalid\"")
+            .count(),
+        4
+    );
+    for kind in [
+        "malformed_envelope",
+        "missing_result",
+        "invalid_result",
+        "too_large",
+    ] {
+        assert!(rendered.contains(&format!("\"kind\":\"{kind}\"")));
+    }
     for forbidden in [
         "provider_message",
         "response_body",

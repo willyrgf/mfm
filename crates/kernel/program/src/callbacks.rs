@@ -130,17 +130,19 @@ pub enum VerifiedReadOutcome {
     /// One schema-valid returned value.
     Returned(VerifiedValueMaterial),
     /// The adapter proved the capability boundary was not entered.
-    DidNotEnter(VerifiedValueMaterial),
+    DidNotEnter {
+        /// Generic classifier-approved safe-failure metadata.
+        metadata: mfm_store::SafeFailureMetadata,
+        /// Optional exact typed diagnostic.
+        diagnostic: Option<VerifiedValueMaterial>,
+    },
     /// Entry or outcome remains indeterminate.
-    Indeterminate(VerifiedValueMaterial),
-}
-
-impl VerifiedReadOutcome {
-    fn value(&self) -> &VerifiedValueMaterial {
-        match self {
-            Self::Returned(value) | Self::DidNotEnter(value) | Self::Indeterminate(value) => value,
-        }
-    }
+    Indeterminate {
+        /// Generic classifier-approved safe-failure metadata.
+        metadata: mfm_store::SafeFailureMetadata,
+        /// Optional exact typed diagnostic.
+        diagnostic: Option<VerifiedValueMaterial>,
+    },
 }
 
 /// One exact output slot proposed by a successful callback.
@@ -319,7 +321,7 @@ pub trait QualifiedStateCallbacks: Send + Sync {
     fn observation_type(&self) -> TypeId;
 
     /// Returns the concrete access-failure type identity.
-    fn access_failure_type(&self) -> TypeId;
+    fn diagnostic_type(&self) -> TypeId;
 
     /// Authors one immutable read/effect request.
     fn author_request(
@@ -337,8 +339,10 @@ pub trait QualifiedStateCallbacks: Send + Sync {
     ) -> Result<ProposedValueMaterial>;
 
     /// Canonicalizes one concrete redaction-safe read failure.
-    fn encode_read_failure(&self, value: &(dyn Any + Send + Sync))
-        -> Result<ProposedValueMaterial>;
+    fn encode_read_diagnostic(
+        &self,
+        value: &(dyn Any + Send + Sync),
+    ) -> Result<ProposedValueMaterial>;
 
     /// Invokes one pure state callback.
     fn settle_pure(&self, frame: &VerifiedStateFrameMaterial) -> Result<QualifiedSettlement>;
@@ -545,8 +549,8 @@ impl<S: State> TypedQualifiedStateCallbacks<S> {
         &self,
         material: &VerifiedReadOutcome,
         returned_codec: &crate::CanonicalCodec<S::Observation>,
-        failure_codec: &crate::CanonicalCodec<S::AccessFailure>,
-    ) -> Result<ObservationOutcome<S::Observation, S::AccessFailure>> {
+        diagnostic_codec: &crate::CanonicalCodec<S::SafeDiagnostic>,
+    ) -> Result<ObservationOutcome<S::Observation, S::SafeDiagnostic>> {
         match material {
             VerifiedReadOutcome::Returned(value) => {
                 verify_material(value, returned_codec.value_contract())?;
@@ -554,16 +558,34 @@ impl<S: State> TypedQualifiedStateCallbacks<S> {
                     returned_codec.decode(value.canonical().as_bytes())?,
                 ))
             }
-            VerifiedReadOutcome::DidNotEnter(value) => {
-                verify_material(value, failure_codec.value_contract())?;
+            VerifiedReadOutcome::DidNotEnter {
+                metadata,
+                diagnostic,
+            } => {
+                let diagnostic = diagnostic
+                    .as_ref()
+                    .map(|value| {
+                        verify_material(value, diagnostic_codec.value_contract())?;
+                        diagnostic_codec.decode(value.canonical().as_bytes())
+                    })
+                    .transpose()?;
                 Ok(ObservationOutcome::DidNotEnter(
-                    failure_codec.decode(value.canonical().as_bytes())?,
+                    crate::ObservedSafeFailure::new(metadata.clone(), diagnostic),
                 ))
             }
-            VerifiedReadOutcome::Indeterminate(value) => {
-                verify_material(value, failure_codec.value_contract())?;
+            VerifiedReadOutcome::Indeterminate {
+                metadata,
+                diagnostic,
+            } => {
+                let diagnostic = diagnostic
+                    .as_ref()
+                    .map(|value| {
+                        verify_material(value, diagnostic_codec.value_contract())?;
+                        diagnostic_codec.decode(value.canonical().as_bytes())
+                    })
+                    .transpose()?;
                 Ok(ObservationOutcome::Indeterminate(
-                    failure_codec.decode(value.canonical().as_bytes())?,
+                    crate::ObservedSafeFailure::new(metadata.clone(), diagnostic),
                 ))
             }
         }
@@ -642,14 +664,11 @@ impl<S: State> TypedQualifiedStateCallbacks<S> {
             .decode_read_outcome(
                 observation,
                 execution.observation_codec(),
-                execution.access_failure_codec(),
+                execution.diagnostic_codec(),
             )
             .map_err(CandidateStateCallbackError::Integrity)?;
         let verdict = self.with_candidate_frame(frame, |frame| {
-            (execution.apply())(
-                frame,
-                ObservationView::new(&outcome, observation.value().value_ref()),
-            )
+            (execution.apply())(frame, ObservationView::new(&outcome))
         })?;
         erase_verdict(verdict, |settlement| self.erase_settlement(settlement))
             .map_err(CandidateStateCallbackError::Integrity)
@@ -695,8 +714,8 @@ impl<S: State> QualifiedStateCallbacks for TypedQualifiedStateCallbacks<S> {
         TypeId::of::<S::Observation>()
     }
 
-    fn access_failure_type(&self) -> TypeId {
-        TypeId::of::<S::AccessFailure>()
+    fn diagnostic_type(&self) -> TypeId {
+        TypeId::of::<S::SafeDiagnostic>()
     }
 
     fn author_request(
@@ -724,16 +743,16 @@ impl<S: State> QualifiedStateCallbacks for TypedQualifiedStateCallbacks<S> {
         encode_erased(value, execution.observation_codec())
     }
 
-    fn encode_read_failure(
+    fn encode_read_diagnostic(
         &self,
         value: &(dyn Any + Send + Sync),
     ) -> Result<ProposedValueMaterial> {
         let StateExecution::Read(execution) = &self.execution else {
             return Err(ProgramError::Registry(
-                "only read states encode access failures".to_owned(),
+                "only read states encode safe diagnostics".to_owned(),
             ));
         };
-        encode_erased(value, execution.access_failure_codec())
+        encode_erased(value, execution.diagnostic_codec())
     }
 
     fn settle_pure(&self, frame: &VerifiedStateFrameMaterial) -> Result<QualifiedSettlement> {

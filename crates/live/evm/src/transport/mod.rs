@@ -22,7 +22,7 @@ use mfm_evm::{
     EvmTokenDecimalsResponse, EVM_READ_MAX_RESPONSE_BYTES,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, LocalPublicId, SchemaId, SemanticTypeId, StableId};
-use mfm_program::{boundary_content_ref, ObservationOutcome};
+use mfm_program::boundary_content_ref;
 use mfm_values::RetainedValueContract;
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,17 @@ pub const EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION: &str = "mfm.evm.routing-catalo
 
 /// Result type for local transport and routing construction.
 pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
+
+/// Transient result of one EVM read before safe-failure classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvmTransportOutcome<R> {
+    /// The destination returned one typed response.
+    Returned(R),
+    /// Boundary entry was proven not to have occurred.
+    DidNotEnter(EvmSafeFailure),
+    /// Boundary entry or the terminal outcome remains indeterminate.
+    Indeterminate(EvmSafeFailure),
+}
 
 /// Redaction-safe local setup failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -500,7 +511,7 @@ impl EvmJsonRpcTransport {
     pub async fn chain_identity(
         &self,
         request: &EvmChainIdentityRequest,
-    ) -> ObservationOutcome<EvmChainIdentityResponse, EvmSafeFailure> {
+    ) -> EvmTransportOutcome<EvmChainIdentityResponse> {
         let route = match self.resolve_binding(request.binding()) {
             Ok(route) => route,
             Err(failure) => return failure.into_outcome(),
@@ -519,7 +530,7 @@ impl EvmJsonRpcTransport {
             Some(chain_id) => chain_id,
             None => return payload.invalid_result(),
         };
-        ObservationOutcome::Returned(EvmChainIdentityResponse {
+        EvmTransportOutcome::Returned(EvmChainIdentityResponse {
             chain_id,
             source_scope: route.descriptor.source_ref.clone(),
             implementation_id: route.implementation_id.clone(),
@@ -530,7 +541,7 @@ impl EvmJsonRpcTransport {
     pub async fn latest_anchor(
         &self,
         request: &EvmLatestAnchorRequest,
-    ) -> ObservationOutcome<EvmBlockResponse, EvmSafeFailure> {
+    ) -> EvmTransportOutcome<EvmBlockResponse> {
         let route = match self.resolve_source(request.source()) {
             Ok(route) => route,
             Err(failure) => return failure.into_outcome(),
@@ -543,7 +554,7 @@ impl EvmJsonRpcTransport {
             Err(failure) => return failure.into_outcome(),
         };
         match parse_block(&payload.result) {
-            Ok(anchor) => ObservationOutcome::Returned(EvmBlockResponse { anchor }),
+            Ok(anchor) => EvmTransportOutcome::Returned(EvmBlockResponse { anchor }),
             Err(()) => payload.invalid_result(),
         }
     }
@@ -552,7 +563,7 @@ impl EvmJsonRpcTransport {
     pub async fn native_balance(
         &self,
         request: &EvmNativeBalanceRequest,
-    ) -> ObservationOutcome<EvmQuantityResponse, EvmSafeFailure> {
+    ) -> EvmTransportOutcome<EvmQuantityResponse> {
         let route = match self.resolve_anchored_source(request.source()) {
             Ok(route) => route,
             Err(failure) => return failure.into_outcome(),
@@ -580,7 +591,7 @@ impl EvmJsonRpcTransport {
             .as_str()
             .and_then(|raw| parse_quantity(raw).ok())
         {
-            Some(quantity) => ObservationOutcome::Returned(EvmQuantityResponse::new(quantity)),
+            Some(quantity) => EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity)),
             None => payload.invalid_result(),
         }
     }
@@ -589,7 +600,7 @@ impl EvmJsonRpcTransport {
     pub async fn token_decimals(
         &self,
         request: &EvmTokenDecimalsRequest,
-    ) -> ObservationOutcome<EvmTokenDecimalsResponse, EvmSafeFailure> {
+    ) -> EvmTransportOutcome<EvmTokenDecimalsResponse> {
         let route = match self.resolve_anchored_source(request.source()) {
             Ok(route) => route,
             Err(failure) => return failure.into_outcome(),
@@ -618,7 +629,7 @@ impl EvmJsonRpcTransport {
             Err(failure) => return failure.into_outcome(),
         };
         match payload.result.as_str().and_then(parse_abi_u8) {
-            Some(decimals) => ObservationOutcome::Returned(EvmTokenDecimalsResponse { decimals }),
+            Some(decimals) => EvmTransportOutcome::Returned(EvmTokenDecimalsResponse { decimals }),
             None => payload.invalid_result(),
         }
     }
@@ -627,7 +638,7 @@ impl EvmJsonRpcTransport {
     pub async fn token_balance(
         &self,
         request: &EvmTokenBalanceRequest,
-    ) -> ObservationOutcome<EvmQuantityResponse, EvmSafeFailure> {
+    ) -> EvmTransportOutcome<EvmQuantityResponse> {
         let route = match self.resolve_anchored_source(request.source()) {
             Ok(route) => route,
             Err(failure) => return failure.into_outcome(),
@@ -664,7 +675,7 @@ impl EvmJsonRpcTransport {
             Err(failure) => return failure.into_outcome(),
         };
         match payload.result.as_str().and_then(parse_abi_u256) {
-            Some(quantity) => ObservationOutcome::Returned(EvmQuantityResponse::new(quantity)),
+            Some(quantity) => EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity)),
             None => payload.invalid_result(),
         }
     }
@@ -673,7 +684,7 @@ impl EvmJsonRpcTransport {
     pub async fn confirm_anchor(
         &self,
         request: &EvmAnchorConfirmationRequest,
-    ) -> ObservationOutcome<EvmBlockResponse, EvmSafeFailure> {
+    ) -> EvmTransportOutcome<EvmBlockResponse> {
         let source = match request.source() {
             Some(source) => source,
             None => return did_not_enter(EvmSafeFailure::RequestInvalid),
@@ -698,7 +709,7 @@ impl EvmJsonRpcTransport {
             Err(failure) => return failure.into_outcome(),
         };
         match parse_block(&payload.result) {
-            Ok(anchor) => ObservationOutcome::Returned(EvmBlockResponse { anchor }),
+            Ok(anchor) => EvmTransportOutcome::Returned(EvmBlockResponse { anchor }),
             Err(()) => payload.invalid_result(),
         }
     }
@@ -928,7 +939,7 @@ struct RpcPayload {
 }
 
 impl RpcPayload {
-    fn invalid_result<T>(self) -> ObservationOutcome<T, EvmSafeFailure> {
+    fn invalid_result<T>(self) -> EvmTransportOutcome<T> {
         indeterminate(EvmSafeFailure::ResponseInvalid {
             response_kind: EvmResponseInvalidKind::InvalidResult,
             size_class: self.size_class,
@@ -942,20 +953,20 @@ enum BoundaryFailure {
 }
 
 impl BoundaryFailure {
-    fn into_outcome<T>(self) -> ObservationOutcome<T, EvmSafeFailure> {
+    fn into_outcome<T>(self) -> EvmTransportOutcome<T> {
         match self {
-            Self::DidNotEnter(failure) => ObservationOutcome::DidNotEnter(failure),
-            Self::Indeterminate(failure) => ObservationOutcome::Indeterminate(failure),
+            Self::DidNotEnter(failure) => EvmTransportOutcome::DidNotEnter(failure),
+            Self::Indeterminate(failure) => EvmTransportOutcome::Indeterminate(failure),
         }
     }
 }
 
-fn did_not_enter<T>(failure: EvmSafeFailure) -> ObservationOutcome<T, EvmSafeFailure> {
-    ObservationOutcome::DidNotEnter(failure)
+fn did_not_enter<T>(failure: EvmSafeFailure) -> EvmTransportOutcome<T> {
+    EvmTransportOutcome::DidNotEnter(failure)
 }
 
-fn indeterminate<T>(failure: EvmSafeFailure) -> ObservationOutcome<T, EvmSafeFailure> {
-    ObservationOutcome::Indeterminate(failure)
+fn indeterminate<T>(failure: EvmSafeFailure) -> EvmTransportOutcome<T> {
+    EvmTransportOutcome::Indeterminate(failure)
 }
 
 fn response_too_large(bytes: usize) -> BoundaryFailure {

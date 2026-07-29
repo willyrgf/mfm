@@ -266,6 +266,13 @@ struct VerifiedResponseClosure {
     objects: Vec<CommittedObject>,
 }
 
+pub(super) struct RecordedFactSourceRoot {
+    pub(super) descriptor_ref: ContentRef,
+    pub(super) claim_ref: ValueRef,
+    pub(super) subject_ref: ValueRef,
+    pub(super) response_ref: ValueRef,
+}
+
 struct RecordedFactSelection {
     authorization_ref: AuthorizationRef,
     request: FactSelectionRequest,
@@ -669,6 +676,15 @@ fn derive_response_closure(
         .find(|entry| entry.authorization_ref() == authorization_ref)
         .ok_or(StoreError::InvalidSourceClosure)?;
     let consumer_prefix = journal_prefix_objects(view, entry.authorization_journal_head())?;
+    derive_response_closure_from_material(response_ref, response_bytes, sources, &consumer_prefix)
+}
+
+fn derive_response_closure_from_material(
+    response_ref: &ValueRef,
+    response_bytes: &[u8],
+    sources: &VerifiedFactSources,
+    consumer_prefix: &[CommittedObject],
+) -> Result<VerifiedResponseClosure> {
     let response_fields = response_ref.fields()?;
     let consumer = PrefixClosureWalker::new(&consumer_prefix)?.verify(
         &[],
@@ -761,6 +777,78 @@ fn derive_response_closure(
         digest,
         objects: graph_objects.into_values().collect(),
     })
+}
+
+pub(super) fn derive_recorded_response_closure_digest(
+    response_ref: &ValueRef,
+    response_bytes: &[u8],
+    roots: Vec<RecordedFactSourceRoot>,
+    observation_graph: &[CommittedObject],
+    consumer_prefix: &[CommittedObject],
+) -> Result<SemanticDigest> {
+    let contract = RecoverabilityContractV1::embedded()?;
+    let mut unique = BTreeMap::<Vec<Vec<u8>>, VerifiedFactSourceRoots>::new();
+    for root in roots {
+        unique.insert(
+            vec![
+                canonical_content_ref_key(contract, &root.descriptor_ref)?,
+                root.claim_ref.as_bytes().to_vec(),
+                root.subject_ref.as_bytes().to_vec(),
+                root.response_ref.as_bytes().to_vec(),
+            ],
+            VerifiedFactSourceRoots {
+                descriptor_ref: root.descriptor_ref,
+                claim_ref: root.claim_ref,
+                subject_ref: root.subject_ref,
+                response_ref: root.response_ref,
+            },
+        );
+    }
+    let roots = unique.into_values().collect::<Vec<_>>();
+    let value_roots = roots
+        .iter()
+        .flat_map(|root| {
+            [
+                root.claim_ref.clone(),
+                root.subject_ref.clone(),
+                root.response_ref.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let dependency_roots = roots
+        .iter()
+        .map(|root| root.descriptor_ref.clone())
+        .collect::<Vec<_>>();
+    let source =
+        PrefixClosureWalker::new(observation_graph)?.verify(&value_roots, &dependency_roots)?;
+    let sources = VerifiedFactSources {
+        roots,
+        dependencies: source.dependencies,
+        objects: source.objects,
+        transport_objects: source.transport_objects,
+    };
+    let closure = derive_response_closure_from_material(
+        response_ref,
+        response_bytes,
+        &sources,
+        consumer_prefix,
+    )?;
+    let expected = closure
+        .objects
+        .iter()
+        .map(|object| (object.value_ref().as_bytes().to_vec(), object))
+        .collect::<BTreeMap<_, _>>();
+    let actual = observation_graph
+        .iter()
+        .map(|object| (object.value_ref().as_bytes().to_vec(), object))
+        .collect::<BTreeMap<_, _>>();
+    if expected.len() != closure.objects.len()
+        || actual.len() != observation_graph.len()
+        || expected != actual
+    {
+        return Err(StoreError::InvalidSourceClosure);
+    }
+    Ok(closure.digest)
 }
 
 fn prepare_fact_observation_graph(

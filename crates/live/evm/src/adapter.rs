@@ -12,21 +12,26 @@
 use std::sync::Arc;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::{BoundaryStage, CoarseSizeClass, FailureClass};
+use mfm_capabilities::{
+    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailureClassifierDescriptor,
+    SafeFailureClassifierRule, SafeFailureDiagnosticConstraint, SafeFailureDiagnosticRule,
+    SafeFailureOutcome, SafeFailureSizeRule,
+};
 use mfm_evm::{
     evm_read_capability_contract_canonical, evm_read_capability_contract_ref,
     evm_read_value_contracts, evm_safe_failure_contract_canonical, evm_safe_failure_contract_ref,
     EvmAnchorConfirmationRequest, EvmBlockResponse, EvmChainIdentityRequest,
     EvmChainIdentityResponse, EvmCoarseSizeClass, EvmLatestAnchorRequest, EvmNativeBalanceRequest,
-    EvmQuantityResponse, EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest,
-    EvmTokenDecimalsResponse, EVM_CHAIN_ID_OPERATION_ID, EVM_CONFIRM_ANCHOR_OPERATION_ID,
-    EVM_LATEST_ANCHOR_OPERATION_ID, EVM_NATIVE_BALANCE_OPERATION_ID,
-    EVM_TOKEN_BALANCE_OPERATION_ID, EVM_TOKEN_DECIMALS_OPERATION_ID,
+    EvmQuantityResponse, EvmResponseInvalidKind, EvmSafeDiagnostic, EvmSafeFailure,
+    EvmTokenBalanceRequest, EvmTokenDecimalsRequest, EvmTokenDecimalsResponse,
+    EVM_CHAIN_ID_OPERATION_ID, EVM_CONFIRM_ANCHOR_OPERATION_ID, EVM_LATEST_ANCHOR_OPERATION_ID,
+    EVM_NATIVE_BALANCE_OPERATION_ID, EVM_TOKEN_BALANCE_OPERATION_ID,
+    EVM_TOKEN_DECIMALS_OPERATION_ID,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, FieldPath, SchemaId, SemanticTypeId, StableId};
 use mfm_journal::v1::ReadCapabilityBinding;
 use mfm_program::{
-    boundary_content_ref, ObservationOutcome, QualifiedProgramRegistryBuilder, QualifiedReadEntry,
+    boundary_content_ref, QualifiedProgramRegistryBuilder, QualifiedReadEntry,
     QualifiedReadOperationContract,
 };
 use mfm_runtime::{
@@ -35,16 +40,13 @@ use mfm_runtime::{
 };
 use mfm_spec::{ComponentImplementationDescriptor, ComponentKind};
 use mfm_store::{AdmittedSupportGraph, AdmittedSupportMember, SafeFailureMetadata};
-use mfm_values::RetainedValueContract;
+use mfm_values::{MfmValue, RetainedValueContract};
 use serde::{Deserialize, Serialize};
 
-use crate::transport::EvmJsonRpcTransport;
+use crate::transport::{EvmJsonRpcTransport, EvmTransportOutcome};
 
 /// Exact version of the sealed live adapter callback surface.
 pub const EVM_ADAPTER_CALLBACK_SURFACE_VERSION: &str = "mfm.evm-live.adapter-callback-surface.v1";
-/// Exact version of the sealed safe-classifier descriptor.
-pub const EVM_SAFE_CLASSIFIER_DESCRIPTOR_VERSION: &str = "mfm.evm-live.safe-classifier.v1";
-
 const OBJECT_EVIDENCE_PATH: &str = "qualification.object_evidence_contract";
 const EXECUTABLE_IDENTITY_PATH: &str = "executable.identity";
 const SHARED_QUALIFICATION_PATH: &str = "qualification.descriptor";
@@ -96,33 +98,16 @@ pub fn evm_adapter_callback_surface_support_contract(
 
 /// Returns the exact exhaustive safe-classifier descriptor.
 pub fn evm_safe_classifier_canonical() -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
-    let descriptor = serde_json::json!({
-        "rules": [
-            classifier_rule("access_cancelled", "did_not_enter", "cancellation", "before_boundary_entry", "none"),
-            classifier_rule("configuration_invalid", "did_not_enter", "configuration", "before_boundary_entry", "none"),
-            classifier_rule("http_status", "indeterminate", "destination", "boundary_observation", "none"),
-            classifier_rule("json_rpc_error", "indeterminate", "destination", "boundary_observation", "none"),
-            classifier_rule("request_invalid", "did_not_enter", "request", "before_boundary_entry", "none"),
-            classifier_rule("response_invalid", "indeterminate", "unrepresentable_response", "boundary_observation", "from_failure"),
-            classifier_rule("response_missing_result", "indeterminate", "unrepresentable_response", "boundary_observation", "from_failure"),
-            classifier_rule("response_too_large", "indeterminate", "unrepresentable_response", "boundary_observation", "from_failure"),
-            classifier_rule("routing_generation_unavailable", "did_not_enter", "authorization", "before_boundary_entry", "none"),
-            classifier_rule("transport_failed", "indeterminate", "transport", "boundary_entry", "none"),
-            classifier_rule("unclassified_failure", "indeterminate", "unclassified", "boundary_observation", "none"),
-        ],
-        "safe_failure_contract_ref": evm_safe_failure_contract_ref()?,
-        "version": EVM_SAFE_CLASSIFIER_DESCRIPTOR_VERSION,
-    });
-    canonical_json(&descriptor)
+    evm_safe_classifier()?
+        .canonical()
+        .map_err(|_| RuntimeError::CatalogSelection)
 }
 
 /// Returns the exact exhaustive safe-classifier identity.
 pub fn evm_safe_classifier_contract_ref() -> mfm_runtime::Result<ContentRef> {
-    boundary_content_ref(
-        descriptor_schema_id("mfm.evm-live.safe-classifier")?,
-        &evm_safe_classifier_canonical()?,
-    )
-    .map_err(Into::into)
+    evm_safe_classifier()?
+        .content_ref()
+        .map_err(|_| RuntimeError::CatalogSelection)
 }
 
 /// Builds retained metadata for the sealed safe-classifier support object.
@@ -130,8 +115,9 @@ pub fn evm_safe_classifier_support_contract(
     role: StableId,
     evidence_contract_ref: ContentRef,
 ) -> mfm_runtime::Result<RetainedValueContract> {
-    descriptor_support_contract(
-        "mfm.evm-live.safe-classifier",
+    retained_support_contract(
+        SafeFailureClassifierDescriptor::schema_id().map_err(|_| RuntimeError::CatalogSelection)?,
+        "mfm.evm-live",
         "safe-classifier",
         role,
         evidence_contract_ref,
@@ -303,166 +289,150 @@ struct QualifiedComponent {
     callback_surface_ref: ContentRef,
 }
 
-fn classifier_rule(
-    code: &'static str,
-    outcome: &'static str,
-    failure_class: &'static str,
-    boundary_stage: &'static str,
-    coarse_size: &'static str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "boundary_stage": boundary_stage,
-        "coarse_size": coarse_size,
-        "code": code,
-        "failure_class": failure_class,
-        "outcome": outcome,
-    })
-}
-
-#[derive(Clone)]
-struct FailureMetadataFactory {
-    contract_ref: ContentRef,
-    routing_generation_unavailable: StableId,
-    configuration_invalid: StableId,
-    request_invalid: StableId,
-    access_cancelled: StableId,
-    transport_failed: StableId,
-    http_status: StableId,
-    json_rpc_error: StableId,
-    response_invalid: StableId,
-    response_missing_result: StableId,
-    response_too_large: StableId,
-    unclassified_failure: StableId,
-}
-
-impl FailureMetadataFactory {
-    fn new() -> mfm_program::Result<Self> {
-        Ok(Self {
-            contract_ref: evm_safe_failure_contract_ref()?,
-            routing_generation_unavailable: stable_id("routing_generation_unavailable")?,
-            configuration_invalid: stable_id("configuration_invalid")?,
-            request_invalid: stable_id("request_invalid")?,
-            access_cancelled: stable_id("access_cancelled")?,
-            transport_failed: stable_id("transport_failed")?,
-            http_status: stable_id("http_status")?,
-            json_rpc_error: stable_id("json_rpc_error")?,
-            response_invalid: stable_id("response_invalid")?,
-            response_missing_result: stable_id("response_missing_result")?,
-            response_too_large: stable_id("response_too_large")?,
-            unclassified_failure: stable_id("unclassified_failure")?,
-        })
-    }
-
-    fn metadata(
-        &self,
-        failure: &EvmSafeFailure,
-        outcome: FailureOutcomeKind,
-    ) -> Option<SafeFailureMetadata> {
-        let (code, class, stage, size) = match failure {
-            EvmSafeFailure::RoutingGenerationUnavailable => (
-                &self.routing_generation_unavailable,
-                FailureClass::Authorization,
-                BoundaryStage::BeforeBoundaryEntry,
-                None,
-            ),
-            EvmSafeFailure::ConfigurationInvalid => (
-                &self.configuration_invalid,
-                FailureClass::Configuration,
-                BoundaryStage::BeforeBoundaryEntry,
-                None,
-            ),
-            EvmSafeFailure::RequestInvalid => (
-                &self.request_invalid,
-                FailureClass::Request,
-                BoundaryStage::BeforeBoundaryEntry,
-                None,
-            ),
-            EvmSafeFailure::AccessCancelled => (
-                &self.access_cancelled,
-                FailureClass::Cancellation,
-                BoundaryStage::BeforeBoundaryEntry,
-                None,
-            ),
-            EvmSafeFailure::TransportFailed => (
-                &self.transport_failed,
-                FailureClass::Transport,
-                BoundaryStage::BoundaryEntry,
-                None,
-            ),
-            EvmSafeFailure::HttpStatus { .. } => (
-                &self.http_status,
-                FailureClass::Destination,
-                BoundaryStage::BoundaryObservation,
-                None,
-            ),
-            EvmSafeFailure::JsonRpcError { .. } => (
-                &self.json_rpc_error,
-                FailureClass::Destination,
-                BoundaryStage::BoundaryObservation,
-                None,
-            ),
-            EvmSafeFailure::ResponseInvalid { size_class, .. } => (
-                &self.response_invalid,
-                FailureClass::UnrepresentableResponse,
-                BoundaryStage::BoundaryObservation,
-                Some(coarse_size(*size_class)),
-            ),
-            EvmSafeFailure::ResponseMissingResult { size_class } => (
-                &self.response_missing_result,
-                FailureClass::UnrepresentableResponse,
-                BoundaryStage::BoundaryObservation,
-                Some(coarse_size(*size_class)),
-            ),
-            EvmSafeFailure::ResponseTooLarge { size_class } => (
-                &self.response_too_large,
-                FailureClass::UnrepresentableResponse,
-                BoundaryStage::BoundaryObservation,
-                Some(coarse_size(*size_class)),
-            ),
-            EvmSafeFailure::UnclassifiedFailure => (
-                &self.unclassified_failure,
-                FailureClass::Unclassified,
-                BoundaryStage::BoundaryObservation,
-                None,
-            ),
-        };
-        let required_outcome = match failure {
-            EvmSafeFailure::RoutingGenerationUnavailable
-            | EvmSafeFailure::ConfigurationInvalid
-            | EvmSafeFailure::RequestInvalid
-            | EvmSafeFailure::AccessCancelled => FailureOutcomeKind::DidNotEnter,
-            EvmSafeFailure::TransportFailed
-            | EvmSafeFailure::HttpStatus { .. }
-            | EvmSafeFailure::JsonRpcError { .. }
-            | EvmSafeFailure::ResponseInvalid { .. }
-            | EvmSafeFailure::ResponseMissingResult { .. }
-            | EvmSafeFailure::ResponseTooLarge { .. }
-            | EvmSafeFailure::UnclassifiedFailure => FailureOutcomeKind::Indeterminate,
-        };
-        (outcome == required_outcome).then(|| {
-            SafeFailureMetadata::new(self.contract_ref.clone(), code.clone(), class, stage, size)
-        })
-    }
-
-    fn unclassified_metadata(&self) -> SafeFailureMetadata {
-        SafeFailureMetadata::new(
-            self.contract_ref.clone(),
-            self.unclassified_failure.clone(),
+fn evm_safe_classifier() -> mfm_runtime::Result<SafeFailureClassifierDescriptor> {
+    let none = SafeFailureSizeRule::None;
+    let from_failure = SafeFailureSizeRule::FromFailure;
+    let forbidden = || SafeFailureDiagnosticRule::Forbidden;
+    let required = |diagnostic: &'static str, kinds: &[&'static str]| {
+        let mut constraints = vec![SafeFailureDiagnosticConstraint::new(
+            FieldPath::new("diagnostic").map_err(|_| RuntimeError::CatalogSelection)?,
+            vec![diagnostic.to_owned()],
+        )
+        .map_err(|_| RuntimeError::CatalogSelection)?];
+        if !kinds.is_empty() {
+            constraints.push(
+                SafeFailureDiagnosticConstraint::new(
+                    FieldPath::new("kind").map_err(|_| RuntimeError::CatalogSelection)?,
+                    kinds.iter().map(|kind| (*kind).to_owned()).collect(),
+                )
+                .map_err(|_| RuntimeError::CatalogSelection)?,
+            );
+        }
+        SafeFailureDiagnosticRule::required(constraints).map_err(|_| RuntimeError::CatalogSelection)
+    };
+    let rules = vec![
+        SafeFailureClassifierRule::new(
+            stable_id("access_cancelled")?,
+            SafeFailureOutcome::DidNotEnter,
+            FailureClass::Cancellation,
+            BoundaryStage::BeforeBoundaryEntry,
+            none,
+            forbidden(),
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("access_cancelled")?,
+            SafeFailureOutcome::Indeterminate,
+            FailureClass::Cancellation,
+            BoundaryStage::BoundaryEntry,
+            none,
+            forbidden(),
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("configuration_invalid")?,
+            SafeFailureOutcome::DidNotEnter,
+            FailureClass::Configuration,
+            BoundaryStage::BeforeBoundaryEntry,
+            none,
+            forbidden(),
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("http_status")?,
+            SafeFailureOutcome::Indeterminate,
+            FailureClass::Destination,
+            BoundaryStage::BoundaryObservation,
+            none,
+            required("http_status", &[])?,
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("json_rpc_error")?,
+            SafeFailureOutcome::Indeterminate,
+            FailureClass::Destination,
+            BoundaryStage::BoundaryObservation,
+            none,
+            required("json_rpc_error", &[])?,
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("request_invalid")?,
+            SafeFailureOutcome::DidNotEnter,
+            FailureClass::Request,
+            BoundaryStage::BeforeBoundaryEntry,
+            none,
+            forbidden(),
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("response_invalid")?,
+            SafeFailureOutcome::Indeterminate,
+            FailureClass::UnrepresentableResponse,
+            BoundaryStage::BoundaryObservation,
+            from_failure,
+            required(
+                "response_invalid",
+                &["malformed_envelope", "invalid_result"],
+            )?,
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("response_missing_result")?,
+            SafeFailureOutcome::Indeterminate,
+            FailureClass::UnrepresentableResponse,
+            BoundaryStage::BoundaryObservation,
+            from_failure,
+            required("response_invalid", &["missing_result"])?,
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("response_too_large")?,
+            SafeFailureOutcome::Indeterminate,
+            FailureClass::UnrepresentableResponse,
+            BoundaryStage::BoundaryObservation,
+            from_failure,
+            required("response_invalid", &["too_large"])?,
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("routing_generation_unavailable")?,
+            SafeFailureOutcome::DidNotEnter,
+            FailureClass::Authorization,
+            BoundaryStage::BeforeBoundaryEntry,
+            none,
+            forbidden(),
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("transport_failed")?,
+            SafeFailureOutcome::DidNotEnter,
+            FailureClass::Transport,
+            BoundaryStage::BeforeBoundaryEntry,
+            none,
+            forbidden(),
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("transport_failed")?,
+            SafeFailureOutcome::Indeterminate,
+            FailureClass::Transport,
+            BoundaryStage::BoundaryEntry,
+            none,
+            forbidden(),
+        ),
+        SafeFailureClassifierRule::new(
+            stable_id("unclassified_failure")?,
+            SafeFailureOutcome::Indeterminate,
             FailureClass::Unclassified,
             BoundaryStage::BoundaryObservation,
-            None,
-        )
-    }
+            none,
+            forbidden(),
+        ),
+    ];
+    SafeFailureClassifierDescriptor::new(
+        evm_safe_failure_contract_ref()?,
+        Some(
+            EvmSafeDiagnostic::schema_descriptor()
+                .map_err(|_| RuntimeError::CatalogSelection)?
+                .identity,
+        ),
+        rules,
+    )
+    .map_err(|_| RuntimeError::CatalogSelection)
 }
 
 fn stable_id(raw: &'static str) -> mfm_program::Result<StableId> {
     StableId::new(raw).map_err(|error| mfm_program::ProgramError::Spec(error.to_string()))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailureOutcomeKind {
-    DidNotEnter,
-    Indeterminate,
 }
 
 const fn coarse_size(size: EvmCoarseSizeClass) -> CoarseSizeClass {
@@ -474,53 +444,192 @@ const fn coarse_size(size: EvmCoarseSizeClass) -> CoarseSizeClass {
     }
 }
 
-fn runtime_outcome<R>(
-    outcome: ObservationOutcome<R, EvmSafeFailure>,
-    metadata: &FailureMetadataFactory,
-) -> ReadCapabilityOutcome<R, EvmSafeFailure> {
-    match outcome {
-        ObservationOutcome::Returned(response) => ReadCapabilityOutcome::Returned(response),
-        ObservationOutcome::DidNotEnter(failure) => {
-            match metadata.metadata(&failure, FailureOutcomeKind::DidNotEnter) {
-                Some(safe_metadata) => ReadCapabilityOutcome::DidNotEnter {
-                    failure,
-                    metadata: safe_metadata,
-                },
-                None => unclassified_outcome(metadata),
+#[derive(Clone)]
+struct EvmSafeFailureClassifier {
+    descriptor: SafeFailureClassifierDescriptor,
+    routing_generation_unavailable: StableId,
+    configuration_invalid: StableId,
+    request_invalid: StableId,
+    access_cancelled: StableId,
+    transport_failed: StableId,
+    http_status: StableId,
+    json_rpc_error: StableId,
+    response_invalid: StableId,
+    response_missing_result: StableId,
+    response_too_large: StableId,
+    unclassified_failure: StableId,
+    unclassified_metadata: SafeFailureMetadata,
+}
+
+impl EvmSafeFailureClassifier {
+    fn new() -> mfm_runtime::Result<Self> {
+        let descriptor = evm_safe_classifier()?;
+        let routing_generation_unavailable = stable_id("routing_generation_unavailable")?;
+        let configuration_invalid = stable_id("configuration_invalid")?;
+        let request_invalid = stable_id("request_invalid")?;
+        let access_cancelled = stable_id("access_cancelled")?;
+        let transport_failed = stable_id("transport_failed")?;
+        let http_status = stable_id("http_status")?;
+        let json_rpc_error = stable_id("json_rpc_error")?;
+        let response_invalid = stable_id("response_invalid")?;
+        let response_missing_result = stable_id("response_missing_result")?;
+        let response_too_large = stable_id("response_too_large")?;
+        let unclassified_failure = stable_id("unclassified_failure")?;
+        let fallback = descriptor
+            .classify(
+                &unclassified_failure,
+                SafeFailureOutcome::Indeterminate,
+                None,
+                false,
+            )
+            .map_err(|_| RuntimeError::CatalogSelection)?;
+        let unclassified_metadata = SafeFailureMetadata::new(
+            descriptor.safe_failure_contract_ref().clone(),
+            unclassified_failure.clone(),
+            fallback.failure_class(),
+            fallback.boundary_stage(),
+            None,
+        );
+        Ok(Self {
+            descriptor,
+            routing_generation_unavailable,
+            configuration_invalid,
+            request_invalid,
+            access_cancelled,
+            transport_failed,
+            http_status,
+            json_rpc_error,
+            response_invalid,
+            response_missing_result,
+            response_too_large,
+            unclassified_failure,
+            unclassified_metadata,
+        })
+    }
+
+    fn projection<'a>(
+        &'a self,
+        failure: &EvmSafeFailure,
+    ) -> (
+        &'a StableId,
+        Option<CoarseSizeClass>,
+        Option<EvmSafeDiagnostic>,
+    ) {
+        match failure {
+            EvmSafeFailure::RoutingGenerationUnavailable => {
+                (&self.routing_generation_unavailable, None, None)
             }
+            EvmSafeFailure::ConfigurationInvalid => (&self.configuration_invalid, None, None),
+            EvmSafeFailure::RequestInvalid => (&self.request_invalid, None, None),
+            EvmSafeFailure::AccessCancelled => (&self.access_cancelled, None, None),
+            EvmSafeFailure::TransportFailed => (&self.transport_failed, None, None),
+            EvmSafeFailure::HttpStatus { status } => (
+                &self.http_status,
+                None,
+                Some(EvmSafeDiagnostic::HttpStatus { status: *status }),
+            ),
+            EvmSafeFailure::JsonRpcError { json_rpc_code } => (
+                &self.json_rpc_error,
+                None,
+                Some(EvmSafeDiagnostic::JsonRpcError {
+                    code: *json_rpc_code,
+                }),
+            ),
+            EvmSafeFailure::ResponseInvalid {
+                response_kind,
+                size_class,
+            } => (
+                &self.response_invalid,
+                Some(coarse_size(*size_class)),
+                Some(EvmSafeDiagnostic::ResponseInvalid {
+                    kind: *response_kind,
+                }),
+            ),
+            EvmSafeFailure::ResponseMissingResult { size_class } => (
+                &self.response_missing_result,
+                Some(coarse_size(*size_class)),
+                Some(EvmSafeDiagnostic::ResponseInvalid {
+                    kind: EvmResponseInvalidKind::MissingResult,
+                }),
+            ),
+            EvmSafeFailure::ResponseTooLarge { size_class } => (
+                &self.response_too_large,
+                Some(coarse_size(*size_class)),
+                Some(EvmSafeDiagnostic::ResponseInvalid {
+                    kind: EvmResponseInvalidKind::TooLarge,
+                }),
+            ),
+            EvmSafeFailure::UnclassifiedFailure => (&self.unclassified_failure, None, None),
         }
-        ObservationOutcome::Indeterminate(failure) => {
-            match metadata.metadata(&failure, FailureOutcomeKind::Indeterminate) {
-                Some(safe_metadata) => ReadCapabilityOutcome::Indeterminate {
-                    failure,
-                    metadata: safe_metadata,
-                },
-                None => unclassified_outcome(metadata),
-            }
+    }
+
+    fn metadata(
+        &self,
+        failure: &EvmSafeFailure,
+        outcome: SafeFailureOutcome,
+    ) -> Option<(SafeFailureMetadata, Option<EvmSafeDiagnostic>)> {
+        let (code, size, diagnostic) = self.projection(failure);
+        let rule = self
+            .descriptor
+            .classify(code, outcome, size, diagnostic.is_some())
+            .ok()?;
+        Some((
+            SafeFailureMetadata::new(
+                self.descriptor.safe_failure_contract_ref().clone(),
+                code.clone(),
+                rule.failure_class(),
+                rule.boundary_stage(),
+                size,
+            ),
+            diagnostic,
+        ))
+    }
+
+    fn unclassified_outcome<R>(&self) -> ReadCapabilityOutcome<R, EvmSafeDiagnostic> {
+        ReadCapabilityOutcome::Indeterminate {
+            diagnostic: None,
+            metadata: self.unclassified_metadata.clone(),
         }
     }
 }
 
-fn unclassified_outcome<R>(
-    metadata: &FailureMetadataFactory,
-) -> ReadCapabilityOutcome<R, EvmSafeFailure> {
-    ReadCapabilityOutcome::Indeterminate {
-        failure: EvmSafeFailure::UnclassifiedFailure,
-        metadata: metadata.unclassified_metadata(),
+fn runtime_outcome<R>(
+    outcome: EvmTransportOutcome<R>,
+    classifier: &EvmSafeFailureClassifier,
+) -> ReadCapabilityOutcome<R, EvmSafeDiagnostic> {
+    let (failure, actual_outcome) = match outcome {
+        EvmTransportOutcome::Returned(response) => {
+            return ReadCapabilityOutcome::Returned(response);
+        }
+        EvmTransportOutcome::DidNotEnter(failure) => (failure, SafeFailureOutcome::DidNotEnter),
+        EvmTransportOutcome::Indeterminate(failure) => (failure, SafeFailureOutcome::Indeterminate),
+    };
+    let Some((metadata, diagnostic)) = classifier.metadata(&failure, actual_outcome) else {
+        return classifier.unclassified_outcome();
+    };
+    match actual_outcome {
+        SafeFailureOutcome::DidNotEnter => ReadCapabilityOutcome::DidNotEnter {
+            diagnostic,
+            metadata,
+        },
+        SafeFailureOutcome::Indeterminate => ReadCapabilityOutcome::Indeterminate {
+            diagnostic,
+            metadata,
+        },
     }
 }
 
 /// One aggregate adapter implementing the closed six-operation EVM read table.
 pub struct EvmReadAdapter {
     transport: Arc<EvmJsonRpcTransport>,
-    failure_metadata: FailureMetadataFactory,
+    safe_classifier: EvmSafeFailureClassifier,
 }
 
 macro_rules! impl_read_capability {
     ($request:ty, $response:ty, $method:ident, $routing_generation:expr) => {
         impl AuditedReadCapability<$request> for EvmReadAdapter {
             type Response = $response;
-            type AccessFailure = EvmSafeFailure;
+            type SafeDiagnostic = EvmSafeDiagnostic;
 
             fn routing_generation_ref(&self, request: &$request) -> Option<ContentRef> {
                 $routing_generation(request)
@@ -529,11 +638,11 @@ macro_rules! impl_read_capability {
             fn call<'a>(
                 &'a self,
                 access: AuthorizedReadAccess<$request>,
-            ) -> ReadCapabilityFuture<'a, Self::Response, Self::AccessFailure> {
+            ) -> ReadCapabilityFuture<'a, Self::Response, Self::SafeDiagnostic> {
                 Box::pin(async move {
                     runtime_outcome(
                         self.transport.$method(access.request()).await,
-                        &self.failure_metadata,
+                        &self.safe_classifier,
                     )
                 })
             }
@@ -698,7 +807,7 @@ pub fn qualify_evm_read_entries(
                 .map_err(|_| RuntimeError::CatalogSelection)
         })
         .collect::<mfm_runtime::Result<Vec<_>>>()?;
-    let metadata = FailureMetadataFactory::new()?;
+    let safe_classifier = EvmSafeFailureClassifier::new()?;
     let operation = |operation_id: &'static str,
                      request_contract: RetainedValueContract,
                      returned_contract: RetainedValueContract|
@@ -715,7 +824,7 @@ pub fn qualify_evm_read_entries(
     };
     let adapter = |transport| EvmReadAdapter {
         transport,
-        failure_metadata: metadata.clone(),
+        safe_classifier: safe_classifier.clone(),
     };
     Ok(QualifiedEvmReadEntries {
         chain_identity: qualify_read_capability::<EvmChainIdentityRequest, _>(
@@ -1380,69 +1489,124 @@ mod tests {
 
     #[test]
     fn safe_classifier_relation_is_exhaustive_and_phase_closed() {
-        let classifier = FailureMetadataFactory::new().expect("classifier");
+        let classifier = EvmSafeFailureClassifier::new().expect("classifier");
         let cases = [
             (
                 EvmSafeFailure::RoutingGenerationUnavailable,
-                FailureOutcomeKind::DidNotEnter,
+                SafeFailureOutcome::DidNotEnter,
             ),
             (
                 EvmSafeFailure::ConfigurationInvalid,
-                FailureOutcomeKind::DidNotEnter,
+                SafeFailureOutcome::DidNotEnter,
             ),
             (
                 EvmSafeFailure::RequestInvalid,
-                FailureOutcomeKind::DidNotEnter,
+                SafeFailureOutcome::DidNotEnter,
             ),
             (
                 EvmSafeFailure::AccessCancelled,
-                FailureOutcomeKind::DidNotEnter,
+                SafeFailureOutcome::DidNotEnter,
+            ),
+            (
+                EvmSafeFailure::AccessCancelled,
+                SafeFailureOutcome::Indeterminate,
             ),
             (
                 EvmSafeFailure::TransportFailed,
-                FailureOutcomeKind::Indeterminate,
+                SafeFailureOutcome::DidNotEnter,
+            ),
+            (
+                EvmSafeFailure::TransportFailed,
+                SafeFailureOutcome::Indeterminate,
             ),
             (
                 EvmSafeFailure::HttpStatus { status: 503 },
-                FailureOutcomeKind::Indeterminate,
+                SafeFailureOutcome::Indeterminate,
             ),
             (
                 EvmSafeFailure::JsonRpcError {
                     json_rpc_code: -32005,
                 },
-                FailureOutcomeKind::Indeterminate,
+                SafeFailureOutcome::Indeterminate,
             ),
             (
                 EvmSafeFailure::ResponseInvalid {
                     response_kind: mfm_evm::EvmResponseInvalidKind::MalformedEnvelope,
                     size_class: EvmCoarseSizeClass::UpTo16Kib,
                 },
-                FailureOutcomeKind::Indeterminate,
+                SafeFailureOutcome::Indeterminate,
+            ),
+            (
+                EvmSafeFailure::ResponseInvalid {
+                    response_kind: mfm_evm::EvmResponseInvalidKind::InvalidResult,
+                    size_class: EvmCoarseSizeClass::UpTo16Kib,
+                },
+                SafeFailureOutcome::Indeterminate,
             ),
             (
                 EvmSafeFailure::ResponseMissingResult {
                     size_class: EvmCoarseSizeClass::Zero,
                 },
-                FailureOutcomeKind::Indeterminate,
+                SafeFailureOutcome::Indeterminate,
             ),
             (
                 EvmSafeFailure::ResponseTooLarge {
                     size_class: EvmCoarseSizeClass::Over1Mib,
                 },
-                FailureOutcomeKind::Indeterminate,
+                SafeFailureOutcome::Indeterminate,
             ),
             (
                 EvmSafeFailure::UnclassifiedFailure,
-                FailureOutcomeKind::Indeterminate,
+                SafeFailureOutcome::Indeterminate,
             ),
         ];
         for (failure, expected) in cases {
-            assert!(classifier.metadata(&failure, expected).is_some());
+            let (code, size, diagnostic) = classifier.projection(&failure);
+            let diagnostic_bytes = diagnostic
+                .as_ref()
+                .map(|diagnostic| canonical_json(diagnostic).expect("diagnostic bytes"));
+            let diagnostic_schema_id = classifier
+                .descriptor
+                .diagnostic_schema_identity()
+                .expect("diagnostic identity")
+                .schema_id()
+                .expect("diagnostic schema id");
+            let diagnostic = diagnostic_bytes
+                .as_ref()
+                .map(|bytes| (&diagnostic_schema_id, bytes.as_bytes()));
+            let rule = classifier
+                .descriptor
+                .classify(code, expected, size, diagnostic.is_some())
+                .expect("classified failure");
+            assert_eq!(rule.outcome(), expected);
+            classifier
+                .descriptor
+                .verify(
+                    classifier.descriptor.safe_failure_contract_ref(),
+                    code,
+                    expected,
+                    rule.failure_class(),
+                    rule.boundary_stage(),
+                    size,
+                    diagnostic,
+                )
+                .expect("exact tuple");
             let hostile = match expected {
-                FailureOutcomeKind::DidNotEnter => FailureOutcomeKind::Indeterminate,
-                FailureOutcomeKind::Indeterminate => FailureOutcomeKind::DidNotEnter,
+                SafeFailureOutcome::DidNotEnter => SafeFailureOutcome::Indeterminate,
+                SafeFailureOutcome::Indeterminate => SafeFailureOutcome::DidNotEnter,
             };
-            assert!(classifier.metadata(&failure, hostile).is_none());
+            assert!(classifier
+                .descriptor
+                .verify(
+                    classifier.descriptor.safe_failure_contract_ref(),
+                    code,
+                    hostile,
+                    rule.failure_class(),
+                    rule.boundary_stage(),
+                    size,
+                    diagnostic,
+                )
+                .is_err());
         }
     }
 
@@ -1482,11 +1646,12 @@ mod tests {
 
     #[test]
     fn classifier_and_callback_descriptors_are_closed_and_redaction_safe() {
+        let classifier = evm_safe_classifier_canonical().expect("classifier");
+        let classifier_json: serde_json::Value =
+            serde_json::from_slice(classifier.as_bytes()).expect("classifier JSON");
         let rendered = format!(
             "{}{}",
-            evm_safe_classifier_canonical()
-                .expect("classifier")
-                .as_str(),
+            classifier.as_str(),
             evm_adapter_callback_surface_canonical()
                 .expect("callbacks")
                 .as_str(),
@@ -1502,9 +1667,12 @@ mod tests {
             assert!(!rendered.contains(forbidden));
         }
         assert_eq!(
-            rendered.matches("\"code\"").count(),
-            11,
-            "every safe failure code has exactly one classifier rule"
+            classifier_json["rules"]
+                .as_array()
+                .expect("classifier rules")
+                .len(),
+            13,
+            "every legal safe failure outcome has exactly one classifier rule"
         );
     }
 
@@ -1584,7 +1752,7 @@ mod tests {
         .expect("anchored source");
         let adapter = EvmReadAdapter {
             transport,
-            failure_metadata: FailureMetadataFactory::new().expect("failure metadata"),
+            safe_classifier: EvmSafeFailureClassifier::new().expect("safe classifier"),
         };
 
         let chain = EvmChainIdentityRequest::new(binding);

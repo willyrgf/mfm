@@ -85,16 +85,16 @@ names and directory counts are not architecture.
 | Category | Owns | Does not own |
 | --- | --- | --- |
 | Canonical/identity primitive | Frozen encodings, domain-separated identities, raw-byte content references | Workflow or domain behavior |
-| Value contract | Typed value descriptors and the one producer-independent retained-value contract | Producer authority, retained-byte identity, or workflow behavior |
+| Value contract | Complete `SchemaIdentity`/`SchemaShape` descriptors, strict canonical structural value validation, and the one producer-independent retained-value contract | Producer authority, retained-byte identity, or workflow behavior |
 | Journal contract | Five record schemas, producer-bound `ValueRef`, heads, references, batch algebra, persisted fact-slot and actual-emission coordinates | Persistence, scheduling, state callbacks |
 | Program | Typed graphs, `StateExecution`, `StateFrame`, value views, settlement values, process-only fact proposals | Store or live-access authority |
 | Certifier | Planning-profile verification, deterministic expansion verification, manifests, certified dependency, terminal, and bounded homogeneous fact-slot contracts | Runtime scheduling or live IO |
 | State | Pure request authorship, observation interpretation, output/fact/failure construction | Ambient IO, persistence, scheduler policy |
-| Capability contract | One typed application-protocol request/return and closed safe-failure contract | State reduction, hidden retry, workflow topology |
+| Capability contract | One typed application-protocol request/return, a closed safe-failure contract, and the callback-free classifier that embeds and enforces an optional exact diagnostic schema identity | State reduction, hidden retry, workflow topology |
 | Adapter | Private binding from runtime-authorized state request to reusable transport/executor surface | A second lifecycle or replay reducer |
 | Transport | Reusable protocol encoding, IO, checked decoding, and safe error classification | Journal access, state settlement, workflow topology |
 | Executor | Keyed delivery convergence, target-entry authority, terminal evidence, typed resource policy | Run scheduling, state settlement, journal mutation |
-| Store | Atomic append, object binding, hashes, CAS, structural fold, fact-group validation and actual-ordinal assignment, verified views/readers | State execution, domain outcomes, destination IO |
+| Store | Atomic append, object binding, hashes, CAS, callback-free structural fold, exact producer/object/observation closure verification, fact-group validation and actual-ordinal assignment, verified views/readers | State execution, domain outcomes, destination IO |
 | Runtime | Deterministic readiness, exact materialization, audited call orchestration, one-action drive | Business policy, protocol phases, resource policy, persisted status |
 | Replay | Recorded verification, exact reproduction, candidate comparison | Live scheduler, live capability, append |
 | App assembly | Authentication, grants, entry-point catalog, store/catalog wiring, DTO services | Planning logic or state behavior |
@@ -119,7 +119,8 @@ Kernel dependencies point toward lower contracts:
 
 ```text
 ids + canonical
-  -> values + capabilities
+  -> values
+  -> capabilities
   -> journal
   -> program + spec
   -> certify
@@ -289,9 +290,11 @@ signer, wallet, or RPC IO.
 
 ## Journal And Store Boundary
 
-`mfm-values` owns the one producer-independent `RetainedValueContract`. `mfm-journal` owns the
-frozen five-record schemas, producer-bound `ValueRef`, and journal references. `mfm-store` owns
-legal append and verified read authority.
+`mfm-values` owns complete `SchemaIdentity` and `SchemaShape` descriptors, their strict canonical
+structural value validator, and the one producer-independent `RetainedValueContract`.
+`mfm-capabilities` owns classifier embedding and callback-free enforcement of an optional exact
+diagnostic `SchemaIdentity`. `mfm-journal` owns the frozen five-record schemas, producer-bound
+`ValueRef`, and journal references. `mfm-store` owns legal append and verified read authority.
 
 Stores own:
 

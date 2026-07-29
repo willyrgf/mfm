@@ -26,10 +26,20 @@ pub enum MaybeValue<T: MfmValue> {
 
 impl<T: MfmValue> MfmValue for MaybeValue<T> {
     fn schema_descriptor() -> Result<SchemaDescriptor> {
-        let produced = SchemaShape::Tuple(vec![SchemaShape::ValueRef {
-            schema_id: T::schema_id()?,
-            semantic_type_id: T::semantic_id()?,
-        }]);
+        let inline_value = SchemaShape::inline_value::<T>()?;
+        let SchemaShape::InlineValue {
+            schema_id: argument_schema_id,
+            semantic_type_id: argument_semantic_type_id,
+            ..
+        } = &inline_value
+        else {
+            return Err(ValueError::Descriptor(
+                "inline value helper returned a non-inline shape".to_owned(),
+            ));
+        };
+        let argument_schema_id = argument_schema_id.clone();
+        let argument_semantic_type_id = argument_semantic_type_id.clone();
+        let produced = SchemaShape::Tuple(vec![inline_value]);
         let skipped = skip_reason_shape()?;
         let serialized_shape = SchemaShape::external_enum(vec![
             EnumVariantDescriptor::new("Produced", produced),
@@ -41,7 +51,10 @@ impl<T: MfmValue> MfmValue for MaybeValue<T> {
             "mfm.kernel.maybe_value",
             SchemaShape::Generic {
                 constructor: "mfm.kernel/maybe-value".to_owned(),
-                arguments: vec![GenericArgumentDescriptor::for_value::<T>()?],
+                arguments: vec![GenericArgumentDescriptor {
+                    schema_id: argument_schema_id,
+                    semantic_type_id: argument_semantic_type_id,
+                }],
                 serialized_shape: Box::new(serialized_shape),
             },
             "mfm_values::MaybeValue",

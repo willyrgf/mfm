@@ -18,9 +18,9 @@ use serde::{de, Deserialize, Serialize};
 use crate::capability::{
     EvmAnchorConfirmationRequest, EvmAnchoredSource, EvmBlockResponse, EvmChainIdentityRequest,
     EvmChainIdentityResponse, EvmCheckedSource, EvmLatestAnchorRequest, EvmNativeBalanceRequest,
-    EvmNetworkBinding, EvmQuantityResponse, EvmReadFailure, EvmSafeFailure, EvmTokenBalanceRequest,
-    EvmTokenDecimalsRequest, EvmTokenDecimalsResponse, EVM_CHAIN_ID_OPERATION_ID,
-    EVM_CONFIRM_ANCHOR_OPERATION_ID, EVM_LATEST_ANCHOR_OPERATION_ID,
+    EvmNetworkBinding, EvmQuantityResponse, EvmReadFailure, EvmResponseInvalidKind,
+    EvmSafeDiagnostic, EvmTokenBalanceRequest, EvmTokenDecimalsRequest, EvmTokenDecimalsResponse,
+    EVM_CHAIN_ID_OPERATION_ID, EVM_CONFIRM_ANCHOR_OPERATION_ID, EVM_LATEST_ANCHOR_OPERATION_ID,
     EVM_NATIVE_BALANCE_OPERATION_ID, EVM_TOKEN_BALANCE_OPERATION_ID,
     EVM_TOKEN_DECIMALS_OPERATION_ID,
 };
@@ -642,7 +642,7 @@ impl State for BootstrapEvmSourceState {
     type Failure = EvmReadFailure;
     type Request = EvmChainIdentityRequest;
     type Observation = EvmChainIdentityResponse;
-    type AccessFailure = EvmSafeFailure;
+    type SafeDiagnostic = EvmSafeDiagnostic;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         state_contract_ref("bootstrap_source")
@@ -655,7 +655,7 @@ fn bootstrap_request(frame: StateFrame<'_, BootstrapEvmSourceState>) -> EvmChain
 
 fn bootstrap_apply(
     frame: StateFrame<'_, BootstrapEvmSourceState>,
-    observation: ObservationView<'_, EvmChainIdentityResponse, EvmSafeFailure>,
+    observation: ObservationView<'_, EvmChainIdentityResponse, EvmSafeDiagnostic>,
 ) -> EvidenceVerdict<Settlement<BootstrapEvmSourceState>> {
     let response = match returned_or_failure::<BootstrapEvmSourceState>(observation) {
         Ok(response) => response,
@@ -684,7 +684,7 @@ impl State for ReadEvmInitialAnchorState {
     type Failure = EvmReadFailure;
     type Request = EvmLatestAnchorRequest;
     type Observation = EvmBlockResponse;
-    type AccessFailure = EvmSafeFailure;
+    type SafeDiagnostic = EvmSafeDiagnostic;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         state_contract_ref("read_initial_anchor")
@@ -699,7 +699,7 @@ fn initial_anchor_request(
 
 fn initial_anchor_apply(
     frame: StateFrame<'_, ReadEvmInitialAnchorState>,
-    observation: ObservationView<'_, EvmBlockResponse, EvmSafeFailure>,
+    observation: ObservationView<'_, EvmBlockResponse, EvmSafeDiagnostic>,
 ) -> EvidenceVerdict<Settlement<ReadEvmInitialAnchorState>> {
     let response = match returned_or_failure::<ReadEvmInitialAnchorState>(observation) {
         Ok(response) => response,
@@ -722,7 +722,7 @@ impl State for ReadEvmTokenDecimalsState {
     type Failure = EvmReadFailure;
     type Request = EvmTokenDecimalsRequest;
     type Observation = EvmTokenDecimalsResponse;
-    type AccessFailure = EvmSafeFailure;
+    type SafeDiagnostic = EvmSafeDiagnostic;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         state_contract_ref("read_token_decimals")
@@ -739,7 +739,7 @@ fn token_decimals_request(
 
 fn token_decimals_apply(
     frame: StateFrame<'_, ReadEvmTokenDecimalsState>,
-    observation: ObservationView<'_, EvmTokenDecimalsResponse, EvmSafeFailure>,
+    observation: ObservationView<'_, EvmTokenDecimalsResponse, EvmSafeDiagnostic>,
 ) -> EvidenceVerdict<Settlement<ReadEvmTokenDecimalsState>> {
     let response = match returned_or_failure::<ReadEvmTokenDecimalsState>(observation) {
         Ok(response) => response,
@@ -764,7 +764,7 @@ impl State for ReadEvmNativeBalanceState {
     type Failure = EvmReadFailure;
     type Request = EvmNativeBalanceRequest;
     type Observation = EvmQuantityResponse;
-    type AccessFailure = EvmSafeFailure;
+    type SafeDiagnostic = EvmSafeDiagnostic;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         state_contract_ref("read_native_balance")
@@ -784,7 +784,7 @@ fn native_balance_request(
 
 fn native_balance_apply(
     frame: StateFrame<'_, ReadEvmNativeBalanceState>,
-    observation: ObservationView<'_, EvmQuantityResponse, EvmSafeFailure>,
+    observation: ObservationView<'_, EvmQuantityResponse, EvmSafeDiagnostic>,
 ) -> EvidenceVerdict<Settlement<ReadEvmNativeBalanceState>> {
     let response = match returned_or_failure::<ReadEvmNativeBalanceState>(observation) {
         Ok(response) => response,
@@ -809,7 +809,7 @@ impl State for ReadEvmTokenBalanceState {
     type Failure = EvmReadFailure;
     type Request = EvmTokenBalanceRequest;
     type Observation = EvmQuantityResponse;
-    type AccessFailure = EvmSafeFailure;
+    type SafeDiagnostic = EvmSafeDiagnostic;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         state_contract_ref("read_token_balance")
@@ -832,7 +832,7 @@ fn token_balance_request(
 
 fn token_balance_apply(
     frame: StateFrame<'_, ReadEvmTokenBalanceState>,
-    observation: ObservationView<'_, EvmQuantityResponse, EvmSafeFailure>,
+    observation: ObservationView<'_, EvmQuantityResponse, EvmSafeDiagnostic>,
 ) -> EvidenceVerdict<Settlement<ReadEvmTokenBalanceState>> {
     let response = match returned_or_failure::<ReadEvmTokenBalanceState>(observation) {
         Ok(response) => response,
@@ -865,7 +865,7 @@ impl State for ConfirmEvmAnchorState {
     type Failure = EvmReadFailure;
     type Request = EvmAnchorConfirmationRequest;
     type Observation = EvmBlockResponse;
-    type AccessFailure = EvmSafeFailure;
+    type SafeDiagnostic = EvmSafeDiagnostic;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         state_contract_ref("confirm_anchor")
@@ -883,7 +883,7 @@ fn confirmation_request(
 
 fn confirmation_apply(
     frame: StateFrame<'_, ConfirmEvmAnchorState>,
-    observation: ObservationView<'_, EvmBlockResponse, EvmSafeFailure>,
+    observation: ObservationView<'_, EvmBlockResponse, EvmSafeDiagnostic>,
 ) -> EvidenceVerdict<Settlement<ConfirmEvmAnchorState>> {
     let source = match common_fanout_source(&frame.input().value().fanout) {
         Some(source) => source,
@@ -910,7 +910,7 @@ impl State for AggregateEvmBalancesState {
     type Failure = EvmReadFailure;
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         state_contract_ref("aggregate_balances")
@@ -1083,10 +1083,10 @@ fn check_anchor_confirmation(
 }
 
 fn returned_or_failure<'a, S>(
-    observation: ObservationView<'a, S::Observation, EvmSafeFailure>,
+    observation: ObservationView<'a, S::Observation, EvmSafeDiagnostic>,
 ) -> std::result::Result<&'a S::Observation, EvidenceVerdict<Settlement<S>>>
 where
-    S: State<Failure = EvmReadFailure, AccessFailure = EvmSafeFailure>,
+    S: State<Failure = EvmReadFailure, SafeDiagnostic = EvmSafeDiagnostic>,
 {
     match observation.outcome() {
         ObservationOutcome::Returned(response) => Ok(response),
@@ -1096,55 +1096,72 @@ where
 }
 
 fn failure_verdict<S>(
-    failure: &EvmSafeFailure,
+    failure: &mfm_program::ObservedSafeFailure<EvmSafeDiagnostic>,
     entered_or_indeterminate: bool,
 ) -> EvidenceVerdict<Settlement<S>>
 where
     S: State<Failure = EvmReadFailure>,
 {
-    let requires_no_entry = matches!(
-        failure,
-        EvmSafeFailure::RoutingGenerationUnavailable
-            | EvmSafeFailure::ConfigurationInvalid
-            | EvmSafeFailure::RequestInvalid
-            | EvmSafeFailure::AccessCancelled
-    );
-    let requires_entry = matches!(
-        failure,
-        EvmSafeFailure::TransportFailed
-            | EvmSafeFailure::HttpStatus { .. }
-            | EvmSafeFailure::JsonRpcError { .. }
-            | EvmSafeFailure::ResponseInvalid { .. }
-            | EvmSafeFailure::ResponseMissingResult { .. }
-            | EvmSafeFailure::ResponseTooLarge { .. }
-            | EvmSafeFailure::UnclassifiedFailure
-    );
-    if (requires_no_entry && entered_or_indeterminate)
-        || (requires_entry && !entered_or_indeterminate)
-    {
-        return EvidenceVerdict::InvalidEvidence;
-    }
-    match failure {
-        EvmSafeFailure::RoutingGenerationUnavailable
-        | EvmSafeFailure::ConfigurationInvalid
-        | EvmSafeFailure::RequestInvalid
-        | EvmSafeFailure::ResponseInvalid { .. }
-        | EvmSafeFailure::ResponseMissingResult { .. }
-        | EvmSafeFailure::ResponseTooLarge { .. } => EvidenceVerdict::InvalidEvidence,
-        EvmSafeFailure::AccessCancelled
-        | EvmSafeFailure::TransportFailed
-        | EvmSafeFailure::UnclassifiedFailure => EvidenceVerdict::InsufficientEvidence,
-        EvmSafeFailure::HttpStatus { status } if http_status_is_insufficient_evidence(*status) => {
-            EvidenceVerdict::InsufficientEvidence
-        }
-        EvmSafeFailure::JsonRpcError { json_rpc_code }
-            if json_rpc_code_is_insufficient_evidence(*json_rpc_code) =>
+    failure_verdict_projection::<S>(
+        failure.stable_code().as_str(),
+        entered_or_indeterminate,
+        failure.diagnostic(),
+    )
+}
+
+fn failure_verdict_projection<S>(
+    stable_code: &str,
+    entered_or_indeterminate: bool,
+    diagnostic: Option<&EvmSafeDiagnostic>,
+) -> EvidenceVerdict<Settlement<S>>
+where
+    S: State<Failure = EvmReadFailure>,
+{
+    match (stable_code, entered_or_indeterminate, diagnostic) {
+        (
+            "routing_generation_unavailable" | "configuration_invalid" | "request_invalid",
+            false,
+            None,
+        )
+        | (
+            "response_invalid",
+            true,
+            Some(EvmSafeDiagnostic::ResponseInvalid {
+                kind:
+                    EvmResponseInvalidKind::MalformedEnvelope | EvmResponseInvalidKind::InvalidResult,
+            }),
+        )
+        | (
+            "response_missing_result",
+            true,
+            Some(EvmSafeDiagnostic::ResponseInvalid {
+                kind: EvmResponseInvalidKind::MissingResult,
+            }),
+        )
+        | (
+            "response_too_large",
+            true,
+            Some(EvmSafeDiagnostic::ResponseInvalid {
+                kind: EvmResponseInvalidKind::TooLarge,
+            }),
+        ) => EvidenceVerdict::InvalidEvidence,
+        ("access_cancelled" | "transport_failed", _, None)
+        | ("unclassified_failure", true, None) => EvidenceVerdict::InsufficientEvidence,
+        ("http_status", true, Some(EvmSafeDiagnostic::HttpStatus { status }))
+            if http_status_is_insufficient_evidence(*status) =>
         {
             EvidenceVerdict::InsufficientEvidence
         }
-        EvmSafeFailure::HttpStatus { .. } | EvmSafeFailure::JsonRpcError { .. } => {
+        ("json_rpc_error", true, Some(EvmSafeDiagnostic::JsonRpcError { code }))
+            if json_rpc_code_is_insufficient_evidence(*code) =>
+        {
+            EvidenceVerdict::InsufficientEvidence
+        }
+        ("http_status", true, Some(EvmSafeDiagnostic::HttpStatus { .. }))
+        | ("json_rpc_error", true, Some(EvmSafeDiagnostic::JsonRpcError { .. })) => {
             EvidenceVerdict::Settlement(Settlement::failed(EvmReadFailure::DestinationRejected))
         }
+        _ => EvidenceVerdict::InvalidEvidence,
     }
 }
 
@@ -1174,7 +1191,7 @@ fn read_execution<S>(
     apply: mfm_program::ReadApply<S>,
 ) -> mfm_program::Result<StateExecution<S>>
 where
-    S: State<AccessFailure = EvmSafeFailure>,
+    S: State<SafeDiagnostic = EvmSafeDiagnostic>,
     S::Request: mfm_values::MfmValue,
     S::Observation: mfm_values::MfmValue,
 {
@@ -1331,7 +1348,7 @@ pub fn evm_read_capability_support_contract(
 /// Returns exact canonical bytes of the closed EVM safe-failure contract.
 pub fn evm_safe_failure_contract_canonical() -> mfm_program::Result<PlainCanonicalJsonBytes> {
     PlainCanonicalJsonBytes::from_json_str(
-        r#"{"codes":["access_cancelled","configuration_invalid","http_status","json_rpc_error","request_invalid","response_invalid","response_missing_result","response_too_large","routing_generation_unavailable","transport_failed","unclassified_failure"],"diagnostic_schema":"mfm.evm.safe_failure","version":"mfm.evm.safe-failure-contract.v1"}"#,
+        r#"{"codes":["access_cancelled","configuration_invalid","http_status","json_rpc_error","request_invalid","response_invalid","response_missing_result","response_too_large","routing_generation_unavailable","transport_failed","unclassified_failure"],"diagnostic_schema":"mfm.evm.safe_diagnostic","version":"mfm.evm.safe-failure-contract.v1"}"#,
     )
     .map_err(|error| mfm_program::ProgramError::Codec(error.to_string()))
 }

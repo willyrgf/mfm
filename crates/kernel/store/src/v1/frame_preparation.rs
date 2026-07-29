@@ -17,8 +17,8 @@ use super::{
     PreparedFrame, PreparedValue, Result, StoreAuthorityContext, StoreError, VerifiedRunView,
 };
 
-const RUN_ADMISSION_INPUT_PATH: &str = "run_admission.input";
-const CONFIGURED_VALUE_PATH: &str = "config.configured";
+pub(super) const RUN_ADMISSION_INPUT_PATH: &str = "run_admission.input";
+pub(super) const CONFIGURED_VALUE_PATH: &str = "config.configured";
 
 struct ResolvedSource {
     source: InputSource,
@@ -575,7 +575,7 @@ fn resolved(
     })
 }
 
-fn select_manifest_value<T>(
+pub(super) fn select_manifest_value<T>(
     entries: Vec<(FieldPath, T)>,
     selected_path: Option<&FieldPath>,
 ) -> Result<(FieldPath, T, Option<FieldPath>)> {
@@ -627,7 +627,7 @@ fn select_manifest_value<T>(
     Ok((path, value, suffix))
 }
 
-fn path_suffix(selected: &FieldPath, root: &FieldPath) -> Option<Option<FieldPath>> {
+pub(super) fn path_suffix(selected: &FieldPath, root: &FieldPath) -> Option<Option<FieldPath>> {
     if selected == root {
         return Some(None);
     }
@@ -721,7 +721,7 @@ pub(super) fn select_canonical(
     PlainCanonicalJsonBytes::from_json_str(&encoded).map_err(|_| StoreError::JournalContract)
 }
 
-fn insert_json_path(
+pub(super) fn insert_json_path(
     root: &mut serde_json::Value,
     field_path: &FieldPath,
     value: serde_json::Value,

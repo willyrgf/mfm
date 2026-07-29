@@ -113,6 +113,30 @@ impl AsyncInMemoryRunStore {
     }
 
     #[cfg(test)]
+    pub(super) fn recorded_run_for_observation_test(
+        &self,
+        run_id: &RunId,
+    ) -> Result<
+        (
+            TenantScopeId,
+            Vec<CommittedJournalCommit>,
+            Vec<CommittedObject>,
+        ),
+        StoreError,
+    > {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| StoreError::MemoryLockPoisoned)?;
+        let run = core.runs.get(run_id).ok_or(StoreError::RunNotFound)?;
+        Ok((
+            run.tenant_scope_id.clone(),
+            run.commits.clone(),
+            reachable_objects(&core, run)?,
+        ))
+    }
+
+    #[cfg(test)]
     pub(super) fn remove_transition_output_for_trace_test(
         &self,
         run_id: &RunId,

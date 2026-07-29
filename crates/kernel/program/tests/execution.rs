@@ -88,21 +88,21 @@ impl State for PureState {
     common_state_types!();
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 }
 
 impl State for ReadState {
     common_state_types!();
     type Request = Boundary;
     type Observation = Boundary;
-    type AccessFailure = Failure;
+    type SafeDiagnostic = Failure;
 }
 
 impl State for EffectState {
     common_state_types!();
     type Request = Boundary;
     type Observation = Boundary;
-    type AccessFailure = Failure;
+    type SafeDiagnostic = Failure;
 }
 
 fn pure_apply(_frame: StateFrame<'_, PureState>) -> Settlement<PureState> {

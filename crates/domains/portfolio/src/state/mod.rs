@@ -358,7 +358,7 @@ impl State for ValidatePortfolioSnapshotSelectionState {
     type Failure = InvalidPortfolioSnapshotSelection;
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         portfolio_state_contract_ref("validate_snapshot_selection")
@@ -385,7 +385,7 @@ impl State for AssemblePortfolioSnapshotState {
     type Failure = PortfolioSnapshotFailure;
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         portfolio_state_contract_ref("assemble_snapshot")
@@ -413,7 +413,7 @@ impl State for ProjectPortfolioReportState {
     type Failure = PortfolioSnapshotFailure;
     type Request = NoBoundaryValue;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         portfolio_state_contract_ref("project_report")

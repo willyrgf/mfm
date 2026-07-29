@@ -756,10 +756,12 @@ pub(super) fn validate_object_envelope(
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) struct ObjectAuthorityState {
     objects: BTreeMap<ObjectAuthorityKey, CommittedObject>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl ObjectAuthorityState {
     pub(super) fn from_committed(
         objects: impl IntoIterator<Item = CommittedObject>,

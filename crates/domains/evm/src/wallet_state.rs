@@ -29,7 +29,7 @@ impl State for SubmitEvmTransactionState {
     type Failure = EvmSubmitTransactionFailure;
     type Request = EvmSubmitTransactionRequest;
     type Observation = NoBoundaryValue;
-    type AccessFailure = NoBoundaryValue;
+    type SafeDiagnostic = NoBoundaryValue;
 
     fn state_contract_ref() -> mfm_program::Result<ContentRef> {
         boundary_content_ref(

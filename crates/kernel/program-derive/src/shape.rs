@@ -216,7 +216,7 @@ fn enum_shape_tokens(
             ));
         }
         variant_names.push(wire_name.clone());
-        let shape_output = variant_shape_tokens(variant, rename_all, kind)?;
+        let shape_output = variant_shape_tokens(variant, kind)?;
         default_bounds.extend(shape_output.default_bounds);
         let shape = shape_output.shape;
         variants.push(quote!(::mfm_values::EnumVariantDescriptor::new(#wire_name, #shape)));
@@ -224,9 +224,14 @@ fn enum_shape_tokens(
 
     let tagging = match (attrs.enum_tag.as_deref(), attrs.enum_content.as_deref()) {
         (None, None) => quote!(::mfm_values::EnumTagging::External),
-        (Some(tag), None) => quote!(::mfm_values::EnumTagging::Internal { tag: #tag }),
+        (Some(tag), None) => {
+            quote!(::mfm_values::EnumTagging::Internal { tag: #tag.to_owned() })
+        }
         (Some(tag), Some(content)) => {
-            quote!(::mfm_values::EnumTagging::Adjacent { tag: #tag, content: #content })
+            quote!(::mfm_values::EnumTagging::Adjacent {
+                tag: #tag.to_owned(),
+                content: #content.to_owned(),
+            })
         }
         (None, Some(_)) => {
             return Err(syn::Error::new(
@@ -242,18 +247,14 @@ fn enum_shape_tokens(
     })
 }
 
-fn variant_shape_tokens(
-    variant: &Variant,
-    rename_all: Option<&str>,
-    kind: DeriveKind,
-) -> syn::Result<SchemaShapeOutput> {
+fn variant_shape_tokens(variant: &Variant, kind: DeriveKind) -> syn::Result<SchemaShapeOutput> {
     match &variant.fields {
         Fields::Unit => Ok(SchemaShapeOutput {
             shape: quote!(::mfm_values::SchemaShape::Unit),
             default_bounds: Vec::new(),
         }),
         Fields::Named(FieldsNamed { named, .. }) => {
-            let field_output = field_descriptor_tokens(named, rename_all, kind)?;
+            let field_output = field_descriptor_tokens(named, None, kind)?;
             let descriptors = field_output.descriptors;
             Ok(SchemaShapeOutput {
                 shape: quote!(::mfm_values::SchemaShape::named_struct(
@@ -333,6 +334,9 @@ fn shape_tokens(ty: &Type, kind: DeriveKind) -> syn::Result<proc_macro2::TokenSt
     match ty {
         Type::Path(type_path) => shape_tokens_for_path(type_path, kind),
         Type::Tuple(tuple) => {
+            if tuple.elems.is_empty() {
+                return Ok(quote!(::mfm_values::SchemaShape::Unit));
+            }
             let elements = tuple
                 .elems
                 .iter()
@@ -431,10 +435,7 @@ fn shape_tokens_for_path(
         }
         _ => {
             let ty = quote!(#type_path);
-            Ok(quote!(::mfm_values::SchemaShape::ValueRef {
-                schema_id: <#ty as ::mfm_values::MfmValue>::schema_id()?,
-                semantic_type_id: <#ty as ::mfm_values::MfmValue>::semantic_id()?,
-            }))
+            Ok(quote!(::mfm_values::SchemaShape::inline_value::<#ty>()?))
         }
     }
 }

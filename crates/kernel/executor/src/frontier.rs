@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV1};
 use mfm_capabilities::{
-    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureCode,
+    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureCode, SafeFailureOutcome,
 };
-use mfm_ids::{AttemptId, ContentRef, EffectKey, RequestDigest, SemanticDigest};
+use mfm_ids::{AttemptId, ContentRef, EffectKey, RequestDigest, SemanticDigest, StableId};
 
 use crate::codec::{Decoder, Encoder, MAX_DURABLE_SNAPSHOT_BYTES};
 use crate::contract::{
@@ -118,6 +118,48 @@ pub fn reference_safe_failure(
     )
     .map_err(|_| ExecutorError::InvalidSafeFailure)?;
     validated_safe_failure(&failure)?;
+    Ok(failure)
+}
+
+/// Reconstructs and verifies one persisted reference-executor failure tuple.
+///
+/// This is the sole public decoder for journal observation validation. It admits neither
+/// diagnostics nor coarse sizes and enforces the exact outcome-specific reference relation.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_reference_safe_failure_tuple(
+    safe_failure_contract_ref: ContentRef,
+    stable_code: &StableId,
+    outcome: SafeFailureOutcome,
+    failure_class: FailureClass,
+    boundary_stage: BoundaryStage,
+    coarse_size_class: Option<CoarseSizeClass>,
+    has_diagnostic: bool,
+) -> Result<ReferenceSafeFailure> {
+    if coarse_size_class.is_some() || has_diagnostic {
+        return Err(ExecutorError::InvalidSafeFailure);
+    }
+    let code = match stable_code.as_str() {
+        "generation_fenced" => ReferenceFailureCode::GenerationFenced,
+        "destination_unavailable" => ReferenceFailureCode::DestinationUnavailable,
+        "request_conflict" => ReferenceFailureCode::RequestConflict,
+        "access_cancelled" => ReferenceFailureCode::AccessCancelled,
+        "unclassified_failure" => ReferenceFailureCode::UnclassifiedFailure,
+        _ => return Err(ExecutorError::InvalidSafeFailure),
+    };
+    let failure = reference_safe_failure(
+        safe_failure_contract_ref,
+        code,
+        failure_class,
+        boundary_stage,
+    )?;
+    match outcome {
+        SafeFailureOutcome::DidNotEnter => {
+            DeliveryAttemptOutcome::did_not_enter(failure.clone())?;
+        }
+        SafeFailureOutcome::Indeterminate => {
+            DeliveryAttemptOutcome::indeterminate(failure.clone())?;
+        }
+    }
     Ok(failure)
 }
 
@@ -503,6 +545,12 @@ impl TerminalTombstoneRef {
     /// Returns the lightweight tombstone content identity.
     pub const fn as_content_ref(&self) -> &ContentRef {
         &self.0
+    }
+
+    /// Reconstructs a tombstone reference after checking its exact schema.
+    pub fn from_content_ref(value: ContentRef) -> Result<Self> {
+        crate::contract::require_schema_ref(&value, TERMINAL_TOMBSTONE_SCHEMA)?;
+        Ok(Self(value))
     }
 }
 
@@ -1066,7 +1114,8 @@ impl DeliveryAuditFrontierRef {
         &self.0
     }
 
-    pub(crate) fn from_content_ref(value: ContentRef) -> Result<Self> {
+    /// Reconstructs a frontier reference after checking its exact schema.
+    pub fn from_content_ref(value: ContentRef) -> Result<Self> {
         crate::contract::require_schema_ref(&value, DELIVERY_FRONTIER_SCHEMA)?;
         Ok(Self(value))
     }
