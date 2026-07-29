@@ -492,6 +492,22 @@ policy, derives deterministic attempts, and submits one atomic compare-and-appen
 store owns only its exact fenced identity, immutable effect/resource records, exact content-object
 loads, and CAS; it does not own folding, policy, attempt, observation, or terminal rules.
 
+After request qualification and permanent allocation, the EVM wallet executor consumes every
+initial, restored, post-target, authorization/terminalization-conflict, pending, and terminal
+decision through one complete domain-history fold before target authorization/observation, signing
+or target IO, terminal append, or return. That fold reconstructs the deterministic plan at each
+attempt; validates each retained candidate descriptor and typed result; derives terminal request,
+prior-result references, candidate lineage, transaction, receipt, finality, inclusion, outcome,
+generation, fence, and assurance as one exact relation; and accepts a tombstone only when its
+operation, outcome, attempt, returned result, and returned observation match that derived terminal
+attempt. Records are folded in immutable append order. Each authorization freezes its expected plan
+from authorization-ordered results observed by that point; a later observation is validated against
+that frozen plan and never changes an already-authorized plan or its terminal lineage. The first
+chronologically observed valid terminal selects terminalization. Every later observation, including
+a legal observation after the tombstone, remains validation-only audit evidence. Invalid restored
+history is read-only failure. A valid restored tombstone returns without signing, target IO, or
+append.
+
 A proposal may bind and allocate in one append, including upgrading a previously bound effect that
 has no target attempt. `Applied` is the only append outcome that grants affine target-entry
 authority. `AlreadyApplied` and `Conflict` require a fresh load and derivation.

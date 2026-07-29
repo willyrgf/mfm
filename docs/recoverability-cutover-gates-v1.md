@@ -238,7 +238,7 @@ derived telemetry.
 | --- | --- | --- |
 | EVM balance/metadata reads | Registered as source/chain bootstrap, initial anchor, one state per independently meaningful RPC, final anchor confirmation, and pure aggregation. | Exact-call, routing-generation, exhaustive safe-failure verdict, cancellation, partial-failure, anchor, and fan-out conformance passed. |
 | Bitcoin balance collection | Aggregate reader removed; collection remains unregistered under its closed disposition. | `scantxoutset "start"` did not pass lost-response, cancellation, concurrent-scan, delayed-reissue, bounded-work/result, and provider-cost qualification. |
-| EVM mutation | Registered only as `mfm.evm/submit-transaction@1` through the durable wallet executor. | One shared pre-admission/pre-allocation wallet qualification closes actual route-catalog membership and chain, exact executor semantics/evidence, derived guarded-signer descriptor, nonce policy/configuration, classifier, finality, assurance, tenant/domain/sender/generation/fence, and every evidence bound. Field-by-field hostile mismatches leave signer/RPC calls and executor storage unchanged. Response-loss/restart, signer-free recovery, already-known, rebroadcast/replacement, success/revert, finality/reorganization, terminal retention, PostgreSQL fencing/refold, and no-secret retention passed. |
+| EVM mutation | Registered only as `mfm.evm/submit-transaction@1` through the durable wallet executor. | One shared pre-admission/pre-allocation wallet qualification closes actual route-catalog membership and chain, exact executor semantics/evidence, derived guarded-signer descriptor, nonce policy/configuration, classifier, finality, assurance, tenant/domain/sender/generation/fence, and every evidence bound. After qualification and permanent allocation, one complete wallet-history fold gates target authorization/observation, signer/RPC entry, terminal append, authorization/terminalization-conflict handling, and pending/terminal returns. It folds immutable append order, freezes each authorization's plan from authorization-ordered results observed by then, validates later observations at their physical positions without changing logical result-reference order, selects the first observed valid terminal, and treats later/post-tombstone observations as validation-only. Restored generic-valid hostile descriptors, terminal request/prior-reference/lineage/transaction/receipt/finality/inclusion/outcome/generation/fence/assurance values, outer terminal results, and tombstone relations fail with byte-identical storage and no signer/RPC call; exact restored tombstones and a valid two-inclusion out-of-order/post-tombstone observation tail are read-only. Response-loss/restart, signer-free recovery, already-known, rebroadcast/replacement, success/revert, finality/reorganization, terminal retention, PostgreSQL fencing/refold, and no-secret retention passed. |
 
 ## Gate classification
 
@@ -249,6 +249,12 @@ derived telemetry.
 - Exact EVM wallet policy qualification before support admission, run admission, effect binding,
   nonce allocation, signing, or RPC, with one shared proof and the `15 + N` live/`68 + N` product
   support closure.
+- One EVM wallet-history owner after qualification/permanent allocation for initial, restored,
+  post-target, authorization/terminalization-conflict, pending, and terminal decisions, with
+  append-order descriptor/result refolding, authorization-time frozen plans, first-observed
+  terminal selection, validation-only late observations, complete terminal lineage validation,
+  exact tombstone relation, read-only hostile-checkpoint rejection, and signer/RPC/write-free valid
+  tombstone replay.
 - Evidence-bag and fact-consumer deletions mapped above.
 - One exact entry-point/profile expansion, including pure/read/effect, nested-child, fan-out,
   fan-in, framework-outer, and executor-inner shapes.

@@ -153,6 +153,21 @@ guard, verifies the newly derived hash and candidate reference against the commi
 and obtains a fresh authorization; signer unavailability is an operational retry without a
 synthetic delivery attempt.
 
+Before any signer call, RPC exchange, terminal append, pending return, terminal return, or
+authorization/terminalization conflict return, the executor reloads one complete verified wallet
+history. It reconstructs the deterministic plan for every retained attempt and validates the exact
+candidate descriptor and result transition. Terminal evidence is accepted only when the complete
+request, prior-result references, candidate lineage, transaction, receipt, finalized head,
+canonical inclusion, outcome, executor generation, generation fence, and assurance tuple equal the
+history-derived terminal. A retained tombstone must then identify that exact operation, outcome,
+attempt, returned result, and returned observation. The history fold follows immutable append order
+and freezes the expected plan at each authorization from authorization-ordered results whose
+observations are already present. Later observations validate only against their frozen plan and do
+not retroactively alter a later authorization. The first observed valid terminal is selected;
+subsequent observations, including a legal post-tombstone observation, are audit-only after
+validation. Any mismatch on restart fails without signing, RPC, or append; an exact restored
+tombstone returns without any of those actions.
+
 The executor terminal claim must identify one exact returned observation and terminal tombstone.
 The MFM store admits its canonical objects through a later audited ensure observation and creates
 the producer-bound `ValueRef` values. The executor cannot append `EffectSettled`.
