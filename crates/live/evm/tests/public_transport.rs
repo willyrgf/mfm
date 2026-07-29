@@ -30,11 +30,39 @@ fn public_transport_rejects_and_redacts_private_route_material() {
 
     let endpoint = EvmRpcEndpoint::new("https://rpc.example.invalid/private").expect("endpoint");
     assert_eq!(format!("{endpoint:?}"), "EvmRpcEndpoint(<redacted>)");
-    let authorization =
-        EvmRpcAuthorization::new(Zeroizing::new("Bearer resolved-secret".to_owned()))
-            .expect("authorization");
+    let authorization = EvmRpcAuthorization::new(Zeroizing::new(format!(
+        "Bearer public-test-{}",
+        std::process::id()
+    )))
+    .expect("authorization");
     assert_eq!(
         format!("{authorization:?}"),
         "EvmRpcAuthorization(<redacted>)"
     );
+}
+
+#[test]
+fn public_wallet_surface_has_no_raw_rpc_or_target_escape_hatch() {
+    let public_surface = include_str!("../src/lib.rs");
+    for removed in [
+        "EvmWalletRpcClient",
+        "EvmWalletRpcResponse",
+        "EvmWalletRpcError",
+        "EvmWalletRpcFailure",
+        "EvmWalletRpcFuture",
+        "EvmWalletJsonRpcTarget",
+        "EvmWalletTargetEntryDescriptor",
+        "PreparedEvmWalletBroadcast",
+        "EvmWalletBroadcastReturn",
+    ] {
+        assert!(
+            !public_surface.contains(removed),
+            "raw wallet surface remained public: {removed}"
+        );
+    }
+    assert!(public_surface.contains("EvmWalletExecutor"));
+
+    let executor_surface = include_str!("../src/wallet_executor.rs");
+    assert!(executor_surface.contains("pub struct EvmWalletExecutor<Store>"));
+    assert!(!executor_surface.contains("EvmWalletExecutor<Store, Client>"));
 }

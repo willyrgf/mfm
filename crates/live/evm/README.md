@@ -17,6 +17,19 @@ aggregate reductions are absent. Fan-out reads use the exact EIP-1898 block
 hash with `requireCanonical: true`, and final confirmation resolves the initial
 block number to a hash.
 
+The transport has one private 11-operation allowlist: the six reads above and the five wallet
+operations below. Requests are encoded directly into exact-capacity zeroizing byte owners; there is
+no generic method/parameter or `serde_json::Value` request path. Authorization is consumed into a
+sensitive owner-backed header, raw broadcasts are limited to 512 KiB, and every response is read
+once into a preallocated zeroizing 1 MiB buffer. Only exact HTTP `200` is accepted.
+
+Response decoding retains borrowed raw JSON ranges. It closes the envelope to exact JSON-RPC
+version/id/result-or-error fields, rejects semantic duplicate keys including escaped aliases, and
+lexically bounds ignored projections to depth 64 and 4096 items per container. Read results have an
+additional 128 KiB semantic limit. Provider error messages are decoded only inside a 16 KiB
+zeroizing owner and are discarded after exact already-known classification; no provider text or
+data reaches a failure value.
+
 After the app admits its one complete support graph, the sealed EVM
 qualification artifacts verify the executable, shared 14-component
 qualification, and exact read-adapter plus wallet-executor
@@ -40,6 +53,11 @@ allocation and immediately before durable target authorization. Hash, receipt, f
 canonical-inclusion recovery use retained public candidate descriptors without reopening the
 signer. Raw signed bytes are zeroized and never enter executor evidence.
 
+`EvmWalletExecutor<Store>` is the only public wallet execution type. It obtains the concrete
+`EvmJsonRpcTransport` only from the sealed wallet qualification; its constructor has no independent
+transport argument. Raw wallet RPC clients, responses, errors, target wrappers, and retained
+target-entry descriptors are private implementation details.
+
 After request qualification and permanent nonce allocation, every initial, recovered,
 post-exchange, authorization/terminalization-conflict, pending, and terminal decision passes
 through one wallet-history fold. The fold reconstructs the deterministic plan at each attempt,
@@ -58,8 +76,11 @@ signer-, RPC-, and write-free.
 predicate. It derives the complete ordered route-generation/chain map from the actual transport,
 closes the verified executor semantics and object-evidence contract, and binds the guarded-signer
 descriptor, wallet domain, generation fence, nonce configuration, classifier, finality,
-assurance, and evidence bounds. The app admission path, executor, and JSON-RPC target share one
-live-owned `Arc`; callers cannot provide parallel route, signer, policy, or safe-failure
-descriptors.
+assurance, and evidence bounds. Its canonical proof, content reference, and debug representation
+are secret-free and exclude endpoints, authorization, and transport internals. The live
+qualification separately retains a private clone sharing the exact transport runtime and route
+catalog; clone equality requires that same instance. The app admission path, executor, and
+JSON-RPC target share one live-owned `Arc`; callers cannot provide parallel transport, route,
+signer, policy, or safe-failure descriptors.
 
 No Bitcoin state, replay reducer, or aggregate reader is registered.

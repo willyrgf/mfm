@@ -58,9 +58,13 @@ the sealed transport catalog, verified executor binding, product object-evidence
 guarded-signer descriptor, selected route generation, and initial-nonce descriptor. Construction
 derives and binds the complete ordered route-generation-to-chain map and verifies the executor's
 exact request/result contracts, wallet leaf expansion, target callback, resource domain/fence,
-safe-failure contract, and evidence-contract closure. The application admission path and executor
-share the same `Arc`; neither accepts an independently supplied signer reference, resource-policy
-pair, route descriptor, or duplicate validator.
+safe-failure contract, and evidence-contract closure. The canonical proof, content reference, and
+debug form contain no endpoint, authorization, or transport internals. The live qualification
+separately retains a private clone sharing the exact transport runtime and route catalog; the
+executor obtains its transport from that qualification and has no injection argument. The
+application admission path and executor share the same `Arc`; neither accepts an independently
+supplied transport, signer reference, resource-policy pair, route descriptor, or duplicate
+validator.
 
 Valid replacement schedules and convergence plans remain request-owned semantic fields. They may
 vary between admitted requests while fitting the exact qualified evidence bounds; the deployment
@@ -101,6 +105,8 @@ Transaction construction uses one canonical Alloy path for the type-2 signing
 digest, signed encoding, and transaction hash. Width conversions to Alloy's chain-id/nonce/gas and
 fee representations must fail closed without truncation or fallback. A deterministic recoverable
 low-s signing profile and expected sender must be verified before target entry.
+The signed EIP-2718 envelope is admitted at no more than 512 KiB immediately after Alloy encoding
+and before hashing, then checked against the same bound again when the exact RPC body is assembled.
 
 ## Resource Contract
 
@@ -143,6 +149,11 @@ An inconclusive submit exchange never authorizes a different transaction. Recove
 on the immutable request through the qualified wallet/relayer contract. Exact-hash observation,
 rebroadcast, replacement, nonce reuse, and reorganization policy must be part of that executor's
 certified equivalence and resource contract rather than runtime heuristics.
+
+The only public live execution seam is `EvmWalletExecutor<Store>` with the concrete exact-generation
+`EvmJsonRpcTransport`. The five wallet operations are private typed transport methods. There is no
+generic wallet RPC client, arbitrary method/parameter call, raw JSON response, or public target
+wrapper that can bypass typed decoding or qualification.
 
 Guarded deterministic signing precedes broadcast authorization and derives one public
 candidate-specific target-entry descriptor. The descriptor commits the exact operation kind,
@@ -200,7 +211,11 @@ the qualified wallet/relayer target boundary and are never:
 - replay inputs;
 - portable export members;
 - diagnostics; or
-- logs and fixtures.
+- logs or durable fixtures.
+
+Loopback transport tests use only runtime-generated ephemeral sentinels, zeroizing socket/body
+owners, borrowed JSON projections, and direct decode into zeroizing signed-byte storage. Test state
+may retain public methods and transaction hashes, never authorization or raw signed bytes.
 
 Only reviewed public identities, immutable unsigned intent, exact hashes, typed receipts, and
 closed safe failures may cross into retained evidence.

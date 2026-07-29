@@ -8,39 +8,86 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use alloy_primitives::{Address, B256, U256};
+use bytes::Bytes;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_evm::{
     EvmAnchorConfirmationRequest, EvmAnchoredSource, EvmBlockAnchor, EvmBlockResponse,
     EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCheckedSource, EvmCoarseSizeClass,
     EvmLatestAnchorRequest, EvmNativeBalanceRequest, EvmQuantityResponse, EvmResponseInvalidKind,
     EvmRoutingGenerationRef, EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest,
-    EvmTokenDecimalsResponse, EVM_READ_MAX_RESPONSE_BYTES,
+    EvmTokenDecimalsResponse, EvmWalletObservedTransaction, EvmWalletReceipt,
+    TransientSignedEip1559Envelope,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, LocalPublicId, SchemaId, SemanticTypeId, StableId};
 use mfm_program::boundary_content_ref;
 use mfm_values::RetainedValueContract;
-use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH};
+use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+mod exact;
+
+pub(crate) use exact::WalletBroadcastResponse;
+use exact::{decode_response, DecodeFailure, EncodedRpcRequest, ExactRpcRequest, ExactRpcResponse};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
 const MAX_GLOBAL_IN_FLIGHT_EXCHANGES: usize = 64;
 const MAX_IN_FLIGHT_EXCHANGES_PER_GENERATION: usize = 16;
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 16;
-const JSON_RPC_ID: u64 = 1;
 const JSON_RPC_IMPLEMENTATION_ID: &str = "mfm.evm.json-rpc.v1";
-const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
-const ERC20_BALANCE_OF_SELECTOR: &str = "70a08231";
+pub(crate) const EXACT_ALREADY_KNOWN_CODE: i64 = -32_000;
+pub(crate) const EXACT_ALREADY_KNOWN_MESSAGE: &str = "already known";
+pub(crate) const EVM_SEND_RAW_TRANSACTION_METHOD: &str = "eth_sendRawTransaction";
+pub(crate) const EVM_TRANSACTION_BY_HASH_METHOD: &str = "eth_getTransactionByHash";
+pub(crate) const EVM_RECEIPT_BY_HASH_METHOD: &str = "eth_getTransactionReceipt";
+pub(crate) const EVM_BLOCK_BY_NUMBER_METHOD: &str = "eth_getBlockByNumber";
+
+#[cfg(test)]
+tokio::task_local! {
+    static EXCHANGE_OWNER_PROBE: Arc<ExchangeOwnerProbe>;
+}
+
+#[cfg(test)]
+async fn with_exchange_owner_probe<Future>(
+    probe: Arc<ExchangeOwnerProbe>,
+    future: Future,
+) -> Future::Output
+where
+    Future: std::future::Future,
+{
+    EXCHANGE_OWNER_PROBE.scope(probe, future).await
+}
+
+#[cfg(test)]
+fn current_exchange_owner_probe() -> Option<Arc<ExchangeOwnerProbe>> {
+    EXCHANGE_OWNER_PROBE.try_with(Arc::clone).ok()
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ExchangeOwnerProbe {
+    request_created: AtomicUsize,
+    request_pointer: AtomicUsize,
+    request_length: AtomicUsize,
+    request_dropped: AtomicUsize,
+    request_zeroized: AtomicUsize,
+    response_created: AtomicUsize,
+    response_capacity: AtomicUsize,
+    response_dropped: AtomicUsize,
+    response_zeroized: AtomicUsize,
+}
 /// Fixed provider class reviewed by the EVM JSON-RPC adapter.
 pub const EVM_JSON_RPC_PROVIDER_CLASS: &str = "mfm.evm-json-rpc";
 /// Fixed route policy: one endpoint entry, no retry, redirect, or fallback.
@@ -112,16 +159,183 @@ impl fmt::Debug for EvmRpcEndpoint {
 
 /// Consumed resolved HTTP authorization value.
 pub struct EvmRpcAuthorization {
-    value: Zeroizing<String>,
+    value: HeaderValue,
 }
 
 impl EvmRpcAuthorization {
-    /// Admits one non-empty valid HTTP authorization header.
+    /// Admits one non-empty valid HTTP authorization header of at most 16 KiB.
     pub fn new(value: Zeroizing<String>) -> TransportResult<Self> {
-        if value.is_empty() || HeaderValue::from_str(value.as_str()).is_err() {
+        if value.is_empty() || value.len() > MAX_AUTHORIZATION_BYTES {
             return Err(EvmTransportError::InvalidConfiguration);
         }
+        let mut value = value;
+        let bytes = Zeroizing::new(std::mem::take(&mut *value).into_bytes());
+        let owner = ZeroizingBytesOwner::new(bytes);
+        let mut value = HeaderValue::from_maybe_shared(Bytes::from_owner(owner))
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        value.set_sensitive(true);
         Ok(Self { value })
+    }
+}
+
+struct ZeroizingBytesOwner {
+    bytes: Zeroizing<Vec<u8>>,
+    #[cfg(test)]
+    drop_probe: Option<Arc<ZeroizingOwnerDropProbe>>,
+    #[cfg(test)]
+    exchange_probe: Option<Arc<ExchangeOwnerProbe>>,
+}
+
+impl ZeroizingBytesOwner {
+    fn new(bytes: Zeroizing<Vec<u8>>) -> Self {
+        #[cfg(test)]
+        let exchange_probe = current_exchange_owner_probe();
+        #[cfg(test)]
+        if let Some(probe) = &exchange_probe {
+            probe.request_created.fetch_add(1, Ordering::SeqCst);
+            probe
+                .request_pointer
+                .store(bytes.as_ptr() as usize, Ordering::SeqCst);
+            probe.request_length.store(bytes.len(), Ordering::SeqCst);
+        }
+        Self {
+            bytes,
+            #[cfg(test)]
+            drop_probe: None,
+            #[cfg(test)]
+            exchange_probe,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_probe(bytes: Zeroizing<Vec<u8>>, drop_probe: Arc<ZeroizingOwnerDropProbe>) -> Self {
+        Self {
+            bytes,
+            drop_probe: Some(drop_probe),
+            exchange_probe: None,
+        }
+    }
+}
+
+impl AsRef<[u8]> for ZeroizingBytesOwner {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+}
+
+fn request_body(body: Zeroizing<Vec<u8>>) -> reqwest::Body {
+    request_body_from_owner(ZeroizingBytesOwner::new(body))
+}
+
+fn request_body_from_owner(owner: ZeroizingBytesOwner) -> reqwest::Body {
+    reqwest::Body::from(Bytes::from_owner(owner))
+}
+
+impl Drop for ZeroizingBytesOwner {
+    fn drop(&mut self) {
+        self.bytes.as_mut_slice().zeroize();
+        #[cfg(test)]
+        if let Some(probe) = &self.drop_probe {
+            probe
+                .zeroized
+                .store(self.bytes.iter().all(|byte| *byte == 0), Ordering::SeqCst);
+            probe.dropped.store(true, Ordering::SeqCst);
+        }
+        #[cfg(test)]
+        if let Some(probe) = &self.exchange_probe {
+            probe.request_zeroized.fetch_add(
+                usize::from(self.bytes.iter().all(|byte| *byte == 0)),
+                Ordering::SeqCst,
+            );
+            probe.request_dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ZeroizingOwnerDropProbe {
+    dropped: AtomicBool,
+    zeroized: AtomicBool,
+}
+
+struct ZeroizingResponseBuffer {
+    bytes: Zeroizing<Vec<u8>>,
+    #[cfg(test)]
+    drop_probe: Option<Arc<ZeroizingOwnerDropProbe>>,
+    #[cfg(test)]
+    exchange_probe: Option<Arc<ExchangeOwnerProbe>>,
+}
+
+impl ZeroizingResponseBuffer {
+    fn new() -> Self {
+        #[cfg(test)]
+        let exchange_probe = current_exchange_owner_probe();
+        #[cfg(test)]
+        if let Some(probe) = &exchange_probe {
+            probe.response_created.fetch_add(1, Ordering::SeqCst);
+            probe
+                .response_capacity
+                .store(MAX_RESPONSE_BYTES, Ordering::SeqCst);
+        }
+        Self {
+            bytes: Zeroizing::new(Vec::with_capacity(MAX_RESPONSE_BYTES)),
+            #[cfg(test)]
+            drop_probe: None,
+            #[cfg(test)]
+            exchange_probe,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_probe(drop_probe: Arc<ZeroizingOwnerDropProbe>) -> Self {
+        Self {
+            bytes: Zeroizing::new(Vec::with_capacity(MAX_RESPONSE_BYTES)),
+            drop_probe: Some(drop_probe),
+            exchange_probe: None,
+        }
+    }
+
+    fn extend(&mut self, chunk: &[u8]) -> Result<(), usize> {
+        let next_len = self
+            .bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or(usize::MAX)?;
+        if next_len > MAX_RESPONSE_BYTES {
+            return Err(next_len);
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl Drop for ZeroizingResponseBuffer {
+    fn drop(&mut self) {
+        self.bytes.as_mut_slice().zeroize();
+        #[cfg(test)]
+        if let Some(probe) = &self.drop_probe {
+            probe
+                .zeroized
+                .store(self.bytes.iter().all(|byte| *byte == 0), Ordering::SeqCst);
+            probe.dropped.store(true, Ordering::SeqCst);
+        }
+        #[cfg(test)]
+        if let Some(probe) = &self.exchange_probe {
+            probe.response_zeroized.fetch_add(
+                usize::from(self.bytes.iter().all(|byte| *byte == 0)),
+                Ordering::SeqCst,
+            );
+            probe.response_dropped.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -507,6 +721,10 @@ impl EvmJsonRpcTransport {
         self.routes.generation_descriptors()
     }
 
+    pub(crate) fn is_same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared) && Arc::ptr_eq(&self.routes, &other.routes)
+    }
+
     /// Performs one exact `eth_chainId` operation.
     pub async fn chain_identity(
         &self,
@@ -516,19 +734,18 @@ impl EvmJsonRpcTransport {
             Ok(route) => route,
             Err(failure) => return failure.into_outcome(),
         };
-        let payload = match self.rpc_call(route.clone(), "eth_chainId", json!([])).await {
-            Ok(payload) => payload,
-            Err(failure) => return failure.into_outcome(),
-        };
-        let chain_id = match payload
-            .result
-            .as_str()
-            .and_then(|raw| parse_quantity(raw).ok())
-            .and_then(|quantity| u64::try_from(quantity).ok())
-            .filter(|chain_id| *chain_id != 0)
+        let chain_id = match self
+            .exchange(route.clone(), ExactRpcRequest::ChainIdentity)
+            .await
         {
-            Some(chain_id) => chain_id,
-            None => return payload.invalid_result(),
+            Ok(ExactRpcResponse::ChainIdentity(chain_id)) => chain_id,
+            Ok(_) => {
+                return indeterminate(EvmSafeFailure::ResponseInvalid {
+                    response_kind: EvmResponseInvalidKind::InvalidResult,
+                    size_class: EvmCoarseSizeClass::UpTo16Kib,
+                });
+            }
+            Err(failure) => return failure.into_outcome(),
         };
         EvmTransportOutcome::Returned(EvmChainIdentityResponse {
             chain_id,
@@ -546,16 +763,15 @@ impl EvmJsonRpcTransport {
             Ok(route) => route,
             Err(failure) => return failure.into_outcome(),
         };
-        let payload = match self
-            .rpc_call(route, "eth_getBlockByNumber", json!(["latest", false]))
-            .await
-        {
-            Ok(payload) => payload,
-            Err(failure) => return failure.into_outcome(),
-        };
-        match parse_block(&payload.result) {
-            Ok(anchor) => EvmTransportOutcome::Returned(EvmBlockResponse { anchor }),
-            Err(()) => payload.invalid_result(),
+        match self.exchange(route, ExactRpcRequest::LatestAnchor).await {
+            Ok(ExactRpcResponse::LatestAnchor(anchor)) => {
+                EvmTransportOutcome::Returned(EvmBlockResponse { anchor })
+            }
+            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+                response_kind: EvmResponseInvalidKind::InvalidResult,
+                size_class: EvmCoarseSizeClass::UpTo16Kib,
+            }),
+            Err(failure) => failure.into_outcome(),
         }
     }
 
@@ -572,27 +788,28 @@ impl EvmJsonRpcTransport {
             Some(account) => account,
             None => return did_not_enter(EvmSafeFailure::RequestInvalid),
         };
-        let payload = match self
-            .rpc_call(
+        let block_hash = match parse_canonical_hash(request.source().anchor().hash()) {
+            Some(block_hash) => block_hash,
+            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+        };
+        match self
+            .exchange(
                 route,
-                "eth_getBalance",
-                json!([
-                    format!("{account:#x}"),
-                    exact_hash_selector(request.source().anchor())
-                ]),
+                ExactRpcRequest::NativeBalance {
+                    account,
+                    block_hash,
+                },
             )
             .await
         {
-            Ok(payload) => payload,
-            Err(failure) => return failure.into_outcome(),
-        };
-        match payload
-            .result
-            .as_str()
-            .and_then(|raw| parse_quantity(raw).ok())
-        {
-            Some(quantity) => EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity)),
-            None => payload.invalid_result(),
+            Ok(ExactRpcResponse::NativeBalance(quantity)) => {
+                EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity))
+            }
+            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+                response_kind: EvmResponseInvalidKind::InvalidResult,
+                size_class: EvmCoarseSizeClass::UpTo16Kib,
+            }),
+            Err(failure) => failure.into_outcome(),
         }
     }
 
@@ -611,26 +828,28 @@ impl EvmJsonRpcTransport {
             Some(contract) => contract,
             None => return did_not_enter(EvmSafeFailure::RequestInvalid),
         };
-        let payload = match self
-            .rpc_call(
+        let block_hash = match parse_canonical_hash(request.source().anchor().hash()) {
+            Some(block_hash) => block_hash,
+            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+        };
+        match self
+            .exchange(
                 route,
-                "eth_call",
-                json!([
-                    {
-                        "to": format!("{contract:#x}"),
-                        "data": ERC20_DECIMALS_SELECTOR,
-                    },
-                    exact_hash_selector(request.source().anchor())
-                ]),
+                ExactRpcRequest::TokenDecimals {
+                    contract,
+                    block_hash,
+                },
             )
             .await
         {
-            Ok(payload) => payload,
-            Err(failure) => return failure.into_outcome(),
-        };
-        match payload.result.as_str().and_then(parse_abi_u8) {
-            Some(decimals) => EvmTransportOutcome::Returned(EvmTokenDecimalsResponse { decimals }),
-            None => payload.invalid_result(),
+            Ok(ExactRpcResponse::TokenDecimals(decimals)) => {
+                EvmTransportOutcome::Returned(EvmTokenDecimalsResponse { decimals })
+            }
+            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+                response_kind: EvmResponseInvalidKind::InvalidResult,
+                size_class: EvmCoarseSizeClass::UpTo16Kib,
+            }),
+            Err(failure) => failure.into_outcome(),
         }
     }
 
@@ -653,30 +872,29 @@ impl EvmJsonRpcTransport {
             Some(contract) => contract,
             None => return did_not_enter(EvmSafeFailure::RequestInvalid),
         };
-        let data = format!(
-            "0x{ERC20_BALANCE_OF_SELECTOR}{:0>64}",
-            hex::encode(account.as_slice())
-        );
-        let payload = match self
-            .rpc_call(
+        let block_hash = match parse_canonical_hash(request.source().anchor().hash()) {
+            Some(block_hash) => block_hash,
+            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+        };
+        match self
+            .exchange(
                 route,
-                "eth_call",
-                json!([
-                    {
-                        "to": format!("{contract:#x}"),
-                        "data": data,
-                    },
-                    exact_hash_selector(request.source().anchor())
-                ]),
+                ExactRpcRequest::TokenBalance {
+                    contract,
+                    account,
+                    block_hash,
+                },
             )
             .await
         {
-            Ok(payload) => payload,
-            Err(failure) => return failure.into_outcome(),
-        };
-        match payload.result.as_str().and_then(parse_abi_u256) {
-            Some(quantity) => EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity)),
-            None => payload.invalid_result(),
+            Ok(ExactRpcResponse::TokenBalance(quantity)) => {
+                EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity))
+            }
+            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+                response_kind: EvmResponseInvalidKind::InvalidResult,
+                size_class: EvmCoarseSizeClass::UpTo16Kib,
+            }),
+            Err(failure) => failure.into_outcome(),
         }
     }
 
@@ -697,20 +915,18 @@ impl EvmJsonRpcTransport {
             Ok(number) => number,
             Err(_) => return did_not_enter(EvmSafeFailure::RequestInvalid),
         };
-        let payload = match self
-            .rpc_call(
-                route,
-                "eth_getBlockByNumber",
-                json!([encode_quantity(number), false]),
-            )
+        match self
+            .exchange(route, ExactRpcRequest::ConfirmAnchor { number })
             .await
         {
-            Ok(payload) => payload,
-            Err(failure) => return failure.into_outcome(),
-        };
-        match parse_block(&payload.result) {
-            Ok(anchor) => EvmTransportOutcome::Returned(EvmBlockResponse { anchor }),
-            Err(()) => payload.invalid_result(),
+            Ok(ExactRpcResponse::ConfirmAnchor(anchor)) => {
+                EvmTransportOutcome::Returned(EvmBlockResponse { anchor })
+            }
+            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+                response_kind: EvmResponseInvalidKind::InvalidResult,
+                size_class: EvmCoarseSizeClass::UpTo16Kib,
+            }),
+            Err(failure) => failure.into_outcome(),
         }
     }
 
@@ -756,52 +972,31 @@ impl EvmJsonRpcTransport {
         self.resolve_source(source.source())
     }
 
-    async fn rpc_call(
+    async fn exchange(
         &self,
         route: Arc<ResolvedGeneration>,
-        method: &'static str,
-        params: Value,
-    ) -> std::result::Result<RpcPayload, BoundaryFailure> {
-        let bytes = self.raw_rpc_call(route, method, params).await?;
-        parse_rpc_payload(&bytes)
-    }
-
-    async fn raw_rpc_call(
-        &self,
-        route: Arc<ResolvedGeneration>,
-        method: &'static str,
-        params: Value,
-    ) -> std::result::Result<Vec<u8>, BoundaryFailure> {
-        let _route_permit = Arc::clone(&route.limit)
-            .acquire_owned()
-            .await
-            .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled))?;
-        let _global_permit = Arc::clone(&self.shared.global_limit)
-            .acquire_owned()
-            .await
-            .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled))?;
+        request: ExactRpcRequest,
+    ) -> std::result::Result<ExactRpcResponse, BoundaryFailure> {
+        let (_route_permit, _global_permit) = self.acquire_exchange_permits(&route).await?;
+        let EncodedRpcRequest { operation, body } = request
+            .encode()
+            .map_err(|()| BoundaryFailure::DidNotEnter(EvmSafeFailure::RequestInvalid))?;
         let mut request = self
             .shared
             .client
             .post(route.endpoint.url.clone())
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "id": JSON_RPC_ID,
-                "method": method,
-                "params": params,
-            }));
+            .header(CONTENT_TYPE, "application/json")
+            .body(request_body(body));
         if let Some(authorization) = &route.authorization {
-            let value = HeaderValue::from_str(authorization.value.as_str())
-                .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::ConfigurationInvalid))?;
-            request = request.header(AUTHORIZATION, value);
+            request = request.header(AUTHORIZATION, authorization.value.clone());
         }
-        debug!(operation = method, "evm audited rpc request");
+        debug!(operation = operation.method(), "evm audited rpc request");
         let mut response = request
             .send()
             .await
             .map_err(|_| BoundaryFailure::Indeterminate(EvmSafeFailure::TransportFailed))?;
         let status = response.status().as_u16();
-        if !response.status().is_success() {
+        if response.status() != reqwest::StatusCode::OK {
             return Err(BoundaryFailure::Indeterminate(EvmSafeFailure::HttpStatus {
                 status,
             }));
@@ -815,50 +1010,154 @@ impl EvmJsonRpcTransport {
         {
             return Err(response_too_large(length));
         }
-        let mut bytes = Vec::new();
+        let mut bytes = ZeroizingResponseBuffer::new();
         while let Some(chunk) = response
             .chunk()
             .await
             .map_err(|_| BoundaryFailure::Indeterminate(EvmSafeFailure::TransportFailed))?
         {
-            let next_len = bytes
-                .len()
-                .checked_add(chunk.len())
-                .ok_or_else(|| response_too_large(usize::MAX))?;
-            if next_len > MAX_RESPONSE_BYTES {
-                return Err(response_too_large(next_len));
-            }
-            bytes.extend_from_slice(&chunk);
+            bytes.extend(&chunk).map_err(response_too_large)?;
         }
-        Ok(bytes)
+        decode_response(operation, bytes.as_slice())
+            .map_err(|failure| decode_boundary_failure(failure, bytes.len()))
     }
-}
 
-impl crate::wallet_rpc::EvmWalletRpcClient for EvmJsonRpcTransport {
-    fn exchange<'a>(
-        &'a self,
-        route_generation_ref: &'a ContentRef,
+    async fn acquire_exchange_permits(
+        &self,
+        route: &Arc<ResolvedGeneration>,
+    ) -> std::result::Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), BoundaryFailure> {
+        let route_permit = Arc::clone(&route.limit)
+            .acquire_owned()
+            .await
+            .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled))?;
+        let global_permit = Arc::clone(&self.shared.global_limit)
+            .acquire_owned()
+            .await
+            .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled))?;
+        Ok((route_permit, global_permit))
+    }
+
+    fn resolve_wallet_route(
+        &self,
+        route_generation_ref: &ContentRef,
         chain_id: u64,
-        method: &'static str,
-        params: Value,
-    ) -> crate::wallet_rpc::EvmWalletRpcFuture<'a> {
-        Box::pin(async move {
-            let generation =
-                EvmRoutingGenerationRef::from_content_ref(route_generation_ref.clone())
-                    .map_err(|_| crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced)?;
-            let route = self
-                .routes
-                .resolve(&generation)
-                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced)?;
-            if route.descriptor.chain_id != chain_id {
-                return Err(crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced);
-            }
-            let bytes = self
-                .raw_rpc_call(route, method, params)
-                .await
-                .map_err(wallet_boundary_failure)?;
-            parse_wallet_rpc_payload(&bytes)
-        })
+    ) -> Result<Arc<ResolvedGeneration>, WalletRpcFailure> {
+        let generation = EvmRoutingGenerationRef::from_content_ref(route_generation_ref.clone())
+            .map_err(|_| WalletRpcFailure::GenerationFenced)?;
+        let route = self
+            .routes
+            .resolve(&generation)
+            .ok_or(WalletRpcFailure::GenerationFenced)?;
+        if route.descriptor.chain_id != chain_id {
+            return Err(WalletRpcFailure::GenerationFenced);
+        }
+        Ok(route)
+    }
+
+    async fn wallet_exchange(
+        &self,
+        route_generation_ref: &ContentRef,
+        chain_id: u64,
+        request: ExactRpcRequest,
+    ) -> Result<ExactRpcResponse, WalletRpcFailure> {
+        let route = self.resolve_wallet_route(route_generation_ref, chain_id)?;
+        self.exchange(route, request)
+            .await
+            .map_err(wallet_boundary_failure)
+    }
+
+    pub(crate) async fn send_raw_transaction(
+        &self,
+        route_generation_ref: &ContentRef,
+        chain_id: u64,
+        signed: TransientSignedEip1559Envelope,
+    ) -> Result<WalletBroadcastResponse, WalletRpcFailure> {
+        match self
+            .wallet_exchange(
+                route_generation_ref,
+                chain_id,
+                ExactRpcRequest::SendRawTransaction { signed },
+            )
+            .await?
+        {
+            ExactRpcResponse::SendRawTransaction(response) => Ok(response),
+            _ => Err(WalletRpcFailure::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn transaction_by_hash(
+        &self,
+        route_generation_ref: &ContentRef,
+        chain_id: u64,
+        transaction_hash: B256,
+    ) -> Result<Option<EvmWalletObservedTransaction>, WalletRpcFailure> {
+        match self
+            .wallet_exchange(
+                route_generation_ref,
+                chain_id,
+                ExactRpcRequest::TransactionByHash { transaction_hash },
+            )
+            .await?
+        {
+            ExactRpcResponse::TransactionByHash(transaction) => Ok(transaction),
+            _ => Err(WalletRpcFailure::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn receipt_by_hash(
+        &self,
+        route_generation_ref: &ContentRef,
+        chain_id: u64,
+        transaction_hash: B256,
+    ) -> Result<Option<EvmWalletReceipt>, WalletRpcFailure> {
+        match self
+            .wallet_exchange(
+                route_generation_ref,
+                chain_id,
+                ExactRpcRequest::ReceiptByHash { transaction_hash },
+            )
+            .await?
+        {
+            ExactRpcResponse::ReceiptByHash(receipt) => Ok(receipt),
+            _ => Err(WalletRpcFailure::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn finalized_head(
+        &self,
+        route_generation_ref: &ContentRef,
+        chain_id: u64,
+    ) -> Result<EvmBlockAnchor, WalletRpcFailure> {
+        match self
+            .wallet_exchange(
+                route_generation_ref,
+                chain_id,
+                ExactRpcRequest::FinalizedHead,
+            )
+            .await?
+        {
+            ExactRpcResponse::FinalizedHead(block) => Ok(block),
+            _ => Err(WalletRpcFailure::InvalidResponse),
+        }
+    }
+
+    pub(crate) async fn inclusion_block(
+        &self,
+        route_generation_ref: &ContentRef,
+        chain_id: u64,
+        number: U256,
+    ) -> Result<Option<EvmBlockAnchor>, WalletRpcFailure> {
+        match self
+            .wallet_exchange(
+                route_generation_ref,
+                chain_id,
+                ExactRpcRequest::InclusionBlock { number },
+            )
+            .await?
+        {
+            ExactRpcResponse::InclusionBlock(block) => Ok(block),
+            _ => Err(WalletRpcFailure::InvalidResponse),
+        }
     }
 }
 
@@ -872,78 +1171,58 @@ impl fmt::Debug for EvmJsonRpcTransport {
     }
 }
 
-fn wallet_boundary_failure(failure: BoundaryFailure) -> crate::wallet_rpc::EvmWalletRpcFailure {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalletRpcFailure {
+    GenerationFenced,
+    AccessCancelled,
+    UnavailableBeforeEntry,
+    ResponseLost,
+    DestinationRejected,
+    InvalidResponse,
+}
+
+fn wallet_boundary_failure(failure: BoundaryFailure) -> WalletRpcFailure {
     match failure {
         BoundaryFailure::DidNotEnter(EvmSafeFailure::RoutingGenerationUnavailable) => {
-            crate::wallet_rpc::EvmWalletRpcFailure::GenerationFenced
+            WalletRpcFailure::GenerationFenced
         }
         BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled) => {
-            crate::wallet_rpc::EvmWalletRpcFailure::AccessCancelled
+            WalletRpcFailure::AccessCancelled
         }
-        BoundaryFailure::DidNotEnter(_) => {
-            crate::wallet_rpc::EvmWalletRpcFailure::UnavailableBeforeEntry
-        }
+        BoundaryFailure::DidNotEnter(_) => WalletRpcFailure::UnavailableBeforeEntry,
         BoundaryFailure::Indeterminate(EvmSafeFailure::TransportFailed) => {
-            crate::wallet_rpc::EvmWalletRpcFailure::ResponseLost
+            WalletRpcFailure::ResponseLost
         }
         BoundaryFailure::Indeterminate(
             EvmSafeFailure::HttpStatus { .. } | EvmSafeFailure::JsonRpcError { .. },
-        ) => crate::wallet_rpc::EvmWalletRpcFailure::DestinationRejected,
-        BoundaryFailure::Indeterminate(_) => {
-            crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse
+        ) => WalletRpcFailure::DestinationRejected,
+        BoundaryFailure::Indeterminate(_) => WalletRpcFailure::InvalidResponse,
+    }
+}
+
+fn decode_boundary_failure(failure: DecodeFailure, response_len: usize) -> BoundaryFailure {
+    match failure {
+        DecodeFailure::MalformedEnvelope => {
+            BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
+                response_kind: EvmResponseInvalidKind::MalformedEnvelope,
+                size_class: EvmCoarseSizeClass::from_byte_length(response_len),
+            })
         }
-    }
-}
-
-fn parse_wallet_rpc_payload(
-    bytes: &[u8],
-) -> Result<crate::wallet_rpc::EvmWalletRpcResponse, crate::wallet_rpc::EvmWalletRpcFailure> {
-    let body: Value = serde_json::from_slice(bytes)
-        .map_err(|_| crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
-    let object = body
-        .as_object()
-        .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
-    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-        || object.get("id").and_then(Value::as_u64) != Some(JSON_RPC_ID)
-    {
-        return Err(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse);
-    }
-    match (object.get("result"), object.get("error")) {
-        (Some(result), None) if object.len() == 3 => Ok(
-            crate::wallet_rpc::EvmWalletRpcResponse::Result(result.clone()),
-        ),
-        (None, Some(error)) if object.len() == 3 => {
-            let error = error
-                .as_object()
-                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
-            let code = error
-                .get("code")
-                .and_then(Value::as_i64)
-                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?;
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .ok_or(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse)?
-                .to_owned();
-            Ok(crate::wallet_rpc::EvmWalletRpcResponse::Error(
-                crate::wallet_rpc::EvmWalletRpcError::new(code, message, error.len() == 2),
-            ))
+        DecodeFailure::MissingResult => {
+            BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseMissingResult {
+                size_class: EvmCoarseSizeClass::from_byte_length(response_len),
+            })
         }
-        _ => Err(crate::wallet_rpc::EvmWalletRpcFailure::InvalidResponse),
-    }
-}
-
-struct RpcPayload {
-    result: Value,
-    size_class: EvmCoarseSizeClass,
-}
-
-impl RpcPayload {
-    fn invalid_result<T>(self) -> EvmTransportOutcome<T> {
-        indeterminate(EvmSafeFailure::ResponseInvalid {
-            response_kind: EvmResponseInvalidKind::InvalidResult,
-            size_class: self.size_class,
-        })
+        DecodeFailure::InvalidResult => {
+            BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
+                response_kind: EvmResponseInvalidKind::InvalidResult,
+                size_class: EvmCoarseSizeClass::from_byte_length(response_len),
+            })
+        }
+        DecodeFailure::ResultTooLarge(result_len) => response_too_large(result_len),
+        DecodeFailure::JsonRpcError(json_rpc_code) => {
+            BoundaryFailure::Indeterminate(EvmSafeFailure::JsonRpcError { json_rpc_code })
+        }
     }
 }
 
@@ -975,173 +1254,28 @@ fn response_too_large(bytes: usize) -> BoundaryFailure {
     })
 }
 
-fn parse_rpc_payload(bytes: &[u8]) -> std::result::Result<RpcPayload, BoundaryFailure> {
-    let size_class = EvmCoarseSizeClass::from_byte_length(bytes.len());
-    let mut body = serde_json::from_slice::<Value>(bytes).map_err(|_| {
-        BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
-            response_kind: EvmResponseInvalidKind::MalformedEnvelope,
-            size_class,
-        })
-    })?;
-    let object = body.as_object_mut().ok_or({
-        BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
-            response_kind: EvmResponseInvalidKind::MalformedEnvelope,
-            size_class,
-        })
-    })?;
-    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-        || object.get("id").and_then(Value::as_u64) != Some(JSON_RPC_ID)
-    {
-        return Err(BoundaryFailure::Indeterminate(
-            EvmSafeFailure::ResponseInvalid {
-                response_kind: EvmResponseInvalidKind::MalformedEnvelope,
-                size_class,
-            },
-        ));
-    }
-    match (object.remove("result"), object.get("error")) {
-        (Some(result), None) => {
-            let result_size = serde_json::to_vec(&result)
-                .map_err(|_| {
-                    BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
-                        response_kind: EvmResponseInvalidKind::InvalidResult,
-                        size_class,
-                    })
-                })?
-                .len();
-            if result_size > EVM_READ_MAX_RESPONSE_BYTES {
-                return Err(BoundaryFailure::Indeterminate(
-                    EvmSafeFailure::ResponseTooLarge {
-                        size_class: EvmCoarseSizeClass::from_byte_length(result_size),
-                    },
-                ));
-            }
-            Ok(RpcPayload { result, size_class })
-        }
-        (None, Some(error)) => {
-            let json_rpc_code = error
-                .as_object()
-                .and_then(|error| error.get("code"))
-                .and_then(Value::as_i64)
-                .ok_or({
-                    BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
-                        response_kind: EvmResponseInvalidKind::MalformedEnvelope,
-                        size_class,
-                    })
-                })?;
-            Err(BoundaryFailure::Indeterminate(
-                EvmSafeFailure::JsonRpcError { json_rpc_code },
-            ))
-        }
-        (None, None) => Err(BoundaryFailure::Indeterminate(
-            EvmSafeFailure::ResponseMissingResult { size_class },
-        )),
-        (Some(_), Some(_)) => Err(BoundaryFailure::Indeterminate(
-            EvmSafeFailure::ResponseInvalid {
-                response_kind: EvmResponseInvalidKind::MalformedEnvelope,
-                size_class,
-            },
-        )),
-    }
-}
-
-fn parse_block(value: &Value) -> std::result::Result<EvmBlockAnchor, ()> {
-    let object = value.as_object().ok_or(())?;
-    let number = quantity_field(object, "number")?;
-    let hash = hash_field(object, "hash")?;
-    Ok(EvmBlockAnchor::new(number, hash))
-}
-
-fn exact_hash_selector(anchor: &EvmBlockAnchor) -> Value {
-    json!({
-        "blockHash": anchor.hash(),
-        "requireCanonical": true,
-    })
-}
-
-fn encode_quantity(value: U256) -> String {
-    format!("0x{value:x}")
-}
-
-fn parse_quantity(raw: &str) -> std::result::Result<U256, ()> {
-    let digits = raw.strip_prefix("0x").ok_or(())?;
-    if digits.is_empty()
-        || digits.len() > 64
-        || (digits.len() > 1 && digits.starts_with('0'))
-        || !digits
+fn parse_canonical_address(raw: &str) -> Option<Address> {
+    if raw.len() != 42
+        || !raw.starts_with("0x")
+        || !raw[2..]
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(());
+        return None;
     }
-    let value = U256::from_str_radix(digits, 16).map_err(|_| ())?;
-    if encode_quantity(value) != raw {
-        return Err(());
-    }
-    Ok(value)
+    raw.parse().ok()
 }
 
-fn parse_canonical_address(raw: &str) -> Option<Address> {
-    let address = Address::from_str(raw).ok()?;
-    (format!("{address:#x}") == raw).then_some(address)
-}
-
-fn parse_hash(raw: &str) -> std::result::Result<B256, ()> {
+fn parse_canonical_hash(raw: &str) -> Option<B256> {
     if raw.len() != 66
         || !raw.starts_with("0x")
         || !raw[2..]
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        return Err(());
-    }
-    let hash = B256::from_str(raw).map_err(|_| ())?;
-    if format!("{hash:#x}") != raw {
-        return Err(());
-    }
-    Ok(hash)
-}
-
-fn parse_abi_u8(raw: &str) -> Option<u8> {
-    let bytes = parse_bounded_hex(raw, 32)?;
-    if bytes.len() != 32 || bytes[..31].iter().any(|byte| *byte != 0) {
         return None;
     }
-    Some(bytes[31])
-}
-
-fn parse_abi_u256(raw: &str) -> Option<U256> {
-    let bytes = parse_bounded_hex(raw, 32)?;
-    let bytes: [u8; 32] = bytes.try_into().ok()?;
-    Some(U256::from_be_bytes(bytes))
-}
-
-fn parse_bounded_hex(raw: &str, maximum: usize) -> Option<Vec<u8>> {
-    let digits = raw.strip_prefix("0x")?;
-    if !digits.len().is_multiple_of(2)
-        || digits.len() / 2 > maximum
-        || !digits
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return None;
-    }
-    hex::decode(digits).ok()
-}
-
-fn string_field<'a>(
-    object: &'a Map<String, Value>,
-    field: &str,
-) -> std::result::Result<&'a str, ()> {
-    object.get(field).and_then(Value::as_str).ok_or(())
-}
-
-fn quantity_field(object: &Map<String, Value>, field: &str) -> std::result::Result<U256, ()> {
-    parse_quantity(string_field(object, field)?)
-}
-
-fn hash_field(object: &Map<String, Value>, field: &str) -> std::result::Result<B256, ()> {
-    parse_hash(string_field(object, field)?)
+    raw.parse().ok()
 }
 
 fn canonical_json<T: Serialize>(value: &T) -> TransportResult<PlainCanonicalJsonBytes> {

@@ -1,0 +1,30 @@
+error[E0107]: struct takes 1 generic argument but 2 generic arguments were supplied
+ --> tests/ui/fail/evm_wallet_transport_injection_is_closed.rs:9:19
+  |
+9 |     let _: Option<EvmWalletExecutor<Store, EvmJsonRpcTransport>> = None;
+  |                   ^^^^^^^^^^^^^^^^^      --------------------- help: remove the unnecessary generic argument
+  |                   |
+  |                   expected 1 generic argument
+  |
+note: struct defined here, with 1 generic parameter: `Store`
+ --> $WORKSPACE/crates/live/evm/src/wallet_executor.rs
+  |
+  | pub struct EvmWalletExecutor<Store>
+  |            ^^^^^^^^^^^^^^^^^ -----
+
+error[E0061]: this function takes 3 arguments but 4 arguments were supplied
+  --> tests/ui/fail/evm_wallet_transport_injection_is_closed.rs:18:13
+   |
+18 |     let _ = EvmWalletExecutor::new(ledger, transport, signer, qualification);
+   |             ^^^^^^^^^^^^^^^^^^^^^^         --------- unexpected argument #2 of type `EvmJsonRpcTransport`
+   |
+note: associated function defined here
+  --> $WORKSPACE/crates/live/evm/src/wallet_executor.rs
+   |
+   |     pub fn new(
+   |            ^^^
+help: remove the extra argument
+   |
+18 -     let _ = EvmWalletExecutor::new(ledger, transport, signer, qualification);
+18 +     let _ = EvmWalletExecutor::new(ledger, signer, qualification);
+   |

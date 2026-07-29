@@ -1,6 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use alloy_eips::eip2930::AccessListItem;
 use alloy_primitives::{address, b256, hex, PrimitiveSignature};
 use mfm_ids::DigestBytes;
 use mfm_signing::{
@@ -235,9 +236,19 @@ fn alloy_known_vector_uses_one_hash_and_encoding_path() {
         alloy_vector_signature(),
     )
     .expect("result");
-    let signed = envelope
-        .finalize_signed(&request, EXPECTED_SENDER, &result)
-        .expect("signed");
+    let (signed, trace) = capture_signed_finalize_trace(|| {
+        envelope
+            .finalize_signed(&request, EXPECTED_SENDER, &result)
+            .expect("signed")
+    });
+    assert_eq!(
+        trace,
+        [
+            SignedFinalizeStage::Encoded(signed.bytes().len()),
+            SignedFinalizeStage::Admitted(signed.bytes().len()),
+            SignedFinalizeStage::Hashing(signed.bytes().len()),
+        ]
+    );
 
     assert_eq!(
         signed.transaction_hash(),
@@ -367,5 +378,101 @@ fn finalization_rejects_noncanonical_parity_high_s_and_wrong_sender() {
     assert_eq!(
         envelope.finalize_signed(&wrong_request, wrong_sender, &result),
         Err(EvmSigningError::RecoveredAddressMismatch)
+    );
+}
+
+#[test]
+fn signed_envelope_admission_accepts_the_exact_bound_and_rejects_one_more_byte() {
+    let admitted = admit_signed_bytes(Zeroizing::new(vec![
+        0x5a;
+        EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES
+    ]))
+    .expect("exact-bound signed bytes");
+    assert_eq!(admitted.len(), EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES);
+
+    assert_eq!(
+        admit_signed_bytes(Zeroizing::new(vec![
+            0x5a;
+            EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES
+                + 1
+        ])),
+        Err(EvmSigningError::SignedTransactionTooLarge)
+    );
+}
+
+#[test]
+fn maximal_wallet_domain_input_encodes_within_the_signed_transport_bound() {
+    assert_eq!(
+        crate::EVM_WALLET_ACCESS_LIST_MAX_STORAGE_KEYS % crate::EVM_WALLET_ACCESS_LIST_MAX_ENTRIES,
+        0
+    );
+    let keys_per_entry =
+        crate::EVM_WALLET_ACCESS_LIST_MAX_STORAGE_KEYS / crate::EVM_WALLET_ACCESS_LIST_MAX_ENTRIES;
+    let access_list = AccessList::from(
+        (0..crate::EVM_WALLET_ACCESS_LIST_MAX_ENTRIES)
+            .map(|entry_index| {
+                let mut address = [0_u8; 20];
+                address[12..].copy_from_slice(
+                    &u64::try_from(entry_index + 1)
+                        .expect("entry index")
+                        .to_be_bytes(),
+                );
+                let storage_keys = (0..keys_per_entry)
+                    .map(|key_index| {
+                        let ordinal = entry_index
+                            .checked_mul(keys_per_entry)
+                            .and_then(|value| value.checked_add(key_index))
+                            .expect("storage-key ordinal");
+                        let mut key = [0_u8; 32];
+                        key[24..].copy_from_slice(
+                            &u64::try_from(ordinal)
+                                .expect("storage-key ordinal")
+                                .to_be_bytes(),
+                        );
+                        B256::from(key)
+                    })
+                    .collect();
+                AccessListItem {
+                    address: Address::from(address),
+                    storage_keys,
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        access_list.0.len(),
+        crate::EVM_WALLET_ACCESS_LIST_MAX_ENTRIES
+    );
+    assert_eq!(
+        access_list
+            .0
+            .iter()
+            .map(|entry| entry.storage_keys.len())
+            .sum::<usize>(),
+        crate::EVM_WALLET_ACCESS_LIST_MAX_STORAGE_KEYS
+    );
+    let envelope = UnsignedEip1559Envelope::new(
+        U256::from(1),
+        U256::from(u64::MAX),
+        U256::from(u128::MAX),
+        U256::from(u128::MAX),
+        U256::from(u64::MAX),
+        TxKind::Create,
+        U256::MAX,
+        access_list,
+        Bytes::from(vec![0x5a; crate::EVM_WALLET_DATA_MAX_BYTES]),
+    )
+    .expect("maximal wallet-domain envelope");
+    let signature =
+        strict_primitive_signature(alloy_vector_signature().as_bytes()).expect("signature");
+    let signed = envelope.transaction.clone().into_signed(signature);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(signed.eip2718_encoded_length()));
+    signed.eip2718_encode(&mut *bytes);
+    assert!(bytes.len() <= EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES);
+    assert_eq!(
+        admit_signed_bytes(bytes)
+            .expect("wallet-domain maximum admitted")
+            .len(),
+        signed.eip2718_encoded_length()
     );
 }

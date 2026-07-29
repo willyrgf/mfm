@@ -13,7 +13,8 @@ use mfm_evm::{
     EvmWalletConvergencePlan, EvmWalletFeeCandidate, EvmWalletInitialNonceDescriptor,
     EvmWalletPolicy, EvmWalletReference, EvmWalletReplacementPolicy, EvmWalletTransactionAction,
     EvmWalletTransactionTemplate, EVM_SUBMIT_TRANSACTION_OPERATION_ID,
-    EVM_WALLET_BROADCAST_OPERATION_ID, EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
+    EVM_WALLET_BROADCAST_OPERATION_ID, EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES,
+    EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
 };
 use mfm_executor::{
     CommittedEffectRequest, DeliveryAttemptOutcome, Ensure, EvidenceBounds, ExecutorBinding,
@@ -35,13 +36,20 @@ use mfm_signing::{
     SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
 use mfm_values::{MfmValue, RetainedValueContract};
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+use zeroize::Zeroizing;
 
-use crate::transport::{EvmJsonRpcTransport, EvmRoutingCatalogBuilder, EvmRpcEndpoint};
+use crate::transport::{
+    EvmJsonRpcTransport, EvmRoutingCatalogBuilder, EvmRpcAuthorization, EvmRpcEndpoint,
+};
 use crate::{
-    evm_already_known_classifier_ref, evm_wallet_target_callback_surface_ref, EvmWalletExecutor,
-    EvmWalletRequestQualification, EvmWalletRpcClient, EvmWalletRpcFailure, EvmWalletRpcFuture,
-    EvmWalletRpcResponse, EvmWalletTargetEntryDescriptor,
+    evm_already_known_classifier_ref, evm_wallet_target_callback_surface_ref,
+    wallet_rpc::EvmWalletTargetEntryDescriptor, EvmWalletExecutor, EvmWalletRequestQualification,
 };
 
 const RECIPIENT: Address = address!("2222222222222222222222222222222222222222");
@@ -49,6 +57,9 @@ const BLOCK_A: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const BLOCK_B: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const WRONG_BLOCK: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const FINALIZED_BLOCK: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const WALLET_AUTHORIZATION_PREFIX: &str = "Bearer wallet-fixture-";
+const MAX_TEST_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_TEST_HTTP_BODY_BYTES: usize = 74 + 2 * EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
@@ -61,12 +72,28 @@ enum Scenario {
 }
 
 #[derive(Clone)]
-struct MockRpc {
-    request: EvmSubmitTransactionRequest,
-    state: Arc<Mutex<MockRpcState>>,
+struct LoopbackRpc {
+    inner: Arc<LoopbackRpcInner>,
 }
 
-struct MockRpcState {
+struct LoopbackRpcInner {
+    state: Arc<Mutex<LoopbackRpcState>>,
+    shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for LoopbackRpcInner {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.get_mut().expect("shutdown mutex").take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.get_mut().expect("server task mutex").take() {
+            task.abort();
+        }
+    }
+}
+
+struct LoopbackRpcState {
     scenario: Scenario,
     calls: Vec<&'static str>,
     broadcast_hashes: Vec<String>,
@@ -75,29 +102,82 @@ struct MockRpcState {
     reorged: bool,
 }
 
-impl MockRpc {
-    fn new(request: EvmSubmitTransactionRequest, scenario: Scenario) -> Self {
+impl LoopbackRpc {
+    fn start(
+        listener: TcpListener,
+        request: EvmSubmitTransactionRequest,
+        scenario: Scenario,
+        expected_authorization: Zeroizing<String>,
+    ) -> Self {
+        let state = Arc::new(Mutex::new(LoopbackRpcState {
+            scenario,
+            calls: Vec::new(),
+            broadcast_hashes: Vec::new(),
+            candidate_ordinals: BTreeMap::new(),
+            response_lost: false,
+            reorged: false,
+        }));
+        let captured = Arc::clone(&state);
+        let (shutdown, mut shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut socket, _)) = accepted else {
+                    break;
+                };
+                let capture = read_http_request(&mut socket).await;
+                assert!(
+                    header_value(capture.headers(), "authorization")
+                        .is_some_and(|value| value == expected_authorization.as_str()),
+                    "loopback authorization did not match"
+                );
+                match loopback_response(&request, &captured, capture.body()) {
+                    LoopbackReply::Disconnect => {}
+                    LoopbackReply::Envelope(envelope) => {
+                        let body = serde_json::to_vec(&envelope).expect("loopback response JSON");
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        socket
+                            .write_all(head.as_bytes())
+                            .await
+                            .expect("write loopback response head");
+                        socket
+                            .write_all(&body)
+                            .await
+                            .expect("write loopback response body");
+                    }
+                }
+            }
+        });
         Self {
-            request,
-            state: Arc::new(Mutex::new(MockRpcState {
-                scenario,
-                calls: Vec::new(),
-                broadcast_hashes: Vec::new(),
-                candidate_ordinals: BTreeMap::new(),
-                response_lost: false,
-                reorged: false,
-            })),
+            inner: Arc::new(LoopbackRpcInner {
+                state,
+                shutdown: Mutex::new(Some(shutdown)),
+                task: Mutex::new(Some(task)),
+            }),
         }
     }
 
     fn call_count(&self) -> usize {
-        self.state.lock().expect("mock RPC mutex").calls.len()
+        self.inner
+            .state
+            .lock()
+            .expect("loopback RPC mutex")
+            .calls
+            .len()
     }
 
-    fn operation_count(&self, method: &'static str) -> usize {
-        self.state
+    fn operation_count(&self, method: &str) -> usize {
+        self.inner
+            .state
             .lock()
-            .expect("mock RPC mutex")
+            .expect("loopback RPC mutex")
             .calls
             .iter()
             .filter(|candidate| **candidate == method)
@@ -105,168 +185,282 @@ impl MockRpc {
     }
 
     fn calls(&self) -> Vec<&'static str> {
-        self.state.lock().expect("mock RPC mutex").calls.clone()
-    }
-
-    fn broadcast_hashes(&self) -> Vec<String> {
-        self.state
+        self.inner
+            .state
             .lock()
-            .expect("mock RPC mutex")
-            .broadcast_hashes
+            .expect("loopback RPC mutex")
+            .calls
             .clone()
     }
 
-    fn response(
-        &self,
-        route_generation_ref: &ContentRef,
-        chain_id: u64,
-        method: &'static str,
-        params: Value,
-    ) -> Result<EvmWalletRpcResponse, EvmWalletRpcFailure> {
-        if self
-            .request
-            .policy()
-            .route_generation_ref()
-            .to_content_ref()
-            .ok()
-            .as_ref()
-            != Some(route_generation_ref)
-            || chain_id != self.request.policy().chain_id()
-        {
-            return Err(EvmWalletRpcFailure::GenerationFenced);
+    fn broadcast_hashes(&self) -> Vec<String> {
+        self.inner
+            .state
+            .lock()
+            .expect("loopback RPC mutex")
+            .broadcast_hashes
+            .clone()
+    }
+}
+
+enum LoopbackReply {
+    Envelope(Value),
+    Disconnect,
+}
+
+fn loopback_response(
+    request: &EvmSubmitTransactionRequest,
+    state: &Mutex<LoopbackRpcState>,
+    rpc_request: &[u8],
+) -> LoopbackReply {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BorrowedRequest<'a> {
+        jsonrpc: &'a str,
+        id: u64,
+        method: &'a str,
+        #[serde(borrow)]
+        params: &'a RawValue,
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(rpc_request);
+    let rpc_request =
+        BorrowedRequest::deserialize(&mut deserializer).expect("borrowed loopback request");
+    deserializer.end().expect("exact loopback request");
+    assert_eq!(rpc_request.jsonrpc, "2.0");
+    assert_eq!(rpc_request.id, 1);
+    let method = match rpc_request.method {
+        "eth_sendRawTransaction" => "eth_sendRawTransaction",
+        "eth_getTransactionByHash" => "eth_getTransactionByHash",
+        "eth_getTransactionReceipt" => "eth_getTransactionReceipt",
+        "eth_getBlockByNumber" => "eth_getBlockByNumber",
+        _ => return invalid_loopback_request(),
+    };
+    let Some((parameter, parameter_suffix)) = first_string_parameter(rpc_request.params) else {
+        return invalid_loopback_request();
+    };
+    let mut state = state.lock().expect("loopback RPC mutex");
+    state.calls.push(method);
+    let result = match method {
+        "eth_sendRawTransaction" => {
+            let Some(signed_hex) = parameter.strip_prefix("0x") else {
+                return invalid_loopback_request();
+            };
+            if parameter_suffix != b"]"
+                || !signed_hex.len().is_multiple_of(2)
+                || signed_hex.len() / 2 > EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES
+            {
+                return invalid_loopback_request();
+            }
+            let mut signed = Zeroizing::new(vec![0_u8; signed_hex.len() / 2]);
+            if hex::decode_to_slice(signed_hex, &mut signed).is_err() {
+                return invalid_loopback_request();
+            }
+            let transaction_hash = format!("{:#x}", keccak256(signed.as_slice()));
+            drop(signed);
+            let next_ordinal = state.candidate_ordinals.len();
+            state
+                .candidate_ordinals
+                .entry(transaction_hash.clone())
+                .or_insert(next_ordinal);
+            state.broadcast_hashes.push(transaction_hash.clone());
+            if state.scenario == Scenario::ResponseLost && !state.response_lost {
+                state.response_lost = true;
+                return LoopbackReply::Disconnect;
+            }
+            if state.scenario == Scenario::AlreadyKnown && state.broadcast_hashes.len() == 1 {
+                return LoopbackReply::Envelope(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": -32_000,
+                        "message": "already known",
+                    },
+                }));
+            }
+            Value::String(transaction_hash)
         }
-        let mut state = self.state.lock().expect("mock RPC mutex");
-        state.calls.push(method);
-        match method {
-            "eth_sendRawTransaction" => {
-                let raw = params
-                    .as_array()
-                    .and_then(|values| values.first())
-                    .and_then(Value::as_str)
-                    .and_then(|value| value.strip_prefix("0x"))
-                    .and_then(|value| hex::decode(value).ok())
-                    .ok_or(EvmWalletRpcFailure::InvalidResponse)?;
-                let transaction_hash = format!("{:#x}", keccak256(raw));
-                let next_ordinal = state.candidate_ordinals.len();
-                state
-                    .candidate_ordinals
-                    .entry(transaction_hash.clone())
-                    .or_insert(next_ordinal);
-                state.broadcast_hashes.push(transaction_hash.clone());
-                if state.scenario == Scenario::ResponseLost && !state.response_lost {
-                    state.response_lost = true;
-                    return Err(EvmWalletRpcFailure::ResponseLost);
-                }
-                if state.scenario == Scenario::AlreadyKnown && state.broadcast_hashes.len() == 1 {
-                    return Ok(EvmWalletRpcResponse::Error(
-                        crate::wallet_rpc::EvmWalletRpcError::new(
-                            -32_000,
-                            "already known".to_owned(),
-                            true,
-                        ),
-                    ));
-                }
-                Ok(EvmWalletRpcResponse::Result(Value::String(
-                    transaction_hash,
-                )))
+        "eth_getTransactionByHash" => {
+            if parameter_suffix != b"]" {
+                return invalid_loopback_request();
             }
-            "eth_getTransactionByHash" => {
-                let hash = hash_parameter(&params)?;
-                let ordinal = candidate_ordinal(&state, &hash)?;
-                if state.scenario == Scenario::Replacement && ordinal == 0 {
-                    return Ok(EvmWalletRpcResponse::Result(Value::Null));
-                }
+            let hash = parameter;
+            let Some(ordinal) = candidate_ordinal(&state, hash) else {
+                return invalid_loopback_request();
+            };
+            if state.scenario == Scenario::Replacement && ordinal == 0 {
+                Value::Null
+            } else {
                 let (block_number, block_hash) = active_block(&state);
-                Ok(EvmWalletRpcResponse::Result(transaction_json(
-                    &self.request,
-                    &hash,
-                    ordinal,
-                    block_number,
-                    block_hash,
-                )?))
+                let Ok(transaction) =
+                    transaction_json(request, hash, ordinal, block_number, block_hash)
+                else {
+                    return invalid_loopback_request();
+                };
+                transaction
             }
-            "eth_getTransactionReceipt" => {
-                let hash = hash_parameter(&params)?;
-                let ordinal = candidate_ordinal(&state, &hash)?;
-                if state.scenario == Scenario::Replacement && ordinal == 0 {
-                    return Ok(EvmWalletRpcResponse::Result(Value::Null));
-                }
+        }
+        "eth_getTransactionReceipt" => {
+            if parameter_suffix != b"]" {
+                return invalid_loopback_request();
+            }
+            let hash = parameter;
+            let Some(ordinal) = candidate_ordinal(&state, hash) else {
+                return invalid_loopback_request();
+            };
+            if state.scenario == Scenario::Replacement && ordinal == 0 {
+                Value::Null
+            } else {
                 let (block_number, block_hash) = active_block(&state);
-                Ok(EvmWalletRpcResponse::Result(receipt_json(
-                    &self.request,
-                    &hash,
+                let Ok(receipt) = receipt_json(
+                    request,
+                    hash,
                     block_number,
                     block_hash,
                     state.scenario == Scenario::Reverted,
-                )?))
+                ) else {
+                    return invalid_loopback_request();
+                };
+                receipt
             }
-            "eth_getBlockByNumber" => {
-                let selector = params
-                    .as_array()
-                    .and_then(|values| values.first())
-                    .and_then(Value::as_str)
-                    .ok_or(EvmWalletRpcFailure::InvalidResponse)?;
-                if selector == "finalized" {
-                    return Ok(EvmWalletRpcResponse::Result(json!({
-                        "hash": FINALIZED_BLOCK,
-                        "number": "0x6e",
-                    })));
-                }
+        }
+        "eth_getBlockByNumber" => {
+            if parameter_suffix != b",false]" {
+                return invalid_loopback_request();
+            }
+            let selector = parameter;
+            if selector == "finalized" {
+                json!({
+                    "hash": FINALIZED_BLOCK,
+                    "number": "0x6e",
+                })
+            } else {
                 let (number, hash) = active_block(&state);
                 if selector != number {
-                    return Err(EvmWalletRpcFailure::InvalidResponse);
+                    return invalid_loopback_request();
                 }
                 if state.scenario == Scenario::Reorganization && !state.reorged {
                     state.reorged = true;
-                    return Ok(EvmWalletRpcResponse::Result(json!({
+                    json!({
                         "hash": WRONG_BLOCK,
                         "number": number,
-                    })));
+                    })
+                } else {
+                    json!({
+                        "hash": hash,
+                        "number": number,
+                    })
                 }
-                Ok(EvmWalletRpcResponse::Result(json!({
-                    "hash": hash,
-                    "number": number,
-                })))
             }
-            _ => Err(EvmWalletRpcFailure::InvalidResponse),
         }
+        _ => return invalid_loopback_request(),
+    };
+    LoopbackReply::Envelope(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": result,
+    }))
+}
+
+fn invalid_loopback_request() -> LoopbackReply {
+    LoopbackReply::Envelope(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32602,
+            "message": "invalid params",
+        },
+    }))
+}
+
+struct CapturedHttpRequest {
+    bytes: Zeroizing<Vec<u8>>,
+    header_end: usize,
+    body_end: usize,
+}
+
+impl CapturedHttpRequest {
+    fn headers(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.header_end]).expect("request headers")
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.bytes[self.header_end..self.body_end]
     }
 }
 
-impl EvmWalletRpcClient for MockRpc {
-    fn exchange<'a>(
-        &'a self,
-        route_generation_ref: &'a ContentRef,
-        chain_id: u64,
-        method: &'static str,
-        params: Value,
-    ) -> EvmWalletRpcFuture<'a> {
-        let response = self.response(route_generation_ref, chain_id, method, params);
-        Box::pin(async move { response })
+async fn read_http_request(socket: &mut TcpStream) -> CapturedHttpRequest {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        MAX_TEST_HTTP_HEADER_BYTES + MAX_TEST_HTTP_BODY_BYTES,
+    ));
+    let header_end = loop {
+        let mut chunk = Zeroizing::new([0_u8; 1024]);
+        let count = socket.read(&mut *chunk).await.expect("read request");
+        assert!(count > 0, "request ended before headers");
+        bytes.extend_from_slice(&chunk[..count]);
+        assert!(
+            bytes.len() <= MAX_TEST_HTTP_HEADER_BYTES,
+            "request headers exceeded fixture bound"
+        );
+        if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+    let headers = std::str::from_utf8(&bytes[..header_end]).expect("request headers");
+    let length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().expect("content length"))
+        })
+        .expect("content length header");
+    assert!(
+        length <= MAX_TEST_HTTP_BODY_BYTES,
+        "request body exceeded fixture bound"
+    );
+    let body_end = header_end.checked_add(length).expect("request body end");
+    while bytes.len() < body_end {
+        let mut chunk = Zeroizing::new([0_u8; 1024]);
+        let count = socket.read(&mut *chunk).await.expect("read request body");
+        assert!(count > 0, "request body ended early");
+        bytes.extend_from_slice(&chunk[..count]);
+        assert!(
+            bytes.len() <= body_end,
+            "request exceeded declared body length"
+        );
+    }
+    CapturedHttpRequest {
+        bytes,
+        header_end,
+        body_end,
     }
 }
 
-fn hash_parameter(params: &Value) -> Result<String, EvmWalletRpcFailure> {
-    params
-        .as_array()
-        .and_then(|values| values.first())
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or(EvmWalletRpcFailure::InvalidResponse)
+fn header_value<'a>(headers: &'a str, expected_name: &str) -> Option<&'a str> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(expected_name)
+            .then_some(value.trim())
+    })
 }
 
-fn candidate_ordinal(
-    state: &MockRpcState,
-    transaction_hash: &str,
-) -> Result<usize, EvmWalletRpcFailure> {
-    state
-        .candidate_ordinals
-        .get(transaction_hash)
-        .copied()
-        .ok_or(EvmWalletRpcFailure::InvalidResponse)
+fn first_string_parameter(params: &RawValue) -> Option<(&str, &[u8])> {
+    let remainder = params.get().as_bytes().strip_prefix(b"[\"")?;
+    let string_end = remainder.iter().position(|byte| *byte == b'"')?;
+    let encoded = &remainder[..string_end];
+    if encoded.iter().any(|byte| *byte == b'\\' || *byte < 0x20) {
+        return None;
+    }
+    let value = std::str::from_utf8(encoded).ok()?;
+    Some((value, &remainder[string_end + 1..]))
 }
 
-fn active_block(state: &MockRpcState) -> (&'static str, &'static str) {
+fn candidate_ordinal(state: &LoopbackRpcState, transaction_hash: &str) -> Option<usize> {
+    state.candidate_ordinals.get(transaction_hash).copied()
+}
+
+fn active_block(state: &LoopbackRpcState) -> (&'static str, &'static str) {
     if state.scenario == Scenario::Reorganization && state.reorged {
         ("0x65", BLOCK_B)
     } else {
@@ -280,19 +474,19 @@ fn transaction_json(
     fee_ordinal: usize,
     block_number: &str,
     block_hash: &str,
-) -> Result<Value, EvmWalletRpcFailure> {
+) -> Result<Value, ()> {
     let fee = request
         .policy()
         .replacement()
         .fee_candidates()
         .get(fee_ordinal)
-        .ok_or(EvmWalletRpcFailure::InvalidResponse)?;
+        .ok_or(())?;
     let to = request
         .template()
         .action()
         .call_destination()
-        .map_err(|_| EvmWalletRpcFailure::InvalidResponse)?
-        .ok_or(EvmWalletRpcFailure::InvalidResponse)?;
+        .map_err(|_| ())?
+        .ok_or(())?;
     let access_list = request
         .template()
         .access_list()
@@ -310,16 +504,16 @@ fn transaction_json(
         "blockNumber": block_number,
         "chainId": quantity(U256::from(request.policy().chain_id())),
         "from": request.policy().sender(),
-        "gas": quantity(request.template().gas_limit_quantity().map_err(|_| EvmWalletRpcFailure::InvalidResponse)?),
+        "gas": quantity(request.template().gas_limit_quantity().map_err(|_| ())?),
         "hash": transaction_hash,
         "input": request.template().input(),
-        "maxFeePerGas": quantity(fee.max_fee_quantity().map_err(|_| EvmWalletRpcFailure::InvalidResponse)?),
-        "maxPriorityFeePerGas": quantity(fee.max_priority_fee_quantity().map_err(|_| EvmWalletRpcFailure::InvalidResponse)?),
-        "nonce": quantity(U256::from(request.policy().initial_nonce().map_err(|_| EvmWalletRpcFailure::InvalidResponse)?)),
+        "maxFeePerGas": quantity(fee.max_fee_quantity().map_err(|_| ())?),
+        "maxPriorityFeePerGas": quantity(fee.max_priority_fee_quantity().map_err(|_| ())?),
+        "nonce": quantity(U256::from(request.policy().initial_nonce().map_err(|_| ())?)),
         "to": format!("{to:#x}"),
         "transactionIndex": "0x0",
         "type": "0x2",
-        "value": quantity(request.template().value_quantity().map_err(|_| EvmWalletRpcFailure::InvalidResponse)?),
+        "value": quantity(request.template().value_quantity().map_err(|_| ())?),
     }))
 }
 
@@ -329,13 +523,13 @@ fn receipt_json(
     block_number: &str,
     block_hash: &str,
     reverted: bool,
-) -> Result<Value, EvmWalletRpcFailure> {
+) -> Result<Value, ()> {
     let to = request
         .template()
         .action()
         .call_destination()
-        .map_err(|_| EvmWalletRpcFailure::InvalidResponse)?
-        .ok_or(EvmWalletRpcFailure::InvalidResponse)?;
+        .map_err(|_| ())?
+        .ok_or(())?;
     Ok(json!({
         "blockHash": block_hash,
         "blockNumber": block_number,
@@ -429,8 +623,8 @@ struct RequestInputs {
 struct Fixture {
     binding: VerifiedExecutorBinding,
     store: MemoryExecutorStore,
-    executor: EvmWalletExecutor<MemoryExecutorStore, MockRpc>,
-    client: MockRpc,
+    executor: EvmWalletExecutor<MemoryExecutorStore>,
+    rpc: LoopbackRpc,
     signer: GenerationGuardedDeterministicSigningProviderBinder,
     qualification: Arc<EvmWalletRequestQualification>,
     committed: CommittedEffectRequest<EvmSubmitTransactionRequest>,
@@ -440,7 +634,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(scenario: Scenario) -> Self {
+    async fn new(scenario: Scenario) -> Self {
         let key = SigningKey::from_slice(&[7_u8; 32]).expect("test signing key");
         let sender = signing_address(&key);
         let tenant_scope_id =
@@ -450,6 +644,16 @@ impl Fixture {
         let fence_ref = reviewed_ref("wallet-generation-fence");
         let wallet_domain_ref = reviewed_ref("wallet-domain");
         let bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024).expect("bounds");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback RPC");
+        let listener_address = listener.local_addr().expect("loopback address");
+        let authorization = Zeroizing::new(format!(
+            "{WALLET_AUTHORIZATION_PREFIX}{}",
+            listener_address.port()
+        ));
+        let expected_authorization = authorization.clone();
+        let endpoint = format!("http://{}", listener_address);
         let mut routing = EvmRoutingCatalogBuilder::new();
         let route_generation = routing
             .insert(
@@ -457,8 +661,8 @@ impl Fixture {
                 "mfm.test.evm-wallet-source",
                 1,
                 StableId::new("mfm.test.evm-wallet-route-generation").expect("generation id"),
-                EvmRpcEndpoint::new("http://127.0.0.1:8545").expect("endpoint"),
-                None,
+                EvmRpcEndpoint::new(endpoint).expect("endpoint"),
+                Some(EvmRpcAuthorization::new(authorization).expect("wallet authorization")),
             )
             .expect("route generation");
         let qualification_transport =
@@ -633,12 +837,11 @@ impl Fixture {
                     Arc::new(provider.clone());
                 Box::pin(async move { Ok(provider) })
             });
-        let client = MockRpc::new(request.clone(), scenario);
+        let rpc = LoopbackRpc::start(listener, request.clone(), scenario, expected_authorization);
         let store = MemoryExecutorStore::new(&binding);
         let executor = wallet_executor(
             store.clone(),
             binding.clone(),
-            client.clone(),
             binder.clone(),
             Arc::clone(&qualification),
         );
@@ -647,7 +850,7 @@ impl Fixture {
             binding,
             store,
             executor,
-            client,
+            rpc,
             signer: binder,
             qualification,
             committed,
@@ -657,14 +860,10 @@ impl Fixture {
         }
     }
 
-    fn restart(
-        &self,
-        store: MemoryExecutorStore,
-    ) -> EvmWalletExecutor<MemoryExecutorStore, MockRpc> {
+    fn restart(&self, store: MemoryExecutorStore) -> EvmWalletExecutor<MemoryExecutorStore> {
         wallet_executor(
             store,
             self.binding.clone(),
-            self.client.clone(),
             self.signer.clone(),
             Arc::clone(&self.qualification),
         )
@@ -674,12 +873,11 @@ impl Fixture {
 fn wallet_executor(
     store: MemoryExecutorStore,
     binding: VerifiedExecutorBinding,
-    client: MockRpc,
     signer: GenerationGuardedDeterministicSigningProviderBinder,
     qualification: Arc<EvmWalletRequestQualification>,
-) -> EvmWalletExecutor<MemoryExecutorStore, MockRpc> {
+) -> EvmWalletExecutor<MemoryExecutorStore> {
     let ledger = KeyedExecutorLedger::new(store, binding).expect("keyed ledger");
-    EvmWalletExecutor::new(ledger, client, signer, qualification).expect("wallet executor")
+    EvmWalletExecutor::new(ledger, signer, qualification).expect("wallet executor")
 }
 
 fn make_request(inputs: &RequestInputs, value: U256) -> EvmSubmitTransactionRequest {
@@ -811,15 +1009,15 @@ fn signing_address(key: &SigningKey) -> Address {
 }
 
 async fn drive_to_terminal(
-    executor: &EvmWalletExecutor<MemoryExecutorStore, MockRpc>,
+    executor: &EvmWalletExecutor<MemoryExecutorStore>,
     committed: &CommittedEffectRequest<EvmSubmitTransactionRequest>,
-    client: &MockRpc,
+    rpc: &LoopbackRpc,
 ) -> VerifiedEnsureResult {
     for _ in 0..40 {
         let result = executor
             .drive(committed)
             .await
-            .unwrap_or_else(|error| panic!("wallet drive {error:?}; calls={:?}", client.calls()));
+            .unwrap_or_else(|error| panic!("wallet drive {error:?}; calls={:?}", rpc.calls()));
         let result = result
             .into_parts()
             .unwrap_or_else(|failure| panic!("unexpected safe failure: {failure:?}"));
@@ -933,7 +1131,7 @@ async fn assert_restored_drive_is_read_only_failure(
         .to_durable_bytes()
         .expect("hostile checkpoint bytes");
     let restored = restore_checkpoint(fixture, &durable);
-    let rpc_calls = fixture.client.call_count();
+    let rpc_calls = fixture.rpc.call_count();
     let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
     let executor = fixture.restart(restored.clone());
     assert_eq!(
@@ -943,7 +1141,7 @@ async fn assert_restored_drive_is_read_only_failure(
             .expect_err("hostile restored history must fail"),
         expected_error
     );
-    assert_eq!(fixture.client.call_count(), rpc_calls);
+    assert_eq!(fixture.rpc.call_count(), rpc_calls);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
     assert_eq!(
         restored
@@ -956,8 +1154,74 @@ async fn assert_restored_drive_is_read_only_failure(
 }
 
 #[tokio::test]
+async fn qualification_equality_binds_the_same_private_live_transport_instance() {
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+    let qualification = fixture.qualification.as_ref();
+    let cloned = qualification.clone();
+    assert_eq!(qualification, &cloned);
+    assert_eq!(qualification.canonical(), cloned.canonical());
+    assert_eq!(qualification.reference(), cloned.reference());
+
+    let rendered = format!("{qualification:?}");
+    assert!(rendered.contains("<private-live-transport>"));
+    for forbidden in [
+        "127.0.0.1",
+        WALLET_AUTHORIZATION_PREFIX,
+        "authorization",
+        "endpoint",
+    ] {
+        assert!(!rendered.contains(forbidden), "{forbidden}");
+        assert!(
+            !qualification.canonical().as_str().contains(forbidden),
+            "{forbidden}"
+        );
+    }
+
+    let mut routes = EvmRoutingCatalogBuilder::new();
+    let independent_route = routes
+        .insert(
+            "primary",
+            "mfm.test.evm-wallet-source",
+            1,
+            StableId::new("mfm.test.evm-wallet-route-generation").expect("generation id"),
+            EvmRpcEndpoint::new("http://127.0.0.1:9").expect("independent endpoint"),
+            None,
+        )
+        .expect("independent route");
+    assert_eq!(
+        independent_route
+            .to_content_ref()
+            .expect("independent route reference"),
+        fixture.request_inputs.route_generation_ref
+    );
+    let independent_transport =
+        EvmJsonRpcTransport::new(routes.build().expect("independent catalog"))
+            .expect("independent transport");
+    let independent = EvmWalletRequestQualification::qualify(
+        &independent_transport,
+        independent_route,
+        fixture.binding.clone(),
+        fixture.signer.binding(),
+        qualification.initial_nonce_descriptor().clone(),
+        qualification.object_evidence_contract_ref().clone(),
+    )
+    .expect("independent qualification");
+    assert_eq!(qualification.canonical(), independent.canonical());
+    assert_eq!(qualification.reference(), independent.reference());
+    assert_ne!(qualification, &independent);
+}
+
+#[tokio::test]
+async fn qualification_owned_transport_executes_after_original_handle_is_dropped() {
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+    let terminal = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.rpc).await;
+    assert!(matches!(terminal.outcome(), Ensure::Terminal { .. }));
+    assert!(fixture.rpc.call_count() > 0);
+}
+
+#[tokio::test]
 async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_substitution() {
-    let fixture = Fixture::new(Scenario::Succeeded);
+    let fixture = Fixture::new(Scenario::Succeeded).await;
     let (left, right) = tokio::join!(
         fixture.executor.drive(&fixture.committed),
         fixture.executor.drive(&fixture.committed)
@@ -970,7 +1234,7 @@ async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_subst
         .expect("right drive")
         .into_parts()
         .expect("right returned outcome");
-    assert_eq!(fixture.client.operation_count("eth_sendRawTransaction"), 1);
+    assert_eq!(fixture.rpc.operation_count("eth_sendRawTransaction"), 1);
     assert!(
         left.delivery_audit().attempt_count() <= 2 && right.delivery_audit().attempt_count() <= 2
     );
@@ -992,7 +1256,7 @@ async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_subst
 
 #[tokio::test]
 async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation() {
-    let fixture = Fixture::new(Scenario::Succeeded);
+    let fixture = Fixture::new(Scenario::Succeeded).await;
     let before = fixture
         .store
         .checkpoint()
@@ -1073,7 +1337,7 @@ async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation
                 .expect_err("qualification mismatch"),
             ExecutorError::TargetOperationMismatch
         );
-        assert_eq!(fixture.client.call_count(), 0);
+        assert_eq!(fixture.rpc.call_count(), 0);
         assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             fixture
@@ -1089,7 +1353,7 @@ async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation
 
 #[tokio::test]
 async fn response_loss_restart_recovers_by_hash_without_persisting_bearer_material() {
-    let fixture = Fixture::new(Scenario::ResponseLost);
+    let fixture = Fixture::new(Scenario::ResponseLost).await;
     let pending = fixture
         .executor
         .drive(&fixture.committed)
@@ -1110,6 +1374,7 @@ async fn response_loss_restart_recovers_by_hash_without_persisting_bearer_materi
         "private_key",
         "unlock_file",
         "authorization_header",
+        WALLET_AUTHORIZATION_PREFIX,
     ] {
         assert!(!retained.contains(forbidden), "{forbidden}");
     }
@@ -1121,16 +1386,16 @@ async fn response_loss_restart_recovers_by_hash_without_persisting_bearer_materi
     .expect("restore");
     let restarted = fixture.restart(restored);
     fixture.signer_available.store(false, Ordering::SeqCst);
-    let terminal = drive_to_terminal(&restarted, &fixture.committed, &fixture.client).await;
+    let terminal = drive_to_terminal(&restarted, &fixture.committed, &fixture.rpc).await;
     assert!(matches!(terminal.outcome(), Ensure::Terminal { .. }));
-    assert_eq!(fixture.client.operation_count("eth_sendRawTransaction"), 1);
+    assert_eq!(fixture.rpc.operation_count("eth_sendRawTransaction"), 1);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
 async fn exact_already_known_response_converges_through_public_hash_observation() {
-    let fixture = Fixture::new(Scenario::AlreadyKnown);
-    let terminal = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.client).await;
+    let fixture = Fixture::new(Scenario::AlreadyKnown).await;
+    let terminal = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.rpc).await;
     let attempts = terminal.delivery_audit().attempts().expect("attempts");
     let already_known = attempts.into_iter().any(|attempt| {
         attempt
@@ -1159,9 +1424,8 @@ async fn exact_already_known_response_converges_through_public_hash_observation(
 #[tokio::test]
 async fn finalized_success_and_revert_produce_closed_terminal_evidence() {
     for (scenario, expected_revert) in [(Scenario::Succeeded, false), (Scenario::Reverted, true)] {
-        let fixture = Fixture::new(scenario);
-        let result =
-            drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.client).await;
+        let fixture = Fixture::new(scenario).await;
+        let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.rpc).await;
         let attempt = terminal_attempt(&result);
         let evidence = attempt
             .terminal_evidence()
@@ -1180,7 +1444,7 @@ async fn finalized_success_and_revert_produce_closed_terminal_evidence() {
 
 #[tokio::test]
 async fn hostile_restored_terminal_descriptor_fails_before_target_entry() {
-    let fixture = Fixture::new(Scenario::Succeeded);
+    let fixture = Fixture::new(Scenario::Succeeded).await;
     let (preterminal, valid_result) = drive_from_preterminal_checkpoint(&fixture).await;
     let evidence = valid_result
         .terminal_evidence()
@@ -1220,7 +1484,7 @@ async fn hostile_restored_terminal_descriptor_fails_before_target_entry() {
 
 #[tokio::test]
 async fn hostile_restored_terminal_history_fails_before_signing_rpc_or_append() {
-    let fixture = Fixture::new(Scenario::Succeeded);
+    let fixture = Fixture::new(Scenario::Succeeded).await;
     let (preterminal, valid_result) = drive_from_preterminal_checkpoint(&fixture).await;
     let evidence = valid_result
         .terminal_evidence()
@@ -1312,7 +1576,7 @@ async fn hostile_restored_terminal_history_fails_before_signing_rpc_or_append() 
 
 #[tokio::test]
 async fn hostile_restored_tombstone_relation_fails_without_mutation() {
-    let fixture = Fixture::new(Scenario::Succeeded);
+    let fixture = Fixture::new(Scenario::Succeeded).await;
     let (preterminal, valid_result) = drive_from_preterminal_checkpoint(&fixture).await;
 
     for (operation, outcome) in [
@@ -1438,8 +1702,8 @@ async fn hostile_restored_tombstone_relation_fails_without_mutation() {
 
 #[tokio::test]
 async fn restored_valid_tombstone_is_signer_rpc_and_write_free() {
-    let fixture = Fixture::new(Scenario::Succeeded);
-    let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.client).await;
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+    let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.rpc).await;
     assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
     let durable = fixture
         .store
@@ -1449,7 +1713,7 @@ async fn restored_valid_tombstone_is_signer_rpc_and_write_free() {
         .expect("terminal checkpoint bytes");
     let restored = restore_checkpoint(&fixture, &durable);
     fixture.signer_available.store(false, Ordering::SeqCst);
-    let rpc_calls = fixture.client.call_count();
+    let rpc_calls = fixture.rpc.call_count();
     let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
     let result = fixture
         .restart(restored.clone())
@@ -1459,7 +1723,7 @@ async fn restored_valid_tombstone_is_signer_rpc_and_write_free() {
         .into_parts()
         .expect("restored terminal result");
     assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
-    assert_eq!(fixture.client.call_count(), rpc_calls);
+    assert_eq!(fixture.rpc.call_count(), rpc_calls);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
     assert_eq!(
         restored
@@ -1473,7 +1737,7 @@ async fn restored_valid_tombstone_is_signer_rpc_and_write_free() {
 
 #[tokio::test]
 async fn late_terminal_observation_after_tombstone_preserves_frozen_plan_and_selection() {
-    let fixture = Fixture::new(Scenario::Succeeded);
+    let fixture = Fixture::new(Scenario::Succeeded).await;
     let (preterminal, valid_result) = drive_from_preterminal_checkpoint(&fixture).await;
     let EvmWalletAttemptResult::CanonicalInclusion {
         block: Some(block),
@@ -1580,7 +1844,7 @@ async fn late_terminal_observation_after_tombstone_preserves_frozen_plan_and_sel
         .expect("late-observation checkpoint bytes");
     let restored = restore_checkpoint(&fixture, &durable);
     fixture.signer_available.store(false, Ordering::SeqCst);
-    let rpc_calls = fixture.client.call_count();
+    let rpc_calls = fixture.rpc.call_count();
     let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
     let result = fixture
         .restart(restored.clone())
@@ -1590,7 +1854,7 @@ async fn late_terminal_observation_after_tombstone_preserves_frozen_plan_and_sel
         .into_parts()
         .expect("late-observation terminal result");
     assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
-    assert_eq!(fixture.client.call_count(), rpc_calls);
+    assert_eq!(fixture.rpc.call_count(), rpc_calls);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
     assert_eq!(
         restored
@@ -1604,29 +1868,23 @@ async fn late_terminal_observation_after_tombstone_preserves_frozen_plan_and_sel
 
 #[tokio::test]
 async fn pre_resolution_reorganization_requires_fresh_transaction_receipt_and_inclusion() {
-    let fixture = Fixture::new(Scenario::Reorganization);
-    let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.client).await;
+    let fixture = Fixture::new(Scenario::Reorganization).await;
+    let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.rpc).await;
     let attempt = terminal_attempt(&result);
     let evidence = attempt
         .terminal_evidence()
         .expect("valid terminal attempt")
         .expect("terminal evidence");
     assert_eq!(evidence.inclusion_block().hash(), BLOCK_B);
-    assert_eq!(
-        fixture.client.operation_count("eth_getTransactionByHash"),
-        2
-    );
-    assert_eq!(
-        fixture.client.operation_count("eth_getTransactionReceipt"),
-        2
-    );
-    assert_eq!(fixture.client.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(fixture.rpc.operation_count("eth_getTransactionByHash"), 2);
+    assert_eq!(fixture.rpc.operation_count("eth_getTransactionReceipt"), 2);
+    assert_eq!(fixture.rpc.operation_count("eth_sendRawTransaction"), 2);
 }
 
 #[tokio::test]
 async fn bounded_rebroadcast_then_replacement_preserves_nonce_and_semantic_request() {
-    let fixture = Fixture::new(Scenario::Replacement);
-    let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.client).await;
+    let fixture = Fixture::new(Scenario::Replacement).await;
+    let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.rpc).await;
     let attempt = terminal_attempt(&result);
     let evidence = attempt
         .terminal_evidence()
@@ -1635,7 +1893,7 @@ async fn bounded_rebroadcast_then_replacement_preserves_nonce_and_semantic_reque
     assert_eq!(evidence.candidate().fee_ordinal(), 1);
     assert_eq!(evidence.candidate().allocated_nonce(), Ok(7));
     assert_eq!(evidence.request(), fixture.committed.request());
-    let hashes = fixture.client.broadcast_hashes();
+    let hashes = fixture.rpc.broadcast_hashes();
     assert_eq!(hashes.len(), 3);
     assert_eq!(hashes[0], hashes[1]);
     assert_ne!(hashes[1], hashes[2]);
@@ -1643,7 +1901,7 @@ async fn bounded_rebroadcast_then_replacement_preserves_nonce_and_semantic_reque
 
 #[tokio::test]
 async fn signer_unavailability_never_creates_a_delivery_authorization() {
-    let fixture = Fixture::new(Scenario::Succeeded);
+    let fixture = Fixture::new(Scenario::Succeeded).await;
     fixture.signer_available.store(false, Ordering::SeqCst);
     let (outcome, failure) = fixture
         .executor
@@ -1657,7 +1915,7 @@ async fn signer_unavailability_never_creates_a_delivery_authorization() {
         failure.stable_code(),
         &ReferenceFailureCode::DestinationUnavailable
     );
-    assert_eq!(fixture.client.call_count(), 0);
+    assert_eq!(fixture.rpc.call_count(), 0);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 1);
     let snapshot = fixture
         .store

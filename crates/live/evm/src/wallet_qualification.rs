@@ -1,5 +1,6 @@
-//! Pure deployment qualification for one exact EVM wallet request family.
+//! Sealed deployment qualification and live transport ownership for one exact EVM wallet family.
 
+use std::fmt;
 use std::str::FromStr;
 
 use alloy_primitives::Address;
@@ -21,11 +22,13 @@ use serde_json::json;
 use crate::transport::EvmJsonRpcTransport;
 use crate::{evm_already_known_classifier_ref, EvmWalletLiveError};
 
-/// Pure sealed proof that one request exactly matches one wallet deployment.
+/// Sealed qualification that exactly matches one wallet deployment.
 ///
-/// Construction resolves only public immutable descriptors. It performs no
-/// route, signer, executor-ledger, or target IO. The same instance is shared
-/// by admission and the live executor.
+/// Construction resolves only public immutable descriptors and performs no
+/// route, signer, executor-ledger, or target IO. The canonical proof, content
+/// identity, and debug representation contain no endpoint or authorization.
+/// The live object separately retains a private clone of the exact transport,
+/// sharing its runtime and route catalog, for use by the executor.
 ///
 /// ```
 /// use mfm_evm::EvmSubmitTransactionRequest;
@@ -38,8 +41,9 @@ use crate::{evm_already_known_classifier_ref, EvmWalletLiveError};
 ///     qualification.verify_request(request)
 /// }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct EvmWalletRequestQualification {
+    transport: EvmJsonRpcTransport,
     executor_binding: VerifiedExecutorBinding,
     resource_policy_binding: ResourcePolicyBinding,
     object_evidence_contract_ref: ContentRef,
@@ -60,7 +64,10 @@ pub struct EvmWalletRequestQualification {
 }
 
 impl EvmWalletRequestQualification {
-    /// Qualifies one exact public wallet deployment without opening its signer.
+    /// Qualifies one exact public wallet deployment and retains its transport.
+    ///
+    /// This does not open the signer or perform provider IO. The retained
+    /// transport is excluded from the canonical proof and public diagnostics.
     #[allow(clippy::too_many_arguments)]
     pub fn qualify(
         transport: &EvmJsonRpcTransport,
@@ -233,6 +240,7 @@ impl EvmWalletRequestQualification {
         )
         .map_err(|_| EvmWalletLiveError::InvalidContract)?;
         Ok(Self {
+            transport: transport.clone(),
             executor_binding,
             resource_policy_binding,
             object_evidence_contract_ref,
@@ -312,6 +320,10 @@ impl EvmWalletRequestQualification {
             return Err(EvmWalletLiveError::InvalidContract);
         }
         Ok(())
+    }
+
+    pub(crate) const fn transport(&self) -> &EvmJsonRpcTransport {
+        &self.transport
     }
 
     /// Returns the exact verified executor binding.
@@ -397,6 +409,26 @@ impl EvmWalletRequestQualification {
     /// Returns the exact qualification-closure content identity.
     pub const fn reference(&self) -> &ContentRef {
         &self.reference
+    }
+}
+
+impl PartialEq for EvmWalletRequestQualification {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical == other.canonical
+            && self.reference == other.reference
+            && self.transport.is_same_instance(&other.transport)
+    }
+}
+
+impl Eq for EvmWalletRequestQualification {}
+
+impl fmt::Debug for EvmWalletRequestQualification {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EvmWalletRequestQualification")
+            .field("reference", &self.reference)
+            .field("transport", &"<private-live-transport>")
+            .finish()
     }
 }
 

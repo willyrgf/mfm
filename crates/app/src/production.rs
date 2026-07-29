@@ -221,7 +221,6 @@ where
         });
     let wallet_executor = mfm_evm_live::EvmWalletExecutor::new(
         ledger,
-        transport.as_ref().clone(),
         signer_binder,
         Arc::clone(&wallet_request_qualification),
     )

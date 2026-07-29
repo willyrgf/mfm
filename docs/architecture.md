@@ -457,7 +457,11 @@ Current domain product placement:
   signer binding.
 - `mfm-evm-live` owns reusable JSON-RPC transport, private audited adapters, and the sealed
   wallet-request qualification that closes the transport catalog, executor semantics, signer,
-  resource policy, and EVM policy artifacts before live use.
+  resource policy, and EVM policy artifacts before live use and privately retains a clone of the
+  exact qualified transport instance.
+- `mfm-evm-live` exposes wallet execution only as `EvmWalletExecutor<Store>` obtaining its concrete
+  exact-operation transport from that qualification; raw wallet RPC, transport injection, and
+  target-entry types remain private.
 - EVM portfolio reads use decomposed bootstrap, anchor, per-call fan-out, confirmation, and pure
   aggregation nodes.
 - EVM transaction submission uses the same stateless transport behind a durable wallet executor;
@@ -496,8 +500,10 @@ guarded-signer descriptor, nonce policy, initial nonce, already-known classifier
 assurance policy, and wallet-request qualification. Private endpoints, credentials, transports,
 caller configuration, and per-run artifacts never enter that graph. Runtime and the private
 application backend borrow one shared registry `Arc`; admission and the executor borrow the same
-live-owned wallet-qualification `Arc`. They do not assemble parallel catalogs, policy predicates,
-or admitted support authority.
+live-owned wallet-qualification `Arc`. The qualification's canonical proof, reference, and debug
+form exclude its privately retained exact transport clone, including endpoints and authorization;
+the clone shares the original runtime and route catalog. Admission and execution do not assemble
+parallel transports, catalogs, policy predicates, or admitted support authority.
 
 The complete facade is:
 

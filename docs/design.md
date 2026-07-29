@@ -74,7 +74,7 @@ only authorize, invoke, and render those lower contracts.
 | `ContentRef` | content identity only | Executor and general lightweight reference: schema id plus raw-byte content digest. |
 | `ValueRef` | journal-retained identity | Full producer-bound artifact, evidence, schema, semantic type, role, length, media type, and producer binding. |
 | `VerifiedExecutorBinding` | executor-ledger authority | Exact tenant, deployment generation, evidence contract, and optional typed resource ownership. |
-| `EvmWalletRequestQualification` | deployment predicate, not target-entry authority | One secret-free sealed equality proof over the actual route catalog, selected route/chain, executor semantic and evidence closure, derived signer descriptor, nonce policy/configuration, classifier, finality, assurance, generation/fence, tenant, wallet domain, sender, and evidence bounds. Admission and execution share one `Arc`. |
+| `EvmWalletRequestQualification` | deployment predicate plus private live transport ownership, not target-entry authority | One secret-free sealed equality proof over the actual route catalog, selected route/chain, executor semantic and evidence closure, derived signer descriptor, nonce policy/configuration, classifier, finality, assurance, generation/fence, tenant, wallet domain, sender, and evidence bounds. The live object separately retains a private clone of that exact transport instance; admission and execution share one qualification `Arc`. |
 | `TargetEntryAuthority` / `TargetOperationReceipt` | one-use executor authority | Authorization committed before target entry and affine receipt returned by that exact entry. |
 | Rendered JSON and portable bytes | no live authority | Reviewed output/export representations; identifiers and cursors are never bearer authority. |
 
@@ -757,13 +757,25 @@ finite qualified fee schedule may change. A missing transaction, timeout, or obs
 never promoted to a generic not-applied terminal result. Raw signed bytes and signatures remain
 transient and zeroizing inside the broadcast target.
 
+`mfm-evm-live` owns one concrete exact-generation transport with a private allowlist of six read
+and five wallet operations. `EvmWalletExecutor<Store>` is the only public wallet execution seam and
+obtains that concrete transport only through its qualification; no independent transport argument,
+generic wallet RPC client, raw response, target wrapper, or target-entry descriptor is public.
+MFM-owned authorization, request-body, signed-envelope, and response buffers are bounded and
+zeroizing. Decoding retains borrowed raw ranges, closes the JSON-RPC envelope and typed result
+shapes, and discards provider text below safe-failure evidence.
+
 The shared qualification is created without signer, route, ledger, or provider IO from the sealed
 transport catalog and immutable public deployment values. It binds the complete ordered
 route-generation-to-chain map and product object-evidence contract, derives the generic guarded
 signer descriptor and EVM nonce-policy pair, and verifies the exact wallet executor semantic
-closure. The application rejects a configured mismatch before certification or append; the
-executor rejects it again before effect binding or nonce allocation. No caller can supply an
-independent signer reference, resource-policy pair, or selected route descriptor.
+closure. Its canonical proof, content reference, and debug representation exclude transport
+internals, endpoints, and authorization. The live qualification privately retains a clone sharing
+the exact transport runtime and route catalog, and instance-aware equality prevents an independently
+constructed transport with identical public descriptors from comparing equal. The application
+rejects a configured mismatch before certification or append; the executor rejects it again before
+effect binding or nonce allocation. No caller can supply an independent transport, signer
+reference, resource-policy pair, or selected route descriptor.
 
 ## Application And Public Surface
 
@@ -814,6 +826,10 @@ The exact DTOs, disclosure rules, pagination, authentication, and portable-expor
 Secrets include passwords, mnemonics, private keys, raw signing material, credentials,
 authorization headers, unlock material, signed bearer payloads, and secret-bearing paths. They
 remain below typed semantic and diagnostic boundaries.
+
+MFM-owned transient EVM buffers use owner-preserving zeroizing allocations and exact limits. This
+guarantee covers allocations controlled by MFM; it does not claim that HTTP/TLS libraries, the
+allocator, the operating system, or a remote peer zeroize their own internal buffers.
 
 Capability classifiers discard provider-controlled text and retain only safe values that satisfy
 the classifier-bound complete diagnostic identity and structural shape. Append, load, and replay

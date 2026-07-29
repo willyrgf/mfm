@@ -6,6 +6,7 @@ use mfm_evm::{
     EvmAnchorConfirmationRequest, EvmAnchoredSource, EvmBlockAnchor, EvmChainIdentityRequest,
     EvmCheckedSource, EvmLatestAnchorRequest, EvmNativeBalanceRequest, EvmNetworkBinding,
     EvmRoutingGenerationRef, EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest,
+    EVM_READ_MAX_RESPONSE_BYTES,
 };
 use mfm_ids::StableId;
 use serde_json::{json, Value};
@@ -22,6 +23,7 @@ struct TestResponse {
     status: u16,
     body: Vec<u8>,
     declared_length: Option<usize>,
+    omit_content_length: bool,
     location: Option<String>,
 }
 
@@ -31,6 +33,7 @@ impl TestResponse {
             status: 200,
             body: serde_json::to_vec(&value).expect("response JSON"),
             declared_length: None,
+            omit_content_length: false,
             location: None,
         }
     }
@@ -40,6 +43,7 @@ impl TestResponse {
             status,
             body: Vec::new(),
             declared_length: None,
+            omit_content_length: false,
             location: None,
         }
     }
@@ -67,23 +71,25 @@ impl TestServer {
                     .push(serde_json::from_slice(&body).expect("request JSON"));
                 let reason = if response.status == 200 { "OK" } else { "TEST" };
                 let length = response.declared_length.unwrap_or(response.body.len());
+                let length_header = if response.omit_content_length {
+                    String::new()
+                } else {
+                    format!("content-length: {length}\r\n")
+                };
                 let location = response
                     .location
                     .as_deref()
                     .map(|value| format!("location: {value}\r\n"))
                     .unwrap_or_default();
                 let head = format!(
-                    "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{}connection: close\r\n\r\n",
-                    response.status, reason, length, location
+                    "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\n{}{}connection: close\r\n\r\n",
+                    response.status, reason, length_header, location
                 );
                 socket
                     .write_all(head.as_bytes())
                     .await
                     .expect("write response head");
-                socket
-                    .write_all(&response.body)
-                    .await
-                    .expect("write response body");
+                let _ = socket.write_all(&response.body).await;
             }
         });
         Self {
@@ -173,6 +179,290 @@ fn rpc_result(result: Value) -> TestResponse {
         "id": 1,
         "result": result,
     }))
+}
+
+#[test]
+fn authorization_and_zeroizing_owner_bounds_are_exact() {
+    for invalid in [
+        Zeroizing::new(String::new()),
+        Zeroizing::new("invalid\nheader".to_owned()),
+        Zeroizing::new("a".repeat(MAX_AUTHORIZATION_BYTES + 1)),
+    ] {
+        assert_eq!(
+            EvmRpcAuthorization::new(invalid).err(),
+            Some(EvmTransportError::InvalidConfiguration)
+        );
+    }
+
+    let exact = Zeroizing::new("a".repeat(MAX_AUTHORIZATION_BYTES));
+    let original = exact.as_ptr();
+    let authorization = EvmRpcAuthorization::new(exact).expect("exact-bound authorization");
+    assert!(authorization.value.is_sensitive());
+    assert_eq!(
+        authorization.value.as_bytes().len(),
+        MAX_AUTHORIZATION_BYTES
+    );
+    assert_eq!(authorization.value.as_bytes().as_ptr(), original);
+    let authorization_clone = authorization.value.clone();
+    assert!(authorization_clone.is_sensitive());
+    assert_eq!(authorization_clone.as_bytes().as_ptr(), original);
+
+    let probe = Arc::new(ZeroizingOwnerDropProbe::default());
+    let payload = Zeroizing::new(vec![0x5a; 1024]);
+    let original = payload.as_ptr();
+    let bytes = Bytes::from_owner(ZeroizingBytesOwner::with_probe(payload, Arc::clone(&probe)));
+    assert_eq!(bytes.as_ptr(), original);
+    let final_owner = bytes.clone();
+    drop(bytes);
+    assert!(!probe.dropped.load(std::sync::atomic::Ordering::SeqCst));
+    drop(final_owner);
+    assert!(probe.dropped.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(probe.zeroized.load(std::sync::atomic::Ordering::SeqCst));
+
+    let response_probe = Arc::new(ZeroizingOwnerDropProbe::default());
+    let mut response = ZeroizingResponseBuffer::with_probe(Arc::clone(&response_probe));
+    assert_eq!(response.bytes.capacity(), MAX_RESPONSE_BYTES);
+    let response_allocation = response.bytes.as_ptr();
+    let exact_response = vec![0x5a; MAX_RESPONSE_BYTES];
+    assert_eq!(response.extend(&exact_response), Ok(()));
+    assert_eq!(response.bytes.as_ptr(), response_allocation);
+    assert_eq!(response.extend(&[0x5a]), Err(MAX_RESPONSE_BYTES + 1));
+    assert_eq!(response.len(), MAX_RESPONSE_BYTES);
+    assert_eq!(response.bytes.as_ptr(), response_allocation);
+    drop(response);
+    assert!(response_probe
+        .dropped
+        .load(std::sync::atomic::Ordering::SeqCst));
+    assert!(response_probe
+        .zeroized
+        .load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn exact_request_owner_moves_unchanged_into_http_body_and_zeroizes_on_drop() {
+    let encoded = ExactRpcRequest::ChainIdentity
+        .encode()
+        .expect("allowlisted request");
+    let pointer = encoded.body.as_ptr();
+    let length = encoded.body.len();
+    let probe = Arc::new(ZeroizingOwnerDropProbe::default());
+    let body = request_body_from_owner(ZeroizingBytesOwner::with_probe(
+        encoded.body,
+        Arc::clone(&probe),
+    ));
+    let body_bytes = body.as_bytes().expect("in-memory request body");
+    assert_eq!(body_bytes.as_ptr(), pointer);
+    assert_eq!(body_bytes.len(), length);
+    assert!(!probe.dropped.load(std::sync::atomic::Ordering::SeqCst));
+    drop(body);
+    assert!(probe.dropped.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(probe.zeroized.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+fn assert_request_owner_wiped(probe: &ExchangeOwnerProbe) {
+    assert_eq!(probe.request_created.load(Ordering::SeqCst), 1);
+    assert_ne!(probe.request_pointer.load(Ordering::SeqCst), 0);
+    assert_ne!(probe.request_length.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.request_dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.request_zeroized.load(Ordering::SeqCst), 1);
+}
+
+fn assert_response_owner_wiped(probe: &ExchangeOwnerProbe) {
+    assert_eq!(probe.response_created.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        probe.response_capacity.load(Ordering::SeqCst),
+        MAX_RESPONSE_BYTES
+    );
+    assert_eq!(probe.response_dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.response_zeroized.load(Ordering::SeqCst), 1);
+}
+
+async fn observed_chain_identity(
+    response: TestResponse,
+) -> (
+    EvmTransportOutcome<EvmChainIdentityResponse>,
+    Arc<ExchangeOwnerProbe>,
+) {
+    let server = TestServer::start(vec![response]).await;
+    let (transport, binding) = transport(&server.endpoint);
+    let probe = Arc::new(ExchangeOwnerProbe::default());
+    let outcome = with_exchange_owner_probe(
+        Arc::clone(&probe),
+        transport.chain_identity(&EvmChainIdentityRequest::new(binding)),
+    )
+    .await;
+    assert_eq!(server.finish().await.len(), 1);
+    (outcome, probe)
+}
+
+#[tokio::test]
+async fn production_exchange_owners_are_used_and_wiped_on_success_and_failure_exits() {
+    let (outcome, probe) = observed_chain_identity(rpc_result(json!("0x1"))).await;
+    assert!(matches!(outcome, EvmTransportOutcome::Returned(_)));
+    assert_request_owner_wiped(&probe);
+    assert_response_owner_wiped(&probe);
+
+    let (outcome, probe) = observed_chain_identity(TestResponse::status(503)).await;
+    assert_eq!(
+        outcome,
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::HttpStatus { status: 503 })
+    );
+    assert_request_owner_wiped(&probe);
+    assert_eq!(probe.response_created.load(Ordering::SeqCst), 0);
+
+    let malformed = TestResponse {
+        status: 200,
+        body: br#"{"jsonrpc":"2.0","id":1,"result":"0x1""#.to_vec(),
+        declared_length: None,
+        omit_content_length: false,
+        location: None,
+    };
+    let (outcome, probe) = observed_chain_identity(malformed).await;
+    assert!(matches!(
+        outcome,
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseInvalid {
+            response_kind: EvmResponseInvalidKind::MalformedEnvelope,
+            ..
+        })
+    ));
+    assert_request_owner_wiped(&probe);
+    assert_response_owner_wiped(&probe);
+
+    let mut exact = br#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#.to_vec();
+    exact.resize(MAX_RESPONSE_BYTES, b' ');
+    let (outcome, probe) = observed_chain_identity(TestResponse {
+        status: 200,
+        body: exact,
+        declared_length: None,
+        omit_content_length: true,
+        location: None,
+    })
+    .await;
+    assert!(matches!(outcome, EvmTransportOutcome::Returned(_)));
+    assert_request_owner_wiped(&probe);
+    assert_response_owner_wiped(&probe);
+
+    let mut overrun = br#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#.to_vec();
+    overrun.resize(MAX_RESPONSE_BYTES + 1, b' ');
+    let (outcome, probe) = observed_chain_identity(TestResponse {
+        status: 200,
+        body: overrun,
+        declared_length: None,
+        omit_content_length: true,
+        location: None,
+    })
+    .await;
+    assert!(matches!(
+        outcome,
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge { .. })
+    ));
+    assert_request_owner_wiped(&probe);
+    assert_response_owner_wiped(&probe);
+
+    let incomplete_body = br#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#.to_vec();
+    let (outcome, probe) = observed_chain_identity(TestResponse {
+        status: 200,
+        declared_length: Some(incomplete_body.len() + 1),
+        body: incomplete_body,
+        omit_content_length: false,
+        location: None,
+    })
+    .await;
+    assert_eq!(
+        outcome,
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::TransportFailed)
+    );
+    assert_request_owner_wiped(&probe);
+    assert_response_owner_wiped(&probe);
+
+    let (transport, binding) = transport("http://127.0.0.1:9");
+    let probe = Arc::new(ExchangeOwnerProbe::default());
+    let outcome = with_exchange_owner_probe(
+        Arc::clone(&probe),
+        transport.chain_identity(&EvmChainIdentityRequest::new(binding)),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::TransportFailed)
+    );
+    assert_request_owner_wiped(&probe);
+    assert_eq!(probe.response_created.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancelling_production_exchange_after_response_owner_creation_wipes_both_owners() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalling server");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("stalling server address")
+    );
+    let (headers_sent, headers_observed) = tokio::sync::oneshot::channel();
+    let (release_server, server_released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let body = read_http_body(&mut socket).await;
+        let request: Value = serde_json::from_slice(&body).expect("request JSON");
+        assert_eq!(request["method"], "eth_chainId");
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write response headers");
+        socket.flush().await.expect("flush response headers");
+        headers_sent.send(()).expect("observe response headers");
+        let _ = server_released.await;
+    });
+
+    let (transport, binding) = transport(&endpoint);
+    let request = EvmChainIdentityRequest::new(binding);
+    let probe = Arc::new(ExchangeOwnerProbe::default());
+    let scoped_probe = Arc::clone(&probe);
+    let exchange = tokio::spawn(async move {
+        with_exchange_owner_probe(scoped_probe, async move {
+            transport.chain_identity(&request).await
+        })
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), headers_observed)
+        .await
+        .expect("response headers timeout")
+        .expect("response headers signal");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while probe.response_created.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("response owner creation timeout");
+    assert_eq!(probe.request_created.load(Ordering::SeqCst), 1);
+    assert!(!exchange.is_finished());
+
+    exchange.abort();
+    assert!(exchange
+        .await
+        .expect_err("cancelled exchange")
+        .is_cancelled());
+    assert_request_owner_wiped(&probe);
+    assert_response_owner_wiped(&probe);
+
+    release_server.send(()).expect("release stalling server");
+    server.await.expect("stalling server task");
+}
+
+#[test]
+fn transport_source_has_no_generic_json_request_path() {
+    let transport_source = include_str!("mod.rs");
+    for removed in [".json(", "RpcPayload", "rpc_call(", "exchange_with_encoder"] {
+        assert!(
+            !transport_source.contains(removed),
+            "generic JSON request path survived: {removed}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -359,11 +649,149 @@ async fn closed_semaphore_is_classified_as_pre_entry_cancellation() {
 }
 
 #[tokio::test]
+async fn queued_exchange_does_not_encode_before_both_permits_and_wipes_sensitive_state() {
+    let (route_blocked_transport, binding) = transport("http://127.0.0.1:9");
+    let route = route_blocked_transport
+        .routes
+        .resolve(binding.routing_generation_ref())
+        .expect("route");
+    let held_route_permits = Arc::clone(&route.limit)
+        .acquire_many_owned(
+            u32::try_from(MAX_IN_FLIGHT_EXCHANGES_PER_GENERATION).expect("route permit count"),
+        )
+        .await
+        .expect("hold route permits");
+    let route_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let route_encode_probe = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let route_owner_probe = Arc::new(ExchangeOwnerProbe::default());
+    let route_probe = Arc::new(ZeroizingOwnerDropProbe::default());
+    let sensitive =
+        ZeroizingBytesOwner::with_probe(Zeroizing::new(vec![0x5a; 1024]), Arc::clone(&route_probe));
+    let queued_transport = route_blocked_transport.clone();
+    let route_for_exchange = Arc::clone(&route);
+    let called = Arc::clone(&route_called);
+    let exchange = with_exchange_owner_probe(
+        Arc::clone(&route_owner_probe),
+        exact::with_encode_probe(Arc::clone(&route_encode_probe), async move {
+            let outcome = queued_transport
+                .exchange(route_for_exchange, ExactRpcRequest::ChainIdentity)
+                .await;
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            drop(sensitive);
+            outcome
+        }),
+    );
+    tokio::pin!(exchange);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut exchange)
+            .await
+            .is_err()
+    );
+    assert!(!route_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!route_encode_probe.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(route_owner_probe.request_created.load(Ordering::SeqCst), 0);
+    assert_eq!(route_owner_probe.response_created.load(Ordering::SeqCst), 0);
+    assert!(!route_probe
+        .dropped
+        .load(std::sync::atomic::Ordering::SeqCst));
+    route.limit.close();
+    assert!(matches!(
+        exchange.await,
+        Err(BoundaryFailure::DidNotEnter(
+            EvmSafeFailure::AccessCancelled
+        ))
+    ));
+    assert!(route_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!route_encode_probe.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(route_probe
+        .dropped
+        .load(std::sync::atomic::Ordering::SeqCst));
+    assert!(route_probe
+        .zeroized
+        .load(std::sync::atomic::Ordering::SeqCst));
+    drop(held_route_permits);
+
+    let (global_blocked_transport, binding) = transport("http://127.0.0.1:9");
+    let route = global_blocked_transport
+        .routes
+        .resolve(binding.routing_generation_ref())
+        .expect("route");
+    let held_global_permits = Arc::clone(&global_blocked_transport.shared.global_limit)
+        .acquire_many_owned(
+            u32::try_from(MAX_GLOBAL_IN_FLIGHT_EXCHANGES).expect("global permit count"),
+        )
+        .await
+        .expect("hold global permits");
+    let global_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let global_encode_probe = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let global_owner_probe = Arc::new(ExchangeOwnerProbe::default());
+    let global_probe = Arc::new(ZeroizingOwnerDropProbe::default());
+    let sensitive = ZeroizingBytesOwner::with_probe(
+        Zeroizing::new(vec![0x5a; 1024]),
+        Arc::clone(&global_probe),
+    );
+    let queued_transport = global_blocked_transport.clone();
+    let route_for_exchange = Arc::clone(&route);
+    let called = Arc::clone(&global_called);
+    let exchange = with_exchange_owner_probe(
+        Arc::clone(&global_owner_probe),
+        exact::with_encode_probe(Arc::clone(&global_encode_probe), async move {
+            let outcome = queued_transport
+                .exchange(route_for_exchange, ExactRpcRequest::ChainIdentity)
+                .await;
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            drop(sensitive);
+            outcome
+        }),
+    );
+    tokio::pin!(exchange);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut exchange)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        route.limit.available_permits(),
+        MAX_IN_FLIGHT_EXCHANGES_PER_GENERATION - 1
+    );
+    assert!(!global_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!global_encode_probe.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(global_owner_probe.request_created.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        global_owner_probe.response_created.load(Ordering::SeqCst),
+        0
+    );
+    assert!(!global_probe
+        .dropped
+        .load(std::sync::atomic::Ordering::SeqCst));
+    global_blocked_transport.shared.global_limit.close();
+    assert!(matches!(
+        exchange.await,
+        Err(BoundaryFailure::DidNotEnter(
+            EvmSafeFailure::AccessCancelled
+        ))
+    ));
+    assert!(global_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!global_encode_probe.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(global_probe
+        .dropped
+        .load(std::sync::atomic::Ordering::SeqCst));
+    assert!(global_probe
+        .zeroized
+        .load(std::sync::atomic::Ordering::SeqCst));
+    drop(held_global_permits);
+}
+
+#[tokio::test]
 async fn destination_and_invalid_response_failures_are_closed_and_single_call() {
     let cases = vec![
         (
             TestResponse::status(503),
             EvmSafeFailure::HttpStatus { status: 503 },
+        ),
+        (
+            TestResponse::status(201),
+            EvmSafeFailure::HttpStatus { status: 201 },
         ),
         (
             TestResponse::json(json!({
@@ -412,6 +840,7 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         status: 307,
         body: Vec::new(),
         declared_length: None,
+        omit_content_length: false,
         location: Some("http://127.0.0.1:9/elsewhere".to_owned()),
     }])
     .await;
@@ -428,9 +857,9 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         "x".repeat(EVM_READ_MAX_RESPONSE_BYTES + 1)
     ))])
     .await;
-    let (transport, binding) = transport(&oversized.endpoint);
+    let (oversized_transport, binding) = transport(&oversized.endpoint);
     assert_eq!(
-        transport
+        oversized_transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
         EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
@@ -438,6 +867,65 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         })
     );
     assert_eq!(oversized.finish().await.len(), 1);
+
+    let declared_oversized = TestServer::start(vec![TestResponse {
+        status: 200,
+        body: Vec::new(),
+        declared_length: Some(MAX_RESPONSE_BYTES + 1),
+        omit_content_length: false,
+        location: None,
+    }])
+    .await;
+    let (declared_transport, binding) = transport(&declared_oversized.endpoint);
+    assert_eq!(
+        declared_transport
+            .chain_identity(&EvmChainIdentityRequest::new(binding))
+            .await,
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
+            size_class: EvmCoarseSizeClass::Over1Mib,
+        })
+    );
+    assert_eq!(declared_oversized.finish().await.len(), 1);
+
+    let mut exact_body = br#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#.to_vec();
+    exact_body.resize(MAX_RESPONSE_BYTES, b' ');
+    let exact_outer = TestServer::start(vec![TestResponse {
+        status: 200,
+        body: exact_body,
+        declared_length: None,
+        omit_content_length: true,
+        location: None,
+    }])
+    .await;
+    let (exact_transport, binding) = transport(&exact_outer.endpoint);
+    assert!(matches!(
+        exact_transport
+            .chain_identity(&EvmChainIdentityRequest::new(binding))
+            .await,
+        EvmTransportOutcome::Returned(response) if response.chain_id == 1
+    ));
+    assert_eq!(exact_outer.finish().await.len(), 1);
+
+    let mut streamed_overrun_body = br#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#.to_vec();
+    streamed_overrun_body.resize(MAX_RESPONSE_BYTES + 1, b' ');
+    let streamed_overrun = TestServer::start(vec![TestResponse {
+        status: 200,
+        body: streamed_overrun_body,
+        declared_length: None,
+        omit_content_length: true,
+        location: None,
+    }])
+    .await;
+    let (streamed_transport, binding) = transport(&streamed_overrun.endpoint);
+    assert_eq!(
+        streamed_transport
+            .chain_identity(&EvmChainIdentityRequest::new(binding))
+            .await,
+        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
+            size_class: EvmCoarseSizeClass::Over1Mib,
+        })
+    );
+    assert_eq!(streamed_overrun.finish().await.len(), 1);
 }
 
 #[test]
@@ -481,9 +969,11 @@ fn route_descriptors_are_canonical_sorted_and_secret_free() {
     );
 
     let mut routes = EvmRoutingCatalogBuilder::new();
-    let authorization =
-        EvmRpcAuthorization::new(Zeroizing::new("Bearer resolved-secret".to_owned()))
-            .expect("authorization");
+    let authorization = EvmRpcAuthorization::new(Zeroizing::new(format!(
+        "Bearer route-test-{}",
+        std::process::id()
+    )))
+    .expect("authorization");
     let second = routes
         .insert(
             "ethereum-sepolia",
@@ -532,7 +1022,7 @@ fn route_descriptors_are_canonical_sorted_and_secret_free() {
         generations.join("")
     );
     for forbidden in [
-        "resolved-secret",
+        "route-test-",
         "rpc.example",
         "/private",
         "authorization",
