@@ -54,11 +54,11 @@ Binaries only parse input, invoke the application facade, and render its reviewe
 
 ## Current workflow surface
 
-The compiled application exposes exactly one public run objective:
-`mfm.portfolio/snapshot@1`. It composes an audited, anchor-confirmed EVM read graph and a pure
-portfolio aggregation. Bitcoin collection remains unregistered until its provider work and
-concurrency behavior qualify. Commit 5 contains no production mutation registration; EVM writes
-qualify separately through the durable keyed executor.
+The compiled application exposes exactly two public entry points:
+`mfm.portfolio/snapshot@1` composes an audited, anchor-confirmed EVM read graph and a pure portfolio
+aggregation, while `mfm.evm/submit-transaction@1` admits one qualified EIP-1559 request and drives
+it through the durable keyed wallet executor. Bitcoin collection remains unregistered until its
+provider work and concurrency behavior qualify.
 
 ## Documentation
 

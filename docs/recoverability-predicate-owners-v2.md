@@ -181,7 +181,7 @@ envelope relation but never chooses a verdict.
 | `P-PG-05` | `store_scope_id` and `store_epoch` are singleton immutable lineage identity after first admission; destructive reset creates a never-reused scope and fresh epoch, while only verified continuation preserves them. | PostgreSQL store bootstrap/reset authority. | Immutable singleton rows, schema validation, and controlled reset/migration tooling. | Admission, journal/fact/effect identity, replay, and deployment inventory compare the retained identity. No app caller can rotate or preserve it by assertion. |
 | `P-PG-06` | Exactly one non-rollback writable database/WAL lineage may use a store scope/epoch; promotion permanently fences old/sibling writers and contains every published run suffix and tenant fact head. | External HA/WAL consensus and generation-fencing authority. | Deployment promotion/restore procedure supplies the irreducible fence before the store opens for authority-bearing work. | Store startup fails closed on missing proof or possible rollback. Split-brain/stale-primary/restore tests validate the deployment mechanism. Worker or executor fences cannot substitute. |
 | `P-PG-07` | Every live authority-bearing read and all writes use the fenced authoritative writer; a replica, apparent catch-up, or connection option cannot construct store-backed authority in recoverability v2. | Deployment/store connection authority qualified by `P-PG-06`. | App/store assembly exposes only the writer pool for admission, journal/object/fact reads, status, replay, trace/audit/export, resume, and writes. | Tests reject replica-configured authority. Offline verification remains `P-ACL-04`; a future replica contract would need exact lineage plus applied barrier/publication proof. |
-| `P-PG-08` | Failed or acknowledgement-ambiguous PostgreSQL commit returns `OutcomeUnknown`, never positive append/admission/access authority; reconciliation uses the original append identity and immutable candidate. | PostgreSQL store result classifier. | Only a directly observed successful commit maps to `NewlyAppended`; connection ambiguity discards transient authority. | Store prototype/parity tests reconcile by `append_request_id`, enforce same-content identity, and prove no second authorization permit or fact coordinate is minted. |
+| `P-PG-08` | Failed or acknowledgement-ambiguous PostgreSQL commit returns `OutcomeUnknown`, never positive append/admission/access authority; reconciliation uses the original append identity and immutable candidate. | PostgreSQL store result classifier. | Only a directly observed successful commit maps to `NewlyAppended`; connection ambiguity discards transient authority. | The PostgreSQL fact-selection regression injects `AfterCommitBeforeAcknowledgement`, observes authority-free `OutcomeUnknown`, verifies the exact committed event and barrier, reconciles the original candidate as `AlreadyCommitted`, and proves one append, one barrier, and an unchanged tenant head. |
 
 ## Boundaries that are deliberately verified more than once
 
@@ -239,27 +239,23 @@ The accepted RFC's original ownership families map without remainder:
 | Access-boundary result | `P-HB-05`, `P-EX-01`, `P-ST-07` |
 | Atomic authority and concurrency | `P-ST-01`–`P-ST-09`, `P-PG-02`, `P-PG-03`, `P-PG-08` |
 
-## Retained contract-shaping evidence
+## Current recoverability evidence
 
-These prototypes exercised the ownership cuts that shaped the frozen annex and corpus. They do not
-themselves mint production authority, override the frozen schema/golden-vector artifacts, or make
-the target the current implementation:
+These current implementation and conformance sources exercise the ownership cuts represented by
+the frozen annex and corpus. They do not independently mint production authority, override the
+frozen schema and golden vectors, or satisfy the deployment-specific rollout gates:
 
-- The retained
-  [composite-planner prototype](../crates/kernel/certify/src/tests/composite_planner_prototype.rs)
-  covers exact authored shapes, stable paths, framework-outer/executor-inner expansion, effective
-  output rewiring, recursive/cyclic expansion rejection, and dependency/terminal totality for
-  `P-TC-04` and `P-TC-05`.
-- The retained
-  [store-contract prototype](../crates/kernel/store/tests/recoverability_store_contract_prototype.rs)
-  covers logical admission equality, per-run CAS/idempotency, `OutcomeUnknown`, positive-only
-  authorization permits, purpose-bound run access, and fixed closure with a constrained audit tail
-  for `P-AR-01`, `P-ST-03`, `P-ST-06`–`P-ST-08`, and `P-ACL-02`.
-- The retained
-  [in-memory fact-frontier prototype](../crates/kernel/store/tests/commit_contract/tenant_fact_frontier_prototype.rs)
-  covers publication/barrier ordering, tenant independence, dense rollback-free coordinates,
-  multi-fact publication, zero frontier, structural contention, source verdicts, and
-  same-store-versus-portable completeness for `P-FA-02`–`P-FA-04`.
+- The current [composite planner](../crates/kernel/certify/src/planner.rs), its
+  [program-registry tests](../crates/kernel/program/src/registry/registry_tests.rs), and the
+  [portfolio graph tests](../crates/domains/portfolio/src/operation_tests.rs) cover the exact
+  planner contract and references, deterministic authored paths, validator-owned admitted roots,
+  fan-out/fan-in edges, public outputs, and required terminal shapes for `P-TC-04` and `P-TC-05`.
+- The current [sealed append contract](../crates/kernel/store/src/v1/append.rs),
+  [observation-verification tests](../crates/kernel/store/src/v1/observation_verification_tests.rs),
+  and [memory conformance target](../crates/kernel/store/tests/memory_conformance.rs) cover the
+  frozen store vectors, exact retained-object and authorization/observation relations,
+  positive-only live authority, purpose-bound access, closure, and replay rejection for
+  `P-AR-01`, `P-ST-03`, `P-ST-05`–`P-ST-08`, and `P-ACL-02`.
 - Production
   [fact-scan core tests](../crates/kernel/store/src/v1/fact_scan_tests.rs) exercise the exact
   4,096-publication and 8,192-emission step boundaries, including 4,097 single-fact publications,
@@ -278,33 +274,32 @@ the target the current implementation:
   ordinals, `ReadSettled` consumes the observation, hostile middle omission is rejected, and replay
   yields exactly one `SameStoreVerified` result. PostgreSQL exercises its real page loader,
   barrier, row decoding, atomic observation/attestation write, and nonempty attestation loader.
-- The retained
-  [PostgreSQL fact-frontier prototype](../crates/storages/postgres/src/run_store/tests/tenant_fact_frontier_postgres_prototype.rs)
-  supplies real row-lock ordering, cross-tenant independence, dense rollback, hot-tenant
-  operation/row counts, non-threshold timing evidence, and writer/replica failure modeling for
-  `P-PG-03`, `P-PG-07`, and `P-PG-08`.
-- The retained
-  [historical-executable isolation prototype](../crates/kernel/replay/tests/historical_executable_isolation.rs)
+- The current [PostgreSQL store tests](../crates/storages/postgres/src/tests.rs) exercise real
+  advisory-lock ordering, exact-head CAS and append-request idempotency, rollback of incomplete
+  commits and tenant-head changes, retained fact-history validation, and modeled fenced-writer
+  lineage.
+  `fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_authority` additionally
+  drives `AfterCommitBeforeAcknowledgement` through the real journal append: `OutcomeUnknown`
+  carries no scan permit, verified reload finds the exact authorization and zero-frontier barrier,
+  the identical preprepared candidate reconciles as `AlreadyCommitted`, and SQL retains one append,
+  one barrier, and head zero for `P-PG-03` and `P-PG-08`.
+- The test-only
+  [historical-executable isolation target](../crates/kernel/replay/tests/historical_executable_isolation.rs)
   separates callback-free verification, exact executable identity, OS-enforced capability denial,
   unavailable artifacts, and non-authoritative candidate comparison for `P-TC-07` and
   `P-RV-01`–`P-RV-03`.
-- The retained
-  [managed-PostgreSQL executor prototype](../crates/storages/postgres/tests/recoverability_postgres_executor_prototype.rs)
-  closes the logical
+- The current [shared executor conformance](../crates/kernel/executor/tests/conformance.rs) and
+  [managed PostgreSQL qualification](../crates/storages/executor-postgres/tests/qualification.rs)
+  close the logical
   [durable reference-executor gate](../RFC_REFACTOR_RECOVERABILITY.md#durable-reference-executor-gate)
-  for `P-EX-04`–`P-EX-08`. It covers the closed five-record delivery algebra, immutable
-  effect/resource streams, atomic compare-and-swap, positive-only target-entry authority,
-  exact-attempt destination receipts including one exact legal post-tombstone observation,
-  cumulative reserve for every unmatched attempt plus the tombstone, exact terminal proofs, the
-  pre-persistence and authoritative-refold 256 UTF-8-byte effect-identifier bound, two materially
-  different typed resource policies, strict refolded restore, modeled generation races, bounded
-  hostile decoding, and secret-free retained surfaces. At the identifier boundary the retained
-  accounting yields a worst-case 1,041-byte ordinal-63 observation and 1,331-byte tombstone within
-  each 16,384-byte completion slot. Memory and file prototypes remain supporting conformance
-  evidence only. This logical closure does not claim physical non-rollback fencing, WAL/backup
-  lineage, real commit ambiguity, stale/sibling exclusion across failure domains,
-  destination-owner qualification, or production promotion/failover; those are rollout evidence
-  obligations under `P-EX-08`.
+  for `P-EX-04`–`P-EX-08`. They cover immutable effect/resource streams, atomic compare-and-swap,
+  positive-only target-entry authority, crash-boundary convergence, exact terminal proof and
+  tombstone relations, two materially different resource policies, strict refold, bounded hostile
+  decoding, secret-free retained surfaces, injected acknowledgement ambiguity, and modeled
+  stale/sibling/rollback fencing. Memory and file stores remain supporting conformance evidence
+  only. These tests do not qualify a production deployment's external non-rollback fence,
+  WAL/backup lineage, destination-owner fence, failure-domain isolation, or promotion procedure;
+  those remain rollout obligations under `P-EX-08`.
 
 ## Frozen-schema rule
 

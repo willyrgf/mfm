@@ -232,11 +232,11 @@ polls, or appends. Candidate comparison is equally capability-free.
 
 ## Registration And Deployment
 
-Commit 6 adds the state, one-state operation, entry-point/profile registration, value and callback
-contracts, executor-required leaf expansion, capability manifest member, qualified live executor,
-and production composition as one vertical change. The app admits an immutable configured request
-only when its embedded tenant equals the authorized tenant and its template target equals the
-public selector.
+The current transaction entry point includes the state, one-state operation, entry-point/profile
+registration, value and callback contracts, executor-required leaf expansion, capability manifest
+member, qualified live executor, and production composition as one vertical path. The app admits
+an immutable configured request only when its embedded tenant equals the authorized tenant and its
+template target equals the public selector.
 
 Deployment must provide:
 

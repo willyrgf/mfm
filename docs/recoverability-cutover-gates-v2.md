@@ -262,24 +262,26 @@ derived telemetry.
   fan-in, framework-outer, and executor-inner shapes.
 - Request-author totality for every registered production state, with retained closure evidence in
   [`request-author-totality-audit-v1.md`](request-author-totality-audit-v1.md).
-- Passing durable reference executor and two materially different typed resource-policy
-  prototypes. The retained managed-PostgreSQL prototype closes the logical contract-shaping gate:
-  it covers the closed evidence algebra, atomic effect/resource compare-and-swap, exact-attempt
-  destination receipts across delayed, reordered, and exact post-tombstone audit returns,
-  cumulative completion reserve, the pre-persistence 256 UTF-8-byte effect-identifier bound
-  (1,041-byte ordinal-63 maximum-bound observation and 1,331-byte maximum-bound tombstone under the
-  retained accounting, versus a 16,384-byte slot), exclusive and
-  finite-inventory/account-sequence policies, strict refolded restore, modeled generation races,
-  exact original-binding routing, and hostile bounded decoding. This does not qualify physical
-  non-rollback generation handling, WAL/backup lineage, real commit ambiguity, stale/sibling-writer
-  exclusion across failure domains, destination-owner coverage, or promotion/failover; those
-  remain rollout obligations below. Memory, file, and ordinary unfenced PostgreSQL persistence
-  remain insufficient for production registration.
+- Passing
+  [shared durable-executor conformance](../crates/kernel/executor/tests/conformance.rs) for two
+  materially different typed resource policies and
+  [managed fenced-PostgreSQL qualification](../crates/storages/executor-postgres/tests/qualification.rs).
+  The current evidence covers the closed delivery algebra, atomic effect/resource compare-and-swap,
+  exact-attempt destination receipts across delayed, reordered, and post-tombstone audit returns,
+  completion reserve, the pre-persistence 256 UTF-8-byte effect-identifier bound,
+  finite-inventory/account-sequence policies, strict refolded restore, exact original-binding
+  routing, hostile bounded decoding, post-commit acknowledgement-loss injection, and modeled
+  stale/sibling/rollback fencing with a complete promoted restore. This closes the implementation
+  and managed-test qualification gate; it does not qualify a production deployment's external
+  non-rollback generation fence, WAL/backup lineage, destination-owner coverage, failure-domain
+  isolation, or promotion/failover procedure. Those remain rollout obligations below. Memory,
+  file, and ordinary unfenced PostgreSQL persistence remain insufficient for production
+  registration.
 - Tenant fact publication/barrier concurrency, authoritative-writer scans, and memory/PostgreSQL
   parity.
 - Generic retained-object fact-response materialization plus deterministic fact-scan and portable
   source-closure continuation evidence in
-  [`recoverability-predicate-owners-v2.md`](recoverability-predicate-owners-v2.md#retained-contract-shaping-evidence).
+  [`recoverability-predicate-owners-v2.md`](recoverability-predicate-owners-v2.md#current-recoverability-evidence).
   The gate requires prefixes/closures larger than one work step to complete without total-size
   rejection, and requires discarded scratch to restart without minting partial authority.
 - One retained historical executable reproducing in the selected OS-enforced capability-free
