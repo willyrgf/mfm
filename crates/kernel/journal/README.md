@@ -24,6 +24,13 @@ emissions grouped in nondecreasing slot order and never returns to an earlier
 slot; fact references and identities continue to use the actual emission
 ordinal.
 
+Successful settlement bodies keep output bindings and fact emissions in
+semantic ordinal order. Their redundant binding delta is an already-ordered
+wire value: repeated output-binding and fact-binding groups are independently
+canonical-byte ordered. The store owns assembly and semantic-ordinal reindexing
+during fold; this crate's `BindingDelta` constructor only validates the supplied
+wire order.
+
 Input lineage is root-only. Nested source selection lives only on
 `InputBinding::source_field_path`; a qualified-support root retains its exact
 support-graph `member_path` alongside the full producer-bound `ValueRef`.

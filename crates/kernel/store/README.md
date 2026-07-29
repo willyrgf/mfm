@@ -37,11 +37,29 @@ close their payload and evidence dependencies. A `ContentRef` target whose schem
 `mfm.value-ref.v1` remains a transport-only wrapper and stops traversal because the incoming
 content reference is already the semantic edge.
 
+`FactScanPageVerifier` alone owns the private `(fact_order, fact_ordinal)` cursor or terminal state,
+the 4,096-publication and 8,192-emission step budgets, and logical emission ranges. Backends load
+ordered complete publications and submit them without local continuation policy. A partial
+publication is fully reloaded and verified on its next logical range; no cursor or permit is
+persisted or public.
+
 The generic observation append atomically persists the returned response, its source-closure
 attestation, all exact object bindings, and one private attestation-routing row. Live reducer entry
 after compatible evidence selection and replay completeness load that row against an exact verified
 view and share the backend completeness predicate. `CompletedFactScan` consumes itself into that
 generic material and derives its sealed authorization reference internally.
+
+The selected-source and transport graph remains unbound `RequireExisting` material, while the
+response and attestation are the two bound `AdmitOrVerifyExact` products. Physical replay may
+defer first-use authority only for unbound imports in an attested fact observation, because a
+single-run history cannot reprove cross-run existence. The semantic fold must exact-close the
+entire import set before returning a verified view; live backends still verify global exact
+authority during append.
+
+Successful transition bodies retain output and fact bindings in semantic ordinal order. Private
+store assembly canonical-byte sorts the repeated output and fact binding-delta groups separately;
+the fold rejects duplicate ordinals and reindexes both groups before semantic comparison and
+application.
 
 `RunAccessAuthority<G>` values are bound to one exact store instance and purpose. The paired
 `RunAccessAuthorityIssuer` is non-cloneable. Only a directly observed newly appended external

@@ -1,5 +1,9 @@
 //! Authoritative legal recoverability-v2 fixtures for backend and runtime conformance tests.
 
+pub(super) mod fact_scan;
+
+pub use self::fact_scan::FactScanConformanceFixture;
+
 use mfm_canonical::{
     sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
 };
@@ -16,7 +20,7 @@ use mfm_spec::v1::{
     AuthoredSourceSelector, CanonicalAuthoredProgram, CanonicalExpansionPath,
     CanonicalExpansionStep, CanonicalJsonValue, CapabilityBindingManifest,
     CapabilityBindingManifestEntry, Certificate, CertificateProofEntry,
-    CertifiedAdmissionArtifacts, CertifiedFrameBinding, CertifiedInputBinding,
+    CertifiedAdmissionArtifacts, CertifiedFactSlot, CertifiedFrameBinding, CertifiedInputBinding,
     CertifiedInputDestination, CertifiedJournalProtocolContracts, CertifiedNodeContract,
     CertifiedOutputBinding, CertifiedOutputSlot, CertifiedSettlementContract,
     CertifiedSourceSelector, CertifiedStateExecution, EntryPointContract, PlanningProfile,
@@ -64,6 +68,7 @@ pub struct LegalAdmissionFixture {
     successor_append_request_id: AppendRequestId,
     read_execution: Option<FixtureReadExecution>,
     effect_execution: Option<FixtureEffectExecution>,
+    fact_execution: Option<FixtureFactExecution>,
 }
 
 pub(super) struct FixtureReadExecution {
@@ -83,6 +88,14 @@ pub(super) struct FixtureEffectExecution {
     pub(super) terminal_evidence_contract: RetainedValueContract,
     pub(super) domain_result_contract: RetainedValueContract,
     pub(super) support_members: Vec<QualifiedSupportMember>,
+}
+
+#[derive(Clone)]
+struct FixtureFactExecution {
+    descriptor_ref: ContentRef,
+    subject_contract: RetainedValueContract,
+    response_contract: RetainedValueContract,
+    support_members: Vec<QualifiedSupportMember>,
 }
 
 /// One store-prepared legal admission and the exact authority that prepared it.
@@ -192,10 +205,11 @@ impl LegalAdmissionFixture {
             successor_append_request_id: append_request_id("fixture-successor", discriminator)?,
             read_execution: None,
             effect_execution: None,
+            fact_execution: None,
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn with_read_execution(mut self, execution: FixtureReadExecution) -> Self {
         self.read_execution = Some(execution);
         self
@@ -204,6 +218,12 @@ impl LegalAdmissionFixture {
     #[cfg(test)]
     pub(super) fn with_effect_execution(mut self, execution: FixtureEffectExecution) -> Self {
         self.effect_execution = Some(execution);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn with_fact_execution(mut self, execution: FixtureFactExecution) -> Self {
+        self.fact_execution = Some(execution);
         self
     }
 
@@ -675,15 +695,41 @@ impl LegalAdmissionFixture {
                 source_field_path: None,
             },
         );
-        let settlement = CertifiedSettlementContract::new(
-            Some(self.failure_contract.clone()),
+        let fact_slots = self
+            .fact_execution
+            .as_ref()
+            .map(|fact| {
+                CertifiedFactSlot::new(
+                    0,
+                    3,
+                    3,
+                    fact.descriptor_ref.clone(),
+                    fact.subject_contract.clone(),
+                    fact.response_contract.clone(),
+                )
+                .map_err(|_| fixture_error("fixture fact slot is invalid"))
+            })
+            .transpose()?
+            .into_iter()
+            .collect();
+        let output_slots = if self.fact_execution.is_some() {
+            vec![
+                CertifiedOutputSlot::new(0, field_path("z_output")?, output_contract.clone()),
+                CertifiedOutputSlot::new(1, field_path("a_output")?, output_contract.clone()),
+            ]
+        } else {
             vec![CertifiedOutputSlot::new(
                 0,
                 field_path(OUTPUT_PATH)?,
                 output_contract.clone(),
-            )],
-            Vec::new(),
-        )?;
+            )]
+        };
+        let settlement = CertifiedSettlementContract::new(
+            Some(self.failure_contract.clone()),
+            output_slots,
+            fact_slots,
+        )
+        .map_err(|_| fixture_error("fixture settlement contract is invalid"))?;
         let input_bindings = if self.requires_effective_output_source {
             vec![CertifiedInputBinding::new(
                 field_path(SOURCE_PATH)?,
@@ -728,7 +774,8 @@ impl LegalAdmissionFixture {
             input_bindings,
             execution,
             settlement,
-        )?;
+        )
+        .map_err(|_| fixture_error("fixture certified node is invalid"))?;
         let node_id = node.node_id().clone();
         let public_bindings = if self.nested_public_output_bindings {
             vec![
@@ -786,14 +833,27 @@ impl LegalAdmissionFixture {
             public_output,
             RunTerminalContract::new(vec![node_id], true),
             CertifiedJournalProtocolContracts::current()?,
-        )?;
-        let expanded_ref = expanded_spec.content_ref()?;
-        let entry_point_ref = entry_point.content_ref()?;
-        let authored_ref = authored_program.content_ref()?;
-        let state_manifest_ref = state_manifest.content_ref()?;
-        let capability_manifest_ref = capability_manifest.content_ref()?;
+        )
+        .map_err(|_| fixture_error("fixture expanded spec is invalid"))?;
+        let expanded_ref = expanded_spec
+            .content_ref()
+            .map_err(|_| fixture_error("fixture expanded-spec reference is invalid"))?;
+        let entry_point_ref = entry_point
+            .content_ref()
+            .map_err(|_| fixture_error("fixture entry-point reference is invalid"))?;
+        let authored_ref = authored_program
+            .content_ref()
+            .map_err(|_| fixture_error("fixture authored-program reference is invalid"))?;
+        let state_manifest_ref = state_manifest
+            .content_ref()
+            .map_err(|_| fixture_error("fixture state-manifest reference is invalid"))?;
+        let capability_manifest_ref = capability_manifest
+            .content_ref()
+            .map_err(|_| fixture_error("fixture capability-manifest reference is invalid"))?;
         let certificate = Certificate::new(
-            expanded_spec.spec_hash()?,
+            expanded_spec
+                .spec_hash()
+                .map_err(|_| fixture_error("fixture expanded-spec hash is invalid"))?,
             expanded_ref.clone(),
             vec![
                 proof(
@@ -810,7 +870,8 @@ impl LegalAdmissionFixture {
                 )?,
                 proof("expanded-spec", expanded_ref.clone(), expanded_ref)?,
             ],
-        )?;
+        )
+        .map_err(|_| fixture_error("fixture certificate is invalid"))?;
         let artifacts = CertifiedAdmissionArtifacts::from_certification(
             entry_point,
             authored_program,
@@ -818,7 +879,8 @@ impl LegalAdmissionFixture {
             certificate,
             state_manifest.clone(),
             capability_manifest.clone(),
-        )?;
+        )
+        .map_err(|_| fixture_error("fixture certification artifacts are invalid"))?;
 
         let state_manifest_support = QualifiedSupportMember::new(
             field_path("manifests.state_implementation")?,
@@ -845,8 +907,12 @@ impl LegalAdmissionFixture {
         if let Some(effect) = &self.effect_execution {
             support_members.extend(effect.support_members.clone());
         }
+        if let Some(fact) = &self.fact_execution {
+            support_members.extend(fact.support_members.clone());
+        }
         let support =
-            QualifiedSupportGraph::new(self.qualification_scope_id.clone(), support_members)?;
+            QualifiedSupportGraph::new(self.qualification_scope_id.clone(), support_members)
+                .map_err(|_| fixture_error("fixture qualified support graph is invalid"))?;
         Ok(FixtureCertificationClosure { artifacts, support })
     }
 }

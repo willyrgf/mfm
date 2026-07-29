@@ -27,11 +27,11 @@ use mfm_journal::v1::{
     ArtifactAdmissionIntent, ArtifactAdmissionMode, AuthorityUse, BatchPurpose,
     CandidateRecordEnvelope, CapabilityBindingRef, CommitCandidatePreimage, CommitDigestPreimage,
     CommitEnvelope, ExecutorEnsureResult, ExecutorEnsureResultFields, ExternalAccessObserved,
-    FactSelectionResponse, FactSelectionScanAttestation, FactSelectionScanContract,
-    JournalPredecessor, ObjectPathBinding, ObservationOutcome, ProducerBinding,
-    ProducerBindingFields, ReadCapabilityBinding, RecordHashPreimage, RecordIdPreimage,
-    RecordLogicalKey, RunJournalRecord, RunJournalRecordFields, SafeFailure, TenantFactCoordinate,
-    TenantFactFrontier, TerminalEffectEvidence, TransitionRef,
+    FactSelectionResponse, FactSelectionScanAttestation, JournalPredecessor, ObjectPathBinding,
+    ObservationOutcome, ProducerBinding, ProducerBindingFields, ReadCapabilityBinding,
+    RecordHashPreimage, RecordIdPreimage, RecordLogicalKey, RunJournalRecord,
+    RunJournalRecordFields, SafeFailure, TenantFactCoordinate, TenantFactFrontier,
+    TerminalEffectEvidence, TransitionRef,
 };
 use mfm_spec::v1::{EntryPointContract, RetainedValueContract};
 use mfm_values::{
@@ -39,6 +39,7 @@ use mfm_values::{
 };
 
 use super::objects::derive_value_ref;
+use super::test_support::fact_scan::fact_selection_contracts;
 use super::test_support::{FixtureEffectExecution, FixtureReadExecution, LegalAdmissionFixture};
 use super::{
     verify_offline_recorded_history, AppendOutcome, AsyncInMemoryRunStore, AuthorizationMaterial,
@@ -46,7 +47,7 @@ use super::{
     FactSelectionAuthorizationOutcome, FactSelectionStore, NewlyAppended, ObjectGraphProposal,
     ObservationMaterial, PreparedJournalAppend, ProducedObjectRoot, QualifiedSupportMember,
     ReadObservationMaterial, RunJournalStore, SafeFailureMetadata, StoreError, StoreIdentity,
-    TransitionMaterial, FACT_SELECTION_OPERATION_ID,
+    TransitionMaterial,
 };
 
 const VALID_DIAGNOSTIC: &str = concat!(
@@ -61,15 +62,6 @@ struct ReadFixtureContracts {
     returned_contract: RetainedValueContract,
     diagnostic_contract: RetainedValueContract,
     metadata: SafeFailureMetadata,
-}
-
-struct FactFixtureContracts {
-    execution: FixtureReadExecution,
-    routing_generation_ref: ContentRef,
-    request_contract: RetainedValueContract,
-    response_contract: RetainedValueContract,
-    attestation_contract: RetainedValueContract,
-    request: FactSelectionRequest,
 }
 
 fn canonical(value: &str) -> PlainCanonicalJsonBytes {
@@ -118,22 +110,6 @@ fn retained_contract_with_media(
             .expect("entry-point contract")
             .evidence_contract_ref()
             .clone(),
-    )
-    .expect("retained contract")
-}
-
-fn retained_contract_with_evidence(
-    schema_id: SchemaId,
-    semantic_name: &str,
-    role: &str,
-    evidence_contract_ref: ContentRef,
-) -> RetainedValueContract {
-    RetainedValueContract::new(
-        schema_id,
-        semantic_type(semantic_name),
-        stable_id(role),
-        "application/json",
-        evidence_contract_ref,
     )
     .expect("retained contract")
 }
@@ -522,162 +498,6 @@ fn read_fixture_contracts(with_diagnostic: bool) -> ReadFixtureContracts {
     }
 }
 
-fn fact_fixture_contracts() -> FactFixtureContracts {
-    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
-    let primitive_schema = contract
-        .schema_id("mfm.primitive-canonical_value.v1")
-        .expect("primitive schema")
-        .clone();
-    let routing_contract =
-        retained_contract(primitive_schema.clone(), "fact-routing", "fact-routing");
-    let (routing_member, routing_ref) = support_member(
-        "fact.routing",
-        canonical(r#"{"routes":[]}"#),
-        routing_contract,
-    );
-
-    let request_contract = retained_contract(
-        contract
-            .schema_id("mfm.fact-selection-request.v1")
-            .expect("fact request schema")
-            .clone(),
-        "fact-selection-request",
-        "fact-selection-request",
-    );
-    let response_contract = retained_contract_with_evidence(
-        contract
-            .schema_id("mfm.fact-selection-response.v1")
-            .expect("fact response schema")
-            .clone(),
-        "fact-selection-response",
-        "fact-selection-response",
-        routing_ref.clone(),
-    );
-    let attestation_contract = retained_contract_with_evidence(
-        contract
-            .schema_id("mfm.fact-selection-scan-attestation.v1")
-            .expect("fact attestation schema")
-            .clone(),
-        "fact-selection-attestation",
-        "fact-selection-attestation",
-        routing_ref.clone(),
-    );
-    let scan_contract = FactSelectionScanContract::new(
-        &stable_id(FACT_SELECTION_OPERATION_ID),
-        &request_contract,
-        &response_contract,
-        &attestation_contract,
-    )
-    .expect("fact scan contract");
-    let (scan_member, scan_ref) = support_member(
-        "fact.scan_contract",
-        PlainCanonicalJsonBytes::from_canonical_json_slice(scan_contract.as_bytes())
-            .expect("scan contract bytes"),
-        retained_contract(
-            scan_contract.schema_id().clone(),
-            "fact-scan-contract",
-            "fact-scan-contract",
-        ),
-    );
-    assert_eq!(
-        content_ref(
-            &retained_contract(
-                scan_contract.schema_id().clone(),
-                "fact-scan-contract",
-                "fact-scan-contract",
-            ),
-            scan_contract.as_bytes(),
-        ),
-        scan_ref
-    );
-
-    let classifier = SafeFailureClassifierDescriptor::new(
-        routing_ref.clone(),
-        None,
-        vec![SafeFailureClassifierRule::new(
-            stable_id("destination_unavailable"),
-            SafeFailureOutcome::DidNotEnter,
-            FailureClass::Transport,
-            BoundaryStage::BeforeBoundaryEntry,
-            SafeFailureSizeRule::None,
-            SafeFailureDiagnosticRule::Forbidden,
-        )],
-    )
-    .expect("fact classifier");
-    let (classifier_member, classifier_ref) = support_member(
-        "fact.classifier",
-        classifier.canonical().expect("classifier bytes"),
-        retained_contract(
-            SafeFailureClassifierDescriptor::schema_id().expect("classifier schema"),
-            "fact-classifier",
-            "fact-classifier",
-        ),
-    );
-    assert_eq!(
-        classifier.content_ref().expect("classifier ref"),
-        classifier_ref
-    );
-    let binding = ReadCapabilityBinding::new(
-        &scan_ref,
-        &routing_ref,
-        &classifier_ref,
-        &routing_ref,
-        &routing_ref,
-        &routing_ref,
-    )
-    .expect("fact binding");
-    let (binding_member, binding_ref) = support_member(
-        "fact.binding",
-        PlainCanonicalJsonBytes::from_canonical_json_slice(binding.as_bytes())
-            .expect("binding bytes"),
-        retained_contract(binding.schema_id().clone(), "fact-binding", "fact-binding"),
-    );
-    assert_eq!(binding.content_ref().expect("binding ref"), binding_ref);
-    let safe_failure_contract =
-        retained_contract(primitive_schema, "fact-safe-failure", "fact-safe-failure");
-    let predicate = CanonicalFactPredicate::from_canonical_value(CanonicalValue::String(
-        "no-selected-facts".to_owned(),
-    ))
-    .expect("fact predicate");
-    let query = FactSelectionQuery::new(
-        routing_ref.clone(),
-        predicate,
-        None,
-        FactOrdering::Ascending,
-        FactSelectionLimit::new(1).expect("fact limit"),
-        FactTieBreak::FactIdentityAscending,
-    )
-    .expect("fact query");
-    let request = FactSelectionRequest::new(vec![query]).expect("fact request");
-
-    FactFixtureContracts {
-        execution: FixtureReadExecution {
-            capability_operation_id: stable_id(FACT_SELECTION_OPERATION_ID),
-            capability_binding_ref: binding_ref,
-            request_contract: request_contract.clone(),
-            returned_contract: response_contract,
-            safe_failure_contract,
-            support_members: vec![
-                routing_member,
-                scan_member,
-                classifier_member,
-                binding_member,
-            ],
-        },
-        routing_generation_ref: routing_ref,
-        request_contract,
-        response_contract: scan_contract
-            .fields()
-            .expect("scan contract fields")
-            .response_contract,
-        attestation_contract: scan_contract
-            .fields()
-            .expect("scan contract fields")
-            .scan_attestation_contract,
-        request,
-    }
-}
-
 struct AuthorizedRead {
     store: AsyncInMemoryRunStore,
     issuer: super::RunAccessAuthorityIssuer,
@@ -931,7 +751,17 @@ struct CommittedFactSelection {
 }
 
 async fn commit_fact_selection(discriminator: u8) -> CommittedFactSelection {
-    let contracts = fact_fixture_contracts();
+    let contracts = fact_selection_contracts(
+        discriminator,
+        None,
+        CanonicalFactPredicate::from_canonical_value(CanonicalValue::String(
+            "no-selected-facts".to_owned(),
+        ))
+        .expect("fact predicate"),
+        FactOrdering::Ascending,
+        1,
+    )
+    .expect("fact fixture contracts");
     let routing_generation_ref = contracts.routing_generation_ref;
     let request_contract = contracts.request_contract;
     let response_contract = contracts.response_contract;
@@ -2021,8 +1851,38 @@ fn add_unbound_observation_object(
         commits,
         objects,
         bytes,
-        "outcome.unbound_extra",
+        UnboundObservationIntent {
+            producer_path: "outcome.unbound_extra",
+            mode: ArtifactAdmissionMode::AdmitOrVerifyExact,
+        },
     );
+}
+
+fn add_unbound_preexisting_observation_object(
+    store_identity: &StoreIdentity,
+    authorization_ref: &mfm_journal::v1::AuthorizationRef,
+    contract: &RetainedValueContract,
+    commits: &mut [CommittedJournalCommit],
+    objects: &mut Vec<CommittedObject>,
+    bytes: &[u8],
+) {
+    add_unbound_observation_object_at_path(
+        store_identity,
+        authorization_ref,
+        contract,
+        commits,
+        objects,
+        bytes,
+        UnboundObservationIntent {
+            producer_path: "outcome.unbound_preexisting",
+            mode: ArtifactAdmissionMode::RequireExisting,
+        },
+    );
+}
+
+struct UnboundObservationIntent<'a> {
+    producer_path: &'a str,
+    mode: ArtifactAdmissionMode,
 }
 
 fn add_unbound_observation_object_at_path(
@@ -2032,11 +1892,31 @@ fn add_unbound_observation_object_at_path(
     commits: &mut [CommittedJournalCommit],
     objects: &mut Vec<CommittedObject>,
     bytes: &[u8],
-    producer_path: &str,
+    intent: UnboundObservationIntent<'_>,
 ) {
     let producer =
-        ProducerBinding::external_observation(authorization_ref, &field_path(producer_path))
+        ProducerBinding::external_observation(authorization_ref, &field_path(intent.producer_path))
             .expect("extra producer");
+    add_unbound_observation_authority(
+        store_identity,
+        contract,
+        commits,
+        objects,
+        bytes,
+        producer,
+        intent.mode,
+    );
+}
+
+fn add_unbound_observation_authority(
+    store_identity: &StoreIdentity,
+    contract: &RetainedValueContract,
+    commits: &mut [CommittedJournalCommit],
+    objects: &mut Vec<CommittedObject>,
+    bytes: &[u8],
+    producer: ProducerBinding,
+    mode: ArtifactAdmissionMode,
+) {
     let extra_ref = derive_value_ref(contract, &producer, bytes).expect("extra ref");
     let extra_fields = extra_ref.fields().expect("extra fields");
     let last = commits.last().expect("observation commit").clone();
@@ -2047,12 +1927,8 @@ fn add_unbound_observation_object_at_path(
     let candidate = record.candidate().clone();
     let mut intents = envelope.core.artifact_admission_intents.clone();
     intents.push(
-        ArtifactAdmissionIntent::new(
-            &extra_ref,
-            &extra_fields.evidence_contract_ref,
-            ArtifactAdmissionMode::AdmitOrVerifyExact,
-        )
-        .expect("extra intent"),
+        ArtifactAdmissionIntent::new(&extra_ref, &extra_fields.evidence_contract_ref, mode)
+            .expect("extra intent"),
     );
     intents.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     let candidate_digest = CommitCandidatePreimage::new(
@@ -2447,10 +2323,10 @@ fn rewrite_last_observation_intents(
         CommittedJournalCommit::from_persisted(rewritten_envelope, vec![record.clone()]);
 }
 
-fn substitute_fact_require_existing_intent(
+fn rewrite_fact_require_existing_intent(
     fixture: &CommittedFactSelection,
     commits: &mut [CommittedJournalCommit],
-    objects: &[CommittedObject],
+    replacement: &mfm_journal::v1::ValueRef,
 ) {
     let last = commits.last().expect("observation commit").clone();
     let envelope = last.envelope().fields().expect("envelope");
@@ -2464,15 +2340,42 @@ fn substitute_fact_require_existing_intent(
         .collect::<Vec<_>>();
     assert_eq!(required.len(), 1, "empty scan has one evidence dependency");
     let old_ref = required[0].fields().expect("intent").value_ref;
+    assert_ne!(&old_ref, replacement, "replacement fact import");
+    let replacement_fields = replacement.fields().expect("replacement ref");
+    let mut intents = envelope
+        .core
+        .artifact_admission_intents
+        .iter()
+        .filter(|intent| intent.fields().expect("intent").value_ref != old_ref)
+        .cloned()
+        .collect::<Vec<_>>();
+    intents.push(
+        ArtifactAdmissionIntent::new(
+            replacement,
+            &replacement_fields.evidence_contract_ref,
+            ArtifactAdmissionMode::RequireExisting,
+        )
+        .expect("replacement intent"),
+    );
+    intents.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    rewrite_last_observation_intents(&fixture.store_identity, commits, intents);
+}
+
+fn substitute_fact_require_existing_intent_with_seen_object(
+    fixture: &CommittedFactSelection,
+    commits: &mut [CommittedJournalCommit],
+    objects: &[CommittedObject],
+) {
+    let last = commits.last().expect("observation commit");
+    let envelope = last.envelope().fields().expect("envelope");
     let replacement = objects
         .iter()
         .find(|object| {
-            object.value_ref() != &old_ref
-                && !envelope
-                    .core
-                    .artifact_admission_intents
-                    .iter()
-                    .any(|intent| intent.fields().expect("intent").value_ref == *object.value_ref())
+            !envelope
+                .core
+                .artifact_admission_intents
+                .iter()
+                .any(|intent| intent.fields().expect("intent").value_ref == *object.value_ref())
                 && matches!(
                     object
                         .value_ref()
@@ -2484,24 +2387,59 @@ fn substitute_fact_require_existing_intent(
         .expect("visible configured replacement")
         .value_ref()
         .clone();
-    let replacement_fields = replacement.fields().expect("replacement ref");
-    let mut intents = envelope
-        .core
-        .artifact_admission_intents
-        .iter()
-        .filter(|intent| intent.fields().expect("intent").value_ref != old_ref)
-        .cloned()
-        .collect::<Vec<_>>();
-    intents.push(
-        ArtifactAdmissionIntent::new(
-            &replacement,
-            &replacement_fields.evidence_contract_ref,
-            ArtifactAdmissionMode::RequireExisting,
-        )
-        .expect("replacement intent"),
+    rewrite_fact_require_existing_intent(fixture, commits, &replacement);
+}
+
+fn substitute_fact_require_existing_intent_with_first_use_unbound_object(
+    fixture: &CommittedFactSelection,
+    commits: &mut [CommittedJournalCommit],
+    objects: &mut Vec<CommittedObject>,
+    bytes: &[u8],
+) {
+    let producer = ProducerBinding::qualified_support(
+        fixture.fixture.qualification_scope_id(),
+        &field_path("fact_scan.unbound_substitution"),
+    )
+    .expect("first-use substitution producer");
+    let replacement =
+        derive_value_ref(&fixture.response_contract, &producer, bytes).expect("replacement ref");
+    assert!(
+        objects
+            .iter()
+            .all(|object| object.value_ref() != &replacement),
+        "replacement must be first-use"
     );
-    intents.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    rewrite_last_observation_intents(&fixture.store_identity, commits, intents);
+    assert!(
+        commits.iter().all(|commit| {
+            let envelope = commit.envelope().fields().expect("envelope");
+            envelope
+                .core
+                .artifact_admission_intents
+                .iter()
+                .all(|intent| intent.fields().expect("intent").value_ref != replacement)
+                && envelope
+                    .core
+                    .ordered_object_bindings
+                    .iter()
+                    .all(|binding| binding.fields().expect("binding").value_ref != replacement)
+        }),
+        "replacement authority must be absent from prior physical history"
+    );
+    rewrite_fact_require_existing_intent(fixture, commits, &replacement);
+    let last = commits.last().expect("observation commit");
+    let envelope = last.envelope().fields().expect("envelope");
+    assert!(
+        envelope
+            .core
+            .ordered_object_bindings
+            .iter()
+            .all(|binding| binding.fields().expect("binding").value_ref != replacement),
+        "replacement RequireExisting authority must remain unbound"
+    );
+    objects.push(
+        CommittedObject::from_persisted(replacement, bytes.to_vec())
+            .expect("first-use replacement object"),
+    );
 }
 
 #[tokio::test]
@@ -2738,6 +2676,27 @@ async fn candidate_and_replay_enforce_returned_contract_producer_path_and_full_v
         wrong_contract_objects,
     )
     .is_err());
+
+    let mut preexisting_commits = commits.clone();
+    let mut preexisting_objects = objects.clone();
+    add_unbound_preexisting_observation_object(
+        &fixture.store_identity,
+        &fixture.authorization_ref,
+        &fixture.returned_contract,
+        &mut preexisting_commits,
+        &mut preexisting_objects,
+        canonical(r#"{"preexisting":true}"#).as_bytes(),
+    );
+    assert!(matches!(
+        verify_offline_recorded_history(
+            fixture.store_identity.clone(),
+            tenant.clone(),
+            fixture.run_id.clone(),
+            preexisting_commits,
+            preexisting_objects,
+        ),
+        Err(StoreError::MissingObjectAuthority { .. })
+    ));
 
     let mut extra_commits = commits;
     let mut extra_objects = objects;
@@ -3260,10 +3219,13 @@ async fn effect_terminal_seals_and_replays_exact_identity_and_complete_closure()
         &mut extra_commits,
         &mut extra_objects,
         extra_bytes.as_bytes(),
-        &format!(
-            "executor.domain_evidence.{}",
-            extra_ref.content_digest().digest()
-        ),
+        UnboundObservationIntent {
+            producer_path: &format!(
+                "executor.domain_evidence.{}",
+                extra_ref.content_digest().digest()
+            ),
+            mode: ArtifactAdmissionMode::AdmitOrVerifyExact,
+        },
     );
     let extra_error = match verify_offline_recorded_history(
         fixture.store_identity,
@@ -3498,6 +3460,57 @@ async fn empty_frontier_fact_selection_replay_enforces_frontier_attestation_and_
         .expect("response object")
         .bytes()
         .to_vec();
+    let mut first_use_substitution_commits = commits.clone();
+    let mut first_use_substitution_objects = objects.clone();
+    substitute_fact_require_existing_intent_with_first_use_unbound_object(
+        &fixture,
+        &mut first_use_substitution_commits,
+        &mut first_use_substitution_objects,
+        &response_bytes,
+    );
+    assert_eq!(
+        match verify_offline_recorded_history(
+            fixture.store_identity.clone(),
+            tenant.clone(),
+            fixture.run_id.clone(),
+            first_use_substitution_commits,
+            first_use_substitution_objects,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("first-use unbound fact substitution unexpectedly replayed"),
+        },
+        StoreError::InvalidSourceClosure
+    );
+
+    let mut imported_extra_commits = commits.clone();
+    let mut imported_extra_objects = objects.clone();
+    add_unbound_observation_authority(
+        &fixture.store_identity,
+        &fixture.response_contract,
+        &mut imported_extra_commits,
+        &mut imported_extra_objects,
+        &response_bytes,
+        ProducerBinding::qualified_support(
+            fixture.fixture.qualification_scope_id(),
+            &field_path("fact_scan.unbound_import"),
+        )
+        .expect("first-use imported producer"),
+        ArtifactAdmissionMode::RequireExisting,
+    );
+    assert_eq!(
+        match verify_offline_recorded_history(
+            fixture.store_identity.clone(),
+            tenant.clone(),
+            fixture.run_id.clone(),
+            imported_extra_commits,
+            imported_extra_objects,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("first-use extra fact import unexpectedly replayed"),
+        },
+        StoreError::InvalidSourceClosure
+    );
+
     let mut extra_commits = commits.clone();
     let mut extra_objects = objects.clone();
     add_unbound_observation_object(
@@ -3521,7 +3534,11 @@ async fn empty_frontier_fact_selection_replay_enforces_frontier_attestation_and_
     assert_eq!(extra_error, StoreError::FactScanBindingMismatch);
 
     let mut closure_commits = commits;
-    substitute_fact_require_existing_intent(&fixture, &mut closure_commits, &objects);
+    substitute_fact_require_existing_intent_with_seen_object(
+        &fixture,
+        &mut closure_commits,
+        &objects,
+    );
     let closure_error = match verify_offline_recorded_history(
         fixture.store_identity,
         tenant,

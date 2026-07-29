@@ -255,6 +255,13 @@ DependencySkipped
 Facts, outputs, requests, evidence, and typed failures are fields or referenced objects of the
 transition. They are not separate semantic record families.
 
+Successful-settlement output bindings and fact emissions retain semantic ordinal order in the
+transition body. The redundant binding delta has a different storage order: the private store
+assembler preserves variant-group precedence but canonical-byte sorts repeated output-binding and
+fact-binding groups independently. Replay rejects duplicate ordinals, reindexes each repeated
+group by its semantic ordinal, and only then compares and applies it. Thus canonical wire order
+never becomes output or emission meaning.
+
 ### `ExternalAccessAuthorized`
 
 An authorization freezes one request and permits zero or one application-protocol operation:
@@ -567,9 +574,15 @@ generation or consulting a second catalog.
 Only a freshly committed reserved authorization returns the affine, non-cloneable scan permit. The
 private scan verifies every dense tenant fact-publication order through the committed barrier,
 including the consuming run's publications for coverage while excluding them from selection. Its
-continuation state is in-memory and non-serializable. Process loss abandons that authorization as
-audit-only; the next attempt appends a fresh current-head authorization and starts a new
-deterministic scan. Partial work cannot mint a response or completeness proof.
+private cursor is either the next `(fact_order, fact_ordinal)` or explicit completion. Each step
+loads and verifies complete ordered producer publications, then consumes only the cursor-selected
+logical emission range. The 4,096-publication and 8,192-emission limits bound one step only; a
+publication split by the emission budget is fully reloaded and revalidated before its remaining
+range is consumed. Backends choose neither ranges nor budget policy. Continuation state is
+in-memory and non-serializable, and there is no public or persisted resume token. Process loss
+abandons that authorization as audit-only; the next attempt appends a fresh current-head
+authorization and starts a new deterministic scan. Partial work cannot mint a response or
+completeness proof.
 
 Only sources selected by the final top-k results survive. Each selected publication independently
 closes its claim, subject, response, descriptor, and transitive typed references against the exact
@@ -595,6 +608,15 @@ are one atomic generic append. `CompletedFactScan` consumes itself into the gene
 material and derives its sealed authorization reference internally. After runtime selects
 compatible returned evidence, live reducer entry and replay completeness reapply the same
 predicate to that row against the exact verified consuming-run view and fixed producer prefixes.
+
+Those imported producer authorities remain unbound `RequireExisting` observation graph material;
+the response and attestation alone are bound `AdmitOrVerifyExact` products. A single-run physical
+replay cannot reprove prior cross-run existence, so it may provisionally accept first-use
+`RequireExisting` only for unbound imports in an observation carrying a scan attestation. Before
+constructing a verified view, semantic replay must identify the exact reserved authorization,
+validate the two produced values, consume the entire imported graph, and reconstruct the exact
+selected-source closure and attested digest with no omission, extra, or substitution. Live
+backends still require each imported exact authority to exist globally before the atomic append.
 
 Cross-run domain corrections are ordinary separately certified runs. A correction consumes an
 exact semantically closed source through `CrossRunSourceRef` in a dedicated correction-evidence

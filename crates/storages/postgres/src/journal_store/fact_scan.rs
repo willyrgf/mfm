@@ -4,7 +4,7 @@ use mfm_journal::v1::{
 };
 use mfm_store::v1::{
     FactAttestationLoadVerifier, FactScanPage, FactScanPageVerifier, PersistedFactScanAttestation,
-    StoreError, FACT_SCAN_STEP_FACTS, FACT_SCAN_STEP_PUBLICATIONS,
+    StoreError,
 };
 use sqlx::Row;
 
@@ -15,7 +15,7 @@ use super::rows::{load_run, LoadedRun};
 
 pub(super) async fn scan_page(
     store: &QualifiedPostgresStore,
-    verifier: FactScanPageVerifier,
+    mut verifier: FactScanPageVerifier,
 ) -> Result<FactScanPage> {
     if verifier.store_identity() != store.store_authority_context().store_identity() {
         return Err(StoreError::AccessDenied {
@@ -59,15 +59,13 @@ pub(super) async fn scan_page(
     .bind(verifier.next_fact_order().to_string())
     .bind(verifier.frontier_fact_order().to_string())
     .bind(
-        i64::try_from(FACT_SCAN_STEP_PUBLICATIONS)
+        i64::try_from(verifier.publication_load_limit())
             .map_err(|_| PostgresStoreError::Corruption("fact scan page limit is invalid"))?,
     )
     .fetch_all(&mut *transaction)
     .await
     .map_err(|error| database_error("load dense fact publication routes", error))?;
 
-    let mut publications = Vec::with_capacity(rows.len());
-    let mut fact_count = 0usize;
     for row in rows {
         let run_id = row
             .try_get::<String, _>("run_id")
@@ -89,18 +87,13 @@ pub(super) async fn scan_page(
         .ok_or(PostgresStoreError::Corruption(
             "fact publication route has no producer run",
         ))?;
-        let publication =
-            verifier.verify_publication(fact_order, run_id, loaded.commits, loaded.objects)?;
-        let next_fact_count = fact_count
-            .checked_add(publication.emissions().len())
-            .ok_or(StoreError::SequenceOverflow)?;
-        if !publications.is_empty() && next_fact_count > FACT_SCAN_STEP_FACTS {
+        let page_full =
+            verifier.submit_publication(fact_order, run_id, loaded.commits, loaded.objects)?;
+        if page_full {
             break;
         }
-        fact_count = next_fact_count;
-        publications.push(publication);
     }
-    let page = verifier.complete(publications)?;
+    let page = verifier.complete()?;
     transaction
         .commit()
         .await
