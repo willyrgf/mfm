@@ -12,22 +12,29 @@ transition or one audited protocol operation.
 
 `Runtime::drive_once` uses the frozen priority:
 
-1. block on invalid evidence or another integrity finding;
-2. settle the first callback-accepted committed observation;
-3. commit the first ready pure settlement, effect request, or dependency skip;
-4. authorize one live read or effect ensure, choosing the fewest prior matching
-   authorizations and then certified node order; or
-5. return a closed or waiting outcome.
+1. block on invalid evidence anywhere in a complete consumable suffix or
+   another integrity finding;
+2. return the existing closure when the verified fold is already closed;
+3. block on the impossible integrity state in which the fold is open but every
+   occurrence is terminal;
+4. settle the first callback-accepted committed observation;
+5. commit the first ready pure settlement, effect request, or dependency skip;
+6. authorize one live read or effect ensure, choosing the fewest prior matching
+   authorizations and then certified node order;
+7. return an operational block when a required prerequisite is unavailable; or
+8. return waiting when no action or block exists.
 
-An unavailable current candidate produces an operational wait, while a sealed
-candidate identity or callback-integrity failure produces an integrity wait.
+An unavailable current candidate produces an operational block, while a sealed
+candidate identity or callback-integrity failure produces an integrity block.
 Candidate execution failure is returned only through its redaction-safe typed
 runtime error.
 
 Already-terminal read and effect occurrences are still reproduced against the
-complete consumable observation suffix. The first accepted observation must be
-the transition's recorded consumed observation, and any later invalid evidence
-still blocks.
+complete consumable observation suffix. Runtime remembers the first accepted
+observation without replacing it with a later settlement, but any invalid
+evidence anywhere in the suffix—including after that remembered
+settlement—blocks. Only a complete all-insufficient suffix allows another live
+access.
 
 A state callback receives only typed value views. It cannot append, perform
 ambient IO, select another implementation, or retain runtime authority.
