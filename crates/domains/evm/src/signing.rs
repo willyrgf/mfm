@@ -43,6 +43,47 @@ type Result<T> = std::result::Result<T, EvmSigningError>;
 
 const EVM_TRANSACTION_DOMAIN_ID: &str = "evm.transaction";
 const EVM_EIP1559_TRANSACTION_PURPOSE_ID: &str = "evm.transaction.eip1559";
+/// Maximum admitted EIP-2718 signed transaction envelope length.
+pub const EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES: usize = 512 * 1024;
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignedFinalizeStage {
+    Encoded(usize),
+    Admitted(usize),
+    Hashing(usize),
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static SIGNED_FINALIZE_TRACE: std::cell::RefCell<Option<Vec<SignedFinalizeStage>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn record_signed_finalize_stage(stage: SignedFinalizeStage) {
+    SIGNED_FINALIZE_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.push(stage);
+        }
+    });
+}
+
+#[cfg(test)]
+fn capture_signed_finalize_trace<T>(action: impl FnOnce() -> T) -> (T, Vec<SignedFinalizeStage>) {
+    SIGNED_FINALIZE_TRACE.with(|trace| {
+        assert!(trace.borrow().is_none(), "nested signed finalize trace");
+        *trace.borrow_mut() = Some(Vec::new());
+    });
+    let output = action();
+    let trace = SIGNED_FINALIZE_TRACE.with(|trace| {
+        trace
+            .borrow_mut()
+            .take()
+            .expect("active signed finalize trace")
+    });
+    (output, trace)
+}
 
 /// One checked, unsigned Alloy EIP-1559 envelope.
 #[derive(Clone, PartialEq, Eq)]
@@ -188,14 +229,17 @@ impl UnsignedEip1559Envelope {
         }
 
         let signed = self.transaction.clone().into_signed(signature);
-        let mut bytes = Vec::with_capacity(signed.eip2718_encoded_length());
-        signed.eip2718_encode(&mut bytes);
-        let transaction_hash = keccak256(&bytes);
+        let mut bytes = Zeroizing::new(Vec::with_capacity(signed.eip2718_encoded_length()));
+        signed.eip2718_encode(&mut *bytes);
+        #[cfg(test)]
+        record_signed_finalize_stage(SignedFinalizeStage::Encoded(bytes.len()));
+        let bytes = admit_signed_bytes(bytes)?;
+        let transaction_hash = hash_admitted_signed_bytes(&bytes);
         if transaction_hash != *signed.hash() {
             return Err(EvmSigningError::SignedHashMismatch);
         }
         Ok(TransientSignedEip1559Envelope {
-            bytes: Zeroizing::new(bytes),
+            bytes,
             transaction_hash,
         })
     }
@@ -246,6 +290,21 @@ impl fmt::Debug for TransientSignedEip1559Envelope {
             .field("transaction_hash", &self.transaction_hash)
             .finish()
     }
+}
+
+fn admit_signed_bytes(bytes: Zeroizing<Vec<u8>>) -> Result<Zeroizing<Vec<u8>>> {
+    if bytes.len() > EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES {
+        return Err(EvmSigningError::SignedTransactionTooLarge);
+    }
+    #[cfg(test)]
+    record_signed_finalize_stage(SignedFinalizeStage::Admitted(bytes.len()));
+    Ok(bytes)
+}
+
+fn hash_admitted_signed_bytes(bytes: &[u8]) -> B256 {
+    #[cfg(test)]
+    record_signed_finalize_stage(SignedFinalizeStage::Hashing(bytes.len()));
+    keccak256(bytes)
 }
 
 /// Signs one checked envelope through one generic provider call.
@@ -417,6 +476,9 @@ pub enum EvmSigningError {
     /// Alloy's signed hash disagreed with the exact encoded bytes.
     #[error("EVM signed transaction hash did not match encoded bytes")]
     SignedHashMismatch,
+    /// The encoded signed envelope exceeded the admitted transport bound.
+    #[error("EVM signed transaction exceeded the supported size")]
+    SignedTransactionTooLarge,
 }
 
 /// Closed strict-signature validation failures.

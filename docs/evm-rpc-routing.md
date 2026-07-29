@@ -4,7 +4,9 @@ Status: production transport and state-graph contract for EVM-backed reads
 
 EVM endpoints, authorization values, connection pools, and local routing configuration are
 process/deployment resources. They are never typed workflow configuration and never appear in a
-spec, journal record, retained object, fact, public output, portable export, fixture, or diagnostic.
+spec, journal record, retained object, fact, public output, portable export, durable fixture, or
+diagnostic. Live transport tests may generate ephemeral authorization sentinels only inside
+zeroizing owners and must not retain or print them.
 
 ## Immutable Routing Generation
 
@@ -156,15 +158,29 @@ The reusable EVM transport owns:
 
 - exact generation resolution;
 - bounded HTTP(S) request/response IO;
+- one private allowlist of the six read and five wallet operations, with no raw method/parameter
+  seam;
+- direct exact-capacity request encoding into owner-backed zeroizing bodies;
+- non-empty valid authorization values bounded to 16 KiB and consumed into sensitive owner-backed
+  headers;
+- a 512 KiB signed-envelope limit checked after encoding and again before HTTP, plus one
+  preallocated zeroizing 1 MiB response buffer;
+- exact HTTP `200` acceptance;
 - redirects and implicit retries disabled;
-- JSON-RPC 2.0 envelope/id validation;
+- strict borrowed JSON-RPC 2.0 envelope/id/result-or-error validation, including semantic duplicate
+  detection across escaped key aliases and trailing-input rejection;
+- bounded lexical projection of ignored values at depth 64 and 4096 items per container;
+- a 128 KiB raw-result limit for reads and 16 KiB encoded/decoded error-message limit;
 - checked Alloy-backed hash, address, bytes, quantity, block, and call decoding;
 - semantic response-size limits in addition to an outer transport limit; and
 - the closed safe-failure mapping.
 
 It receives operation-only typed requests. It knows neither the portfolio graph nor journal/store
 authority. A private live adapter consumes runtime's affine access authority and calls the
-transport; the public reusable transport API remains runtime-agnostic.
+transport; the public reusable read API remains runtime-agnostic. Wallet mutation is exposed only
+through `EvmWalletExecutor<Store>`, which receives this concrete transport only through the sealed
+wallet qualification. The executor cannot accept an independently constructed transport. No public
+raw wallet RPC client, response, error, target wrapper, or target-entry descriptor exists.
 
 ## Replay And Inspection
 
@@ -181,7 +197,9 @@ diagnostics, and facts require separately authorized trace, audit, replay, or ex
 ## Mutation Separation
 
 This routing/read graph by itself grants no transaction, signer, nonce, or raw-broadcast authority.
-The registered wallet effect reuses only the exact-generation stateless transport. Its target-entry
-authority, sender/nonce ownership, guarded signer, delivery audit, replacement policy, and terminal
-evidence come from the separately qualified durable executor described in
-`docs/evm-transactions.md`.
+The registered wallet effect reuses only the exact-generation stateless transport privately
+retained by its wallet qualification. That live clone shares the original transport runtime and
+route catalog, while the secret-free canonical qualification proof, reference, and debug form
+exclude endpoints, authorization, and transport internals. Its target-entry authority,
+sender/nonce ownership, guarded signer, delivery audit, replacement policy, and terminal evidence
+come from the separately qualified durable executor described in `docs/evm-transactions.md`.

@@ -25,11 +25,9 @@ pub use wallet_qualification::EvmWalletRequestQualification;
 pub use wallet_rpc::{
     evm_already_known_classifier_canonical, evm_already_known_classifier_ref,
     evm_wallet_target_callback_surface_canonical, evm_wallet_target_callback_surface_ref,
-    evm_wallet_target_callback_surface_support_contract, EvmWalletBroadcastReturn,
-    EvmWalletJsonRpcTarget, EvmWalletLiveError, EvmWalletRpcClient, EvmWalletRpcError,
-    EvmWalletRpcFailure, EvmWalletRpcFuture, EvmWalletRpcResponse, EvmWalletTargetEntryDescriptor,
-    PreparedEvmWalletBroadcast, EVM_ALREADY_KNOWN_CLASSIFIER_VERSION,
-    EVM_WALLET_TARGET_CALLBACK_SURFACE_VERSION, EVM_WALLET_TARGET_ENTRY_DESCRIPTOR_VERSION,
+    evm_wallet_target_callback_surface_support_contract, EvmWalletLiveError,
+    EVM_ALREADY_KNOWN_CLASSIFIER_VERSION, EVM_WALLET_TARGET_CALLBACK_SURFACE_VERSION,
+    EVM_WALLET_TARGET_ENTRY_DESCRIPTOR_VERSION,
 };
 
 #[cfg(test)]

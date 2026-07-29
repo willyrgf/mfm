@@ -116,6 +116,19 @@ fn candidate_specific_descriptors_round_trip_without_bearer_material() {
         EvmWalletTargetEntryDescriptor::canonical_inclusion(&request, &candidate, U256::from(100))
             .expect("inclusion"),
     ];
+    assert_eq!(
+        descriptors
+            .iter()
+            .map(|descriptor| descriptor.wire.rpc_method.as_str())
+            .collect::<Vec<_>>(),
+        [
+            EVM_SEND_RAW_TRANSACTION_METHOD,
+            EVM_TRANSACTION_BY_HASH_METHOD,
+            EVM_RECEIPT_BY_HASH_METHOD,
+            EVM_BLOCK_BY_NUMBER_METHOD,
+            EVM_BLOCK_BY_NUMBER_METHOD,
+        ]
+    );
 
     let refs = descriptors
         .iter()
@@ -141,6 +154,23 @@ fn candidate_specific_descriptors_round_trip_without_bearer_material() {
             assert!(!retained.contains(forbidden), "{forbidden}");
         }
     }
+}
+
+#[test]
+fn already_known_classifier_uses_the_exact_live_decoder_contract() {
+    let classifier: serde_json::Value =
+        serde_json::from_slice(evm_already_known_classifier_canonical().unwrap().as_bytes())
+            .expect("classifier JSON");
+    assert_eq!(
+        classifier["exact_error"]["code"].as_i64(),
+        Some(EXACT_ALREADY_KNOWN_CODE)
+    );
+    assert_eq!(
+        classifier["exact_error"]["message"].as_str(),
+        Some(EXACT_ALREADY_KNOWN_MESSAGE)
+    );
+    assert_eq!(classifier["exact_error"]["other_fields"], false);
+    assert_eq!(classifier["provider_text_persisted"], false);
 }
 
 #[test]
@@ -178,110 +208,4 @@ fn descriptor_decode_rejects_method_input_and_nonce_substitution() {
         EvmWalletTargetEntryDescriptor::strict_decode(&value),
         Err(EvmWalletLiveError::InvalidContract)
     );
-}
-
-#[test]
-fn already_known_classifier_is_exact_and_shape_closed() {
-    assert!(EvmWalletRpcError::new(
-        EXACT_ALREADY_KNOWN_CODE,
-        EXACT_ALREADY_KNOWN_MESSAGE.to_owned(),
-        true,
-    )
-    .is_exact_already_known());
-    for error in [
-        EvmWalletRpcError::new(EXACT_ALREADY_KNOWN_CODE, "already Known".to_owned(), true),
-        EvmWalletRpcError::new(
-            EXACT_ALREADY_KNOWN_CODE - 1,
-            EXACT_ALREADY_KNOWN_MESSAGE.to_owned(),
-            true,
-        ),
-        EvmWalletRpcError::new(
-            EXACT_ALREADY_KNOWN_CODE,
-            EXACT_ALREADY_KNOWN_MESSAGE.to_owned(),
-            false,
-        ),
-    ] {
-        assert!(!error.is_exact_already_known());
-    }
-}
-
-#[test]
-fn strict_transaction_parser_rejects_noncanonical_or_candidate_mismatched_fields() {
-    let request = request();
-    let candidate = candidate(&request);
-    let valid = serde_json::json!({
-        "accessList": [{
-            "address": format!("{RECIPIENT:#x}"),
-            "storageKeys": [
-                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            ],
-        }],
-        "blockHash": null,
-        "blockNumber": null,
-        "chainId": "0x1",
-        "from": format!("{SENDER:#x}"),
-        "gas": "0x124f8",
-        "hash": candidate.transaction_hash(),
-        "input": "0xdead",
-        "maxFeePerGas": "0x14",
-        "maxPriorityFeePerGas": "0x2",
-        "nonce": "0x7",
-        "to": format!("{RECIPIENT:#x}"),
-        "transactionIndex": null,
-        "type": "0x2",
-        "value": "0x5",
-    });
-    let parsed = parse_transaction(&valid).expect("strict transaction");
-    assert!(parsed
-        .matches_candidate(&candidate)
-        .expect("candidate match"));
-
-    let mut noncanonical = valid.clone();
-    noncanonical["nonce"] = serde_json::Value::String("0x07".to_owned());
-    assert_eq!(parse_transaction(&noncanonical), Err(()));
-
-    let mut wrong_sender = valid;
-    wrong_sender["from"] = serde_json::Value::String(format!(
-        "{:#x}",
-        address!("3333333333333333333333333333333333333333")
-    ));
-    let parsed = parse_transaction(&wrong_sender).expect("schema-valid transaction");
-    assert!(!parsed
-        .matches_candidate(&candidate)
-        .expect("candidate mismatch"));
-}
-
-#[test]
-fn receipt_parser_rejects_cross_block_log_splicing() {
-    let transaction_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    let block_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-    let mut receipt = serde_json::json!({
-        "blockHash": block_hash,
-        "blockNumber": "0x64",
-        "contractAddress": null,
-        "cumulativeGasUsed": "0xa410",
-        "from": format!("{SENDER:#x}"),
-        "gasUsed": "0xa410",
-        "logs": [{
-            "address": format!("{RECIPIENT:#x}"),
-            "blockHash": block_hash,
-            "blockNumber": "0x64",
-            "data": "0x",
-            "logIndex": "0x0",
-            "removed": false,
-            "topics": [],
-            "transactionHash": transaction_hash,
-            "transactionIndex": "0x2",
-        }],
-        "status": "0x1",
-        "to": format!("{RECIPIENT:#x}"),
-        "transactionHash": transaction_hash,
-        "transactionIndex": "0x2",
-        "type": "0x2",
-    });
-    parse_receipt(&receipt).expect("coherent receipt");
-    receipt["logs"][0]["blockHash"] = serde_json::Value::String(
-        "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
-    );
-    assert_eq!(parse_receipt(&receipt), Err(()));
 }

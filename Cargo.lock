@@ -2446,6 +2446,7 @@ name = "mfm-evm-live"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "bytes",
  "hex",
  "k256",
  "mfm-canonical",

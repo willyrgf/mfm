@@ -28,19 +28,18 @@ use mfm_signing::GenerationGuardedDeterministicSigningProviderBinder;
 use mfm_values::MfmValue;
 
 use crate::{
-    EvmWalletJsonRpcTarget, EvmWalletLiveError, EvmWalletRequestQualification, EvmWalletRpcClient,
-    EvmWalletTargetEntryDescriptor,
+    wallet_rpc::{EvmWalletJsonRpcTarget, EvmWalletTargetEntryDescriptor},
+    EvmWalletLiveError, EvmWalletRequestQualification,
 };
 
 /// Qualified durable wallet executor over one exact ledger, signer, and RPC target.
 #[derive(Clone)]
-pub struct EvmWalletExecutor<Store, Client>
+pub struct EvmWalletExecutor<Store>
 where
     Store: ExecutorLedgerStore,
-    Client: EvmWalletRpcClient,
 {
     ledger: KeyedExecutorLedger<Store>,
-    target: EvmWalletJsonRpcTarget<Client>,
+    target: EvmWalletJsonRpcTarget,
     qualification: Arc<EvmWalletRequestQualification>,
 }
 
@@ -55,22 +54,20 @@ impl From<ExecutorError> for WalletDriveError {
     }
 }
 
-impl<Store, Client> EvmWalletExecutor<Store, Client>
+impl<Store> EvmWalletExecutor<Store>
 where
     Store: ExecutorLedgerStore,
-    Client: EvmWalletRpcClient,
 {
     /// Binds the high-level wallet to one verified durable executor deployment.
     pub fn new(
         ledger: KeyedExecutorLedger<Store>,
-        client: Client,
         signer: GenerationGuardedDeterministicSigningProviderBinder,
         qualification: Arc<EvmWalletRequestQualification>,
     ) -> mfm_executor::Result<Self> {
         if qualification.executor_binding() != ledger.exact_binding() {
             return Err(ExecutorError::LedgerGenerationMismatch);
         }
-        let target = EvmWalletJsonRpcTarget::new(client, signer, Arc::clone(&qualification))
+        let target = EvmWalletJsonRpcTarget::new(signer, Arc::clone(&qualification))
             .map_err(map_live_error)?;
         Ok(Self {
             ledger,
@@ -466,11 +463,9 @@ where
     }
 }
 
-impl<Store, Client> RecoverableEffectExecutor<EvmSubmitTransactionRequest>
-    for EvmWalletExecutor<Store, Client>
+impl<Store> RecoverableEffectExecutor<EvmSubmitTransactionRequest> for EvmWalletExecutor<Store>
 where
     Store: ExecutorLedgerStore,
-    Client: EvmWalletRpcClient,
 {
     fn ensure<'a>(
         &'a self,

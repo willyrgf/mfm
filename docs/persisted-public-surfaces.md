@@ -109,6 +109,24 @@ EVM read audit records may retain exact reviewed HTTP status, JSON-RPC numeric c
 response-invalid discriminator through the EVM diagnostic union. Semantic source mismatch and
 anchor change are typed returned values interpreted by the state, not provider diagnostics.
 
+### Transient EVM transport ownership
+
+The exact-generation EVM transport changes no retained surface. MFM-owned authorization values,
+encoded request bodies, signed envelopes, response buffers, decoded error messages, and
+secret-bearing fixture captures are transient bounded zeroizing owners. Typed decoding borrows from
+the response owner; only reviewed typed results or closed safe failures may leave it. Provider text,
+error data, authorization, and raw signed bytes are discarded before any executor or journal value
+is built.
+
+The live wallet qualification privately retains a clone of the exact transport runtime and route
+catalog so execution cannot inject a parallel transport. That process-local handle is excluded from
+the qualification's secret-free canonical proof, content reference, and debug representation; it
+creates no persisted or public surface.
+
+The zeroization guarantee ends at allocations directly owned by MFM. HTTP/TLS libraries, allocators,
+the operating system, and remote peers can maintain internal transport copies outside that
+guarantee; none of those copies is a persisted or public MFM surface.
+
 Production EVM portfolio reads retain separate authorization/observation pairs for:
 
 - routing-generation/source/chain bootstrap;

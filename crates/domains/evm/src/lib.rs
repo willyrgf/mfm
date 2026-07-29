@@ -54,6 +54,7 @@ pub use qualification::{
 pub use signing::{
     sign_eip1559, sign_eip1559_guarded, Eip1559QuantityField, EvmSignatureError, EvmSigningError,
     TransientSignedEip1559Envelope, UnsignedEip1559Envelope,
+    EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES,
 };
 pub use state::{
     evm_read_capability_contract_canonical, evm_read_capability_contract_ref,

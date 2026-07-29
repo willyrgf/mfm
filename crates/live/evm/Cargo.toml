@@ -12,10 +12,11 @@ domain = "evm"
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["serde"] }
+bytes = "1.12.1"
 hex = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
