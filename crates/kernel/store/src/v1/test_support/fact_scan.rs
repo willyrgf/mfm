@@ -26,12 +26,14 @@ use crate::v1::fact_scan::{
     verify_middle_fact_omission_rejected, verify_three_fact_completion,
 };
 use crate::v1::{
-    AdmissionSourceBackend, AppendOutcome, AuthorizationMaterial, CommittedJournalCommit,
-    ConfiguredValueBackend, ExistingRunAppendMaterial, FactAttestationLoadVerifier,
-    FactSelectionAuthorizationOutcome, FactSelectionStore, NewlyAppended, ObjectGraphProposal,
-    PreparedJournalAppend, ProducedObjectRoot, ProducedOutputSlot, QualifiedSupportMember, Result,
+    AdmissionSourceBackend, AppendOutcome, AuthorizationMaterial, AuthorizeExternalAccess,
+    CommittedJournalCommit, ConfiguredValueBackend, Drive, ExistingRunAppendMaterial,
+    FactAttestationLoadVerifier, FactSelectionAuthorizationOutcome, FactSelectionStore,
+    NewlyAppended, ObjectGraphProposal, PreparedJournalAppend, ProducedObjectRoot,
+    ProducedOutputSlot, QualifiedSupportMember, Result, RunAccessAuthority,
     RunAccessAuthorityIssuer, RunJournalBackend, RunJournalStore, SettlementMaterial, StoreError,
-    StoreIdentity, SupportBackend, TransitionMaterial, FACT_SELECTION_OPERATION_ID,
+    StoreIdentity, SupportBackend, TransitionMaterial, VerifiedRunView,
+    FACT_SELECTION_OPERATION_ID,
 };
 
 pub(in crate::v1) struct FactSelectionFixtureContracts {
@@ -354,6 +356,53 @@ impl FactScanConformanceFixture {
     /// Returns the reserved fact-selection consumer admission fixture.
     pub const fn consumer(&self) -> &LegalAdmissionFixture {
         &self.consumer
+    }
+
+    /// Prepares one reserved fact-selection authorization against an explicit verified view.
+    pub async fn prepare_authorization_on<B>(
+        &self,
+        store: &B,
+        authority: &RunAccessAuthority<Drive>,
+        view: &VerifiedRunView,
+        append_request_id: AppendRequestId,
+    ) -> std::result::Result<
+        (AuthorizeExternalAccess, FactSelectionRequest),
+        <B as RunJournalBackend>::Error,
+    >
+    where
+        B: RunJournalBackend,
+    {
+        let [node] = view.certified_spec().nodes() else {
+            return Err(<B as RunJournalBackend>::Error::from(
+                StoreError::FactScanBindingMismatch,
+            ));
+        };
+        let frame = store.prepare_frame(authority, view, node.node_id()).await?;
+        let append = store
+            .prepare_append(
+                authority,
+                view,
+                append_request_id,
+                ExistingRunAppendMaterial::Authorization(Box::new(AuthorizationMaterial::Read {
+                    prepared_frame: Box::new(frame),
+                    immutable_request_root: Box::new(ProducedObjectRoot::new(
+                        self.request_contract.clone(),
+                        PlainCanonicalJsonBytes::from_canonical_json_slice(
+                            self.request.canonical_json(),
+                        )
+                        .map_err(|_| StoreError::JournalContract)
+                        .map_err(<B as RunJournalBackend>::Error::from)?,
+                    )),
+                    routing_generation_ref: self.routing_generation_ref.clone(),
+                })),
+            )
+            .map_err(<B as RunJournalBackend>::Error::from)?;
+        let PreparedJournalAppend::AuthorizeExternalAccess(append) = append else {
+            return Err(<B as RunJournalBackend>::Error::from(
+                StoreError::FactScanBindingMismatch,
+            ));
+        };
+        Ok((append, self.request.clone()))
     }
 
     /// Builds three genuine same-slot proposals with one common subject and distinct responses.
@@ -941,40 +990,18 @@ where
         .await?
         .verify_recorded_history()
         .map_err(<B as RunJournalBackend>::Error::from)?;
-    let [node] = view.certified_spec().nodes() else {
-        return Err(<B as RunJournalBackend>::Error::from(
-            StoreError::FactScanBindingMismatch,
-        ));
-    };
-    let frame = store.prepare_frame(&drive, &view, node.node_id()).await?;
-    let append = store
-        .prepare_append(
+    let (append, request) = fixture
+        .prepare_authorization_on(
+            store,
             &drive,
             &view,
             AppendRequestId::new(append_request_id)
                 .map_err(StoreError::from)
                 .map_err(<B as RunJournalBackend>::Error::from)?,
-            ExistingRunAppendMaterial::Authorization(Box::new(AuthorizationMaterial::Read {
-                prepared_frame: Box::new(frame),
-                immutable_request_root: Box::new(ProducedObjectRoot::new(
-                    fixture.request_contract.clone(),
-                    PlainCanonicalJsonBytes::from_canonical_json_slice(
-                        fixture.request.canonical_json(),
-                    )
-                    .map_err(|_| StoreError::JournalContract)
-                    .map_err(<B as RunJournalBackend>::Error::from)?,
-                )),
-                routing_generation_ref: fixture.routing_generation_ref.clone(),
-            })),
         )
-        .map_err(<B as RunJournalBackend>::Error::from)?;
-    let PreparedJournalAppend::AuthorizeExternalAccess(append) = append else {
-        return Err(<B as RunJournalBackend>::Error::from(
-            StoreError::FactScanBindingMismatch,
-        ));
-    };
+        .await?;
     let permit = match store
-        .append_fact_selection_authorization(&drive, append, fixture.request.clone())
+        .append_fact_selection_authorization(&drive, append, request)
         .await?
     {
         FactSelectionAuthorizationOutcome::NewlyAuthorized(permit) => *permit,

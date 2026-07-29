@@ -11,8 +11,9 @@ use mfm_ids::{
 };
 use mfm_journal::v1::{
     ArtifactIdPreimage, BatchPurpose, ConfiguredValueBinding, ConfiguredValueKey,
-    ObjectEvidencePreimage, ProducerBinding, RecordLogicalKey, RunAdmitted, RunAdmittedFields,
-    RunJournalRecord, RunJournalRecordFields, ValueRef,
+    JournalPredecessor, ObjectEvidencePreimage, ProducerBinding, RecordLogicalKey, RunAdmitted,
+    RunAdmittedFields, RunJournalRecord, RunJournalRecordFields, TenantFactCoordinateFields,
+    ValueRef,
 };
 use mfm_qualified_run_test_support::QualifiedRunFixture;
 use mfm_spec::v1::RetainedValueContract;
@@ -21,10 +22,10 @@ use mfm_store::v1::test_support::{
 };
 use mfm_store::v1::{
     AdmissionSourceStore, AppendOutcome, ConfiguredValueStore, ExistingRunAppendMaterial,
-    NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
-    QualifiedSupportGraph, QualifiedSupportMember, RunAccessAuthorityIssuer, RunJournalStore,
-    SettlementMaterial, StoreError, SupportStore, TransitionMaterial, TransitionTracePageRequest,
-    VerifiedRunView,
+    FactSelectionAuthorizationOutcome, FactSelectionStore, NewlyAppended, ObjectGraphProposal,
+    ProducedObjectRoot, ProducedOutputSlot, QualifiedSupportGraph, QualifiedSupportMember,
+    RunAccessAuthorityIssuer, RunJournalStore, SettlementMaterial, StoreError, SupportStore,
+    TransitionMaterial, TransitionTracePageRequest, VerifiedRunView,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
@@ -826,6 +827,272 @@ async fn fact_scan_continuation_attestation_and_replay_match_memory() {
         .verify_on(&store, &issuer)
         .await
         .expect("PostgreSQL fact-scan conformance");
+
+    drop(store);
+    drop(issuer);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_authority() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("fact_authorization_acknowledgement_ambiguity").await;
+    let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
+        .await
+        .expect("qualify fact-authorization ambiguity store");
+    let namespace = LegalAdmissionFixture::for_store(store.store_identity().clone(), 74)
+        .expect("fact-authorization ambiguity namespace");
+    let fixture = FactScanConformanceFixture::new(
+        store.store_identity().clone(),
+        namespace.tenant_scope_id().clone(),
+        75,
+        76,
+        77,
+    )
+    .expect("fact-authorization ambiguity fixture");
+    provision_configured_value(
+        &database.pool,
+        fixture.consumer().configured_binding(),
+        fixture.consumer().configured_bytes(),
+    )
+    .await;
+
+    let prepared = fixture
+        .consumer()
+        .prepare_on(&store, &issuer)
+        .await
+        .expect("prepare fact-selection consumer admission");
+    let (admission_authority, admission) = prepared.into_parts();
+    let run_id = match store
+        .append_admission(&admission_authority, admission)
+        .await
+        .expect("append fact-selection consumer admission")
+    {
+        AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(admitted)) => {
+            admitted.run_id().clone()
+        }
+        _ => panic!("fact-selection consumer admission must be newly appended"),
+    };
+    let drive =
+        issuer.authorize_drive(fixture.consumer().tenant_scope_id().clone(), run_id.clone());
+    let initial_view = store
+        .load_committed_journal(&drive)
+        .await
+        .expect("load fact-selection consumer admission")
+        .verify_recorded_history()
+        .expect("verify fact-selection consumer admission");
+    let initial_head = initial_view.journal_head().clone();
+    let append_request_id = AppendRequestId::new("fact-authorization-acknowledgement-ambiguity")
+        .expect("fact-selection authorization append request id");
+    let (first_append, first_request) = fixture
+        .prepare_authorization_on(&store, &drive, &initial_view, append_request_id.clone())
+        .await
+        .expect("prepare first identical fact-selection authorization");
+    let (retry_append, retry_request) = fixture
+        .prepare_authorization_on(&store, &drive, &initial_view, append_request_id.clone())
+        .await
+        .expect("prepare retry fact-selection authorization");
+    assert_eq!(first_request, retry_request);
+    assert_eq!(first_append.authorization(), retry_append.authorization());
+    assert_eq!(
+        first_append
+            .authorization()
+            .fields()
+            .expect("decode prepared fact-selection authorization")
+            .semantic_anchor
+            .fields()
+            .expect("decode prepared fact-selection semantic anchor")
+            .journal_head,
+        initial_head
+    );
+
+    store
+        .inject_commit_failure(
+            run_id.clone(),
+            BatchPurpose::ExternalAccessAuthorization,
+            TestCommitFailurePoint::AfterCommitBeforeAcknowledgement,
+        )
+        .expect("arm post-commit fact-selection acknowledgement failure");
+    match store
+        .append_fact_selection_authorization(&drive, first_append, first_request)
+        .await
+        .expect("return authority-free ambiguous fact-selection outcome")
+    {
+        FactSelectionAuthorizationOutcome::OutcomeUnknown => {}
+        FactSelectionAuthorizationOutcome::NewlyAuthorized(_)
+        | FactSelectionAuthorizationOutcome::AlreadyCommitted(_)
+        | FactSelectionAuthorizationOutcome::Rejected(_) => {
+            panic!("ambiguous acknowledgement must not return fact-scan authority");
+        }
+    }
+    assert!(!store
+        .commit_failure_is_armed()
+        .expect("post-commit failure selector must be consumed"));
+
+    let reconciled = store
+        .load_committed_journal(&drive)
+        .await
+        .expect("reload ambiguous fact-selection append")
+        .verify_recorded_history()
+        .expect("verify ambiguous fact-selection append");
+    let [admission_commit, authorization_commit] = reconciled.journal().commits() else {
+        panic!("reconciled journal must contain one admission and one authorization");
+    };
+    assert!(matches!(
+        admission_commit
+            .records()
+            .first()
+            .expect("admission commit has one record")
+            .candidate()
+            .fields()
+            .expect("decode admission candidate")
+            .payload
+            .fields()
+            .expect("decode admission payload"),
+        RunJournalRecordFields::RunAdmitted(_)
+    ));
+    let authorization_fields = authorization_commit
+        .envelope()
+        .fields()
+        .expect("decode reconciled authorization commit");
+    assert_eq!(authorization_fields.core.run_sequence, 2);
+    assert_eq!(
+        authorization_fields.core.append_request_id,
+        append_request_id
+    );
+    assert_eq!(
+        authorization_fields.core.predecessor,
+        JournalPredecessor::journal_head(&initial_head)
+            .expect("derive exact authorization predecessor")
+    );
+    match authorization_fields
+        .core
+        .tenant_fact_coordinate
+        .fields()
+        .expect("decode reconciled fact-selection barrier")
+    {
+        TenantFactCoordinateFields::FactSelectionBarrier {
+            tenant_scope_id,
+            frontier_fact_order,
+        } => {
+            assert_eq!(tenant_scope_id, *fixture.consumer().tenant_scope_id());
+            assert_eq!(frontier_fact_order, 0);
+        }
+        TenantFactCoordinateFields::None | TenantFactCoordinateFields::FactPublication { .. } => {
+            panic!("fact-selection authorization must retain its exact barrier");
+        }
+    }
+    let [authorization_record] = authorization_commit.records() else {
+        panic!("authorization commit must contain exactly one record");
+    };
+    let recorded_authorization = match authorization_record
+        .candidate()
+        .fields()
+        .expect("decode reconciled authorization candidate")
+        .payload
+        .fields()
+        .expect("decode reconciled authorization payload")
+    {
+        RunJournalRecordFields::ExternalAccessAuthorized(authorization) => authorization,
+        RunJournalRecordFields::RunAdmitted(_)
+        | RunJournalRecordFields::StateTransitionCommitted(_)
+        | RunJournalRecordFields::ExternalAccessObserved(_)
+        | RunJournalRecordFields::RunClosed(_) => {
+            panic!("reconciled record must be an external-access authorization");
+        }
+    };
+    assert_eq!(&recorded_authorization, retry_append.authorization());
+    let expected_authorization_head = authorization_commit
+        .envelope()
+        .journal_head()
+        .expect("derive reconciled authorization head");
+    let expected_authorization_record = authorization_record
+        .record_ref(&run_id, authorization_fields.core.run_sequence)
+        .expect("derive reconciled authorization record reference");
+    let mut authorizations = reconciled.authorizations();
+    let (authorization_ref, folded_authorization) = authorizations
+        .next()
+        .expect("verified fold must retain the authorization");
+    assert!(authorizations.next().is_none());
+    assert_eq!(folded_authorization, retry_append.authorization());
+    assert_eq!(
+        authorization_ref
+            .record_ref()
+            .expect("project folded authorization reference"),
+        expected_authorization_record
+    );
+    assert_eq!(reconciled.unobserved_authorizations().count(), 1);
+
+    let retry_committed = match store
+        .append_fact_selection_authorization(&drive, retry_append, retry_request)
+        .await
+        .expect("resolve exact fact-selection authorization retry")
+    {
+        FactSelectionAuthorizationOutcome::AlreadyCommitted(committed) => committed,
+        FactSelectionAuthorizationOutcome::NewlyAuthorized(_)
+        | FactSelectionAuthorizationOutcome::Rejected(_)
+        | FactSelectionAuthorizationOutcome::OutcomeUnknown => {
+            panic!("exact retry must reconcile without reminting fact-scan authority");
+        }
+    };
+    assert_eq!(retry_committed.journal_head(), &expected_authorization_head);
+    assert_eq!(
+        retry_committed.record_refs(),
+        std::slice::from_ref(&expected_authorization_record)
+    );
+    let retry_frontier = retry_committed
+        .fact_frontier()
+        .expect("exact retry must recover the committed barrier")
+        .fields()
+        .expect("decode exact retry fact frontier");
+    assert_eq!(
+        retry_frontier.tenant_scope_id,
+        *fixture.consumer().tenant_scope_id()
+    );
+    assert_eq!(retry_frontier.fact_order, 0);
+
+    let final_view = store
+        .load_committed_journal(&drive)
+        .await
+        .expect("reload reconciled fact-selection authorization")
+        .verify_recorded_history()
+        .expect("verify reconciled fact-selection authorization");
+    assert_eq!(final_view.journal().commits().len(), 2);
+    assert_eq!(final_view.authorizations().count(), 1);
+
+    let append_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) \
+           FROM journal_commits \
+          WHERE run_id = $1 AND append_request_id = $2",
+    )
+    .bind(run_id.as_str())
+    .bind(append_request_id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .expect("count exact fact-selection authorization append");
+    assert_eq!(append_count, 1);
+    let barrier_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) \
+           FROM journal_commits \
+          WHERE run_id = $1 \
+            AND tenant_fact_coordinate_kind = 'fact_selection_barrier' \
+            AND tenant_fact_order = 0",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .expect("count exact fact-selection barrier");
+    assert_eq!(barrier_count, 1);
+    let retained_fact_head = sqlx::query_scalar::<_, String>(
+        "SELECT current_fact_order::text \
+           FROM tenant_fact_order_heads \
+          WHERE tenant_scope_id = $1",
+    )
+    .bind(fixture.consumer().tenant_scope_id().as_str())
+    .fetch_one(&database.pool)
+    .await
+    .expect("load retained fact head after selection barrier");
+    assert_eq!(retained_fact_head, "0");
 
     drop(store);
     drop(issuer);
