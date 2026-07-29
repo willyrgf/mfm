@@ -202,14 +202,14 @@ pub(crate) fn validated_safe_failure_for_result(
 /// Safe persisted outcome returned by a target operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnedOutcome {
-    safe_result_ref: ContentRef,
+    safe_result_ref: Box<ContentRef>,
     safe_result: SchemaQualifiedCanonicalValue,
 }
 
 impl ReturnedOutcome {
     /// Constructs one exact schema-qualified reviewed safe result.
     pub fn new(safe_result: SchemaQualifiedCanonicalValue) -> Result<Self> {
-        let safe_result_ref = safe_result.reference()?;
+        let safe_result_ref = Box::new(safe_result.reference()?);
         let outcome = Self {
             safe_result_ref,
             safe_result,
@@ -232,7 +232,10 @@ impl ReturnedOutcome {
     pub fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
         encode(
             RETURNED_OUTCOME_SCHEMA,
-            &canonical_object([("safe_result_ref", content_ref_value(&self.safe_result_ref)?)])?,
+            &canonical_object([(
+                "safe_result_ref",
+                content_ref_value(self.safe_result_ref())?,
+            )])?,
         )
     }
 }

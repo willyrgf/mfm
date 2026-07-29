@@ -3,20 +3,22 @@ use std::sync::{Arc, Barrier};
 use mfm_canonical::{
     sha256_digest_bytes, CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1,
 };
+use mfm_capabilities::SafeFailureOutcome;
 use mfm_executor::{
-    verify_ensure_result, AccountSequencePolicy, AccountSequenceRequest, AllocationOutcome,
-    CommittedEffectRequest, ContentRef, EffectIdentity, Ensure, EvidenceBounds, ExecutorBinding,
+    reference_safe_failure, verify_ensure_result, AccountSequencePolicy, AccountSequenceRequest,
+    AllocationOutcome, BoundaryStage, CommittedEffectRequest, ContentRef, EffectExecutorOutcome,
+    EffectExecutorOutcomeView, EffectIdentity, Ensure, EvidenceBounds, ExecutorBinding,
     ExecutorContractDescriptor, ExecutorDeployment, ExecutorEnsureResultClaim, ExecutorError,
     ExecutorEvidenceRecord, ExecutorFuture, ExecutorRetainedClosureClaim,
     ExecutorRetainedClosureContract, ExecutorRetainedValue, ExecutorRetainedValueRelation,
-    ExecutorStoreSnapshot, ExecutorTerminalEvidenceClaim, FencingRef, FiniteInventoryPolicy,
-    FiniteInventoryRequest, KeyedExecutorLedger, MemoryConvergentDestination,
-    MemoryDestinationCheckpoint, MemoryExecutorStore, MemoryLedgerCheckpoint, ReferenceContract,
-    ReferenceCrashPoint, ReferenceDestination, ReferenceDestinationReturn, ReferenceDriveOutcome,
-    ReferenceExecutor, ReferenceRequest, ReferenceTargetBehavior, ReferenceTerminalProof,
-    ResourceLedgerRecord, ResourceOwnership, ResourcePolicyBinding, RetainedValueContract,
-    SchemaQualifiedCanonicalValue, TargetEntryAuthority, TerminalTombstone, TypedResourcePolicy,
-    VerifiedExecutorBinding,
+    ExecutorStoreSnapshot, ExecutorTerminalEvidenceClaim, FailureClass, FencingRef,
+    FiniteInventoryPolicy, FiniteInventoryRequest, KeyedExecutorLedger,
+    MemoryConvergentDestination, MemoryDestinationCheckpoint, MemoryExecutorStore,
+    MemoryLedgerCheckpoint, ReferenceContract, ReferenceCrashPoint, ReferenceDestination,
+    ReferenceDestinationReturn, ReferenceDriveOutcome, ReferenceExecutor, ReferenceFailureCode,
+    ReferenceRequest, ReferenceTargetBehavior, ReferenceTerminalProof, ResourceLedgerRecord,
+    ResourceOwnership, ResourcePolicyBinding, RetainedValueContract, SchemaQualifiedCanonicalValue,
+    TargetEntryAuthority, TerminalTombstone, TypedResourcePolicy, VerifiedExecutorBinding,
 };
 use mfm_ids::{
     DigestAlgorithm, NodeId, RunId, SemanticTypeId, StableId, StoreScopeId, TenantScopeId,
@@ -518,6 +520,92 @@ fn retained_verifier_rejects_missing_objects_and_terminal_substitution() {
         )
         .expect_err("domain evidence substitution"),
         ExecutorError::TerminalProofMismatch
+    );
+}
+
+#[test]
+fn verified_results_and_executor_outcomes_preserve_public_values() {
+    let (fixture, _, executor) = reference_fixture(8);
+    let request = committed(&fixture, 94, "operation.outcome", "payload");
+    let verified = block_on(executor.drive(&request)).expect("verified result");
+    let expected_identity = verified.identity().clone();
+    let expected_outcome = verified.outcome().clone();
+    let expected_audit = verified.delivery_audit().clone();
+    let expected_closure = verified.retained_closure().clone();
+    let Ensure::Terminal { evidence } = verified.outcome() else {
+        panic!("expected terminal result");
+    };
+    let returned_outcome = evidence.terminal_proof().returned_outcome();
+    let expected_safe_result = returned_outcome.safe_result().clone();
+    let expected_safe_result_ref = expected_safe_result.reference().expect("safe result ref");
+    assert_eq!(returned_outcome.safe_result(), &expected_safe_result);
+    assert_eq!(
+        returned_outcome.safe_result_ref(),
+        &expected_safe_result_ref
+    );
+    let cloned_returned_outcome = returned_outcome.clone();
+    assert_eq!(&cloned_returned_outcome, returned_outcome);
+    assert_eq!(cloned_returned_outcome.safe_result(), &expected_safe_result);
+    assert_eq!(
+        cloned_returned_outcome.safe_result_ref(),
+        &expected_safe_result_ref
+    );
+
+    let returned = EffectExecutorOutcome::returned(verified.clone());
+    assert_eq!(
+        returned.view(),
+        EffectExecutorOutcomeView::Returned(&verified)
+    );
+    assert_eq!(returned.into_parts(), Ok(verified.clone()));
+    assert_eq!(
+        verified.into_parts(),
+        (
+            expected_identity,
+            expected_outcome,
+            expected_audit,
+            expected_closure,
+        )
+    );
+
+    let safe_failure_contract_ref = fixture
+        .binding
+        .contract()
+        .safe_failure_contract_ref()
+        .clone();
+    let did_not_enter_failure = reference_safe_failure(
+        safe_failure_contract_ref.clone(),
+        ReferenceFailureCode::DestinationUnavailable,
+        FailureClass::Transport,
+        BoundaryStage::BeforeBoundaryEntry,
+    )
+    .expect("did-not-enter failure");
+    let did_not_enter =
+        EffectExecutorOutcome::did_not_enter(did_not_enter_failure.clone()).expect("outcome");
+    assert_eq!(
+        did_not_enter.view(),
+        EffectExecutorOutcomeView::DidNotEnter(&did_not_enter_failure)
+    );
+    assert_eq!(
+        did_not_enter.into_parts(),
+        Err((SafeFailureOutcome::DidNotEnter, did_not_enter_failure,))
+    );
+
+    let indeterminate_failure = reference_safe_failure(
+        safe_failure_contract_ref,
+        ReferenceFailureCode::DestinationUnavailable,
+        FailureClass::Transport,
+        BoundaryStage::BoundaryEntry,
+    )
+    .expect("indeterminate failure");
+    let indeterminate =
+        EffectExecutorOutcome::indeterminate(indeterminate_failure.clone()).expect("outcome");
+    assert_eq!(
+        indeterminate.view(),
+        EffectExecutorOutcomeView::Indeterminate(&indeterminate_failure)
+    );
+    assert_eq!(
+        indeterminate.into_parts(),
+        Err((SafeFailureOutcome::Indeterminate, indeterminate_failure,))
     );
 }
 
