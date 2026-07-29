@@ -9,10 +9,10 @@ use recoverability_v2_support::{
 };
 
 #[test]
-fn certify_executes_all_576_frozen_recoverability_vectors() {
+fn certify_executes_all_578_frozen_recoverability_vectors() {
     let mut visited = 0;
     for_each_vector(|_| visited += 1);
-    assert_eq!(visited, 576);
+    assert_eq!(visited, 578);
 
     run_consumer("mfm-certify", |vector| {
         assert_lower_layer_owner_vector(vector);

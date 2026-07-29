@@ -5,6 +5,13 @@ contract. Both files are exact, float-free canonical JSON bytes. The complete
 v1 directory is retained byte-identically only as an archival and hostile-input
 reference; production consumers must not load it.
 
+The initial local v2 freeze named the absent `emission_ordinal` field as the
+ordering key for certified fact slots, which rejected every nonempty
+`fact_slots` value. Because that freeze was unpublished and no v2 data had
+been persisted, these corrected bytes replace it in place as the sole v2
+authority. There is no compatibility identity or fallback, and v1 remains
+byte-identical.
+
 Portable run transfer uses the registered framed sequence
 `mfm.portable-run-export-stream.v1` with media type
 `application/vnd.mfm.run-export-stream.v1+json-seq`. Its sole integrity value
@@ -14,22 +21,22 @@ and LF. There is no bundle, manifest, member path, or internal stream digest.
 ## Frozen artifact metadata
 
 ```text
-annex_bytes: 223651
-annex_sha256: d6ef3644581094b1d08812f71a6a05fdaa935972a8b63ab0af818ef4179a0ba4
+annex_bytes: 223652
+annex_sha256: bf1065f32a8249f69b9a82f19be2a221d1db5b683fa439ec6f701c42666b3ff8
 annex_schema_count: 258
 annex_invariant_clause_count: 233
-corpus_bytes: 1709958
-corpus_sha256: b41900112b6bb90c350c25897cbc24ba81977da77eb892c32519042c1647fe32
-corpus_positive_case_count: 433
-corpus_negative_case_count: 59
+corpus_bytes: 1728876
+corpus_sha256: a2b249e054e7c6e85edfd91a6f3c6c9fc9588f65a9f3dfbfe0eac08f9f0be7a9
+corpus_positive_case_count: 434
+corpus_negative_case_count: 60
 corpus_relational_case_count: 84
-corpus_total_case_count: 576
-corpus_schema_acceptance_case_count: 379
-corpus_codec_rejection_case_count: 27
+corpus_total_case_count: 578
+corpus_schema_acceptance_case_count: 380
+corpus_codec_rejection_case_count: 28
 corpus_relational_rejection_case_count: 32
 ```
 
-All 576 vectors are mandatory for each of the nine consumers named by
+All 578 vectors are mandatory for each of the nine consumers named by
 `corpus.json`.
 
 ## Portable stream registry

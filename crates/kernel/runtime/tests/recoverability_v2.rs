@@ -11,7 +11,7 @@ use runtime_decision::{
 };
 
 #[test]
-fn runtime_executes_all_576_frozen_recoverability_vectors() {
+fn runtime_executes_all_578_frozen_recoverability_vectors() {
     run_consumer("mfm-runtime", |vector| {
         assert_lower_layer_owner_vector(vector);
         assert_runtime_owner_vector(vector);
