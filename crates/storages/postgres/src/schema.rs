@@ -14,7 +14,7 @@ const OWNER_ROLE: &str = "mfm_store_owner";
 const AUTHORITY_CATALOG_DEFINITION_SHA256: &str =
     "f9fc1e32f85cc6c3e8f338a519313fc3fd2dbe3a6714d8e1b38777f445a58392";
 
-/// Administrative schema management for the destructive recoverability-v1 baseline.
+/// Administrative schema management for the destructive recoverability-v2 baseline.
 pub struct PostgresSchema;
 
 impl PostgresSchema {

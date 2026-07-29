@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_canonical::{CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1};
+use mfm_canonical::{CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2};
 use mfm_capabilities::{SafeFailureClassifierDescriptor, SafeFailureOutcome};
 use mfm_executor::{
     verify_ensure_result, verify_reference_safe_failure_tuple, CommittedEffectRequest,
@@ -4131,7 +4131,7 @@ fn derive_observation_request_digest(
             .map_err(|_| observation_mismatch("observation_request"))?,
     )
     .map_err(|_| observation_mismatch("observation_request"))?;
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let validated = contract.strict_decode(REQUEST_PREIMAGE_SCHEMA, canonical.as_bytes())?;
     contract
         .derive_request_digest(&validated)
@@ -6198,7 +6198,7 @@ fn verified_recorded_value_contract(
         field: "configured_value_contract",
     })?;
     value_ref.validate_contract(&value_contract)?;
-    RecoverabilityContractV1::embedded()?
+    RecoverabilityContractV2::embedded()?
         .strict_decode_schema_id(value_contract.schema_id(), object.bytes())
         .map_err(|_| StoreError::PersistedMismatch {
             field: "configured_value_contract",

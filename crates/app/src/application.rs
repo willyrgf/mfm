@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 use crate::{
     AccessAuditPage, AccessTarget, AdmitRunRequest, AdmitRunResponse, DriveResponse,
-    EntryPointContract, ErrorClass, ExportRequest, ExportedRunBytes, PageRequest, PublicError,
+    EntryPointContract, ErrorClass, ExportRequest, ExportedRun, PageRequest, PublicError,
     PublicRunView, ReplayRequest, ReplayResponse, RunAccessGrant, RunAccessPolicy,
     SecretCredential, TransitionTracePage,
 };
@@ -190,7 +190,7 @@ impl Application {
         let call = self
             .authorize_run(credential, RunAccessGrant::Replay, run_id)
             .await?;
-        if request.portable_export().is_some() {
+        if request.requires_export_authorization() {
             call.authorize_same_run_grant(RunAccessGrant::Export)
                 .await?;
         }
@@ -223,13 +223,13 @@ impl Application {
         self.backend.read_access_audit(&call, page).await
     }
 
-    /// Authenticates every dependency and returns final canonical portable-export bytes.
+    /// Authenticates every dependency and returns a complete portable-export stream.
     pub async fn export_run(
         &self,
         credential: SecretCredential,
         run_id: RunId,
         request: ExportRequest,
-    ) -> Result<ExportedRunBytes, PublicError> {
+    ) -> Result<ExportedRun, PublicError> {
         let call = self
             .authorize_run(credential, RunAccessGrant::Export, run_id)
             .await?;
@@ -402,7 +402,7 @@ pub(crate) trait ApplicationBackend: Send + Sync {
         &self,
         call: &AuthorizedRunCall<'_>,
         request: ExportRequest,
-    ) -> Result<ExportedRunBytes, PublicError>;
+    ) -> Result<ExportedRun, PublicError>;
 }
 
 /// Value-only behavior available to application transport tests.
@@ -433,13 +433,43 @@ pub fn application_for_test(
         store_scope_id,
         policy,
         entry_points,
-        TestApplicationBackend { mode },
+        TestApplicationBackend { mode, export: None },
+    )
+}
+
+/// Builds a one-use streaming-export fixture without exposing the private backend trait.
+#[cfg(any(test, feature = "test-support"))]
+pub fn application_with_export_for_test(
+    policy: Arc<dyn RunAccessPolicy>,
+    content_ref: mfm_ids::ContentRef,
+    reader: crate::ExportAsyncReader,
+) -> Application {
+    let store_scope_id = StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+        .expect("the fixed test store scope is valid");
+    Application::new(
+        store_scope_id,
+        policy,
+        Vec::new(),
+        TestApplicationBackend {
+            mode: TestApplicationMode::Sentinel,
+            export: Some(std::sync::Mutex::new(Some(TestExport {
+                content_ref,
+                reader,
+            }))),
+        },
     )
 }
 
 #[cfg(any(test, feature = "test-support"))]
 struct TestApplicationBackend {
     mode: TestApplicationMode,
+    export: Option<std::sync::Mutex<Option<TestExport>>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct TestExport {
+    content_ref: mfm_ids::ContentRef,
+    reader: crate::ExportAsyncReader,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -518,8 +548,18 @@ impl ApplicationBackend for TestApplicationBackend {
         &self,
         _call: &AuthorizedRunCall<'_>,
         _request: ExportRequest,
-    ) -> Result<ExportedRunBytes, PublicError> {
-        Err(self.failure())
+    ) -> Result<ExportedRun, PublicError> {
+        let Some(export) = &self.export else {
+            return Err(self.failure());
+        };
+        let mut export = export.lock().map_err(|_| {
+            PublicError::internal(
+                "TestApplicationBackendReached",
+                "The test application backend was reached",
+            )
+        })?;
+        let export = export.take().ok_or_else(|| self.failure())?;
+        Ok(ExportedRun::for_test(export.content_ref, export.reader))
     }
 }
 
@@ -560,15 +600,20 @@ fn wallet_deployment_invalid() -> PublicError {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
 
-    use super::AuthorizedRunCall;
+    use super::{application_for_test, AuthorizedRunCall, TestApplicationMode};
     use crate::{
-        AccessPolicyError, AccessTarget, AuthorizedTenant, RunAccessGrant, RunAccessPolicy,
-        SecretCredential,
+        AccessPolicyError, AccessTarget, AuthorizedTenant, ExportStreamInput, ReplayRequest,
+        RunAccessGrant, RunAccessPolicy, SecretCredential,
     };
     use async_trait::async_trait;
-    use mfm_ids::{RunId, StoreScopeId, TenantScopeId};
+    use mfm_canonical::RecoverabilityContractV2;
+    use mfm_ids::{ContentRef, RunId, StoreScopeId, TenantScopeId};
+    use tokio::io::{AsyncRead, ReadBuf};
 
     struct FixedPolicy {
         expected_grant: RunAccessGrant,
@@ -603,6 +648,44 @@ mod tests {
         ) -> Result<AuthorizedTenant, AccessPolicyError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(AccessPolicyError::GrantDenied)
+        }
+    }
+
+    struct ReplayPolicy {
+        replay: Result<AuthorizedTenant, AccessPolicyError>,
+        export: Result<AuthorizedTenant, AccessPolicyError>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RunAccessPolicy for ReplayPolicy {
+        async fn authorize(
+            &self,
+            _credential: &SecretCredential,
+            grant: RunAccessGrant,
+            _target: &AccessTarget,
+        ) -> Result<AuthorizedTenant, AccessPolicyError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match grant {
+                RunAccessGrant::Replay => self.replay.clone(),
+                RunAccessGrant::Export => self.export.clone(),
+                _ => panic!("unexpected replay policy grant"),
+            }
+        }
+    }
+
+    struct PollProbe {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for PollProbe {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
         }
     }
 
@@ -724,6 +807,72 @@ mod tests {
             .await
             .expect_err("revoked replay credential");
         assert_eq!(error.code, "AuthenticationRequired");
+    }
+
+    #[tokio::test]
+    async fn replay_and_export_denials_leave_the_input_unpolled() {
+        let tenant = AuthorizedTenant::new(tenant('1'));
+        for (replay, export, expected_calls) in [
+            (Err(AccessPolicyError::GrantDenied), Ok(tenant.clone()), 1),
+            (Ok(tenant.clone()), Err(AccessPolicyError::GrantDenied), 2),
+        ] {
+            let policy = Arc::new(ReplayPolicy {
+                replay,
+                export,
+                calls: AtomicUsize::new(0),
+            });
+            let application =
+                application_for_test(policy.clone(), Vec::new(), TestApplicationMode::Sentinel);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let result = application
+                .replay_run(
+                    SecretCredential::new(b"opaque".to_vec()).expect("credential"),
+                    run_id(),
+                    ReplayRequest::CompareCurrent(stream_input(Arc::clone(&polls))),
+                )
+                .await;
+            assert!(result.is_err());
+            assert_eq!(policy.calls.load(Ordering::SeqCst), expected_calls);
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_history_failure_after_both_grants_leaves_input_unpolled() {
+        let tenant = AuthorizedTenant::new(tenant('1'));
+        let policy = Arc::new(ReplayPolicy {
+            replay: Ok(tenant.clone()),
+            export: Ok(tenant),
+            calls: AtomicUsize::new(0),
+        });
+        let application =
+            application_for_test(policy.clone(), Vec::new(), TestApplicationMode::Sentinel);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let error = application
+            .replay_run(
+                SecretCredential::new(b"opaque".to_vec()).expect("credential"),
+                run_id(),
+                ReplayRequest::Reproduce(stream_input(Arc::clone(&polls))),
+            )
+            .await
+            .expect_err("backend sentinel");
+        assert_eq!(error.code, "TestApplicationBackendReached");
+        assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+
+    fn stream_input(polls: Arc<AtomicUsize>) -> ExportStreamInput {
+        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let content_ref = ContentRef::new(
+            contract
+                .schema_id("mfm.portable-run-export-stream.v1")
+                .expect("stream schema")
+                .clone(),
+            contract.raw_content_digest(b"stream"),
+        )
+        .expect("content ref");
+        ExportStreamInput::from_reader(content_ref, Box::pin(PollProbe { polls }))
+            .expect("stream input")
     }
 
     #[tokio::test]

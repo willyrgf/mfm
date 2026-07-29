@@ -74,7 +74,7 @@ struct MemoryCommitFailureArm {
     point: MemoryCommitFailurePoint,
 }
 
-/// Atomic in-memory implementation of the recoverability-v1 journal backend.
+/// Atomic in-memory implementation of the recoverability-v2 journal backend.
 ///
 /// The semantic core is staged in a private clone and swapped once after all fallible checks.
 /// Cloning the store clones only the handle and preserves the exact authority-instance seal.

@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContractV1};
+use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContractV2};
 use mfm_executor::{
     AccountSequencePolicy, AccountSequenceRequest, AllocationOutcome, CommittedEffectRequest,
     ContentRef, EvidenceBounds, ExecutorBinding, ExecutorContractDescriptor, ExecutorDeployment,
@@ -30,8 +30,8 @@ struct Fixture {
     tenant_scope_id: TenantScopeId,
 }
 
-fn contract() -> &'static RecoverabilityContractV1 {
-    RecoverabilityContractV1::embedded().expect("recoverability contract")
+fn contract() -> &'static RecoverabilityContractV2 {
+    RecoverabilityContractV2::embedded().expect("recoverability contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {

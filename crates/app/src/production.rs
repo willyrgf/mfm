@@ -38,11 +38,12 @@ use crate::application::{
     ApplicationBackend, AuthorizedRunCall, EvmWalletDeployment, EvmWalletDeploymentParts,
 };
 use crate::executable_identity::{current_executable_identity, CurrentExecutableIdentity};
+use crate::stream_spool::{snapshot_input, WritableSpool};
 use crate::{
     complete_access_audit_page, complete_transition_trace_page, decode_access_audit_page_request,
     decode_transition_trace_page_request, production_database_url, AccessAuditPage,
     AdmissionStatus, AdmitRunRequest, AdmitRunResponse, Application, DriveResponse, ErrorClass,
-    ExportRequest, ExportedRunBytes, PageRequest, PublicError, PublicRunView, ReplayRequest,
+    ExportRequest, ExportedRun, PageRequest, PublicError, PublicRunView, ReplayRequest,
     ReplayResponse, RunAccessPolicy, TransitionTracePage,
 };
 
@@ -603,16 +604,24 @@ impl ProductionBackend {
         match request {
             ReplayRequest::Verify => verified.canonical_result().map_err(Into::into),
             ReplayRequest::Reproduce(input) => {
+                let (content_ref, reader) = snapshot_input(input)
+                    .await
+                    .map_err(|_| export_stream_io_error())?;
                 let historical = verified
-                    .verify_portable_export(input.bytes(), input.content_ref())
+                    .verify_export_stream(reader, &content_ref)
+                    .await
                     .map_err(replay_artifact_error)?;
                 mfm_replay::v1::reproduce_exact(&historical, &UnavailableReproductionResolver)
                     .await
                     .map_err(Into::into)
             }
             ReplayRequest::CompareCurrent(input) => {
+                let (content_ref, reader) = snapshot_input(input)
+                    .await
+                    .map_err(|_| export_stream_io_error())?;
                 let historical = verified
-                    .verify_portable_export(input.bytes(), input.content_ref())
+                    .verify_export_stream(reader, &content_ref)
+                    .await
                     .map_err(replay_artifact_error)?;
                 mfm_replay::v1::compare_current(&historical, self.registry.as_ref())
                     .map_err(Into::into)
@@ -624,7 +633,7 @@ impl ProductionBackend {
         &self,
         call: &AuthorizedRunCall<'_>,
         request: ExportRequest,
-    ) -> Result<ExportedRunBytes, PublicError> {
+    ) -> Result<ExportedRun, PublicError> {
         let root_authority = self
             .issuer
             .authorize_export(call.tenant_scope_id().clone(), call.run_id().clone());
@@ -653,14 +662,19 @@ impl ProductionBackend {
             );
         }
         let dependencies = dependencies.into_values().collect::<Vec<_>>();
-        let export = mfm_replay::trace_export::export_portable_run(
+        let mut spool = WritableSpool::create()
+            .await
+            .map_err(|_| export_stream_io_error())?;
+        let metadata = mfm_replay::trace_export::write_portable_run_export_stream(
             &self.store,
             &root_authority,
             &dependencies,
             request.kind(),
+            &mut spool,
         )
         .await?;
-        Ok(ExportedRunBytes::from_portable(export))
+        let spool = spool.finish().await.map_err(|_| export_stream_io_error())?;
+        Ok(ExportedRun::from_parts(metadata, Box::pin(spool)))
     }
 }
 
@@ -749,7 +763,7 @@ impl ApplicationBackend for ProductionBackend {
         &self,
         call: &AuthorizedRunCall<'_>,
         request: ExportRequest,
-    ) -> Result<ExportedRunBytes, PublicError> {
+    ) -> Result<ExportedRun, PublicError> {
         self.export(call, request).await
     }
 }
@@ -802,11 +816,18 @@ fn admission_store_error(error: mfm_storage_postgres::PostgresStoreError) -> Pub
 }
 
 fn replay_artifact_error(error: mfm_replay::v1::ReplayError) -> PublicError {
-    if error.kind() == mfm_replay::v1::ReplayErrorKind::InvalidExport {
-        PublicError::replay_artifact_invalid()
-    } else {
-        error.into()
+    match error.kind() {
+        mfm_replay::v1::ReplayErrorKind::InvalidExport => PublicError::replay_artifact_invalid(),
+        mfm_replay::v1::ReplayErrorKind::ExportStreamIo => export_stream_io_error(),
+        _ => error.into(),
     }
+}
+
+fn export_stream_io_error() -> PublicError {
+    PublicError::internal(
+        "ExportStreamIoFailed",
+        "The export stream could not be processed",
+    )
 }
 
 fn export_dependency_discovery_error(error: mfm_replay::v1::ReplayError) -> PublicError {
@@ -884,6 +905,13 @@ mod tests {
             assert_eq!(error.class, ErrorClass::Internal);
             assert_eq!(error.code, "ReplayVerificationFailed");
         }
+
+        let error = replay_artifact_error(mfm_replay::v1::ReplayError::ExportStreamIo {
+            source: std::io::Error::other("private sentinel"),
+        });
+        assert_eq!(error.class, ErrorClass::Internal);
+        assert_eq!(error.code, "ExportStreamIoFailed");
+        assert_eq!(error.message, "The export stream could not be processed");
     }
 
     #[test]

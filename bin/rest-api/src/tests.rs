@@ -1,13 +1,17 @@
 use super::*;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use axum::http::{Method, Request};
 use mfm_app::{
-    application_for_test, AccessPolicyError, AccessTarget, AuthorizedTenant, RunAccessGrant,
-    RunAccessPolicy, SecretCredential, TestApplicationMode,
+    application_for_test, application_with_export_for_test, AccessPolicyError, AccessTarget,
+    AuthorizedTenant, RunAccessGrant, RunAccessPolicy, SecretCredential, TestApplicationMode,
 };
 use mfm_ids::TenantScopeId;
+use tokio::io::{AsyncRead, ReadBuf};
 use tower::ServiceExt as _;
 
 const RUN_ID: &str =
@@ -61,6 +65,31 @@ impl RunAccessPolicy for RecordingPolicy {
     }
 }
 
+struct ExportProbe {
+    bytes: &'static [u8],
+    offset: usize,
+    polls: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+impl AsyncRead for ExportProbe {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        if self.fail {
+            return Poll::Ready(Err(std::io::Error::other("private export-reader sentinel")));
+        }
+        let remaining = &self.bytes[self.offset..];
+        let count = remaining.len().min(buffer.remaining());
+        buffer.put_slice(&remaining[..count]);
+        self.offset += count;
+        Poll::Ready(Ok(()))
+    }
+}
+
 #[test]
 fn error_status_mapping_includes_authentication_and_grant_denial() {
     assert_eq!(
@@ -97,64 +126,88 @@ fn bearer_parser_accepts_only_one_exact_nonempty_bearer_header() {
 }
 
 #[test]
-fn request_bodies_reject_unknown_fields() {
-    let replay = decode_replay_body(br#"{"mode":"verify","tenant":"forbidden"}"#)
-        .expect_err("unknown replay field");
-    assert_eq!(replay.public_error().code, "ReplayArtifactInvalid");
-    assert!(decode_body::<ExportBody>(br#"{"kind":"audit","token":"forbidden"}"#).is_err());
-}
-
-#[test]
-fn request_bodies_reject_duplicate_fields_and_floats() {
-    let duplicate = decode_replay_body(br#"{"mode":"verify","mode":"reproduce"}"#)
-        .expect_err("duplicate replay mode");
-    assert_eq!(duplicate.public_error().code, "ReplayArtifactInvalid");
-    assert!(decode_body::<ExportBody>(br#"{"kind":"audit","kind":"semantic"}"#).is_err());
-    let float = decode_replay_body(br#"{"mode":1.5}"#).expect_err("float replay mode");
-    assert_eq!(float.public_error().code, "ReplayArtifactInvalid");
-
-    let syntax = decode_replay_body(br#"{"mode":"verify""#).expect_err("malformed JSON");
-    assert_eq!(syntax.public_error().code, "InvalidJson");
-}
-
-#[test]
-fn replay_request_is_an_exact_mode_tagged_union() {
-    let verify = decode_replay_body(br#"{"mode":"verify"}"#).expect("verify request");
-    assert_eq!(verify.mode(), mfm_app::ReplayMode::Verify);
-    let forbidden = decode_replay_body(
-        br#"{"mode":"verify","portable_export_ref":null,"portable_export_base64url":null}"#,
-    )
-    .expect_err("verify artifact fields");
-    assert_eq!(forbidden.public_error().code, "ReplayArtifactInvalid");
+fn replay_query_requires_one_exact_mode() {
     assert_eq!(
-        forbidden.public_error().message,
-        "The replay artifact is invalid."
+        decode_replay_query(Some("mode=verify")).expect("verify mode"),
+        ReplayMode::Verify
     );
+    assert_eq!(
+        decode_replay_query(Some("mode=reproduce")).expect("reproduce mode"),
+        ReplayMode::Reproduce
+    );
+    assert_eq!(
+        decode_replay_query(Some("mode=compare_current")).expect("compare mode"),
+        ReplayMode::CompareCurrent
+    );
+    for query in [
+        None,
+        Some(""),
+        Some("tenant=forbidden"),
+        Some("mode=verify&mode=reproduce"),
+        Some("mode=unknown"),
+    ] {
+        assert!(decode_replay_query(query).is_err(), "{query:?}");
+    }
+}
 
-    let content_ref = replay_export_ref(b"{}");
-    let body = serde_json::to_vec(&json!({
-        "mode": "reproduce",
-        "portable_export_ref": content_ref,
-        "portable_export_base64url": "e30",
-    }))
-    .expect("replay JSON");
-    let reproduce = decode_replay_body(&body).expect("reproduce request");
-    let ReplayRequest::Reproduce(export) = reproduce else {
+#[test]
+fn json_request_bodies_reject_unknown_and_duplicate_fields() {
+    assert!(decode_body::<ExportBody>(br#"{"kind":"audit","token":"forbidden"}"#).is_err());
+    assert!(decode_body::<ExportBody>(br#"{"kind":"audit","kind":"semantic"}"#).is_err());
+}
+
+#[tokio::test]
+async fn replay_stream_request_requires_exact_headers_and_preserves_raw_bytes() {
+    let bytes = b"\x1e{\"kind\":\"end\"}\n";
+    let mut headers = replay_stream_headers(bytes);
+    let reproduce = replay_stream_request(
+        ReplayMode::Reproduce,
+        &headers,
+        Body::from(bytes.as_slice()),
+    )
+    .expect("reproduce stream");
+    let ReplayRequest::Reproduce(input) = reproduce else {
         panic!("reproduce variant");
     };
-    assert_eq!(export.bytes(), b"{}");
+    assert_eq!(input.content_ref(), &replay_export_ref(bytes));
 
-    let missing = decode_replay_body(br#"{"mode":"reproduce","portable_export_base64url":"e30"}"#)
-        .expect_err("missing artifact ref");
-    assert_eq!(missing.public_error().code, "ReplayArtifactInvalid");
-    let padded = serde_json::to_vec(&json!({
-        "mode": "compare_current",
-        "portable_export_ref": replay_export_ref(b"{}"),
-        "portable_export_base64url": "e30=",
-    }))
-    .expect("padded replay JSON");
-    let padded = decode_replay_body(&padded).expect_err("padded replay artifact");
-    assert_eq!(padded.public_error().code, "ReplayArtifactInvalid");
+    headers.remove(CONTENT_TYPE);
+    assert_eq!(
+        replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty())
+            .expect_err("missing content type")
+            .public_error()
+            .code,
+        "ReplayArtifactInvalid"
+    );
+
+    let mut headers = replay_stream_headers(bytes);
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
+
+    let mut headers = replay_stream_headers(bytes);
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(
+            "application/vnd.mfm.run-export-stream.v1+json-seq; charset=utf-8",
+        ),
+    );
+    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
+
+    let mut headers = replay_stream_headers(bytes);
+    headers.append(
+        CONTENT_TYPE,
+        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE),
+    );
+    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
+
+    let mut headers = replay_stream_headers(bytes);
+    headers.append(
+        MFM_CONTENT_DIGEST,
+        HeaderValue::from_static(
+            "content:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+    );
+    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
 }
 
 #[test]
@@ -179,7 +232,6 @@ fn page_query_rejects_unknown_repeated_and_out_of_range_values() {
 
 #[tokio::test]
 async fn request_body_limit_returns_a_reviewed_public_error() {
-    assert_eq!(MAX_REPLAY_REQUEST_BODY_BYTES, 22_373_718);
     let error = request_body(
         Body::from(vec![b'x'; MAX_REQUEST_BODY_BYTES + 1]),
         MAX_REQUEST_BODY_BYTES,
@@ -188,20 +240,6 @@ async fn request_body_limit_returns_a_reviewed_public_error() {
     .expect_err("oversized body");
     assert_eq!(error.status(), StatusCode::BAD_REQUEST);
     assert_eq!(error.public_error().code, "RequestBodyTooLarge");
-
-    let error = request_body_with_limit(
-        Body::from(vec![b'x'; 5]),
-        4,
-        PublicError::replay_artifact_too_large,
-    )
-    .await
-    .expect_err("oversized replay body");
-    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(error.public_error().code, "ReplayArtifactTooLarge");
-    assert_eq!(
-        error.public_error().message,
-        "The replay artifact exceeds the allowed size."
-    );
 }
 
 #[tokio::test]
@@ -380,13 +418,12 @@ async fn real_router_rejects_head_on_every_path_without_policy_or_backend_work()
 async fn bearer_authentication_precedes_replay_body_reads() {
     let policy = RecordingPolicy::allowing('1');
     let router = test_router(policy.clone(), TestApplicationMode::Sentinel);
-    let oversized = vec![b'x'; MAX_REPLAY_REQUEST_BODY_BYTES + 1];
     let response = router
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/v1/runs/{RUN_ID}/replay"),
-            Body::from(oversized),
+            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
+            panic_body(),
             None,
         ))
         .await
@@ -402,8 +439,8 @@ async fn bearer_authentication_precedes_replay_body_reads() {
     let response = router
         .oneshot(request(
             Method::POST,
-            &format!("/v1/runs/{RUN_ID}/replay"),
-            Body::from("{"),
+            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
+            panic_body(),
             Some("Basic opaque"),
         ))
         .await
@@ -442,6 +479,29 @@ async fn exact_grant_denial_is_forbidden_before_backend_access() {
     .await;
     assert_eq!(policy.calls().len(), 1);
     assert_eq!(policy.calls()[0].0, RunAccessGrant::ReadPublic);
+}
+
+#[tokio::test]
+async fn replay_grant_denial_does_not_poll_a_valid_raw_stream() {
+    let policy = RecordingPolicy::denying();
+    let response = test_router(policy.clone(), TestApplicationMode::Sentinel)
+        .oneshot(replay_stream_http_request(
+            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
+            panic_body(),
+            b"unpolled",
+            Some("Bearer opaque"),
+        ))
+        .await
+        .expect("grant denial response");
+    assert_public_error(
+        response,
+        StatusCode::FORBIDDEN,
+        "GrantDenied",
+        "The credential does not grant this operation",
+    )
+    .await;
+    assert_eq!(policy.calls().len(), 1);
+    assert_eq!(policy.calls()[0].0, RunAccessGrant::Replay);
 }
 
 #[tokio::test]
@@ -487,8 +547,8 @@ async fn replay_reauthorizes_export_only_for_non_verify_artifacts() {
     )
     .oneshot(request(
         Method::POST,
-        &format!("/v1/runs/{RUN_ID}/replay"),
-        Body::from(r#"{"mode":"verify"}"#),
+        &format!("/v1/runs/{RUN_ID}/replay?mode=verify"),
+        Body::empty(),
         Some("Bearer opaque"),
     ))
     .await
@@ -503,22 +563,16 @@ async fn replay_reauthorizes_export_only_for_non_verify_artifacts() {
         vec![RunAccessGrant::Replay]
     );
 
-    let artifact = b"{}";
+    let artifact = b"\x1e{\"kind\":\"end\"}\n";
     let non_verify_policy = RecordingPolicy::allowing('1');
-    let body = serde_json::to_vec(&json!({
-        "mode": "compare_current",
-        "portable_export_ref": replay_export_ref(artifact),
-        "portable_export_base64url": "e30",
-    }))
-    .expect("non-verify request");
     let response = test_router(
         non_verify_policy.clone(),
         TestApplicationMode::Replay(replay_response()),
     )
-    .oneshot(request(
-        Method::POST,
-        &format!("/v1/runs/{RUN_ID}/replay"),
-        Body::from(body),
+    .oneshot(replay_stream_http_request(
+        &format!("/v1/runs/{RUN_ID}/replay?mode=compare_current"),
+        Body::from(artifact.as_slice()),
+        artifact,
         Some("Bearer opaque"),
     ))
     .await
@@ -536,14 +590,108 @@ async fn replay_reauthorizes_export_only_for_non_verify_artifacts() {
 }
 
 #[tokio::test]
+async fn replay_raw_stream_has_no_old_rest_total_body_cap() {
+    let bytes = vec![b'x'; 16_777_216 + 1];
+    let policy = RecordingPolicy::allowing('1');
+    let response = test_router(policy, TestApplicationMode::Replay(replay_response()))
+        .oneshot(replay_stream_http_request(
+            &format!("/v1/runs/{RUN_ID}/replay?mode=compare_current"),
+            Body::from(bytes.clone()),
+            &bytes,
+            Some("Bearer opaque"),
+        ))
+        .await
+        .expect("large raw replay response");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn export_response_is_lazy_raw_stream_with_exact_headers() {
+    let bytes = b"\x1e{\"kind\":\"end\"}\n";
+    let content_ref = replay_export_ref(bytes);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let policy = RecordingPolicy::allowing('1');
+    let application = application_with_export_for_test(
+        policy.clone(),
+        content_ref.clone(),
+        Box::pin(ExportProbe {
+            bytes,
+            offset: 0,
+            polls: Arc::clone(&polls),
+            fail: false,
+        }),
+    );
+    let response = make_app(AppState::new(application))
+        .oneshot(request(
+            Method::POST,
+            &format!("/v1/runs/{RUN_ID}/exports"),
+            Body::from(r#"{"kind":"semantic"}"#),
+            Some("Bearer opaque"),
+        ))
+        .await
+        .expect("export response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE),
+        Some(&HeaderValue::from_static(
+            mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE
+        ))
+    );
+    assert_eq!(
+        response.headers().get(MFM_CONTENT_DIGEST),
+        Some(&HeaderValue::from_str(content_ref.content_digest().as_str()).expect("digest header"))
+    );
+    let streamed = to_bytes(response.into_body(), 1_024)
+        .await
+        .expect("streamed body");
+    assert_eq!(streamed.as_ref(), bytes);
+    assert!(polls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        policy
+            .calls()
+            .iter()
+            .map(|(grant, _)| *grant)
+            .collect::<Vec<_>>(),
+        vec![RunAccessGrant::Export]
+    );
+}
+
+#[tokio::test]
+async fn export_body_reader_errors_hide_private_diagnostics() {
+    let content_ref = replay_export_ref(b"unavailable");
+    let policy = RecordingPolicy::allowing('1');
+    let application = application_with_export_for_test(
+        policy,
+        content_ref,
+        Box::pin(ExportProbe {
+            bytes: b"",
+            offset: 0,
+            polls: Arc::new(AtomicUsize::new(0)),
+            fail: true,
+        }),
+    );
+    let response = make_app(AppState::new(application))
+        .oneshot(request(
+            Method::POST,
+            &format!("/v1/runs/{RUN_ID}/exports"),
+            Body::from(r#"{"kind":"semantic"}"#),
+            Some("Bearer opaque"),
+        ))
+        .await
+        .expect("export response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let error = to_bytes(response.into_body(), 1_024)
+        .await
+        .expect_err("reader failure");
+    let rendered = error.to_string();
+    assert!(!rendered.contains("private export-reader sentinel"));
+    assert!(rendered.contains("export stream unavailable"));
+}
+
+#[tokio::test]
 async fn invalid_replay_artifacts_fail_before_policy_or_backend_replay() {
     let policy = RecordingPolicy::allowing('1');
-    let body = serde_json::to_vec(&json!({
-        "mode": "reproduce",
-        "portable_export_ref": replay_export_ref(b"{}"),
-        "portable_export_base64url": "e30=",
-    }))
-    .expect("invalid artifact request");
     let router = test_router(
         policy.clone(),
         TestApplicationMode::Replay(replay_response()),
@@ -552,8 +700,8 @@ async fn invalid_replay_artifacts_fail_before_policy_or_backend_replay() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/v1/runs/{RUN_ID}/replay"),
-            Body::from(body),
+            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
+            panic_body(),
             Some("Bearer opaque"),
         ))
         .await
@@ -567,20 +715,29 @@ async fn invalid_replay_artifacts_fail_before_policy_or_backend_replay() {
     .await;
     assert!(policy.calls().is_empty());
 
+    let mut invalid_digest = request(
+        Method::POST,
+        &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
+        panic_body(),
+        Some("Bearer opaque"),
+    );
+    invalid_digest.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE),
+    );
+    invalid_digest.headers_mut().insert(
+        MFM_CONTENT_DIGEST,
+        HeaderValue::from_static("not-a-content-digest"),
+    );
     let response = router
-        .oneshot(request(
-            Method::POST,
-            &format!("/v1/runs/{RUN_ID}/replay"),
-            Body::from(vec![b'x'; MAX_REPLAY_REQUEST_BODY_BYTES + 1]),
-            Some("Bearer opaque"),
-        ))
+        .oneshot(invalid_digest)
         .await
-        .expect("oversized artifact response");
+        .expect("invalid digest response");
     assert_public_error(
         response,
         StatusCode::BAD_REQUEST,
-        "ReplayArtifactTooLarge",
-        "The replay artifact exceeds the allowed size.",
+        "ReplayArtifactInvalid",
+        "The replay artifact is invalid.",
     )
     .await;
     assert!(policy.calls().is_empty());
@@ -638,6 +795,45 @@ fn request(method: Method, uri: &str, body: Body, authorization: Option<&str>) -
     builder.body(body).expect("request")
 }
 
+fn replay_stream_http_request(
+    uri: &str,
+    body: Body,
+    digest_bytes: &[u8],
+    authorization: Option<&str>,
+) -> Request<Body> {
+    let mut request = request(Method::POST, uri, body, authorization);
+    *request.headers_mut() = replay_stream_headers(digest_bytes);
+    if let Some(authorization) = authorization {
+        request.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(authorization).expect("authorization header"),
+        );
+    }
+    request
+}
+
+fn replay_stream_headers(bytes: &[u8]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE),
+    );
+    headers.insert(
+        MFM_CONTENT_DIGEST,
+        HeaderValue::from_str(replay_export_ref(bytes).content_digest().as_str())
+            .expect("content digest header"),
+    );
+    headers
+}
+
+fn panic_body() -> Body {
+    Body::from_stream(futures_util::stream::once(async {
+        panic!("the replay body must remain unpolled");
+        #[allow(unreachable_code)]
+        Ok::<axum::body::Bytes, std::io::Error>(axum::body::Bytes::new())
+    }))
+}
+
 async fn assert_public_error(response: Response, status: StatusCode, code: &str, message: &str) {
     assert_eq!(response.status(), status);
     let body = to_bytes(response.into_body(), 1_024)
@@ -665,11 +861,11 @@ fn replay_response() -> mfm_app::ReplayResponse {
 
 fn replay_export_ref(bytes: &[u8]) -> ContentRef {
     let contract =
-        mfm_canonical::RecoverabilityContractV1::embedded().expect("recoverability annex");
+        mfm_canonical::RecoverabilityContractV2::embedded().expect("recoverability annex");
     ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export.v1")
-            .expect("portable export schema")
+            .schema_id("mfm.portable-run-export-stream.v1")
+            .expect("portable export stream schema")
             .clone(),
         contract.raw_content_digest(bytes),
     )

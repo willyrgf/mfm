@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV2};
 use mfm_ids::{AppendRequestId, ContentRef, FieldPath, RunId, StableId};
 use mfm_journal::v1::{
     ConfigManifest, ContextManifest, CrossRunSourceManifest, CrossRunSourceManifestEntry,
@@ -312,7 +312,7 @@ fn validate_configured_value(
         return Err(StoreError::AdmissionAuthorityMismatch);
     }
     let fields = configured.value_ref().fields()?;
-    RecoverabilityContractV1::embedded()?
+    RecoverabilityContractV2::embedded()?
         .strict_decode_schema_id(&fields.schema_id, configured.bytes())?;
     Ok(())
 }
@@ -327,7 +327,7 @@ fn validate_input(
             message: "input contract differs from the entry-point input schema",
         });
     }
-    RecoverabilityContractV1::embedded()?.strict_decode_schema_id(
+    RecoverabilityContractV2::embedded()?.strict_decode_schema_id(
         input.value_contract().schema_id(),
         input.canonical().as_bytes(),
     )?;
@@ -465,7 +465,7 @@ fn resolve_manifest_roots(
                 let selected =
                     super::frame_preparation::select_canonical(member.bytes(), nested.as_ref())
                         .ok()?;
-                RecoverabilityContractV1::embedded()
+                RecoverabilityContractV2::embedded()
                     .ok()?
                     .strict_decode_schema_id(expected.schema_id(), selected.as_bytes())
                     .ok()?;
@@ -666,7 +666,7 @@ fn derive_run_id(
         ),
     ])
     .map_err(|_| StoreError::JournalContract)?;
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let logical = contract.encode("mfm.admission-logical-key-preimage.v1", &value)?;
     contract.derive_admission_logical_key(&logical)?;
     let run = contract.encode("mfm.run-id-preimage.v1", &value)?;

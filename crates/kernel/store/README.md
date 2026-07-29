@@ -1,6 +1,6 @@
 # mfm-store
 
-`mfm-store` owns the recoverability-v1 run-journal boundary.
+`mfm-store` owns the recoverability-v2 run-journal boundary.
 
 Its public surface has one current model:
 

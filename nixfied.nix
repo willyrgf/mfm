@@ -406,7 +406,7 @@ in
       env = postgresSqlxEnv;
       requires = [ "postgres" ];
     };
-    recoverability-postgres-v1 = cargoLeaf {
+    recoverability-postgres-v2 = cargoLeaf {
       run = [
         "cargo"
         "test"
@@ -491,8 +491,8 @@ in
       steps = {
         executor-postgres-qualification.task = "executor-postgres-qualification";
         postgres-sqlx-check.task = "postgres-sqlx-check";
-        recoverability-postgres-v1 = {
-          task = "recoverability-postgres-v1";
+        recoverability-postgres-v2 = {
+          task = "recoverability-postgres-v2";
           dependsOn = [ "postgres-sqlx-check" ];
         };
       };

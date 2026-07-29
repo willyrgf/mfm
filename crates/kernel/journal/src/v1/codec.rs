@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use mfm_canonical::{
-    CanonicalValue, RecoverabilityContractV1, RecoverabilityError, ValidatedCanonicalValueV1,
+    CanonicalValue, RecoverabilityContractV2, RecoverabilityError, ValidatedCanonicalValueV2,
 };
 use mfm_ids::{
     AppendRequestId, ArtifactId, CheckedStringError, ContentDigest, ContentRef, EffectKey,
@@ -20,7 +20,7 @@ macro_rules! define_schema_value {
             $(#[$meta])*
             #[derive(Clone, PartialEq, Eq)]
             $visibility struct $name {
-                validated: mfm_canonical::ValidatedCanonicalValueV1,
+                validated: mfm_canonical::ValidatedCanonicalValueV2,
             }
 
             impl $name {
@@ -64,7 +64,7 @@ macro_rules! define_schema_value {
             impl $crate::v1::codec::sealed::Sealed for $name {}
 
             impl $crate::v1::PersistedJournalValue for $name {
-                fn validated(&self) -> &mfm_canonical::ValidatedCanonicalValueV1 {
+                fn validated(&self) -> &mfm_canonical::ValidatedCanonicalValueV2 {
                     &self.validated
                 }
             }
@@ -73,7 +73,7 @@ macro_rules! define_schema_value {
                 const CONTRACT: &'static str = $contract;
 
                 fn from_validated(
-                    validated: mfm_canonical::ValidatedCanonicalValueV1,
+                    validated: mfm_canonical::ValidatedCanonicalValueV2,
                 ) -> Self {
                     Self { validated }
                 }
@@ -167,7 +167,7 @@ pub(crate) mod sealed {
 /// come only from the embedded recoverability annex.
 pub trait PersistedJournalValue: sealed::Sealed {
     /// Returns the annex-validated value that is the sole persisted authority.
-    fn validated(&self) -> &ValidatedCanonicalValueV1;
+    fn validated(&self) -> &ValidatedCanonicalValueV2;
 
     /// Returns the registered annex contract selected during validation.
     fn schema_contract(&self) -> &str {
@@ -201,11 +201,11 @@ pub trait PersistedJournalValue: sealed::Sealed {
 pub(crate) trait SchemaValue: PersistedJournalValue + Sized {
     const CONTRACT: &'static str;
 
-    fn from_validated(validated: ValidatedCanonicalValueV1) -> Self;
+    fn from_validated(validated: ValidatedCanonicalValueV2) -> Self;
 }
 
-pub(crate) fn contract() -> Result<&'static RecoverabilityContractV1> {
-    RecoverabilityContractV1::embedded().map_err(Into::into)
+pub(crate) fn contract() -> Result<&'static RecoverabilityContractV2> {
+    RecoverabilityContractV2::embedded().map_err(Into::into)
 }
 
 pub(crate) fn decode<T: SchemaValue>(bytes: &[u8]) -> Result<T> {

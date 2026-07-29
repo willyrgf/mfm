@@ -6,7 +6,7 @@ use mfm_ids::{
 
 use crate::*;
 
-const CORPUS: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/corpus.json");
+const CORPUS: &[u8] = include_bytes!("../../../../contracts/recoverability/v2/corpus.json");
 
 fn digest(seed: u64) -> DigestBytes {
     let mut bytes = [0_u8; 32];

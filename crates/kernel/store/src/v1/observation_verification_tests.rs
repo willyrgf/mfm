@@ -1,5 +1,5 @@
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1,
+    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
 };
 use mfm_capabilities::{
     BoundaryStage, CoarseSizeClass, FailureClass, SafeFailureClassifierDescriptor,
@@ -141,7 +141,7 @@ fn retained_contract_with_evidence(
 fn content_ref(contract: &RetainedValueContract, bytes: &[u8]) -> ContentRef {
     ContentRef::new(
         contract.schema_id().clone(),
-        RecoverabilityContractV1::embedded()
+        RecoverabilityContractV2::embedded()
             .expect("recoverability contract")
             .raw_content_digest(bytes),
     )
@@ -164,7 +164,7 @@ fn executor_support_member(
     path: &str,
     semantic_name: &str,
     role: &str,
-    validated: &mfm_canonical::ValidatedCanonicalValueV1,
+    validated: &mfm_canonical::ValidatedCanonicalValueV2,
 ) -> (QualifiedSupportMember, ContentRef) {
     let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(validated.as_bytes())
         .expect("executor support bytes");
@@ -183,7 +183,7 @@ struct EffectFixtureContracts {
 }
 
 fn effect_fixture_contracts(tenant_scope_id: &mfm_ids::TenantScopeId) -> EffectFixtureContracts {
-    let contract = RecoverabilityContractV1::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
     let primitive_schema = contract
         .schema_id("mfm.primitive-canonical_value.v1")
         .expect("primitive schema")
@@ -402,7 +402,7 @@ fn diagnostic_identity() -> SchemaIdentity {
 }
 
 fn read_fixture_contracts(with_diagnostic: bool) -> ReadFixtureContracts {
-    let primitive_schema = RecoverabilityContractV1::embedded()
+    let primitive_schema = RecoverabilityContractV2::embedded()
         .expect("recoverability contract")
         .schema_id("mfm.primitive-canonical_value.v1")
         .expect("primitive schema")
@@ -523,7 +523,7 @@ fn read_fixture_contracts(with_diagnostic: bool) -> ReadFixtureContracts {
 }
 
 fn fact_fixture_contracts() -> FactFixtureContracts {
-    let contract = RecoverabilityContractV1::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
     let primitive_schema = contract
         .schema_id("mfm.primitive-canonical_value.v1")
         .expect("primitive schema")
@@ -826,7 +826,7 @@ async fn authorize_effect(discriminator: u8) -> AuthorizedEffect {
         .fields()
         .expect("configured binding")
         .value_ref;
-    let payload_ref = RecoverabilityContractV1::embedded()
+    let payload_ref = RecoverabilityContractV2::embedded()
         .expect("recoverability contract")
         .strict_decode("mfm.value-ref.v1", configured_ref.as_bytes())
         .expect("configured value ref");
@@ -1123,7 +1123,7 @@ async fn verified_terminal_effect(
         fixture.binding.clone(),
     )
     .expect("executor ledger");
-    let reviewed_operation = RecoverabilityContractV1::embedded()
+    let reviewed_operation = RecoverabilityContractV2::embedded()
         .expect("recoverability contract")
         .encode(
             "mfm.primitive-stable_id.v1",
@@ -3129,7 +3129,7 @@ async fn effect_terminal_seals_and_replays_exact_identity_and_complete_closure()
     let extra_bytes = canonical(
         r#"{"destination_key":"mfm.store-test/extra","kind":"enqueued","queue_position":"2"}"#,
     );
-    let extra_validated = RecoverabilityContractV1::embedded()
+    let extra_validated = RecoverabilityContractV2::embedded()
         .expect("recoverability contract")
         .strict_decode(
             "mfm.executor-reference-queue-result.v1",
@@ -3371,7 +3371,7 @@ async fn effect_safe_failure_requires_the_exact_contract_and_zero_produced_value
         .recorded_run_for_observation_test(&fixture.run_id)
         .expect("recorded safe-failure effect");
     let diagnostic_contract = retained_contract(
-        RecoverabilityContractV1::embedded()
+        RecoverabilityContractV2::embedded()
             .expect("recoverability contract")
             .schema_id("mfm.primitive-canonical_value.v1")
             .expect("diagnostic schema")

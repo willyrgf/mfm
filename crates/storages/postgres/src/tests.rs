@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1,
+    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
 };
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, FieldPath, GenesisDigest,
@@ -853,7 +853,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
     let output = PlainCanonicalJsonBytes::from_json_str(r#"{"value":43}"#)
         .expect("canonical genuine output");
     let output_schema_id = output_contract.schema_id().clone();
-    let output_digest = RecoverabilityContractV1::embedded()
+    let output_digest = RecoverabilityContractV2::embedded()
         .expect("embedded recoverability contract")
         .raw_content_digest(output.as_bytes());
     let successor_append_request_id =
@@ -2260,7 +2260,7 @@ fn semantic_type(label: &str) -> SemanticTypeId {
 
 fn retained_contract(label: &str) -> RetainedValueContract {
     let recoverability =
-        RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
     let evidence = recoverability
         .encode(
             "mfm.primitive-stable_id.v1",
@@ -2302,7 +2302,7 @@ fn derive_value_ref(
     bytes: &[u8],
 ) -> ValueRef {
     let recoverability =
-        RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
     let content_digest = recoverability.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         contract.schema_id(),
@@ -2341,7 +2341,7 @@ fn derive_value_ref(
 
 fn admission_reference() -> ContentRef {
     let recoverability =
-        RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
     let value = recoverability
         .encode(
             "mfm.primitive-stable_id.v1",

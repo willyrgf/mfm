@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use mfm_app::{PortableExportInput, PublicError};
+use mfm_app::{ExportStreamInput, PublicError};
 use mfm_ids::ContentRef;
 use tokio::io::AsyncReadExt;
 
@@ -10,7 +10,7 @@ const MAX_PORTABLE_EXPORT_REF_BYTES: usize = 4_096;
 pub(crate) async fn read_portable_export_input(
     export_path: &Path,
     content_ref_path: &Path,
-) -> Result<PortableExportInput, PublicError> {
+) -> Result<ExportStreamInput, PublicError> {
     let content_ref_bytes = read_bounded(content_ref_path, MAX_PORTABLE_EXPORT_REF_BYTES).await?;
     let content_ref: ContentRef =
         serde_json::from_slice(&content_ref_bytes).map_err(|_| invalid_input())?;
@@ -19,8 +19,10 @@ pub(crate) async fn read_portable_export_input(
         return Err(invalid_input());
     }
 
-    let export_bytes = read_bounded(export_path, mfm_app::MAX_REPLAY_PORTABLE_EXPORT_BYTES).await?;
-    PortableExportInput::from_bytes(content_ref, export_bytes)
+    let export = tokio::fs::File::open(export_path)
+        .await
+        .map_err(|_| invalid_input())?;
+    ExportStreamInput::from_reader(content_ref, Box::pin(export))
 }
 
 async fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, PublicError> {
@@ -63,10 +65,10 @@ mod tests {
             .expect("portable export");
         let content_ref = ContentRef::new(
             SchemaId::parse(
-                "schema:mfm.portable-run-export:1:sha256-jcs-v1:\
-                 3a270e7b87eab6cc696813f2e947aed6503f3744be51709059bee23f4934c82d",
+                "schema:mfm.portable-run-export-stream:1:sha256-jcs-v1:\
+                 4fa9b2e8e090997c0ee69c70812059d2f9ea019391c02c86d7576037dc668d35",
             )
-            .expect("portable schema"),
+            .expect("portable stream schema"),
             ContentDigest::parse(
                 "content:sha256-v1:\
                  120b15311bb4011d6d7dd26a9311d2abfd12b8be74275d2031bf0f49c44304ad",
@@ -83,9 +85,8 @@ mod tests {
             .await
             .expect("portable input");
         assert_eq!(input.content_ref(), &content_ref);
-        assert_eq!(input.bytes(), bytes);
 
-        let mut noncanonical = canonical;
+        let mut noncanonical = canonical.clone();
         noncanonical.push(b'\n');
         tokio::fs::write(&ref_path, noncanonical)
             .await
@@ -118,6 +119,26 @@ mod tests {
             assert_eq!(error.code, "ReplayArtifactInvalid");
         }
 
+        let legacy_ref = ContentRef::new(
+            SchemaId::parse(
+                "schema:mfm.portable-run-export:1:sha256-jcs-v1:\
+                 3a270e7b87eab6cc696813f2e947aed6503f3744be51709059bee23f4934c82d",
+            )
+            .expect("legacy schema"),
+            content_ref.content_digest().clone(),
+        )
+        .expect("legacy content ref");
+        tokio::fs::write(
+            &ref_path,
+            serde_json::to_vec(&legacy_ref).expect("legacy sidecar"),
+        )
+        .await
+        .expect("legacy sidecar");
+        let error = read_portable_export_input(&export_path, &ref_path)
+            .await
+            .expect_err("legacy sidecar");
+        assert_eq!(error.code, "ReplayArtifactInvalid");
+
         tokio::fs::write(&ref_path, vec![b'x'; MAX_PORTABLE_EXPORT_REF_BYTES + 1])
             .await
             .expect("oversized ref sidecar");
@@ -125,6 +146,16 @@ mod tests {
             .await
             .expect_err("oversized ref sidecar");
         assert_eq!(error.code, "ReplayArtifactTooLarge");
+
+        tokio::fs::write(&ref_path, &canonical)
+            .await
+            .expect("restored sidecar");
+        tokio::fs::write(&export_path, vec![b'x'; 16_777_216 + 1])
+            .await
+            .expect("large export");
+        read_portable_export_input(&export_path, &ref_path)
+            .await
+            .expect("export input has no old total cap");
     }
 
     #[tokio::test]

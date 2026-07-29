@@ -6,7 +6,7 @@ use mfm_ids::{FactQueryDigest, JournalRecordHash};
 use mfm_journal::v1::*;
 use serde_json::Value;
 
-const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/corpus.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v2/corpus.json");
 
 #[derive(Debug)]
 struct Decoded {
@@ -44,7 +44,7 @@ fn decode_retained_value_contract(bytes: &[u8]) -> Result<Decoded> {
     let canonical = validated.as_bytes().to_vec();
     let schema_id = validated.schema_id().as_str().to_owned();
     let content_ref =
-        mfm_canonical::RecoverabilityContractV1::embedded()?.content_ref(&validated)?;
+        mfm_canonical::RecoverabilityContractV2::embedded()?.content_ref(&validated)?;
     assert_eq!(content_ref.schema_id().as_str(), schema_id);
 
     let round_trip = RetainedValueContract::from_validated(validated)?;

@@ -1,6 +1,6 @@
 # MFM REST API
 
-`mfm-rest-api` is the HTTP adapter for the recoverability-v1 `mfm_app::Application` facade. The
+`mfm-rest-api` is the HTTP adapter for the recoverability-v2 `mfm_app::Application` facade. The
 router owns request decoding, bearer extraction, status mapping, and response envelopes only.
 Storage, authentication policy, tenant derivation, run authority, planning, runtime, and replay
 remain behind the application facade.
@@ -83,36 +83,33 @@ Admission accepts the exact annex-validated request:
 ```
 
 `newly_admitted`, `attached`, and `outcome_unknown` map to HTTP `201`, `200`, and `202`
-respectively. Drive has an empty body. Replay accepts the exact tagged union:
+respectively. Drive has an empty body. Replay requires exactly one `mode` query parameter:
 
-```json
-{"mode":"verify"}
+```text
+POST /v1/runs/{run_id}/replay?mode=verify
+POST /v1/runs/{run_id}/replay?mode=reproduce
+POST /v1/runs/{run_id}/replay?mode=compare_current
 ```
 
-or, for `reproduce` and `compare_current`:
+`verify` requires an empty body. `reproduce` and `compare_current` require the raw portable stream
+as the request body and exactly one value for each header:
 
-```json
-{
-  "mode": "reproduce",
-  "portable_export_ref": {
-    "content_digest": "content:sha256-v1:...",
-    "schema_id": "schema:mfm.portable-run-export:1:sha256-jcs-v1:..."
-  },
-  "portable_export_base64url": "..."
-}
+```http
+Content-Type: application/vnd.mfm.run-export-stream.v1+json-seq
+Mfm-Content-Digest: content:sha256-v1:<64 lowercase hex>
 ```
 
-The export is canonical unpadded base64url, at most 22,369,622 encoded characters and 16,777,216
-decoded bytes. Both export fields are forbidden for verify and required for either non-verify
-mode. Non-verify replay obtains a separate same-run semantic `Export` decision and rejects a
-wrong ref, digest, run/store/tenant binding, semantic coordinate, or closure before any resolver.
-Replay never generates or fetches a replacement export.
+The content type must match byte-for-byte and cannot carry parameters. The adapter derives the
+current stream schema identity, constructs an affine body reader without polling it, and passes
+that reader and external digest to the app. Non-verify replay obtains a separate same-run
+`Export` decision before polling the body and rejects wrong framing, digest,
+run/store/tenant binding, semantic coordinate, or closure before any resolver. Replay never
+generates or fetches a replacement export.
 
-Malformed, noncanonical, missing, forbidden, or binding-mismatched caller artifacts return
-`400 ReplayArtifactInvalid` with `The replay artifact is invalid.` Encoded, decoded, or complete
-replay-body size violations return `400 ReplayArtifactTooLarge` with
-`The replay artifact exceeds the allowed size.` Authenticated store/history integrity failures
-remain `500 ReplayVerificationFailed`.
+Malformed, noncanonical, missing, forbidden, or binding-mismatched caller streams return
+`400 ReplayArtifactInvalid` with `The replay artifact is invalid.` Stream-reader I/O failures
+return only the fixed `500 ExportStreamIoFailed` contract. Authenticated store/history integrity
+failures remain `500 ReplayVerificationFailed`.
 Candidate execution and comparison-integrity failures use that same 500 response. An unavailable
 sealed current candidate returns `503 RuntimeCatalogUnavailable` with
 `The exact admitted runtime catalog is unavailable`; a missing exact historical executable remains
@@ -121,9 +118,10 @@ a successful `reproduced` response whose result is `unavailable`.
 Trace and audit use only `cursor` and `limit` query parameters, with a default of 100 and maximum
 of 500.
 Protected request bodies are read only after bearer extraction and reject duplicate JSON fields.
-Ordinary request bodies are bounded to 16 MiB; the complete replay HTTP envelope is bounded to
-22,373,718 bytes, enough for the exact maximum base64url export and its fixed request fields. The
-protected `GET` routes and `drive` reject non-empty bodies.
+Ordinary JSON request bodies are bounded to 16 MiB. A non-verify replay body has no total-byte
+validity ceiling: stream frames and decoded chunks are individually bounded and verification
+advances in bounded cooperative steps. The protected `GET` routes, `drive`, and verify replay
+reject non-empty bodies.
 Transition traces render an authorized-but-absent cross-run source with the same redacted lineage
 as a source denied by grant or tenant. A fresh source `AuthenticationRequired` decision fails the
 page with `401`.
@@ -136,8 +134,10 @@ when no returned ensure is verified at the page head. It is presentation-only; t
 persists only `delivery_audit_ref`.
 
 Export accepts `{"kind":"semantic"}` or `{"kind":"audit"}`. It is the only non-envelope success:
-the response body is the exact canonical portable-export bytes, `Content-Type` is
-`application/vnd.mfm.run-export.v1+json`, and `Mfm-Content-Digest` is the raw-byte content digest.
+the response body lazily streams the exact framed portable-export bytes, `Content-Type` is
+`application/vnd.mfm.run-export-stream.v1+json-seq`, and `Mfm-Content-Digest` is SHA-256 over every
+record separator, canonical frame byte, and line feed. A body-reader failure exposes only the
+fixed `export stream unavailable` body error, never a private path or backend diagnostic.
 
 ## Deployment
 
@@ -151,4 +151,4 @@ policy, run-store writer fence, exact wallet deployment, and independent executo
 writer-generation fence, wraps it in `AppState::new`, and passes that state to `make_app`.
 
 The frozen application and wire contract is
-[`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md).
+[`docs/recoverability-app-surface-v2.md`](../../docs/recoverability-app-surface-v2.md).

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use mfm_canonical::{
-    CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1,
-    ReferenceTerminalKindV1, ValidatedCanonicalValueV1,
+    CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
+    ReferenceTerminalKindV2, ValidatedCanonicalValueV2,
 };
 use mfm_ids::{ContentRef, FieldPath, RunId, SemanticDigest, TenantScopeId};
 use mfm_journal::v1::{
@@ -196,7 +196,7 @@ pub struct VerifiedTransitionTrace {
 
 impl VerifiedTransitionTrace {
     pub(super) fn new(canonical_value: CanonicalValue) -> Result<Self> {
-        RecoverabilityContractV1::embedded()?
+        RecoverabilityContractV2::embedded()?
             .encode(TRANSITION_TRACE_CONTRACT, &canonical_value)?;
         Ok(Self { canonical_value })
     }
@@ -570,7 +570,7 @@ fn canonical_expansion_path(path: &CanonicalExpansionPath) -> Result<CanonicalVa
     let json = serde_json::to_string(path).map_err(|_| StoreError::JournalContract)?;
     let canonical =
         PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| StoreError::JournalContract)?;
-    RecoverabilityContractV1::embedded()?
+    RecoverabilityContractV2::embedded()?
         .strict_decode("mfm.canonical-expansion-path.v1", canonical.as_bytes())?
         .canonical_value()
         .map_err(Into::into)
@@ -783,7 +783,7 @@ fn terminal_effect_evidence(
     }
 
     let authorization_ref = observed.audit().authorization_ref();
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let result_fields = result_ref.fields()?;
     if !matches!(
         result_fields.producer_binding.fields()?,
@@ -830,7 +830,7 @@ fn terminal_effect_evidence(
         let object = view.retained_value(&value_ref)?;
         let validated = contract.strict_decode_schema_id(&fields.schema_id, object.bytes())?;
         for edge in contract.reference_edges(&validated)? {
-            if edge.terminal_kind() == ReferenceTerminalKindV1::ValueRef {
+            if edge.terminal_kind() == ReferenceTerminalKindV2::ValueRef {
                 pending.push_back(ValueRef::strict_decode(edge.value().as_bytes())?);
             }
         }
@@ -969,7 +969,7 @@ fn retained_value(view: &VerifiedRunView, value_ref: &ValueRef) -> Result<Canoni
     let fields = value_ref.fields()?;
     let object = view.retained_value(value_ref)?;
     if fields.media_type == "application/json" {
-        let validated = RecoverabilityContractV1::embedded()?
+        let validated = RecoverabilityContractV2::embedded()?
             .strict_decode("mfm.primitive-canonical_value.v1", object.bytes())?;
         retained_value_from_validated(&fields, &validated)
     } else {
@@ -984,7 +984,7 @@ fn retained_value(view: &VerifiedRunView, value_ref: &ValueRef) -> Result<Canoni
 
 fn retained_value_from_validated(
     fields: &mfm_journal::v1::ValueRefFields,
-    validated: &ValidatedCanonicalValueV1,
+    validated: &ValidatedCanonicalValueV2,
 ) -> Result<CanonicalValue> {
     trace_retained_json(
         fields.schema_id.as_str(),

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_canonical::ValidatedCanonicalValueV1;
+use mfm_canonical::ValidatedCanonicalValueV2;
 use mfm_ids::{AttemptId, ContentRef, EffectKey, TenantScopeId};
 
 use crate::contract::{
@@ -970,7 +970,7 @@ where
         &self,
         identity: &EffectIdentity,
         resource_key_ref: &ResourceKeyRef,
-        resource_key_value: &ValidatedCanonicalValueV1,
+        resource_key_value: &ValidatedCanonicalValueV2,
         policy: &Policy,
         request: &Policy::Request,
         allocation_record: &ResourceLedgerRecord,

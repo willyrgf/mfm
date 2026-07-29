@@ -4,13 +4,13 @@ use mfm_ids::{JournalRecordHash, RunId};
 use mfm_journal::v1::{RecordRef, TransitionRef};
 use mfm_replay::v1::{ExactReproduction, ReplayError};
 
-#[path = "../../../../tests/support/recoverability_v1.rs"]
-mod recoverability_v1_support;
+#[path = "../../../../tests/support/recoverability_v2.rs"]
+mod recoverability_v2_support;
 
 #[test]
-fn replay_executes_the_complete_recoverability_v1_corpus() {
-    recoverability_v1_support::run_consumer("mfm-replay", |vector| {
-        recoverability_v1_support::assert_lower_layer_owner_vector(vector);
+fn replay_executes_the_complete_recoverability_v2_corpus() {
+    recoverability_v2_support::run_consumer("mfm-replay", |vector| {
+        recoverability_v2_support::assert_lower_layer_owner_vector(vector);
 
         let run_id = RunId::from_str(
             "run:sha256-jcs-v1:\

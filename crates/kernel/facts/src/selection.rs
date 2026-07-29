@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV1};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV2};
 use mfm_ids::{
     ContentRef, FactContentIdentityDigest, FactLogicalIdentityDigest, FactQueryDigest, SchemaId,
 };
@@ -16,7 +16,7 @@ const FACT_SELECTION_REQUEST_CONTRACT: &str = "mfm.fact-selection-request.v1";
 const REQUEST_VERSION: &str = "mfm.fact-selection-request.v1";
 const PRODUCER_SCOPE: &str = "other_runs_in_tenant_scope";
 
-/// Closed producer scope for recoverability-v1 fact selection.
+/// Closed producer scope for recoverability-v2 fact selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactProducerScope {
     /// Facts emitted by other runs admitted in the same tenant scope.
@@ -122,7 +122,7 @@ impl TryFrom<u32> for FactSelectionLimit {
 /// One annex-backed query within a reserved fact-selection request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSelectionQuery {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
     descriptor_ref: ContentRef,
     predicate: CanonicalFactPredicate,
     content_identity_filter: Option<FactContentIdentityDigest>,
@@ -176,7 +176,7 @@ impl FactSelectionQuery {
         Self::from_validated(codec::encode(FACT_SELECTION_QUERY_CONTRACT, &value)?)
     }
 
-    fn from_validated(validated: ValidatedCanonicalValueV1) -> Result<Self> {
+    fn from_validated(validated: ValidatedCanonicalValueV2) -> Result<Self> {
         let value = validated
             .canonical_value()
             .map_err(FactError::Recoverability)?;
@@ -293,7 +293,7 @@ impl FactSelectionQuery {
 /// One closed, state-authored request for other-run facts in the admitted tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSelectionRequest {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
     queries: Vec<FactSelectionQuery>,
 }
 
@@ -335,7 +335,7 @@ impl FactSelectionRequest {
         Self::from_validated(codec::encode(FACT_SELECTION_REQUEST_CONTRACT, &value)?)
     }
 
-    fn from_validated(validated: ValidatedCanonicalValueV1) -> Result<Self> {
+    fn from_validated(validated: ValidatedCanonicalValueV2) -> Result<Self> {
         let value = validated
             .canonical_value()
             .map_err(FactError::Recoverability)?;

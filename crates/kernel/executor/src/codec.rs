@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use mfm_canonical::{sha256_digest_bytes, ValidatedCanonicalValueV1};
+use mfm_canonical::{sha256_digest_bytes, ValidatedCanonicalValueV2};
 use mfm_ids::{
     AttemptId, ContentDigest, ContentRef, EffectKey, RequestDigest, SchemaId, TenantScopeId,
 };
@@ -61,7 +61,7 @@ impl Encoder {
         self.string(value.content_digest().as_str())
     }
 
-    pub(crate) fn validated(&mut self, value: &ValidatedCanonicalValueV1) -> Result<()> {
+    pub(crate) fn validated(&mut self, value: &ValidatedCanonicalValueV2) -> Result<()> {
         self.string(value.schema_contract())?;
         self.bytes(value.as_bytes())
     }
@@ -164,7 +164,7 @@ impl<'a> Decoder<'a> {
             .map_err(|_| ExecutorError::InvalidDurableSnapshot)
     }
 
-    pub(crate) fn validated(&mut self) -> Result<ValidatedCanonicalValueV1> {
+    pub(crate) fn validated(&mut self) -> Result<ValidatedCanonicalValueV2> {
         let schema_contract = self.string()?;
         let bytes = self.canonical_bytes()?;
         recoverability_contract()?

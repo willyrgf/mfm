@@ -1,6 +1,6 @@
 use mfm_canonical::{
-    CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV1, RecoverabilityErrorCode,
-    ReferenceTerminalKindV1,
+    CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2, RecoverabilityErrorCode,
+    ReferenceTerminalKindV2,
 };
 use mfm_ids::{
     AttemptId, ContentRef, DigestAlgorithm, DigestBytes, EffectKey, SchemaId, SemanticDigest,
@@ -8,21 +8,21 @@ use mfm_ids::{
 };
 use serde_json::Value;
 
-#[path = "../../../../tests/support/recoverability_v1.rs"]
-mod recoverability_v1_support;
+#[path = "../../../../tests/support/recoverability_v2.rs"]
+mod recoverability_v2_support;
 
-const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/corpus.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v2/corpus.json");
 
 #[test]
 fn canonical_executes_every_frozen_recoverability_vector() {
-    recoverability_v1_support::run_consumer("mfm-canonical", |vector| {
-        recoverability_v1_support::assert_lower_layer_owner_vector(vector);
+    recoverability_v2_support::run_consumer("mfm-canonical", |vector| {
+        recoverability_v2_support::assert_lower_layer_owner_vector(vector);
     });
 }
 
 #[test]
 fn typed_encoding_uses_the_same_frozen_schema_boundary() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let value = contract
         .encode(
             "mfm.primitive-stable_id.v1",
@@ -48,7 +48,7 @@ fn typed_encoding_uses_the_same_frozen_schema_boundary() {
 
 #[test]
 fn cross_run_source_redaction_derivation_uses_only_the_exact_registered_preimage() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let corpus = corpus();
     let vectors = array(&corpus, "positive_vectors")
         .iter()
@@ -91,7 +91,7 @@ fn cross_run_source_redaction_derivation_uses_only_the_exact_registered_preimage
 
 #[test]
 fn schema_identity_lookup_and_decode_require_the_exact_registered_identity() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let schema_id = contract
         .schema_id("mfm.content-ref.v1")
         .expect("content-ref schema")
@@ -132,7 +132,7 @@ fn schema_identity_lookup_and_decode_require_the_exact_registered_identity() {
 
 #[test]
 fn reference_projection_resolves_alias_nullable_union_and_terminal_stop() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
 
     let alias = contract
         .strict_decode(
@@ -146,7 +146,7 @@ fn reference_projection_resolves_alias_nullable_union_and_terminal_stop() {
     assert_eq!(alias_edges[0].declared_contract(), "mfm.content-ref.v1");
     assert_eq!(
         alias_edges[0].terminal_kind(),
-        ReferenceTerminalKindV1::ContentRef
+        ReferenceTerminalKindV2::ContentRef
     );
     assert_eq!(
         alias_edges[0].value().schema_contract(),
@@ -188,25 +188,25 @@ fn reference_projection_resolves_alias_nullable_union_and_terminal_stop() {
             (
                 "/capability_binding_ref",
                 "mfm.capability-binding-ref.v1",
-                ReferenceTerminalKindV1::ContentRef,
+                ReferenceTerminalKindV2::ContentRef,
                 "mfm.content-ref.v1",
             ),
             (
                 "/frozen_read_intent_ref",
                 "mfm.value-ref.v1",
-                ReferenceTerminalKindV1::ValueRef,
+                ReferenceTerminalKindV2::ValueRef,
                 "mfm.value-ref.v1",
             ),
             (
                 "/request_ref",
                 "mfm.value-ref.v1",
-                ReferenceTerminalKindV1::ValueRef,
+                ReferenceTerminalKindV2::ValueRef,
                 "mfm.value-ref.v1",
             ),
             (
                 "/scope/input_manifest_ref",
                 "mfm.input-manifest-ref.v1",
-                ReferenceTerminalKindV1::ValueRef,
+                ReferenceTerminalKindV2::ValueRef,
                 "mfm.value-ref.v1",
             ),
         ]
@@ -215,7 +215,7 @@ fn reference_projection_resolves_alias_nullable_union_and_terminal_stop() {
 
 #[test]
 fn reference_projection_stops_at_a_transport_only_root_value_ref() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let value_ref = contract
         .strict_decode("mfm.value-ref.v1", &schema_golden("mfm.value-ref.v1"))
         .expect("root value ref");
@@ -231,7 +231,7 @@ fn reference_projection_stops_at_a_transport_only_root_value_ref() {
 
 #[test]
 fn reference_projection_preserves_canonical_array_paths_and_repeated_values() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let content_ref: Value =
         serde_json::from_slice(&schema_golden("mfm.content-ref.v1")).expect("content ref");
     let value_ref: Value =
@@ -271,17 +271,17 @@ fn reference_projection_preserves_canonical_array_paths_and_repeated_values() {
         vec![
             (
                 "/ordered_dependency_refs/0",
-                ReferenceTerminalKindV1::ContentRef,
+                ReferenceTerminalKindV2::ContentRef,
             ),
             (
                 "/ordered_dependency_refs/1",
-                ReferenceTerminalKindV1::ContentRef,
+                ReferenceTerminalKindV2::ContentRef,
             ),
-            ("/ordered_object_refs/0", ReferenceTerminalKindV1::ValueRef,),
-            ("/ordered_object_refs/1", ReferenceTerminalKindV1::ValueRef,),
+            ("/ordered_object_refs/0", ReferenceTerminalKindV2::ValueRef,),
+            ("/ordered_object_refs/1", ReferenceTerminalKindV2::ValueRef,),
             (
                 "/root_source_manifest_ref",
-                ReferenceTerminalKindV1::ContentRef,
+                ReferenceTerminalKindV2::ContentRef,
             ),
         ]
     );
@@ -309,7 +309,7 @@ fn reference_projection_preserves_canonical_array_paths_and_repeated_values() {
 
 #[test]
 fn reference_projection_never_scans_native_keys_or_text() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let content_ref = contract
         .strict_decode("mfm.content-ref.v1", &schema_golden("mfm.content-ref.v1"))
         .expect("content-ref value")
@@ -354,7 +354,7 @@ fn ids_serde_uses_exact_closed_recoverability_shapes() {
         tenant
     );
 
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let corpus = corpus();
     let vector = array(&corpus, "positive_vectors")
         .iter()
@@ -417,11 +417,11 @@ fn hostile_candidate_and_value_text_never_enters_public_errors() {
     const CANARY: &str = "fixture_private_schema_field_value";
 
     let oversized = vec![b' '; 16_777_217];
-    let error = RecoverabilityContractV1::validate_annex_candidate(&oversized)
+    let error = RecoverabilityContractV2::validate_annex_candidate(&oversized)
         .expect_err("oversized annex candidate");
     assert_eq!(error.code(), RecoverabilityErrorCode::InvalidAnnex);
 
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     for error in [
         contract
             .strict_decode(CANARY, b"{}")
@@ -470,14 +470,14 @@ fn hostile_candidate_and_value_text_never_enters_public_errors() {
         .expect("object schema");
     descriptor["shape"]["fields"][0]["name"] = Value::String(CANARY.to_owned());
     let error =
-        RecoverabilityContractV1::validate_annex_candidate(&canonical_value_bytes(&candidate))
+        RecoverabilityContractV2::validate_annex_candidate(&canonical_value_bytes(&candidate))
             .expect_err("hostile annex field");
     assert!(!error.to_string().contains(CANARY));
 }
 
 #[test]
 fn candidate_annex_rejects_every_noncanonical_reference_cycle() {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded annex");
     let mut candidate: Value =
         serde_json::from_slice(contract.annex_bytes()).expect("annex candidate");
     let descriptor = candidate["schemas"]
@@ -488,7 +488,7 @@ fn candidate_annex_rejects_every_noncanonical_reference_cycle() {
         .expect("run-id schema");
     descriptor["shape"]["contract"] = Value::String("mfm.run-id.v1".to_owned());
     let error =
-        RecoverabilityContractV1::validate_annex_candidate(&canonical_value_bytes(&candidate))
+        RecoverabilityContractV2::validate_annex_candidate(&canonical_value_bytes(&candidate))
             .expect_err("unreviewed schema cycle");
     assert_eq!(error.code(), RecoverabilityErrorCode::InvalidAnnex);
 }

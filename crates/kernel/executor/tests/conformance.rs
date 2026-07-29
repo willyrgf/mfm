@@ -1,7 +1,7 @@
 use std::sync::{Arc, Barrier};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1,
+    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2,
 };
 use mfm_capabilities::SafeFailureOutcome;
 use mfm_executor::{
@@ -24,10 +24,10 @@ use mfm_ids::{
     DigestAlgorithm, NodeId, RunId, SemanticTypeId, StableId, StoreScopeId, TenantScopeId,
 };
 
-#[path = "../../../../tests/support/recoverability_v1.rs"]
-mod recoverability_v1;
+#[path = "../../../../tests/support/recoverability_v2.rs"]
+mod recoverability_v2;
 
-const CORPUS: &str = include_str!("../../../../contracts/recoverability/v1/corpus.json");
+const CORPUS: &str = include_str!("../../../../contracts/recoverability/v2/corpus.json");
 
 #[derive(Clone)]
 struct BindingFixture {
@@ -37,8 +37,8 @@ struct BindingFixture {
     destination_domain_ref: ContentRef,
 }
 
-fn contract() -> &'static RecoverabilityContractV1 {
-    RecoverabilityContractV1::embedded().expect("embedded contract")
+fn contract() -> &'static RecoverabilityContractV2 {
+    RecoverabilityContractV2::embedded().expect("embedded contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {
@@ -1505,35 +1505,35 @@ fn credentials_injected_below_target_entry_never_reach_retained_surfaces() {
 }
 
 #[test]
-fn all_570_frozen_vectors_are_consumed_by_the_shared_authority() {
-    recoverability_v1::run_consumer("mfm-executor", |owner| {
-        recoverability_v1::assert_lower_layer_owner_vector(owner);
+fn all_576_frozen_vectors_are_consumed_by_the_shared_authority() {
+    recoverability_v2::run_consumer("mfm-executor", |owner| {
+        recoverability_v2::assert_lower_layer_owner_vector(owner);
         assert_executor_owner_vector(owner);
     });
 }
 
-fn assert_executor_owner_vector(owner: recoverability_v1::OwnerVector<'_>) {
+fn assert_executor_owner_vector(owner: recoverability_v2::OwnerVector<'_>) {
     let vector = owner.vector();
     match owner {
-        recoverability_v1::OwnerVector::RelationalPositive(_) => match owner.kind() {
+        recoverability_v2::OwnerVector::RelationalPositive(_) => match owner.kind() {
             "frontier_order" => assert_eq!(
-                recoverability_v1::string(vector, "expected"),
+                recoverability_v2::string(vector, "expected"),
                 "ancestor_or_equal_does_not_regress_descendant_advances"
             ),
             "relational_acceptance" => assert_eq!(
-                recoverability_v1::string(vector, "expected"),
+                recoverability_v2::string(vector, "expected"),
                 "exact_returned_observation_matches"
             ),
             "request_identity" => assert_eq!(
-                recoverability_v1::string(vector, "expected"),
+                recoverability_v2::string(vector, "expected"),
                 "different_request_digest"
             ),
             "resource_refold" => assert_eq!(
-                recoverability_v1::string(vector, "expected"),
+                recoverability_v2::string(vector, "expected"),
                 "restored_policy_and_configuration_match_before_authorization"
             ),
             "type_separation" => assert_eq!(
-                recoverability_v1::string(vector, "expected"),
+                recoverability_v2::string(vector, "expected"),
                 "non_substitutable"
             ),
             "commit_coordinate_separation"
@@ -1550,9 +1550,9 @@ fn assert_executor_owner_vector(owner: recoverability_v1::OwnerVector<'_>) {
                 owner.id()
             ),
         },
-        recoverability_v1::OwnerVector::RelationalRejection(_) => {
-            let target = recoverability_v1::string(vector, "target");
-            let expected = recoverability_v1::string(vector, "expected_error");
+        recoverability_v2::OwnerVector::RelationalRejection(_) => {
+            let target = recoverability_v2::string(vector, "target");
+            let expected = recoverability_v2::string(vector, "expected_error");
             let mapped = match (target, expected) {
                 ("mfm.initial-binding.v1", "binding_conflict") => {
                     Some(ExecutorError::EffectBindingConflict)
@@ -1593,7 +1593,6 @@ fn assert_executor_owner_vector(owner: recoverability_v1::OwnerVector<'_>) {
                     | "mfm.fact-selection-completeness.v1"
                     | "mfm.journal-predecessor.v1"
                     | "mfm.legal-commit-batch.v1"
-                    | "mfm.portable-export-manifest.v1"
                     | "recoverability_annex"
                     | "schema_algebra"
                     | "schema_arrays"
@@ -1613,7 +1612,7 @@ fn assert_executor_owner_vector(owner: recoverability_v1::OwnerVector<'_>) {
     }
 }
 
-fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV1 {
+fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV2 {
     let corpus: serde_json::Value = serde_json::from_str(CORPUS).expect("corpus");
     let vector = corpus["positive_vectors"]
         .as_array()

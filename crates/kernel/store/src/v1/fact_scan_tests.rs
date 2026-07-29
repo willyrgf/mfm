@@ -3,8 +3,8 @@ use mfm_ids::{DigestAlgorithm, SemanticTypeId, StableId};
 
 use super::*;
 
-fn contract() -> &'static RecoverabilityContractV1 {
-    RecoverabilityContractV1::embedded().expect("embedded recoverability contract")
+fn contract() -> &'static RecoverabilityContractV2 {
+    RecoverabilityContractV2::embedded().expect("embedded recoverability contract")
 }
 
 fn leaf(label: &str) -> (Vec<u8>, ContentRef) {

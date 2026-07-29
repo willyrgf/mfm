@@ -10,7 +10,7 @@ replay, facts, framework enforcement, execution catalogs, and app status
 This RFC records the breaking replacement of the former event, projection, attempt, side-effect,
 and generic saga machinery. Its architecture and fixed contract choices are the implemented core
 authority, with repository evidence and remaining gate classification recorded in the versioned
-[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md). The
+[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v2.md). The
 [design contract](docs/design.md), [architecture guide](docs/architecture.md), affected companion
 documents, code, schemas, and tests now implement this design together. The retained prototypes
 and inventories closed the contract-shaping evidence gate; the commit-2 annex and shared corpus
@@ -619,7 +619,7 @@ API notation may refine the sealed authority by its grant, such as
 `RunAccessAuthority<Drive>`. The app owns authentication, authorization policy, and minting; the
 kernel and store own only type/binding validation and never independently broaden a grant.
 
-An offline verifier may inspect a bundle already produced through an authorized `Export` without a
+An offline verifier may inspect a stream already produced through an authorized `Export` without a
 live token; it has no store/object dereference authority beyond the supplied bytes. `Replay` gates
 loading authoritative store-backed history, not pure verification of caller-held data.
 
@@ -628,7 +628,7 @@ sealed store-internal same-tenant prefix-verification operation. That operation 
 the producing journal/object closure through the barrier frontier, but returns only the closed
 `FactSelectionCompleteness` result bound to the consuming authorization. It never returns
 unselected facts, producer objects, or arbitrary source-run records and grants no general
-cross-run read authority. An offline bundle cannot invoke it.
+cross-run read authority. An offline stream cannot invoke it.
 
 The manifests enumerate every typed root slot, schema and semantic type, content digest, object
 evidence, context constraint, and exact state implementation or capability binding selected for
@@ -3620,9 +3620,9 @@ store snapshot they do not prove that the exporter supplied the authoritative fa
 every order for that tenant.
 
 The baseline supports fact-selection completeness only for a trusted same-store verifier scanning
-the authoritative contiguous tenant fact prefix. Every self-contained portable bundle reports selection
+the authoritative contiguous tenant fact prefix. Every self-contained portable stream reports selection
 completeness as `Unverified`; it may verify the integrity and provenance of included facts, but it
-cannot prove absence or that no qualifying fact was omitted. A portable tenant-prefix bundle does
+cannot prove absence or that no qualifying fact was omitted. A portable tenant-prefix stream does
 not upgrade that claim, and unrelated tenant records are never disclosed merely to imitate density.
 
 The closed assurance carried per fact-selection observation in `VerifiedRunView` is:
@@ -3643,6 +3643,8 @@ attestation above; its authorization and frontier must equal the retained respon
 `Unverified` does not invalidate the rest of the view and cannot be upgraded by exact executable
 reproduction alone. Neither variant exposes an unselected fact or independently authorizes a
 transition.
+`PortableBundle` is the frozen persisted reason spelling retained for schema identity; it does not
+name the current portable transport, which is solely a framed stream.
 
 A later RFC may add portable completeness only by choosing one concrete scope-safe census or
 frontier-commitment scheme, exact trust root and revocation model, canonical proof schema, and
@@ -3721,8 +3723,8 @@ digest and fold-version identity and be discarded on any mismatch.
 
 All three modes below perform zero live semantic-capability, provider, executor, network,
 filesystem-domain, or signer IO. Recorded-history verification reads only the explicitly supplied
-journal, object annex, certification proof closure, and cross-run source dependency bundles through
-read-only storage readers. Exact reproduction and candidate comparison may additionally perform
+journal, object closure, certification proof closure, and cross-run source dependency frames
+through read-only stream readers. Exact reproduction and candidate comparison may additionally perform
 the bounded platform bootstrap read needed to self-attest their own executable identity before
 callbacks; that exception cannot expose domain files or state inputs. The modes do not run the live
 scheduler, mint `AuthorizedAccess`, or append records.
@@ -3754,9 +3756,9 @@ transition and closure, referenced objects, and certified destination role. Veri
 the effective post output or evidence-only role from the retained graph. A missing or downgraded
 source proof makes the view invalid rather than trusting a destination root hash.
 
-Portable transfer preserves that content-addressed DAG and object annex as deterministic,
-individually bounded records; it does not impose a total source, object, or byte validity ceiling.
-A private, non-cloneable `ClosureVerificationSession` contains the root candidate and bundle root,
+Portable transfer preserves that content-addressed DAG and object closure as deterministic,
+individually bounded frames; it does not impose a total source, object, or byte validity ceiling.
+A private, non-cloneable `ClosureVerificationSession` contains the root candidate and stream root,
 ordered traversal stack, active and verified source sets, exact verified-object set, any current
 object offset, and logical/unique measurement counters. Each bounded step consumes it and returns
 only private `More(session)` or `Complete(verified_closure)`. The baseline step budgets are 256 new
@@ -3769,13 +3771,13 @@ scratch, not a serialized or cryptographically sealed proof.
 constructible only with an empty pending traversal after every reachable dependency and object
 verifies. Missing, extra, cyclic, reordered, wrongly bound, or tampered material rejects. Repeated
 logical references remain present and verified while identical payload bytes are transferred once.
-Loss or unverifiable restoration of scratch restarts verification from the immutable bundle; it
+Loss or unverifiable restoration of scratch restarts verification from the immutable stream; it
 never upgrades a partial closure. Total deduplicated counts/bytes and elapsed time are measurement
 only.
 
 For a fact-selection transition, omission verification additionally requires the authoritative
 same-store, same-tenant fact history through the authorization's exact
-`TenantFactFrontier`. A portable bundle reports selection completeness as `Unverified`; it may
+`TenantFactFrontier`. A portable stream reports selection completeness as `Unverified`; it may
 verify only the integrity and provenance of included facts. This limitation does not invalidate
 the rest of the recorded history. Store-backed replay may obtain `SameStoreVerified` only through
 the sealed, non-disclosing tenant-prefix operation permitted by that exact run's `Replay`
@@ -4358,35 +4360,37 @@ provider-controlled content.
 
 ## Canonical Schema and Golden-Vector Gate
 
-Gate status: **closed for the implemented recoverability v1 core** by the fixed commit-2 artifact
+Gate status: **closed for the implemented recoverability v2 core** by the current C11 artifact
 set:
 
-- `contracts/recoverability/v1/annex.json` — the normative machine-readable schema registry;
-- `contracts/recoverability/v1/corpus.json` — the shared positive/negative canonical-vector
+- `contracts/recoverability/v2/annex.json` — the normative machine-readable schema registry;
+- `contracts/recoverability/v2/corpus.json` — the shared positive/negative canonical-vector
   corpus; and
-- `contracts/recoverability/v1/README.md` — the non-normative artifact index and consumer guide.
+- `contracts/recoverability/v2/README.md` — the non-normative artifact index and consumer guide.
 
 The artifacts are the byte-level authority consumed by the current memory, PostgreSQL, runtime,
 replay, app, CLI, and REST implementation. They prohibit later changes to bytes, identities, tags,
 or semantics without a new version.
 
-Exact artifact metadata derived from the final commit-2 bytes is:
+Exact artifact metadata derived from the current C11 bytes is:
 
 ```text
-COMMIT2_ARTIFACT_METADATA
-annex_sha256: a3fb5cf2e0486a1a1e906c2fd93b10b3f0f52c5a785b163b6cc758ff39a4defe
-corpus_sha256: 8d10c1a05820a18781a4864fb2d47248d6de41689db5fe0ed4800dd8b0742f82
-readme_sha256: bdec7624585a046407b9aaac6c36868050af2c52fa4f815cb05ebafecc5a8ed0
-annex_byte_count: 222127
-corpus_byte_count: 1706315
-annex_schema_count: 259
-annex_invariant_clause_count: 231
+C11_ARTIFACT_METADATA
+annex_sha256: d6ef3644581094b1d08812f71a6a05fdaa935972a8b63ab0af818ef4179a0ba4
+corpus_sha256: b41900112b6bb90c350c25897cbc24ba81977da77eb892c32519042c1647fe32
+readme_sha256: 15fc5de051356936180db26927dc7d7b44341f774c9b1b46395741f3bf96085a
+annex_byte_count: 223651
+corpus_byte_count: 1709958
 annex_domain_count: 26
-corpus_positive_case_count: 427
+annex_schema_count: 258
+annex_invariant_clause_count: 233
+corpus_positive_case_count: 433
 corpus_negative_case_count: 59
 corpus_relational_case_count: 84
-corpus_total_case_count: 570
-corpus_schema_acceptance_case_count: 373
+corpus_total_case_count: 576
+corpus_schema_acceptance_case_count: 379
+corpus_codec_rejection_case_count: 27
+corpus_relational_rejection_case_count: 32
 ```
 
 The logical schemas in this RFC obtain their frozen current encoding only through the versioned
@@ -4413,6 +4417,9 @@ The annex freezes:
 - the whole-executable component qualification, its shared evidence/profile contracts, and the
   composite planner semantic and sole-callback surfaces;
 - object-path bindings and artifact-admission intents;
+- the `mfm.portable-run-export-stream.v1` framed sequence and its closed
+  `mfm.portable-run-export-frame.v1` union, exact RS/canonical-JSON/LF framing, ordering,
+  frame/chunk bounds, terminal EOF, and external raw-byte digest;
 - enum tags, field names, integer widths, ordering, optional absence, explicit null where legal,
   empty strings, empty collections, and union discriminants; and
 - schema/version rejection behavior.
@@ -4425,8 +4432,9 @@ It also covers missing, spurious, wrong-kind, and wrong-tenant fact coordinates;
 advancement; publication without facts; fact emission without publication order; copied-routing
 mismatch; candidate exclusion and final commit-digest inclusion of assigned coordinates; and
 admission under a changed executable identity.
-Memory, PostgreSQL, runtime, replay, trace export, and the durable reference executor consume the
-same corpus and shared domain-free codec/digest/fold implementation.
+Canonical, ids, certifier, executor, memory store, PostgreSQL store, runtime, replay, and trace
+export execute all 576 vectors through the same corpus and shared domain-free
+codec/digest/fold implementation.
 
 Schema freeze followed every contract-shaping prototype and inventory retained as core-gate
 evidence,
@@ -4556,7 +4564,7 @@ The v1 live-store baseline is writer-only for authority. Every admission, journa
 fact-completeness read that can construct a verified view or influence a state, and every write,
 uses that fenced authoritative writer. Status, replay loading, trace/audit/export dereference, and
 resume use the same rule because stale bytes cannot mint store-backed authority. Pure verification
-of an already authorized offline bundle is separate and grants no store access. No replica may
+of an already authorized offline stream is separate and grants no store access. No replica may
 claim store-backed authority until a later contract qualifies its non-rollback lineage and exact
 applied frontier; a connection option or apparent catch-up is insufficient.
 
@@ -4682,7 +4690,7 @@ the objects legal for that surface. Before loading records or objects, the reade
 authority for the exact tenant, store, run, and purpose and verifies that every requested object is
 reachable from that run's admitted journal/object closure. `ReadPublic` reaches only the certified
 public-output closure; the privileged grants reach only their reviewed trace, audit, replay, or
-export closure. A record reference, artifact digest, fact identity, run id, or export manifest is
+export closure. A record reference, artifact digest, fact identity, run id, or stream header is
 not bearer authority.
 
 The sole non-disclosing exception is the sealed fact-prefix verifier reached by `Replay`: for a
@@ -4725,8 +4733,8 @@ indeterminate
 ```
 
 The semantic run export is fixed at its semantic head or closure coordinate. A privileged semantic
-or audit export is scoped to the authorized tenant/run and records that scope in its export
-manifest, but the manifest grants no later access. Dereferencing a cross-run source from an export
+or audit export is scoped to the authorized tenant/run and records that scope in its stream
+header, but the header grants no later access. Dereferencing a cross-run source from an export
 or trace requires separate authority for the exact source run; without it, the reader exposes only
 the reviewed redacted source identity. The audit export is explicitly “complete as of journal head
 H” and, for each executor effect, “F is the greatest executor frontier committed to this MFM
@@ -4735,14 +4743,18 @@ delivery history only when the bound verifier proves a sealed terminal frontier 
 another target-attempt record. An unmatched MFM authorization, asynchronous work after
 `Returned(Pending)`, or later evidence strengthening can all make a newer frontier arrive.
 
-The canonical portable document contains no digest of itself in its manifest or any nested member.
-After deterministic closure traversal finishes and the final canonical bytes exist, the exporter
-computes `SHA-256(exact canonical export bytes)` and returns that content digest outside the bytes.
-REST returns it only as the exact `Mfm-Content-Digest` header; the app's
-`PortableRunExport.digest` is the same external value. No separate manifest digest, bundle digest,
-domain-hashed export identity, or compatibility checksum is semantic authority. Missing,
-duplicated, extra, cyclic, or tampered members reject before a complete export or verified view is
-reported.
+The portable representation is one `mfm.portable-run-export-stream.v1` JSON text sequence. Each
+record is exact RS, one canonical closed-union frame, and LF; the first frame is `header`, the last
+is `end` followed immediately by EOF. Runs are root first and then dependencies by canonical
+`RunId`; journals are dense; object payloads are ordered and transferred once; and every logical
+`ValueRef` authority follows its payload in canonical order. No frame contains a stream digest.
+After deterministic closure traversal finishes and the final byte is written, the exporter
+computes `SHA-256(every record separator, canonical frame byte, and line feed)` and returns that
+content digest outside the stream in its exact `ContentRef`. REST returns it only as the exact
+`Mfm-Content-Digest` header; `ExportedRun::digest` exposes the same external value. No manifest,
+member path, internal stream digest, domain-hashed export identity, compatibility checksum, or
+byte-wrapper DTO is semantic authority. Missing, duplicated, extra, cyclic, reordered, trailing,
+or tampered frames or authorities reject before a complete export or verified view is reported.
 
 It may expose stable public capability, operation, request, result, and failure identities. It must
 not expose credentials, bearer bytes, raw provider errors, secret-bearing routes, or executor
@@ -4752,7 +4764,7 @@ There is no generic manual “mark successful,” “mark not applied,” “aba
 evidence-submission endpoint.
 
 The app exposes only `drive_once`. A host may implement its own mechanical loop by calling that
-operation repeatedly, but the v1 app, CLI, and REST surface has no `drive_until_waiting`
+operation repeatedly, but the current app, CLI, and REST surface has no `drive_until_waiting`
 convenience. Transports render `DriveOutcome`; they cannot select the next node, construct state
 requests, choose observations, install execution hooks, or interpret typed results.
 
@@ -5258,7 +5270,7 @@ adapter-owned lifecycle, reducer, or runner authority.
   exposing included-fact integrity only through the non-authoritative inclusion view.
 - Revalidate every effective-output/evidence-only cross-run source from its complete source
   admission/spec/journal/closure/object/role proof plus retained profile/planner/expansion proof;
-  reject a missing or downgraded dependency bundle.
+  reject a missing or downgraded dependency stream segment.
 - Verify portable source closures larger than one 256-source/512-object/256-KiB step reach the same
   byte-identical terminal result as a single-step fixture, with budget changes affecting only
   private step count; reject reordered supplied records, premature completion, missing
@@ -5299,7 +5311,7 @@ adapter-owned lifecycle, reducer, or runner authority.
 - Accept fact-selection completeness only against the authoritative same-store snapshot.
 - With one run-scoped `Replay` authority, privately verify only barriers reachable from that run
   and return `SameStoreVerified` without exposing any unselected fact, producer record, or
-  cross-run object; an offline bundle returns `Unverified`.
+  cross-run object; an offline stream returns `Unverified`.
 - On store open, derive the tenant integrity universe from head, publication, and barrier rows;
   reject missing/orphan heads, duplicate or gapped publications, invalid barrier ranges, and a
   publication/head mismatch.
@@ -5308,7 +5320,7 @@ adapter-owned lifecycle, reducer, or runner authority.
   the deterministic admission lock/unique path creates one stable root.
 - Restrict fact candidates to other runs in the admitted tenant and reject a state-authored tenant
   selector or cross-tenant fact.
-- Require every portable bundle, including a dense tenant-prefix bundle, to report selection
+- Require every portable stream, including a dense tenant-prefix stream, to report selection
   completeness as unverified; verify included-fact integrity without disclosing an unrelated
   tenant record.
 - Test missing, swapped, tampered, or wrong-schema objects.
@@ -5413,7 +5425,7 @@ adapter-owned lifecycle, reducer, or runner authority.
 ## Gate Classification
 
 The versioned
-[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v1.md) is the closure
+[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v2.md) is the closure
 record for repository-wide producer/consumer disposition. The current choices are fixed; an open
 gate cannot reintroduce an alternate lifecycle, schema, route fallback, public fact/list surface,
 or weaker capability.
@@ -5475,7 +5487,7 @@ contract. All six steps of the fixed sequence are closed:
 3. **Identity and schema freeze — closed:** the commit-2 artifact set fixes node-occurrence
    derivation, terminal/dependency contracts, every canonical persisted schema, and the complete
    golden-vector corpus. Exact artifact hashes and counts are recorded in the searchable
-   `COMMIT2_ARTIFACT_METADATA` ledger above.
+   `C11_ARTIFACT_METADATA` ledger above.
 4. **Implementation package plan — closed:** crate ownership, dependency order, deletion
    checkpoints, focused verification, and final integration responsibility were assigned for every
    package below.
@@ -5555,7 +5567,7 @@ only read- and effect-specific orchestration over that one boundary.
    bytes and added no runtime mutation phase or compatibility path.
 
 The
-[fixed six-commit implementation sequence](docs/recoverability-cutover-gates-v1.md#fixed-implementation-commit-sequence)
+[fixed six-commit implementation sequence](docs/recoverability-cutover-gates-v2.md#fixed-implementation-commit-sequence)
 records packages A–J in internally coherent changes without compatibility paths. All six steps and
 the three boundaries above are closed; registered production EVM reads and the qualified wallet
 effect are both part of the current product. Each landed boundary updated its code, tests, design
@@ -5741,7 +5753,7 @@ survived.
 | Added | Complete transition before/input/evidence/result/output/after lineage; one authorization per independently meaningful external operation before access; one observation per surviving wrapper result; one frozen read intent per occurrence; immutable compatibility plus state-dependent consumability; keyed-convergent redelivery; stable tenant-scoped admission identity; per-run heads and tenant fact frontiers; exact whole-executable live-resume and reproduction gates; diagnostic cross-version comparison; deterministic composite framework/executor expansion; closed fan-out scheduling; immutable semantic closure; exact capability/executor binding; domain-derived at-most-once identity for correction entry points that claim it; purpose-bound run access and privileged trace/object access. |
 | Removed | Generic saga/remediation obligations; reverse compensation ordering; generic rollback/finally; manual terminalization; worker-attempt history; phase ledgers; FIFO waiters and resource lanes; store-global commit order; custom runner and adapter-owned lifecycle/reducer machinery; runtime pre/post hooks; universal projection authority; support for non-convergent writes; compatibility readers and dual writers. |
 | Delegated | Destination delivery and convergence, nonce/UTXO/sequence/resource ownership, and executor-internal delivery-attempt evidence move to the exact certified executor/domain binding over a reusable durable ledger substrate or destination-native equivalent. They are not a second MFM run-state model. |
-| Changed or restricted | Independent ready effects may begin after another node fails unless the certified graph/profile gates them; semantic closure may receive audit-only observations for pre-closure authorizations; unresolved effects may remain pending indefinitely; finite executor evidence-record/attempt/frontier bounds forbid another target attempt and can force permanent pending, with no baseline pagination; exact reproduction may be unavailable without historical executable bytes while recorded-history verification remains valid; EVM writes are available only through the qualified independently fenced wallet executor; cross-run sources and facts are same-tenant; fact-selection completeness is same-store, authoritative-writer-only, and portable bundles are inclusion-only; public fact browsing and cross-run run list/watch are removed; complete transition and audit traces are privileged rather than ordinary public output. |
+| Changed or restricted | Independent ready effects may begin after another node fails unless the certified graph/profile gates them; semantic closure may receive audit-only observations for pre-closure authorizations; unresolved effects may remain pending indefinitely; finite executor evidence-record/attempt/frontier bounds forbid another target attempt and can force permanent pending, with no baseline pagination; exact reproduction may be unavailable without historical executable bytes while recorded-history verification remains valid; EVM writes are available only through the qualified independently fenced wallet executor; cross-run sources and facts are same-tenant; fact-selection completeness is same-store, authoritative-writer-only, and portable streams are inclusion-only; public fact browsing and cross-run run list/watch are removed; complete transition and audit traces are privileged rather than ordinary public output. |
 
 ## Decision Summary
 

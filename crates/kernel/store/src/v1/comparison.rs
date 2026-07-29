@@ -1,4 +1,4 @@
-use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV1};
+use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV2};
 use mfm_ids::{ContentRef, FieldPath, RunSemanticStateDigest};
 use mfm_journal::v1::{
     AuthorizationRef, AuthorizationScopeFields, BlockingSource, CapabilityBindingRef,
@@ -647,7 +647,7 @@ fn comparison_uncontracted_value(
     value_ref: ValueRef,
 ) -> Result<VerifiedComparisonValue> {
     let object = view.retained_value(&value_ref)?;
-    RecoverabilityContractV1::embedded()?
+    RecoverabilityContractV2::embedded()?
         .strict_decode("mfm.primitive-canonical_value.v1", object.bytes())?;
     let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(object.bytes())
         .map_err(|_| StoreError::JournalContract)?;

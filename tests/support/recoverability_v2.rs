@@ -1,17 +1,17 @@
 use std::collections::BTreeSet;
 
 use mfm_canonical::{
-    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV1, RecoverabilityErrorCode,
+    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV2, RecoverabilityErrorCode,
 };
 use serde_json::Value;
 
-const ANNEX_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v1/annex.json");
-const CORPUS_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v1/corpus.json");
-const ANNEX_BYTE_LENGTH: usize = 222_127;
-const CORPUS_BYTE_LENGTH: usize = 1_706_315;
-const ANNEX_SHA256_HEX: &str = "a3fb5cf2e0486a1a1e906c2fd93b10b3f0f52c5a785b163b6cc758ff39a4defe";
-const CORPUS_SHA256_HEX: &str = "8d10c1a05820a18781a4864fb2d47248d6de41689db5fe0ed4800dd8b0742f82";
-const POSITIVE_VECTOR_COUNT: usize = 427;
+const ANNEX_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v2/annex.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v2/corpus.json");
+const ANNEX_BYTE_LENGTH: usize = 223_651;
+const CORPUS_BYTE_LENGTH: usize = 1_709_958;
+const ANNEX_SHA256_HEX: &str = "d6ef3644581094b1d08812f71a6a05fdaa935972a8b63ab0af818ef4179a0ba4";
+const CORPUS_SHA256_HEX: &str = "b41900112b6bb90c350c25897cbc24ba81977da77eb892c32519042c1647fe32";
+const POSITIVE_VECTOR_COUNT: usize = 433;
 const NEGATIVE_VECTOR_COUNT: usize = 59;
 const RELATIONAL_VECTOR_COUNT: usize = 84;
 const TOTAL_VECTOR_COUNT: usize =
@@ -77,7 +77,7 @@ impl<'a> CorpusVector<'a> {
     }
 }
 
-/// Visits all 570 frozen vector objects without filtering or copying corpus authority.
+/// Visits all 576 frozen vector objects without filtering or copying corpus authority.
 ///
 /// This optional visitor is used by consumers that must persist every corpus
 /// object; the generic executor below does not require a second traversal.
@@ -113,10 +113,10 @@ pub fn for_each_vector(mut visit: impl FnMut(CorpusVector<'_>)) {
 /// relational vector and every relational rejection. It must assert the
 /// consumer-owned invariant or rejection; returning means that vector passed.
 pub fn run_consumer(consumer: &str, mut execute_owner_vector: impl FnMut(OwnerVector<'_>)) {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded recoverability annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded recoverability annex");
     assert_artifact_bindings(contract);
     let corpus = corpus();
-    assert_eq!(string(&corpus, "contract"), "mfm.recoverability-corpus.v1");
+    assert_eq!(string(&corpus, "contract"), "mfm.recoverability-corpus.v2");
     let coverage = object(&corpus, "coverage");
     let mandatory_consumers: BTreeSet<&str> = array(coverage, "mandatory_consumers")
         .iter()
@@ -124,7 +124,7 @@ pub fn run_consumer(consumer: &str, mut execute_owner_vector: impl FnMut(OwnerVe
         .collect();
     assert!(
         mandatory_consumers.contains(consumer),
-        "{consumer} is not a mandatory recoverability-v1 consumer"
+        "{consumer} is not a mandatory recoverability-v2 consumer"
     );
 
     let positives = array(&corpus, "positive_vectors");
@@ -225,7 +225,7 @@ fn assert_corpus_vector(vector: CorpusVector<'_>) {
 /// Higher-layer owners should call this from their mandatory callback and then
 /// assert their own storage, replay, authority, or runtime invariant.
 pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
-    let contract = RecoverabilityContractV1::embedded().expect("embedded recoverability annex");
+    let contract = RecoverabilityContractV2::embedded().expect("embedded recoverability annex");
     let vector = owner.vector();
     let id = owner.id();
     match owner {
@@ -298,26 +298,49 @@ pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
                 assert_ne!(prefixed, nul, "{id}");
             }
             "export_identity" => {
-                let manifest = contract
-                    .strict_decode(
-                        "mfm.portable-export-manifest.v1",
-                        &hex_field(vector, "manifest_hex"),
-                    )
-                    .unwrap_or_else(|error| panic!("{id}: {error}"));
-                let value: Value =
-                    serde_json::from_slice(manifest.as_bytes()).expect("manifest JSON");
-                assert!(
-                    !value
-                        .as_object()
-                        .expect("manifest object")
-                        .keys()
-                        .any(|key| key.contains("digest")),
+                let stream = hex_field(vector, "stream_hex");
+                assert_eq!(
+                    string(vector, "media_type"),
+                    "application/vnd.mfm.run-export-stream.v1+json-seq",
                     "{id}"
                 );
                 assert_eq!(
-                    string(vector, "media_type"),
-                    "application/vnd.mfm.run-export.v1+json",
+                    contract.raw_content_digest(&stream).as_str(),
+                    string(vector, "expected_content_digest"),
                     "{id}"
+                );
+                assert_eq!(
+                    contract
+                        .schema_id("mfm.portable-run-export-stream.v1")
+                        .unwrap_or_else(|error| panic!("{id}: {error}"))
+                        .as_str(),
+                    string(vector, "expected_schema_id"),
+                    "{id}"
+                );
+
+                let mut frames = Vec::new();
+                for record in stream.split(|byte| *byte == 0x1e).skip(1) {
+                    let frame_bytes = record
+                        .strip_suffix(b"\n")
+                        .unwrap_or_else(|| panic!("{id}: frame lacks LF suffix"));
+                    let frame = contract
+                        .strict_decode("mfm.portable-run-export-frame.v1", frame_bytes)
+                        .unwrap_or_else(|error| panic!("{id}: {error}"));
+                    frames.push(
+                        serde_json::from_slice::<Value>(frame.as_bytes())
+                            .expect("portable frame JSON"),
+                    );
+                }
+                assert_eq!(frames.len(), 2, "{id}");
+                assert_eq!(string(&frames[0], "kind"), "header", "{id}");
+                assert_eq!(string(&frames[1], "kind"), "end", "{id}");
+                assert!(
+                    frames.iter().all(|frame| frame
+                        .as_object()
+                        .expect("frame object")
+                        .keys()
+                        .all(|key| !key.contains("digest"))),
+                    "{id}: stream contains a self digest"
                 );
             }
             "frontier_order" => {
@@ -586,7 +609,7 @@ fn assert_read_verdict_metadata(vector: &Value, id: &str) {
     );
 }
 
-fn assert_typed_failure(contract: &RecoverabilityContractV1, vector: &Value, id: &str) {
+fn assert_typed_failure(contract: &RecoverabilityContractV2, vector: &Value, id: &str) {
     let schema_id = string(vector, "expected_typed_failure_schema_id");
     let prefix = "schema:";
     let suffix = ":1:sha256-jcs-v1:";
@@ -624,7 +647,7 @@ fn canonical_json_value(value: &Value) -> Vec<u8> {
         .to_vec()
 }
 
-fn assert_artifact_bindings(contract: &RecoverabilityContractV1) {
+fn assert_artifact_bindings(contract: &RecoverabilityContractV2) {
     assert_eq!(ANNEX_BYTES.len(), ANNEX_BYTE_LENGTH);
     assert_eq!(CORPUS_BYTES.len(), CORPUS_BYTE_LENGTH);
     assert_eq!(
@@ -636,7 +659,7 @@ fn assert_artifact_bindings(contract: &RecoverabilityContractV1) {
         CORPUS_SHA256_HEX
     );
     assert_eq!(contract.annex_bytes(), ANNEX_BYTES);
-    RecoverabilityContractV1::validate_annex_candidate(ANNEX_BYTES)
+    RecoverabilityContractV2::validate_annex_candidate(ANNEX_BYTES)
         .expect("frozen annex candidate");
     PlainCanonicalJsonBytes::from_canonical_json_slice(ANNEX_BYTES)
         .expect("canonical frozen annex");
@@ -650,7 +673,7 @@ fn assert_artifact_bindings(contract: &RecoverabilityContractV1) {
     );
 }
 
-fn execute_positive(contract: &RecoverabilityContractV1, vector: &Value) {
+fn execute_positive(contract: &RecoverabilityContractV2, vector: &Value) {
     let id = string(vector, "id");
     match string(vector, "kind") {
         "schema_acceptance" => {
@@ -772,9 +795,9 @@ fn execute_positive(contract: &RecoverabilityContractV1, vector: &Value) {
 }
 
 fn derive_frozen_domain_identity(
-    contract: &RecoverabilityContractV1,
+    contract: &RecoverabilityContractV2,
     domain: &str,
-    value: &mfm_canonical::ValidatedCanonicalValueV1,
+    value: &mfm_canonical::ValidatedCanonicalValueV2,
 ) -> String {
     macro_rules! derive {
         ($method:ident) => {
@@ -831,17 +854,17 @@ fn derive_frozen_domain_identity(
 }
 
 fn execute_codec_rejection(
-    contract: &RecoverabilityContractV1,
+    contract: &RecoverabilityContractV2,
     vector: &Value,
     known_domain: &Value,
-    known_preimage: &mfm_canonical::ValidatedCanonicalValueV1,
-    known_content: &mfm_canonical::ValidatedCanonicalValueV1,
+    known_preimage: &mfm_canonical::ValidatedCanonicalValueV2,
+    known_content: &mfm_canonical::ValidatedCanonicalValueV2,
 ) {
     let id = string(vector, "id");
     let expected = error_code(string(vector, "expected_error"));
     let input = hex_field(vector, "input_hex");
     let result = match id {
-        "codec/invalid-annex" => RecoverabilityContractV1::validate_annex_candidate(&input),
+        "codec/invalid-annex" => RecoverabilityContractV2::validate_annex_candidate(&input),
         "codec/schema-mismatch/cross-run-source-redaction" => contract
             .strict_decode(string(vector, "target"), &input)
             .and_then(|value| {

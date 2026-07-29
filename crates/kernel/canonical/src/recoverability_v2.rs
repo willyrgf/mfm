@@ -13,17 +13,20 @@ use mfm_ids::{
 };
 use serde_json::{Map, Value};
 
-use crate::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue, PlainCanonicalJsonBytes};
+use crate::{
+    sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue, PlainCanonicalJsonBytes,
+    RawContentDigestHasher,
+};
 
-const ANNEX_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/annex.json");
+const ANNEX_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v2/annex.json");
 const MAX_ANNEX_BYTES: usize = 16_777_216;
 const MAX_SCHEMA_DEPTH: usize = 256;
 
 static EMBEDDED_CONTRACT: OnceLock<
-    std::result::Result<RecoverabilityContractV1, RecoverabilityError>,
+    std::result::Result<RecoverabilityContractV2, RecoverabilityError>,
 > = OnceLock::new();
 
-/// Stable machine-readable failure code for the recoverability-v1 codec.
+/// Stable machine-readable failure code for the recoverability-v2 codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RecoverabilityErrorCode {
     /// The embedded annex is not canonical or violates its closed meta-contract.
@@ -81,7 +84,7 @@ impl fmt::Display for RecoverabilityErrorCode {
     }
 }
 
-/// Redaction-safe error returned by the recoverability-v1 contract.
+/// Redaction-safe error returned by the recoverability-v2 contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct RecoverabilityError {
@@ -108,19 +111,19 @@ impl RecoverabilityError {
     }
 }
 
-/// One schema-checked canonical value from the recoverability-v1 annex.
+/// One schema-checked canonical value from the recoverability-v2 annex.
 ///
-/// Construction is private to [`RecoverabilityContractV1`], so callers cannot
+/// Construction is private to [`RecoverabilityContractV2`], so callers cannot
 /// pair claimed bytes with an unrelated schema identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedCanonicalValueV1 {
+pub struct ValidatedCanonicalValueV2 {
     schema_contract: String,
     schema_id: SchemaId,
     canonical: PlainCanonicalJsonBytes,
     value: Value,
 }
 
-impl ValidatedCanonicalValueV1 {
+impl ValidatedCanonicalValueV2 {
     /// Returns the exact registered schema contract.
     pub fn schema_contract(&self) -> &str {
         &self.schema_contract
@@ -151,14 +154,14 @@ impl ValidatedCanonicalValueV1 {
 /// Opaque canonical location of one projected schema reference.
 ///
 /// The path uses RFC 6901 JSON Pointer syntax. Construction remains private to
-/// [`RecoverabilityContractV1`] so callers cannot pair an arbitrary path with a
+/// [`RecoverabilityContractV2`] so callers cannot pair an arbitrary path with a
 /// validated reference value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CanonicalReferencePathV1 {
+pub struct CanonicalReferencePathV2 {
     pointer: String,
 }
 
-impl CanonicalReferencePathV1 {
+impl CanonicalReferencePathV2 {
     /// Returns the canonical RFC 6901 JSON Pointer.
     ///
     /// The empty string identifies the root value.
@@ -169,14 +172,14 @@ impl CanonicalReferencePathV1 {
 
 /// Closed terminal authority kind reached through an annex schema reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ReferenceTerminalKindV1 {
+pub enum ReferenceTerminalKindV2 {
     /// Lightweight content identity.
     ContentRef,
     /// Producer-bound retained-value authority.
     ValueRef,
 }
 
-impl ReferenceTerminalKindV1 {
+impl ReferenceTerminalKindV2 {
     fn schema_contract(self) -> &'static str {
         match self {
             Self::ContentRef => "mfm.content-ref.v1",
@@ -187,16 +190,16 @@ impl ReferenceTerminalKindV1 {
 
 /// One terminal schema-reference edge projected from an annex-validated value.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchemaReferenceEdgeV1 {
-    path: CanonicalReferencePathV1,
+pub struct SchemaReferenceEdgeV2 {
+    path: CanonicalReferencePathV2,
     declared_contract: String,
-    terminal_kind: ReferenceTerminalKindV1,
-    value: ValidatedCanonicalValueV1,
+    terminal_kind: ReferenceTerminalKindV2,
+    value: ValidatedCanonicalValueV2,
 }
 
-impl SchemaReferenceEdgeV1 {
+impl SchemaReferenceEdgeV2 {
     /// Returns the opaque canonical location of the encountered reference.
-    pub const fn path(&self) -> &CanonicalReferencePathV1 {
+    pub const fn path(&self) -> &CanonicalReferencePathV2 {
         &self.path
     }
 
@@ -206,12 +209,12 @@ impl SchemaReferenceEdgeV1 {
     }
 
     /// Returns the resolved closed terminal authority kind.
-    pub const fn terminal_kind(&self) -> ReferenceTerminalKindV1 {
+    pub const fn terminal_kind(&self) -> ReferenceTerminalKindV2 {
         self.terminal_kind
     }
 
     /// Returns the referenced value revalidated under its resolved terminal schema.
-    pub const fn value(&self) -> &ValidatedCanonicalValueV1 {
+    pub const fn value(&self) -> &ValidatedCanonicalValueV2 {
         &self.value
     }
 }
@@ -233,7 +236,7 @@ macro_rules! branded_domain_derivation {
         #[doc = $doc]
         pub fn $method(
             &self,
-            value: &ValidatedCanonicalValueV1,
+            value: &ValidatedCanonicalValueV2,
         ) -> std::result::Result<$identity, RecoverabilityError> {
             self.semantic_digest_for($domain, $result_kind, value)
                 .map(<$identity>::from_semantic_digest)
@@ -246,7 +249,7 @@ macro_rules! digest_only_domain_derivation {
         #[doc = $doc]
         pub fn $method(
             &self,
-            value: &ValidatedCanonicalValueV1,
+            value: &ValidatedCanonicalValueV2,
         ) -> std::result::Result<$identity, RecoverabilityError> {
             self.semantic_digest_for($domain, $result_kind, value)
                 .map(|digest| {
@@ -256,9 +259,9 @@ macro_rules! digest_only_domain_derivation {
     };
 }
 
-/// Embedded, closed recoverability-v1 schema, codec, and digest authority.
+/// Embedded, closed recoverability-v2 schema, codec, and digest authority.
 #[derive(Debug)]
-pub struct RecoverabilityContractV1 {
+pub struct RecoverabilityContractV2 {
     annex: PlainCanonicalJsonBytes,
     schemas: BTreeMap<String, SchemaDefinition>,
     schema_contracts_by_id: BTreeMap<SchemaId, String>,
@@ -267,7 +270,7 @@ pub struct RecoverabilityContractV1 {
     maximum_canonical_bytes: usize,
 }
 
-impl RecoverabilityContractV1 {
+impl RecoverabilityContractV2 {
     /// Loads and validates the embedded annex once for the process.
     pub fn embedded() -> std::result::Result<&'static Self, RecoverabilityError> {
         match EMBEDDED_CONTRACT.get_or_init(|| Self::from_annex_bytes(ANNEX_BYTES)) {
@@ -343,7 +346,8 @@ impl RecoverabilityContractV1 {
         &self,
         schema_contract: &str,
         bytes: &[u8],
-    ) -> std::result::Result<ValidatedCanonicalValueV1, RecoverabilityError> {
+    ) -> std::result::Result<ValidatedCanonicalValueV2, RecoverabilityError> {
+        self.ordinary_schema(schema_contract)?;
         if bytes.len() > self.maximum_canonical_bytes {
             return Err(RecoverabilityError::new(
                 RecoverabilityErrorCode::OutOfBounds,
@@ -371,7 +375,7 @@ impl RecoverabilityContractV1 {
         &self,
         schema_id: &SchemaId,
         bytes: &[u8],
-    ) -> std::result::Result<ValidatedCanonicalValueV1, RecoverabilityError> {
+    ) -> std::result::Result<ValidatedCanonicalValueV2, RecoverabilityError> {
         self.strict_decode(self.schema_contract_for_id(schema_id)?, bytes)
     }
 
@@ -384,8 +388,8 @@ impl RecoverabilityContractV1 {
     /// its fields.
     pub fn reference_edges(
         &self,
-        value: &ValidatedCanonicalValueV1,
-    ) -> std::result::Result<Vec<SchemaReferenceEdgeV1>, RecoverabilityError> {
+        value: &ValidatedCanonicalValueV2,
+    ) -> std::result::Result<Vec<SchemaReferenceEdgeV2>, RecoverabilityError> {
         let schema = self.schemas.get(value.schema_contract()).ok_or_else(|| {
             RecoverabilityError::new(
                 RecoverabilityErrorCode::UnknownSchema,
@@ -412,7 +416,8 @@ impl RecoverabilityContractV1 {
         &self,
         schema_contract: &str,
         value: &CanonicalValue,
-    ) -> std::result::Result<ValidatedCanonicalValueV1, RecoverabilityError> {
+    ) -> std::result::Result<ValidatedCanonicalValueV2, RecoverabilityError> {
+        self.ordinary_schema(schema_contract)?;
         let canonical = CanonicalJsonBytes::from_value(value);
         if canonical.as_bytes().len() > self.maximum_canonical_bytes {
             return Err(RecoverabilityError::new(
@@ -440,7 +445,7 @@ impl RecoverabilityContractV1 {
     pub fn semantic_digest(
         &self,
         domain: &str,
-        value: &ValidatedCanonicalValueV1,
+        value: &ValidatedCanonicalValueV2,
     ) -> std::result::Result<SemanticDigest, RecoverabilityError> {
         let definition = self.domains.get(domain).ok_or_else(|| {
             RecoverabilityError::new(
@@ -661,7 +666,7 @@ impl RecoverabilityContractV1 {
     /// Derives the frozen redaction digest of one exact cross-run source reference.
     pub fn derive_cross_run_source_redaction_digest(
         &self,
-        value: &ValidatedCanonicalValueV1,
+        value: &ValidatedCanonicalValueV2,
     ) -> std::result::Result<SemanticDigest, RecoverabilityError> {
         self.semantic_digest_for(
             "mfm.cross-run-source-redaction.v1",
@@ -697,7 +702,7 @@ impl RecoverabilityContractV1 {
     /// Derives the frozen schema identity from its exact descriptor preimage.
     pub fn derive_schema_id(
         &self,
-        value: &ValidatedCanonicalValueV1,
+        value: &ValidatedCanonicalValueV2,
     ) -> std::result::Result<SchemaId, RecoverabilityError> {
         let digest = self.semantic_digest_for("mfm.schema.v1", "schema_id", value)?;
         let contract = value
@@ -728,13 +733,20 @@ impl RecoverabilityContractV1 {
 
     /// Computes the raw SHA-256 digest of exact retained bytes.
     pub fn raw_content_digest(&self, bytes: &[u8]) -> ContentDigest {
-        ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(bytes))
+        let mut hasher = self.raw_content_digest_hasher();
+        hasher.update(bytes);
+        hasher.finalize()
+    }
+
+    /// Starts one incremental raw SHA-256 retained-content digest.
+    pub fn raw_content_digest_hasher(&self) -> RawContentDigestHasher {
+        RawContentDigestHasher::new()
     }
 
     /// Constructs the lightweight annex-derived content identity for a value.
     pub fn content_ref(
         &self,
-        value: &ValidatedCanonicalValueV1,
+        value: &ValidatedCanonicalValueV2,
     ) -> std::result::Result<ContentRef, RecoverabilityError> {
         let registered = self.schema_id(&value.schema_contract)?;
         if registered != &value.schema_id {
@@ -760,15 +772,10 @@ impl RecoverabilityContractV1 {
         schema_contract: &str,
         canonical: PlainCanonicalJsonBytes,
         value: Value,
-    ) -> std::result::Result<ValidatedCanonicalValueV1, RecoverabilityError> {
-        let schema = self.schemas.get(schema_contract).ok_or_else(|| {
-            RecoverabilityError::new(
-                RecoverabilityErrorCode::UnknownSchema,
-                "schema contract is not registered",
-            )
-        })?;
+    ) -> std::result::Result<ValidatedCanonicalValueV2, RecoverabilityError> {
+        let schema = self.ordinary_schema(schema_contract)?;
         self.validate_shape(&schema.shape, &value, "$", 0)?;
-        Ok(ValidatedCanonicalValueV1 {
+        Ok(ValidatedCanonicalValueV2 {
             schema_contract: schema_contract.to_owned(),
             schema_id: schema.schema_id.clone(),
             canonical,
@@ -776,11 +783,36 @@ impl RecoverabilityContractV1 {
         })
     }
 
+    fn ordinary_schema(
+        &self,
+        schema_contract: &str,
+    ) -> std::result::Result<&SchemaDefinition, RecoverabilityError> {
+        let schema = self.schemas.get(schema_contract).ok_or_else(|| {
+            RecoverabilityError::new(
+                RecoverabilityErrorCode::UnknownSchema,
+                "schema contract is not registered",
+            )
+        })?;
+        if schema
+            .shape
+            .as_object()
+            .and_then(|shape| shape.get("kind"))
+            .and_then(Value::as_str)
+            == Some("framed_sequence")
+        {
+            return Err(RecoverabilityError::new(
+                RecoverabilityErrorCode::WrongType,
+                "framed-sequence schemas require the streaming codec",
+            ));
+        }
+        Ok(schema)
+    }
+
     fn semantic_digest_for(
         &self,
         domain: &'static str,
         result_kind: &'static str,
-        value: &ValidatedCanonicalValueV1,
+        value: &ValidatedCanonicalValueV2,
     ) -> std::result::Result<SemanticDigest, RecoverabilityError> {
         let definition = self.domains.get(domain).ok_or_else(|| {
             RecoverabilityError::new(
@@ -802,7 +834,7 @@ impl RecoverabilityContractV1 {
         shape: &Value,
         value: &Value,
         path: &str,
-        edges: &mut Vec<SchemaReferenceEdgeV1>,
+        edges: &mut Vec<SchemaReferenceEdgeV2>,
         depth: usize,
     ) -> std::result::Result<(), RecoverabilityError> {
         if depth > MAX_SCHEMA_DEPTH {
@@ -841,8 +873,8 @@ impl RecoverabilityContractV1 {
                         terminal_kind.schema_contract(),
                         &json_to_canonical_value(value)?,
                     )?;
-                    edges.push(SchemaReferenceEdgeV1 {
-                        path: CanonicalReferencePathV1 {
+                    edges.push(SchemaReferenceEdgeV2 {
+                        path: CanonicalReferencePathV2 {
                             pointer: path.to_owned(),
                         },
                         declared_contract: declared_contract.to_owned(),
@@ -964,7 +996,7 @@ impl RecoverabilityContractV1 {
         fields: &[Value],
         object: &Map<String, Value>,
         path: &str,
-        edges: &mut Vec<SchemaReferenceEdgeV1>,
+        edges: &mut Vec<SchemaReferenceEdgeV2>,
         depth: usize,
     ) -> std::result::Result<(), RecoverabilityError> {
         let mut present_fields = Vec::with_capacity(fields.len());
@@ -1015,7 +1047,7 @@ impl RecoverabilityContractV1 {
         &self,
         contract: &str,
         depth: usize,
-    ) -> std::result::Result<Option<ReferenceTerminalKindV1>, RecoverabilityError> {
+    ) -> std::result::Result<Option<ReferenceTerminalKindV2>, RecoverabilityError> {
         if depth > MAX_SCHEMA_DEPTH {
             return Err(RecoverabilityError::new(
                 RecoverabilityErrorCode::InvalidAnnex,
@@ -1023,8 +1055,8 @@ impl RecoverabilityContractV1 {
             ));
         }
         match contract {
-            "mfm.content-ref.v1" => return Ok(Some(ReferenceTerminalKindV1::ContentRef)),
-            "mfm.value-ref.v1" => return Ok(Some(ReferenceTerminalKindV1::ValueRef)),
+            "mfm.content-ref.v1" => return Ok(Some(ReferenceTerminalKindV2::ContentRef)),
+            "mfm.value-ref.v1" => return Ok(Some(ReferenceTerminalKindV2::ValueRef)),
             _ => {}
         }
         let referenced = self.schemas.get(contract).ok_or_else(|| {
@@ -1053,7 +1085,7 @@ impl RecoverabilityContractV1 {
     }
 }
 
-impl RecoverabilityContractV1 {
+impl RecoverabilityContractV2 {
     fn from_annex_bytes(bytes: &[u8]) -> std::result::Result<Self, RecoverabilityError> {
         if bytes.len() > MAX_ANNEX_BYTES {
             return Err(RecoverabilityError::new(
@@ -1224,7 +1256,7 @@ impl RecoverabilityContractV1 {
             return Err(value_error(
                 RecoverabilityErrorCode::OutOfBounds,
                 path,
-                "schema recursion exceeds the recoverability-v1 bound",
+                "schema recursion exceeds the recoverability-v2 bound",
             ));
         }
         let definition = shape.as_object().ok_or_else(|| {
@@ -1300,6 +1332,11 @@ impl RecoverabilityContractV1 {
             "array" => self.validate_array(definition, value, path, depth),
             "object" => self.validate_object(definition, value, path, depth),
             "tagged_union" => self.validate_tagged_union(definition, value, path, depth),
+            "framed_sequence" => Err(value_error(
+                RecoverabilityErrorCode::WrongType,
+                path,
+                "framed-sequence schemas require the streaming codec",
+            )),
             _ => Err(value_error(
                 RecoverabilityErrorCode::InvalidAnnex,
                 path,
@@ -1805,6 +1842,16 @@ fn collect_schema_references(
                     .to_owned(),
             );
         }
+        Some("framed_sequence") => {
+            output.insert(
+                required_string(
+                    object,
+                    "frame_contract",
+                    RecoverabilityErrorCode::InvalidAnnex,
+                )?
+                .to_owned(),
+            );
+        }
         Some("nullable" | "optional_absent") => collect_schema_references(
             required_value(object, "value", RecoverabilityErrorCode::InvalidAnnex)?,
             output,
@@ -1944,7 +1991,7 @@ fn json_to_canonical_value(
 }
 
 fn ordering_key(
-    contract: &RecoverabilityContractV1,
+    contract: &RecoverabilityContractV2,
     value: &Value,
     item_shape: &Value,
     ordering: &str,
@@ -2032,7 +2079,7 @@ fn ordering_key(
 }
 
 fn resolved_union_variants<'a>(
-    contract: &'a RecoverabilityContractV1,
+    contract: &'a RecoverabilityContractV2,
     shape: &'a Value,
     depth: usize,
 ) -> std::result::Result<&'a [Value], RecoverabilityError> {
@@ -2411,10 +2458,10 @@ fn validate_annex_root(root: &Map<String, Value>) -> std::result::Result<(), Rec
         "annex root",
     )?;
     let contract = required_string(root, "contract", RecoverabilityErrorCode::InvalidAnnex)?;
-    if !string_matches_grammar(contract, "mfm.[a-z0-9._-]+.v1") {
+    if contract != "mfm.recoverability-annex.v2" {
         return Err(RecoverabilityError::new(
             RecoverabilityErrorCode::InvalidAnnex,
-            "annex contract id violates the v1 contract grammar",
+            "annex does not declare the recoverability-v2 contract",
         ));
     }
     for field in [
@@ -2632,6 +2679,44 @@ fn validate_annex_metadata(
         "values",
         RecoverabilityErrorCode::InvalidAnnex,
     )?)?;
+    let actual_transient =
+        required_array(transient, "values", RecoverabilityErrorCode::InvalidAnnex)?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+    let expected_transient = BTreeSet::from([
+        "AdmitAuthority",
+        "AdmittedSupportGraph",
+        "AuthorizedAccess",
+        "AuthorizedEnsureAccess",
+        "AuthorizedReadAccess",
+        "CapabilityCatalog",
+        "ClosureVerificationSession",
+        "CommittedObservation",
+        "CommittedRequest",
+        "FactScanSession",
+        "More",
+        "NewlyAppendedAuthorization",
+        "OfflineVerifiedRun",
+        "PreparedObjectGraph",
+        "QualifiedDeploymentAuthority",
+        "QualifiedSupportGraph",
+        "RequestView",
+        "RunAccessAuthority",
+        "StateCatalog",
+        "StateFrame",
+        "TargetOperationReceipt",
+        "VerifiedConfiguredValue",
+        "VerifiedExportStream",
+        "VerifiedRunView",
+        "VerifiedTerminalEffectView",
+    ]);
+    if actual_transient != expected_transient {
+        return Err(RecoverabilityError::new(
+            RecoverabilityErrorCode::InvalidAnnex,
+            "transient authority registry does not match recoverability-v2",
+        ));
+    }
     validate_logical_key_registry(required_object(root, "logical_keys")?)?;
     validate_batch_registry(required_object(root, "batch_legality")?)?;
     Ok(())
@@ -2805,6 +2890,7 @@ fn validate_schema_algebra_registry(
         "boolean",
         "bounded_unsigned_integer",
         "canonical_decimal_u64",
+        "framed_sequence",
         "literal",
         "nullable",
         "object",
@@ -3104,6 +3190,74 @@ fn validate_shape_definition(
             require_exact_key_set(object, &allowed, "tagged union schema node")?;
             validate_closed_object_metadata(object)?;
             validate_union_definition(object, schemas, depth)?;
+        }
+        "framed_sequence" => {
+            require_exact_keys(
+                object,
+                &[
+                    "frame_contract",
+                    "invariants",
+                    "kind",
+                    "max_frame_canonical_json_bytes",
+                    "media_type",
+                    "record_prefix_hex",
+                    "record_suffix_hex",
+                ],
+                "framed sequence schema node",
+            )?;
+            if required_string(
+                object,
+                "frame_contract",
+                RecoverabilityErrorCode::InvalidAnnex,
+            )? != "mfm.portable-run-export-frame.v1"
+                || required_string(
+                    object,
+                    "max_frame_canonical_json_bytes",
+                    RecoverabilityErrorCode::InvalidAnnex,
+                )? != "16777216"
+                || required_string(object, "media_type", RecoverabilityErrorCode::InvalidAnnex)?
+                    != "application/vnd.mfm.run-export-stream.v1+json-seq"
+                || required_string(
+                    object,
+                    "record_prefix_hex",
+                    RecoverabilityErrorCode::InvalidAnnex,
+                )? != "1e"
+                || required_string(
+                    object,
+                    "record_suffix_hex",
+                    RecoverabilityErrorCode::InvalidAnnex,
+                )? != "0a"
+            {
+                return Err(RecoverabilityError::new(
+                    RecoverabilityErrorCode::InvalidAnnex,
+                    "framed sequence does not match the portable export wire contract",
+                ));
+            }
+            let frame = schemas
+                .get("mfm.portable-run-export-frame.v1")
+                .ok_or_else(|| {
+                    RecoverabilityError::new(
+                        RecoverabilityErrorCode::InvalidAnnex,
+                        "portable export frame schema is not registered",
+                    )
+                })?;
+            if frame
+                .shape
+                .as_object()
+                .and_then(|shape| shape.get("kind"))
+                .and_then(Value::as_str)
+                != Some("tagged_union")
+            {
+                return Err(RecoverabilityError::new(
+                    RecoverabilityErrorCode::InvalidAnnex,
+                    "portable export frame contract is not a tagged union",
+                ));
+            }
+            validate_unique_strings(required_array(
+                object,
+                "invariants",
+                RecoverabilityErrorCode::InvalidAnnex,
+            )?)?;
         }
         _ => {
             return Err(RecoverabilityError::new(

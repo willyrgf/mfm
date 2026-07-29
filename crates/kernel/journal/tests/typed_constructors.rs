@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV2};
 use mfm_journal::v1::*;
 use mfm_values::component_object_evidence_contract_ref;
 use serde_json::Value;
 
-const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/corpus.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v2/corpus.json");
 
 fn corpus() -> Value {
     serde_json::from_slice(CORPUS_BYTES).expect("frozen corpus must decode")
@@ -334,7 +334,7 @@ fn journal_runtime_retained_contract_factories_are_exact_and_deterministic() {
     }
 
     let recoverability =
-        RecoverabilityContractV1::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
     let evidence_ref =
         component_object_evidence_contract_ref().expect("component object evidence ref");
     let cases = [

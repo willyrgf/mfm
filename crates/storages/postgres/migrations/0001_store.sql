@@ -1,4 +1,4 @@
--- MFM recoverability-v1 PostgreSQL authority.
+-- MFM recoverability-v2 PostgreSQL authority.
 --
 -- This is a destructive pre-production baseline, not an upgrade from the retired event,
 -- projection, global-order, lane, or fact-query schemas. A database carrying an earlier

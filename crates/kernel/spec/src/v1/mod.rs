@@ -1,10 +1,10 @@
-//! Frozen recoverability-v1 planning and graph values.
+//! Frozen recoverability-v2 planning and graph values.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_canonical::{
-    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV1,
-    ValidatedCanonicalValueV1,
+    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV2,
+    ValidatedCanonicalValueV2,
 };
 pub use mfm_ids::EntryPointId;
 use mfm_ids::{
@@ -51,8 +51,8 @@ fn admission_retained_contract(
     )?)
 }
 
-fn contract() -> Result<&'static RecoverabilityContractV1> {
-    RecoverabilityContractV1::embedded().map_err(Into::into)
+fn contract() -> Result<&'static RecoverabilityContractV2> {
+    RecoverabilityContractV2::embedded().map_err(Into::into)
 }
 
 fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
@@ -62,7 +62,7 @@ fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
         .map_err(|error| SpecError::Contract(error.to_string()))
 }
 
-fn validated<T: Serialize>(schema_contract: &str, value: &T) -> Result<ValidatedCanonicalValueV1> {
+fn validated<T: Serialize>(schema_contract: &str, value: &T) -> Result<ValidatedCanonicalValueV2> {
     let canonical = canonical(value)?;
     contract()?
         .strict_decode(schema_contract, canonical.as_bytes())

@@ -1,4 +1,4 @@
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2};
 use mfm_journal::v1::{ProducerBindingFields, RunPhase};
 
 use super::{
@@ -29,7 +29,7 @@ const CANONICAL_VALUE_CONTRACT: &str = "mfm.primitive-canonical_value.v1";
 /// }
 /// ```
 pub struct VerifiedPublicRunView {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
 }
 
 impl VerifiedPublicRunView {
@@ -74,12 +74,12 @@ impl VerifiedPublicRunView {
             ("public_outputs", CanonicalValue::Array(public_outputs)),
         ])?;
         let validated =
-            RecoverabilityContractV1::embedded()?.encode(PUBLIC_RUN_VIEW_CONTRACT, &value)?;
+            RecoverabilityContractV2::embedded()?.encode(PUBLIC_RUN_VIEW_CONTRACT, &value)?;
         Ok(Self { validated })
     }
 
     /// Consumes this sealed projection into its exact annex-validated canonical response.
-    pub fn into_validated(self) -> ValidatedCanonicalValueV1 {
+    pub fn into_validated(self) -> ValidatedCanonicalValueV2 {
         self.validated
     }
 }
@@ -151,7 +151,7 @@ fn public_outputs(
         });
     }
     let object = view.retained_value(value_ref)?;
-    let contract = RecoverabilityContractV1::embedded()?;
+    let contract = RecoverabilityContractV2::embedded()?;
     let aggregate = contract.strict_decode(CANONICAL_VALUE_CONTRACT, object.bytes())?;
 
     public_contract

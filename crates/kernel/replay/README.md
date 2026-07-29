@@ -2,6 +2,8 @@
 
 Callback-free recorded-history inspection and portable export for MFM.
 
+The sole current codec and portable-stream registry is
+`contracts/recoverability/v2/annex.json`.
 `docs/design.md` is the normative authority contract. Every store-backed operation accepts the
 exact store-owned purpose authority for replay, transition trace, access audit, or export and loads
 one fresh head-bound `CommittedRunJournal`. The store consumes that journal into one opaque,
@@ -14,7 +16,7 @@ This crate traverses the verified view without a runtime catalog or historical c
 - exact transition-trace and safe access-audit derivation;
 - deterministic semantic and audit export canonicalization;
 - complete source/object closure traversal; and
-- callback-free offline verification of portable bundles.
+- callback-free offline verification of portable streams.
 
 It owns no append path, scheduler, live capability, provider, executor, transport, signer,
 filesystem-domain reader, or replay broker. Exact reproduction gives an isolated historical
@@ -35,7 +37,7 @@ do not change historical execution input.
 
 Same-store fact completeness is positive only when the authoritative store rechecks the immutable
 private scan attestation and its complete dense writer prefix. Portable/offline verification always
-returns `UnverifiedPortableBundle`, because included portable bytes cannot prove tenant-wide
+returns `UnverifiedPortableStream`, because included portable bytes cannot prove tenant-wide
 omission completeness.
 
 Transition trace paging accepts only the application-decoded optional fixed head, start index, and
@@ -51,10 +53,13 @@ public projection annotates a verified returned ensure as pending or terminal wi
 retained values in the application. Replay accepts only the store seam's decoded head, start index,
 and limit and returns the next scalar index; the application alone owns opaque transport cursors.
 
-Portable members use fixed coordinate-derived paths, with the root at `runs.r0000` and dependency
-runs sorted by canonical run identity. The manifest contains no self or bundle digest. The sole
-transport integrity value is raw SHA-256 over the exact final canonical bundle bytes and is returned
-outside those bytes. Export recursively follows the complete source closure fixed by each run's
-admission and requires the exact transitive `Export` authority set. A missing source authority is a
-denial; after that exact authority is supplied, an absent or corrupt append-only source is export
+Portable transfer is one `mfm.portable-run-export-stream.v1` JSON text sequence. The header fixes
+the root and coordinate; run frames are root first and then dependencies by canonical `RunId`;
+journal payloads are dense; object payloads are ordered and transferred once; and every logical
+`ValueRef` authority follows its payload in canonical order. The final `end` frame is followed
+immediately by EOF. The sole transport integrity value is raw SHA-256 over every record separator,
+canonical frame byte, and line feed and is returned outside the stream. Export recursively follows
+the complete source closure fixed by each run's admission and requires the exact transitive
+`Export` authority set before any stream byte is written. A missing source authority is a denial;
+after that exact authority is supplied, an absent or corrupt append-only source is export
 integrity failure rather than another policy denial.

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, b256, keccak256, Address, PrimitiveSignature, B256, U256};
 use k256::ecdsa::SigningKey;
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV1};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV2};
 use mfm_evm::{
     evm_submit_transaction_leaf_expansion, evm_submit_transaction_value_contracts,
     evm_wallet_assurance_policy_ref, evm_wallet_finality_policy_ref, evm_wallet_nonce_policy_ref,
@@ -969,7 +969,7 @@ fn retained_contract(
     evidence_contract_ref: &ContentRef,
 ) -> RetainedValueContract {
     RetainedValueContract::new(
-        RecoverabilityContractV1::embedded()
+        RecoverabilityContractV2::embedded()
             .expect("recoverability contract")
             .schema_id(schema_contract)
             .expect("retained schema")

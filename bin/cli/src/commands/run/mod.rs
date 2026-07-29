@@ -370,27 +370,31 @@ async fn export(
 ) -> Result<(), PublicError> {
     let credential = credential(ctx).await?;
     let run_id = parse_run_id(run_id)?;
+    tokio::task::spawn_blocking({
+        let output = output.clone();
+        let ref_output = ref_output.clone();
+        move || output_file::preflight_new_atomic_pair(&output, &ref_output)
+    })
+    .await
+    .map_err(|_| export_write_error())?
+    .map_err(map_export_write_error)?;
     let export = application(connection)
         .await?
         .export_run(credential, run_id, ExportRequest::new(kind.into_app()))
         .await?;
-    let content_ref = export.content_ref()?;
-    let content_ref_bytes = serde_json::to_vec(&content_ref).map_err(|_| {
+    let content_ref_bytes = serde_json::to_vec(export.content_ref()).map_err(|_| {
         PublicError::internal(
             "ExportContentRefInvalid",
             "Export ContentRef could not be rendered",
         )
     })?;
-    tokio::task::spawn_blocking(move || {
-        output_file::create_new_atomic_pair(
-            &output,
-            export.bytes(),
-            &ref_output,
-            &content_ref_bytes,
-        )
-    })
+    output_file::create_new_atomic_pair_from_reader(
+        output,
+        export.into_reader(),
+        ref_output,
+        content_ref_bytes,
+    )
     .await
-    .map_err(|_| export_write_error())?
     .map_err(map_export_write_error)
 }
 
@@ -422,5 +426,20 @@ fn finish_export(result: Result<(), PublicError>, format: &super::OutputFormat) 
             print_error(error, format);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mfm_app::ErrorClass;
+
+    use super::{map_export_write_error, CreateNewFileError};
+
+    #[test]
+    fn destination_copy_failures_use_only_the_fixed_export_write_contract() {
+        let error = map_export_write_error(CreateNewFileError::WriteFailed);
+        assert_eq!(error.class, ErrorClass::Internal);
+        assert_eq!(error.code, "ExportWriteFailed");
+        assert_eq!(error.message, "Export could not be written");
     }
 }

@@ -33,15 +33,15 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
-use ring::digest::{digest, SHA256};
+use ring::digest::{digest, Context, SHA256};
 use serde::de::{self, Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 
-mod recoverability_v1;
+mod recoverability_v2;
 
-pub use recoverability_v1::{
-    CanonicalReferencePathV1, RecoverabilityContractV1, RecoverabilityError,
-    RecoverabilityErrorCode, ReferenceTerminalKindV1, SchemaReferenceEdgeV1,
-    ValidatedCanonicalValueV1,
+pub use recoverability_v2::{
+    CanonicalReferencePathV2, RecoverabilityContractV2, RecoverabilityError,
+    RecoverabilityErrorCode, ReferenceTerminalKindV2, SchemaReferenceEdgeV2,
+    ValidatedCanonicalValueV2,
 };
 
 /// Result type for canonicalization operations.
@@ -53,6 +53,50 @@ pub type Result<T> = std::result::Result<T, CanonicalError>;
 #[error("{message}")]
 pub struct CanonicalError {
     message: String,
+}
+
+/// Incremental raw retained-content digest fixed to `sha256-v1`.
+///
+/// Construction is available only through
+/// [`RecoverabilityContractV2::raw_content_digest_hasher`]. The hasher is
+/// intentionally non-cloneable and exposes no generic algorithm selection.
+///
+/// ```compile_fail
+/// let contract = mfm_canonical::RecoverabilityContractV2::embedded().unwrap();
+/// let hasher = contract.raw_content_digest_hasher();
+/// let _duplicate = hasher.clone();
+/// ```
+pub struct RawContentDigestHasher {
+    context: Context,
+}
+
+impl RawContentDigestHasher {
+    fn new() -> Self {
+        Self {
+            context: Context::new(&SHA256),
+        }
+    }
+
+    /// Adds the next exact byte segment to the content digest.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.context.update(bytes);
+    }
+
+    /// Finalizes this one-use hasher as a typed `sha256-v1` content digest.
+    pub fn finalize(self) -> ContentDigest {
+        let digest = self.context.finish();
+        let mut output = [0_u8; 32];
+        output.copy_from_slice(digest.as_ref());
+        ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array(output))
+    }
+}
+
+impl fmt::Debug for RawContentDigestHasher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RawContentDigestHasher")
+            .finish_non_exhaustive()
+    }
 }
 
 impl CanonicalError {

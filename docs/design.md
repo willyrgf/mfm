@@ -4,7 +4,7 @@ Status: authoritative typed-core design contract
 
 This document defines the one current runtime, journal, store, replay, and application design. The
 canonical recoverability schemas and identities are frozen in
-`contracts/recoverability/v1/annex.json` and `contracts/recoverability/v1/corpus.json`. Where this
+`contracts/recoverability/v2/annex.json` and `contracts/recoverability/v2/corpus.json`. Where this
 document summarizes a frozen encoding, the annex is authoritative.
 The typed-core cutover is implemented and no pre-cutover lifecycle remains. Production EVM reads
 are current audited graph nodes. EVM transaction submission is a registered recoverable effect
@@ -814,12 +814,14 @@ Public status is exactly `active | succeeded | failed`. The ordinary run read ex
 status, reviewed active-run fields, and certified public outputs. Trace, audit, replay, and export
 are separately authorized. There is no arbitrary object reader or tenant-wide discovery surface.
 
-`PortableRunExport` is the canonical annex-defined bundle containing its version, media type,
-manifest, and members. Its serialized bytes contain no self-digest. The external content digest is
-SHA-256 over those exact final canonical bytes and is not a bundle field.
+Portable run transfer is the annex-defined `mfm.portable-run-export-stream.v1` framed JSON text
+sequence. It begins with one header, carries root-first journals and deduplicated object payloads
+with every logical `ValueRef` authority, and ends with one terminal frame followed immediately by
+EOF. The external content digest is SHA-256 over every exact record separator, canonical frame
+byte, and line feed; no frame contains a self-digest.
 
 The exact DTOs, disclosure rules, pagination, authentication, and portable-export contract are in
-`docs/recoverability-app-surface-v1.md`.
+`docs/recoverability-app-surface-v2.md`.
 
 ## Security And Redaction
 
@@ -835,8 +837,8 @@ Capability classifiers discard provider-controlled text and retain only safe val
 the classifier-bound complete diagnostic identity and structural shape. Append, load, and replay
 then recheck that identity and shape, full producer-qualified `ValueRef`s, frozen object intents,
 effect-retained closure, and fact-source closure without invoking callbacks. Public errors are
-closed redaction-safe codes. A record id, run id, value reference, content digest, cursor, or
-portable manifest grants no access.
+closed redaction-safe codes. A record id, run id, value reference, content digest, cursor,
+portable stream, or export content reference grants no access.
 
 ## Documentation Update Rules
 

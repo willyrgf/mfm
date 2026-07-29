@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Canonical recoverability-v1 program, planning, and execution contracts.
+//! Canonical recoverability-v2 program, planning, and execution contracts.
 //!
 //! This crate contains value contracts only. It does not author programs, run
 //! planners, execute states, bind live capabilities, or grant admission
@@ -61,7 +61,7 @@ pub fn exact_content_ref(
     .map_err(Into::into)
 }
 
-/// Frozen recoverability-v1 planning and graph values.
+/// Frozen recoverability-v2 planning and graph values.
 pub mod v1;
 
 pub use v1::*;

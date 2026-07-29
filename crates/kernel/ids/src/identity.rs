@@ -115,7 +115,7 @@ impl SemanticDigest {
         }
     }
 
-    /// Parses the exact recoverability v1 semantic-digest grammar.
+    /// Parses the exact recoverability v2 semantic-digest grammar.
     pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
         let digest = value
@@ -201,7 +201,7 @@ macro_rules! semantic_identity {
                 }
             }
 
-            /// Parses the exact recoverability v1 identity grammar.
+            /// Parses the exact recoverability v2 identity grammar.
             pub fn parse(value: impl AsRef<str>) -> Result<Self> {
                 let value = value.as_ref();
                 let semantic_digest = SemanticDigest::parse(
@@ -289,7 +289,7 @@ macro_rules! branded_semantic_digest {
                 Self(digest)
             }
 
-            /// Parses the exact recoverability v1 semantic-digest grammar.
+            /// Parses the exact recoverability v2 semantic-digest grammar.
             pub fn parse(value: impl AsRef<str>) -> Result<Self> {
                 SemanticDigest::parse(value).map(Self)
             }

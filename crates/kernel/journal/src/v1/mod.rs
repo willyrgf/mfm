@@ -1,4 +1,4 @@
-//! Frozen recoverability-v1 journal model.
+//! Frozen recoverability-v2 journal model.
 
 mod access;
 mod codec;

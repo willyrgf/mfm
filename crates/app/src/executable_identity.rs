@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Read;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2};
 use mfm_ids::{ContentRef, DigestBytes};
 
 use crate::{ErrorClass, PublicError};
@@ -12,7 +12,7 @@ const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Self-attested identity and exact retained descriptor of the serving executable.
 pub(super) struct CurrentExecutableIdentity {
-    descriptor: ValidatedCanonicalValueV1,
+    descriptor: ValidatedCanonicalValueV2,
     content_ref: ContentRef,
 }
 
@@ -63,7 +63,7 @@ fn executable_identity(raw_sha256: &DigestBytes) -> Result<CurrentExecutableIden
     ])
     .map_err(|_| executable_identity_unavailable())?;
     let contract =
-        RecoverabilityContractV1::embedded().map_err(|_| executable_identity_unavailable())?;
+        RecoverabilityContractV2::embedded().map_err(|_| executable_identity_unavailable())?;
     let descriptor = contract
         .encode(EXECUTABLE_DESCRIPTOR_CONTRACT, &value)
         .map_err(|_| executable_identity_unavailable())?;

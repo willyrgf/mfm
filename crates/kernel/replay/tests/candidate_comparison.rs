@@ -1,14 +1,18 @@
+use std::collections::BTreeSet;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::{CanonicalBytes, PlainCanonicalJsonBytes, RecoverabilityContractV2};
 use mfm_ids::{AppendRequestId, RunId, StableId, StoreEpoch, StoreScopeId};
 use mfm_program::{QualifiedCandidateIdentity, QualifiedProgramRegistry};
 use mfm_qualified_run_test_support::{
     CandidateCallbackCounts, PreparedQualifiedRun, QualifiedRunFixture,
 };
 use mfm_replay::trace_export::{
-    export_portable_run, verify_portable_run_export, ExportKind, PortableRunExport,
-    VerifiedPortableExport,
+    verify_portable_run_export_stream, write_portable_run_export_stream, ExportKind,
+    PortableRunExportMetadata, VerifiedExportStream,
 };
 use mfm_replay::v1::{
     compare_current, required_export_source_run_ids, verify_recorded_history, ReplayErrorKind,
@@ -19,6 +23,7 @@ use mfm_store::{
     ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot, RunAccessAuthorityIssuer,
     RunJournalStore, SettlementMaterial, StoreIdentity, TransitionMaterial,
 };
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 struct ClosedQualifiedRun {
     store: AsyncInMemoryRunStore,
@@ -29,7 +34,7 @@ struct ClosedQualifiedRun {
 }
 
 impl ClosedQualifiedRun {
-    async fn portable_history(&self) -> VerifiedPortableExport {
+    async fn portable_stream(&self) -> (Vec<u8>, PortableRunExportMetadata) {
         let export_authority = self
             .issuer
             .authorize_export(self.fixture.tenant_scope_id().clone(), self.run_id.clone());
@@ -39,10 +44,22 @@ impl ClosedQualifiedRun {
                 .expect("discover source-free export closure")
                 .is_empty()
         );
-        let export = export_portable_run(&self.store, &export_authority, &[], ExportKind::Semantic)
-            .await
-            .expect("export genuine semantic history");
-        bind_portable_history(self, &export).await
+        let mut bytes = Vec::new();
+        let metadata = write_portable_run_export_stream(
+            &self.store,
+            &export_authority,
+            &[],
+            ExportKind::Semantic,
+            &mut bytes,
+        )
+        .await
+        .expect("export genuine semantic history");
+        (bytes, metadata)
+    }
+
+    async fn portable_history(&self) -> VerifiedExportStream {
+        let (bytes, metadata) = self.portable_stream().await;
+        bind_portable_history(self, bytes, metadata).await
     }
 
     async fn candidate_registry(
@@ -241,9 +258,23 @@ async fn close_panicking_history_manually(
 
 async fn bind_portable_history(
     run: &ClosedQualifiedRun,
-    export: &PortableRunExport,
-) -> VerifiedPortableExport {
-    let offline = verify_portable_run_export(export.as_bytes(), export.digest())
+    bytes: Vec<u8>,
+    metadata: PortableRunExportMetadata,
+) -> VerifiedExportStream {
+    assert_stream_framing(&bytes);
+    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+    assert_eq!(
+        metadata.content_digest(),
+        &contract.raw_content_digest(&bytes)
+    );
+    assert_eq!(
+        metadata.schema_id(),
+        contract
+            .schema_id("mfm.portable-run-export-stream.v1")
+            .expect("portable stream schema")
+    );
+    let offline = verify_portable_run_export_stream(bytes.as_slice(), metadata.content_ref())
+        .await
         .expect("independently verify generated portable export");
     assert_eq!(offline.run_id(), &run.run_id);
     assert_eq!(offline.export_kind(), ExportKind::Semantic);
@@ -254,11 +285,92 @@ async fn bind_portable_history(
         .await
         .expect("verify callback-free recorded history");
     verified
-        .verify_portable_export(
-            export.as_bytes(),
-            &export.content_ref().expect("portable export content ref"),
-        )
+        .verify_export_stream(bytes.as_slice(), metadata.content_ref())
+        .await
         .expect("bind semantic export to verified history")
+}
+
+fn assert_stream_framing(bytes: &[u8]) {
+    assert_eq!(bytes.first(), Some(&0x1e));
+    let mut kinds = Vec::new();
+    for record in bytes.split_inclusive(|byte| *byte == b'\n') {
+        assert_eq!(record.first(), Some(&0x1e));
+        assert_eq!(record.last(), Some(&b'\n'));
+        let canonical =
+            PlainCanonicalJsonBytes::from_canonical_json_slice(&record[1..record.len() - 1])
+                .expect("canonical stream frame");
+        let frame: serde_json::Value =
+            serde_json::from_slice(canonical.as_bytes()).expect("stream frame JSON");
+        let kind = frame
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .expect("frame kind");
+        if kind == "chunk" {
+            let decoded = CanonicalBytes::from_base64url_no_pad(
+                frame
+                    .get("bytes")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("chunk bytes"),
+            )
+            .expect("canonical chunk");
+            assert!(!decoded.as_bytes().is_empty());
+            assert!(decoded.as_bytes().len() <= 65_536);
+        }
+        if matches!(kind, "header" | "end") {
+            assert!(
+                frame
+                    .as_object()
+                    .expect("frame object")
+                    .keys()
+                    .all(|key| !key.contains("digest")),
+                "stream must not carry its own digest"
+            );
+        }
+        kinds.push(kind.to_owned());
+    }
+    assert_eq!(kinds.first().map(String::as_str), Some("header"));
+    assert_eq!(kinds.last().map(String::as_str), Some("end"));
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| kind.as_str() == "header")
+            .count(),
+        1
+    );
+    assert_eq!(
+        kinds.iter().filter(|kind| kind.as_str() == "end").count(),
+        1
+    );
+    assert_eq!(
+        kinds.into_iter().collect::<BTreeSet<_>>(),
+        [
+            "chunk",
+            "commit_begin",
+            "end",
+            "header",
+            "object_authority",
+            "object_begin",
+            "object_end",
+            "record_begin",
+            "run_begin",
+            "run_end",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+}
+
+fn stream_ref(bytes: &[u8]) -> mfm_ids::ContentRef {
+    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+    mfm_ids::ContentRef::new(
+        contract
+            .schema_id("mfm.portable-run-export-stream.v1")
+            .expect("portable stream schema")
+            .clone(),
+        contract.raw_content_digest(bytes),
+    )
+    .expect("portable stream reference")
 }
 
 fn parse_result(result: &mfm_replay::v1::CanonicalReplayResult) -> serde_json::Value {
@@ -327,6 +439,253 @@ fn assert_candidate_identities(
             .expect("top-level candidate executable ref"),
         candidate.candidate_executable_identity_ref(),
     );
+}
+
+#[tokio::test]
+async fn portable_stream_is_deterministic_and_rejects_structural_tampering() {
+    let run = close_with_runtime(0x40, 0x41).await;
+    let (first, first_metadata) = run.portable_stream().await;
+    let (second, second_metadata) = run.portable_stream().await;
+    assert_eq!(first, second);
+    assert_eq!(first_metadata, second_metadata);
+    assert_stream_framing(&first);
+
+    let error = verify_portable_run_export_stream(
+        FailAtEofReader::new(first.clone()),
+        first_metadata.content_ref(),
+    )
+    .await
+    .expect_err("EOF probe I/O failure after a valid end frame");
+    assert_eq!(error.kind(), ReplayErrorKind::ExportStreamIo);
+
+    let mut wrong_offset = first.clone();
+    let needle = br#""offset":"0""#;
+    let index = wrong_offset
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("stream chunk offset");
+    wrong_offset[index + needle.len() - 2] = b'1';
+    let error =
+        verify_portable_run_export_stream(wrong_offset.as_slice(), &stream_ref(&wrong_offset))
+            .await
+            .expect_err("noncontiguous chunk offset");
+    assert_eq!(error.kind(), ReplayErrorKind::InvalidExport);
+
+    let mut wrong_prefix = first.clone();
+    wrong_prefix[0] = b' ';
+    let error =
+        verify_portable_run_export_stream(wrong_prefix.as_slice(), &stream_ref(&wrong_prefix))
+            .await
+            .expect_err("wrong record prefix");
+    assert_eq!(error.kind(), ReplayErrorKind::InvalidExport);
+
+    let truncated = &first[..first.len() - 1];
+    let error = verify_portable_run_export_stream(truncated, &stream_ref(truncated))
+        .await
+        .expect_err("premature clean EOF");
+    assert_eq!(error.kind(), ReplayErrorKind::InvalidExport);
+
+    let error = verify_portable_run_export_stream(first.as_slice(), &stream_ref(b"different"))
+        .await
+        .expect_err("external digest mismatch");
+    assert_eq!(error.kind(), ReplayErrorKind::InvalidExport);
+
+    let mut short_writer = ShortWriter::new(3);
+    let export_authority = run
+        .issuer
+        .authorize_export(run.fixture.tenant_scope_id().clone(), run.run_id.clone());
+    let short_metadata = write_portable_run_export_stream(
+        &run.store,
+        &export_authority,
+        &[],
+        ExportKind::Semantic,
+        &mut short_writer,
+    )
+    .await
+    .expect("write through deterministic short writes");
+    assert!(short_writer.flushed);
+    assert!(short_writer.shutdown);
+    assert_eq!(short_writer.bytes, first);
+    assert_eq!(short_metadata, first_metadata);
+
+    let first_record_end = first
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("header line feed")
+        + 1;
+    let last_record_start = first
+        .iter()
+        .rposition(|byte| *byte == 0x1e)
+        .expect("terminal record separator");
+    let terminal = &first[last_record_start..];
+    let duplicate_field_record =
+        raw_record(br#"{"kind":"end","kind":"end","version":"mfm.portable-run-export-frame.v1"}"#);
+    let unknown_field_record = raw_record(
+        br#"{"kind":"end","unknown":true,"version":"mfm.portable-run-export-frame.v1"}"#,
+    );
+    let non_jcs_record =
+        raw_record(br#"{"version":"mfm.portable-run-export-frame.v1","kind":"end"}"#);
+    let malformed = [
+        (
+            "byte-order-mark",
+            [b"\xef\xbb\xbf".as_slice(), first.as_slice()].concat(),
+        ),
+        (
+            "crlf",
+            [
+                &first[..first_record_end - 1],
+                b"\r\n".as_slice(),
+                &first[first_record_end..],
+            ]
+            .concat(),
+        ),
+        (
+            "blank-record",
+            [b"\n".as_slice(), first.as_slice()].concat(),
+        ),
+        (
+            "json-whitespace",
+            [&first[..1], b" ".as_slice(), &first[1..]].concat(),
+        ),
+        (
+            "duplicate-field",
+            [
+                &first[..last_record_start],
+                duplicate_field_record.as_slice(),
+            ]
+            .concat(),
+        ),
+        (
+            "unknown-field",
+            [&first[..last_record_start], unknown_field_record.as_slice()].concat(),
+        ),
+        (
+            "non-jcs-order",
+            [&first[..last_record_start], non_jcs_record.as_slice()].concat(),
+        ),
+        (
+            "duplicate-header",
+            [&first[..first_record_end], first.as_slice()].concat(),
+        ),
+        ("frame-after-end", [first.as_slice(), terminal].concat()),
+        (
+            "bytes-after-end",
+            [first.as_slice(), b"x".as_slice()].concat(),
+        ),
+        ("old-v1-bundle", old_v1_portable_bundle()),
+    ];
+    for (name, malformed) in malformed {
+        let error =
+            verify_portable_run_export_stream(malformed.as_slice(), &stream_ref(&malformed))
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ReplayErrorKind::InvalidExport,
+            "{name} must be rejected"
+        );
+    }
+}
+
+fn raw_record(json: &[u8]) -> Vec<u8> {
+    [b"\x1e".as_slice(), json, b"\n".as_slice()].concat()
+}
+
+fn old_v1_portable_bundle() -> Vec<u8> {
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../contracts/recoverability/v1/corpus.json"
+    ))
+    .expect("retained V1 corpus");
+    let hex = corpus["positive_vectors"]
+        .as_array()
+        .expect("positive vectors")
+        .iter()
+        .find(|vector| vector["schema_contract"].as_str() == Some("mfm.portable-run-export.v1"))
+        .and_then(|vector| vector["canonical_hex"].as_str())
+        .expect("retained V1 portable bundle");
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("ASCII hex");
+            u8::from_str_radix(pair, 16).expect("hex byte")
+        })
+        .collect()
+}
+
+struct ShortWriter {
+    bytes: Vec<u8>,
+    max_write: usize,
+    flushed: bool,
+    shutdown: bool,
+}
+
+struct FailAtEofReader {
+    bytes: Vec<u8>,
+    position: usize,
+}
+
+impl FailAtEofReader {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes, position: 0 }
+    }
+}
+
+impl AsyncRead for FailAtEofReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.position == self.bytes.len() {
+            return Poll::Ready(Err(io::Error::other("sentinel EOF probe failure")));
+        }
+        let count = buffer
+            .remaining()
+            .min(self.bytes.len().saturating_sub(self.position));
+        let end = self.position + count;
+        buffer.put_slice(&self.bytes[self.position..end]);
+        self.position = end;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl ShortWriter {
+    fn new(max_write: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_write,
+            flushed: false,
+            shutdown: false,
+        }
+    }
+}
+
+impl AsyncWrite for ShortWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.shutdown {
+            return Poll::Ready(Err(io::Error::other("write after shutdown")));
+        }
+        let count = buffer.len().min(self.max_write);
+        self.bytes.extend_from_slice(&buffer[..count]);
+        Poll::Ready(Ok(count))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.flushed = true;
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if !self.flushed {
+            return Poll::Ready(Err(io::Error::other("shutdown before flush")));
+        }
+        self.shutdown = true;
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[tokio::test]

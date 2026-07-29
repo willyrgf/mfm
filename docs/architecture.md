@@ -375,7 +375,7 @@ reruns the admitted pure planner/state computations. Candidate comparison runs o
 identified current candidate code.
 
 Replay may read the exact journal, immutable object closure, certification proof closure, and
-authorized cross-run source bundle. It may self-attest its executable where the mode requires it.
+authorized cross-run source stream. It may self-attest its executable where the mode requires it.
 It does not invoke the live scheduler, authorize access, append, resolve routing, call a provider or
 executor, read domain files, or construct a signer.
 
@@ -575,7 +575,7 @@ Before merging, verify:
 
 - `docs/design.md`: normative semantic and authority contract
 - `docs/persisted-public-surfaces.md`: persisted/public no-secret inventory
-- `docs/recoverability-app-surface-v1.md`: exact app, CLI, REST, DTO, and disclosure contract
+- `docs/recoverability-app-surface-v2.md`: exact app, CLI, REST, DTO, and disclosure contract
 - `docs/portfolio-snapshot.md`: published product objective
 - `docs/evm-rpc-routing.md`: EVM routing generation and audited read graph
 - `docs/btc-rpc-routing.md`: unregistered Bitcoin qualification target

@@ -1,4 +1,4 @@
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV1, ValidatedCanonicalValueV1};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2};
 use mfm_ids::{EffectKey, RunId, SchemaId, StableId};
 use mfm_journal::v1::{
     AccessAuditStatus, AuthorizationRef, CapabilityBindingRef, JournalHead, ObservationRef,
@@ -15,19 +15,19 @@ const TRANSITION_TRACE_CONTRACT: &str = "mfm.transition-trace.v1";
 /// access.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CanonicalTransitionTrace {
-    validated: ValidatedCanonicalValueV1,
+    validated: ValidatedCanonicalValueV2,
 }
 
 impl CanonicalTransitionTrace {
     pub(crate) fn encode(value: &CanonicalValue) -> Result<Self> {
         let validated =
-            RecoverabilityContractV1::embedded()?.encode(TRANSITION_TRACE_CONTRACT, value)?;
+            RecoverabilityContractV2::embedded()?.encode(TRANSITION_TRACE_CONTRACT, value)?;
         Ok(Self { validated })
     }
 
     /// Strictly decodes exact canonical transition-trace bytes.
     pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
-        let validated = RecoverabilityContractV1::embedded()?
+        let validated = RecoverabilityContractV2::embedded()?
             .strict_decode(TRANSITION_TRACE_CONTRACT, bytes)?;
         Ok(Self { validated })
     }

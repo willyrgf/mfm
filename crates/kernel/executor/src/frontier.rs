@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV1};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV2};
 use mfm_capabilities::{
     BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureCode, SafeFailureOutcome,
 };
@@ -163,7 +163,7 @@ pub fn verify_reference_safe_failure_tuple(
     Ok(failure)
 }
 
-fn validated_safe_failure(failure: &ReferenceSafeFailure) -> Result<ValidatedCanonicalValueV1> {
+fn validated_safe_failure(failure: &ReferenceSafeFailure) -> Result<ValidatedCanonicalValueV2> {
     encode(
         SAFE_FAILURE_SCHEMA,
         &canonical_object([
@@ -195,7 +195,7 @@ fn validated_safe_failure(failure: &ReferenceSafeFailure) -> Result<ValidatedCan
 
 pub(crate) fn validated_safe_failure_for_result(
     failure: &ReferenceSafeFailure,
-) -> Result<ValidatedCanonicalValueV1> {
+) -> Result<ValidatedCanonicalValueV2> {
     validated_safe_failure(failure)
 }
 
@@ -229,7 +229,7 @@ impl ReturnedOutcome {
     }
 
     /// Returns the exact canonical returned-outcome object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
         encode(
             RETURNED_OUTCOME_SCHEMA,
             &canonical_object([(
@@ -327,7 +327,7 @@ impl DeliveryAttemptOutcome {
         }
     }
 
-    fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
+    fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
         let value = match self {
             Self::Returned(outcome) => canonical_object([
                 ("kind", CanonicalValue::String("returned".to_owned())),
@@ -439,7 +439,7 @@ impl ReferenceTerminalProof {
     }
 
     /// Returns the exact canonical proof object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
         encode(
             TERMINAL_PROOF_SCHEMA,
             &canonical_object([
@@ -514,7 +514,7 @@ impl TerminalTombstone {
     }
 
     /// Returns the exact canonical tombstone object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
         encode(
             TERMINAL_TOMBSTONE_SCHEMA,
             &canonical_object([
@@ -654,7 +654,7 @@ impl ResourceAllocatedRecord {
 
 impl ExecutorEvidenceRecord {
     /// Returns the exact canonical wrapper object retained in a frontier.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
         let (kind, record) = match self {
             Self::EffectBound {
                 executor_binding_ref,
@@ -968,7 +968,7 @@ impl DeliveryAuditFrontier {
     }
 
     /// Returns the exact canonical frontier object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
         let records = self
             .appended_records
             .iter()
@@ -1230,7 +1230,7 @@ impl EvidenceBounds {
     }
 
     /// Returns the exact canonical evidence-bounds object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV1> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
         encode(
             EVIDENCE_BOUNDS_SCHEMA,
             &canonical_object([
