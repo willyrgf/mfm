@@ -20,8 +20,11 @@ block number to a hash.
 The transport has one private 11-operation allowlist: the six reads above and the five wallet
 operations below. Requests are encoded directly into exact-capacity zeroizing byte owners; there is
 no generic method/parameter or `serde_json::Value` request path. Authorization is consumed into a
-sensitive owner-backed header, raw broadcasts are limited to 512 KiB, and every response is read
-once into a preallocated zeroizing 1 MiB buffer. Only exact HTTP `200` is accepted.
+sensitive owner-backed header, and raw broadcasts are limited to 512 KiB. Non-`200` responses are
+classified solely by numeric status; the transport does not poll, decode, hash, or retain their
+provider bodies. For exact HTTP `200`, a declared `Content-Length` above 1 MiB is rejected from the
+headers before response-owner construction or body polling. Otherwise, each body chunk is polled at
+most once into a preallocated zeroizing 1 MiB buffer, and any streamed overrun is rejected.
 
 Response decoding retains borrowed raw JSON ranges. It closes the envelope to exact JSON-RPC
 version/id/result-or-error fields, rejects semantic duplicate keys including escaped aliases, and
