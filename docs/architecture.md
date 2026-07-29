@@ -437,7 +437,13 @@ on an aggregate or its operation topology.
 Current domain product placement:
 
 - `mfm-evm` owns typed EVM model, capability, state, and operation contracts.
-- `mfm-evm-live` owns reusable JSON-RPC transport plus private audited adapters.
+- `mfm-evm` also owns the canonical nonce, initial-nonce, finality, and assurance policy
+  artifacts used by the wallet executor.
+- `mfm-signing` derives the generic secret-free guarded-signer descriptor from one verified
+  signer binding.
+- `mfm-evm-live` owns reusable JSON-RPC transport, private audited adapters, and the sealed
+  wallet-request qualification that closes the transport catalog, executor semantics, signer,
+  resource policy, and EVM policy artifacts before live use.
 - EVM portfolio reads use decomposed bootstrap, anchor, per-call fan-out, confirmation, and pure
   aggregation nodes.
 - EVM transaction submission uses the same stateless transport behind a durable wallet executor;
@@ -460,19 +466,24 @@ Current domain product placement:
 - the entry-point/planning-profile catalog;
 - sole `QualifiedProgramRegistry` assembly, including admitted support, deterministic callbacks,
   semantic read/effect entries, and process-private live invokers;
-- the one content-scoped `61 + N` portfolio/EVM support graph, its single store admission, and
+- the one content-scoped `68 + N` portfolio/EVM support graph, its single store admission, and
   transfer of that non-cloneable admitted graph into the sole registry;
 - the qualified PostgreSQL run store and separately fenced PostgreSQL executor store;
-- exact wallet executor, resource-owner, signer-generation, and target binding composition;
+- exact wallet executor, resource-owner, signer-generation, request-qualification, and target
+  binding composition;
 - current-configuration resolution for admission;
 - exact run services and reviewed DTOs; and
 - public-output, trace, audit, replay, and export reader composition.
 
 For the current product, `N` is the exact configured EVM routing-generation count in
 `1..=4096`. The support scope hashes the complete field-path-ordered member identities and retained
-contracts. Private endpoints, credentials, transports, caller configuration, and per-run
-artifacts never enter that graph. Runtime and the private application backend borrow one shared
-registry `Arc`; they do not assemble parallel catalogs or clone admitted support authority.
+contracts. Its live EVM portion is `15 + N`: the prior route/read/executor closure plus the derived
+guarded-signer descriptor, nonce policy, initial nonce, already-known classifier, finality policy,
+assurance policy, and wallet-request qualification. Private endpoints, credentials, transports,
+caller configuration, and per-run artifacts never enter that graph. Runtime and the private
+application backend borrow one shared registry `Arc`; admission and the executor borrow the same
+live-owned wallet-qualification `Arc`. They do not assemble parallel catalogs, policy predicates,
+or admitted support authority.
 
 The complete facade is:
 

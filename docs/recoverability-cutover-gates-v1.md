@@ -238,7 +238,7 @@ derived telemetry.
 | --- | --- | --- |
 | EVM balance/metadata reads | Registered as source/chain bootstrap, initial anchor, one state per independently meaningful RPC, final anchor confirmation, and pure aggregation. | Exact-call, routing-generation, exhaustive safe-failure verdict, cancellation, partial-failure, anchor, and fan-out conformance passed. |
 | Bitcoin balance collection | Aggregate reader removed; collection remains unregistered under its closed disposition. | `scantxoutset "start"` did not pass lost-response, cancellation, concurrent-scan, delayed-reissue, bounded-work/result, and provider-cost qualification. |
-| EVM mutation | Registered only as `mfm.evm/submit-transaction@1` through the durable wallet executor. | Immutable request and signer binding, account-sequence ownership, stale-head target exclusion, response-loss/restart, already-known, rebroadcast/replacement, success/revert, finality/reorganization, terminal retention, PostgreSQL fencing/refold, and no-secret retention passed. |
+| EVM mutation | Registered only as `mfm.evm/submit-transaction@1` through the durable wallet executor. | One shared pre-admission/pre-allocation wallet qualification closes actual route-catalog membership and chain, exact executor semantics/evidence, derived guarded-signer descriptor, nonce policy/configuration, classifier, finality, assurance, tenant/domain/sender/generation/fence, and every evidence bound. Field-by-field hostile mismatches leave signer/RPC calls and executor storage unchanged. Response-loss/restart, signer-free recovery, already-known, rebroadcast/replacement, success/revert, finality/reorganization, terminal retention, PostgreSQL fencing/refold, and no-secret retention passed. |
 
 ## Gate classification
 
@@ -246,6 +246,9 @@ derived telemetry.
 
 - Compile-only vertical proof of the program value-view/runtime-proof/store-permit boundary.
 - Exact routing-generation schemas and bootstrap read graphs.
+- Exact EVM wallet policy qualification before support admission, run admission, effect binding,
+  nonce allocation, signing, or RPC, with one shared proof and the `15 + N` live/`68 + N` product
+  support closure.
 - Evidence-bag and fact-consumer deletions mapped above.
 - One exact entry-point/profile expansion, including pure/read/effect, nested-child, fan-out,
   fan-in, framework-outer, and executor-inner shapes.

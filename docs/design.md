@@ -74,6 +74,7 @@ only authorize, invoke, and render those lower contracts.
 | `ContentRef` | content identity only | Executor and general lightweight reference: schema id plus raw-byte content digest. |
 | `ValueRef` | journal-retained identity | Full producer-bound artifact, evidence, schema, semantic type, role, length, media type, and producer binding. |
 | `VerifiedExecutorBinding` | executor-ledger authority | Exact tenant, deployment generation, evidence contract, and optional typed resource ownership. |
+| `EvmWalletRequestQualification` | deployment predicate, not target-entry authority | One secret-free sealed equality proof over the actual route catalog, selected route/chain, executor semantic and evidence closure, derived signer descriptor, nonce policy/configuration, classifier, finality, assurance, generation/fence, tenant, wallet domain, sender, and evidence bounds. Admission and execution share one `Arc`. |
 | `TargetEntryAuthority` / `TargetOperationReceipt` | one-use executor authority | Authorization committed before target entry and affine receipt returned by that exact entry. |
 | Rendered JSON and portable bytes | no live authority | Reviewed output/export representations; identifiers and cursors are never bearer authority. |
 
@@ -725,6 +726,7 @@ Production EVM transaction submission is one ordinary effect state:
 
 ```text
 immutable configured transaction request
+  -> exact shared wallet-request qualification before admission
   -> typed sender/nonce allocation in the executor resource stream
   -> guarded deterministic signing before each authorized broadcast
   -> exact-hash transaction and receipt lookup without signer access
@@ -738,6 +740,14 @@ destination, value, calldata semantics, access list, gas limit, and signing prof
 finite qualified fee schedule may change. A missing transaction, timeout, or observed nonce is
 never promoted to a generic not-applied terminal result. Raw signed bytes and signatures remain
 transient and zeroizing inside the broadcast target.
+
+The shared qualification is created without signer, route, ledger, or provider IO from the sealed
+transport catalog and immutable public deployment values. It binds the complete ordered
+route-generation-to-chain map and product object-evidence contract, derives the generic guarded
+signer descriptor and EVM nonce-policy pair, and verifies the exact wallet executor semantic
+closure. The application rejects a configured mismatch before certification or append; the
+executor rejects it again before effect binding or nonce allocation. No caller can supply an
+independent signer reference, resource-policy pair, or selected route descriptor.
 
 ## Application And Public Surface
 

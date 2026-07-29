@@ -18,7 +18,12 @@ most 1,024 holdings and 1,024 distinct tokens, producing at most 2,052 graph
 nodes. The source, chain, routing generation, fan-out coverage, and final
 anchor are checked again during pure aggregation.
 
-Production aggregate-reader, transaction/effect lifecycle, ingress-validation,
-and replay-helper surfaces are absent. Recoverability-neutral transaction
-models and EIP-1559 signing remain reusable protocol primitives for a future
-qualified executor.
+The registered `mfm.evm/submit-transaction@1` mutation uses this crate's immutable EIP-1559
+request, candidate, attempt-result, receipt/finality, and terminal-evidence contracts behind the
+durable wallet executor. This crate also owns the canonical account-sequence nonce policy,
+deployment-attested initial-nonce descriptor, finalized-tag policy, and terminal assurance
+policy. Their content identities are qualified before admission and reused by allocation,
+delivery, recovery, and terminal convergence.
+
+Production aggregate-reader, ingress-validation, transport, custody, storage, and replay-helper
+surfaces remain outside this crate.

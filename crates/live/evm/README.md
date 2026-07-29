@@ -40,4 +40,12 @@ allocation and immediately before durable target authorization. Hash, receipt, f
 canonical-inclusion recovery use retained public candidate descriptors without reopening the
 signer. Raw signed bytes are zeroized and never enter executor evidence.
 
-No Bitcoin state, replay reducer, aggregate reader, or special mutation lifecycle is registered.
+`EvmWalletRequestQualification` is the single sealed pre-admission and pre-allocation wallet
+predicate. It derives the complete ordered route-generation/chain map from the actual transport,
+closes the verified executor semantics and object-evidence contract, and binds the guarded-signer
+descriptor, wallet domain, generation fence, nonce configuration, classifier, finality,
+assurance, and evidence bounds. The app admission path, executor, and JSON-RPC target share one
+live-owned `Arc`; callers cannot provide parallel route, signer, policy, or safe-failure
+descriptors.
+
+No Bitcoin state, replay reducer, or aggregate reader is registered.

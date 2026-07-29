@@ -1,7 +1,7 @@
 use alloy_primitives::{address, b256, TxKind, B256, U256};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{DigestAlgorithm, SchemaId, TenantScopeId};
-use mfm_program::{boundary_content_ref, encode_boundary};
+use mfm_program::{boundary_content_ref, decode_boundary, encode_boundary};
 
 use super::*;
 
@@ -40,8 +40,9 @@ fn policy() -> EvmWalletPolicy {
         1,
         SENDER,
         reference("signer-binding"),
+        reference("nonce-policy"),
         7,
-        reference("nonce-attestation"),
+        reference("initial-nonce"),
         fee_schedule(),
         reference("already-known"),
         reference("finality-policy"),
@@ -76,6 +77,90 @@ fn request(action: EvmWalletTransactionAction, input: &[u8]) -> EvmSubmitTransac
         policy,
     )
     .expect("request")
+}
+
+#[test]
+fn wallet_policy_artifacts_are_distinct_canonical_content_identities() {
+    let nonce = evm_wallet_nonce_policy_ref().expect("nonce policy");
+    let finality = evm_wallet_finality_policy_ref().expect("finality policy");
+    let assurance = evm_wallet_assurance_policy_ref().expect("assurance policy");
+    let refs = [
+        nonce.to_content_ref().expect("nonce ref"),
+        finality.to_content_ref().expect("finality ref"),
+        assurance.to_content_ref().expect("assurance ref"),
+    ];
+    assert_eq!(
+        refs.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        refs.len()
+    );
+    assert_eq!(
+        evm_wallet_nonce_policy_canonical()
+            .expect("nonce canonical")
+            .as_str(),
+        r#"{"advance_requires_prior_terminal":true,"allocation":"monotonic_u64","fencing":"required","first_sequence":"configuration.initial_nonce","reassignment":false,"version":"mfm.evm.wallet-nonce-policy.v1"}"#
+    );
+    assert_eq!(
+        evm_wallet_finality_policy_canonical()
+            .expect("finality canonical")
+            .as_str(),
+        r#"{"canonical_inclusion_recheck":"fresh_number_lookup","finalized_head":"fresh_finalized_tag","finalized_head_at_or_after_receipt":true,"version":"mfm.evm.wallet-finality-policy.v1"}"#
+    );
+    assert_eq!(
+        evm_wallet_assurance_policy_canonical()
+            .expect("assurance canonical")
+            .as_str(),
+        r#"{"candidate_lineage":"complete_through_selected_candidate","canonical_inclusion":"receipt_block_matches_fresh_number_lookup","executor_generation_and_fence":"exact","finalized_head":"at_or_after_receipt","outcomes":["reverted","succeeded"],"receipt":"exact_candidate_and_transaction","request":"exact","transaction":"exact_candidate","version":"mfm.evm.wallet-assurance-policy.v1"}"#
+    );
+}
+
+#[test]
+fn initial_nonce_descriptor_identity_fixes_every_coordination_field() {
+    let descriptor = |nonce, source, domain, chain, sender, generation| {
+        EvmWalletInitialNonceDescriptor::new(
+            nonce,
+            reference(source),
+            reference(domain),
+            chain,
+            sender,
+            reference(generation),
+        )
+        .expect("initial nonce descriptor")
+    };
+    let base = descriptor(7, "source", "wallet-domain", 1, SENDER, "generation");
+    let variants = [
+        descriptor(8, "source", "wallet-domain", 1, SENDER, "generation"),
+        descriptor(7, "other-source", "wallet-domain", 1, SENDER, "generation"),
+        descriptor(7, "source", "other-domain", 1, SENDER, "generation"),
+        descriptor(7, "source", "wallet-domain", 2, SENDER, "generation"),
+        descriptor(7, "source", "wallet-domain", 1, RECIPIENT, "generation"),
+        descriptor(7, "source", "wallet-domain", 1, SENDER, "other-generation"),
+    ];
+    let base_ref = base.reference().expect("base reference");
+    for variant in variants {
+        assert_ne!(variant.reference().expect("variant reference"), base_ref,);
+    }
+}
+
+#[test]
+fn wallet_policy_has_only_the_current_nonce_contract_fields() {
+    let canonical = encode_boundary(&policy()).expect("policy canonical");
+    let mut wire: serde_json::Value =
+        serde_json::from_slice(canonical.as_bytes()).expect("policy JSON");
+    assert!(wire.get("nonce_policy_ref").is_some());
+    assert!(wire.get("initial_nonce_descriptor_ref").is_some());
+    assert!(wire.get("initial_nonce_attestation_ref").is_none());
+    let initial_nonce_ref = wire
+        .as_object_mut()
+        .expect("policy object")
+        .remove("initial_nonce_descriptor_ref")
+        .expect("initial nonce descriptor");
+    wire.as_object_mut().expect("policy object").insert(
+        "initial_nonce_attestation_ref".to_owned(),
+        initial_nonce_ref,
+    );
+    let legacy =
+        PlainCanonicalJsonBytes::from_json_str(&wire.to_string()).expect("legacy policy canonical");
+    assert!(decode_boundary::<EvmWalletPolicy>(&legacy).is_err());
 }
 
 fn candidate(request: &EvmSubmitTransactionRequest) -> EvmWalletTransactionCandidate {
@@ -287,6 +372,7 @@ fn convergence_budget_must_fit_executor_bounds_at_construction() {
         1,
         SENDER,
         reference("signer"),
+        reference("nonce-policy"),
         0,
         reference("nonce"),
         fee_schedule(),

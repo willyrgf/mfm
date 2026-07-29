@@ -9,8 +9,9 @@ use std::str::FromStr;
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_executor::{CanonicalExecutorRequest, EvidenceBounds, SchemaQualifiedCanonicalValue};
-use mfm_ids::{ContentDigest, ContentRef, LocalPublicId, SchemaId, TenantScopeId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, LocalPublicId, SchemaId, TenantScopeId};
 use mfm_program::{boundary_content_ref, decode_boundary, encode_boundary};
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs, StateInput};
 use mfm_values::SchemaDescriptor;
@@ -40,6 +41,14 @@ pub const EVM_WALLET_RECEIPT_LOG_LIMIT: usize = 4_096;
 pub const EVM_WALLET_RECEIPT_LOG_DATA_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Conservative retained wrapper allowance per executor evidence record.
 pub const EVM_WALLET_EXECUTOR_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
+/// Exact version of the selected EVM account-sequence policy descriptor.
+pub const EVM_WALLET_NONCE_POLICY_VERSION: &str = "mfm.evm.wallet-nonce-policy.v1";
+/// Exact version of one deployment-attested initial nonce descriptor.
+pub const EVM_WALLET_INITIAL_NONCE_DESCRIPTOR_VERSION: &str = "mfm.evm.wallet-initial-nonce.v1";
+/// Exact version of the finalized-tag finality policy.
+pub const EVM_WALLET_FINALITY_POLICY_VERSION: &str = "mfm.evm.wallet-finality-policy.v1";
+/// Exact version of the terminal wallet assurance policy.
+pub const EVM_WALLET_ASSURANCE_POLICY_VERSION: &str = "mfm.evm.wallet-assurance-policy.v1";
 
 /// Exact target operation for a raw type-2 broadcast or rebroadcast.
 pub const EVM_WALLET_BROADCAST_OPERATION_ID: &str = "eth_send_raw_transaction";
@@ -136,6 +145,182 @@ impl<'de> Deserialize<'de> for EvmWalletReference {
         reference.to_content_ref().map_err(de::Error::custom)?;
         Ok(reference)
     }
+}
+
+/// Returns the canonical EVM account-sequence policy selected by deployment.
+///
+/// ```
+/// let canonical = mfm_evm::evm_wallet_nonce_policy_canonical()?;
+/// let reference = mfm_evm::evm_wallet_nonce_policy_ref()?;
+///
+/// assert!(canonical.as_str().contains("\"fencing\":\"required\""));
+/// assert!(reference
+///     .to_content_ref()?
+///     .schema_id()
+///     .as_str()
+///     .contains("mfm.evm.wallet-nonce-policy"));
+/// # Ok::<(), mfm_evm::EvmWalletError>(())
+/// ```
+pub fn evm_wallet_nonce_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
+    wallet_descriptor_canonical(&serde_json::json!({
+        "advance_requires_prior_terminal": true,
+        "allocation": "monotonic_u64",
+        "first_sequence": "configuration.initial_nonce",
+        "fencing": "required",
+        "reassignment": false,
+        "version": EVM_WALLET_NONCE_POLICY_VERSION,
+    }))
+}
+
+/// Returns the exact EVM account-sequence policy identity.
+pub fn evm_wallet_nonce_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
+    wallet_descriptor_ref(
+        "mfm.evm.wallet-nonce-policy",
+        &evm_wallet_nonce_policy_canonical()?,
+    )
+}
+
+/// Deployment-attested first unused nonce for one exact wallet generation.
+///
+/// The source attestation is public evidence identity only. This descriptor
+/// contains no endpoint, provider response, credential, or signing material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvmWalletInitialNonceDescriptor {
+    version: String,
+    initial_nonce: String,
+    source_attestation_ref: EvmWalletReference,
+    wallet_domain_ref: EvmWalletReference,
+    chain_id: u64,
+    sender: String,
+    durable_generation_ref: EvmWalletReference,
+}
+
+impl EvmWalletInitialNonceDescriptor {
+    /// Constructs one complete content-addressed initial nonce descriptor.
+    pub fn new(
+        initial_nonce: u64,
+        source_attestation_ref: EvmWalletReference,
+        wallet_domain_ref: EvmWalletReference,
+        chain_id: u64,
+        sender: Address,
+        durable_generation_ref: EvmWalletReference,
+    ) -> Result<Self, EvmWalletError> {
+        let descriptor = Self {
+            version: EVM_WALLET_INITIAL_NONCE_DESCRIPTOR_VERSION.to_owned(),
+            initial_nonce: initial_nonce.to_string(),
+            source_attestation_ref,
+            wallet_domain_ref,
+            chain_id,
+            sender: canonical_address(sender),
+            durable_generation_ref,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    /// Returns the deployment-attested first unused nonce.
+    pub fn initial_nonce(&self) -> Result<u64, EvmWalletError> {
+        parse_quantity(&self.initial_nonce)?
+            .try_into()
+            .map_err(|_| EvmWalletError::Invalid("initial_nonce"))
+    }
+
+    /// Returns the public source-attestation identity.
+    pub const fn source_attestation_ref(&self) -> &EvmWalletReference {
+        &self.source_attestation_ref
+    }
+
+    /// Returns the externally coordinated wallet domain.
+    pub const fn wallet_domain_ref(&self) -> &EvmWalletReference {
+        &self.wallet_domain_ref
+    }
+
+    /// Returns the exact EVM chain.
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Returns the canonical wallet sender.
+    pub fn sender(&self) -> &str {
+        &self.sender
+    }
+
+    /// Parses the checked wallet sender.
+    pub fn sender_address(&self) -> Result<Address, EvmWalletError> {
+        parse_address(&self.sender)
+    }
+
+    /// Returns the durable executor/wallet generation.
+    pub const fn durable_generation_ref(&self) -> &EvmWalletReference {
+        &self.durable_generation_ref
+    }
+
+    /// Returns exact canonical descriptor bytes.
+    pub fn canonical(&self) -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
+        self.validate()?;
+        wallet_descriptor_canonical(self)
+    }
+
+    /// Returns the exact descriptor identity used as nonce policy configuration.
+    pub fn reference(&self) -> Result<EvmWalletReference, EvmWalletError> {
+        wallet_descriptor_ref("mfm.evm.wallet-initial-nonce", &self.canonical()?)
+    }
+
+    fn validate(&self) -> Result<(), EvmWalletError> {
+        if self.version != EVM_WALLET_INITIAL_NONCE_DESCRIPTOR_VERSION
+            || self.chain_id == 0
+            || self.sender_address()?.is_zero()
+        {
+            return Err(EvmWalletError::Invalid("initial_nonce_descriptor"));
+        }
+        self.initial_nonce()?;
+        self.source_attestation_ref.to_content_ref()?;
+        self.wallet_domain_ref.to_content_ref()?;
+        self.durable_generation_ref.to_content_ref()?;
+        Ok(())
+    }
+}
+
+/// Returns the canonical finalized-tag finality policy.
+pub fn evm_wallet_finality_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
+    wallet_descriptor_canonical(&serde_json::json!({
+        "canonical_inclusion_recheck": "fresh_number_lookup",
+        "finalized_head": "fresh_finalized_tag",
+        "finalized_head_at_or_after_receipt": true,
+        "version": EVM_WALLET_FINALITY_POLICY_VERSION,
+    }))
+}
+
+/// Returns the exact finalized-tag finality-policy identity.
+pub fn evm_wallet_finality_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
+    wallet_descriptor_ref(
+        "mfm.evm.wallet-finality-policy",
+        &evm_wallet_finality_policy_canonical()?,
+    )
+}
+
+/// Returns the canonical terminal wallet assurance policy.
+pub fn evm_wallet_assurance_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
+    wallet_descriptor_canonical(&serde_json::json!({
+        "candidate_lineage": "complete_through_selected_candidate",
+        "canonical_inclusion": "receipt_block_matches_fresh_number_lookup",
+        "executor_generation_and_fence": "exact",
+        "finalized_head": "at_or_after_receipt",
+        "outcomes": ["reverted", "succeeded"],
+        "receipt": "exact_candidate_and_transaction",
+        "request": "exact",
+        "transaction": "exact_candidate",
+        "version": EVM_WALLET_ASSURANCE_POLICY_VERSION,
+    }))
+}
+
+/// Returns the exact terminal wallet assurance-policy identity.
+pub fn evm_wallet_assurance_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
+    wallet_descriptor_ref(
+        "mfm.evm.wallet-assurance-policy",
+        &evm_wallet_assurance_policy_canonical()?,
+    )
 }
 
 /// Stable configured-value target selected by the public entry-point input.
@@ -629,8 +814,9 @@ struct EvmWalletPolicyWire {
     chain_id: u64,
     sender: String,
     signer_binding_ref: EvmWalletReference,
+    nonce_policy_ref: EvmWalletReference,
     initial_nonce: String,
-    initial_nonce_attestation_ref: EvmWalletReference,
+    initial_nonce_descriptor_ref: EvmWalletReference,
     replacement: EvmWalletReplacementPolicy,
     already_known_classifier_ref: EvmWalletReference,
     finality_policy_ref: EvmWalletReference,
@@ -660,8 +846,9 @@ impl EvmWalletPolicy {
         chain_id: u64,
         sender: Address,
         signer_binding_ref: EvmWalletReference,
+        nonce_policy_ref: EvmWalletReference,
         initial_nonce: u64,
-        initial_nonce_attestation_ref: EvmWalletReference,
+        initial_nonce_descriptor_ref: EvmWalletReference,
         replacement: EvmWalletReplacementPolicy,
         already_known_classifier_ref: EvmWalletReference,
         finality_policy_ref: EvmWalletReference,
@@ -676,8 +863,9 @@ impl EvmWalletPolicy {
             chain_id,
             sender: canonical_address(sender),
             signer_binding_ref,
+            nonce_policy_ref,
             initial_nonce: initial_nonce.to_string(),
-            initial_nonce_attestation_ref,
+            initial_nonce_descriptor_ref,
             replacement,
             already_known_classifier_ref,
             finality_policy_ref,
@@ -735,6 +923,11 @@ impl EvmWalletPolicy {
         &self.wire.signer_binding_ref
     }
 
+    /// Returns the exact selected account-sequence policy identity.
+    pub const fn nonce_policy_ref(&self) -> &EvmWalletReference {
+        &self.wire.nonce_policy_ref
+    }
+
     /// Returns the externally attested first unused nonce.
     pub fn initial_nonce(&self) -> Result<u64, EvmWalletError> {
         parse_quantity(&self.wire.initial_nonce)?
@@ -742,9 +935,9 @@ impl EvmWalletPolicy {
             .map_err(|_| EvmWalletError::Invalid("initial_nonce"))
     }
 
-    /// Returns the attestation for the first unused nonce.
-    pub const fn initial_nonce_attestation_ref(&self) -> &EvmWalletReference {
-        &self.wire.initial_nonce_attestation_ref
+    /// Returns the complete descriptor for the first unused nonce.
+    pub const fn initial_nonce_descriptor_ref(&self) -> &EvmWalletReference {
+        &self.wire.initial_nonce_descriptor_ref
     }
 
     /// Returns the finite replacement schedule.
@@ -792,8 +985,9 @@ impl EvmWalletPolicy {
             return Err(EvmWalletError::Invalid("wallet_policy_identity"));
         }
         self.wire.signer_binding_ref.to_content_ref()?;
+        self.wire.nonce_policy_ref.to_content_ref()?;
         self.initial_nonce()?;
-        self.wire.initial_nonce_attestation_ref.to_content_ref()?;
+        self.wire.initial_nonce_descriptor_ref.to_content_ref()?;
         self.wire.replacement.validate()?;
         self.wire.already_known_classifier_ref.to_content_ref()?;
         self.wire.finality_policy_ref.to_content_ref()?;
@@ -2506,6 +2700,29 @@ where
     let schema = T::schema_id().map_err(|_| EvmWalletError::RequestEncoding)?;
     let reference =
         boundary_content_ref(schema, &canonical).map_err(|_| EvmWalletError::RequestEncoding)?;
+    Ok(EvmWalletReference::from_content_ref(reference))
+}
+
+fn wallet_descriptor_canonical(
+    value: &impl Serialize,
+) -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
+    let json = serde_json::to_string(value).map_err(|_| EvmWalletError::RequestEncoding)?;
+    PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| EvmWalletError::RequestEncoding)
+}
+
+fn wallet_descriptor_ref(
+    schema_name: &'static str,
+    canonical: &PlainCanonicalJsonBytes,
+) -> Result<EvmWalletReference, EvmWalletError> {
+    let schema = SchemaId::new(
+        schema_name,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(format!("schema:{schema_name}:1").as_bytes()),
+    )
+    .map_err(|_| EvmWalletError::RequestEncoding)?;
+    let reference =
+        boundary_content_ref(schema, canonical).map_err(|_| EvmWalletError::RequestEncoding)?;
     Ok(EvmWalletReference::from_content_ref(reference))
 }
 

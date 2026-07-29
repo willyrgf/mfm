@@ -7,16 +7,18 @@ use k256::ecdsa::SigningKey;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV1};
 use mfm_evm::{
     evm_submit_transaction_leaf_expansion, evm_submit_transaction_value_contracts,
+    evm_wallet_assurance_policy_ref, evm_wallet_finality_policy_ref, evm_wallet_nonce_policy_ref,
     EvmSubmitTransactionRequest, EvmTransactionOutcome, EvmTransactionTarget,
     EvmWalletAccessListEntry, EvmWalletAttemptResult, EvmWalletBroadcastStatus,
-    EvmWalletConvergencePlan, EvmWalletFeeCandidate, EvmWalletPolicy, EvmWalletReference,
-    EvmWalletReplacementPolicy, EvmWalletTransactionAction, EvmWalletTransactionTemplate,
+    EvmWalletConvergencePlan, EvmWalletFeeCandidate, EvmWalletInitialNonceDescriptor,
+    EvmWalletPolicy, EvmWalletReference, EvmWalletReplacementPolicy, EvmWalletTransactionAction,
+    EvmWalletTransactionTemplate,
 };
 use mfm_executor::{
     CommittedEffectRequest, Ensure, EvidenceBounds, ExecutorBinding, ExecutorContractDescriptor,
     ExecutorDeployment, ExecutorError, ExecutorRetainedClosureContract, KeyedExecutorLedger,
-    MemoryExecutorStore, ReferenceFailureCode, ResourceOwnership, ResourcePolicyBinding,
-    SchemaQualifiedCanonicalValue, VerifiedEnsureResult, VerifiedExecutorBinding,
+    MemoryExecutorStore, ReferenceFailureCode, ResourceOwnership, SchemaQualifiedCanonicalValue,
+    VerifiedEnsureResult, VerifiedExecutorBinding,
 };
 use mfm_ids::{
     ContentRef, DigestAlgorithm, NodeId, RunId, SchemaId, SemanticTypeId, StableId, StoreScopeId,
@@ -33,10 +35,11 @@ use mfm_signing::{
 use mfm_values::{MfmValue, RetainedValueContract};
 use serde_json::{json, Value};
 
+use crate::transport::{EvmJsonRpcTransport, EvmRoutingCatalogBuilder, EvmRpcEndpoint};
 use crate::{
     evm_already_known_classifier_ref, evm_wallet_target_callback_surface_ref, EvmWalletExecutor,
-    EvmWalletRpcClient, EvmWalletRpcFailure, EvmWalletRpcFuture, EvmWalletRpcResponse,
-    EvmWalletSignerBinding,
+    EvmWalletRequestQualification, EvmWalletRpcClient, EvmWalletRpcFailure, EvmWalletRpcFuture,
+    EvmWalletRpcResponse,
 };
 
 const RECIPIENT: Address = address!("2222222222222222222222222222222222222222");
@@ -409,8 +412,12 @@ struct RequestInputs {
     tenant_scope_id: TenantScopeId,
     wallet_domain_ref: ContentRef,
     route_generation_ref: ContentRef,
+    chain_id: u64,
     signer_binding_ref: ContentRef,
-    nonce_attestation_ref: ContentRef,
+    nonce_policy_ref: ContentRef,
+    initial_nonce: u64,
+    initial_nonce_descriptor_ref: ContentRef,
+    already_known_classifier_ref: ContentRef,
     finality_policy_ref: ContentRef,
     assurance_policy_ref: ContentRef,
     sender: Address,
@@ -422,8 +429,8 @@ struct Fixture {
     store: MemoryExecutorStore,
     executor: EvmWalletExecutor<MemoryExecutorStore, MockRpc>,
     client: MockRpc,
-    signer: EvmWalletSignerBinding,
-    resource_policy_binding: ResourcePolicyBinding,
+    signer: GenerationGuardedDeterministicSigningProviderBinder,
+    qualification: Arc<EvmWalletRequestQualification>,
     committed: CommittedEffectRequest<EvmSubmitTransactionRequest>,
     request_inputs: RequestInputs,
     signer_calls: Arc<AtomicUsize>,
@@ -439,18 +446,22 @@ impl Fixture {
                 .expect("tenant");
         let generation_ref = reviewed_ref("wallet-generation");
         let fence_ref = reviewed_ref("wallet-generation-fence");
-        let request_inputs = RequestInputs {
-            tenant_scope_id: tenant_scope_id.clone(),
-            wallet_domain_ref: reviewed_ref("wallet-domain"),
-            route_generation_ref: reviewed_ref("route-generation"),
-            signer_binding_ref: reviewed_ref("signer-binding"),
-            nonce_attestation_ref: reviewed_ref("nonce-attestation"),
-            finality_policy_ref: reviewed_ref("finality-policy"),
-            assurance_policy_ref: reviewed_ref("assurance-policy"),
-            sender,
-            bounds: EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024).expect("bounds"),
-        };
-        let request = make_request(&request_inputs, U256::from(5));
+        let wallet_domain_ref = reviewed_ref("wallet-domain");
+        let bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024).expect("bounds");
+        let mut routing = EvmRoutingCatalogBuilder::new();
+        let route_generation = routing
+            .insert(
+                "primary",
+                "mfm.test.evm-wallet-source",
+                1,
+                StableId::new("mfm.test.evm-wallet-route-generation").expect("generation id"),
+                EvmRpcEndpoint::new("http://127.0.0.1:8545").expect("endpoint"),
+                None,
+            )
+            .expect("route generation");
+        let qualification_transport =
+            EvmJsonRpcTransport::new(routing.build().expect("routing catalog"))
+                .expect("qualification transport");
         let object_evidence_ref = reviewed_ref("object-evidence");
         let value_contracts = evm_submit_transaction_value_contracts(object_evidence_ref.clone())
             .expect("wallet value contracts");
@@ -495,17 +506,17 @@ impl Fixture {
             value_contracts.request().clone(),
             retained_contract("safe-failure", "mfm.safe-failure.v1", &object_evidence_ref),
             retained,
-            reviewed_ref("safe-failure-contract"),
+            mfm_evm::evm_safe_failure_contract_ref().expect("safe failure contract"),
             target_surface.clone(),
-            request_inputs.bounds.clone(),
-            Some(request_inputs.wallet_domain_ref.clone()),
+            bounds.clone(),
+            Some(wallet_domain_ref.clone()),
             vec![evm_submit_transaction_leaf_expansion(target_surface)
                 .expect("wallet leaf expansion")],
         )
         .expect("executor contract");
         let ownership = ResourceOwnership::new(
             reviewed_ref("wallet-coordination"),
-            request_inputs.wallet_domain_ref.clone(),
+            wallet_domain_ref.clone(),
             generation_ref.clone(),
             Some(fence_ref.clone()),
         )
@@ -551,6 +562,61 @@ impl Fixture {
             reviewed_ref("direct-sign-exclusion"),
         )
         .expect("guarded signer binding");
+        let signer_descriptor = signer_binding
+            .public_descriptor()
+            .expect("signer descriptor");
+        let initial_nonce_descriptor = EvmWalletInitialNonceDescriptor::new(
+            7,
+            EvmWalletReference::from_content_ref(reviewed_ref("nonce-source-attestation")),
+            EvmWalletReference::from_content_ref(wallet_domain_ref.clone()),
+            1,
+            sender,
+            EvmWalletReference::from_content_ref(
+                binding.deployment().durable_ledger_generation_ref().clone(),
+            ),
+        )
+        .expect("initial nonce descriptor");
+        let qualification = Arc::new(
+            EvmWalletRequestQualification::qualify(
+                &qualification_transport,
+                route_generation.clone(),
+                binding.clone(),
+                &signer_binding,
+                initial_nonce_descriptor.clone(),
+                object_evidence_ref,
+            )
+            .expect("wallet request qualification"),
+        );
+        let request_inputs = RequestInputs {
+            tenant_scope_id: tenant_scope_id.clone(),
+            wallet_domain_ref,
+            route_generation_ref: route_generation
+                .to_content_ref()
+                .expect("route generation reference"),
+            chain_id: 1,
+            signer_binding_ref: signer_descriptor.reference().clone(),
+            nonce_policy_ref: evm_wallet_nonce_policy_ref()
+                .and_then(|reference| reference.to_content_ref())
+                .expect("nonce policy reference"),
+            initial_nonce: 7,
+            initial_nonce_descriptor_ref: initial_nonce_descriptor
+                .reference()
+                .and_then(|reference| reference.to_content_ref())
+                .expect("initial nonce reference"),
+            already_known_classifier_ref: evm_already_known_classifier_ref()
+                .expect("already-known classifier")
+                .to_content_ref()
+                .expect("already-known classifier reference"),
+            finality_policy_ref: evm_wallet_finality_policy_ref()
+                .and_then(|reference| reference.to_content_ref())
+                .expect("finality policy reference"),
+            assurance_policy_ref: evm_wallet_assurance_policy_ref()
+                .and_then(|reference| reference.to_content_ref())
+                .expect("assurance policy reference"),
+            sender,
+            bounds,
+        };
+        let request = make_request(&request_inputs, U256::from(5));
         let signer_calls = Arc::new(AtomicUsize::new(0));
         let signer_available = Arc::new(AtomicBool::new(true));
         let provider = TestSigner {
@@ -565,23 +631,14 @@ impl Fixture {
                     Arc::new(provider.clone());
                 Box::pin(async move { Ok(provider) })
             });
-        let signer = EvmWalletSignerBinding::new(
-            EvmWalletReference::from_content_ref(request_inputs.signer_binding_ref.clone()),
-            binder,
-        )
-        .expect("wallet signer");
-        let resource_policy_binding = ResourcePolicyBinding::new(
-            reviewed_ref("account-sequence-policy"),
-            request_inputs.nonce_attestation_ref.clone(),
-        );
         let client = MockRpc::new(request.clone(), scenario);
         let store = MemoryExecutorStore::new(&binding);
         let executor = wallet_executor(
             store.clone(),
             binding.clone(),
             client.clone(),
-            signer.clone(),
-            resource_policy_binding.clone(),
+            binder.clone(),
+            Arc::clone(&qualification),
         );
         let committed = committed_request(&binding, &tenant_scope_id, request);
         Self {
@@ -589,8 +646,8 @@ impl Fixture {
             store,
             executor,
             client,
-            signer,
-            resource_policy_binding,
+            signer: binder,
+            qualification,
             committed,
             request_inputs,
             signer_calls,
@@ -607,7 +664,7 @@ impl Fixture {
             self.binding.clone(),
             self.client.clone(),
             self.signer.clone(),
-            self.resource_policy_binding.clone(),
+            Arc::clone(&self.qualification),
         )
     }
 }
@@ -616,12 +673,11 @@ fn wallet_executor(
     store: MemoryExecutorStore,
     binding: VerifiedExecutorBinding,
     client: MockRpc,
-    signer: EvmWalletSignerBinding,
-    resource_policy_binding: ResourcePolicyBinding,
+    signer: GenerationGuardedDeterministicSigningProviderBinder,
+    qualification: Arc<EvmWalletRequestQualification>,
 ) -> EvmWalletExecutor<MemoryExecutorStore, MockRpc> {
     let ledger = KeyedExecutorLedger::new(store, binding).expect("keyed ledger");
-    EvmWalletExecutor::new(ledger, client, signer, resource_policy_binding)
-        .expect("wallet executor")
+    EvmWalletExecutor::new(ledger, client, signer, qualification).expect("wallet executor")
 }
 
 fn make_request(inputs: &RequestInputs, value: U256) -> EvmSubmitTransactionRequest {
@@ -649,13 +705,14 @@ fn make_request(inputs: &RequestInputs, value: U256) -> EvmSubmitTransactionRequ
         EvmWalletReference::from_content_ref(inputs.wallet_domain_ref.clone()),
         inputs.tenant_scope_id.clone(),
         EvmWalletReference::from_content_ref(inputs.route_generation_ref.clone()),
-        1,
+        inputs.chain_id,
         inputs.sender,
         EvmWalletReference::from_content_ref(inputs.signer_binding_ref.clone()),
-        7,
-        EvmWalletReference::from_content_ref(inputs.nonce_attestation_ref.clone()),
+        EvmWalletReference::from_content_ref(inputs.nonce_policy_ref.clone()),
+        inputs.initial_nonce,
+        EvmWalletReference::from_content_ref(inputs.initial_nonce_descriptor_ref.clone()),
         replacement,
-        evm_already_known_classifier_ref().expect("already-known classifier"),
+        EvmWalletReference::from_content_ref(inputs.already_known_classifier_ref.clone()),
         EvmWalletReference::from_content_ref(inputs.finality_policy_ref.clone()),
         EvmWalletReference::from_content_ref(inputs.assurance_policy_ref.clone()),
         EvmWalletConvergencePlan::new(2, 2, 2, 2, 2, 128 * 1024).expect("convergence"),
@@ -817,6 +874,103 @@ async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_subst
 }
 
 #[tokio::test]
+async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation() {
+    let fixture = Fixture::new(Scenario::Succeeded);
+    let before = fixture
+        .store
+        .checkpoint()
+        .expect("checkpoint")
+        .to_durable_bytes()
+        .expect("checkpoint bytes");
+    let mut hostile = Vec::new();
+
+    let mut changed = fixture.request_inputs.clone();
+    changed.tenant_scope_id =
+        TenantScopeId::new("mfm.tenant_scope.v1:00000000000000000000000000000042").expect("tenant");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.wallet_domain_ref = reviewed_ref("other-wallet-domain");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.route_generation_ref = reviewed_ref("other-route-generation");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.chain_id = 2;
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.sender = RECIPIENT;
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.signer_binding_ref = reviewed_ref("other-signer-binding");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.nonce_policy_ref = reviewed_ref("other-nonce-policy");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.initial_nonce = 8;
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.initial_nonce_descriptor_ref = reviewed_ref("other-initial-nonce");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.already_known_classifier_ref = reviewed_ref("other-already-known-classifier");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.finality_policy_ref = reviewed_ref("other-finality-policy");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.assurance_policy_ref = reviewed_ref("other-assurance-policy");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.bounds =
+        EvidenceBounds::new(21, 64, 8 * 1024 * 1024, 2, 16 * 1024).expect("changed max attempts");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.bounds =
+        EvidenceBounds::new(20, 65, 8 * 1024 * 1024, 2, 16 * 1024).expect("changed max records");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024 + 1, 2, 16 * 1024)
+        .expect("changed retained bytes");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 3, 16 * 1024)
+        .expect("changed completion records");
+    hostile.push(changed);
+    let mut changed = fixture.request_inputs.clone();
+    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024 + 1)
+        .expect("changed completion bytes");
+    hostile.push(changed);
+
+    for inputs in hostile {
+        let committed = committed_request(
+            &fixture.binding,
+            &inputs.tenant_scope_id,
+            make_request(&inputs, U256::from(5)),
+        );
+        assert_eq!(
+            fixture
+                .executor
+                .drive(&committed)
+                .await
+                .expect_err("qualification mismatch"),
+            ExecutorError::TargetOperationMismatch
+        );
+        assert_eq!(fixture.client.call_count(), 0);
+        assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fixture
+                .store
+                .checkpoint()
+                .expect("checkpoint")
+                .to_durable_bytes()
+                .expect("checkpoint bytes"),
+            before
+        );
+    }
+}
+
+#[tokio::test]
 async fn response_loss_restart_recovers_by_hash_without_persisting_bearer_material() {
     let fixture = Fixture::new(Scenario::ResponseLost);
     let pending = fixture
@@ -903,6 +1057,45 @@ async fn finalized_success_and_revert_produce_closed_terminal_evidence() {
                 EvmTransactionOutcome::Reverted { .. }
             ),
             expected_revert
+        );
+    }
+}
+
+#[tokio::test]
+async fn retained_terminal_generation_fence_and_assurance_must_match_qualification() {
+    let fixture = Fixture::new(Scenario::Succeeded);
+    let result = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.client).await;
+    let attempt = terminal_attempt(&result);
+    let evidence = attempt
+        .terminal_evidence()
+        .expect("valid terminal attempt")
+        .expect("terminal evidence");
+    crate::wallet_executor::validate_terminal_binding(
+        evidence,
+        fixture.committed.request(),
+        fixture.qualification.as_ref(),
+    )
+    .expect("terminal binding");
+
+    for field in [
+        "executor_generation_ref",
+        "generation_fence_ref",
+        "assurance_policy_ref",
+    ] {
+        let mut wire = serde_json::to_value(evidence).expect("terminal JSON");
+        wire[field] = serde_json::to_value(EvmWalletReference::from_content_ref(reviewed_ref(
+            &format!("wrong-{field}"),
+        )))
+        .expect("wrong reference JSON");
+        let hostile: mfm_evm::EvmWalletTerminalEvidence =
+            serde_json::from_value(wire).expect("hostile terminal evidence");
+        assert_eq!(
+            crate::wallet_executor::validate_terminal_binding(
+                &hostile,
+                fixture.committed.request(),
+                fixture.qualification.as_ref(),
+            ),
+            Err(ExecutorError::TerminalProofMismatch),
         );
     }
 }
