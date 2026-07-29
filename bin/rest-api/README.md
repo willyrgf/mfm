@@ -25,10 +25,12 @@ The complete route set is:
 There is no fact endpoint, `GET /v1/runs` list/watch route, start/resume route, status/stream
 split, manual-resolution route, public-output route, or arbitrary object endpoint.
 
-`GET /v1/health` is process liveness only. `GET /v1/ready` performs one bounded PostgreSQL
-writable-lineage probe against the already qualified authoritative store. It never performs EVM,
-DNS, provider, semantic-callback, or run work. Any readiness-probe failure returns the same
-`503 NotReady` error with `The authoritative run store is not ready`.
+`GET /v1/health` is process liveness only. `GET /v1/ready` performs a bounded PostgreSQL
+writable-lineage probe against the already qualified authoritative run store and independently
+checks the fenced executor ledger; both are mandatory. Success uses the normal envelope with data
+exactly `{ "ok": true }` and exposes no component checks. It never performs EVM, DNS, provider,
+semantic-callback, or run work. Any probe failure returns the same `503 NotReady` error with
+`The service is not ready`.
 
 ## Authentication and errors
 

@@ -182,17 +182,14 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
         .check_ready()
         .await
         .map_err(|_| readiness_failed())?;
-    Ok(Json(success(json!({
-        "ok": true,
-        "checks": { "run_store": "ready" },
-    }))))
+    Ok(Json(success(json!({ "ok": true }))))
 }
 
 fn readiness_failed() -> ApiError {
     ApiError::new(
         ErrorClass::ServiceUnavailable,
         "NotReady",
-        "The authoritative run store is not ready",
+        "The service is not ready",
     )
 }
 

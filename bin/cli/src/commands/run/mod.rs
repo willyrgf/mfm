@@ -21,7 +21,7 @@ pub(crate) enum RunCommand {
         /// Canonical lower-case UUIDv4 invocation identity.
         #[arg(long, value_name = "UUID")]
         invocation_identity: String,
-        /// Configured portfolio target.
+        /// Configured entry-point target.
         #[arg(long, value_name = "TARGET")]
         target: String,
         /// Non-semantic process connection options.
