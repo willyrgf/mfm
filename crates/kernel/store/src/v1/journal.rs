@@ -28,14 +28,15 @@ use mfm_journal::v1::{
     FactValueComponent, FrozenReadIntent, InitialBinding, InputManifest, InputManifestRef,
     InputSource, JournalHead, JournalPredecessor, JournalPredecessorFields, LegalCommitBatch,
     NodePhase, NodeSemanticState, NodeTerminalOutcome as JournalNodeTerminalOutcome,
-    ObjectPathBinding, ObservationOutcomeFields, ObservationRef, OutputBinding, OutputRef,
-    PendingEffectState as JournalPendingEffectState, ProducerBinding, ProducerBindingFields,
-    ProducerBindingKind, ReadCapabilityBinding, RecordHashPreimage, RecordIdPreimage, RecordRef,
-    RunAdmitted, RunJournalRecordFields, RunPhase, RunSemanticStatePreimage, SafeFailure,
-    SeedManifest, SemanticBinding, SemanticClosureCoordinate, SettlementFields,
-    StateTransitionCommitted, TenantFactCoordinateFields, TenantFactFrontier,
-    TerminalEffectEvidence, TransitionAfter, TransitionBefore, TransitionBody,
-    TransitionBodyFields, TransitionRef, TransitionSlot, ValueRef,
+    ObjectPathBinding, ObservationOutcome, ObservationOutcomeFields, ObservationRef, OutputBinding,
+    OutputRef, PendingEffectState as JournalPendingEffectState, ProducerBinding,
+    ProducerBindingFields, ProducerBindingKind, ReadCapabilityBinding, RecordHashPreimage,
+    RecordIdPreimage, RecordRef, RunAdmitted, RunJournalRecordFields, RunPhase,
+    RunSemanticStatePreimage, SafeFailure, SeedManifest, SemanticBinding,
+    SemanticClosureCoordinate, SettlementFields, StateTransitionCommitted,
+    TenantFactCoordinateFields, TenantFactFrontier, TerminalEffectEvidence, TransitionAfter,
+    TransitionBefore, TransitionBody, TransitionBodyFields, TransitionRef, TransitionSlot,
+    ValueRef,
 };
 use mfm_spec::v1::{
     CapabilityBindingManifest, Certificate, CertifiedFrameBinding, CertifiedNodeContract,
@@ -934,6 +935,16 @@ struct TransitionApplication<'a> {
     journal: &'a CommittedRunJournal,
 }
 
+struct ObservationApplication<'a> {
+    run_id: &'a RunId,
+    run_sequence: u64,
+    commit: &'a CommittedJournalCommit,
+    observation: ExternalAccessObserved,
+    spec: &'a ExpandedCertifiedSpec,
+    capability_binding_manifest: &'a CapabilityBindingManifest,
+    journal: &'a CommittedRunJournal,
+}
+
 impl FoldState {
     fn rebuild(
         journal: &CommittedRunJournal,
@@ -1080,15 +1091,15 @@ impl FoldState {
                 )?;
             }
             NormalizedBatch::Observation(observation) => {
-                self.apply_observation(
-                    &envelope_fields.core.run_id,
-                    envelope_fields.core.run_sequence,
+                self.apply_observation(ObservationApplication {
+                    run_id: &envelope_fields.core.run_id,
+                    run_sequence: envelope_fields.core.run_sequence,
                     commit,
-                    observation.clone(),
+                    observation: observation.clone(),
                     spec,
                     capability_binding_manifest,
                     journal,
-                )?;
+                })?;
             }
             NormalizedBatch::Admission(_) => {
                 return Err(StoreError::DuplicateLogicalRecord);
@@ -1594,16 +1605,16 @@ impl FoldState {
         Ok(())
     }
 
-    fn apply_observation(
-        &mut self,
-        run_id: &RunId,
-        run_sequence: u64,
-        commit: &CommittedJournalCommit,
-        observation: ExternalAccessObserved,
-        spec: &ExpandedCertifiedSpec,
-        capability_binding_manifest: &CapabilityBindingManifest,
-        journal: &CommittedRunJournal,
-    ) -> Result<()> {
+    fn apply_observation(&mut self, application: ObservationApplication<'_>) -> Result<()> {
+        let ObservationApplication {
+            run_id,
+            run_sequence,
+            commit,
+            observation,
+            spec,
+            capability_binding_manifest,
+            journal,
+        } = application;
         let fields = observation.fields()?;
         let key = fields.authorization_ref.as_bytes();
         let authorization_index = self
@@ -1619,11 +1630,15 @@ impl FoldState {
             return Err(StoreError::ObservationAlreadyCommitted);
         }
         verify_observation_semantics(
-            self,
-            journal,
-            None,
-            run_sequence,
-            spec,
+            ObservationVerificationContext {
+                fold: self,
+                resolver: ObservationObjectResolver {
+                    journal,
+                    prepared: None,
+                    visible_run_sequence: run_sequence,
+                },
+                spec,
+            },
             capability_binding_manifest,
             &self.authorizations[authorization_index]
                 .entry
@@ -1813,11 +1828,16 @@ impl FoldState {
             return Err(StoreError::ObservationAlreadyCommitted);
         }
         verify_observation_semantics(
-            self,
-            journal,
-            Some(objects),
-            u64::try_from(journal.commits.len()).map_err(|_| StoreError::SequenceOverflow)?,
-            spec,
+            ObservationVerificationContext {
+                fold: self,
+                resolver: ObservationObjectResolver {
+                    journal,
+                    prepared: Some(objects),
+                    visible_run_sequence: u64::try_from(journal.commits.len())
+                        .map_err(|_| StoreError::SequenceOverflow)?,
+                },
+                spec,
+            },
             capability_binding_manifest,
             &entry.entry.authorization_ref,
             &entry.entry.authorization,
@@ -2278,6 +2298,12 @@ struct ObservationObjectResolver<'a> {
     visible_run_sequence: u64,
 }
 
+struct ObservationVerificationContext<'a> {
+    fold: &'a FoldState,
+    resolver: ObservationObjectResolver<'a>,
+    spec: &'a ExpandedCertifiedSpec,
+}
+
 impl ObservationObjectResolver<'_> {
     fn value_bytes(&self, value_ref: &ValueRef) -> Result<Vec<u8>> {
         if let Some(prepared) = self.prepared {
@@ -2387,21 +2413,12 @@ impl ObservationObjectResolver<'_> {
 }
 
 fn verify_observation_semantics(
-    fold: &FoldState,
-    journal: &CommittedRunJournal,
-    prepared: Option<&super::PreparedObjectGraph>,
-    visible_run_sequence: u64,
-    spec: &ExpandedCertifiedSpec,
+    context: ObservationVerificationContext<'_>,
     capability_binding_manifest: &CapabilityBindingManifest,
     expected_authorization_ref: &AuthorizationRef,
     authorization: &ExternalAccessAuthorized,
     observation: &ExternalAccessObserved,
 ) -> Result<()> {
-    let resolver = ObservationObjectResolver {
-        journal,
-        prepared,
-        visible_run_sequence,
-    };
     let authorization_fields = authorization.fields()?;
     let observation_fields = observation.fields()?;
     if &observation_fields.authorization_ref != expected_authorization_ref
@@ -2410,7 +2427,7 @@ fn verify_observation_semantics(
         return Err(observation_mismatch("observation_authorization"));
     }
     let anchor = authorization_fields.semantic_anchor.fields()?;
-    let node = certified_node(spec, &anchor.node_id)?;
+    let node = certified_node(context.spec, &anchor.node_id)?;
     let admitted = capability_binding_manifest
         .entries()
         .iter()
@@ -2423,10 +2440,7 @@ fn verify_observation_semantics(
 
     if authorization_fields.capability_operation_id.as_str() == FACT_SELECTION_OPERATION_ID {
         return verify_fact_selection_observation(
-            fold,
-            journal,
-            &resolver,
-            spec,
+            &context,
             node,
             expected_authorization_ref,
             &authorization_fields,
@@ -2440,74 +2454,39 @@ fn verify_observation_semantics(
         return Err(observation_mismatch("observation_scan_attestation"));
     }
 
-    match (node.execution(), authorization_fields.scope.fields()?) {
-        (
-            CertifiedStateExecution::Read {
-                capability_operation_id,
-                capability_binding_ref,
-                request_contract,
-                returned_contract,
-                safe_failure_contract,
-            },
-            AuthorizationScopeFields::Read { input_manifest_ref },
-        ) => verify_read_observation(
-            fold,
-            journal,
-            &resolver,
-            spec,
+    match authorization_fields.scope.fields()? {
+        AuthorizationScopeFields::Read { input_manifest_ref } => verify_read_observation(
+            &context,
             node,
             &observation_fields.authorization_ref,
             &authorization_fields,
             &input_manifest_ref,
-            capability_operation_id,
-            capability_binding_ref,
-            request_contract,
-            returned_contract,
-            safe_failure_contract,
-            &observation_fields.outcome.fields()?,
+            &observation_fields.outcome,
         ),
-        (
-            CertifiedStateExecution::Effect {
-                executor_operation_id,
-                executor_binding_ref,
-                request_contract,
-                ensure_result_contract,
-                terminal_evidence_contract,
-                ..
-            },
-            AuthorizationScopeFields::EnsureEffect {
-                effect_request_transition_ref,
-            },
-        ) => verify_effect_observation(
-            fold,
-            journal,
-            &resolver,
-            spec,
+        AuthorizationScopeFields::EnsureEffect {
+            effect_request_transition_ref,
+        } => verify_effect_observation(
+            &context,
             node,
             &observation_fields.authorization_ref,
             &authorization_fields,
             &effect_request_transition_ref,
-            executor_operation_id,
-            executor_binding_ref,
-            request_contract,
-            ensure_result_contract,
-            terminal_evidence_contract,
-            &observation_fields.outcome.fields()?,
+            &observation_fields.outcome,
         ),
-        _ => Err(observation_mismatch("observation_execution_kind")),
     }
 }
 
 fn verify_fact_selection_observation(
-    fold: &FoldState,
-    journal: &CommittedRunJournal,
-    resolver: &ObservationObjectResolver<'_>,
-    spec: &ExpandedCertifiedSpec,
+    context: &ObservationVerificationContext<'_>,
     node: &CertifiedNodeContract,
     authorization_ref: &AuthorizationRef,
     authorization: &mfm_journal::v1::ExternalAccessAuthorizedFields,
     observation: &mfm_journal::v1::ExternalAccessObservedFields,
 ) -> Result<()> {
+    let fold = context.fold;
+    let journal = context.resolver.journal;
+    let resolver = &context.resolver;
+    let spec = context.spec;
     let CertifiedStateExecution::Read {
         capability_operation_id,
         capability_binding_ref,
@@ -2904,28 +2883,34 @@ fn verify_exact_observation_values(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify_read_observation(
-    fold: &FoldState,
-    journal: &CommittedRunJournal,
-    resolver: &ObservationObjectResolver<'_>,
-    spec: &ExpandedCertifiedSpec,
+    context: &ObservationVerificationContext<'_>,
     node: &CertifiedNodeContract,
     authorization_ref: &AuthorizationRef,
     authorization: &mfm_journal::v1::ExternalAccessAuthorizedFields,
     input_manifest_ref: &InputManifestRef,
-    capability_operation_id: &StableId,
-    capability_binding_ref: &ContentRef,
-    request_contract: &RetainedValueContract,
-    returned_contract: &RetainedValueContract,
-    safe_failure_contract: &RetainedValueContract,
-    outcome: &ObservationOutcomeFields,
+    outcome: &ObservationOutcome,
 ) -> Result<()> {
+    let CertifiedStateExecution::Read {
+        capability_operation_id,
+        capability_binding_ref,
+        request_contract,
+        returned_contract,
+        safe_failure_contract,
+    } = node.execution()
+    else {
+        return Err(observation_mismatch("observation_execution_kind"));
+    };
+    let outcome = outcome.fields()?;
     if authorization.capability_operation_id != *capability_operation_id
         || authorization.capability_binding_ref.fields()? != *capability_binding_ref
     {
         return Err(observation_mismatch("read_operation_binding"));
     }
+    let fold = context.fold;
+    let journal = context.resolver.journal;
+    let resolver = &context.resolver;
+    let spec = context.spec;
     let frozen_ref = authorization
         .frozen_read_intent_ref
         .as_ref()
@@ -3025,7 +3010,7 @@ fn verify_read_observation(
         return Err(observation_mismatch("read_routing_generation"));
     }
 
-    match outcome {
+    match &outcome {
         ObservationOutcomeFields::Returned { result_ref } => {
             validate_value_contract(returned_contract, result_ref)?;
             validate_external_observation_producer(
@@ -3111,28 +3096,35 @@ fn verify_read_safe_failure(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify_effect_observation(
-    fold: &FoldState,
-    journal: &CommittedRunJournal,
-    resolver: &ObservationObjectResolver<'_>,
-    spec: &ExpandedCertifiedSpec,
+    context: &ObservationVerificationContext<'_>,
     node: &CertifiedNodeContract,
     authorization_ref: &AuthorizationRef,
     authorization: &mfm_journal::v1::ExternalAccessAuthorizedFields,
     effect_request_transition_ref: &TransitionRef,
-    executor_operation_id: &StableId,
-    executor_binding_ref: &ContentRef,
-    request_contract: &RetainedValueContract,
-    ensure_result_contract: &RetainedValueContract,
-    terminal_evidence_contract: &RetainedValueContract,
-    outcome: &ObservationOutcomeFields,
+    outcome: &ObservationOutcome,
 ) -> Result<()> {
+    let CertifiedStateExecution::Effect {
+        executor_operation_id,
+        executor_binding_ref,
+        request_contract,
+        ensure_result_contract,
+        terminal_evidence_contract,
+        ..
+    } = node.execution()
+    else {
+        return Err(observation_mismatch("observation_execution_kind"));
+    };
+    let outcome = outcome.fields()?;
     if authorization.capability_operation_id != *executor_operation_id
         || authorization.capability_binding_ref.fields()? != *executor_binding_ref
     {
         return Err(observation_mismatch("effect_operation_binding"));
     }
+    let fold = context.fold;
+    let journal = context.resolver.journal;
+    let resolver = &context.resolver;
+    let spec = context.spec;
     let request_transition = fold
         .transitions
         .iter()
@@ -3236,7 +3228,7 @@ fn verify_effect_observation(
         return Err(observation_mismatch("effect_identity"));
     }
 
-    match outcome {
+    match &outcome {
         ObservationOutcomeFields::DidNotEnter { safe_failure } => verify_effect_safe_failure(
             resolver,
             authorization_ref,
