@@ -123,7 +123,10 @@ impl Application {
         &self.entry_points
     }
 
-    /// Checks the authoritative store with one bounded writable-lineage probe.
+    /// Checks the authoritative run store and independently fenced executor ledger.
+    ///
+    /// Readiness requires both the bounded run-store writable-lineage probe and the executor
+    /// ledger/fence probe to succeed.
     pub async fn check_ready(&self) -> Result<(), PublicError> {
         self.backend.check_ready().await
     }

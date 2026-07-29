@@ -223,7 +223,7 @@ async fn readiness_failure_has_one_fixed_service_unavailable_contract() {
         readiness_failed().into_response(),
         StatusCode::SERVICE_UNAVAILABLE,
         "NotReady",
-        "The authoritative run store is not ready",
+        "The service is not ready",
     )
     .await;
 }
@@ -243,10 +243,7 @@ async fn readiness_is_unauthenticated_and_performs_no_policy_work() {
         serde_json::from_slice::<Value>(&body).expect("readiness JSON"),
         json!({
             "status": "success",
-            "data": {
-                "ok": true,
-                "checks": { "run_store": "ready" },
-            },
+            "data": { "ok": true },
         })
     );
     assert!(policy.calls().is_empty());

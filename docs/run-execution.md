@@ -45,7 +45,7 @@ flowchart TD
     A -->|drive same run id| R["Runtime::drive_once"]
     R --> V["Load and verify journal"]
     V --> D["Derive one legal action"]
-    D -->|pure or settlement| ST["Append state transition"]
+    D -->|local transition or settlement| ST["Append state transition"]
     D -->|read or ensure| AU["Append access authorization"]
     AU --> CAP["One capability operation"]
     CAP --> OB["Append access observation"]
@@ -71,7 +71,7 @@ separate makes the execution model easier to understand.
 
 | Term | Meaning |
 | --- | --- |
-| Product entry point | A published operation contract, currently `mfm.portfolio/snapshot@1`. |
+| Product entry point | One of the published operation contracts: `mfm.portfolio/snapshot@1` or `mfm.evm/submit-transaction@1`. |
 | Operation | Deterministic code that constructs a typed state graph. It performs no live work. |
 | State contract | Reusable pure, read, or effect semantics for one kind of state. |
 | State occurrence | One planned use of a state, with its own node id, configuration, and graph edges. |
@@ -85,11 +85,14 @@ separate makes the execution model easier to understand.
 
 ### Product registration
 
-The current product publishes:
+The current product publishes exactly two entry points:
 
 ```text
 entry_point_id           = "mfm.portfolio/snapshot@1"
 entry_point_operation_id = "mfm.portfolio/snapshot"
+
+entry_point_id           = "mfm.evm/submit-transaction@1"
+entry_point_operation_id = "mfm.evm/submit-transaction"
 ```
 
 The entry-point contract binds:
@@ -185,9 +188,11 @@ flowchart LR
     A --> C --> F --> E --> I --> V --> S
 ```
 
-The current portfolio planning profile has no framework-policy states, and the current product
-registers no mutation effect. The same planning pipeline still binds the exact empty policy,
-planner, graph, implementations, dependencies, terminal contract, and public output.
+The current portfolio planning profile has no framework-policy states and contains no effect state.
+The EVM transaction planning profile owns one ordinary effect state and uses the same generic
+planning and runtime paths rather than an EVM-specific branch. The planning pipeline binds each
+profile's exact empty policy, planner, graph, implementations, dependencies, terminal contract,
+and public output.
 
 Certification freezes:
 
@@ -206,7 +211,7 @@ Runtime executes only this certified expanded graph. It has no branch for “por
 
 ## Admission
 
-The current CLI admission looks like:
+For example, portfolio admission through the CLI looks like:
 
 ```sh
 mfm run admit mfm.portfolio/snapshot@1 \
@@ -425,11 +430,18 @@ Each transport invocation:
 
 Runtime selects actions in this order:
 
-1. settle a usable committed observation;
-2. commit one ready pure, effect-request, or dependency-skip transition;
-3. authorize and perform one live read or effect `ensure`;
-4. report an already closed run; or
-5. report why no action is currently possible.
+1. scan every committed observation suffix completely and integrity-block on any invalid evidence,
+   including invalid evidence after a would-be settlement;
+2. report an already closed run, or integrity-block an impossible open/all-terminal fold, before
+   semantic work;
+3. settle the first callback-accepted structurally consumable observation;
+4. commit one ready local pure, effect-request, or dependency-skip transition;
+5. authorize and perform one live read or effect `ensure`, ranked by prior authorization count and
+   then certified node order; or
+6. report an operational block when a current candidate is unavailable, otherwise report waiting.
+
+Invalid evidence and an open/all-terminal fold are integrity blocks. Operational unavailability and
+waiting do not reinterpret committed evidence.
 
 The caller supplies only the run id. It cannot choose the node, request, evidence, output, or
 transition.
@@ -788,6 +800,8 @@ The current design deliberately does not guarantee:
   contract.
 - [`docs/evm-rpc-routing.md`](evm-rpc-routing.md): routing generation, bootstrap, anchor, and EVM
   capability requirements.
+- [`docs/evm-transactions.md`](evm-transactions.md): the registered transaction effect profile,
+  executor protocol, and recovery contract.
 - [`docs/design.md`](design.md): authoritative runtime, journal, store, replay, and authority
   contract.
 - [`docs/architecture.md`](architecture.md): ownership and dependency boundaries.

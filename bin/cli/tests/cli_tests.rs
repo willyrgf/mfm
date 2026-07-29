@@ -90,6 +90,27 @@ fn run_help_has_only_the_recoverability_v1_commands() {
 }
 
 #[test]
+fn run_admit_help_describes_generic_entry_point_target() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args(["run", "admit", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rendered = String::from_utf8(output).expect("run admit help is UTF-8");
+    assert!(
+        rendered.contains("Configured entry-point target"),
+        "generic target help is missing: {rendered}"
+    );
+    assert!(
+        !rendered.to_ascii_lowercase().contains("portfolio target"),
+        "portfolio-only target help survived: {rendered}"
+    );
+}
+
+#[test]
 fn test_keystore_help_surfaces() {
     for (args, expected) in [
         (

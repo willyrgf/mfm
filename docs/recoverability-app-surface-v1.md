@@ -280,10 +280,12 @@ manual-resolution service, runner factory, or arbitrary object reader.
 
 Health and readiness remain unauthenticated. Health is process liveness only. Readiness performs
 bounded PostgreSQL writable-lineage probes against the already opened run store and independently
-fenced executor ledger. Every probe failure collapses to the fixed `503 NotReady` response. It
-performs no EVM request, DNS lookup, signer or unlock-file access, provider check, semantic
-callback, or run operation; the bootstrap-qualified sealed process capabilities are sufficient
-without requalification. `GET /v1/runs` does not exist.
+fenced executor ledger; both are mandatory. Success uses the normal envelope with data exactly
+`{ "ok": true }` and exposes no component checks. Every probe failure collapses to the fixed
+`503 NotReady` response with `The service is not ready`. It performs no EVM request, DNS lookup,
+signer or unlock-file access, provider check, semantic callback, or run operation; the
+bootstrap-qualified sealed process capabilities are sufficient without requalification.
+`GET /v1/runs` does not exist.
 The CLI does not carry a second static discovery catalog: `mfm ops list` accepts the same database
 and runtime-configuration connection inputs, performs the same qualified production
 `Application` bootstrap as run commands, and then reads the cached slice. The repository

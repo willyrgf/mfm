@@ -191,8 +191,10 @@ Exact reproduction reruns the admitted pure request authors and reducers from re
 Candidate comparison runs only explicitly identified candidate callbacks. No replay mode resolves a
 routing generation, opens HTTP, reads current routing config, or appends.
 
-`ReadPublic` exposes only certified portfolio output. Exact EVM requests, observations, safe
-diagnostics, and facts require separately authorized trace, audit, replay, or export access.
+For the portfolio snapshot entry point, `ReadPublic` exposes only certified portfolio output. The
+wallet transaction entry point exposes its own certified public output. Exact EVM requests,
+observations, safe diagnostics, and facts require separately authorized trace, audit, replay, or
+export access.
 
 ## Mutation Separation
 
