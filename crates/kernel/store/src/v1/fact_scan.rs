@@ -686,7 +686,7 @@ fn derive_response_closure_from_material(
     consumer_prefix: &[CommittedObject],
 ) -> Result<VerifiedResponseClosure> {
     let response_fields = response_ref.fields()?;
-    let consumer = PrefixClosureWalker::new(&consumer_prefix)?.verify(
+    let consumer = PrefixClosureWalker::new(consumer_prefix)?.verify(
         &[],
         std::slice::from_ref(&response_fields.evidence_contract_ref),
     )?;
