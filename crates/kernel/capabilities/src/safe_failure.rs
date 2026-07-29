@@ -663,11 +663,16 @@ pub enum SafeFailureError {
 /// message, body, URL, path, credential, or debug output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeFailure<Code, DiagnosticRef = ContentRef> {
-    safe_failure_contract_ref: ContentRef,
+    references: Box<SafeFailureReferences<DiagnosticRef>>,
     stable_code: Code,
     failure_class: FailureClass,
     boundary_stage: BoundaryStage,
     coarse_size_class: Option<CoarseSizeClass>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SafeFailureReferences<DiagnosticRef> {
+    safe_failure_contract_ref: ContentRef,
     diagnostic_ref: Option<DiagnosticRef>,
 }
 
@@ -693,18 +698,20 @@ where
             return Err(SafeFailureError::InvalidTuple);
         }
         Ok(Self {
-            safe_failure_contract_ref,
+            references: Box::new(SafeFailureReferences {
+                safe_failure_contract_ref,
+                diagnostic_ref,
+            }),
             stable_code,
             failure_class,
             boundary_stage,
             coarse_size_class,
-            diagnostic_ref,
         })
     }
 
     /// Returns the exact selected safe-failure contract.
     pub const fn safe_failure_contract_ref(&self) -> &ContentRef {
-        &self.safe_failure_contract_ref
+        &self.references.safe_failure_contract_ref
     }
 
     /// Returns the stable closed code.
@@ -729,7 +736,7 @@ where
 
     /// Returns the optional reviewed diagnostic reference.
     pub const fn diagnostic_ref(&self) -> Option<&DiagnosticRef> {
-        self.diagnostic_ref.as_ref()
+        self.references.diagnostic_ref.as_ref()
     }
 }
 
@@ -744,11 +751,15 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum TestCode {
         Unavailable,
+        InvalidResponse,
     }
 
     impl SafeFailureCode for TestCode {
         fn as_str(&self) -> &'static str {
-            "unavailable"
+            match self {
+                Self::Unavailable => "unavailable",
+                Self::InvalidResponse => "invalid_response",
+            }
         }
 
         fn accepts(
@@ -761,7 +772,7 @@ mod tests {
             failure_class == FailureClass::Transport
                 && boundary_stage == BoundaryStage::BeforeBoundaryEntry
                 && coarse_size_class.is_none()
-                && !has_diagnostic
+                && has_diagnostic == matches!(self, Self::InvalidResponse)
         }
     }
 
@@ -778,15 +789,34 @@ mod tests {
 
     #[test]
     fn selected_code_controls_the_complete_safe_tuple() {
-        assert!(SafeFailure::<TestCode>::new(
-            reviewed_ref(),
+        let contract_ref = reviewed_ref();
+        let diagnostic_ref = reviewed_ref();
+        let failure = SafeFailure::<TestCode>::new(
+            contract_ref.clone(),
+            TestCode::InvalidResponse,
+            FailureClass::Transport,
+            BoundaryStage::BeforeBoundaryEntry,
+            None,
+            Some(diagnostic_ref.clone()),
+        )
+        .expect("reviewed tuple");
+        assert_eq!(failure.safe_failure_contract_ref(), &contract_ref);
+        assert_eq!(failure.stable_code(), &TestCode::InvalidResponse);
+        assert_eq!(failure.failure_class(), FailureClass::Transport);
+        assert_eq!(failure.boundary_stage(), BoundaryStage::BeforeBoundaryEntry);
+        assert_eq!(failure.coarse_size_class(), None);
+        assert_eq!(failure.diagnostic_ref(), Some(&diagnostic_ref));
+        assert_eq!(failure.clone(), failure);
+
+        SafeFailure::<TestCode>::new(
+            contract_ref,
             TestCode::Unavailable,
             FailureClass::Transport,
             BoundaryStage::BeforeBoundaryEntry,
             None,
             None,
         )
-        .is_ok());
+        .expect("reviewed tuple");
         assert_eq!(
             SafeFailure::<TestCode>::new(
                 reviewed_ref(),

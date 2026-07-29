@@ -525,6 +525,11 @@ impl VerifiedTerminalEvidence {
 /// Generic verified executor result plus one exact binding-qualified closure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedEnsureResult {
+    fields: Box<VerifiedEnsureResultFields>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedEnsureResultFields {
     identity: EffectIdentity,
     outcome: Ensure<VerifiedTerminalEvidence>,
     delivery_audit: DeliveryAudit,
@@ -622,22 +627,22 @@ impl EffectExecutorOutcome {
 impl VerifiedEnsureResult {
     /// Returns the exact immutable effect identity.
     pub const fn identity(&self) -> &EffectIdentity {
-        &self.identity
+        &self.fields.identity
     }
 
     /// Returns the structurally verified pending or terminal outcome.
     pub const fn outcome(&self) -> &Ensure<VerifiedTerminalEvidence> {
-        &self.outcome
+        &self.fields.outcome
     }
 
     /// Returns the complete verified delivery audit.
     pub const fn delivery_audit(&self) -> &DeliveryAudit {
-        &self.delivery_audit
+        &self.fields.delivery_audit
     }
 
     /// Returns the one binding-qualified complete producer-free closure.
     pub const fn retained_closure(&self) -> &VerifiedExecutorRetainedClosure {
-        &self.retained_closure
+        &self.fields.retained_closure
     }
 
     /// Splits the verified result for runtime's sole journal promotion.
@@ -649,12 +654,13 @@ impl VerifiedEnsureResult {
         DeliveryAudit,
         VerifiedExecutorRetainedClosure,
     ) {
-        (
-            self.identity,
-            self.outcome,
-            self.delivery_audit,
-            self.retained_closure,
-        )
+        let VerifiedEnsureResultFields {
+            identity,
+            outcome,
+            delivery_audit,
+            retained_closure,
+        } = *self.fields;
+        (identity, outcome, delivery_audit, retained_closure)
     }
 }
 
@@ -706,14 +712,16 @@ pub fn verify_ensure_result(
     index.verify_exact(&expected_members)?;
     drop(index);
     Ok(VerifiedEnsureResult {
-        identity,
-        outcome,
-        delivery_audit,
-        retained_closure: VerifiedExecutorRetainedClosure {
-            executor_binding_ref: binding.binding_ref().clone(),
-            contract: binding.contract().retained_closure_contract().clone(),
-            members: retained_closure.into_members().collect(),
-        },
+        fields: Box::new(VerifiedEnsureResultFields {
+            identity,
+            outcome,
+            delivery_audit,
+            retained_closure: VerifiedExecutorRetainedClosure {
+                executor_binding_ref: binding.binding_ref().clone(),
+                contract: binding.contract().retained_closure_contract().clone(),
+                members: retained_closure.into_members().collect(),
+            },
+        }),
     })
 }
 
