@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_ids::{FieldPath, SemanticTypeId};
-use mfm_journal::v2::ValueRef;
-use mfm_store::v2::{
+use mfm_journal::ValueRef;
+use mfm_store::{
     AdmittedSupportGraph, PreparedSupportMember, StoreError, SupportGraphAdmissionVerifier,
 };
 use sqlx::{Postgres, Row, Transaction};

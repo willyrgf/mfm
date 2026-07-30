@@ -40,10 +40,10 @@ fn authentication_grant_and_tenant_hidden_absence_have_distinct_status_classes()
     );
 
     for error in [
-        mfm_replay::v2::ReplayError::InvalidRecordedHistory,
-        mfm_replay::v2::ReplayError::CandidateExecutionFailed,
-        mfm_replay::v2::ReplayError::ComparisonIntegrityFailed,
-        mfm_replay::v2::ReplayError::InvalidExport,
+        mfm_replay::ReplayError::InvalidRecordedHistory,
+        mfm_replay::ReplayError::CandidateExecutionFailed,
+        mfm_replay::ReplayError::ComparisonIntegrityFailed,
+        mfm_replay::ReplayError::InvalidExport,
     ] {
         let integrity: PublicError = error.into();
         assert_public_error(
@@ -55,7 +55,7 @@ fn authentication_grant_and_tenant_hidden_absence_have_distinct_status_classes()
         );
     }
 
-    let unavailable: PublicError = mfm_replay::v2::ReplayError::CandidateUnavailable.into();
+    let unavailable: PublicError = mfm_replay::ReplayError::CandidateUnavailable.into();
     assert_public_error(
         &unavailable,
         ErrorClass::ServiceUnavailable,

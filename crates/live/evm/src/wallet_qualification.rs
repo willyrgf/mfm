@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use alloy_primitives::Address;
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract};
 use mfm_evm::{
     evm_wallet_assurance_policy_ref, evm_wallet_finality_policy_ref, evm_wallet_nonce_policy_ref,
     EvmRoutingGenerationRef, EvmSubmitTransactionRequest, EvmWalletAttemptResult,
@@ -549,7 +549,7 @@ fn maximum_attempt_result(
 }
 
 fn dummy_content_ref(schema_contract: &str, seed: &[u8]) -> Result<ContentRef, EvmWalletLiveError> {
-    let schema_id = RecoverabilityContractV3::embedded()
+    let schema_id = RecoverabilityContract::embedded()
         .map_err(|_| EvmWalletLiveError::InvalidContract)?
         .schema_id(schema_contract)
         .map_err(|_| EvmWalletLiveError::InvalidContract)?

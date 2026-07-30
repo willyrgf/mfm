@@ -14,7 +14,7 @@ use mfm_executor::{
 use mfm_ids::{
     ContentRef, EffectKey, NodeId, RequestDigest, RunId, StableId, StoreScopeId, TenantScopeId,
 };
-use mfm_journal::v2::{
+use mfm_journal::{
     AuthorizationRef, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure,
     NonDomainFailureCode, ReadCapabilityBinding, ValueRef,
 };
@@ -452,7 +452,7 @@ where
                         == self.binding.contract().safe_failure_contract_ref()
                 }
                 EffectExecutorOutcomeView::NonDomainFailure(failure) => failure
-                    .validate_layer(mfm_journal::v2::NonDomainFailureLayer::Ensure)
+                    .validate_layer(mfm_journal::NonDomainFailureLayer::Ensure)
                     .is_ok(),
             };
             ErasedEnsureObservation {

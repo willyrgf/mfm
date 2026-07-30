@@ -1,7 +1,7 @@
 //! Deterministic per-head append request identities.
 
 use mfm_ids::{AppendRequestId, NodeId};
-use mfm_journal::v2::JournalHead;
+use mfm_journal::JournalHead;
 
 use crate::{Result, RuntimeError};
 

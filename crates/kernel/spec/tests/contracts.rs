@@ -14,7 +14,7 @@ fn stable(value: &str) -> StableId {
 fn retained_value_contract_is_one_shared_rust_type() {
     let _: fn(mfm_spec::RetainedValueContract) -> mfm_values::RetainedValueContract =
         std::convert::identity;
-    let _: fn(mfm_journal::v2::RetainedValueContract) -> mfm_values::RetainedValueContract =
+    let _: fn(mfm_journal::RetainedValueContract) -> mfm_values::RetainedValueContract =
         std::convert::identity;
 }
 
@@ -152,7 +152,7 @@ fn journal_protocol_contracts_are_factory_exact_not_schema_only() {
         CertifiedJournalProtocolContracts::current().expect("current journal protocol contracts");
     assert_eq!(
         current.input_manifest_contract(),
-        &mfm_journal::v2::InputManifest::retained_contract().expect("input contract")
+        &mfm_journal::InputManifest::retained_contract().expect("input contract")
     );
 
     let original = current.input_manifest_contract();

@@ -7,7 +7,7 @@ This crate is framework-owned and must remain domain-free.
 
 The recoverability v3 target embeds the sole current versioned annex and exposes
 its strict codec and registered-domain digest operations through
-`RecoverabilityContractV3`.
+`RecoverabilityContract`.
 Callers select annex contracts by name; they do not supply local schema
 identities, arbitrary semantic domains, or claimed digests. Exact retained-byte
 content addressing remains distinct from semantic envelope hashing.

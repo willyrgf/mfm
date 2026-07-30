@@ -48,10 +48,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV3};
+use mfm_canonical::{CanonicalValue, RecoverabilityContract};
 use mfm_ids::{ContentDigest, ContentRef, JournalCommitDigest, JournalRecordHash, RunId};
-use mfm_journal::v2::{JournalHead, RecordRef, TransitionRef};
-use mfm_replay::v2::{
+use mfm_journal::{JournalHead, RecordRef, TransitionRef};
+use mfm_replay::{
     ExactReproduction as ReplayExactReproduction, ExactReproductionPlan, ReproductionFuture,
     ReproductionResolver,
 };
@@ -1023,7 +1023,7 @@ fn executable_identity_for_bytes(bytes: &[u8]) -> io::Result<String> {
         ("sha256", CanonicalValue::String(raw_sha256)),
     ])
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let contract = RecoverabilityContractV3::embedded()
+    let contract = RecoverabilityContract::embedded()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     let descriptor = contract
         .encode(EXECUTABLE_DESCRIPTOR_CONTRACT, &identity)
@@ -1038,7 +1038,7 @@ fn exact_plan_for_adapter(
     artifact: &RetainedExecutable,
     transitions: &[TransitionRef],
 ) -> ExactReproductionPlan {
-    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
     let run_id = RunId::from_str(
         "run:sha256-jcs-v1:\
          0000000000000000000000000000000000000000000000000000000000000000",

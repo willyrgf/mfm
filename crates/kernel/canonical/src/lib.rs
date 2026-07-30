@@ -27,6 +27,12 @@
 //! // Raw JSON is intentionally not a typed persisted-value canonicalizer.
 //! let _ = mfm_canonical::CanonicalJsonBytes::from_json_str("{}");
 //! ```
+//!
+//! Version-suffixed recoverability type aliases are deliberately absent:
+//!
+//! ```compile_fail
+//! use mfm_canonical::RecoverabilityContractV3;
+//! ```
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -36,12 +42,11 @@ use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 use ring::digest::{digest, Context, SHA256};
 use serde::de::{self, Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 
-mod recoverability_v3;
+mod recoverability;
 
-pub use recoverability_v3::{
-    CanonicalReferencePathV3, RecoverabilityContractV3, RecoverabilityError,
-    RecoverabilityErrorCode, ReferenceTerminalKindV3, SchemaReferenceEdgeV3,
-    ValidatedCanonicalValueV3,
+pub use recoverability::{
+    CanonicalReferencePath, RecoverabilityContract, RecoverabilityError, RecoverabilityErrorCode,
+    ReferenceTerminalKind, SchemaReferenceEdge, ValidatedCanonicalValue,
 };
 
 /// Result type for canonicalization operations.
@@ -58,11 +63,11 @@ pub struct CanonicalError {
 /// Incremental raw retained-content digest fixed to `sha256-v1`.
 ///
 /// Construction is available only through
-/// [`RecoverabilityContractV3::raw_content_digest_hasher`]. The hasher is
+/// [`RecoverabilityContract::raw_content_digest_hasher`]. The hasher is
 /// intentionally non-cloneable and exposes no generic algorithm selection.
 ///
 /// ```compile_fail
-/// let contract = mfm_canonical::RecoverabilityContractV3::embedded().unwrap();
+/// let contract = mfm_canonical::RecoverabilityContract::embedded().unwrap();
 /// let hasher = contract.raw_content_digest_hasher();
 /// let _duplicate = hasher.clone();
 /// ```

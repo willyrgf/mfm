@@ -1,6 +1,6 @@
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
-use mfm_journal::v2::{ArtifactIdPreimage, ObjectEvidencePreimage, ProducerBinding, ValueRef};
+use mfm_journal::{ArtifactIdPreimage, ObjectEvidencePreimage, ProducerBinding, ValueRef};
 use mfm_program::{encode_config, UnitConfig};
 use mfm_spec::AuthoredSourceSelector;
 use mfm_values::{MfmConfig, PublicOutputDescriptor, RetainedValueContract};
@@ -154,7 +154,7 @@ fn derive_value_ref(
     canonical: &PlainCanonicalJsonBytes,
     producer: &ProducerBinding,
 ) -> ValueRef {
-    let recoverability = RecoverabilityContractV3::embedded().expect("recoverability contract");
+    let recoverability = RecoverabilityContract::embedded().expect("recoverability contract");
     let content_digest = recoverability.raw_content_digest(canonical.as_bytes());
     let artifact_id = ArtifactIdPreimage::new(
         contract.schema_id(),

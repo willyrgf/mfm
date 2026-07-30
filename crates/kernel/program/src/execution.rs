@@ -1,6 +1,6 @@
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
-use mfm_journal::v2::{TerminalEffectEvidence, ValueRef};
+use mfm_journal::{TerminalEffectEvidence, ValueRef};
 use mfm_spec::{exact_content_ref, RetainedValueContract};
 use mfm_values::{MfmConfig, MfmValue, StateInput};
 use serde::de::DeserializeOwned;
@@ -333,7 +333,7 @@ impl CanonicalCodec<mfm_facts::FactSelectionRequest> {
     }
 }
 
-impl CanonicalCodec<mfm_journal::v2::FactSelectionResponse> {
+impl CanonicalCodec<mfm_journal::FactSelectionResponse> {
     /// Returns the frozen fact-selection response codec.
     pub fn fact_selection_response(value_contract: RetainedValueContract) -> Result<Self> {
         ensure_schema(&value_contract, "mfm.fact-selection-response.v1")?;
@@ -345,7 +345,7 @@ impl CanonicalCodec<mfm_journal::v2::FactSelectionResponse> {
     }
 }
 
-impl CanonicalCodec<mfm_journal::v2::SafeFailure> {
+impl CanonicalCodec<mfm_journal::SafeFailure> {
     /// Returns the frozen redaction-safe access-failure codec.
     pub fn safe_failure(value_contract: RetainedValueContract) -> Result<Self> {
         ensure_schema(&value_contract, "mfm.safe-failure.v1")?;
@@ -378,22 +378,22 @@ fn decode_fact_selection_request(bytes: &[u8]) -> Result<mfm_facts::FactSelectio
 }
 
 fn encode_fact_selection_response(
-    value: &mfm_journal::v2::FactSelectionResponse,
+    value: &mfm_journal::FactSelectionResponse,
 ) -> Result<PlainCanonicalJsonBytes> {
     exact_plain_bytes(value.as_bytes())
 }
 
-fn decode_fact_selection_response(bytes: &[u8]) -> Result<mfm_journal::v2::FactSelectionResponse> {
-    mfm_journal::v2::FactSelectionResponse::strict_decode(bytes)
+fn decode_fact_selection_response(bytes: &[u8]) -> Result<mfm_journal::FactSelectionResponse> {
+    mfm_journal::FactSelectionResponse::strict_decode(bytes)
         .map_err(|error| ProgramError::Codec(error.to_string()))
 }
 
-fn encode_safe_failure(value: &mfm_journal::v2::SafeFailure) -> Result<PlainCanonicalJsonBytes> {
+fn encode_safe_failure(value: &mfm_journal::SafeFailure) -> Result<PlainCanonicalJsonBytes> {
     exact_plain_bytes(value.as_bytes())
 }
 
-fn decode_safe_failure(bytes: &[u8]) -> Result<mfm_journal::v2::SafeFailure> {
-    mfm_journal::v2::SafeFailure::strict_decode(bytes)
+fn decode_safe_failure(bytes: &[u8]) -> Result<mfm_journal::SafeFailure> {
+    mfm_journal::SafeFailure::strict_decode(bytes)
         .map_err(|error| ProgramError::Codec(error.to_string()))
 }
 

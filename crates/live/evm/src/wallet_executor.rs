@@ -562,41 +562,41 @@ impl EvmExecutorFailureOutcomes {
             BoundaryStage::BeforeBoundaryEntry,
         )?;
         let non_domain = |entry_status, disposition, code| {
-            let failure = mfm_journal::v2::NonDomainFailure::new(entry_status, disposition, code)
+            let failure = mfm_journal::NonDomainFailure::new(entry_status, disposition, code)
                 .map_err(|_| ExecutorError::InvalidSafeFailure)?;
             EffectExecutorOutcome::non_domain_failure(failure)
         };
         Ok(Self {
             signer_unavailable: EffectExecutorOutcome::did_not_enter(signer_failure)?,
             store_unavailable: non_domain(
-                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
-                mfm_journal::v2::NonDomainDisposition::RetryableOperational,
-                mfm_journal::v2::NonDomainFailureCode::ExecutorStoreUnavailable,
+                mfm_journal::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::NonDomainDisposition::RetryableOperational,
+                mfm_journal::NonDomainFailureCode::ExecutorStoreUnavailable,
             )?,
             contention: non_domain(
-                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
-                mfm_journal::v2::NonDomainDisposition::RetryableOperational,
-                mfm_journal::v2::NonDomainFailureCode::ExecutorContention,
+                mfm_journal::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::NonDomainDisposition::RetryableOperational,
+                mfm_journal::NonDomainFailureCode::ExecutorContention,
             )?,
             history_invalid: non_domain(
-                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
-                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
-                mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid,
+                mfm_journal::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::NonDomainFailureCode::ExecutorHistoryInvalid,
             )?,
             capacity_exhausted: non_domain(
-                mfm_journal::v2::NonDomainEntryStatus::ProvenNotEntered,
-                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
-                mfm_journal::v2::NonDomainFailureCode::ExecutorCapacityExhausted,
+                mfm_journal::NonDomainEntryStatus::ProvenNotEntered,
+                mfm_journal::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::NonDomainFailureCode::ExecutorCapacityExhausted,
             )?,
             adapter_contract_violation: non_domain(
-                mfm_journal::v2::NonDomainEntryStatus::ProvenNotEntered,
-                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
-                mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation,
+                mfm_journal::NonDomainEntryStatus::ProvenNotEntered,
+                mfm_journal::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::NonDomainFailureCode::AdapterContractViolation,
             )?,
             result_encoding_failure: non_domain(
-                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
-                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
-                mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure,
+                mfm_journal::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::NonDomainFailureCode::ResultEncodingFailure,
             )?,
         })
     }

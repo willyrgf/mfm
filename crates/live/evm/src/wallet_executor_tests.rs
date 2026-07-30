@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, b256, keccak256, Address, PrimitiveSignature, B256, U256};
 use k256::ecdsa::SigningKey;
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract};
 use mfm_evm::{
     evm_submit_transaction_leaf_expansion, evm_submit_transaction_value_contracts,
     evm_wallet_assurance_policy_ref, evm_wallet_finality_policy_ref, evm_wallet_nonce_policy_ref,
@@ -987,7 +987,7 @@ fn retained_contract(
     evidence_contract_ref: &ContentRef,
 ) -> RetainedValueContract {
     RetainedValueContract::new(
-        RecoverabilityContractV3::embedded()
+        RecoverabilityContract::embedded()
             .expect("recoverability contract")
             .schema_id(schema_contract)
             .expect("retained schema")
@@ -1140,7 +1140,7 @@ async fn executor_error_classification_distinguishes_fresh_material_from_retaine
                 .executor
                 .classify_executor_error_for_test(&ExecutorError::TargetOperationMismatch, false,),
         ),
-        mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation
+        mfm_journal::NonDomainFailureCode::AdapterContractViolation
     );
     assert_eq!(
         executor_failure_code(
@@ -1148,7 +1148,7 @@ async fn executor_error_classification_distinguishes_fresh_material_from_retaine
                 .executor
                 .classify_executor_error_for_test(&ExecutorError::TargetOperationMismatch, true,),
         ),
-        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
+        mfm_journal::NonDomainFailureCode::ExecutorHistoryInvalid
     );
     assert_eq!(
         executor_failure_code(
@@ -1156,7 +1156,7 @@ async fn executor_error_classification_distinguishes_fresh_material_from_retaine
                 .executor
                 .classify_executor_error_for_test(&ExecutorError::CanonicalEncoding, false),
         ),
-        mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure
+        mfm_journal::NonDomainFailureCode::ResultEncodingFailure
     );
     assert_eq!(
         executor_failure_code(
@@ -1164,7 +1164,7 @@ async fn executor_error_classification_distinguishes_fresh_material_from_retaine
                 .executor
                 .classify_executor_error_for_test(&ExecutorError::CanonicalEncoding, true),
         ),
-        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
+        mfm_journal::NonDomainFailureCode::ExecutorHistoryInvalid
     );
     assert_eq!(
         executor_failure_code(
@@ -1362,15 +1362,15 @@ async fn invalid_typed_postexchange_result_is_adapter_contract_violation() {
     let fields = failure.fields();
     assert_eq!(
         fields.entry_status,
-        mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered
+        mfm_journal::NonDomainEntryStatus::MayHaveEntered
     );
     assert_eq!(
         fields.disposition,
-        mfm_journal::v2::NonDomainDisposition::IntegrityBlocked
+        mfm_journal::NonDomainDisposition::IntegrityBlocked
     );
     assert_eq!(
         fields.code,
-        mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation
+        mfm_journal::NonDomainFailureCode::AdapterContractViolation
     );
 }
 
@@ -1385,15 +1385,15 @@ async fn postexchange_canonical_encoding_failure_is_result_encoding_failure() {
     let fields = failure.fields();
     assert_eq!(
         fields.entry_status,
-        mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered
+        mfm_journal::NonDomainEntryStatus::MayHaveEntered
     );
     assert_eq!(
         fields.disposition,
-        mfm_journal::v2::NonDomainDisposition::IntegrityBlocked
+        mfm_journal::NonDomainDisposition::IntegrityBlocked
     );
     assert_eq!(
         fields.code,
-        mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure
+        mfm_journal::NonDomainFailureCode::ResultEncodingFailure
     );
 }
 
@@ -1522,7 +1522,7 @@ async fn assert_restored_drive_is_read_only_failure(fixture: &Fixture, store: Me
     };
     assert_eq!(
         failure.fields().code,
-        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
+        mfm_journal::NonDomainFailureCode::ExecutorHistoryInvalid
     );
     assert_eq!(fixture.rpc.call_count(), rpc_calls);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
@@ -1628,7 +1628,7 @@ async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_subst
     };
     assert_eq!(
         failure.fields().code,
-        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
+        mfm_journal::NonDomainFailureCode::ExecutorHistoryInvalid
     );
 }
 
@@ -1714,7 +1714,7 @@ async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation
         };
         assert_eq!(
             failure.fields().code,
-            mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation
+            mfm_journal::NonDomainFailureCode::AdapterContractViolation
         );
         assert_eq!(fixture.rpc.call_count(), 0);
         assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 0);

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_ids::{ContentRef, FieldPath, NodeId, StableAuthorKey, StableId};
-use mfm_journal::v2::{ProducerBindingFields, ValueRef};
+use mfm_journal::{ProducerBindingFields, ValueRef};
 use mfm_program::{
     QualifiedEntryPointDefinition, QualifiedExecutorExpansion, QualifiedFrameworkPolicy,
     QualifiedInputContract, QualifiedProgramDefinition, QualifiedSourceContract,

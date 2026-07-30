@@ -62,12 +62,12 @@ struct ProductionBackend {
 
 struct UnavailableReproductionResolver;
 
-impl mfm_replay::v2::ReproductionResolver for UnavailableReproductionResolver {
+impl mfm_replay::ReproductionResolver for UnavailableReproductionResolver {
     fn reproduce_exact<'a>(
         &'a self,
         _canonical_plan: &'a [u8],
-    ) -> mfm_replay::v2::ReproductionFuture<'a, mfm_replay::v2::ExactReproduction> {
-        Box::pin(async { mfm_replay::v2::ExactReproduction::Unavailable })
+    ) -> mfm_replay::ReproductionFuture<'a, mfm_replay::ExactReproduction> {
+        Box::pin(async { mfm_replay::ExactReproduction::Unavailable })
     }
 }
 
@@ -543,7 +543,7 @@ impl ProductionBackend {
         let authority = self
             .issuer
             .authorize_inspect_audit(call.tenant_scope_id().clone(), call.run_id().clone());
-        let page = mfm_replay::v2::inspect_access_audit(
+        let page = mfm_replay::inspect_access_audit(
             &self.reader,
             &authority,
             position.complete_as_of_journal_head.as_ref(),
@@ -563,12 +563,9 @@ impl ProductionBackend {
         let root_authority = self
             .issuer
             .authorize_inspect_trace(call.tenant_scope_id().clone(), call.run_id().clone());
-        let requirements = mfm_replay::v2::discover_transition_trace_sources(
-            &self.reader,
-            &root_authority,
-            request,
-        )
-        .await?;
+        let requirements =
+            mfm_replay::discover_transition_trace_sources(&self.reader, &root_authority, request)
+                .await?;
         let mut source_authorities = Vec::with_capacity(requirements.source_run_ids().len());
         for source_run_id in requirements.source_run_ids() {
             let Some(tenant_scope_id) = call.authorize_trace_source(source_run_id.clone()).await?
@@ -580,7 +577,7 @@ impl ProductionBackend {
                     .authorize_inspect_trace(tenant_scope_id, source_run_id.clone()),
             );
         }
-        let page = mfm_replay::v2::inspect_transition_trace(
+        let page = mfm_replay::inspect_transition_trace(
             &self.reader,
             &root_authority,
             requirements,
@@ -598,7 +595,7 @@ impl ProductionBackend {
         let authority = self
             .issuer
             .authorize_replay(call.tenant_scope_id().clone(), call.run_id().clone());
-        let verified = mfm_replay::v2::verify_recorded_history(&self.reader, &authority).await?;
+        let verified = mfm_replay::verify_recorded_history(&self.reader, &authority).await?;
         match request {
             ReplayRequest::Verify => verified.canonical_result().map_err(Into::into),
             ReplayRequest::Reproduce(input) => {
@@ -609,7 +606,7 @@ impl ProductionBackend {
                     .verify_export_stream(reader, &content_ref)
                     .await
                     .map_err(replay_artifact_error)?;
-                mfm_replay::v2::reproduce_exact(&historical, &UnavailableReproductionResolver)
+                mfm_replay::reproduce_exact(&historical, &UnavailableReproductionResolver)
                     .await
                     .map_err(Into::into)
             }
@@ -621,8 +618,7 @@ impl ProductionBackend {
                     .verify_export_stream(reader, &content_ref)
                     .await
                     .map_err(replay_artifact_error)?;
-                mfm_replay::v2::compare_current(&historical, self.registry.as_ref())
-                    .map_err(Into::into)
+                mfm_replay::compare_current(&historical, self.registry.as_ref()).map_err(Into::into)
             }
         }
     }
@@ -635,11 +631,10 @@ impl ProductionBackend {
         let root_authority = self
             .issuer
             .authorize_export(call.tenant_scope_id().clone(), call.run_id().clone());
-        let mut pending =
-            mfm_replay::v2::required_export_source_run_ids(&self.reader, &root_authority)
-                .await?
-                .into_iter()
-                .collect::<BTreeSet<_>>();
+        let mut pending = mfm_replay::required_export_source_run_ids(&self.reader, &root_authority)
+            .await?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let mut dependencies = BTreeMap::<RunId, RunAccessAuthority<mfm_store::Export>>::new();
         while let Some(run_id) = pending.pop_first() {
             if dependencies.contains_key(&run_id) {
@@ -649,7 +644,7 @@ impl ProductionBackend {
             let authority = self
                 .issuer
                 .authorize_export(tenant_scope_id, run_id.clone());
-            let required = mfm_replay::v2::required_export_source_run_ids(&self.reader, &authority)
+            let required = mfm_replay::required_export_source_run_ids(&self.reader, &authority)
                 .await
                 .map_err(export_dependency_discovery_error)?;
             dependencies.insert(run_id, authority);
@@ -781,10 +776,10 @@ fn admission_status(disposition: AdmissionDisposition) -> AdmissionStatus {
     }
 }
 
-fn replay_artifact_error(error: mfm_replay::v2::ReplayError) -> PublicError {
+fn replay_artifact_error(error: mfm_replay::ReplayError) -> PublicError {
     match error.kind() {
-        mfm_replay::v2::ReplayErrorKind::InvalidExport => PublicError::replay_artifact_invalid(),
-        mfm_replay::v2::ReplayErrorKind::ExportStreamIo => export_stream_io_error(),
+        mfm_replay::ReplayErrorKind::InvalidExport => PublicError::replay_artifact_invalid(),
+        mfm_replay::ReplayErrorKind::ExportStreamIo => export_stream_io_error(),
         _ => error.into(),
     }
 }
@@ -796,8 +791,8 @@ fn export_stream_io_error() -> PublicError {
     )
 }
 
-fn export_dependency_discovery_error(error: mfm_replay::v2::ReplayError) -> PublicError {
-    if error.kind() == mfm_replay::v2::ReplayErrorKind::RunNotFound {
+fn export_dependency_discovery_error(error: mfm_replay::ReplayError) -> PublicError {
+    if error.kind() == mfm_replay::ReplayErrorKind::RunNotFound {
         PublicError::replay_verification_failed()
     } else {
         error.into()
@@ -857,20 +852,20 @@ mod tests {
 
     #[test]
     fn only_caller_export_validation_uses_the_artifact_error_contract() {
-        let invalid = replay_artifact_error(mfm_replay::v2::ReplayError::InvalidExport);
+        let invalid = replay_artifact_error(mfm_replay::ReplayError::InvalidExport);
         assert_eq!(invalid.class, ErrorClass::BadRequest);
         assert_eq!(invalid.code, "ReplayArtifactInvalid");
 
         for error in [
-            mfm_replay::v2::ReplayError::InvalidRecordedHistory,
-            mfm_replay::v2::ReplayError::AuthorityMismatch,
+            mfm_replay::ReplayError::InvalidRecordedHistory,
+            mfm_replay::ReplayError::AuthorityMismatch,
         ] {
             let error = replay_artifact_error(error);
             assert_eq!(error.class, ErrorClass::Internal);
             assert_eq!(error.code, "ReplayVerificationFailed");
         }
 
-        let error = replay_artifact_error(mfm_replay::v2::ReplayError::ExportStreamIo {
+        let error = replay_artifact_error(mfm_replay::ReplayError::ExportStreamIo {
             source: std::io::Error::other("private sentinel"),
         });
         assert_eq!(error.class, ErrorClass::Internal);
@@ -880,7 +875,7 @@ mod tests {
 
     #[test]
     fn authorized_missing_export_dependency_is_an_integrity_failure() {
-        let error = export_dependency_discovery_error(mfm_replay::v2::ReplayError::RunNotFound);
+        let error = export_dependency_discovery_error(mfm_replay::ReplayError::RunNotFound);
         assert_eq!(error.class, ErrorClass::Internal);
         assert_eq!(error.code, "ReplayVerificationFailed");
     }

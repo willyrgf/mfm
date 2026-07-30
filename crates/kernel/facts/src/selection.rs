@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV3};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValue};
 use mfm_ids::{
     ContentRef, FactContentIdentityDigest, FactLogicalIdentityDigest, FactQueryDigest, SchemaId,
 };
@@ -122,7 +122,7 @@ impl TryFrom<u32> for FactSelectionLimit {
 /// One annex-backed query within a reserved fact-selection request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSelectionQuery {
-    validated: ValidatedCanonicalValueV3,
+    validated: ValidatedCanonicalValue,
     descriptor_ref: ContentRef,
     predicate: CanonicalFactPredicate,
     content_identity_filter: Option<FactContentIdentityDigest>,
@@ -176,7 +176,7 @@ impl FactSelectionQuery {
         Self::from_validated(codec::encode(FACT_SELECTION_QUERY_CONTRACT, &value)?)
     }
 
-    fn from_validated(validated: ValidatedCanonicalValueV3) -> Result<Self> {
+    fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
         let value = validated
             .canonical_value()
             .map_err(FactError::Recoverability)?;
@@ -293,7 +293,7 @@ impl FactSelectionQuery {
 /// One closed, state-authored request for other-run facts in the admitted tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSelectionRequest {
-    validated: ValidatedCanonicalValueV3,
+    validated: ValidatedCanonicalValue,
     queries: Vec<FactSelectionQuery>,
 }
 
@@ -335,7 +335,7 @@ impl FactSelectionRequest {
         Self::from_validated(codec::encode(FACT_SELECTION_REQUEST_CONTRACT, &value)?)
     }
 
-    fn from_validated(validated: ValidatedCanonicalValueV3) -> Result<Self> {
+    fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
         let value = validated
             .canonical_value()
             .map_err(FactError::Recoverability)?;

@@ -120,13 +120,12 @@ fn access_audit_entry_json(entry: &AccessAuditEntry) -> Result<Value, PublicErro
     let non_domain_failure = entry
         .non_domain_failure()
         .map(|value| {
-            let persisted =
-                mfm_journal::v2::PersistedNonDomainFailure::new(value).map_err(|_| {
-                    PublicError::internal(
-                        "PublicResponseRenderingFailed",
-                        "A public response could not be rendered",
-                    )
-                })?;
+            let persisted = mfm_journal::PersistedNonDomainFailure::new(value).map_err(|_| {
+                PublicError::internal(
+                    "PublicResponseRenderingFailed",
+                    "A public response could not be rendered",
+                )
+            })?;
             canonical_json(persisted.as_bytes())
         })
         .transpose()?;

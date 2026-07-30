@@ -2,15 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use mfm_canonical::{
-    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3,
-    ValidatedCanonicalValueV3,
+    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract, ValidatedCanonicalValue,
 };
 use mfm_executor::{
     ExecutorBinding, ExecutorContractDescriptor, ExecutorDeployment, ResourceOwnership,
     VerifiedExecutorBinding,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, FieldPath, SchemaId, SemanticTypeId, StableId};
-use mfm_journal::v2::ReadCapabilityBinding;
+use mfm_journal::ReadCapabilityBinding;
 use mfm_spec::{
     exact_content_ref, CapabilityBindingManifest, CapabilityBindingManifestEntry,
     ComponentImplementationDescriptor, ComponentKind, RetainedValueContract,
@@ -2004,7 +2003,7 @@ fn executor_support_member(
     path: &str,
     role: &str,
     semantic_name: &str,
-    validated: ValidatedCanonicalValueV3,
+    validated: ValidatedCanonicalValue,
     object_evidence_contract_ref: ContentRef,
 ) -> Result<QualifiedSupportMember, PublicError> {
     let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(validated.as_bytes())
@@ -2233,7 +2232,7 @@ fn annex_canonical_bytes(
     contract: &str,
     bytes: &[u8],
 ) -> Result<PlainCanonicalJsonBytes, PublicError> {
-    let annex = RecoverabilityContractV3::embedded().map_err(|_| invalid_qualification())?;
+    let annex = RecoverabilityContract::embedded().map_err(|_| invalid_qualification())?;
     let validated = annex
         .strict_decode(contract, bytes)
         .map_err(|_| invalid_qualification())?;

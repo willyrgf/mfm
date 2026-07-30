@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 
-use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV3};
+use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContract};
 use mfm_ids::{ContentRef, RunId};
 use mfm_replay::trace_export::{
     verify_portable_run_export_stream, write_portable_run_export_stream, ExportKind,
     OfflineFactCompleteness,
 };
-use mfm_replay::v2::{required_export_source_run_ids, ReplayErrorKind};
-use mfm_store::v2::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
+use mfm_replay::{required_export_source_run_ids, ReplayErrorKind};
+use mfm_store::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
 use mfm_store::{
     open_in_memory, AppendOutcome, ExistingRunAppendMaterial, InMemoryRunJournalBackend,
     NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
@@ -586,7 +586,7 @@ async fn assert_invalid(bytes: &[u8], reason: &str) {
 }
 
 fn stream_ref(bytes: &[u8]) -> ContentRef {
-    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
     ContentRef::new(
         contract
             .schema_id("mfm.portable-run-export-stream.v2")

@@ -995,19 +995,19 @@ impl PreparedWalletOutcomes {
                 false,
             )?,
             adapter_contract_violation: DeliveryAttemptOutcome::non_domain_failure(
-                mfm_journal::v2::NonDomainFailure::new(
-                    mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
-                    mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
-                    mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation,
+                mfm_journal::NonDomainFailure::new(
+                    mfm_journal::NonDomainEntryStatus::MayHaveEntered,
+                    mfm_journal::NonDomainDisposition::IntegrityBlocked,
+                    mfm_journal::NonDomainFailureCode::AdapterContractViolation,
                 )
                 .map_err(|_| EvmWalletLiveError::InvalidContract)?,
             )
             .map_err(|_| EvmWalletLiveError::InvalidContract)?,
             result_encoding_failure: DeliveryAttemptOutcome::non_domain_failure(
-                mfm_journal::v2::NonDomainFailure::new(
-                    mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
-                    mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
-                    mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure,
+                mfm_journal::NonDomainFailure::new(
+                    mfm_journal::NonDomainEntryStatus::MayHaveEntered,
+                    mfm_journal::NonDomainDisposition::IntegrityBlocked,
+                    mfm_journal::NonDomainFailureCode::ResultEncodingFailure,
                 )
                 .map_err(|_| EvmWalletLiveError::InvalidContract)?,
             )

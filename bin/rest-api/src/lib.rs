@@ -527,7 +527,7 @@ fn replay_stream_request(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| ContentDigest::parse(value).ok())
         .ok_or_else(PublicError::replay_artifact_invalid)?;
-    let schema_id = mfm_canonical::RecoverabilityContractV3::embedded()
+    let schema_id = mfm_canonical::RecoverabilityContract::embedded()
         .and_then(|contract| contract.schema_id("mfm.portable-run-export-stream.v2"))
         .map_err(|_| {
             PublicError::internal(

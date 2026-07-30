@@ -152,7 +152,7 @@ fn run_history_ownership_dependencies_and_sources_are_one_way() {
         !postgres_exports.contains("QualifiedPostgresStore"),
         "the retired combined PostgreSQL facade must not remain exported"
     );
-    let store_exports = read_source(&root, "crates/kernel/store/src/v2/mod.rs");
+    let store_exports = read_source(&root, "crates/kernel/store/src/lib.rs");
     for retired in [
         "RunJournalStore",
         "SupportStore",

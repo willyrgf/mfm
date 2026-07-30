@@ -860,8 +860,7 @@ fn replay_response() -> mfm_app::ReplayResponse {
 }
 
 fn replay_export_ref(bytes: &[u8]) -> ContentRef {
-    let contract =
-        mfm_canonical::RecoverabilityContractV3::embedded().expect("recoverability annex");
+    let contract = mfm_canonical::RecoverabilityContract::embedded().expect("recoverability annex");
     ContentRef::new(
         contract
             .schema_id("mfm.portable-run-export-stream.v2")

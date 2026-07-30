@@ -2,7 +2,7 @@
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{EffectKey, FieldPath, RequestDigest};
-use mfm_journal::v2::{
+use mfm_journal::{
     AuthorizationRef, CapabilityBindingRef, ExecutorEnsureResult, ExecutorEnsureResultFields,
     ObservationOutcomeFields, ProducerBindingFields, TerminalEffectEvidence, ValueRef,
 };
@@ -97,7 +97,7 @@ pub(crate) fn committed_read_observation(
 fn verified_safe_failure(
     view: &VerifiedRunView,
     authorization_ref: &AuthorizationRef,
-    failure: &mfm_journal::v2::SafeFailure,
+    failure: &mfm_journal::SafeFailure,
     contract: &RetainedValueContract,
 ) -> Result<(
     mfm_store::SafeFailureMetadata,

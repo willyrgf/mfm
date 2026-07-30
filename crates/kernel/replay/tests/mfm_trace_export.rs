@@ -1,9 +1,9 @@
-use mfm_canonical::RecoverabilityContractV3;
+use mfm_canonical::RecoverabilityContract;
 use mfm_ids::ContentRef;
 use mfm_replay::trace_export::{
     verify_portable_run_export_stream, PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE,
 };
-use mfm_replay::v2::ReplayErrorKind;
+use mfm_replay::ReplayErrorKind;
 
 #[path = "../../../../tests/support/recoverability_v3.rs"]
 mod recoverability_v3_support;
@@ -19,14 +19,14 @@ async fn trace_export_executes_the_complete_recoverability_v3_corpus() {
         );
 
         if vector.kind() == "export_identity" {
-            let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
+            let contract = RecoverabilityContract::embedded().expect("recoverability contract");
             let stream = recoverability_v3_support::hex_field(vector.vector(), "stream_hex");
             let external_digest = contract.raw_content_digest(&stream);
             assert!(external_digest.as_str().starts_with("content:sha256-v1:"));
         }
     });
 
-    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
     let incomplete = b"";
     let expected_ref = ContentRef::new(
         contract

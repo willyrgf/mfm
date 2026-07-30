@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use mfm_ids::{JournalRecordHash, RunId};
-use mfm_journal::v2::{RecordRef, TransitionRef};
-use mfm_replay::v2::{ExactReproduction, ReplayError};
+use mfm_journal::{RecordRef, TransitionRef};
+use mfm_replay::{ExactReproduction, ReplayError};
 
 #[path = "../../../../tests/support/recoverability_v3.rs"]
 mod recoverability_v3_support;
@@ -20,7 +20,7 @@ fn replay_executes_the_complete_recoverability_v3_corpus() {
         let unavailable = ExactReproduction::Unavailable
             .canonical_result(&run_id)
             .expect("canonical unavailable result");
-        let decoded = mfm_replay::v2::CanonicalReplayResult::strict_decode(unavailable.as_bytes())
+        let decoded = mfm_replay::CanonicalReplayResult::strict_decode(unavailable.as_bytes())
             .expect("strict replay result");
         let value: serde_json::Value =
             serde_json::from_slice(decoded.as_bytes()).expect("canonical replay JSON");
