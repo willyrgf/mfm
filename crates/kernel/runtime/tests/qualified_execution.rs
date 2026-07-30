@@ -3,10 +3,12 @@ use std::sync::Arc;
 use mfm_ids::{StableId, StoreEpoch, StoreScopeId};
 use mfm_program::CandidateCertificationErrorKind;
 use mfm_qualified_run_test_support::{PreparedQualifiedRun, QualifiedRunFixture};
-use mfm_runtime::{DriveOutcome, DriveWaitReason, Runtime, RuntimeError};
+use mfm_runtime::{
+    AdmissionDisposition, AuthorizedAdmissionPlan, DriveOutcome, Runtime, RuntimeError,
+};
 use mfm_store::{
-    AppendOutcome, AsyncInMemoryRunStore, NewlyAppended, RunAccessAuthorityIssuer, RunJournalStore,
-    StoreIdentity,
+    open_in_memory, InMemoryRunJournalBackend, QualifiedRunStore, RunAccessAuthorityIssuer,
+    RunHistoryReader, StoreError, StoreIdentity,
 };
 
 fn store_identity(discriminator: u8) -> StoreIdentity {
@@ -21,7 +23,7 @@ fn store_identity(discriminator: u8) -> StoreIdentity {
     )
 }
 
-fn provision(store: &AsyncInMemoryRunStore, fixture: &QualifiedRunFixture) {
+fn provision(store: &QualifiedRunStore<InMemoryRunJournalBackend>, fixture: &QualifiedRunFixture) {
     store
         .provision_configured_value(
             fixture.configured_binding().clone(),
@@ -31,40 +33,68 @@ fn provision(store: &AsyncInMemoryRunStore, fixture: &QualifiedRunFixture) {
 }
 
 async fn prepare(
-    store: &AsyncInMemoryRunStore,
+    reader: &RunHistoryReader<InMemoryRunJournalBackend>,
     issuer: &RunAccessAuthorityIssuer,
     fixture: &QualifiedRunFixture,
+    registry: Arc<mfm_program::QualifiedProgramRegistry>,
 ) -> PreparedQualifiedRun {
-    provision(store, fixture);
     fixture
-        .prepare_on(store, issuer)
+        .prepare_on(reader, issuer, registry)
         .await
         .expect("prepare genuine qualified run")
 }
 
-async fn admit(
-    store: &AsyncInMemoryRunStore,
+fn plan(
+    fixture: &QualifiedRunFixture,
     prepared: PreparedQualifiedRun,
-) -> (Arc<mfm_program::QualifiedProgramRegistry>, mfm_ids::RunId) {
-    let (registry, authority, append) = prepared.into_parts();
-    let outcome = store
-        .append_admission(&authority, append)
+) -> (
+    Arc<mfm_program::QualifiedProgramRegistry>,
+    AuthorizedAdmissionPlan,
+) {
+    let (registry, authority, append_request_id, artifacts, input, configured, sources) =
+        prepared.into_parts();
+    let plan = AuthorizedAdmissionPlan::new(
+        authority,
+        append_request_id,
+        fixture.entry_point_id().clone(),
+        fixture.entry_point_operation_id().clone(),
+        fixture.invocation_identity().clone(),
+        artifacts,
+        input,
+        configured,
+        sources,
+    );
+    (registry, plan)
+}
+
+async fn one_fixture_runtime(
+    fixture: &QualifiedRunFixture,
+) -> (
+    Runtime<InMemoryRunJournalBackend>,
+    RunHistoryReader<InMemoryRunJournalBackend>,
+    RunAccessAuthorityIssuer,
+    AuthorizedAdmissionPlan,
+) {
+    let (store, issuer) = open_in_memory(fixture.store_identity().clone());
+    provision(&store, fixture);
+    let registry = fixture
+        .qualify_on(&store, &issuer)
         .await
-        .expect("append genuine qualified run");
-    let AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(admitted)) = outcome else {
-        panic!("qualified fixture admission was not newly committed");
-    };
-    (registry, admitted.run_id().clone())
+        .expect("qualify fixture");
+    let (writer, reader) = store.split();
+    let prepared = prepare(&reader, &issuer, fixture, Arc::clone(&registry)).await;
+    let (_, plan) = plan(fixture, prepared);
+    (Runtime::new(writer, registry), reader, issuer, plan)
 }
 
 #[tokio::test]
-async fn genuine_qualified_run_advances_then_closes() {
-    let identity = store_identity(1);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
-    let fixture = QualifiedRunFixture::for_store(identity, 1).expect("qualified fixture");
-    let prepared = prepare(&store, &issuer, &fixture).await;
-    let (registry, run_id) = admit(&store, prepared).await;
-    let runtime = Runtime::new(store, registry);
+async fn runtime_admission_advances_then_closes() {
+    let fixture = QualifiedRunFixture::for_store(store_identity(1), 1).expect("qualified fixture");
+    let (runtime, _reader, issuer, plan) = one_fixture_runtime(&fixture).await;
+    let admission = runtime.admit(plan).await.expect("runtime admission");
+    assert_eq!(admission.disposition(), AdmissionDisposition::NewlyAdmitted);
+    assert!(admission.committed().is_some());
+    let run_id = admission.run_id().clone();
 
     let first = runtime
         .drive_once(issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone()))
@@ -80,105 +110,202 @@ async fn genuine_qualified_run_advances_then_closes() {
 }
 
 #[tokio::test]
-async fn unavailable_candidate_waits_on_an_operational_block() {
-    let identity = store_identity(2);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
-    let recorded = QualifiedRunFixture::for_store(identity.clone(), 2).expect("recorded fixture");
-    let (recorded_registry, run_id) =
-        admit(&store, prepare(&store, &issuer, &recorded).await).await;
-    drop(recorded_registry);
-
-    let unavailable = QualifiedRunFixture::for_store_with_operation(
-        identity,
-        3,
-        StableId::new("mfm.fixture/unavailable-operation").expect("operation id"),
-    )
-    .expect("unavailable fixture");
-    let current = prepare(&store, &issuer, &unavailable).await;
-    let registry = Arc::clone(current.registry());
-    let runtime = Runtime::new(store, registry);
-
-    let outcome = runtime
-        .drive_once(issuer.authorize_drive(recorded.tenant_scope_id().clone(), run_id))
+async fn independently_authored_identical_plans_attach_to_one_admission() {
+    let fixture = QualifiedRunFixture::for_store(store_identity(2), 2).expect("qualified fixture");
+    let (store, issuer) = open_in_memory(fixture.store_identity().clone());
+    provision(&store, &fixture);
+    let registry = fixture
+        .qualify_on(&store, &issuer)
         .await
-        .expect("classify unavailable candidate");
-    assert!(matches!(
-        outcome,
-        DriveOutcome::Waiting {
-            reason: DriveWaitReason::OperationalBlock,
-            ..
-        }
-    ));
+        .expect("qualify fixture");
+    let (writer, reader) = store.split();
+    let (_, first_plan) = plan(
+        &fixture,
+        prepare(&reader, &issuer, &fixture, Arc::clone(&registry)).await,
+    );
+    let (_, second_plan) = plan(
+        &fixture,
+        prepare(&reader, &issuer, &fixture, Arc::clone(&registry)).await,
+    );
+    let runtime = Runtime::new(writer, registry);
+
+    let first = runtime.admit(first_plan).await.expect("first admission");
+    let second = runtime
+        .admit(second_plan)
+        .await
+        .expect("idempotent admission");
+    assert_eq!(first.disposition(), AdmissionDisposition::NewlyAdmitted);
+    assert_eq!(second.disposition(), AdmissionDisposition::Attached);
+    assert_eq!(first.run_id(), second.run_id());
+    assert_eq!(
+        first.committed().expect("known first head").journal_head(),
+        second
+            .committed()
+            .expect("known attached head")
+            .journal_head()
+    );
+
+    let replay = issuer.authorize_replay(fixture.tenant_scope_id().clone(), first.run_id().clone());
+    let journal = reader
+        .load_for_replay(&replay)
+        .await
+        .expect("load admitted run");
+    assert_eq!(journal.commits().len(), 1);
 }
 
 #[tokio::test]
-async fn incompatible_candidate_waits_on_an_integrity_block() {
+async fn foreign_registry_plan_is_rejected_before_append() {
     let identity = store_identity(3);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
-    let recorded = QualifiedRunFixture::for_store(identity.clone(), 4).expect("recorded fixture");
-    let (recorded_registry, run_id) =
-        admit(&store, prepare(&store, &issuer, &recorded).await).await;
-    drop(recorded_registry);
-
-    let incompatible = QualifiedRunFixture::for_store(identity, 5)
-        .expect("candidate fixture")
-        .with_incompatible_planning_profile();
-    let current = prepare(&store, &issuer, &incompatible).await;
-    let registry = Arc::clone(current.registry());
-    let runtime = Runtime::new(store, registry);
-
-    let outcome = runtime
-        .drive_once(issuer.authorize_drive(recorded.tenant_scope_id().clone(), run_id))
+    let current = QualifiedRunFixture::for_store(identity.clone(), 3).expect("current fixture");
+    let foreign = QualifiedRunFixture::for_store_with_operation(
+        identity,
+        4,
+        StableId::new("mfm.fixture/foreign-operation").expect("operation id"),
+    )
+    .expect("foreign fixture");
+    let (store, issuer) = open_in_memory(current.store_identity().clone());
+    provision(&store, &current);
+    provision(&store, &foreign);
+    let current_registry = current
+        .qualify_on(&store, &issuer)
         .await
-        .expect("classify incompatible candidate");
+        .expect("qualify current fixture");
+    let foreign_registry = foreign
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify foreign fixture");
+    let (writer, reader) = store.split();
+    let (_, foreign_plan) = plan(
+        &foreign,
+        prepare(&reader, &issuer, &foreign, foreign_registry).await,
+    );
+    let runtime = Runtime::new(writer, Arc::clone(&current_registry));
+
     assert!(matches!(
-        outcome,
-        DriveOutcome::Waiting {
-            reason: DriveWaitReason::IntegrityBlock,
-            ..
-        }
+        runtime.admit(foreign_plan).await,
+        Err(RuntimeError::CatalogSelection)
     ));
+
+    let (_, current_plan) = plan(
+        &current,
+        prepare(&reader, &issuer, &current, current_registry).await,
+    );
+    assert_eq!(
+        runtime
+            .admit(current_plan)
+            .await
+            .expect("current admission")
+            .disposition(),
+        AdmissionDisposition::NewlyAdmitted
+    );
 }
 
 #[tokio::test]
-async fn same_identity_callback_decode_failure_is_an_integrity_block() {
-    let identity = store_identity(5);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
-    let recorded = QualifiedRunFixture::for_store(identity.clone(), 7).expect("recorded fixture");
-    let (recorded_registry, run_id) =
-        admit(&store, prepare(&store, &issuer, &recorded).await).await;
-    drop(recorded_registry);
-
-    let integrity_failing = QualifiedRunFixture::for_store(identity, 7)
-        .expect("candidate fixture")
-        .with_integrity_failing_state_callback();
-    let current = prepare(&store, &issuer, &integrity_failing).await;
-    let registry = Arc::clone(current.registry());
-    let runtime = Runtime::new(store, registry);
-
-    let outcome = runtime
-        .drive_once(issuer.authorize_drive(recorded.tenant_scope_id().clone(), run_id))
+async fn mismatched_operation_tuple_is_rejected_before_append() {
+    let fixture = QualifiedRunFixture::for_store(store_identity(4), 5).expect("qualified fixture");
+    let (store, issuer) = open_in_memory(fixture.store_identity().clone());
+    provision(&store, &fixture);
+    let registry = fixture
+        .qualify_on(&store, &issuer)
         .await
-        .expect("classify callback decode failure");
+        .expect("qualify fixture");
+    let (writer, reader) = store.split();
+    let prepared = prepare(&reader, &issuer, &fixture, Arc::clone(&registry)).await;
+    let (_, authority, append_request_id, artifacts, input, configured, sources) =
+        prepared.into_parts();
+    let mismatched = AuthorizedAdmissionPlan::new(
+        authority,
+        append_request_id,
+        fixture.entry_point_id().clone(),
+        StableId::new("mfm.fixture/substituted-operation").expect("operation id"),
+        fixture.invocation_identity().clone(),
+        artifacts,
+        input,
+        configured,
+        sources,
+    );
+    let runtime = Runtime::new(writer, Arc::clone(&registry));
     assert!(matches!(
-        outcome,
-        DriveOutcome::Waiting {
-            reason: DriveWaitReason::IntegrityBlock,
-            ..
-        }
+        runtime.admit(mismatched).await,
+        Err(RuntimeError::CatalogSelection)
+    ));
+
+    let (_, valid) = plan(
+        &fixture,
+        prepare(&reader, &issuer, &fixture, registry).await,
+    );
+    assert_eq!(
+        runtime
+            .admit(valid)
+            .await
+            .expect("valid admission")
+            .disposition(),
+        AdmissionDisposition::NewlyAdmitted
+    );
+}
+
+#[tokio::test]
+async fn foreign_source_proof_is_rejected_by_the_writer_seal() {
+    let fixture = QualifiedRunFixture::for_store(store_identity(5), 6).expect("qualified fixture");
+    let (store, issuer) = open_in_memory(fixture.store_identity().clone());
+    provision(&store, &fixture);
+    let registry = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify fixture");
+    let (writer, reader) = store.split();
+    let prepared = prepare(&reader, &issuer, &fixture, Arc::clone(&registry)).await;
+    let (_, authority, append_request_id, artifacts, input, configured, _sources) =
+        prepared.into_parts();
+
+    let (other_store, other_issuer) = open_in_memory(fixture.store_identity().clone());
+    provision(&other_store, &fixture);
+    fixture
+        .qualify_on(&other_store, &other_issuer)
+        .await
+        .expect("qualify other fixture");
+    let (_other_writer, other_reader) = other_store.split();
+    let other_authority = other_issuer.authorize_admit(
+        fixture.tenant_scope_id().clone(),
+        fixture.entry_point_id().clone(),
+        fixture.entry_point_operation_id().clone(),
+        fixture.invocation_identity().clone(),
+    );
+    let foreign_sources = other_reader
+        .verify_no_admission_sources(&other_authority)
+        .await
+        .expect("foreign source proof");
+    let plan = AuthorizedAdmissionPlan::new(
+        authority,
+        append_request_id,
+        fixture.entry_point_id().clone(),
+        fixture.entry_point_operation_id().clone(),
+        fixture.invocation_identity().clone(),
+        artifacts,
+        input,
+        configured,
+        foreign_sources,
+    );
+    let runtime = Runtime::new(writer, registry);
+    assert!(matches!(
+        runtime.admit(plan).await,
+        Err(RuntimeError::Store(StoreError::AdmissionAuthorityMismatch))
     ));
 }
 
 #[tokio::test]
 async fn genuine_two_node_chain_recomputes_both_frames_then_closes() {
-    let identity = store_identity(6);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
-    let fixture = QualifiedRunFixture::for_store(identity, 8)
+    let fixture = QualifiedRunFixture::for_store(store_identity(6), 8)
         .expect("qualified fixture")
         .with_two_node_chain();
     fixture.reset_candidate_callback_counts();
-    let (registry, run_id) = admit(&store, prepare(&store, &issuer, &fixture).await).await;
-    let runtime = Runtime::new(store, registry);
+    let (runtime, _reader, issuer, plan) = one_fixture_runtime(&fixture).await;
+    let run_id = runtime
+        .admit(plan)
+        .await
+        .expect("admit two-node run")
+        .run_id()
+        .clone();
 
     for expected_step in 1..=2 {
         let outcome = runtime
@@ -200,14 +327,17 @@ async fn genuine_two_node_chain_recomputes_both_frames_then_closes() {
 
 #[tokio::test]
 async fn callback_panic_is_a_redaction_safe_execution_failure() {
-    let identity = store_identity(7);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
-    let fixture = QualifiedRunFixture::for_store(identity, 6)
+    let fixture = QualifiedRunFixture::for_store(store_identity(7), 7)
         .expect("qualified fixture")
         .with_panicking_state_callback()
         .expect("panicking fixture");
-    let (registry, run_id) = admit(&store, prepare(&store, &issuer, &fixture).await).await;
-    let runtime = Runtime::new(store, registry);
+    let (runtime, _reader, issuer, plan) = one_fixture_runtime(&fixture).await;
+    let run_id = runtime
+        .admit(plan)
+        .await
+        .expect("admit panicking run")
+        .run_id()
+        .clone();
 
     let error = runtime
         .drive_once(issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id))

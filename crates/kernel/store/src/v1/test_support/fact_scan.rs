@@ -11,9 +11,10 @@ use mfm_facts::{
 };
 use mfm_ids::{AppendRequestId, ContentRef, RunId, TenantScopeId};
 use mfm_journal::v1::{
-    ArtifactAdmissionMode, BindingDeltaEntryFields, FactSelectionCompletenessFields,
-    FactSelectionScanContract, ObservationRef, ReadCapabilityBinding, SettlementFields,
-    TenantFactFrontier, TransitionBodyFields, TransitionRef, ValueRef,
+    ArtifactAdmissionMode, BindingDeltaEntry, BindingDeltaEntryFields,
+    FactSelectionCompletenessFields, FactSelectionScanContract, ObservationRef,
+    ReadCapabilityBinding, SettlementFields, TenantFactFrontier, TransitionBodyFields,
+    TransitionRef, ValueRef,
 };
 use mfm_spec::v1::{EntryPointContract, RetainedValueContract};
 
@@ -28,12 +29,12 @@ use crate::v1::fact_scan::{
 use crate::v1::{
     AdmissionSourceBackend, AppendOutcome, AuthorizationMaterial, AuthorizeExternalAccess,
     CommittedJournalCommit, ConfiguredValueBackend, Drive, ExistingRunAppendMaterial,
-    FactAttestationLoadVerifier, FactSelectionAuthorizationOutcome, FactSelectionStore,
-    NewlyAppended, ObjectGraphProposal, PreparedJournalAppend, ProducedObjectRoot,
-    ProducedOutputSlot, QualifiedSupportMember, Result, RunAccessAuthority,
-    RunAccessAuthorityIssuer, RunJournalBackend, RunJournalStore, SettlementMaterial, StoreError,
-    StoreIdentity, SupportBackend, TransitionMaterial, VerifiedRunView,
-    FACT_SELECTION_OPERATION_ID,
+    FactAttestationLoadVerifier, FactSelectionAuthorizationOutcome, NewlyAppended,
+    ObjectGraphProposal, PreparedJournalAppend, ProducedObjectRoot, ProducedOutputSlot,
+    QualifiedRunStore, QualifiedSupportMember, Result, RunAccessAuthority,
+    RunAccessAuthorityIssuer, RunHistoryReader, RunHistoryWriter, RunJournalBackend,
+    SettlementMaterial, StoreError, StoreIdentity, SupportBackend, TransitionMaterial,
+    VerifiedRunView, FACT_SELECTION_OPERATION_ID,
 };
 
 pub(in crate::v1) struct FactSelectionFixtureContracts {
@@ -361,7 +362,7 @@ impl FactScanConformanceFixture {
     /// Prepares one reserved fact-selection authorization against an explicit verified view.
     pub async fn prepare_authorization_on<B>(
         &self,
-        store: &B,
+        writer: &RunHistoryWriter<B>,
         authority: &RunAccessAuthority<Drive>,
         view: &VerifiedRunView,
         append_request_id: AppendRequestId,
@@ -377,8 +378,10 @@ impl FactScanConformanceFixture {
                 StoreError::FactScanBindingMismatch,
             ));
         };
-        let frame = store.prepare_frame(authority, view, node.node_id()).await?;
-        let append = store
+        let frame = writer
+            .prepare_frame(authority, view, node.node_id())
+            .await?;
+        let append = writer
             .prepare_append(
                 authority,
                 view,
@@ -426,22 +429,34 @@ impl FactScanConformanceFixture {
     /// The caller must provision all three configured values before invoking this helper.
     pub async fn verify_on<B>(
         &self,
-        store: &B,
+        store: QualifiedRunStore<B>,
         issuer: &RunAccessAuthorityIssuer,
     ) -> std::result::Result<(), <B as RunJournalBackend>::Error>
     where
-        B: FactSelectionStore
-            + RunJournalStore<Error = <B as RunJournalBackend>::Error>
+        B: crate::v1::FactScanBackend
             + SupportBackend
             + ConfiguredValueBackend
             + AdmissionSourceBackend,
     {
-        let producer_run_id = admit_fixture(store, issuer, &self.producer).await?;
-        let late_producer_run_id = admit_fixture(store, issuer, &self.late_producer).await?;
-        let consumer_run_id = admit_fixture(store, issuer, &self.consumer).await?;
+        let producer_support = self.producer.qualify_on(&store, issuer).await?;
+        let late_producer_support = self.late_producer.qualify_on(&store, issuer).await?;
+        let consumer_support = self.consumer.qualify_on(&store, issuer).await?;
+        let (writer, reader) = store.split();
+        let producer_run_id =
+            admit_fixture(&writer, &reader, issuer, &self.producer, &producer_support).await?;
+        let late_producer_run_id = admit_fixture(
+            &writer,
+            &reader,
+            issuer,
+            &self.late_producer,
+            &late_producer_support,
+        )
+        .await?;
+        let consumer_run_id =
+            admit_fixture(&writer, &reader, issuer, &self.consumer, &consumer_support).await?;
 
         let producing_transition_ref = settle_fact_producer(
-            store,
+            &writer,
             issuer,
             &self.producer,
             &producer_run_id,
@@ -453,7 +468,7 @@ impl FactScanConformanceFixture {
         .await?;
 
         let abandoned = authorize_fact_selection(
-            store,
+            &writer,
             issuer,
             self,
             &consumer_run_id,
@@ -472,18 +487,19 @@ impl FactScanConformanceFixture {
                 StoreError::FactScanBindingMismatch,
             ));
         }
-        abandon_fact_scan_after_first_page(store, abandoned.permit, 2, 1, 2).await?;
+        abandon_fact_scan_after_first_page(writer.backend(), abandoned.permit, 2, 1, 2).await?;
 
         let consumer_drive = issuer.authorize_drive(
             self.consumer.tenant_scope_id().clone(),
             consumer_run_id.clone(),
         );
-        let abandoned_view = store
-            .load_committed_journal(&consumer_drive)
+        let abandoned_view = writer
+            .load_for_drive(&consumer_drive)
             .await?
             .verify_recorded_history()
             .map_err(<B as RunJournalBackend>::Error::from)?;
-        let rows = store
+        let rows = writer
+            .backend()
             .backend_load_fact_attestations(FactAttestationLoadVerifier::new(
                 abandoned_view.store_identity().clone(),
                 abandoned_view.tenant_scope_id().clone(),
@@ -497,7 +513,7 @@ impl FactScanConformanceFixture {
         }
 
         let completed_authorization = authorize_fact_selection(
-            store,
+            &writer,
             issuer,
             self,
             &consumer_run_id,
@@ -514,7 +530,7 @@ impl FactScanConformanceFixture {
         let frontier = completed_authorization.frontier;
 
         settle_fact_producer(
-            store,
+            &writer,
             issuer,
             &self.late_producer,
             &late_producer_run_id,
@@ -525,8 +541,12 @@ impl FactScanConformanceFixture {
         )
         .await?;
 
-        let completed =
-            scan_fact_selection_with_fact_limit(store, completed_authorization.permit, 2).await?;
+        let completed = scan_fact_selection_with_fact_limit(
+            writer.backend(),
+            completed_authorization.permit,
+            2,
+        )
+        .await?;
         if completed.authorization_ref() != &authorization_ref || completed.frontier() != &frontier
         {
             return Err(<B as RunJournalBackend>::Error::from(
@@ -536,12 +556,13 @@ impl FactScanConformanceFixture {
         verify_three_fact_completion(&completed, &producing_transition_ref)
             .map_err(<B as RunJournalBackend>::Error::from)?;
 
-        let before_observation = store
-            .load_committed_journal(&consumer_drive)
+        let before_observation = writer
+            .load_for_drive(&consumer_drive)
             .await?
             .verify_recorded_history()
             .map_err(<B as RunJournalBackend>::Error::from)?;
-        let rows = store
+        let rows = writer
+            .backend()
             .backend_load_fact_attestations(FactAttestationLoadVerifier::new(
                 before_observation.store_identity().clone(),
                 before_observation.tenant_scope_id().clone(),
@@ -553,7 +574,7 @@ impl FactScanConformanceFixture {
                 StoreError::FactScanBindingMismatch,
             ));
         }
-        let observation = store
+        let observation = writer
             .prepare_append(
                 &consumer_drive,
                 &before_observation,
@@ -563,7 +584,7 @@ impl FactScanConformanceFixture {
                 completed.into_observation_material(),
             )
             .map_err(<B as RunJournalBackend>::Error::from)?;
-        let observation_commit = match store.append(&consumer_drive, observation).await? {
+        let observation_commit = match writer.append(&consumer_drive, observation).await? {
             AppendOutcome::NewlyAppended(NewlyAppended::Observation(committed)) => committed,
             AppendOutcome::NewlyAppended(
                 NewlyAppended::RunAdmitted(_)
@@ -587,8 +608,8 @@ impl FactScanConformanceFixture {
             .map_err(StoreError::from)
             .map_err(<B as RunJournalBackend>::Error::from)?;
 
-        let observed_view = store
-            .load_committed_journal(&consumer_drive)
+        let observed_view = writer
+            .load_for_drive(&consumer_drive)
             .await?
             .verify_recorded_history()
             .map_err(<B as RunJournalBackend>::Error::from)?;
@@ -601,7 +622,8 @@ impl FactScanConformanceFixture {
                 .map_err(<B as RunJournalBackend>::Error::from)?,
         )
         .map_err(<B as RunJournalBackend>::Error::from)?;
-        let rows = store
+        let rows = writer
+            .backend()
             .backend_load_fact_attestations(FactAttestationLoadVerifier::new(
                 observed_view.store_identity().clone(),
                 observed_view.tenant_scope_id().clone(),
@@ -621,7 +643,7 @@ impl FactScanConformanceFixture {
                 StoreError::FactScanBindingMismatch,
             ));
         }
-        store
+        writer
             .verify_drive_fact_selection_observations(
                 &consumer_drive,
                 &observed_view,
@@ -639,10 +661,10 @@ impl FactScanConformanceFixture {
                 StoreError::FactScanBindingMismatch,
             ));
         };
-        let frame = store
+        let frame = writer
             .prepare_frame(&consumer_drive, &observed_view, node.node_id())
             .await?;
-        let settled = store
+        let settled = writer
             .prepare_append(
                 &consumer_drive,
                 &observed_view,
@@ -669,7 +691,7 @@ impl FactScanConformanceFixture {
                 })),
             )
             .map_err(<B as RunJournalBackend>::Error::from)?;
-        match store.append(&consumer_drive, settled).await? {
+        match writer.append(&consumer_drive, settled).await? {
             AppendOutcome::NewlyAppended(NewlyAppended::Transition(_)) => {}
             AppendOutcome::NewlyAppended(
                 NewlyAppended::RunAdmitted(_)
@@ -685,15 +707,15 @@ impl FactScanConformanceFixture {
             }
         }
 
-        let settled_view = store
-            .load_committed_journal(&consumer_drive)
+        let settled_view = writer
+            .load_for_drive(&consumer_drive)
             .await?
             .verify_recorded_history()
             .map_err(<B as RunJournalBackend>::Error::from)?;
-        verify_middle_fact_omission_rejected(store, &settled_view).await?;
+        verify_middle_fact_omission_rejected(writer.backend(), &settled_view).await?;
         let replay =
             issuer.authorize_replay(self.consumer.tenant_scope_id().clone(), consumer_run_id);
-        let completeness = store
+        let completeness = reader
             .verify_fact_selection_completeness(&replay, &settled_view)
             .await?;
         let [claim] = completeness.fact_selections() else {
@@ -728,20 +750,18 @@ struct AuthorizedFactScan {
 }
 
 async fn admit_fixture<B>(
-    store: &B,
+    writer: &RunHistoryWriter<B>,
+    reader: &RunHistoryReader<B>,
     issuer: &RunAccessAuthorityIssuer,
     fixture: &LegalAdmissionFixture,
+    support: &crate::v1::AdmittedSupportGraph,
 ) -> std::result::Result<RunId, <B as RunJournalBackend>::Error>
 where
-    B: FactSelectionStore
-        + RunJournalStore<Error = <B as RunJournalBackend>::Error>
-        + SupportBackend
-        + ConfiguredValueBackend
-        + AdmissionSourceBackend,
+    B: crate::v1::FactScanBackend + ConfiguredValueBackend + AdmissionSourceBackend,
 {
-    let prepared = fixture.prepare_on(store, issuer).await?;
+    let prepared = fixture.prepare_on(writer, reader, issuer, support).await?;
     let (authority, append) = prepared.into_parts();
-    match store.append_admission(&authority, append).await? {
+    match writer.append_admission(&authority, append).await? {
         AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(admitted)) => {
             Ok(admitted.run_id().clone())
         }
@@ -759,7 +779,7 @@ where
 }
 
 async fn settle_fact_producer<B>(
-    store: &B,
+    writer: &RunHistoryWriter<B>,
     issuer: &RunAccessAuthorityIssuer,
     fixture: &LegalAdmissionFixture,
     run_id: &RunId,
@@ -768,11 +788,11 @@ async fn settle_fact_producer<B>(
     label: &str,
 ) -> std::result::Result<TransitionRef, <B as RunJournalBackend>::Error>
 where
-    B: FactSelectionStore + RunJournalStore<Error = <B as RunJournalBackend>::Error>,
+    B: crate::v1::FactScanBackend,
 {
     let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
-    let view = store
-        .load_committed_journal(&drive)
+    let view = writer
+        .load_for_drive(&drive)
         .await?
         .verify_recorded_history()
         .map_err(<B as RunJournalBackend>::Error::from)?;
@@ -786,46 +806,72 @@ where
             StoreError::FactScanBindingMismatch,
         ));
     };
-    let frame = store.prepare_frame(&drive, &view, node.node_id()).await?;
-    let append = store
-        .prepare_append(
-            &drive,
-            &view,
-            AppendRequestId::new(format!("fact-conformance-{label}-settlement"))
-                .map_err(StoreError::from)
-                .map_err(<B as RunJournalBackend>::Error::from)?,
-            ExistingRunAppendMaterial::Transition(Box::new(TransitionMaterial::PureSettled {
-                prepared_frame: Box::new(frame),
-                settlement: SettlementMaterial::Succeeded {
-                    output_roots: vec![
-                        ProducedOutputSlot::new(
-                            first_output_slot.output_ordinal(),
-                            first_output_slot.field_path().clone(),
-                            ProducedObjectRoot::new(
-                                first_output_slot.value_contract().clone(),
-                                canonical_json(&format!(r#"{{"result":"{label}-producer-z"}}"#))
-                                    .map_err(<B as RunJournalBackend>::Error::from)?,
-                            ),
-                        ),
-                        ProducedOutputSlot::new(
-                            second_output_slot.output_ordinal(),
-                            second_output_slot.field_path().clone(),
-                            ProducedObjectRoot::new(
-                                second_output_slot.value_contract().clone(),
-                                canonical_json(&format!(r#"{{"result":"{label}-producer-a"}}"#))
-                                    .map_err(<B as RunJournalBackend>::Error::from)?,
-                            ),
-                        ),
-                    ],
-                    fact_roots,
-                },
-                object_graph: ObjectGraphProposal::empty(),
-            })),
-        )
+    let append_request_id = AppendRequestId::new(format!("fact-conformance-{label}-settlement"))
+        .map_err(StoreError::from)
         .map_err(<B as RunJournalBackend>::Error::from)?;
-    verify_prepared_fact_settlement_ordering(&append, expected_fact_order == 1)
-        .map_err(<B as RunJournalBackend>::Error::from)?;
-    let committed = match store.append(&drive, append).await? {
+    let fact_roots: [FactProposal; 3] = fact_roots
+        .try_into()
+        .map_err(|_| <B as RunJournalBackend>::Error::from(StoreError::FactScanBindingMismatch))?;
+    let mut selected_append = None;
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let frame = writer.prepare_frame(&drive, &view, node.node_id()).await?;
+        let append = writer
+            .prepare_append(
+                &drive,
+                &view,
+                append_request_id.clone(),
+                ExistingRunAppendMaterial::Transition(Box::new(TransitionMaterial::PureSettled {
+                    prepared_frame: Box::new(frame),
+                    settlement: SettlementMaterial::Succeeded {
+                        output_roots: vec![
+                            ProducedOutputSlot::new(
+                                first_output_slot.output_ordinal(),
+                                first_output_slot.field_path().clone(),
+                                ProducedObjectRoot::new(
+                                    first_output_slot.value_contract().clone(),
+                                    canonical_json(&format!(
+                                        r#"{{"result":"{label}-producer-z"}}"#
+                                    ))
+                                    .map_err(<B as RunJournalBackend>::Error::from)?,
+                                ),
+                            ),
+                            ProducedOutputSlot::new(
+                                second_output_slot.output_ordinal(),
+                                second_output_slot.field_path().clone(),
+                                ProducedObjectRoot::new(
+                                    second_output_slot.value_contract().clone(),
+                                    canonical_json(&format!(
+                                        r#"{{"result":"{label}-producer-a"}}"#
+                                    ))
+                                    .map_err(<B as RunJournalBackend>::Error::from)?,
+                                ),
+                            ),
+                        ],
+                        fact_roots: order
+                            .into_iter()
+                            .map(|index| fact_roots[index].clone())
+                            .collect(),
+                    },
+                    object_graph: ObjectGraphProposal::empty(),
+                })),
+            )
+            .map_err(<B as RunJournalBackend>::Error::from)?;
+        if verify_prepared_fact_settlement_ordering(&append).is_ok() {
+            selected_append = Some(append);
+            break;
+        }
+    }
+    let append = selected_append.ok_or_else(|| {
+        <B as RunJournalBackend>::Error::from(StoreError::FactScanBindingMismatch)
+    })?;
+    let committed = match writer.append(&drive, append).await? {
         AppendOutcome::NewlyAppended(NewlyAppended::Transition(committed)) => committed,
         AppendOutcome::NewlyAppended(
             NewlyAppended::RunAdmitted(_)
@@ -855,8 +901,8 @@ where
             StoreError::FactScanBindingMismatch,
         ));
     }
-    let closed = store
-        .load_committed_journal(&drive)
+    let closed = writer
+        .load_for_drive(&drive)
         .await?
         .verify_recorded_history()
         .map_err(<B as RunJournalBackend>::Error::from)?;
@@ -886,10 +932,7 @@ where
         .map_err(<B as RunJournalBackend>::Error::from)
 }
 
-fn verify_prepared_fact_settlement_ordering(
-    append: &PreparedJournalAppend,
-    require_fact_wire_reordering: bool,
-) -> Result<()> {
+fn verify_prepared_fact_settlement_ordering(append: &PreparedJournalAppend) -> Result<()> {
     let PreparedJournalAppend::CommitTransition(append) = append else {
         return Err(StoreError::FactScanBindingMismatch);
     };
@@ -915,6 +958,22 @@ fn verify_prepared_fact_settlement_ordering(
     if semantic_output_ordinals != [0, 1] || semantic_fact_ordinals != [0, 1, 2] {
         return Err(StoreError::FactScanBindingMismatch);
     }
+    let mut canonical_fact_entries = fact_emissions
+        .iter()
+        .map(|emission| {
+            Ok((
+                BindingDeltaEntry::fact_binding(emission)?
+                    .as_bytes()
+                    .to_vec(),
+                emission.fields()?.emission_ordinal,
+            ))
+        })
+        .collect::<mfm_journal::v1::Result<Vec<_>>>()?;
+    canonical_fact_entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let expected_wire_fact_ordinals = canonical_fact_entries
+        .into_iter()
+        .map(|(_, ordinal)| ordinal)
+        .collect::<Vec<_>>();
 
     let mut wire_output_ordinals = Vec::new();
     let mut wire_fact_ordinals = Vec::new();
@@ -933,9 +992,12 @@ fn verify_prepared_fact_settlement_ordering(
             | BindingDeltaEntryFields::RunPhaseChange(_) => {}
         }
     }
+    let mut sorted_wire_fact_ordinals = wire_fact_ordinals.clone();
+    sorted_wire_fact_ordinals.sort_unstable();
     if wire_output_ordinals != [1, 0]
-        || wire_fact_ordinals.len() != 3
-        || (require_fact_wire_reordering && wire_fact_ordinals == [0, 1, 2])
+        || sorted_wire_fact_ordinals != [0, 1, 2]
+        || wire_fact_ordinals != expected_wire_fact_ordinals
+        || wire_fact_ordinals == semantic_fact_ordinals
     {
         return Err(StoreError::FactScanBindingMismatch);
     }
@@ -975,24 +1037,24 @@ fn verify_committed_fact_observation_modes(commit: &CommittedJournalCommit) -> R
 }
 
 async fn authorize_fact_selection<B>(
-    store: &B,
+    writer: &RunHistoryWriter<B>,
     issuer: &RunAccessAuthorityIssuer,
     fixture: &FactScanConformanceFixture,
     run_id: &RunId,
     append_request_id: &str,
 ) -> std::result::Result<AuthorizedFactScan, <B as RunJournalBackend>::Error>
 where
-    B: FactSelectionStore + RunJournalStore<Error = <B as RunJournalBackend>::Error>,
+    B: crate::v1::FactScanBackend,
 {
     let drive = issuer.authorize_drive(fixture.consumer.tenant_scope_id().clone(), run_id.clone());
-    let view = store
-        .load_committed_journal(&drive)
+    let view = writer
+        .load_for_drive(&drive)
         .await?
         .verify_recorded_history()
         .map_err(<B as RunJournalBackend>::Error::from)?;
     let (append, request) = fixture
         .prepare_authorization_on(
-            store,
+            writer,
             &drive,
             &view,
             AppendRequestId::new(append_request_id)
@@ -1000,7 +1062,7 @@ where
                 .map_err(<B as RunJournalBackend>::Error::from)?,
         )
         .await?;
-    let permit = match store
+    let permit = match writer
         .append_fact_selection_authorization(&drive, append, request)
         .await?
     {

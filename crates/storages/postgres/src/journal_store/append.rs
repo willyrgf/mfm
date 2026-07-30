@@ -15,7 +15,7 @@ use mfm_store::v1::{
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::error::{ambiguous_commit_error, database_error, PostgresStoreError, Result};
-use crate::store::QualifiedPostgresStore;
+use crate::store::PostgresRunJournalBackend;
 #[cfg(any(test, feature = "parity-tests"))]
 use crate::store::TestCommitFailurePoint;
 
@@ -25,14 +25,14 @@ const ADMISSION_LOCK_DOMAIN: &str = "mfm.postgres.admission-lock.v1";
 const RUN_LOCK_DOMAIN: &str = "mfm.postgres.run-lock.v1";
 
 pub(super) async fn append(
-    store: &QualifiedPostgresStore,
+    store: &PostgresRunJournalBackend,
     verifier: JournalAppendVerifier,
 ) -> Result<AppendOutcome> {
     append_verified(store, verifier).await
 }
 
 async fn append_verified(
-    store: &QualifiedPostgresStore,
+    store: &PostgresRunJournalBackend,
     verifier: JournalAppendVerifier,
 ) -> Result<AppendOutcome> {
     #[cfg(any(test, feature = "parity-tests"))]
@@ -339,7 +339,10 @@ fn digest_lock_key(value: &CanonicalValue) -> Result<i64> {
     Ok(i64::from_be_bytes(key))
 }
 
-async fn stage_blobs(store: &QualifiedPostgresStore, objects: &PreparedObjectGraph) -> Result<()> {
+async fn stage_blobs(
+    store: &PostgresRunJournalBackend,
+    objects: &PreparedObjectGraph,
+) -> Result<()> {
     if objects.payloads().is_empty() {
         return Ok(());
     }

@@ -29,7 +29,7 @@ tokio = { workspace = true }
 [dev-dependencies]
 mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
 mfm-runtime = { path = "../runtime" }
-mfm-store = { path = "../store", features = ["test-support"] }
+mfm-store = { path = "../store", features = ["backend-conformance"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

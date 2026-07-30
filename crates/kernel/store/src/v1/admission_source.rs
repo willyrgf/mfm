@@ -8,8 +8,8 @@ use super::objects::{derive_value_ref, validate_value_contract};
 use super::preparation::VerifiedAdmissionSource;
 use super::{
     Admit, AsyncStoreFuture, CommittedJournalCommit, CommittedObject, CommittedRunJournal,
-    JournalLoadVerifier, Result, RunAccessAuthority, RunJournalBackend, StoreAuthorityContext,
-    StoreError, VerifiedAdmissionSources, VerifiedRunView,
+    JournalLoadVerifier, Result, RunAccessAuthority, RunHistoryReader, RunJournalBackend,
+    StoreAuthorityContext, StoreError, VerifiedAdmissionSources, VerifiedRunView,
 };
 
 const MAX_ADMISSION_SOURCES: usize = 4_096;
@@ -328,52 +328,44 @@ pub trait AdmissionSourceBackend: RunJournalBackend {
     ) -> AsyncStoreFuture<'a, VerifiedAdmissionSources, Self::Error>;
 }
 
-/// Admission-authorized source-verification surface.
-pub trait AdmissionSourceStore: RunJournalBackend {
+impl<B: AdmissionSourceBackend> RunHistoryReader<B> {
     /// Mints the exact store-sealed empty source set under admission authority.
-    fn verify_no_admission_sources<'a>(
+    pub fn verify_no_admission_sources<'a>(
         &'a self,
         authority: &'a RunAccessAuthority<Admit>,
-    ) -> AsyncStoreFuture<'a, VerifiedAdmissionSources, Self::Error>;
-
-    /// Verifies one nonempty direct source set and its complete recursive closure.
-    fn verify_admission_sources<'a>(
-        &'a self,
-        authority: &'a RunAccessAuthority<Admit>,
-        proposed: ProposedAdmissionSources,
-    ) -> AsyncStoreFuture<'a, VerifiedAdmissionSources, Self::Error>;
-}
-
-impl<B: AdmissionSourceBackend> AdmissionSourceStore for B {
-    fn verify_no_admission_sources<'a>(
-        &'a self,
-        authority: &'a RunAccessAuthority<Admit>,
-    ) -> AsyncStoreFuture<'a, VerifiedAdmissionSources, Self::Error> {
+    ) -> AsyncStoreFuture<'a, VerifiedAdmissionSources, B::Error> {
         let checked: Result<VerifiedAdmissionSources> = (|| {
-            let target = self.store_authority_context().validate_admit(authority)?;
+            let target = self
+                .backend()
+                .store_authority_context()
+                .validate_admit(authority)?;
             Ok(VerifiedAdmissionSources::empty(
-                self.store_authority_context().clone(),
+                self.backend().store_authority_context().clone(),
                 target.tenant_scope_id.clone(),
             ))
         })();
         Box::pin(async move { checked.map_err(Into::into) })
     }
 
-    fn verify_admission_sources<'a>(
+    /// Verifies one nonempty direct source set and its complete recursive closure.
+    pub fn verify_admission_sources<'a>(
         &'a self,
         authority: &'a RunAccessAuthority<Admit>,
         proposed: ProposedAdmissionSources,
-    ) -> AsyncStoreFuture<'a, VerifiedAdmissionSources, Self::Error> {
+    ) -> AsyncStoreFuture<'a, VerifiedAdmissionSources, B::Error> {
         let checked = (|| {
-            let target = self.store_authority_context().validate_admit(authority)?;
+            let target = self
+                .backend()
+                .store_authority_context()
+                .validate_admit(authority)?;
             AdmissionSourceVerifier::new(
-                self.store_authority_context().clone(),
+                self.backend().store_authority_context().clone(),
                 target.tenant_scope_id.clone(),
                 proposed,
             )
         })();
         match checked {
-            Ok(verifier) => self.backend_verify_admission_sources(verifier),
+            Ok(verifier) => self.backend().backend_verify_admission_sources(verifier),
             Err(error) => Box::pin(async move { Err(error.into()) }),
         }
     }

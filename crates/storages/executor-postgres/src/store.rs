@@ -53,6 +53,12 @@ pub struct QualifiedPostgresExecutorStore {
     inner: Arc<StoreInner>,
 }
 
+/// Cloneable, read-only readiness capability for one qualified executor writer.
+#[derive(Clone)]
+pub struct QualifiedPostgresExecutorReadiness {
+    inner: Arc<StoreInner>,
+}
+
 struct StoreInner {
     pool: PgPool,
     binding: VerifiedExecutorBinding,
@@ -135,6 +141,13 @@ where
 }
 
 impl QualifiedPostgresExecutorStore {
+    /// Narrows this executor store to its independently qualified readiness capability.
+    pub fn readiness_handle(&self) -> QualifiedPostgresExecutorReadiness {
+        QualifiedPostgresExecutorReadiness {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
     /// Selects one deterministic acknowledgement fault for the next append.
     #[cfg(feature = "qualification-tests")]
     pub fn inject_qualification_fault(&self, fault: PostgresExecutorFaultPoint) {
@@ -145,19 +158,7 @@ impl QualifiedPostgresExecutorStore {
     ///
     /// The probe never opens a signer, wallet, destination, or RPC transport.
     pub async fn readiness(&self) -> Result<PostgresExecutorReadiness> {
-        self.verify_fence().await?;
-        let probe = probe_writer(&self.inner.pool).await?;
-        if probe.database_name != self.inner.context.database_name()
-            || probe.schema_name != self.inner.context.schema_name()
-            || probe.database_oid != self.inner.context.database_oid()
-        {
-            return Err(PostgresExecutorStoreError::WriterFenceRejected);
-        }
-        verify_binding(&self.inner.pool, &self.inner.identity).await?;
-        Ok(PostgresExecutorReadiness {
-            ledger_ready: true,
-            fence_ready: true,
-        })
+        readiness(&self.inner).await
     }
 
     async fn verify_fence(&self) -> Result<()> {
@@ -463,6 +464,29 @@ impl QualifiedPostgresExecutorStore {
             content,
         ))
     }
+}
+
+impl QualifiedPostgresExecutorReadiness {
+    /// Performs bounded ledger-identity and independent-fence readiness probes.
+    pub async fn readiness(&self) -> Result<PostgresExecutorReadiness> {
+        readiness(&self.inner).await
+    }
+}
+
+async fn readiness(inner: &StoreInner) -> Result<PostgresExecutorReadiness> {
+    inner.fence.verify(&inner.pool, &inner.context).await?;
+    let probe = probe_writer(&inner.pool).await?;
+    if probe.database_name != inner.context.database_name()
+        || probe.schema_name != inner.context.schema_name()
+        || probe.database_oid != inner.context.database_oid()
+    {
+        return Err(PostgresExecutorStoreError::WriterFenceRejected);
+    }
+    verify_binding(&inner.pool, &inner.identity).await?;
+    Ok(PostgresExecutorReadiness {
+        ledger_ready: true,
+        fence_ready: true,
+    })
 }
 
 /// Deterministic qualification-only PostgreSQL acknowledgement faults.

@@ -37,10 +37,10 @@ use mfm_spec::{
     StateImplementationManifestEntry,
 };
 use mfm_store::{
-    AdmissionMaterial, AdmissionSourceBackend, AdmissionSourceStore, Admit, AdmitRun,
-    ConfiguredValueBackend, ConfiguredValueStore, ProposedAdmissionInput, QualifiedSupportGraph,
-    QualifiedSupportMember, RunAccessAuthority, RunAccessAuthorityIssuer, RunJournalBackend,
-    RunJournalStore, StoreError, StoreIdentity, SupportBackend, SupportStore,
+    AdmissionSourceBackend, Admit, ConfiguredValueBackend, ProposedAdmissionInput,
+    QualifiedRunStore, QualifiedSupportGraph, QualifiedSupportMember, RunAccessAuthority,
+    RunAccessAuthorityIssuer, RunHistoryReader, RunJournalBackend, StoreError, StoreIdentity,
+    SupportBackend, VerifiedAdmissionSources, VerifiedConfiguredValue,
 };
 use mfm_values::component_object_evidence_contract_canonical;
 use serde::{Deserialize, Serialize};
@@ -362,7 +362,11 @@ pub struct QualifiedRunFixture {
 pub struct PreparedQualifiedRun {
     registry: Arc<QualifiedProgramRegistry>,
     authority: RunAccessAuthority<Admit>,
-    append: AdmitRun,
+    append_request_id: AppendRequestId,
+    artifacts: mfm_spec::CertifiedAdmissionArtifacts,
+    input: ProposedAdmissionInput,
+    configured: VerifiedConfiguredValue,
+    sources: VerifiedAdmissionSources,
 }
 
 impl PreparedQualifiedRun {
@@ -376,20 +380,27 @@ impl PreparedQualifiedRun {
         &self.authority
     }
 
-    /// Returns the complete store-prepared admission append.
-    pub const fn append(&self) -> &AdmitRun {
-        &self.append
-    }
-
-    /// Consumes the result into its registry, authority, and prepared append.
+    /// Consumes the result into the exact owned prerequisites for Runtime admission.
     pub fn into_parts(
         self,
     ) -> (
         Arc<QualifiedProgramRegistry>,
         RunAccessAuthority<Admit>,
-        AdmitRun,
+        AppendRequestId,
+        mfm_spec::CertifiedAdmissionArtifacts,
+        ProposedAdmissionInput,
+        VerifiedConfiguredValue,
+        VerifiedAdmissionSources,
     ) {
-        (self.registry, self.authority, self.append)
+        (
+            self.registry,
+            self.authority,
+            self.append_request_id,
+            self.artifacts,
+            self.input,
+            self.configured,
+            self.sources,
+        )
     }
 }
 
@@ -575,16 +586,16 @@ impl QualifiedRunFixture {
         &self.append_request_id
     }
 
-    /// Admits support, builds the genuine registry, and prepares one run root.
-    pub async fn prepare_on<B>(
+    /// Admits support before the one-shot split and builds the genuine registry.
+    pub async fn qualify_on<B>(
         &self,
-        store: &B,
+        store: &QualifiedRunStore<B>,
         issuer: &RunAccessAuthorityIssuer,
-    ) -> Result<PreparedQualifiedRun, PrepareQualifiedRunError<B::Error>>
+    ) -> Result<Arc<QualifiedProgramRegistry>, PrepareQualifiedRunError<B::Error>>
     where
         B: RunJournalBackend + SupportBackend + ConfiguredValueBackend + AdmissionSourceBackend,
     {
-        if RunJournalStore::store_identity(store) != &self.store_identity
+        if store.store_identity() != &self.store_identity
             || issuer.store_identity() != &self.store_identity
         {
             return Err(QualifiedRunFixtureError::Invalid(
@@ -595,10 +606,10 @@ impl QualifiedRunFixture {
         let package = self.package()?;
         let deployment_authority =
             issuer.authorize_qualified_deployment(self.qualification_scope_id.clone());
-        let admitted_support =
-            SupportStore::admit_support_graph(store, &deployment_authority, package.support_graph)
-                .await
-                .map_err(|error| PrepareQualifiedRunError::Backend(Box::new(error)))?;
+        let admitted_support = store
+            .admit_support_graph(&deployment_authority, package.support_graph)
+            .await
+            .map_err(|error| PrepareQualifiedRunError::Backend(Box::new(error)))?;
 
         let mut builder = QualifiedProgramRegistry::builder(
             package.executable_identity_ref,
@@ -610,30 +621,50 @@ impl QualifiedRunFixture {
         for state in package.states {
             state.register(&mut builder)?;
         }
-        let registry = Arc::new(builder.build()?);
+        Ok(Arc::new(builder.build()?))
+    }
 
+    /// Resolves post-split read prerequisites and returns owned Runtime admission material.
+    pub async fn prepare_on<B>(
+        &self,
+        reader: &RunHistoryReader<B>,
+        issuer: &RunAccessAuthorityIssuer,
+        registry: Arc<QualifiedProgramRegistry>,
+    ) -> Result<PreparedQualifiedRun, PrepareQualifiedRunError<B::Error>>
+    where
+        B: RunJournalBackend + ConfiguredValueBackend + AdmissionSourceBackend,
+    {
+        if reader.store_identity() != &self.store_identity
+            || issuer.store_identity() != &self.store_identity
+        {
+            return Err(QualifiedRunFixtureError::Invalid(
+                "fixture, reader, and issuer store identities differ".to_owned(),
+            )
+            .into());
+        }
         let authority = issuer.authorize_admit(
             self.tenant_scope_id.clone(),
             self.entry_point_id.clone(),
             self.entry_point_operation_id.clone(),
             self.invocation_identity.clone(),
         );
-        let configured = ConfiguredValueStore::resolve_configured_value(
-            store,
-            &authority,
-            &self.entry_point_id,
-            &self.configured_target,
-            &self.configured_contract,
-        )
-        .await
-        .map_err(|error| PrepareQualifiedRunError::Backend(Box::new(error)))?;
+        let configured = reader
+            .resolve_configured_value(
+                &authority,
+                &self.entry_point_id,
+                &self.configured_target,
+                &self.configured_contract,
+            )
+            .await
+            .map_err(|error| PrepareQualifiedRunError::Backend(Box::new(error)))?;
         let artifacts = registry.author_and_certify_verified_parts(
             &self.entry_point_id,
             configured.binding(),
             configured.value_ref(),
             configured.bytes(),
         )?;
-        let sources = AdmissionSourceStore::verify_no_admission_sources(store, &authority)
+        let sources = reader
+            .verify_no_admission_sources(&authority)
             .await
             .map_err(|error| PrepareQualifiedRunError::Backend(Box::new(error)))?;
         let input = ProposedAdmissionInput::new(
@@ -641,22 +672,14 @@ impl QualifiedRunFixture {
                 .map_err(|error| QualifiedRunFixtureError::Invalid(error.to_string()))?,
             admission_input_contract()?,
         );
-        let append = RunJournalStore::prepare_admission(
-            store,
-            &authority,
-            self.append_request_id.clone(),
-            AdmissionMaterial::new(
-                artifacts,
-                input,
-                &configured,
-                registry.admitted_support(),
-                &sources,
-            ),
-        )?;
         Ok(PreparedQualifiedRun {
             registry,
             authority,
-            append,
+            append_request_id: self.append_request_id.clone(),
+            artifacts,
+            input,
+            configured,
+            sources,
         })
     }
 

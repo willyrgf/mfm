@@ -17,4 +17,7 @@ pub use fence::{
 pub use schema::PostgresExecutorSchema;
 #[cfg(feature = "qualification-tests")]
 pub use store::PostgresExecutorFaultPoint;
-pub use store::{open_executor_store, PostgresExecutorReadiness, QualifiedPostgresExecutorStore};
+pub use store::{
+    open_executor_store, PostgresExecutorReadiness, QualifiedPostgresExecutorReadiness,
+    QualifiedPostgresExecutorStore,
+};

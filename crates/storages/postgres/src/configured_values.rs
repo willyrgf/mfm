@@ -6,9 +6,9 @@ use mfm_store::v1::{
 use sqlx::Row;
 
 use crate::error::{database_error, PostgresStoreError, Result};
-use crate::store::QualifiedPostgresStore;
+use crate::store::PostgresRunJournalBackend;
 
-impl ConfiguredValueBackend for QualifiedPostgresStore {
+impl ConfiguredValueBackend for PostgresRunJournalBackend {
     fn backend_resolve_configured_value<'a>(
         &'a self,
         verifier: ConfiguredValueResolveVerifier,
@@ -18,7 +18,7 @@ impl ConfiguredValueBackend for QualifiedPostgresStore {
 }
 
 async fn resolve(
-    store: &QualifiedPostgresStore,
+    store: &PostgresRunJournalBackend,
     verifier: ConfiguredValueResolveVerifier,
 ) -> Result<VerifiedConfiguredValue> {
     let expected_key = verifier.key().fields()?;

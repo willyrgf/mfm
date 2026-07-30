@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `mfm_storage_postgres::QualifiedPostgresStore`
+ --> tests/ui/fail/retired_postgres_store_facade_is_absent.rs:1:5
+  |
+1 | use mfm_storage_postgres::QualifiedPostgresStore;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `QualifiedPostgresStore` in the root

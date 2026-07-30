@@ -42,12 +42,12 @@ use super::objects::derive_value_ref;
 use super::test_support::fact_scan::fact_selection_contracts;
 use super::test_support::{FixtureEffectExecution, FixtureReadExecution, LegalAdmissionFixture};
 use super::{
-    verify_offline_recorded_history, AppendOutcome, AsyncInMemoryRunStore, AuthorizationMaterial,
+    open_in_memory, verify_offline_recorded_history, AppendOutcome, AuthorizationMaterial,
     CommittedJournalCommit, CommittedJournalRecord, CommittedObject, ExistingRunAppendMaterial,
-    FactSelectionAuthorizationOutcome, FactSelectionStore, NewlyAppended, ObjectGraphProposal,
-    ObservationMaterial, PreparedJournalAppend, ProducedObjectRoot, QualifiedSupportMember,
-    ReadObservationMaterial, RunJournalStore, SafeFailureMetadata, StoreError, StoreIdentity,
-    TransitionMaterial,
+    FactSelectionAuthorizationOutcome, InMemoryRunJournalBackend, NewlyAppended,
+    ObjectGraphProposal, ObservationMaterial, PreparedJournalAppend, ProducedObjectRoot,
+    QualifiedSupportMember, ReadObservationMaterial, RunHistoryWriter, SafeFailureMetadata,
+    StoreError, StoreIdentity, TransitionMaterial,
 };
 
 const VALID_DIAGNOSTIC: &str = concat!(
@@ -499,7 +499,7 @@ fn read_fixture_contracts(with_diagnostic: bool) -> ReadFixtureContracts {
 }
 
 struct AuthorizedRead {
-    store: AsyncInMemoryRunStore,
+    store: RunHistoryWriter<InMemoryRunJournalBackend>,
     issuer: super::RunAccessAuthorityIssuer,
     store_identity: StoreIdentity,
     fixture: LegalAdmissionFixture,
@@ -524,12 +524,17 @@ async fn authorize_read_with(contracts: ReadFixtureContracts, discriminator: u8)
         .expect("fixture")
         .with_read_execution(contracts.execution);
     let store_identity = fixture.store_identity().clone();
-    let (store, issuer) = AsyncInMemoryRunStore::new(store_identity.clone());
+    let (store, issuer) = open_in_memory(store_identity.clone());
     fixture
         .provision_in_memory(&store)
         .expect("configured value");
+    let support = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify fixture");
+    let (store, reader) = store.split();
     let prepared = fixture
-        .prepare_on(&store, &issuer)
+        .prepare_on(&store, &reader, &issuer, &support)
         .await
         .expect("prepare admission");
     let (admit, append) = prepared.into_parts();
@@ -543,7 +548,7 @@ async fn authorize_read_with(contracts: ReadFixtureContracts, discriminator: u8)
     let run_id = admitted.run_id().clone();
     let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
     let view = store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load admitted run")
         .verify_recorded_history()
@@ -592,7 +597,7 @@ async fn authorize_read_with(contracts: ReadFixtureContracts, discriminator: u8)
 }
 
 struct AuthorizedEffect {
-    store: AsyncInMemoryRunStore,
+    store: RunHistoryWriter<InMemoryRunJournalBackend>,
     issuer: super::RunAccessAuthorityIssuer,
     store_identity: StoreIdentity,
     fixture: LegalAdmissionFixture,
@@ -612,12 +617,17 @@ async fn authorize_effect(discriminator: u8) -> AuthorizedEffect {
     let request_contract = contracts.request_contract.clone();
     let fixture = fixture.with_effect_execution(contracts.execution);
     let store_identity = fixture.store_identity().clone();
-    let (store, issuer) = AsyncInMemoryRunStore::new(store_identity.clone());
+    let (store, issuer) = open_in_memory(store_identity.clone());
     fixture
         .provision_in_memory(&store)
         .expect("configured value");
+    let support = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify fixture");
+    let (store, reader) = store.split();
     let prepared = fixture
-        .prepare_on(&store, &issuer)
+        .prepare_on(&store, &reader, &issuer, &support)
         .await
         .expect("prepare admission");
     let (admit, append) = prepared.into_parts();
@@ -631,7 +641,7 @@ async fn authorize_effect(discriminator: u8) -> AuthorizedEffect {
     let run_id = admitted.run_id().clone();
     let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
     let view = store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load admitted run")
         .verify_recorded_history()
@@ -698,7 +708,7 @@ async fn authorize_effect(discriminator: u8) -> AuthorizedEffect {
     let request_transition_ref =
         TransitionRef::new(&transition.record_refs()[0]).expect("request transition ref");
     let view = store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load effect request")
         .verify_recorded_history()
@@ -740,7 +750,7 @@ async fn authorize_effect(discriminator: u8) -> AuthorizedEffect {
 }
 
 struct CommittedFactSelection {
-    store: AsyncInMemoryRunStore,
+    store: RunHistoryWriter<InMemoryRunJournalBackend>,
     issuer: super::RunAccessAuthorityIssuer,
     store_identity: StoreIdentity,
     fixture: LegalAdmissionFixture,
@@ -784,12 +794,17 @@ async fn commit_fact_selection(discriminator: u8) -> CommittedFactSelection {
         .expect("fixture")
         .with_read_execution(contracts.execution);
     let store_identity = fixture.store_identity().clone();
-    let (store, issuer) = AsyncInMemoryRunStore::new(store_identity.clone());
+    let (store, issuer) = open_in_memory(store_identity.clone());
     fixture
         .provision_in_memory(&store)
         .expect("configured value");
+    let support = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify fixture");
+    let (store, reader) = store.split();
     let prepared = fixture
-        .prepare_on(&store, &issuer)
+        .prepare_on(&store, &reader, &issuer, &support)
         .await
         .expect("prepare admission");
     let (admit, append) = prepared.into_parts();
@@ -803,7 +818,7 @@ async fn commit_fact_selection(discriminator: u8) -> CommittedFactSelection {
     let run_id = admitted.run_id().clone();
     let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
     let view = store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load admitted run")
         .verify_recorded_history()
@@ -879,7 +894,7 @@ async fn commit_fact_selection(discriminator: u8) -> CommittedFactSelection {
         .await
         .expect("complete fact scan");
     let view = store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load fact authorization")
         .verify_recorded_history()
@@ -901,7 +916,7 @@ async fn commit_fact_selection(discriminator: u8) -> CommittedFactSelection {
         AppendOutcome::NewlyAppended(NewlyAppended::Observation(_))
     ));
     store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("reload fact observation")
         .verify_recorded_history()
@@ -987,7 +1002,7 @@ async fn append_effect_result(
     );
     let view = fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load authorized effect")
         .verify_recorded_history()
@@ -2451,7 +2466,7 @@ async fn candidate_and_replay_reject_recomputed_malformed_read_diagnostics() {
     );
     let view = fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load authorized run")
         .verify_recorded_history()
@@ -2561,7 +2576,7 @@ async fn candidate_and_replay_enforce_returned_contract_producer_path_and_full_v
     );
     let view = fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load authorized run")
         .verify_recorded_history()
@@ -2734,7 +2749,7 @@ async fn classifier_without_a_diagnostic_identity_accepts_a_forbidden_diagnostic
     );
     let view = fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load authorized run")
         .verify_recorded_history()
@@ -2758,7 +2773,7 @@ async fn classifier_without_a_diagnostic_identity_accepts_a_forbidden_diagnostic
     ));
     fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("reload no-diagnostic run")
         .verify_recorded_history()
@@ -2776,7 +2791,7 @@ async fn assert_diagnostic_contract_bridge_mismatch(
     );
     let view = fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load authorized run")
         .verify_recorded_history()
@@ -2863,7 +2878,7 @@ async fn effect_returned_candidate_commits_and_replays_with_the_exact_retained_c
     );
     fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("reload returned effect")
         .verify_recorded_history()
@@ -3015,7 +3030,7 @@ async fn effect_terminal_candidate_commits_and_replays_every_retained_relation()
     );
     fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("reload terminal effect")
         .verify_recorded_history()
@@ -3254,7 +3269,7 @@ async fn effect_safe_failure_requires_the_exact_contract_and_zero_produced_value
     );
     let view = fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("load authorized effect")
         .verify_recorded_history()
@@ -3322,7 +3337,7 @@ async fn effect_safe_failure_requires_the_exact_contract_and_zero_produced_value
     ));
     fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("reload safe-failure effect")
         .verify_recorded_history()
@@ -3375,7 +3390,7 @@ async fn empty_frontier_fact_selection_candidate_commits_and_replays() {
     );
     let view = fixture
         .store
-        .load_committed_journal(&drive)
+        .load_for_drive(&drive)
         .await
         .expect("reload fact selection")
         .verify_recorded_history()

@@ -227,9 +227,11 @@ run_id = H(
 )
 ```
 
-Admission is admit-only. It may resolve current configuration, plan and certify, self-attest the
-current executable, retain root objects, and append `RunAdmitted`. It never invokes a semantic
-capability and never calls `drive_once`.
+Admission is admit-only. The application may resolve current configuration, plan and certify,
+self-attest the current executable, and retain root objects. It then submits one opaque owned
+`AuthorizedAdmissionPlan` to `Runtime::admit`; Runtime validates the exact registry, injects its
+admitted support, and appends `RunAdmitted`. The application retains no writer or prepared append.
+Admission never invokes a semantic capability and never calls `drive_once`.
 
 Repeating the same identity and exact root candidate returns `attached`. Different root material
 for the same identity returns `AdmissionConflict`; it never creates a second run. A connection
@@ -402,7 +404,7 @@ operation.
 public-output surfaces do not exist.
 
 Production mints one exact `ReadPublic` run authority and makes one
-`store.read_public_run(authority)` call. The store returns only a sealed
+`RunHistoryReader::read_public_run(authority)` call. The reader returns only a sealed
 `VerifiedPublicRunView`; the application consumes that already annex-validated projection through
 its crate-private `PublicRunView::from_verified` constructor after checking the exact schema
 contract, without reconstructing or re-decoding it. The application and transports do not load a

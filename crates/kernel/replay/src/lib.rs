@@ -15,13 +15,13 @@
 //!     compare_current, verify_recorded_history, CanonicalReplayResult, Result,
 //!     VerifiedHistoryResult,
 //! };
-//! use mfm_store::v1::{FactSelectionStore, Replay, RunAccessAuthority};
+//! use mfm_store::v1::{FactScanBackend, Replay, RunAccessAuthority, RunHistoryReader};
 //!
-//! async fn verify<S: FactSelectionStore>(
-//!     store: &S,
+//! async fn verify<B: FactScanBackend>(
+//!     reader: &RunHistoryReader<B>,
 //!     authority: &RunAccessAuthority<Replay>,
 //! ) -> Result<VerifiedHistoryResult> {
-//!     verify_recorded_history(store, authority).await
+//!     verify_recorded_history(reader, authority).await
 //! }
 //!
 //! fn compare(

@@ -11,6 +11,7 @@ mod configured_value;
 mod errors;
 mod fact_scan;
 mod frame_preparation;
+mod history;
 mod journal;
 mod objects;
 #[cfg(test)]
@@ -24,13 +25,13 @@ mod transition_preparation;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
 #[cfg(any(test, feature = "test-support"))]
-pub use self::memory::{AsyncInMemoryRunStore, MemoryCommitFailurePoint};
-#[cfg(any(test, feature = "test-support"))]
+pub use self::memory::{open_in_memory, InMemoryRunJournalBackend, MemoryCommitFailurePoint};
+#[cfg(any(test, feature = "backend-conformance"))]
 pub mod test_support;
 
 pub use self::admission_source::{
-    AdmissionSourceBackend, AdmissionSourceStore, AdmissionSourceVerifier,
-    ProposedAdmissionSourceRoot, ProposedAdmissionSources,
+    AdmissionSourceBackend, AdmissionSourceVerifier, ProposedAdmissionSourceRoot,
+    ProposedAdmissionSources,
 };
 pub use self::append::{
     AdmitRun, AppendOutcome, AppendRejection, AssignedJournalAppend, AuthorizeExternalAccess,
@@ -43,9 +44,7 @@ pub use self::authority::{
     InspectTrace, QualifiedDeploymentAuthority, ReadPublic, Replay, RunAccessAuthority,
     RunAccessAuthorityIssuer, RunAccessGrant, StoreAuthorityContext, StoreIdentity,
 };
-pub use self::backend::{
-    AsyncStoreFuture, RunJournalBackend, RunJournalStore, VerifiedAccessAuditPage,
-};
+pub use self::backend::{AsyncStoreFuture, RunJournalBackend, VerifiedAccessAuditPage};
 pub use self::comparison::{
     ComparisonEvidenceKind, ComparisonSettlementKind, ComparisonTransitionKind,
     RecordedEvidenceVerdict, VerifiedComparisonEvidence, VerifiedComparisonFact,
@@ -54,16 +53,20 @@ pub use self::comparison::{
     VerifiedComparisonStateFrame, VerifiedComparisonTerminalEffect, VerifiedComparisonValue,
 };
 pub use self::configured_value::{
-    ConfiguredValueBackend, ConfiguredValueResolveVerifier, ConfiguredValueStore,
-    VerifiedConfiguredValue,
+    ConfiguredValueBackend, ConfiguredValueResolveVerifier, VerifiedConfiguredValue,
 };
 pub use self::errors::{StoreError, StoreErrorInspection};
 pub use self::fact_scan::{
     CompletedFactScan, FactAttestationLoadVerifier, FactScanBackend, FactScanPage,
-    FactScanPageVerifier, FactScanPermit, FactSelectionAuthorizationOutcome, FactSelectionStore,
+    FactScanPageVerifier, FactScanPermit, FactSelectionAuthorizationOutcome,
     PendingFactScanAttestation, PersistedFactScanAttestation, VerifiedFactSelectionCompleteness,
     FACT_SCAN_STEP_FACTS, FACT_SCAN_STEP_PUBLICATIONS, FACT_SOURCE_CLOSURE_MAX_REFERENCES,
 };
+pub use self::history::{
+    QualifiedRunStore, RunHistoryReader, RunHistoryReadinessBackend, RunHistoryWriter,
+};
+#[cfg(any(test, feature = "backend-conformance"))]
+pub use self::history::{RunHistoryAdmissionLockTestBackend, RunHistoryCommitFailureBackend};
 pub use self::journal::{
     derive_initial_run_state_digest, verify_offline_recorded_history,
     verify_offline_recorded_material, CommittedJournalCommit, CommittedJournalRecord,
@@ -88,7 +91,6 @@ pub use self::public_read::VerifiedPublicRunView;
 pub use self::support::{
     AdmittedSupportGraph, AdmittedSupportMember, PreparedSupportGraph, PreparedSupportMember,
     QualifiedSupportGraph, QualifiedSupportMember, SupportBackend, SupportGraphAdmissionVerifier,
-    SupportStore,
 };
 pub use self::trace::{
     TransitionTracePageRequest, TransitionTraceSourceRequirements, VerifiedTransitionTrace,

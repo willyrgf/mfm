@@ -20,9 +20,9 @@ certified typed graph
 ```
 
 Operations plan typed state graphs. States own all outcome-affecting computation. Runtime
-interprets one certified graph and one verified journal view. The store owns atomic append and
-structural verification. Replay verifies or recomputes without live semantic IO. App, CLI, and REST
-only authorize, invoke, and render those lower contracts.
+owns admission and interprets one certified graph and one verified journal view. The store owns
+atomic append and structural verification. Replay verifies or recomputes without live semantic IO.
+App, CLI, and REST only authorize, invoke, and render those lower contracts.
 
 ## Non-Negotiable Invariants
 
@@ -65,6 +65,10 @@ only authorize, invoke, and render those lower contracts.
 | Untrusted or lowered graph/spec bytes | no | Data until certification validates their exact schemas, planner profile, manifests, identities, and hashes. |
 | `CertifiedAdmissionArtifacts` | yes | Non-cloneable coherent certification closure for one exact entry point, authored and expanded graph, certificate, and implementation manifests. |
 | `QualifiedProgramRegistry` | yes, exact live/reproduction dispatch | One closed executable selection owning the admitted support graph, deterministic state callbacks, semantic read/effect entries, and process-private live invokers. |
+| `QualifiedRunStore<B>` | affine bootstrap authority | Owns the only qualified backend handle and mutation seal before runtime assembly; admits support and is consumed by one split. |
+| `RunHistoryWriter<B>` | sole process mutation capability | Non-cloneable split result consumed by `Runtime`; never retained by application or replay composition. |
+| `RunHistoryReader<B>` | cloneable purpose-read capability | Read, replay, inspection, export, configuration, and source-verification surface with no append or support admission. |
+| `AuthorizedAdmissionPlan` | one-use application-to-runtime authority | Opaque owned exact-registry admission prerequisites; carries no support graph, writer, backend, or prepared append. |
 | `CommittedRunJournal` | structural authority | One store-verified sequence of native commits and records plus every exactly bound immutable object. |
 | `VerifiedRunView` | semantic read authority | Non-cloneable view created by callback-free verification of the committed journal against the exact certified spec. |
 | `VerifiedPublicRunView` | reviewed public value | Owned annex-validated status and certified-output projection with no journal, object, or follow-up read authority. |
@@ -388,7 +392,18 @@ combinations leave readiness, skip legality, public output, or run result undefi
 A closed run succeeds exactly when every required-success node succeeded and the certified public
 output binding exists. Otherwise it fails.
 
-## Stateless Runtime
+## Runtime-Owned Admission And Stateless Drive
+
+Concrete backend qualification returns one `QualifiedRunStore<B>` and its sole issuer. Application
+bootstrap provisions current configuration and admits the complete qualified support graph before
+consuming the assembly with `split`. Runtime consumes the sole `RunHistoryWriter<B>`; application
+and replay services retain only `RunHistoryReader<B>` values.
+
+`Runtime::admit` accepts one opaque owned `AuthorizedAdmissionPlan`, validates its authority,
+entry-point operation, invocation, certification artifacts, configured value, sources, and exact
+registry, injects only that registry's admitted support, and appends the immutable root. Application
+code cannot prepare or append journal material directly. `drive_once` remains stateless across
+calls even though the shared process runtime owns the affine writer capability.
 
 Runtime derives one private next action:
 
@@ -629,6 +644,7 @@ key; there is no correction-specific store path.
 
 `mfm-store` owns:
 
+- the affine pre-split assembly, sole writer, and purpose-specific readers;
 - canonical record and commit hashing;
 - exact per-run predecessor validation;
 - logical-key and batch legality;
@@ -682,14 +698,16 @@ cannot update, delete, truncate, or directly manipulate identity or fact-head au
 
 Every authority-bearing read and write uses that fenced writer. Status, drive, replay loading,
 trace, audit, export, object dereference, and fact completeness do not use replicas in v1.
+Independent processes may each qualify the same fenced lineage and construct their own sole
+runtime writer; PostgreSQL locks, exact-head CAS, and append-request idempotency serialize them.
 
 ## One Journal, One Fold, One Verified View
 
-`RunJournalStore::load_committed_journal` loads native commits, records, and exactly bound objects
-under one authoritative snapshot. The sealed full-journal bound accepts only `Drive`, `Replay`, or
-`Export` authority; public and inspection grants cannot call this seam. The load checks canonical
-encodings, identities, order, predecessor links, atomic grouping, object evidence, and structural
-legality before returning the opaque, non-cloneable `CommittedRunJournal`.
+`RunHistoryWriter::load_for_drive`, `RunHistoryReader::load_for_replay`, and
+`RunHistoryReader::load_for_export` load native commits, records, and exactly bound objects under
+one authoritative snapshot. Public and inspection grants cannot call those seams. The load checks
+canonical encodings, identities, order, predecessor links, atomic grouping, object evidence, and
+structural legality before returning the opaque, non-cloneable `CommittedRunJournal`.
 
 Consuming that journal with `verify_recorded_history` validates its retained
 `ExpandedCertifiedSpec`, `Certificate`, and implementation manifests, performs callback-free

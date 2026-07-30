@@ -22,8 +22,8 @@ use super::{
     AsyncStoreFuture, AuthorizeExternalAccess, CommittedAppend, CommittedJournalCommit,
     CommittedObject, Drive, ExistingRunAppendMaterial, NewlyAppended, ObjectAuthorityKey,
     ObservationMaterial, PreparedJournalAppend, PreparedObjectGraph, Replay, Result,
-    RunAccessAuthority, RunJournalBackend, RunJournalStore, StoreError, StoreIdentity,
-    VerifiedRunView, FACT_SELECTION_OPERATION_ID,
+    RunAccessAuthority, RunHistoryReader, RunHistoryWriter, RunJournalBackend, StoreError,
+    StoreIdentity, VerifiedRunView, FACT_SELECTION_OPERATION_ID,
 };
 
 /// Maximum publications read by one private fact-scan backend step.
@@ -178,7 +178,7 @@ impl CompletedFactScan {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "backend-conformance"))]
 pub(super) fn verify_three_fact_completion(
     completed: &CompletedFactScan,
     producing_transition_ref: &TransitionRef,
@@ -230,7 +230,7 @@ pub(super) fn verify_three_fact_completion(
 
 /// Same-store fact completeness established against one exact verified run view.
 ///
-/// Construction is private to [`FactSelectionStore`]. The sealed result binds
+/// Construction is private to the run-history writer. The sealed result binds
 /// every returned completeness claim to the store lineage, tenant, run, and
 /// physical journal head that were rechecked.
 pub struct VerifiedFactSelectionCompleteness {
@@ -1270,6 +1270,7 @@ impl FactScanStepLimits {
         facts: FACT_SCAN_STEP_FACTS,
     };
 
+    #[cfg(any(test, feature = "backend-conformance"))]
     fn new(publications: usize, facts: usize) -> Result<Self> {
         if publications == 0 || facts == 0 {
             return Err(StoreError::FactScanBindingMismatch);
@@ -2026,7 +2027,7 @@ async fn drive_fact_scan_with_limits<B: FactScanBackend>(
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "backend-conformance"))]
 pub(super) async fn abandon_fact_scan_after_first_page<B: FactScanBackend>(
     store: &B,
     permit: FactScanPermit,
@@ -2072,7 +2073,7 @@ pub(super) async fn abandon_fact_scan_after_first_page<B: FactScanBackend>(
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "backend-conformance"))]
 pub(super) async fn scan_fact_selection_with_fact_limit<B: FactScanBackend>(
     store: &B,
     permit: FactScanPermit,
@@ -2376,7 +2377,7 @@ fn compare_recorded_fact_selection(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "backend-conformance"))]
 pub(super) async fn verify_middle_fact_omission_rejected<B: FactScanBackend>(
     store: &B,
     view: &VerifiedRunView,
@@ -2431,50 +2432,19 @@ pub(super) async fn verify_middle_fact_omission_rejected<B: FactScanBackend>(
     }
 }
 
-/// Dedicated same-store fact-selection operations.
-pub trait FactSelectionStore: FactScanBackend {
+impl<B: FactScanBackend> RunHistoryWriter<B> {
     /// Appends the reserved authorization and returns its affine permit only on a fresh commit.
-    fn append_fact_selection_authorization<'a>(
+    pub fn append_fact_selection_authorization<'a>(
         &'a self,
         authority: &'a RunAccessAuthority<Drive>,
         append: AuthorizeExternalAccess,
         request: FactSelectionRequest,
-    ) -> AsyncStoreFuture<'a, FactSelectionAuthorizationOutcome, <Self as RunJournalBackend>::Error>;
-
-    /// Consumes one fresh affine permit and scans its authoritative prefix to completion.
-    fn scan_fact_selection<'a>(
-        &'a self,
-        permit: FactScanPermit,
-    ) -> AsyncStoreFuture<'a, CompletedFactScan, <Self as RunJournalBackend>::Error>;
-
-    /// Rechecks exact returned observations selected for one live reducer invocation.
-    ///
-    /// References must be unique and in physical journal order. The result is
-    /// intentionally unit: verification grants no reusable completeness token.
-    fn verify_drive_fact_selection_observations<'a>(
-        &'a self,
-        authority: &'a RunAccessAuthority<Drive>,
-        view: &'a VerifiedRunView,
-        observation_refs: &'a [ObservationRef],
-    ) -> AsyncStoreFuture<'a, (), <Self as RunJournalBackend>::Error>;
-
-    /// Rechecks every retained reserved response against its fixed writer prefix.
-    fn verify_fact_selection_completeness<'a>(
-        &'a self,
-        authority: &'a RunAccessAuthority<Replay>,
-        view: &'a VerifiedRunView,
-    ) -> AsyncStoreFuture<'a, VerifiedFactSelectionCompleteness, <Self as RunJournalBackend>::Error>;
-}
-
-impl<B: FactScanBackend> FactSelectionStore for B {
-    fn append_fact_selection_authorization<'a>(
-        &'a self,
-        authority: &'a RunAccessAuthority<Drive>,
-        append: AuthorizeExternalAccess,
-        request: FactSelectionRequest,
-    ) -> AsyncStoreFuture<'a, FactSelectionAuthorizationOutcome, <Self as RunJournalBackend>::Error>
-    {
-        let store_identity = self.store_authority_context().store_identity().clone();
+    ) -> AsyncStoreFuture<'a, FactSelectionAuthorizationOutcome, B::Error> {
+        let store_identity = self
+            .backend()
+            .store_authority_context()
+            .store_identity()
+            .clone();
         let checked = (|| {
             let fields = append.authorization().fields()?;
             let request_fields = fields.request_ref.fields()?;
@@ -2492,8 +2462,7 @@ impl<B: FactScanBackend> FactSelectionStore for B {
         if let Err(error) = checked {
             return Box::pin(async move { Err(error.into()) });
         }
-        let future = RunJournalStore::append(
-            self,
+        let future = self.append(
             authority,
             PreparedJournalAppend::AuthorizeExternalAccess(append),
         );
@@ -2507,7 +2476,8 @@ impl<B: FactScanBackend> FactSelectionStore for B {
                         request,
                     )
                     .map_err(B::Error::from)?;
-                    let view = RunJournalStore::load_committed_journal(self, authority)
+                    let view = self
+                        .load_for_drive(authority)
                         .await?
                         .verify_recorded_history()
                         .map_err(B::Error::from)?;
@@ -2532,28 +2502,36 @@ impl<B: FactScanBackend> FactSelectionStore for B {
         })
     }
 
-    fn scan_fact_selection<'a>(
+    /// Consumes one fresh affine permit and scans its authoritative prefix to completion.
+    pub fn scan_fact_selection<'a>(
         &'a self,
         permit: FactScanPermit,
-    ) -> AsyncStoreFuture<'a, CompletedFactScan, <Self as RunJournalBackend>::Error> {
+    ) -> AsyncStoreFuture<'a, CompletedFactScan, B::Error> {
         Box::pin(drive_fact_scan_with_limits(
-            self,
+            self.backend(),
             permit,
             FactScanStepLimits::PRODUCTION,
         ))
     }
 
-    fn verify_drive_fact_selection_observations<'a>(
+    /// Rechecks exact returned observations selected for one live reducer invocation.
+    ///
+    /// References must be unique and in physical journal order.
+    pub fn verify_drive_fact_selection_observations<'a>(
         &'a self,
         authority: &'a RunAccessAuthority<Drive>,
         view: &'a VerifiedRunView,
         observation_refs: &'a [ObservationRef],
-    ) -> AsyncStoreFuture<'a, (), <Self as RunJournalBackend>::Error> {
-        let target = match self.store_authority_context().validate_run(authority) {
+    ) -> AsyncStoreFuture<'a, (), B::Error> {
+        let target = match self
+            .backend()
+            .store_authority_context()
+            .validate_run(authority)
+        {
             Ok(target) => target,
             Err(error) => return Box::pin(async move { Err(error.into()) }),
         };
-        if view.store_identity() != self.store_authority_context().store_identity()
+        if view.store_identity() != self.backend().store_authority_context().store_identity()
             || view.tenant_scope_id() != &target.tenant_scope_id
             || view.run_id() != &target.run_id
         {
@@ -2562,7 +2540,8 @@ impl<B: FactScanBackend> FactSelectionStore for B {
             );
         }
         Box::pin(async move {
-            let mut verified_by_observation = verify_fact_selection_rows(self, view).await?;
+            let mut verified_by_observation =
+                verify_fact_selection_rows(self.backend(), view).await?;
             let mut journal_order_by_observation = BTreeMap::new();
             for entry in view.access_audit_entries() {
                 let Some((observation_ref, _, containing_head)) = entry.observation() else {
@@ -2600,18 +2579,24 @@ impl<B: FactScanBackend> FactSelectionStore for B {
             Ok(())
         })
     }
+}
 
-    fn verify_fact_selection_completeness<'a>(
+impl<B: FactScanBackend> RunHistoryReader<B> {
+    /// Rechecks every retained reserved response against its fixed writer prefix.
+    pub fn verify_fact_selection_completeness<'a>(
         &'a self,
         authority: &'a RunAccessAuthority<Replay>,
         view: &'a VerifiedRunView,
-    ) -> AsyncStoreFuture<'a, VerifiedFactSelectionCompleteness, <Self as RunJournalBackend>::Error>
-    {
-        let target = match self.store_authority_context().validate_run(authority) {
+    ) -> AsyncStoreFuture<'a, VerifiedFactSelectionCompleteness, B::Error> {
+        let target = match self
+            .backend()
+            .store_authority_context()
+            .validate_run(authority)
+        {
             Ok(target) => target,
             Err(error) => return Box::pin(async move { Err(error.into()) }),
         };
-        if view.store_identity() != self.store_authority_context().store_identity()
+        if view.store_identity() != self.backend().store_authority_context().store_identity()
             || view.tenant_scope_id() != &target.tenant_scope_id
             || view.run_id() != &target.run_id
         {
@@ -2620,7 +2605,8 @@ impl<B: FactScanBackend> FactSelectionStore for B {
             );
         }
         Box::pin(async move {
-            let mut verified_by_observation = verify_fact_selection_rows(self, view).await?;
+            let mut verified_by_observation =
+                verify_fact_selection_rows(self.backend(), view).await?;
             let fact_observations = verified_by_observation
                 .keys()
                 .cloned()

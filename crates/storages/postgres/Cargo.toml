@@ -18,8 +18,9 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
+mfm-runtime = { path = "../../kernel/runtime" }
 mfm-spec = { path = "../../kernel/spec" }
-mfm-store = { path = "../../kernel/store", features = ["test-support"] }
+mfm-store = { path = "../../kernel/store", features = ["backend-conformance"] }
 serde_json = { workspace = true }
 
 [features]

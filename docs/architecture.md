@@ -10,7 +10,8 @@ document owns responsibility taxonomy, placement, dependency direction, and cont
 MFM operations deterministically plan certified typed graphs; states own closed pure/read/effect
 semantics; adapters bind state requests to explicit capabilities; transports and signers remain
 reusable platform primitives; the executor owns durable mutation convergence; runtime performs one
-stateless action; the journal records five complete record families; store verifies and appends
+authorized admission or one stateless drive action; the journal records five complete record
+families; store verifies and appends
 them atomically; replay uses the same verified view without live semantic IO; and app, CLI, and
 REST are authorization and presentation boundaries only.
 
@@ -22,7 +23,8 @@ deployment-provisioned current configuration
   -> exact entry-point registration selects one PlanningProfile
   -> operation authoring plus deterministic framework/executor expansion
   -> certification of graph, manifests, dependencies, terminal contract, and public output
-  -> app authorizes Admit and appends RunAdmitted without semantic live IO
+  -> app authorizes one opaque admission plan
+  -> Runtime::admit validates the exact registry and appends RunAdmitted without semantic live IO
 
 later drive_once call
   -> app authorizes Drive for one tenant/run
@@ -94,10 +96,10 @@ names and directory counts are not architecture.
 | Adapter | Private binding from runtime-authorized state request to reusable transport/executor surface | A second lifecycle or replay reducer |
 | Transport | Reusable protocol encoding, IO, checked decoding, and safe error classification | Journal access, state settlement, workflow topology |
 | Executor | Keyed delivery convergence, target-entry authority, terminal evidence, typed resource policy | Run scheduling, state settlement, journal mutation |
-| Store | Atomic append, object binding, hashes, CAS, callback-free structural fold, exact producer/object/observation closure verification, fact-group validation and actual-ordinal assignment, verified views/readers | State execution, domain outcomes, destination IO |
-| Runtime | Deterministic readiness, exact materialization, audited call orchestration, one-action drive | Business policy, protocol phases, resource policy, persisted status |
+| Store | One-shot qualified assembly, sole affine writer, cloneable purpose readers, atomic append, object binding, hashes, CAS, callback-free structural fold, exact producer/object/observation closure verification, fact-group validation and actual-ordinal assignment, verified views | State execution, domain outcomes, destination IO |
+| Runtime | Sole run-history writer ownership, exact admission, deterministic readiness, exact materialization, audited call orchestration, one-action drive | Business policy, protocol phases, resource policy, persisted status |
 | Replay | Recorded verification, exact reproduction, candidate comparison | Live scheduler, live capability, append |
-| App assembly | Authentication, grants, entry-point catalog, store/catalog wiring, DTO services | Planning logic or state behavior |
+| App assembly | Authentication, grants, entry-point catalog, pre-split support bootstrap, runtime/reader wiring, DTO services | Run-history mutation, planning logic, or state behavior |
 | Binary/API | Input decoding, route/command dispatch, response rendering | Store/runtime/live implementation construction |
 
 Before adding a module, crate, schema, capability, public type, route, or command, identify one row
@@ -310,6 +312,13 @@ structural value validator, and the one producer-independent `RetainedValueContr
 diagnostic `SchemaIdentity`. `mfm-journal` owns the frozen five-record schemas, producer-bound
 `ValueRef`, and journal references. `mfm-store` owns legal append and verified read authority.
 
+Concrete qualification creates one non-cloneable `QualifiedRunStore<B>` containing the sole
+backend handle and mutation seal. Application assembly may provision current configuration and
+admit the exact qualified support graph before `split` consumes that assembly once. The result is
+one non-cloneable `RunHistoryWriter<B>` and a cloneable `RunHistoryReader<B>`. Runtime consumes the
+writer. Replay and application read services receive only readers; neither can admit support,
+prepare appends, append history, or recover a backend or pool handle.
+
 Successful transition bodies preserve output and fact bindings in semantic ordinal order.
 `mfm-store` privately assembles the redundant binding delta by canonical-byte sorting repeated
 output and fact groups independently after variant-group precedence is fixed. Its fold alone
@@ -345,7 +354,8 @@ pre-admission concern and becomes immutable root material when selected for a ru
 
 ## Runtime Boundary
 
-Runtime is a stateless interpreter over one certified graph and one borrowed `VerifiedRunView`.
+Runtime is the process-local owner of the sole run-history writer and an interpreter over one
+certified graph and one borrowed `VerifiedRunView`.
 Its private action algebra is:
 
 ```text
@@ -362,6 +372,9 @@ Blocked
 
 Runtime owns:
 
+- validation and append of one opaque, owned `AuthorizedAdmissionPlan`;
+- exact registry admission-artifact matching and injection of that registry's admitted support;
+- the sole non-cloneable `RunHistoryWriter`;
 - deterministic readiness and dependency-skip derivation;
 - exact typed input/context materialization;
 - sole qualified-program-registry selection and callback/live-invoker dispatch;
@@ -372,8 +385,9 @@ Runtime owns:
 - transition candidate construction; and
 - exact-head retry after reload.
 
-Runtime owns no process-persistent semantic state. Another process with the same exact qualified
-program registry and authorized writer can continue the next `drive_once`.
+Runtime owns no process-persistent semantic state. Another process may independently qualify the
+same fenced backend, construct the same exact registry and runtime, and continue under store CAS;
+it does not clone or recover another process's writer.
 
 ## Replay Boundary
 
@@ -505,7 +519,8 @@ Current domain product placement:
   semantic read/effect entries, and process-private live invokers;
 - the one content-scoped `68 + N` portfolio/EVM support graph, its single store admission, and
   transfer of that non-cloneable admitted graph into the sole registry;
-- the qualified PostgreSQL run store and separately fenced PostgreSQL executor store;
+- one-shot qualified PostgreSQL run-store bootstrap, the shared `Arc<Runtime<_>>`, a cloneable
+  run-history reader, and the separately fenced PostgreSQL executor store;
 - exact wallet executor, resource-owner, signer-generation, request-qualification, and target
   binding composition;
 - current-configuration resolution for admission;
@@ -518,8 +533,10 @@ contracts. Its live EVM portion is `15 + N`: the prior route/read/executor closu
 guarded-signer descriptor, nonce policy, initial nonce, already-known classifier, finality policy,
 assurance policy, and wallet-request qualification. Private endpoints, credentials, transports,
 caller configuration, and per-run artifacts never enter that graph. Runtime and the private
-application backend borrow one shared registry `Arc`; admission and the executor borrow the same
-live-owned wallet-qualification `Arc`. The qualification's canonical proof, reference, and debug
+application backend borrow one shared registry `Arc`; Runtime owns the sole writer, while the
+application backend retains only its reader and executor-readiness capability. Admission and the
+executor borrow the same live-owned wallet-qualification `Arc`. The qualification's canonical
+proof, reference, and debug
 form exclude its privately retained exact transport clone, including endpoints and authorization;
 the clone shares the original runtime and route catalog. Admission and execution do not assemble
 parallel transports, catalogs, policy predicates, or admitted support authority.

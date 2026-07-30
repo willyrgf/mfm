@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `QualifiedRunStore<mfm_storage_postgres::PostgresRunJournalBackend>: Clone` is not satisfied
+ --> tests/ui/fail/qualified_run_assembly_cannot_clone.rs:7:18
+  |
+7 |     Clone::clone(assembly)
+  |     ------------ ^^^^^^^^ the trait `Clone` is not implemented for `QualifiedRunStore<mfm_storage_postgres::PostgresRunJournalBackend>`
+  |     |
+  |     required by a bound introduced by this call

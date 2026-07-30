@@ -38,12 +38,14 @@ Recoverability v2 publishes exactly `mfm.portfolio/snapshot@1` and
 identity and `{ "target": "..." }`. Portfolio targets resolve a `PortfolioConfig`; transaction
 targets resolve an immutable `EvmSubmitTransactionRequest` whose tenant and target must match the
 authorized admission and selector. Admission deterministically plans and certifies the selected
-graph, self-attests the serving executable, retains the root proof objects, and appends only
-`RunAdmitted`. It performs no semantic capability, signer, executor, or RPC call and does not drive
-the run.
+graph, self-attests the serving executable, retains the root proof objects, and submits one opaque
+owned `AuthorizedAdmissionPlan` to `Runtime::admit`. Runtime alone prepares and appends
+`RunAdmitted`. Admission performs no semantic capability, signer, executor, or RPC call and does
+not drive the run.
 
 `drive_once` advances at most one transition or audited protocol operation. The sole ordinary read
-is `PublicRunView`: production performs one purpose-authorized `store.read_public_run` call and
+is `PublicRunView`: production performs one purpose-authorized
+`RunHistoryReader::read_public_run` call and
 converts only its sealed `VerifiedPublicRunView` projection. It does not load a raw journal or
 assemble status and outputs through separate readers. Privileged trace and audit readers inline
 reviewed retained values. Replay verification is callback-free. Production exact reproduction is
@@ -136,8 +138,12 @@ scope is derived from the complete field-path-ordered member identities and cont
 executable, route, executor, resource-owner, wallet-policy, or support-contract change selects a
 new scope. The scope preimage is not itself retained.
 
-The app admits that graph once and moves the resulting non-cloneable authority into one
-`QualifiedProgramRegistry`. The private application admission backend and wallet executor also
+The app admits that graph once through the pre-split `QualifiedRunStore` and moves the resulting
+non-cloneable authority into one `QualifiedProgramRegistry`. It then consumes the assembly into
+the writer owned by one shared `Arc<Runtime<_>>` and the cloneable reader retained for public,
+inspection, replay, export, and readiness services. The app retains no run-history writer,
+prepared append, raw backend, or PostgreSQL pool. The private application admission backend and
+wallet executor also
 share the one live-owned `Arc<EvmWalletRequestQualification>` created before that admission; they
 cannot reconstruct or weaken its predicate. A configured wallet request must match it before
 certification or any journal append, and the executor rechecks it before effect binding or nonce

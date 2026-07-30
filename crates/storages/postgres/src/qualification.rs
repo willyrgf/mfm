@@ -2,12 +2,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_ids::{StoreEpoch, StoreScopeId};
-use mfm_store::v1::RunAccessAuthorityIssuer;
+use mfm_store::v1::{QualifiedRunStore, RunAccessAuthorityIssuer};
 use sqlx::{PgPool, Row};
 
 use crate::error::{PostgresStoreError, Result};
 use crate::schema::{validate_authoritative_schema_at, ValidatedStoreIdentity, APPLICATION_ROLE};
-use crate::store::QualifiedPostgresStore;
+use crate::store::PostgresRunJournalBackend;
 
 /// Future returned by a deployment-owned authoritative-writer fence.
 pub type AuthoritativeWriterFenceFuture<'a, E> =
@@ -95,7 +95,10 @@ impl WriterQualification {
 pub async fn open_authoritative<F>(
     writer_pool: PgPool,
     deployment_writer_fence: F,
-) -> Result<(QualifiedPostgresStore, RunAccessAuthorityIssuer)>
+) -> Result<(
+    QualifiedRunStore<PostgresRunJournalBackend>,
+    RunAccessAuthorityIssuer,
+)>
 where
     F: AuthoritativeWriterFence,
 {
@@ -116,10 +119,11 @@ where
         return Err(PostgresStoreError::WriterFenceRejected);
     }
 
-    Ok(QualifiedPostgresStore::from_qualification(
+    let (backend, issuer) = PostgresRunJournalBackend::from_qualification(
         writer_pool,
         WriterQualification::new(context),
-    ))
+    );
+    Ok((QualifiedRunStore::from_qualified_backend(backend), issuer))
 }
 
 struct WriterProbe {

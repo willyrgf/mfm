@@ -9,12 +9,12 @@ use mfm_store::v1::{
 use sqlx::Row;
 
 use crate::error::{database_error, PostgresStoreError, Result};
-use crate::store::QualifiedPostgresStore;
+use crate::store::PostgresRunJournalBackend;
 
 use super::rows::{load_run, LoadedRun};
 
 pub(super) async fn scan_page(
-    store: &QualifiedPostgresStore,
+    store: &PostgresRunJournalBackend,
     mut verifier: FactScanPageVerifier,
 ) -> Result<FactScanPage> {
     if verifier.store_identity() != store.store_authority_context().store_identity() {
@@ -102,7 +102,7 @@ pub(super) async fn scan_page(
 }
 
 pub(super) async fn load_attestations(
-    store: &QualifiedPostgresStore,
+    store: &PostgresRunJournalBackend,
     verifier: FactAttestationLoadVerifier,
 ) -> Result<Vec<PersistedFactScanAttestation>> {
     if verifier.store_identity() != store.store_authority_context().store_identity() {

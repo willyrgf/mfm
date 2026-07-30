@@ -7,15 +7,16 @@ pool and a deployment-owned `AuthoritativeWriterFence`, qualifies the exact
 database/schema/store lineage, and returns:
 
 ```text
-(QualifiedPostgresStore, RunAccessAuthorityIssuer)
+(QualifiedRunStore<PostgresRunJournalBackend>, RunAccessAuthorityIssuer)
 ```
 
 The issuer is the sole non-cloneable issuer paired with that qualified store.
-The store may be cloned as a handle, but it exposes neither its pool nor a
-second issuer/bootstrap path. The blanket `RunJournalStore` implementation over
-its internal `RunJournalBackend` accepts only store-created append/load
-verifiers; PostgreSQL rows are not a generic reader or a way to mint run
-authority.
+The assembly is not cloneable and exposes neither its backend nor its pool. Qualified support is
+admitted before `QualifiedRunStore::split` consumes it into one non-cloneable
+`RunHistoryWriter<PostgresRunJournalBackend>` and a cloneable
+`RunHistoryReader<PostgresRunJournalBackend>`. Runtime consumes the writer; application and replay
+composition retain readers. The internal `RunJournalBackend` accepts only store-created
+append/load verifiers; PostgreSQL rows are not a generic reader or a way to mint run authority.
 
 ## Destructive baseline
 
@@ -78,8 +79,8 @@ There is deliberately no production bypass, caught-up-replica mode, or fence
 implementation in this crate. `TestAuthoritativeWriterFence` exists only under
 tests or the `parity-tests` feature.
 
-`QualifiedPostgresStore::check_ready` is the bounded local readiness proof for
-an already qualified process capability. It opens one `READ COMMITTED`,
+`RunHistoryReader<PostgresRunJournalBackend>::check_ready` is the bounded local readiness proof
+for an already qualified process capability. It opens one `READ COMMITTED`,
 `READ WRITE` transaction, installs a transaction-local quoted search path and
 statement/lock timeouts, and uses one row query to recheck the database name
 and OID, schema, recovery/read-only state, permission to assume the application
@@ -149,8 +150,8 @@ store-owned verifier rederives the physical journal before returning an opaque
 
 ## Support, configured values, and facts
 
-`SupportStore::admit_support_graph` binds a producer-free qualified graph to one
-sealed deployment authority. Admission is serialized by qualification scope
+`QualifiedRunStore::admit_support_graph` binds a producer-free qualified graph to one sealed
+deployment authority before the one-shot split. Admission is serialized by qualification scope
 and atomically admits or verifies the complete exact field-path keyset, full
 producer-bound references, and bytes. A retained graph cannot be extended,
 trimmed, or repointed by a later retry.
@@ -172,9 +173,9 @@ The runtime has no publish, update, target-only lookup, list, or export API.
 Deployment tooling provisions the full canonical `ConfiguredValueBinding`,
 producer-bound `ValueRef`, and admitted bytes through a migration-owner path.
 The application role has `SELECT` only. Runtime resolution is available solely
-through `ConfiguredValueStore` with an exact `RunAccessAuthority<Admit>` and
-certified `RetainedValueContract`; the verifier rederives the key, producer,
-contract, and byte identity before returning a sealed value.
+through `RunHistoryReader::resolve_configured_value` with an exact
+`RunAccessAuthority<Admit>` and certified `RetainedValueContract`; the verifier rederives the key,
+producer, contract, and byte identity before returning a sealed value.
 
 Fact selection pages use one read-only `REPEATABLE READ` snapshot and scan the
 dense tenant publication coordinate range fixed by the store verifier. Each
@@ -201,19 +202,16 @@ cannot be mutated by the application role.
 
 ## Verification
 
-Use a disposable PostgreSQL schema. Direct Cargo commands must run inside the
-default Nix development shell:
+Use the repository-owned task, which provisions a disposable PostgreSQL schema:
 
 ```sh
-DATABASE_URL=postgresql://postgres@127.0.0.1:5432/postgres \
-  nix develop . -c cargo test -p mfm-storage-postgres \
-    --features parity-tests --test recoverability-v2
+nix run .#run -- --task recoverability-postgres-v2
 ```
 
 The dedicated `recoverability-v2` target runs all 578 shared corpus vectors through
 a physical blob round trip. Package tests cover the closed catalog,
 qualification, privileges, rollback/head integrity, advisory-lock behavior,
-idempotency, and backend parity.
+idempotency, independent qualified-writer reconciliation, and backend parity.
 
 When SQL, the authoritative schema model, or SQLx query metadata changes, run
 the repository-owned narrow task. It performs the online SQLx check and proves

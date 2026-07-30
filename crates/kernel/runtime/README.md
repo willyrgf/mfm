@@ -1,14 +1,23 @@
 # mfm-runtime
 
-Stateless audited interpreter for an admitted MFM run.
+Audited owner of run admission and one-action execution.
 
 The store owns the verified append-only journal and all persisted structural
-validation. `mfm-runtime` receives a drive-purpose store authority, loads a
-fresh `VerifiedRunView`, and selects the admitted package from one qualified
-program registry. That registry owns the exact admitted support graph,
+validation. `Runtime<B>` consumes the sole non-cloneable `RunHistoryWriter<B>` during process
+assembly and becomes the only application-visible run-history mutation path. It is shared as an
+`Arc`; callers can neither clone nor recover the writer. The runtime selects the admitted package
+from one qualified program registry. That registry owns the exact admitted support graph,
 deterministic callbacks, semantic read/effect entries, and process-private
-runtime invokers as one closed selection. It performs at most one semantic
-transition or one audited protocol operation.
+runtime invokers as one closed selection.
+
+`Runtime::admit` consumes an opaque `AuthorizedAdmissionPlan` containing only owned, already
+authorized application inputs. It verifies the exact registry, entry point, operation,
+invocation, artifacts, configured value, and source seals, injects the registry's admitted
+support, prepares the immutable root, and appends it. The application cannot supply support,
+prepared append bytes, a store, or a writer through that plan.
+
+`Runtime::drive_once` loads a fresh `VerifiedRunView` under drive-purpose authority and performs at
+most one semantic transition or one audited protocol operation.
 
 `Runtime::drive_once` uses the frozen priority:
 
@@ -66,6 +75,7 @@ atomically to the transition that terminalizes the final occurrence. After
 closure, runtime can append only the single unmatched observation for each
 authorization committed before closure.
 
-The runtime has no admission path, retry state, attempt object, runner
-lifecycle, raw journal append, replay-specific reducer, or compatibility
-fallback.
+The runtime has no caller-supplied append path, retry state, attempt object, runner lifecycle,
+replay-specific reducer, or compatibility fallback. Its process-local writer capability is not
+persisted semantic state; another independently qualified runtime may continue the same journal
+under backend compare-and-swap.
