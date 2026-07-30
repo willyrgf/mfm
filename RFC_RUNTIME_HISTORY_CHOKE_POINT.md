@@ -329,6 +329,11 @@ The stronger design must combine:
   stage-aware, redaction-safe pending observation.
 - Keep retryable operational faults and integrity/contract violations auditable but impossible for
   state logic to consume.
+- Preserve one stable, queryable classification for every normally returned provider or transport
+  fault through either its certified `SafeFailure` contract or the closed non-domain fault
+  code/context relation, without retaining provider-controlled diagnostics.
+- Keep retry legality in the persisted disposition while allowing a future qualified scheduling
+  policy to consult the closed fault code after commit; every retry remains a new authorization.
 - Distinguish one observation's stable logical identity from each predecessor-bound physical append
   attempt.
 - Let semantic transitions consume only freshly verified committed observations.
@@ -355,6 +360,8 @@ The stronger design must combine:
 - Turning runtime authorization, retry, observation, or persistence phases into domain behavior.
 - Pre-expanding an unbounded number of access attempts into a finite certified graph.
 - Making audit attempt count, latency, worker identity, or retry timing part of semantic state.
+- Treating a persisted fault code as an instruction to retry, or permitting an adapter to retry or
+  fail over invisibly inside one authorization.
 - Absorbing executor delivery or resource streams into the MFM run history.
 - Persisting raw provider text, bodies, paths, endpoints, credentials, signatures, signed
   envelopes, or arbitrary diagnostics.
@@ -399,6 +406,12 @@ The stronger design must combine:
   fault. It carries conservative entry status, one closed disposition
   (`RetryableOperational | IntegrityBlocked`), and one closed redaction-safe code. State callbacks
   never receive it.
+
+**Non-domain failure code**
+: `NonDomainFailureCode`, the current concrete type for the RFC-level access non-domain fault
+  classification. Its variant plus the history-derived `NonDomainFailureLayer` preserve one closed,
+  queryable origin/category. Each legal code/layer/status/disposition relation is frozen; there is
+  no open string, provider message, or unknown fallback.
 
 **Logical observation identity**
 : The exact authorization reference plus the complete persistable observation content and digest.
@@ -469,13 +482,17 @@ observation, while acknowledgement ambiguity resolves the unchanged original att
 
 Every surviving operational, protocol, integrity, or contract failure produced by the live
 boundary or returned-value totalization becomes a closed `NonDomainFailure` with conservative
-entry status, closed disposition, and closed code. It cannot yield normal success until that
-observation commits, and it cannot become a domain failure, accepted result, or state-consumable
-safe failure. `RetryableOperational` permits a later separately authorized attempt after commit;
-`IntegrityBlocked` deterministically blocks. Journal corruption, journal unavailability, an
-unresolved append, or a changed-content observation conflict is instead a history-persistence
-interruption and may prevent any new observation from being committed; in those cases no pending
-value escapes and durable history remains authoritative.
+entry status, closed disposition, and `NonDomainFailureCode`. The code plus its history-derived
+`NonDomainFailureLayer` preserves the reviewed origin/category without provider-controlled text.
+It cannot yield normal success until that observation commits, and it cannot become a domain
+failure, accepted result, or state-consumable safe failure. `RetryableOperational` permits, but
+does not command, a later separately authorized attempt after commit; `IntegrityBlocked`
+deterministically blocks. A future qualified scheduler may use the committed code to select
+operational policy, but the code cannot mint authority, override the disposition, or cause an
+invisible adapter retry. Journal corruption, journal unavailability, an unresolved append, or a
+changed-content observation conflict is instead a history-persistence interruption and may prevent
+any new observation from being committed; in those cases no pending value escapes and durable
+history remains authoritative.
 
 ### G-08: Process loss is not fabricated
 
@@ -710,15 +727,10 @@ enum PersistableAccessOutcome<K: AccessKind> {
     DidNotEnter(PersistableSafeFailure<K>),
     Indeterminate(PersistableSafeFailure<K>),
     NonDomainFailure {
-        entry_status: EntryStatus,
-        disposition: AccessFaultDisposition,
-        code: AccessNonDomainFaultCode,
+        entry_status: NonDomainEntryStatus,
+        disposition: NonDomainDisposition,
+        code: NonDomainFailureCode,
     },
-}
-
-enum AccessFaultDisposition {
-    RetryableOperational,
-    IntegrityBlocked,
 }
 
 struct PendingObservation<K: AccessKind> {
@@ -878,7 +890,7 @@ NonDomainFailure {
       | IntegrityBlocked,
 
     code:
-        one closed redaction-safe non-domain fault code
+        NonDomainFailureCode
 }
 ```
 
@@ -897,12 +909,61 @@ NonDomainFailure {
 the observation commits. `IntegrityBlocked` is non-consumable and deterministically blocks the run.
 Neither disposition fabricates a domain failure or safe failure.
 
-The code vocabulary must be closed, bounded, and free of provider text, paths, endpoint details,
+The current recoverability-v3 code vocabulary is:
+
+```text
+NonDomainFailureCode =
+    AdapterContractViolation
+  | ResultEncodingFailure
+  | FactStoreUnavailable
+  | FactHistoryInvalid
+  | ExecutorStoreUnavailable
+  | ExecutorContention
+  | ExecutorHistoryInvalid
+  | ExecutorCapacityExhausted
+```
+
+The record context derives one closed validation layer:
+
+```text
+NonDomainFailureLayer =
+    Read
+  | Fact
+  | Ensure
+  | ExecutorTarget
+```
+
+The layer is not a caller-authored diagnostic field. Store and replay derive it from the
+authorization/observation context and reject any code that is illegal for that layer. The code
+vocabulary must remain closed, bounded, and free of provider text, paths, endpoint details,
 credentials, response bodies, source chains, or arbitrary debug data.
 
 Store and replay validate the closed code, status, disposition, binding, and permitted
 code/status/disposition relation. They do not independently prove whether a remote target was
 physically entered.
+
+#### Provider and transport trackability
+
+Every normally returned external provider or transport fault has exactly one reviewed route:
+
+- if the certified capability contract admits it as state-facing evidence, it becomes
+  `DidNotEnter` or `Indeterminate` with that `SafeFailure` contract's stable code,
+  `FailureClass`, `BoundaryStage`, and optional bounded typed diagnostic reference; or
+- otherwise it becomes audit-only `NonDomainFailure` with `NonDomainFailureCode`, conservative
+  entry status, and fixed disposition.
+
+The linked authorization already identifies the exact qualified operation, request, and binding.
+Together, that linkage and the closed failure classification make the incident queryable without
+persisting an endpoint, provider message, response body, source chain, or arbitrary diagnostic
+map. A normally returned provider or transport error may not use an outer `Result` to bypass both
+routes. Panic, abort, task loss, and process loss return no classification and remain an unmatched
+authorization.
+
+`NonDomainDisposition` is the authority-level retry gate. `RetryableOperational` only makes a later
+freshly authorized attempt legal; it does not require immediate retry. The closed code and layer
+may support future qualified choices such as backoff or circuit breaking after the observation
+commits, but they cannot override `IntegrityBlocked`, alter replay, reuse an authorization, or hide
+another provider call inside the original attempt.
 
 The design uses a distinct outcome rather than reusing `DidNotEnter` or `Indeterminate`, because
 certified state policy may consume an admitted safe failure. Operational platform faults and
@@ -1400,9 +1461,12 @@ failure. Reusing `DidNotEnter` or `Indeterminate` could turn platform unavailabi
 into state-consumable evidence.
 
 The completed cutover inventories every error reachable from the registered live boundary through
-pending-observation construction. The v3 annex freezes the closed fault-code,
-conservative entry-status, and
-`RetryableOperational | IntegrityBlocked` disposition relation.
+pending-observation construction. The v3 annex freezes `NonDomainFailureCode`, the
+history-derived `NonDomainFailureLayer`, conservative entry status, and the
+`RetryableOperational | IntegrityBlocked` disposition relation. Provider and transport faults
+admitted by a certified `SafeFailure` contract remain in that separately closed
+code/class/stage/diagnostic relation; every other normally returned external fault must use the
+non-domain relation.
 
 The change created one current v3 schema lineage and corpus, explicitly rejects the v1 and v2
 archives, and has no dual reader or compatibility writer. Archived bytes cannot be silently
@@ -1493,8 +1557,8 @@ reinterpreted.
 
 - Retain the five record families.
 - Add `NonDomainFailure` through one complete current-schema cutover.
-- Validate its closed code, entry status, disposition, binding, non-consumability, and fixed
-  retry/block projection.
+- Validate its closed `NonDomainFailureCode`, history-derived `NonDomainFailureLayer`, entry status,
+  disposition, binding, non-consumability, and fixed retry/block projection.
 - Resolve observation logical keys by authorization reference and exact content before preparing a
   physical append attempt.
 - Keep physical append-request idempotency bound to one predecessor and candidate. On stale head,
@@ -1560,6 +1624,8 @@ reinterpreted.
 - `Advanced`, `Replan`, rejection, and unresolved acknowledgement never mint live authority.
 - Every persistable outcome variant produces exactly one linked pending observation.
 - `NonDomainFailure` is never state-consumable.
+- Every `NonDomainFailureCode` is legal only for its history-derived layer and exact
+  code/status/disposition relation.
 - `RetryableOperational` permits only a later separately authorized attempt after its observation
   commits.
 - `IntegrityBlocked` deterministically blocks.
@@ -1597,7 +1663,9 @@ operation is legal, and whether recovery repeats IO.
 ### Effect tests
 
 - Every surviving `ExecutorError` site reachable after MFM authorization receives an exact
-  entry-stage and non-domain disposition classification.
+  entry-stage, closed fault-code, and non-domain disposition classification.
+- Every normally returned provider or transport fault becomes either its exact certified
+  `SafeFailure` or one linked `NonDomainFailure`; no outer transport error bypasses observation.
 - Restored terminal evidence returns without target entry.
 - Target mutation followed by executor crash converges without duplicate logical effect.
 - MFM observation failure does not discard executor-retained evidence.
@@ -1611,6 +1679,8 @@ operation is legal, and whether recovery repeats IO.
 - A lost read result leaves only unmatched authorization.
 - A fresh read attempt has a new authorization.
 - A surviving closed read result cannot produce successful drive without observation commit.
+- Normally returned provider and transport faults preserve their closed safe-failure or
+  non-domain classification without provider-controlled text.
 - Fact-scan partial work cannot mint completion or observation.
 - Fact-scan completion and attestation commit atomically.
 - A complete fact scan totalizes once into stable pending material and survives stale-head
@@ -1637,6 +1707,10 @@ operation is legal, and whether recovery repeats IO.
   transport callback.
 - Every non-domain failure deterministically yields the same retryable-operational or
   integrity-blocked projection.
+- Unknown non-domain codes, illegal contextual layers, and invalid code/status/disposition
+  relations are rejected rather than projected through a fallback.
+- Any future code-guided operational retry policy must prove that it acts only after the prior
+  observation commits and only under a new authorization.
 - No non-domain failure can be reinterpreted as a domain failure or safe failure.
 - Provider text, endpoints, paths, credentials, raw response bodies, signatures, and signed
   envelopes never enter records, objects, diagnostics, errors, audit DTOs, or exports.
@@ -1676,6 +1750,10 @@ The implementation satisfies the following accepted criteria:
   `CommittedObservation<K>`;
 - non-domain failures are never state-consumable and have one fixed retryable-operational or
   integrity-blocked disposition;
+- every normally returned provider or transport fault has a linked, closed, queryable
+  safe-failure or non-domain classification with no open diagnostic escape;
+- a non-domain code may refine future qualified retry scheduling but cannot itself authorize,
+  require, or hide a retry;
 - only committed observations can enter semantic evaluation;
 - process loss remains an unmatched authorization without invented evidence;
 - effect recovery still uses the independently fenced executor ledger;
@@ -1807,10 +1885,14 @@ The runtime protocol must:
 - persist only reviewed typed values and closed codes;
 - never log raw boundary returns, pending observations, or debug values;
 - avoid formatting provider or executor errors into persisted/public messages;
+- preserve provider and transport trackability only through the exact authorization linkage,
+  certified `SafeFailure` relation, or closed non-domain code/layer/status/disposition relation;
 - preserve zeroizing transient buffers where required;
 - never expose append or access authority through trace, audit, replay, or export;
 - fail closed when authorization append is unavailable or ambiguous;
-- conservatively classify entry status and non-domain disposition; and
+- conservatively classify entry status and non-domain disposition;
+- never interpret a non-domain code as fresh authority or permission to bypass its persisted
+  disposition; and
 - keep every non-domain failure non-consumable.
 
 The passive writer must never be exposed through trace, audit, replay, export, application, CLI, or
@@ -1834,8 +1916,12 @@ commit, live access must not occur. If observation cannot commit, the access ste
 success.
 
 Observation retry cannot repeat external IO. A definite exact-head conflict retains
-the pending observation and prepare a new physical attempt against the new head. Acknowledgement
+the pending observation and prepares a new physical attempt against the new head. Acknowledgement
 ambiguity must resolve the unchanged old attempt before any such rebase.
+
+Future code-guided backoff or circuit-breaking policy operates only after a retryable observation
+commits. It must not add an invisible transport retry within one authorization or make timing,
+worker identity, or transient routing choice part of semantic state.
 
 Any future batching optimization must retain one authorization and one observation identity per
 independently meaningful operation and prove partial-return and cancellation semantics separately.
@@ -1856,6 +1942,12 @@ independently meaningful operation and prove partial-return and cancellation sem
 
 No persisted bytes are rewritten in place. No dual reader, dual writer, fallback decoder, alias, or
 compatibility mode is permitted.
+
+Adding a provider- or transport-specific `NonDomainFailureCode`, changing a code's legal layer,
+entry status, or disposition, or adding an unknown-code fallback changes persisted semantics and
+requires a new current schema lineage, annex, corpus, store/replay validation, and public
+projection. The current v3 enum must not gain an open string, catch-all provider error, or
+compatibility interpretation.
 
 ## Logical Commit Sequence
 
@@ -1912,7 +2004,11 @@ The following decisions are accepted by this RFC:
 - logical observation identity is distinct from predecessor-bound physical append-attempt
   identity;
 - non-domain failures are never state-consumable and have a fixed
-  `RetryableOperational | IntegrityBlocked` disposition; and
+  `RetryableOperational | IntegrityBlocked` disposition;
+- `NonDomainFailureCode` plus the history-derived contextual layer is the closed non-domain fault
+  classification; normally returned provider/transport faults use either that relation or their
+  certified `SafeFailure` relation, and a code may guide future policy only after commit and under a
+  new authorization; and
 - completion algebra, shared access composition, observation retry, and persisted-schema changes
   are one inseparable implementation commit.
 
@@ -1923,6 +2019,8 @@ The implementation closes every former decision gate:
   preparation, so stale-head retry never rescans;
 - the v3 annex freezes the complete `NonDomainFailure` code, entry-status, disposition, and
   contextual-layer relation;
+- provider and transport failures are queryable through exact authorization linkage and one closed
+  safe-failure or non-domain classification, never provider-controlled text;
 - runtime-facing executor adapters classify fresh material separately from retained-history
   corruption and use exact affine-authority consumption and completion progress;
 - app policy produces an authorized admission plan while runtime alone commits it;
@@ -1962,6 +2060,9 @@ The implemented current design is:
 - one mandatory linked observation before successful escape;
 - one mandatory audit-only `NonDomainFailure` representation with fixed
   `RetryableOperational | IntegrityBlocked` disposition;
+- one closed `NonDomainFailureCode` plus history-derived layer for non-domain fault trackability,
+  with code-guided future retry policy subordinate to committed disposition and fresh
+  authorization;
 - semantic settlement only from freshly verified committed observations;
 - honest unmatched authorization for interruption and process loss;
 - five distinct persisted run-history record families;
