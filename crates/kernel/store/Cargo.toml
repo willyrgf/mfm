@@ -18,6 +18,7 @@ path = "src/lib.rs"
 
 [features]
 test-support = []
+backend-conformance = ["test-support"]
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
@@ -38,6 +39,5 @@ tokio = { workspace = true }
 trybuild = "1.0"
 
 [[test]]
-name = "mfm-store-memory"
+name = "memory_conformance"
 path = "tests/memory_conformance.rs"
-required-features = ["test-support"]

@@ -4,9 +4,10 @@ Callback-free recorded-history inspection and portable export for MFM.
 
 The sole current codec and portable-stream registry is
 `contracts/recoverability/v2/annex.json`.
-`docs/design.md` is the normative authority contract. Every store-backed operation accepts the
-exact store-owned purpose authority for replay, transition trace, access audit, or export and loads
-one fresh head-bound `CommittedRunJournal`. The store consumes that journal into one opaque,
+`docs/design.md` is the normative authority contract. Every store-backed operation borrows a
+cloneable `RunHistoryReader<B>`, accepts the exact store-owned purpose authority for replay,
+transition trace, access audit, or export, and loads one fresh head-bound
+`CommittedRunJournal`. The reader consumes that journal into one opaque,
 non-cloneable `VerifiedRunView`; raw records, object bytes, cursors, and prior views cannot
 substitute for a grant.
 
@@ -18,7 +19,7 @@ This crate traverses the verified view without a runtime catalog or historical c
 - complete source/object closure traversal; and
 - callback-free offline verification of portable streams.
 
-It owns no append path, scheduler, live capability, provider, executor, transport, signer,
+It owns no writer, append path, scheduler, live capability, provider, executor, transport, signer,
 filesystem-domain reader, or replay broker. Exact reproduction gives an isolated historical
 executable resolver only canonical plan bytes. Candidate comparison instead resolves the
 capability-free authoring, certification, and state callbacks sealed by one qualified current

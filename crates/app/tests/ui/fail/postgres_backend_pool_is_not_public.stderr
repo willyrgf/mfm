@@ -1,0 +1,10 @@
+error[E0624]: method `writer_pool` is private
+ --> tests/ui/fail/postgres_backend_pool_is_not_public.rs:4:21
+  |
+4 |     let _ = backend.writer_pool();
+  |                     ^^^^^^^^^^^ private method
+  |
+ ::: $WORKSPACE/crates/storages/postgres/src/store.rs
+  |
+  |     pub(crate) fn writer_pool(&self) -> &PgPool {
+  |     ------------------------------------------- private method defined here

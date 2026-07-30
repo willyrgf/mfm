@@ -465,7 +465,7 @@ content-addressed objects
 The irreducible logical persistence is:
 
 ```text
-RunJournalStore
+Run history store
   journal commits
   journal records
   immutable content-addressed objects
@@ -3080,7 +3080,7 @@ consult a mutable route alias, choose a newer generation on resume, or fail over
 Injected and authored states enter this manifest identically; runtime dispatch does not retain an
 origin bit or use a second catalog.
 The reserved `mfm.journal.fact-selection.v1` entry is constructed internally from the exact
-`RunJournalStore` used by the runtime; app assembly cannot override it or supply a separate fact
+runtime-owned `RunHistoryWriter` backend; app assembly cannot override it or supply a separate fact
 store.
 
 Type erasure exists only at heterogeneous catalog dispatch and is checked against the selected

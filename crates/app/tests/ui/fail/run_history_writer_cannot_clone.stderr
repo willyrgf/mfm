@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `RunHistoryWriter<mfm_storage_postgres::PostgresRunJournalBackend>: Clone` is not satisfied
+ --> tests/ui/fail/run_history_writer_cannot_clone.rs:7:18
+  |
+7 |     Clone::clone(writer)
+  |     ------------ ^^^^^^ the trait `Clone` is not implemented for `RunHistoryWriter<mfm_storage_postgres::PostgresRunJournalBackend>`
+  |     |
+  |     required by a bound introduced by this call

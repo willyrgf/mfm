@@ -1127,8 +1127,8 @@ mod tests {
     use alloy_primitives::{Address, B256, U256};
     use mfm_ids::{FieldPath, StoreEpoch, StoreScopeId};
     use mfm_store::{
-        AdmittedSupportGraph, AsyncInMemoryRunStore, QualifiedSupportGraph, QualifiedSupportMember,
-        StoreIdentity, SupportStore,
+        open_in_memory, AdmittedSupportGraph, QualifiedSupportGraph, QualifiedSupportMember,
+        StoreIdentity,
     };
 
     fn test_schema(name: &str) -> SchemaId {
@@ -1467,7 +1467,7 @@ mod tests {
         }
         let scope = test_semantic("qualification-scope");
         let graph = QualifiedSupportGraph::new(scope.clone(), objects).expect("support graph");
-        let (store, issuer) = AsyncInMemoryRunStore::new(StoreIdentity::new(
+        let (store, issuer) = open_in_memory(StoreIdentity::new(
             StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "e".repeat(32)))
                 .expect("store scope"),
             StoreEpoch::new(1),

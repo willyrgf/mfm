@@ -1,12 +1,12 @@
 use mfm_store::v1::{CommittedRunJournal, JournalLoadVerifier, StoreError};
 
 use crate::error::{database_error, Result};
-use crate::store::QualifiedPostgresStore;
+use crate::store::PostgresRunJournalBackend;
 
 use super::rows::load_run;
 
 pub(super) async fn load(
-    store: &QualifiedPostgresStore,
+    store: &PostgresRunJournalBackend,
     verifier: JournalLoadVerifier,
 ) -> Result<CommittedRunJournal> {
     let mut transaction = store

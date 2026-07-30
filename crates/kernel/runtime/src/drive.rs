@@ -21,9 +21,9 @@ use mfm_program::{
 use mfm_spec::{CertifiedNodeContract, CertifiedStateExecution, RetainedValueContract};
 use mfm_store::{
     AppendOutcome, AppendRejection, AuthorizationMaterial, Drive, ExistingRunAppendMaterial,
-    FactSelectionAuthorizationOutcome, FactSelectionStore, NewlyAppended, NodeTerminalOutcome,
+    FactScanBackend, FactSelectionAuthorizationOutcome, NewlyAppended, NodeTerminalOutcome,
     ObjectGraphProposal, ObservationMaterial, PreparedFrame, PreparedJournalAppend,
-    ProducedObjectRoot, ReadObservationMaterial, RunAccessAuthority, RunJournalStore,
+    ProducedObjectRoot, ReadObservationMaterial, RunAccessAuthority, RunHistoryWriter,
     TransitionMaterial, VerifiedNodeAccessHistory, VerifiedRunView, FACT_SELECTION_OPERATION_ID,
 };
 
@@ -45,16 +45,19 @@ use crate::runtime_error::map_store_error;
 use crate::{DriveOutcome, DriveWaitReason, Result, RuntimeError};
 
 /// Stateless interpreter over one authoritative run-journal store.
-pub struct Runtime<S> {
-    store: S,
-    program_registry: Arc<QualifiedProgramRegistry>,
+pub struct Runtime<B> {
+    pub(crate) writer: RunHistoryWriter<B>,
+    pub(crate) program_registry: Arc<QualifiedProgramRegistry>,
 }
 
-impl<S> Runtime<S> {
-    /// Binds one store to the sole exact qualified program and process registry.
-    pub fn new(store: S, program_registry: Arc<QualifiedProgramRegistry>) -> Self {
+impl<B> Runtime<B> {
+    /// Binds the sole history writer to the exact qualified program registry.
+    pub fn new(
+        writer: RunHistoryWriter<B>,
+        program_registry: Arc<QualifiedProgramRegistry>,
+    ) -> Self {
         Self {
-            store,
+            writer,
             program_registry,
         }
     }
@@ -226,16 +229,16 @@ enum ActionResult {
     Retry,
 }
 
-impl<S> Runtime<S>
+impl<B> Runtime<B>
 where
-    S: FactSelectionStore,
+    B: FactScanBackend,
 {
     /// Loads a fresh verified view and performs at most one legal action.
     pub async fn drive_once(&self, authority: RunAccessAuthority<Drive>) -> Result<DriveOutcome> {
         loop {
             let journal = self
-                .store
-                .load_committed_journal(&authority)
+                .writer
+                .load_for_drive(&authority)
                 .await
                 .map_err(|error| map_store_error(&error))?;
             let view = journal.verify_recorded_history()?;
@@ -408,7 +411,7 @@ where
                         };
                         if !observation_refs.is_empty() {
                             if let Err(error) = self
-                                .store
+                                .writer
                                 .verify_drive_fact_selection_observations(
                                     authority,
                                     view,
@@ -885,7 +888,7 @@ where
         view: &VerifiedRunView,
         node_id: &NodeId,
     ) -> Result<PreparedFrame> {
-        self.store
+        self.writer
             .prepare_frame(authority, view, node_id)
             .await
             .map_err(|error| map_store_error(&error))
@@ -1002,14 +1005,14 @@ where
         material: TransitionMaterial,
     ) -> Result<ActionResult> {
         let append_id = append_request_id(action, view.journal_head(), Some(&node_id))?;
-        let append = self.store.prepare_append(
+        let append = self.writer.prepare_append(
             authority,
             view,
             append_id,
             ExistingRunAppendMaterial::Transition(Box::new(material)),
         )?;
         let outcome = self
-            .store
+            .writer
             .append(authority, append)
             .await
             .map_err(|error| map_store_error(&error))?;
@@ -1054,7 +1057,7 @@ where
             view.journal_head(),
             Some(&action.node_id),
         )?;
-        let append = self.store.prepare_append(
+        let append = self.writer.prepare_append(
             authority,
             view,
             append_id,
@@ -1067,7 +1070,7 @@ where
         let (expected_request_ref, frozen_read_intent_ref) =
             prepared_read_authorization_refs(&append)?;
         let outcome = self
-            .store
+            .writer
             .append(authority, append)
             .await
             .map_err(|error| map_store_error(&error))?;
@@ -1216,14 +1219,14 @@ where
     ) -> Result<ActionResult> {
         loop {
             let journal = self
-                .store
-                .load_committed_journal(authority)
+                .writer
+                .load_for_drive(authority)
                 .await
                 .map_err(|error| map_store_error(&error))?;
             let view = journal.verify_recorded_history()?;
             let append_id =
                 append_request_id("read_observation", view.journal_head(), Some(node_id))?;
-            let append = self.store.prepare_append(
+            let append = self.writer.prepare_append(
                 authority,
                 &view,
                 append_id,
@@ -1233,7 +1236,7 @@ where
                 })),
             )?;
             let result = self
-                .store
+                .writer
                 .append(authority, append)
                 .await
                 .map_err(|error| map_store_error(&error))?;
@@ -1282,7 +1285,7 @@ where
             view.journal_head(),
             Some(&action.node_id),
         )?;
-        let append = self.store.prepare_append(
+        let append = self.writer.prepare_append(
             authority,
             view,
             append_id,
@@ -1294,7 +1297,7 @@ where
         )?;
         let expected_request_ref = prepared_authorization_request_ref(&append)?;
         let outcome = self
-            .store
+            .writer
             .append(authority, append)
             .await
             .map_err(|error| map_store_error(&error))?;
@@ -1348,14 +1351,14 @@ where
     ) -> Result<ActionResult> {
         loop {
             let journal = self
-                .store
-                .load_committed_journal(authority)
+                .writer
+                .load_for_drive(authority)
                 .await
                 .map_err(|error| map_store_error(&error))?;
             let view = journal.verify_recorded_history()?;
             let append_id =
                 append_request_id("effect_observation", view.journal_head(), Some(node_id))?;
-            let append = self.store.prepare_append(
+            let append = self.writer.prepare_append(
                 authority,
                 &view,
                 append_id,
@@ -1367,7 +1370,7 @@ where
                 )),
             )?;
             let result = self
-                .store
+                .writer
                 .append(authority, append)
                 .await
                 .map_err(|error| map_store_error(&error))?;
@@ -1389,7 +1392,7 @@ where
             view.journal_head(),
             Some(&action.node_id),
         )?;
-        let append = self.store.prepare_append(
+        let append = self.writer.prepare_append(
             authority,
             view,
             append_id,
@@ -1406,7 +1409,7 @@ where
             return Err(RuntimeError::InvalidCallbackResult);
         };
         let outcome = self
-            .store
+            .writer
             .append_fact_selection_authorization(authority, append, action.request)
             .await
             .map_err(|error| map_store_error(&error))?;
@@ -1428,13 +1431,13 @@ where
             }
         };
         let completed = self
-            .store
+            .writer
             .scan_fact_selection(permit)
             .await
             .map_err(|error| map_store_error(&error))?;
         let journal = self
-            .store
-            .load_committed_journal(authority)
+            .writer
+            .load_for_drive(authority)
             .await
             .map_err(|error| map_store_error(&error))?;
         let view = journal.verify_recorded_history()?;
@@ -1443,14 +1446,14 @@ where
             view.journal_head(),
             Some(&action.node_id),
         )?;
-        let append = self.store.prepare_append(
+        let append = self.writer.prepare_append(
             authority,
             &view,
             append_id,
             completed.into_observation_material(),
         )?;
         let result = self
-            .store
+            .writer
             .append(authority, append)
             .await
             .map_err(|error| map_store_error(&error))?;

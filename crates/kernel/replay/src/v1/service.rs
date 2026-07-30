@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use mfm_ids::RunId;
 use mfm_journal::v1::JournalHead;
 use mfm_store::v1::{
-    Export, FactSelectionStore, InspectAudit, InspectTrace, Replay, RunAccessAuthority,
-    RunJournalStore, TransitionTracePageRequest, TransitionTraceSourceRequirements,
-    VerifiedRunView,
+    Export, FactScanBackend, InspectAudit, InspectTrace, Replay, RunAccessAuthority,
+    RunHistoryReader, RunJournalBackend, TransitionTracePageRequest,
+    TransitionTraceSourceRequirements, VerifiedRunView,
 };
 
 use super::{
@@ -17,12 +17,12 @@ use super::{
 ///
 /// Every retained fact selection is rechecked by the authoritative store against its exact
 /// immutable private attestation and dense writer prefix at the same verified physical head.
-pub async fn verify_recorded_history<S: FactSelectionStore>(
-    store: &S,
+pub async fn verify_recorded_history<B: FactScanBackend>(
+    reader: &RunHistoryReader<B>,
     authority: &RunAccessAuthority<Replay>,
 ) -> Result<VerifiedHistoryResult> {
-    let view = load_verified_view(store, authority).await?;
-    let completeness = store
+    let view = load_replay_view(reader, authority).await?;
+    let completeness = reader
         .verify_fact_selection_completeness(authority, &view)
         .await
         .map_err(|error| store_error(&error))?;
@@ -42,14 +42,14 @@ pub async fn verify_recorded_history<S: FactSelectionStore>(
 /// Omitting `complete_as_of_journal_head` atomically fixes the page to the
 /// store's current physical head. The application owns opaque cursor
 /// encoding and supplies the decoded head and zero-based start index here.
-pub async fn inspect_access_audit<S: RunJournalStore>(
-    store: &S,
+pub async fn inspect_access_audit<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
     authority: &RunAccessAuthority<InspectAudit>,
     complete_as_of_journal_head: Option<&JournalHead>,
     start: u32,
     limit: u16,
 ) -> Result<AccessAuditPage> {
-    let page = store
+    let page = reader
         .inspect_access_audit(authority, complete_as_of_journal_head, start, limit)
         .await
         .map_err(|error| store_error(&error))?;
@@ -87,12 +87,12 @@ pub async fn inspect_access_audit<S: RunJournalStore>(
 /// The opaque requirements retain the verified root view and page coordinate. Its sorted source
 /// identifiers grant no source access; the application must make a fresh separate `InspectTrace`
 /// decision for each source before the second phase.
-pub async fn discover_transition_trace_sources<S: RunJournalStore>(
-    store: &S,
+pub async fn discover_transition_trace_sources<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
     authority: &RunAccessAuthority<InspectTrace>,
     request: TransitionTracePageRequest,
 ) -> Result<TransitionTraceSourceRequirements> {
-    store
+    reader
         .discover_transition_trace_sources(authority, request)
         .await
         .map_err(|error| store_error(&error))
@@ -103,13 +103,13 @@ pub async fn discover_transition_trace_sources<S: RunJournalStore>(
 /// Source authorities must be a canonical sorted, duplicate-free subset of the page requirements.
 /// Missing authorities and authorized-but-absent source runs produce the same digest-only
 /// redaction; corrupt authorized source history fails verification.
-pub async fn inspect_transition_trace<S: RunJournalStore>(
-    store: &S,
+pub async fn inspect_transition_trace<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
     authority: &RunAccessAuthority<InspectTrace>,
     requirements: TransitionTraceSourceRequirements,
     source_authorities: &[RunAccessAuthority<InspectTrace>],
 ) -> Result<TransitionTracePage> {
-    let page = store
+    let page = reader
         .inspect_transition_trace(authority, requirements, source_authorities)
         .await
         .map_err(|error| store_error(&error))?;
@@ -133,11 +133,11 @@ pub async fn inspect_transition_trace<S: RunJournalStore>(
 /// Discovery is deliberately non-recursive. The application authorizes each
 /// returned run independently, repeats discovery for that newly authorized
 /// source, and supplies the complete exact authority set to export.
-pub async fn required_export_source_run_ids<S: RunJournalStore>(
-    store: &S,
+pub async fn required_export_source_run_ids<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
     authority: &RunAccessAuthority<Export>,
 ) -> Result<Vec<RunId>> {
-    let view = load_verified_view(store, authority).await?;
+    let view = load_export_view(reader, authority).await?;
     Ok(view
         .admission_source_requirements()
         .cross_run_sources()
@@ -148,16 +148,25 @@ pub async fn required_export_source_run_ids<S: RunJournalStore>(
         .collect())
 }
 
-pub(crate) async fn load_verified_view<S, G>(
-    store: &S,
-    authority: &RunAccessAuthority<G>,
-) -> Result<VerifiedRunView>
-where
-    S: RunJournalStore,
-    G: mfm_store::v1::CommittedJournalLoadGrant,
-{
-    let journal = store
-        .load_committed_journal(authority)
+async fn load_replay_view<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
+    authority: &RunAccessAuthority<Replay>,
+) -> Result<VerifiedRunView> {
+    let journal = reader
+        .load_for_replay(authority)
+        .await
+        .map_err(|error| store_error(&error))?;
+    journal
+        .verify_recorded_history()
+        .map_err(|error| store_error(&error))
+}
+
+async fn load_export_view<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
+    authority: &RunAccessAuthority<Export>,
+) -> Result<VerifiedRunView> {
+    let journal = reader
+        .load_for_export(authority)
         .await
         .map_err(|error| store_error(&error))?;
     journal

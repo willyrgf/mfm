@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mfm_ids::{
@@ -17,8 +19,9 @@ use super::{
     ConfiguredValueBackend, ConfiguredValueResolveVerifier, FactAttestationLoadVerifier,
     FactScanBackend, FactScanPage, FactScanPageVerifier, JournalAppendVerifier,
     JournalLoadVerifier, ObjectAuthorityKey, PersistedFactScanAttestation, PreparedAppendKind,
-    RunAccessAuthorityIssuer, StoreAuthorityContext, StoreError, StoreIdentity, SupportBackend,
-    SupportGraphAdmissionVerifier, VerifiedAdmissionSources, VerifiedConfiguredValue,
+    QualifiedRunStore, RunAccessAuthorityIssuer, RunHistoryWriter, StoreAuthorityContext,
+    StoreError, StoreIdentity, SupportBackend, SupportGraphAdmissionVerifier,
+    VerifiedAdmissionSources, VerifiedConfiguredValue,
 };
 
 #[derive(Clone)]
@@ -73,20 +76,94 @@ struct MemoryCommitFailureArm {
     point: MemoryCommitFailurePoint,
 }
 
-/// Atomic in-memory implementation of the recoverability-v2 journal backend.
-///
-/// The semantic core is staged in a private clone and swapped once after all fallible checks.
-/// Cloning the store clones only the handle and preserves the exact authority-instance seal.
-#[derive(Clone)]
-pub struct AsyncInMemoryRunStore {
+/// Test-only in-memory implementation hidden behind the affine history wrappers.
+#[doc(hidden)]
+pub struct InMemoryRunJournalBackend {
     authority: StoreAuthorityContext,
     core: Arc<Mutex<MemoryCore>>,
     commit_failure: Arc<Mutex<Option<MemoryCommitFailureArm>>>,
+    #[cfg(test)]
+    backend_loads: AtomicUsize,
 }
 
-impl AsyncInMemoryRunStore {
-    /// Creates one empty store paired with its sole non-cloneable authority issuer.
-    pub fn new(identity: StoreIdentity) -> (Self, RunAccessAuthorityIssuer) {
+/// Opens one empty test store as a pre-split qualified history assembly.
+pub fn open_in_memory(
+    identity: StoreIdentity,
+) -> (
+    QualifiedRunStore<InMemoryRunJournalBackend>,
+    RunAccessAuthorityIssuer,
+) {
+    let (backend, issuer) = InMemoryRunJournalBackend::new(identity);
+    (QualifiedRunStore::from_qualified_backend(backend), issuer)
+}
+
+impl QualifiedRunStore<InMemoryRunJournalBackend> {
+    /// Provisions one immutable configured value before the history split.
+    pub fn provision_configured_value(
+        &self,
+        binding: ConfiguredValueBinding,
+        bytes: Vec<u8>,
+    ) -> Result<(), StoreError> {
+        self.backend().provision_configured_value(binding, bytes)
+    }
+}
+
+impl RunHistoryWriter<InMemoryRunJournalBackend> {
+    /// Arms one exact test-only commit failure or acknowledgement loss.
+    pub fn inject_commit_failure(
+        &self,
+        run_id: RunId,
+        batch_purpose: mfm_journal::v1::BatchPurpose,
+        point: MemoryCommitFailurePoint,
+    ) -> Result<(), StoreError> {
+        self.backend()
+            .inject_commit_failure(run_id, batch_purpose, point)
+    }
+
+    /// Returns whether a test-only commit failure selector remains armed.
+    pub fn commit_failure_is_armed(&self) -> Result<bool, StoreError> {
+        self.backend().commit_failure_is_armed()
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_run_for_trace_test(&self, run_id: &RunId) -> Result<(), StoreError> {
+        self.backend().remove_run_for_trace_test(run_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn recorded_run_for_observation_test(
+        &self,
+        run_id: &RunId,
+    ) -> Result<
+        (
+            TenantScopeId,
+            Vec<CommittedJournalCommit>,
+            Vec<CommittedObject>,
+        ),
+        StoreError,
+    > {
+        self.backend().recorded_run_for_observation_test(run_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_transition_output_for_trace_test(
+        &self,
+        run_id: &RunId,
+    ) -> Result<(), StoreError> {
+        self.backend()
+            .remove_transition_output_for_trace_test(run_id)
+    }
+}
+
+#[cfg(test)]
+impl super::RunHistoryReader<InMemoryRunJournalBackend> {
+    pub(super) fn backend_load_count_for_test(&self) -> usize {
+        self.backend().backend_loads.load(Ordering::SeqCst)
+    }
+}
+
+impl InMemoryRunJournalBackend {
+    fn new(identity: StoreIdentity) -> (Self, RunAccessAuthorityIssuer) {
         let (authority, issuer) = StoreAuthorityContext::bootstrap(identity);
         (
             Self {
@@ -96,6 +173,8 @@ impl AsyncInMemoryRunStore {
                     ..MemoryCore::default()
                 })),
                 commit_failure: Arc::new(Mutex::new(None)),
+                #[cfg(test)]
+                backend_loads: AtomicUsize::new(0),
             },
             issuer,
         )
@@ -171,7 +250,7 @@ impl AsyncInMemoryRunStore {
     /// Arms one exact run-and-purpose commit failure or acknowledgement loss.
     ///
     /// Unrelated appends do not consume the selector. A matching append consumes it once.
-    pub fn inject_commit_failure(
+    fn inject_commit_failure(
         &self,
         run_id: RunId,
         batch_purpose: mfm_journal::v1::BatchPurpose,
@@ -193,7 +272,7 @@ impl AsyncInMemoryRunStore {
     }
 
     /// Reports whether an exact test-only commit failure selector remains armed.
-    pub fn commit_failure_is_armed(&self) -> Result<bool, StoreError> {
+    fn commit_failure_is_armed(&self) -> Result<bool, StoreError> {
         self.commit_failure
             .lock()
             .map_err(|_| StoreError::MemoryLockPoisoned)
@@ -201,7 +280,7 @@ impl AsyncInMemoryRunStore {
     }
 
     /// Provisions one exact immutable configured value for test-support workflows.
-    pub fn provision_configured_value(
+    fn provision_configured_value(
         &self,
         binding: ConfiguredValueBinding,
         bytes: Vec<u8>,
@@ -474,7 +553,7 @@ impl AsyncInMemoryRunStore {
     }
 }
 
-impl RunJournalBackend for AsyncInMemoryRunStore {
+impl RunJournalBackend for InMemoryRunJournalBackend {
     type Error = StoreError;
 
     fn store_authority_context(&self) -> &StoreAuthorityContext {
@@ -492,6 +571,8 @@ impl RunJournalBackend for AsyncInMemoryRunStore {
         &'a self,
         verifier: JournalLoadVerifier,
     ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error> {
+        #[cfg(test)]
+        self.backend_loads.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
             let guard = self
                 .core
@@ -502,7 +583,7 @@ impl RunJournalBackend for AsyncInMemoryRunStore {
     }
 }
 
-impl AdmissionSourceBackend for AsyncInMemoryRunStore {
+impl AdmissionSourceBackend for InMemoryRunJournalBackend {
     fn backend_verify_admission_sources<'a>(
         &'a self,
         mut verifier: AdmissionSourceVerifier,
@@ -523,7 +604,7 @@ impl AdmissionSourceBackend for AsyncInMemoryRunStore {
     }
 }
 
-impl SupportBackend for AsyncInMemoryRunStore {
+impl SupportBackend for InMemoryRunJournalBackend {
     fn backend_admit_support_graph<'a>(
         &'a self,
         verifier: SupportGraphAdmissionVerifier,
@@ -564,7 +645,7 @@ impl SupportBackend for AsyncInMemoryRunStore {
     }
 }
 
-impl ConfiguredValueBackend for AsyncInMemoryRunStore {
+impl ConfiguredValueBackend for InMemoryRunJournalBackend {
     fn backend_resolve_configured_value<'a>(
         &'a self,
         verifier: ConfiguredValueResolveVerifier,
@@ -607,7 +688,7 @@ impl ConfiguredValueBackend for AsyncInMemoryRunStore {
     }
 }
 
-impl FactScanBackend for AsyncInMemoryRunStore {
+impl FactScanBackend for InMemoryRunJournalBackend {
     fn backend_fact_scan_page<'a>(
         &'a self,
         mut verifier: FactScanPageVerifier,
@@ -869,8 +950,22 @@ mod tests {
     use mfm_ids::{RunId, StoreEpoch, StoreScopeId};
     use mfm_journal::v1::BatchPurpose;
 
-    use super::{AsyncInMemoryRunStore, MemoryCommitFailurePoint};
+    use super::{open_in_memory, MemoryCommitFailurePoint};
     use crate::v1::{StoreError, StoreIdentity};
+
+    #[test]
+    fn reader_clone_does_not_require_the_concrete_backend_to_clone() {
+        let identity = StoreIdentity::new(
+            StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "ab".repeat(16)))
+                .expect("store scope"),
+            StoreEpoch::new(1),
+        );
+        let (store, _) = open_in_memory(identity);
+        let (_writer, reader) = store.split();
+
+        let cloned = reader.clone();
+        assert_eq!(reader.store_identity(), cloned.store_identity());
+    }
 
     #[test]
     fn commit_failure_selector_is_exact_non_consuming_and_one_shot() {
@@ -881,18 +976,19 @@ mod tests {
         );
         let selected = run_id('b');
         let unrelated = run_id('c');
-        let (store, _) = AsyncInMemoryRunStore::new(identity);
+        let (store, _) = open_in_memory(identity);
+        let (writer, _reader) = store.split();
 
-        store
+        writer
             .inject_commit_failure(
                 selected.clone(),
                 BatchPurpose::PureSettlement,
                 MemoryCommitFailurePoint::BeforeCommit,
             )
             .expect("arm exact commit failure");
-        assert!(store.commit_failure_is_armed().expect("inspect selector"));
+        assert!(writer.commit_failure_is_armed().expect("inspect selector"));
         assert_eq!(
-            store.inject_commit_failure(
+            writer.inject_commit_failure(
                 selected.clone(),
                 BatchPurpose::PureSettlement,
                 MemoryCommitFailurePoint::AfterCommitBeforeAcknowledgement,
@@ -900,25 +996,28 @@ mod tests {
             Err(StoreError::MemoryFailureSelectorAlreadyArmed)
         );
         assert_eq!(
-            store
+            writer
+                .backend()
                 .take_commit_failure(&unrelated, BatchPurpose::PureSettlement)
                 .expect("unrelated run"),
             None
         );
         assert_eq!(
-            store
+            writer
+                .backend()
                 .take_commit_failure(&selected, BatchPurpose::ReadSettlement)
                 .expect("unrelated purpose"),
             None
         );
-        assert!(store.commit_failure_is_armed().expect("selector remains"));
+        assert!(writer.commit_failure_is_armed().expect("selector remains"));
         assert_eq!(
-            store
+            writer
+                .backend()
                 .take_commit_failure(&selected, BatchPurpose::PureSettlement)
                 .expect("matching append"),
             Some(MemoryCommitFailurePoint::BeforeCommit)
         );
-        assert!(!store.commit_failure_is_armed().expect("selector consumed"));
+        assert!(!writer.commit_failure_is_armed().expect("selector consumed"));
     }
 
     fn run_id(fill: char) -> RunId {

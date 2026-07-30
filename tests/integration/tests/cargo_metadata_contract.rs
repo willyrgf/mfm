@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -83,6 +84,81 @@ fn superseded_event_manual_auth_and_portfolio_live_crates_are_absent() {
     }
 }
 
+#[test]
+fn run_history_ownership_dependencies_and_sources_are_one_way() {
+    let root = repository_root();
+    let metadata = cargo_metadata(&root);
+    let packages = workspace_packages(&metadata);
+
+    assert_normal_dependencies(
+        &packages,
+        "mfm-store",
+        &[],
+        &["mfm-app", "mfm-runtime", "mfm-storage-postgres"],
+    );
+    assert_normal_dependencies(
+        &packages,
+        "mfm-runtime",
+        &["mfm-program", "mfm-store"],
+        &["mfm-app", "mfm-storage-postgres"],
+    );
+    assert_normal_dependencies(
+        &packages,
+        "mfm-replay",
+        &["mfm-store"],
+        &["mfm-app", "mfm-runtime", "mfm-storage-postgres"],
+    );
+    assert_normal_dependencies(
+        &packages,
+        "mfm-storage-postgres",
+        &["mfm-store"],
+        &["mfm-app", "mfm-runtime"],
+    );
+    assert_normal_dependencies(
+        &packages,
+        "mfm-app",
+        &["mfm-replay", "mfm-runtime", "mfm-storage-postgres"],
+        &[],
+    );
+
+    let production = read_source(&root, "crates/app/src/production.rs");
+    for forbidden in [
+        ".append_admission(",
+        ".prepare_admission(",
+        "QualifiedPostgresStore",
+        "PreparedJournalAppend",
+        "writer_pool(",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "application production assembly must not retain `{forbidden}`"
+        );
+    }
+    assert!(
+        production.contains(".admit("),
+        "application admission must enter through Runtime"
+    );
+
+    let postgres_exports = read_source(&root, "crates/storages/postgres/src/lib.rs");
+    assert!(
+        !postgres_exports.contains("QualifiedPostgresStore"),
+        "the retired combined PostgreSQL facade must not remain exported"
+    );
+    let store_exports = read_source(&root, "crates/kernel/store/src/v1/mod.rs");
+    for retired in [
+        "RunJournalStore",
+        "SupportStore",
+        "ConfiguredValueStore",
+        "AdmissionSourceStore",
+        "FactSelectionStore",
+    ] {
+        assert!(
+            !store_exports.contains(retired),
+            "the retired combined store facade `{retired}` must not remain exported"
+        );
+    }
+}
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -158,6 +234,51 @@ fn dependency_names(package: &Value) -> BTreeSet<&str> {
                 .expect("dependency name")
         })
         .collect()
+}
+
+fn normal_dependency_names(package: &Value) -> BTreeSet<&str> {
+    package
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .expect("package dependencies")
+        .iter()
+        .filter(|dependency| dependency.get("kind").is_none_or(Value::is_null))
+        .map(|dependency| {
+            dependency
+                .get("name")
+                .and_then(Value::as_str)
+                .expect("dependency name")
+        })
+        .collect()
+}
+
+fn assert_normal_dependencies(
+    packages: &BTreeMap<String, &Value>,
+    package_name: &str,
+    required: &[&str],
+    forbidden: &[&str],
+) {
+    let package = packages
+        .get(package_name)
+        .unwrap_or_else(|| panic!("{package_name} must be a workspace member"));
+    let dependencies = normal_dependency_names(package);
+    for required_name in required {
+        assert!(
+            dependencies.contains(required_name),
+            "{package_name} must normally depend on {required_name}"
+        );
+    }
+    for forbidden_name in forbidden {
+        assert!(
+            !dependencies.contains(forbidden_name),
+            "{package_name} must not normally depend on {forbidden_name}"
+        );
+    }
+}
+
+fn read_source(root: &Path, relative: &str) -> String {
+    fs::read_to_string(root.join(relative))
+        .unwrap_or_else(|error| panic!("read {relative}: {error}"))
 }
 
 fn relative_manifest_path(root: &Path, package: &Value) -> String {

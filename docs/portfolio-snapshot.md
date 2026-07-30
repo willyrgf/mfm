@@ -34,7 +34,8 @@ Admission:
 5. certifies the exact planning profile, graph, implementations, terminal contract, and public
    output;
 6. binds immutable non-secret routing-generation references; and
-7. appends `RunAdmitted`.
+7. submits one opaque authorized plan to `Runtime::admit`, which validates the exact registry and
+   appends `RunAdmitted`.
 
 It performs no EVM, Bitcoin, provider, signer, or executor semantic call and does not drive the
 graph. Repeating the exact invocation and root attaches to the same run; changed root material is

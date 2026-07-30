@@ -3,7 +3,10 @@ use mfm_journal::v1::{ConfiguredValueBinding, ConfiguredValueKey, ProducerBindin
 use mfm_spec::v1::RetainedValueContract;
 
 use super::objects::{derive_value_ref, validate_value_contract, StagedObject};
-use super::{Admit, AsyncStoreFuture, Result, RunAccessAuthority, RunJournalBackend, StoreError};
+use super::{
+    Admit, AsyncStoreFuture, Result, RunAccessAuthority, RunHistoryReader, RunJournalBackend,
+    StoreError,
+};
 
 /// Sealed exact configured value frozen for one admission.
 ///
@@ -101,33 +104,26 @@ pub trait ConfiguredValueBackend: RunJournalBackend {
     ) -> AsyncStoreFuture<'a, VerifiedConfiguredValue, Self::Error>;
 }
 
-/// Admission-authorized configured-value resolution surface.
-pub trait ConfiguredValueStore: RunJournalBackend {
+impl<B: ConfiguredValueBackend> RunHistoryReader<B> {
     /// Resolves one exact value for the authority's store, tenant, and versioned entry point.
-    fn resolve_configured_value<'a>(
+    pub fn resolve_configured_value<'a>(
         &'a self,
         authority: &'a RunAccessAuthority<Admit>,
         entry_point_id: &'a EntryPointId,
         target: &'a StableId,
         expected: &'a RetainedValueContract,
-    ) -> AsyncStoreFuture<'a, VerifiedConfiguredValue, Self::Error>;
-}
-
-impl<B: ConfiguredValueBackend> ConfiguredValueStore for B {
-    fn resolve_configured_value<'a>(
-        &'a self,
-        authority: &'a RunAccessAuthority<Admit>,
-        entry_point_id: &'a EntryPointId,
-        target: &'a StableId,
-        expected: &'a RetainedValueContract,
-    ) -> AsyncStoreFuture<'a, VerifiedConfiguredValue, Self::Error> {
+    ) -> AsyncStoreFuture<'a, VerifiedConfiguredValue, B::Error> {
         let checked = (|| {
-            let target_authority = self.store_authority_context().validate_admit(authority)?;
+            let target_authority = self
+                .backend()
+                .store_authority_context()
+                .validate_admit(authority)?;
             if &target_authority.entry_point_id != entry_point_id {
                 return Err(StoreError::AdmissionAuthorityMismatch);
             }
             let key = ConfiguredValueKey::new(
-                self.store_authority_context()
+                self.backend()
+                    .store_authority_context()
                     .store_identity()
                     .store_scope_id(),
                 &target_authority.tenant_scope_id,
@@ -137,7 +133,7 @@ impl<B: ConfiguredValueBackend> ConfiguredValueStore for B {
             Ok(ConfiguredValueResolveVerifier::new(key, expected.clone()))
         })();
         match checked {
-            Ok(verifier) => self.backend_resolve_configured_value(verifier),
+            Ok(verifier) => self.backend().backend_resolve_configured_value(verifier),
             Err(error) => Box::pin(async move { Err(error.into()) }),
         }
     }

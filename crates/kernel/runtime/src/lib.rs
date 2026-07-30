@@ -8,6 +8,7 @@
 //! semantic callbacks, and value-only views remain owned by `mfm-program`.
 
 mod access;
+mod admission;
 mod append_id;
 mod callback_material;
 mod capability_registry;
@@ -22,6 +23,7 @@ pub use access::{
     AuditedReadCapability, AuthorizedEnsureAccess, AuthorizedReadAccess, ReadCapabilityFuture,
     ReadCapabilityOutcome, RecoverableEffectExecutor,
 };
+pub use admission::{AdmissionDisposition, AdmissionOutcome, AuthorizedAdmissionPlan};
 pub use capability_registry::{qualify_effect_executor, qualify_read_capability};
 pub use drive::Runtime;
 pub use outcome::{DriveOutcome, DriveWaitReason};

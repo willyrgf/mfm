@@ -40,7 +40,8 @@ flowchart TD
     C --> O["Operation authors typed graph"]
     O --> P["Deterministic planning expansion"]
     P --> CERT["Certification"]
-    CERT --> RA["Append RunAdmitted"]
+    CERT --> AP["Build opaque authorized admission plan"]
+    AP --> RA["Runtime::admit<br/>append RunAdmitted"]
 
     A -->|drive same run id| R["Runtime::drive_once"]
     R --> V["Load and verify journal"]
@@ -76,7 +77,7 @@ separate makes the execution model easier to understand.
 | State contract | Reusable pure, read, or effect semantics for one kind of state. |
 | State occurrence | One planned use of a state, with its own node id, configuration, and graph edges. |
 | Transport entry point | A CLI command or REST route used by a person or client. |
-| Runtime entry point | `drive_once`, which advances an admitted run by at most one action. |
+| Runtime entry point | `admit`, which owns the initial append, or `drive_once`, which advances an admitted run by at most one action. |
 | Driver invocation | One active call to `drive_once`. |
 | Invoker or driver controller | Whatever decides when and how many `drive_once` calls to issue. |
 | Logical state machine | The one admitted graph plus its authoritative journal, independent of process memory. |
@@ -227,8 +228,11 @@ Admission:
 3. validates its schema, identity, and cardinality bounds;
 4. derives immutable EVM routing-generation references;
 5. authors and expands the graph;
-6. certifies the graph, profile, manifests, terminal contract, and public output; and
-7. atomically appends `RunAdmitted` with the required immutable objects.
+6. certifies the graph, profile, manifests, terminal contract, and public output;
+7. creates one opaque owned `AuthorizedAdmissionPlan` containing no writer, backend, support graph,
+   or prepared append; and
+8. calls `Runtime::admit`, which validates the exact registry, injects its admitted support, and
+   atomically appends `RunAdmitted` with the required immutable objects.
 
 It does not contact an EVM endpoint, inspect a chain, call a signer, invoke an executor, or execute
 the first state.
@@ -751,8 +755,8 @@ For one admitted EVM portfolio snapshot:
 
 1. The user imports canonical setup configuration.
 2. The user admits `mfm.portfolio/snapshot@1`.
-3. The application resolves configuration, authors and certifies the exact graph, and appends
-   `RunAdmitted`.
+3. The application resolves configuration, authors and certifies the exact graph, then
+   `Runtime::admit` validates the exact registry and appends `RunAdmitted`.
 4. A drive performs the audited source/chain bootstrap call.
 5. A later drive settles the bootstrap observation.
 6. A drive performs the audited initial-anchor call.

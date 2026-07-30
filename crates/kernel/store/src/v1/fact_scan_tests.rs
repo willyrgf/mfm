@@ -475,8 +475,7 @@ async fn memory_three_fact_scan_restarts_and_replays_with_nonempty_attestation()
         .producer()
         .certified_artifacts()
         .expect("producer certified artifacts");
-    let (store, issuer) =
-        super::super::AsyncInMemoryRunStore::new(namespace.store_identity().clone());
+    let (store, issuer) = super::super::open_in_memory(namespace.store_identity().clone());
     fixture
         .producer()
         .provision_in_memory(&store)
@@ -491,7 +490,7 @@ async fn memory_three_fact_scan_restarts_and_replays_with_nonempty_attestation()
         .expect("consumer configured value");
 
     fixture
-        .verify_on(&store, &issuer)
+        .verify_on(store, &issuer)
         .await
         .expect("memory fact scan conformance");
 }

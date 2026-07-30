@@ -7,7 +7,7 @@ use mfm_spec::v1::RetainedValueContract;
 
 use super::objects::{derive_value_ref, StagedObject};
 use super::{
-    AsyncStoreFuture, QualifiedDeploymentAuthority, Result, RunJournalBackend,
+    AsyncStoreFuture, QualifiedDeploymentAuthority, QualifiedRunStore, Result, RunJournalBackend,
     StoreAuthorityContext, StoreError, StoreIdentity,
 };
 
@@ -282,24 +282,16 @@ pub trait SupportBackend: RunJournalBackend {
     ) -> AsyncStoreFuture<'a, AdmittedSupportGraph, Self::Error>;
 }
 
-/// Store-authorized qualified support admission surface.
-pub trait SupportStore: RunJournalBackend {
-    /// Admits one complete producer-free qualified graph under exact deployment authority.
-    fn admit_support_graph<'a>(
+impl<B: SupportBackend> QualifiedRunStore<B> {
+    /// Admits one complete producer-free qualified graph before the one-shot history split.
+    pub fn admit_support_graph<'a>(
         &'a self,
         authority: &'a QualifiedDeploymentAuthority,
         graph: QualifiedSupportGraph,
-    ) -> AsyncStoreFuture<'a, AdmittedSupportGraph, Self::Error>;
-}
-
-impl<B: SupportBackend> SupportStore for B {
-    fn admit_support_graph<'a>(
-        &'a self,
-        authority: &'a QualifiedDeploymentAuthority,
-        graph: QualifiedSupportGraph,
-    ) -> AsyncStoreFuture<'a, AdmittedSupportGraph, Self::Error> {
+    ) -> AsyncStoreFuture<'a, AdmittedSupportGraph, B::Error> {
         let checked = (|| {
             let allowed = self
+                .backend()
                 .store_authority_context()
                 .validate_qualified_deployment(authority)?;
             if allowed != graph.qualification_scope_id() {
@@ -307,12 +299,14 @@ impl<B: SupportBackend> SupportStore for B {
                     purpose: "admit_support_graph",
                 });
             }
-            let prepared =
-                PreparedSupportGraph::prepare(self.store_authority_context().clone(), graph)?;
+            let prepared = PreparedSupportGraph::prepare(
+                self.backend().store_authority_context().clone(),
+                graph,
+            )?;
             Ok(SupportGraphAdmissionVerifier::new(prepared))
         })();
         match checked {
-            Ok(verifier) => self.backend_admit_support_graph(verifier),
+            Ok(verifier) => self.backend().backend_admit_support_graph(verifier),
             Err(error) => Box::pin(async move { Err(error.into()) }),
         }
     }

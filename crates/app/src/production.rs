@@ -12,20 +12,21 @@ use mfm_keystore::KeystoreSignerProvider;
 use mfm_program::{
     QualifiedExecutorExpansion, QualifiedPlannerRegistration, QualifiedProgramRegistry,
 };
-use mfm_runtime::Runtime;
+use mfm_runtime::{AdmissionDisposition, AuthorizedAdmissionPlan, Runtime};
 use mfm_signing::{
     GenerationGuardedDeterministicSigningProvider,
     GenerationGuardedDeterministicSigningProviderBinder,
 };
 use mfm_spec::{CertifiedJournalProtocolContracts, EntryPointContract};
 use mfm_storage_executor_postgres::{
-    open_executor_store, ExecutorWriterGenerationFence, QualifiedPostgresExecutorStore,
+    open_executor_store, ExecutorWriterGenerationFence, QualifiedPostgresExecutorReadiness,
 };
-use mfm_storage_postgres::{open_authoritative, AuthoritativeWriterFence, QualifiedPostgresStore};
+use mfm_storage_postgres::{
+    open_authoritative, AuthoritativeWriterFence, PostgresRunJournalBackend,
+};
 use mfm_store::{
-    AdmissionMaterial, AdmissionSourceStore, AppendOutcome, AppendRejection, ConfiguredValueStore,
-    NewlyAppended, ProposedAdmissionInput, RunAccessAuthority, RunAccessAuthorityIssuer,
-    RunJournalStore, SupportStore,
+    ProposedAdmissionInput, QualifiedRunStore, RunAccessAuthority, RunAccessAuthorityIssuer,
+    RunHistoryReader, RunHistoryWriter,
 };
 use sqlx::postgres::PgPoolOptions;
 
@@ -51,11 +52,11 @@ mod qualification;
 mod routes;
 
 struct ProductionBackend {
-    store: QualifiedPostgresStore,
-    executor_store: QualifiedPostgresExecutorStore,
+    reader: RunHistoryReader<PostgresRunJournalBackend>,
+    executor_readiness: QualifiedPostgresExecutorReadiness,
     issuer: RunAccessAuthorityIssuer,
     registry: Arc<QualifiedProgramRegistry>,
-    runtime: Runtime<QualifiedPostgresStore>,
+    runtime: Arc<Runtime<PostgresRunJournalBackend>>,
     wallet_request_qualification: Arc<mfm_evm_live::EvmWalletRequestQualification>,
 }
 
@@ -94,9 +95,9 @@ where
         current_executable_identity(),
         load_evm_deployment(runtime_config_path, signer_ref)
     )?;
-    let (registry, entry_points, executor_store, wallet_request_qualification) =
+    let (registry, entry_points, writer, reader, executor_readiness, wallet_request_qualification) =
         assemble_program_registry(
-            &store,
+            store,
             &issuer,
             &executable,
             evm,
@@ -104,11 +105,11 @@ where
             executor_writer_fence,
         )
         .await?;
-    let store_scope_id = store.store_scope_id().clone();
-    let runtime = Runtime::new(store.clone(), Arc::clone(&registry));
+    let store_scope_id = reader.store_identity().store_scope_id().clone();
+    let runtime = Arc::new(Runtime::new(writer, Arc::clone(&registry)));
     let backend = ProductionBackend {
-        store,
-        executor_store,
+        reader,
+        executor_readiness,
         issuer,
         registry,
         runtime,
@@ -123,7 +124,7 @@ where
 }
 
 async fn assemble_program_registry<ExecutorFence>(
-    store: &QualifiedPostgresStore,
+    store: QualifiedRunStore<PostgresRunJournalBackend>,
     issuer: &RunAccessAuthorityIssuer,
     executable: &CurrentExecutableIdentity,
     evm: EvmDeployment,
@@ -133,7 +134,9 @@ async fn assemble_program_registry<ExecutorFence>(
     (
         Arc<QualifiedProgramRegistry>,
         Vec<EntryPointContract>,
-        QualifiedPostgresExecutorStore,
+        RunHistoryWriter<PostgresRunJournalBackend>,
+        RunHistoryReader<PostgresRunJournalBackend>,
+        QualifiedPostgresExecutorReadiness,
         Arc<mfm_evm_live::EvmWalletRequestQualification>,
     ),
     PublicError,
@@ -193,6 +196,7 @@ where
     let admitted_support = store
         .admit_support_graph(&deployment_authority, support_graph)
         .await?;
+    let (writer, reader) = store.split();
     let executor_store = open_executor_store(
         executor_pool,
         executor_binding.clone(),
@@ -200,7 +204,8 @@ where
     )
     .await
     .map_err(|_| wallet_executor_unavailable())?;
-    let ledger = KeyedExecutorLedger::new(executor_store.clone(), executor_binding.clone())
+    let executor_readiness = executor_store.readiness_handle();
+    let ledger = KeyedExecutorLedger::new(executor_store, executor_binding.clone())
         .map_err(|_| production_registry_invalid())?;
     let (entry_id, keystore_path, unlock_file_path) = resolved_signer.into_parts();
     let provider_binding = signer_binding.clone();
@@ -369,19 +374,21 @@ where
             published_portfolio_entry_point,
             published_wallet_entry_point,
         ],
-        executor_store,
+        writer,
+        reader,
+        executor_readiness,
         wallet_request_qualification,
     ))
 }
 
 impl ProductionBackend {
     async fn ready(&self) -> Result<(), PublicError> {
-        self.store
+        self.reader
             .check_ready()
             .await
             .map_err(|_| run_store_unavailable())?;
         let readiness = self
-            .executor_store
+            .executor_readiness
             .readiness()
             .await
             .map_err(|_| wallet_executor_unavailable())?;
@@ -444,7 +451,7 @@ impl ProductionBackend {
             .entry_point(entry_point.entry_point_id())
             .ok_or_else(production_admission_invalid)?;
         let configured = self
-            .store
+            .reader
             .resolve_configured_value(
                 &authority,
                 entry_point.entry_point_id(),
@@ -483,32 +490,23 @@ impl ProductionBackend {
                 .root_contract()
                 .clone(),
         );
-        let sources = self.store.verify_no_admission_sources(&authority).await?;
+        let sources = self.reader.verify_no_admission_sources(&authority).await?;
         let append_request_id = admission_append_request_id(request.invocation_identity())?;
-        let prepared = self.store.prepare_admission(
-            &authority,
+        let plan = AuthorizedAdmissionPlan::new(
+            authority,
             append_request_id,
-            AdmissionMaterial::new(
-                artifacts,
-                input,
-                &configured,
-                self.registry.admitted_support(),
-                &sources,
-            ),
-        )?;
-        let run_id = prepared
-            .admission()
-            .fields()
-            .map_err(|_| production_admission_invalid())?
-            .run_id;
-        let outcome = self
-            .store
-            .append_admission(&authority, prepared)
-            .await
-            .map_err(admission_store_error)?;
-        let status = admission_status(outcome)?;
+            entry_point.entry_point_id().clone(),
+            entry_point.entry_point_operation_id().clone(),
+            request.invocation_identity().clone(),
+            artifacts,
+            input,
+            configured,
+            sources,
+        );
+        let outcome = self.runtime.admit(plan).await.map_err(PublicError::from)?;
+        let status = admission_status(outcome.disposition());
         AdmitRunResponse::new(
-            &run_id,
+            outcome.run_id(),
             status,
             entry_point.entry_point_id(),
             entry_point.entry_point_operation_id(),
@@ -532,7 +530,7 @@ impl ProductionBackend {
         let authority = self
             .issuer
             .authorize_read_public(call.tenant_scope_id().clone(), call.run_id().clone());
-        let verified = self.store.read_public_run(&authority).await?;
+        let verified = self.reader.read_public_run(&authority).await?;
         PublicRunView::from_verified(verified)
     }
 
@@ -546,7 +544,7 @@ impl ProductionBackend {
             .issuer
             .authorize_inspect_audit(call.tenant_scope_id().clone(), call.run_id().clone());
         let page = mfm_replay::v1::inspect_access_audit(
-            &self.store,
+            &self.reader,
             &authority,
             position.complete_as_of_journal_head.as_ref(),
             position.start,
@@ -566,7 +564,7 @@ impl ProductionBackend {
             .issuer
             .authorize_inspect_trace(call.tenant_scope_id().clone(), call.run_id().clone());
         let requirements = mfm_replay::v1::discover_transition_trace_sources(
-            &self.store,
+            &self.reader,
             &root_authority,
             request,
         )
@@ -583,7 +581,7 @@ impl ProductionBackend {
             );
         }
         let page = mfm_replay::v1::inspect_transition_trace(
-            &self.store,
+            &self.reader,
             &root_authority,
             requirements,
             &source_authorities,
@@ -600,7 +598,7 @@ impl ProductionBackend {
         let authority = self
             .issuer
             .authorize_replay(call.tenant_scope_id().clone(), call.run_id().clone());
-        let verified = mfm_replay::v1::verify_recorded_history(&self.store, &authority).await?;
+        let verified = mfm_replay::v1::verify_recorded_history(&self.reader, &authority).await?;
         match request {
             ReplayRequest::Verify => verified.canonical_result().map_err(Into::into),
             ReplayRequest::Reproduce(input) => {
@@ -638,7 +636,7 @@ impl ProductionBackend {
             .issuer
             .authorize_export(call.tenant_scope_id().clone(), call.run_id().clone());
         let mut pending =
-            mfm_replay::v1::required_export_source_run_ids(&self.store, &root_authority)
+            mfm_replay::v1::required_export_source_run_ids(&self.reader, &root_authority)
                 .await?
                 .into_iter()
                 .collect::<BTreeSet<_>>();
@@ -651,7 +649,7 @@ impl ProductionBackend {
             let authority = self
                 .issuer
                 .authorize_export(tenant_scope_id, run_id.clone());
-            let required = mfm_replay::v1::required_export_source_run_ids(&self.store, &authority)
+            let required = mfm_replay::v1::required_export_source_run_ids(&self.reader, &authority)
                 .await
                 .map_err(export_dependency_discovery_error)?;
             dependencies.insert(run_id, authority);
@@ -666,7 +664,7 @@ impl ProductionBackend {
             .await
             .map_err(|_| export_stream_io_error())?;
         let metadata = mfm_replay::trace_export::write_portable_run_export_stream(
-            &self.store,
+            &self.reader,
             &root_authority,
             &dependencies,
             request.kind(),
@@ -775,43 +773,11 @@ fn admission_append_request_id(
         .map_err(|_| production_admission_invalid())
 }
 
-fn admission_status(outcome: AppendOutcome) -> Result<AdmissionStatus, PublicError> {
-    match outcome {
-        AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(_)) => {
-            Ok(AdmissionStatus::NewlyAdmitted)
-        }
-        AppendOutcome::AlreadyCommitted(_) => Ok(AdmissionStatus::Attached),
-        AppendOutcome::OutcomeUnknown => Ok(AdmissionStatus::OutcomeUnknown),
-        AppendOutcome::Rejected(rejection) => Err(match rejection {
-            AppendRejection::AdmissionConflict => mfm_store::StoreError::AdmissionConflict.into(),
-            AppendRejection::AppendRequestConflict => {
-                mfm_store::StoreError::AdmissionConflict.into()
-            }
-            AppendRejection::StaleHead { expected, actual } => {
-                mfm_store::StoreError::HeadMismatch {
-                    expected: Box::new(expected),
-                    actual,
-                }
-                .into()
-            }
-            AppendRejection::RunClosed => mfm_store::StoreError::RunClosed.into(),
-        }),
-        AppendOutcome::NewlyAppended(
-            NewlyAppended::Transition(_)
-            | NewlyAppended::Authorization(_)
-            | NewlyAppended::Observation(_),
-        ) => Err(production_admission_invalid()),
-    }
-}
-
-fn admission_store_error(error: mfm_storage_postgres::PostgresStoreError) -> PublicError {
-    match error {
-        mfm_storage_postgres::PostgresStoreError::Store(error)
-            if matches!(error.as_ref(), mfm_store::StoreError::AppendRequestConflict) =>
-        {
-            mfm_store::StoreError::AdmissionConflict.into()
-        }
-        error => error.into(),
+fn admission_status(disposition: AdmissionDisposition) -> AdmissionStatus {
+    match disposition {
+        AdmissionDisposition::NewlyAdmitted => AdmissionStatus::NewlyAdmitted,
+        AdmissionDisposition::Attached => AdmissionStatus::Attached,
+        AdmissionDisposition::OutcomeUnknown => AdmissionStatus::OutcomeUnknown,
     }
 }
 
@@ -873,22 +839,20 @@ fn wallet_executor_unavailable() -> PublicError {
 #[cfg(test)]
 mod tests {
     use super::{export_dependency_discovery_error, replay_artifact_error, ErrorClass};
-    use mfm_store::{AppendOutcome, AppendRejection};
 
     #[test]
-    fn admission_append_request_conflict_uses_the_admission_contract() {
-        let outcome_error = super::admission_status(AppendOutcome::Rejected(
-            AppendRejection::AppendRequestConflict,
-        ))
-        .expect_err("admission append-request conflict must be redacted");
-        let backend_error =
-            super::admission_store_error(mfm_storage_postgres::PostgresStoreError::Store(
-                Box::new(mfm_store::StoreError::AppendRequestConflict),
-            ));
-        for error in [outcome_error, backend_error] {
-            assert_eq!(error.class, ErrorClass::Conflict);
-            assert_eq!(error.code, "AdmissionConflict");
-        }
+    fn normalized_runtime_admission_conflict_uses_the_public_admission_contract() {
+        let normalized = crate::PublicError::from(mfm_runtime::RuntimeError::Store(
+            mfm_store::StoreError::AdmissionConflict,
+        ));
+        assert_eq!(normalized.class, ErrorClass::Conflict);
+        assert_eq!(normalized.code, "AdmissionConflict");
+
+        let unnormalized = crate::PublicError::from(mfm_runtime::RuntimeError::Store(
+            mfm_store::StoreError::AppendRequestConflict,
+        ));
+        assert_eq!(unnormalized.class, ErrorClass::Conflict);
+        assert_eq!(unnormalized.code, "AppendRequestConflict");
     }
 
     #[test]

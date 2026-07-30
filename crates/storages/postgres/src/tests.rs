@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mfm_canonical::{
@@ -15,17 +16,21 @@ use mfm_journal::v1::{
     RunAdmittedFields, RunJournalRecord, RunJournalRecordFields, TenantFactCoordinateFields,
     ValueRef,
 };
-use mfm_qualified_run_test_support::QualifiedRunFixture;
+use mfm_qualified_run_test_support::{PreparedQualifiedRun, QualifiedRunFixture};
+use mfm_runtime::{
+    AdmissionDisposition, AuthorizedAdmissionPlan, DriveOutcome, DriveWaitReason, Runtime,
+    RuntimeError,
+};
 use mfm_spec::v1::RetainedValueContract;
 use mfm_store::v1::test_support::{
     FactScanConformanceFixture, LegalAdmissionFixture, PreparedLegalAdmission,
 };
 use mfm_store::v1::{
-    AdmissionSourceStore, AppendOutcome, ConfiguredValueStore, ExistingRunAppendMaterial,
-    FactSelectionAuthorizationOutcome, FactSelectionStore, NewlyAppended, ObjectGraphProposal,
-    ProducedObjectRoot, ProducedOutputSlot, QualifiedSupportGraph, QualifiedSupportMember,
-    RunAccessAuthorityIssuer, RunJournalStore, SettlementMaterial, StoreError, SupportStore,
-    TransitionMaterial, TransitionTracePageRequest, VerifiedRunView,
+    AdmissionMaterial, AppendOutcome, ExistingRunAppendMaterial, FactSelectionAuthorizationOutcome,
+    NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
+    ProposedAdmissionInput, QualifiedRunStore, QualifiedSupportGraph, QualifiedSupportMember,
+    RunAccessAuthorityIssuer, RunHistoryWriter, SettlementMaterial, StoreError, TransitionMaterial,
+    TransitionTracePageRequest, VerifiedRunView,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
@@ -38,10 +43,83 @@ use crate::schema::{
     migrate_pool, validate_authoritative_schema, validate_authoritative_schema_at,
 };
 use crate::store::TestCommitFailurePoint;
-use crate::{open_authoritative, PostgresStoreError};
+use crate::{open_authoritative, PostgresRunJournalBackend, PostgresStoreError};
 
 static DATABASE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+type PostgresWriter = RunHistoryWriter<PostgresRunJournalBackend>;
+
+fn runtime_admission_plan(
+    fixture: &QualifiedRunFixture,
+    prepared: PreparedQualifiedRun,
+    replacement_input: Option<PlainCanonicalJsonBytes>,
+) -> AuthorizedAdmissionPlan {
+    let (_registry, authority, append_request_id, artifacts, input, configured, sources) =
+        prepared.into_parts();
+    let input = match replacement_input {
+        Some(canonical) => {
+            let contract = input.value_contract().clone();
+            ProposedAdmissionInput::new(canonical, contract)
+        }
+        None => input,
+    };
+    AuthorizedAdmissionPlan::new(
+        authority,
+        append_request_id,
+        fixture.entry_point_id().clone(),
+        fixture.entry_point_operation_id().clone(),
+        fixture.invocation_identity().clone(),
+        artifacts,
+        input,
+        configured,
+        sources,
+    )
+}
+
+async fn admit_recorded_run(
+    store: QualifiedRunStore<PostgresRunJournalBackend>,
+    issuer: &RunAccessAuthorityIssuer,
+    fixture: &QualifiedRunFixture,
+) -> RunId {
+    let registry = fixture
+        .qualify_on(&store, issuer)
+        .await
+        .expect("qualify recorded Runtime registry");
+    let (writer, reader) = store.split();
+    let prepared = fixture
+        .prepare_on(&reader, issuer, Arc::clone(&registry))
+        .await
+        .expect("prepare recorded Runtime admission");
+    let runtime = Runtime::new(writer, registry);
+    let admitted = runtime
+        .admit(runtime_admission_plan(fixture, prepared, None))
+        .await
+        .expect("admit recorded Runtime history");
+    assert_eq!(admitted.disposition(), AdmissionDisposition::NewlyAdmitted);
+    admitted.run_id().clone()
+}
+
+async fn drive_with_reopened_candidate(
+    database: &TestDatabase,
+    fixture: &QualifiedRunFixture,
+    tenant_scope_id: &TenantScopeId,
+    run_id: RunId,
+) -> DriveOutcome {
+    let pool = database.independent_store_pool().await;
+    let (store, issuer) = open_authoritative(pool, TestAuthoritativeWriterFence)
+        .await
+        .expect("reopen authoritative Runtime backend");
+    let registry = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify reopened candidate registry");
+    let (writer, _reader) = store.split();
+    Runtime::new(writer, registry)
+        .drive_once(issuer.authorize_drive(tenant_scope_id.clone(), run_id))
+        .await
+        .expect("classify reopened Runtime candidate")
+}
 
 #[tokio::test]
 async fn authoritative_baseline_opens_with_stable_identity() {
@@ -52,26 +130,43 @@ async fn authoritative_baseline_opens_with_stable_identity() {
         open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
             .await
             .expect("the exact migrated baseline must qualify");
-    first
+    let store_scope_id = first.store_identity().store_scope_id().clone();
+    let store_epoch = first.store_identity().store_epoch();
+    let (first_writer, first_reader) = first.split();
+    let cloned_reader = first_reader.clone();
+    first_reader
         .check_ready()
         .await
         .expect("the qualified writer must remain ready");
-    let store_scope_id = first.store_scope_id().clone();
-    let store_epoch = first.store_epoch();
-    drop(first);
+    cloned_reader
+        .check_ready()
+        .await
+        .expect("a cloned production reader must share the qualified backend");
+    assert_eq!(
+        first_reader.store_identity(),
+        cloned_reader.store_identity()
+    );
+    drop(first_writer);
+    drop(first_reader);
+    drop(cloned_reader);
     drop(first_issuer);
 
     let (second, _second_issuer) =
         open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
             .await
             .expect("reopening the same retained writer must qualify");
-    second
+    let (second_writer, second_reader) = second.split();
+    second_reader
         .check_ready()
         .await
         .expect("the reopened writer must remain ready");
-    assert_eq!(second.store_scope_id(), &store_scope_id);
-    assert_eq!(second.store_epoch(), store_epoch);
-    drop(second);
+    assert_eq!(
+        second_reader.store_identity().store_scope_id(),
+        &store_scope_id
+    );
+    assert_eq!(second_reader.store_identity().store_epoch(), store_epoch);
+    drop(second_writer);
+    drop(second_reader);
 
     database.cleanup().await;
 }
@@ -150,12 +245,14 @@ async fn application_role_only_login_opens_and_is_ready() {
     let (store, issuer) = open_authoritative(role_pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("application-role-only login must qualify");
-    store
+    let (writer, reader) = store.split();
+    reader
         .check_ready()
         .await
         .expect("application-role-only login must remain ready");
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     role_pool.close().await;
     database.cleanup().await;
@@ -177,6 +274,7 @@ async fn qualified_operations_pin_the_validated_schema_on_every_transaction() {
     let (store, _issuer) = open_authoritative(pool, TestAuthoritativeWriterFence)
         .await
         .expect("qualify exact schema");
+    let (writer, reader) = store.split();
     let count_statement = format!(
         "SELECT \
              (SELECT count(*)::bigint FROM {schema}.store_identity) \
@@ -207,7 +305,7 @@ async fn qualified_operations_pin_the_validated_schema_on_every_transaction() {
         .execute(&raw_clone)
         .await
         .expect("simulate caller session search-path drift");
-    store
+    reader
         .check_ready()
         .await
         .expect("readiness must pin the qualified schema");
@@ -233,7 +331,8 @@ async fn qualified_operations_pin_the_validated_schema_on_every_transaction() {
     );
     assert_eq!(after_counts, before_counts);
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     raw_clone.close().await;
     database.cleanup().await;
 }
@@ -289,6 +388,7 @@ async fn readiness_rejects_a_changed_retained_store_lineage() {
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify readiness lineage store");
+    let (writer, reader) = store.split();
     let changed_scope = format!(
         "mfm.store_scope.v1:{}",
         &digest_hex(b"readiness-changed-store-lineage")[..32]
@@ -308,11 +408,12 @@ async fn readiness_rejects_a_changed_retained_store_lineage() {
         .expect("restore identity guard");
 
     assert!(matches!(
-        store.check_ready().await,
+        reader.check_ready().await,
         Err(PostgresStoreError::WriterFenceRejected)
     ));
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -324,6 +425,7 @@ async fn readiness_rejects_missing_schema_metadata_singleton() {
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify readiness metadata store");
+    let (writer, reader) = store.split();
     sqlx::query("ALTER TABLE store_schema_metadata DISABLE TRIGGER ALL")
         .execute(&database.pool)
         .await
@@ -338,11 +440,12 @@ async fn readiness_rejects_missing_schema_metadata_singleton() {
         .expect("restore metadata guard");
 
     assert!(matches!(
-        store.check_ready().await,
+        reader.check_ready().await,
         Err(PostgresStoreError::SchemaAuthorityMismatch)
     ));
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -354,6 +457,7 @@ async fn readiness_rejects_a_changed_schema_contract_version() {
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify readiness version store");
+    let (writer, reader) = store.split();
     sqlx::query(
         "ALTER TABLE store_schema_metadata \
          DISABLE TRIGGER ALL, \
@@ -375,11 +479,12 @@ async fn readiness_rejects_a_changed_schema_contract_version() {
         .expect("restore metadata mutation guard");
 
     assert!(matches!(
-        store.check_ready().await,
+        reader.check_ready().await,
         Err(PostgresStoreError::SchemaAuthorityMismatch)
     ));
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -412,6 +517,7 @@ async fn readiness_rechecks_application_role_assumption() {
     let (store, issuer) = open_authoritative(role_pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify readiness role before revocation");
+    let (writer, reader) = store.split();
 
     sqlx::query(AssertSqlSafe(format!(
         "REVOKE SET OPTION FOR mfm_store_application FROM {role}"
@@ -443,11 +549,12 @@ async fn readiness_rechecks_application_role_assumption() {
         .try_get::<bool, _>("can_insert")
         .expect("retained journal insert"));
     assert!(matches!(
-        store.check_ready().await,
+        reader.check_ready().await,
         Err(PostgresStoreError::WriterRequired)
     ));
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     role_pool.close().await;
     database.cleanup().await;
@@ -481,6 +588,7 @@ async fn readiness_rechecks_required_journal_privileges() {
     let (store, issuer) = open_authoritative(role_pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify readiness privilege role");
+    let (writer, reader) = store.split();
 
     sqlx::query(AssertSqlSafe(format!(
         "REVOKE INSERT ON TABLE {schema}.journal_commits \
@@ -491,7 +599,7 @@ async fn readiness_rechecks_required_journal_privileges() {
     .await
     .expect("revoke required journal insertion");
     assert!(matches!(
-        store.check_ready().await,
+        reader.check_ready().await,
         Err(PostgresStoreError::WriterRequired)
     ));
     sqlx::query(AssertSqlSafe(format!(
@@ -511,11 +619,12 @@ async fn readiness_rechecks_required_journal_privileges() {
     .await
     .expect("revoke required journal selection");
     assert!(matches!(
-        store.check_ready().await,
+        reader.check_ready().await,
         Err(PostgresStoreError::WriterRequired)
     ));
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     role_pool.close().await;
     database.cleanup().await;
@@ -528,8 +637,8 @@ async fn writer_condition_proof_rejects_an_actual_read_only_transaction() {
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify read-only proof store");
-    let mut transaction = store
-        .writer_pool()
+    let mut transaction = database
+        .pool
         .begin()
         .await
         .expect("begin read-only proof transaction");
@@ -537,10 +646,15 @@ async fn writer_condition_proof_rejects_an_actual_read_only_transaction() {
         .execute(&mut *transaction)
         .await
         .expect("enter an actual PostgreSQL read-only transaction");
-    store
-        .pin_transaction_schema(&mut transaction)
-        .await
-        .expect("pin the qualified schema");
+    sqlx::query(
+        "SELECT pg_catalog.set_config( \
+             'search_path', pg_catalog.format('%I, pg_catalog', $1), TRUE \
+         )",
+    )
+    .bind(&database.schema)
+    .execute(&mut *transaction)
+    .await
+    .expect("pin the qualified schema");
     let row = sqlx::query(
         "SELECT pg_catalog.pg_is_in_recovery() AS in_recovery, \
                 pg_catalog.current_setting('transaction_read_only') \
@@ -603,14 +717,16 @@ async fn readiness_reports_a_closed_pool_as_a_connection_failure() {
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify readiness connection store");
+    let (writer, reader) = store.split();
     database.pool.close().await;
 
     assert!(matches!(
-        store.check_ready().await,
+        reader.check_ready().await,
         Err(PostgresStoreError::Connection)
     ));
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -622,6 +738,7 @@ async fn admission_source_verification_mints_a_store_sealed_empty_set() {
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify admission-source store");
+    let (writer, reader) = store.split();
     let tenant = tenant_scope("empty-admission-sources")
         .parse::<TenantScopeId>()
         .expect("typed admission-source tenant");
@@ -635,13 +752,14 @@ async fn admission_source_verification_mints_a_store_sealed_empty_set() {
             .expect("admission-source invocation"),
     );
 
-    let verified = store
+    let verified = reader
         .verify_no_admission_sources(&authority)
         .await
         .expect("mint an exact empty source set");
     assert!(verified.is_empty());
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -677,21 +795,34 @@ async fn admission_source_verification_loads_the_complete_recursive_source_closu
         )
         .await;
     }
+    let support_a = source_a
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify source A support");
+    let support_b = source_b
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify source B support");
+    let support_c = consumer_c
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify consumer C support");
+    let (writer, reader) = store.split();
 
     let prepared_a = source_a
-        .prepare_on(&store, &issuer)
+        .prepare_on(&writer, &reader, &issuer, &support_a)
         .await
         .expect("prepare source-free A");
-    let view_a = append_and_close_legal_fixture(&store, &issuer, &source_a, prepared_a).await;
+    let view_a = append_and_close_legal_fixture(&writer, &issuer, &source_a, prepared_a).await;
 
     let proposed_a = source_b
         .proposed_effective_output_sources(&view_a)
         .expect("derive A effective-output source");
     let prepared_b = source_b
-        .prepare_on_with_sources(&store, &issuer, proposed_a)
+        .prepare_on_with_sources(&writer, &reader, &issuer, &support_b, proposed_a)
         .await
         .expect("prepare B with direct source A");
-    let view_b = append_and_close_legal_fixture(&store, &issuer, &source_b, prepared_b).await;
+    let view_b = append_and_close_legal_fixture(&writer, &issuer, &source_b, prepared_b).await;
     let [requirement_a] = view_b.admission_source_requirements().cross_run_sources() else {
         panic!("B must retain exactly one direct source requirement");
     };
@@ -701,11 +832,11 @@ async fn admission_source_verification_loads_the_complete_recursive_source_closu
         .proposed_effective_output_sources(&view_b)
         .expect("derive B effective-output source");
     let prepared_c = consumer_c
-        .prepare_on_with_sources(&store, &issuer, proposed_b)
+        .prepare_on_with_sources(&writer, &reader, &issuer, &support_c, proposed_b)
         .await
         .expect("recursive verification must load B and then A");
     let (authority_c, append_c) = prepared_c.into_parts();
-    let run_c = match store
+    let run_c = match writer
         .append_admission(&authority_c, append_c)
         .await
         .expect("append C after recursive verification")
@@ -716,8 +847,8 @@ async fn admission_source_verification_loads_the_complete_recursive_source_closu
         _ => panic!("C must be newly admitted"),
     };
     let drive_c = issuer.authorize_drive(consumer_c.tenant_scope_id().clone(), run_c);
-    let view_c = store
-        .load_committed_journal(&drive_c)
+    let view_c = writer
+        .load_for_drive(&drive_c)
         .await
         .expect("load C")
         .verify_recorded_history()
@@ -727,7 +858,8 @@ async fn admission_source_verification_loads_the_complete_recursive_source_closu
     };
     assert_eq!(requirement_b.source_run_id(), view_b.run_id());
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -747,13 +879,32 @@ async fn qualified_run_fixture_admits_loads_qualifies_and_prepares_a_frame() {
         fixture.configured_bytes(),
     )
     .await;
+    let registry = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify genuine fixture support");
+    let (writer, reader) = store.split();
 
     let prepared = fixture
-        .prepare_on(&store, &issuer)
+        .prepare_on(&reader, &issuer, registry)
         .await
         .expect("prepare genuine qualified admission");
-    let (registry, authority, append) = prepared.into_parts();
-    let run_id = match store
+    let (registry, authority, append_request_id, artifacts, input, configured, sources) =
+        prepared.into_parts();
+    let append = writer
+        .prepare_admission(
+            &authority,
+            append_request_id,
+            AdmissionMaterial::new(
+                artifacts,
+                input,
+                &configured,
+                registry.admitted_support(),
+                &sources,
+            ),
+        )
+        .expect("store-prepare genuine admission");
+    let run_id = match writer
         .append_admission(&authority, append)
         .await
         .expect("append genuine qualified admission")
@@ -765,8 +916,8 @@ async fn qualified_run_fixture_admits_loads_qualifies_and_prepares_a_frame() {
     };
 
     let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id);
-    let view = store
-        .load_committed_journal(&drive)
+    let view = writer
+        .load_for_drive(&drive)
         .await
         .expect("load genuine qualified admission")
         .verify_recorded_history()
@@ -779,7 +930,7 @@ async fn qualified_run_fixture_admits_loads_qualifies_and_prepares_a_frame() {
         .nodes()
         .first()
         .expect("genuine fixture has one certified node");
-    let frame = store
+    let frame = writer
         .prepare_frame(&drive, &view, node.node_id())
         .await
         .expect("prepare genuine callback frame");
@@ -788,7 +939,8 @@ async fn qualified_run_fixture_admits_loads_qualifies_and_prepares_a_frame() {
     assert_eq!(frame.input().bytes(), b"{}");
     assert!(frame.context().is_none());
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -824,11 +976,10 @@ async fn fact_scan_continuation_attestation_and_replay_match_memory() {
     }
 
     fixture
-        .verify_on(&store, &issuer)
+        .verify_on(store, &issuer)
         .await
         .expect("PostgreSQL fact-scan conformance");
 
-    drop(store);
     drop(issuer);
     database.cleanup().await;
 }
@@ -856,14 +1007,20 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
         fixture.consumer().configured_bytes(),
     )
     .await;
+    let support = fixture
+        .consumer()
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify fact-selection consumer support");
+    let (writer, reader) = store.split();
 
     let prepared = fixture
         .consumer()
-        .prepare_on(&store, &issuer)
+        .prepare_on(&writer, &reader, &issuer, &support)
         .await
         .expect("prepare fact-selection consumer admission");
     let (admission_authority, admission) = prepared.into_parts();
-    let run_id = match store
+    let run_id = match writer
         .append_admission(&admission_authority, admission)
         .await
         .expect("append fact-selection consumer admission")
@@ -875,8 +1032,8 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
     };
     let drive =
         issuer.authorize_drive(fixture.consumer().tenant_scope_id().clone(), run_id.clone());
-    let initial_view = store
-        .load_committed_journal(&drive)
+    let initial_view = writer
+        .load_for_drive(&drive)
         .await
         .expect("load fact-selection consumer admission")
         .verify_recorded_history()
@@ -885,11 +1042,11 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
     let append_request_id = AppendRequestId::new("fact-authorization-acknowledgement-ambiguity")
         .expect("fact-selection authorization append request id");
     let (first_append, first_request) = fixture
-        .prepare_authorization_on(&store, &drive, &initial_view, append_request_id.clone())
+        .prepare_authorization_on(&writer, &drive, &initial_view, append_request_id.clone())
         .await
         .expect("prepare first identical fact-selection authorization");
     let (retry_append, retry_request) = fixture
-        .prepare_authorization_on(&store, &drive, &initial_view, append_request_id.clone())
+        .prepare_authorization_on(&writer, &drive, &initial_view, append_request_id.clone())
         .await
         .expect("prepare retry fact-selection authorization");
     assert_eq!(first_request, retry_request);
@@ -906,14 +1063,14 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
         initial_head
     );
 
-    store
+    writer
         .inject_commit_failure(
             run_id.clone(),
             BatchPurpose::ExternalAccessAuthorization,
             TestCommitFailurePoint::AfterCommitBeforeAcknowledgement,
         )
         .expect("arm post-commit fact-selection acknowledgement failure");
-    match store
+    match writer
         .append_fact_selection_authorization(&drive, first_append, first_request)
         .await
         .expect("return authority-free ambiguous fact-selection outcome")
@@ -925,12 +1082,12 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
             panic!("ambiguous acknowledgement must not return fact-scan authority");
         }
     }
-    assert!(!store
+    assert!(!writer
         .commit_failure_is_armed()
         .expect("post-commit failure selector must be consumed"));
 
-    let reconciled = store
-        .load_committed_journal(&drive)
+    let reconciled = writer
+        .load_for_drive(&drive)
         .await
         .expect("reload ambiguous fact-selection append")
         .verify_recorded_history()
@@ -1023,7 +1180,7 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
     );
     assert_eq!(reconciled.unobserved_authorizations().count(), 1);
 
-    let retry_committed = match store
+    let retry_committed = match writer
         .append_fact_selection_authorization(&drive, retry_append, retry_request)
         .await
         .expect("resolve exact fact-selection authorization retry")
@@ -1051,8 +1208,8 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
     );
     assert_eq!(retry_frontier.fact_order, 0);
 
-    let final_view = store
-        .load_committed_journal(&drive)
+    let final_view = writer
+        .load_for_drive(&drive)
         .await
         .expect("reload reconciled fact-selection authorization")
         .verify_recorded_history()
@@ -1094,8 +1251,326 @@ async fn fact_selection_authorization_acknowledgement_ambiguity_does_not_remint_
     .expect("load retained fact head after selection barrier");
     assert_eq!(retained_fact_head, "0");
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn independently_opened_writers_reconcile_the_same_admission_under_cas() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("independent_writer_admission_cas").await;
+    let first_pool = database.independent_store_pool().await;
+    let second_pool = database.independent_store_pool().await;
+    let mut first_connection = first_pool
+        .acquire()
+        .await
+        .expect("acquire first independent connection");
+    let mut second_connection = second_pool
+        .acquire()
+        .await
+        .expect("acquire second independent connection");
+    let first_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *first_connection)
+        .await
+        .expect("inspect first independent connection");
+    let second_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *second_connection)
+        .await
+        .expect("inspect second independent connection");
+    assert_ne!(
+        first_backend_pid, second_backend_pid,
+        "the CAS race must cross independently constructed PostgreSQL connections"
+    );
+    drop(first_connection);
+    drop(second_connection);
+    let (first, first_issuer) = open_authoritative(first_pool, TestAuthoritativeWriterFence)
+        .await
+        .expect("open first authoritative writer");
+    let (second, second_issuer) = open_authoritative(second_pool, TestAuthoritativeWriterFence)
+        .await
+        .expect("open second authoritative writer");
+    assert_eq!(first.store_identity(), second.store_identity());
+
+    let fixture = LegalAdmissionFixture::for_store(first.store_identity().clone(), 78)
+        .expect("independent-writer fixture");
+    provision_configured_value(
+        &database.pool,
+        fixture.configured_binding(),
+        fixture.configured_bytes(),
+    )
+    .await;
+    let first_support = fixture
+        .qualify_on(&first, &first_issuer)
+        .await
+        .expect("qualify support through first writer");
+    let second_support = fixture
+        .qualify_on(&second, &second_issuer)
+        .await
+        .expect("reconcile support through second writer");
+    let (first_writer, first_reader) = first.split();
+    let (second_writer, second_reader) = second.split();
+    let first_prepared = fixture
+        .prepare_on(&first_writer, &first_reader, &first_issuer, &first_support)
+        .await
+        .expect("prepare admission through first writer");
+    let second_prepared = fixture
+        .prepare_on(
+            &second_writer,
+            &second_reader,
+            &second_issuer,
+            &second_support,
+        )
+        .await
+        .expect("prepare admission through second writer");
+    assert_eq!(
+        first_prepared.append().admission(),
+        second_prepared.append().admission(),
+        "independent qualification must author the same immutable root"
+    );
+
+    let (first_authority, first_append) = first_prepared.into_parts();
+    let (second_authority, second_append) = second_prepared.into_parts();
+    let start = Arc::new(tokio::sync::Barrier::new(3));
+    let first_start = Arc::clone(&start);
+    let first_task = tokio::spawn(async move {
+        first_start.wait().await;
+        first_writer
+            .append_admission(&first_authority, first_append)
+            .await
+    });
+    let second_start = Arc::clone(&start);
+    let second_task = tokio::spawn(async move {
+        second_start.wait().await;
+        second_writer
+            .append_admission(&second_authority, second_append)
+            .await
+    });
+    start.wait().await;
+    let first_outcome = first_task
+        .await
+        .expect("first writer task must not panic")
+        .expect("first writer append");
+    let second_outcome = second_task
+        .await
+        .expect("second writer task must not panic")
+        .expect("second writer append");
+    assert!(
+        matches!(
+            (&first_outcome, &second_outcome),
+            (
+                AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(_)),
+                AppendOutcome::AlreadyCommitted(_)
+            ) | (
+                AppendOutcome::AlreadyCommitted(_),
+                AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(_))
+            )
+        ),
+        "exactly one independent writer must publish while the other reconciles"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM journal_commits WHERE run_sequence = 1"
+        )
+        .fetch_one(&database.pool)
+        .await
+        .expect("count retained admission roots"),
+        1
+    );
+
+    drop(first_reader);
+    drop(second_reader);
+    drop(first_issuer);
+    drop(second_issuer);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn runtime_normalizes_changed_root_admission_retry_to_admission_conflict() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("runtime_changed_root_admission").await;
+    let pool = database.independent_store_pool().await;
+    let (store, issuer) = open_authoritative(pool, TestAuthoritativeWriterFence)
+        .await
+        .expect("open authoritative Runtime store");
+    let fixture = QualifiedRunFixture::for_store(store.store_identity().clone(), 79)
+        .expect("changed-root Runtime fixture");
+    provision_configured_value(
+        &database.pool,
+        fixture.configured_binding(),
+        fixture.configured_bytes(),
+    )
+    .await;
+    let registry = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify changed-root Runtime registry");
+    let (writer, reader) = store.split();
+    let first = fixture
+        .prepare_on(&reader, &issuer, Arc::clone(&registry))
+        .await
+        .expect("prepare first Runtime admission");
+    let changed = fixture
+        .prepare_on(&reader, &issuer, Arc::clone(&registry))
+        .await
+        .expect("prepare changed-root Runtime retry");
+    let runtime = Runtime::new(writer, registry);
+    let admitted = runtime
+        .admit(runtime_admission_plan(&fixture, first, None))
+        .await
+        .expect("commit first Runtime admission");
+    let error = match runtime
+        .admit(runtime_admission_plan(
+            &fixture,
+            changed,
+            Some(
+                PlainCanonicalJsonBytes::from_json_str(r#"{"changed":true}"#)
+                    .expect("changed canonical admission input"),
+            ),
+        ))
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("changed immutable root must conflict"),
+    };
+    assert!(matches!(
+        error,
+        RuntimeError::Store(StoreError::AdmissionConflict)
+    ));
+
+    let replay =
+        issuer.authorize_replay(fixture.tenant_scope_id().clone(), admitted.run_id().clone());
+    assert_eq!(
+        reader
+            .load_for_replay(&replay)
+            .await
+            .expect("load retained admission after conflict")
+            .commits()
+            .len(),
+        1,
+        "the changed-root retry must not publish another root"
+    );
+
+    drop(runtime);
+    drop(reader);
+    drop(issuer);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn reopened_runtime_classifies_unavailable_candidate_as_operational_block() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("runtime_reopen_unavailable").await;
+    let pool = database.independent_store_pool().await;
+    let (store, issuer) = open_authoritative(pool, TestAuthoritativeWriterFence)
+        .await
+        .expect("open recorded Runtime backend");
+    let identity = store.store_identity().clone();
+    let recorded = QualifiedRunFixture::for_store(identity.clone(), 80).expect("recorded fixture");
+    let unavailable = QualifiedRunFixture::for_store_with_operation(
+        identity,
+        81,
+        StableId::new("mfm.fixture/unavailable-operation").expect("unavailable operation"),
+    )
+    .expect("unavailable candidate fixture");
+    for fixture in [&recorded, &unavailable] {
+        provision_configured_value(
+            &database.pool,
+            fixture.configured_binding(),
+            fixture.configured_bytes(),
+        )
+        .await;
+    }
+    let run_id = admit_recorded_run(store, &issuer, &recorded).await;
+    drop(issuer);
+
+    assert!(matches!(
+        drive_with_reopened_candidate(&database, &unavailable, recorded.tenant_scope_id(), run_id,)
+            .await,
+        DriveOutcome::Waiting {
+            reason: DriveWaitReason::OperationalBlock,
+            ..
+        }
+    ));
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn reopened_runtime_classifies_incompatible_candidate_as_integrity_block() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("runtime_reopen_incompatible").await;
+    let pool = database.independent_store_pool().await;
+    let (store, issuer) = open_authoritative(pool, TestAuthoritativeWriterFence)
+        .await
+        .expect("open recorded Runtime backend");
+    let identity = store.store_identity().clone();
+    let recorded = QualifiedRunFixture::for_store(identity.clone(), 82).expect("recorded fixture");
+    let incompatible = QualifiedRunFixture::for_store(identity, 83)
+        .expect("incompatible candidate fixture")
+        .with_incompatible_planning_profile();
+    for fixture in [&recorded, &incompatible] {
+        provision_configured_value(
+            &database.pool,
+            fixture.configured_binding(),
+            fixture.configured_bytes(),
+        )
+        .await;
+    }
+    let run_id = admit_recorded_run(store, &issuer, &recorded).await;
+    drop(issuer);
+
+    assert!(matches!(
+        drive_with_reopened_candidate(
+            &database,
+            &incompatible,
+            recorded.tenant_scope_id(),
+            run_id,
+        )
+        .await,
+        DriveOutcome::Waiting {
+            reason: DriveWaitReason::IntegrityBlock,
+            ..
+        }
+    ));
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn reopened_runtime_classifies_same_identity_decode_failure_as_integrity_block() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("runtime_reopen_decode_failure").await;
+    let pool = database.independent_store_pool().await;
+    let (store, issuer) = open_authoritative(pool, TestAuthoritativeWriterFence)
+        .await
+        .expect("open recorded Runtime backend");
+    let identity = store.store_identity().clone();
+    let recorded = QualifiedRunFixture::for_store(identity.clone(), 84).expect("recorded fixture");
+    let integrity_failing = QualifiedRunFixture::for_store(identity, 84)
+        .expect("same-identity candidate fixture")
+        .with_integrity_failing_state_callback();
+    provision_configured_value(
+        &database.pool,
+        recorded.configured_binding(),
+        recorded.configured_bytes(),
+    )
+    .await;
+    let run_id = admit_recorded_run(store, &issuer, &recorded).await;
+    drop(issuer);
+
+    assert!(matches!(
+        drive_with_reopened_candidate(
+            &database,
+            &integrity_failing,
+            recorded.tenant_scope_id(),
+            run_id,
+        )
+        .await,
+        DriveOutcome::Waiting {
+            reason: DriveWaitReason::IntegrityBlock,
+            ..
+        }
+    ));
     database.cleanup().await;
 }
 
@@ -1114,13 +1589,32 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         fixture.configured_bytes(),
     )
     .await;
+    let registry = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify genuine race support");
+    let (writer, reader) = store.split();
 
     let prepared = fixture
-        .prepare_on(&store, &issuer)
+        .prepare_on(&reader, &issuer, registry)
         .await
         .expect("prepare initial genuine admission");
-    let (registry, admission_authority, admission) = prepared.into_parts();
-    let run_id = match store
+    let (registry, admission_authority, append_request_id, artifacts, input, configured, sources) =
+        prepared.into_parts();
+    let admission = writer
+        .prepare_admission(
+            &admission_authority,
+            append_request_id,
+            AdmissionMaterial::new(
+                artifacts,
+                input,
+                &configured,
+                registry.admitted_support(),
+                &sources,
+            ),
+        )
+        .expect("prepare initial genuine admission append");
+    let run_id = match writer
         .append_admission(&admission_authority, admission)
         .await
         .expect("append initial genuine admission")
@@ -1132,8 +1626,8 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
     };
 
     let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
-    let view = store
-        .load_committed_journal(&drive)
+    let view = writer
+        .load_for_drive(&drive)
         .await
         .expect("load initial genuine admission")
         .verify_recorded_history()
@@ -1155,7 +1649,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
     let output_ordinal = certified_output.output_ordinal();
     let output_path = certified_output.field_path().clone();
     let output_contract = certified_output.value_contract().clone();
-    let frame = store
+    let frame = writer
         .prepare_frame(&drive, &view, &node_id)
         .await
         .expect("prepare genuine pure frame");
@@ -1167,7 +1661,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         .raw_content_digest(output.as_bytes());
     let successor_append_request_id =
         AppendRequestId::new("qualified-fixture-successor/2a").expect("successor request id");
-    let successor = store
+    let successor = writer
         .prepare_append(
             &drive,
             &view,
@@ -1187,10 +1681,31 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         )
         .expect("prepare genuine successor");
     let retry = fixture
-        .prepare_on(&store, &issuer)
+        .prepare_on(&reader, &issuer, Arc::clone(&registry))
         .await
         .expect("prepare immutable-root retry");
-    let (_retry_registry, retry_authority, retry_admission) = retry.into_parts();
+    let (
+        retry_registry,
+        retry_authority,
+        retry_append_request_id,
+        retry_artifacts,
+        retry_input,
+        retry_configured,
+        retry_sources,
+    ) = retry.into_parts();
+    let retry_admission = writer
+        .prepare_admission(
+            &retry_authority,
+            retry_append_request_id,
+            AdmissionMaterial::new(
+                retry_artifacts,
+                retry_input,
+                &retry_configured,
+                retry_registry.admitted_support(),
+                &retry_sources,
+            ),
+        )
+        .expect("prepare immutable-root retry append");
 
     let run_lock_key =
         crate::journal_store::run_advisory_lock_key(&run_id).expect("derive exact run lock");
@@ -1200,11 +1715,12 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         .execute(&mut *holder)
         .await
         .expect("hold exact run lock");
-    let hook = store
+    let hook = writer
         .inject_before_admission_run_lock(fixture.append_request_id().clone())
         .expect("arm admission run-lock hook");
 
-    let retry_store = store.clone();
+    let writer = Arc::new(writer);
+    let retry_store = Arc::clone(&writer);
     let mut retry_task = tokio::spawn(async move {
         retry_store
             .append_admission(&retry_authority, retry_admission)
@@ -1214,7 +1730,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         .await
         .expect("admission retry must reach the run-lock boundary");
 
-    let successor_store = store.clone();
+    let successor_store = Arc::clone(&writer);
     let mut successor_task =
         tokio::spawn(async move { successor_store.append(&drive, successor).await });
     wait_for_advisory_waiters(&database.pool, run_lock_key, 1).await;
@@ -1246,8 +1762,8 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
     assert!(matches!(retry_outcome, AppendOutcome::AlreadyCommitted(_)));
 
     let final_drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
-    let journal = store
-        .load_committed_journal(&final_drive)
+    let journal = writer
+        .load_for_drive(&final_drive)
         .await
         .expect("load final raced journal");
     let admission_count = journal
@@ -1282,7 +1798,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
 
     let public_authority =
         issuer.authorize_read_public(fixture.tenant_scope_id().clone(), run_id.clone());
-    let public = store
+    let public = reader
         .read_public_run(&public_authority)
         .await
         .expect("read genuine public run")
@@ -1308,12 +1824,12 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         issuer.authorize_inspect_trace(fixture.tenant_scope_id().clone(), run_id.clone());
     let trace_request =
         TransitionTracePageRequest::new(None, 0, 1).expect("bounded first trace page");
-    let requirements = store
+    let requirements = reader
         .discover_transition_trace_sources(&trace_authority, trace_request)
         .await
         .expect("discover genuine trace sources");
     assert!(requirements.source_run_ids().is_empty());
-    let trace_page = store
+    let trace_page = reader
         .inspect_transition_trace(&trace_authority, requirements, &[])
         .await
         .expect("render genuine transition trace");
@@ -1333,7 +1849,8 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         Some(CanonicalValue::String(value)) if value == "mfm.transition-trace.v1"
     ));
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     drop(issuer);
     database.cleanup().await;
 }
@@ -1401,7 +1918,10 @@ async fn generation_fence_rejects_stale_writer_rollback_and_identity_change() {
     let (store, issuer) = open_authoritative(database.pool.clone(), fence.clone())
         .await
         .expect("the exact retained generation must qualify");
-    assert_eq!(store.store_scope_id().as_str(), expected_scope);
+    assert_eq!(
+        store.store_identity().store_scope_id().as_str(),
+        expected_scope
+    );
     drop(store);
     drop(issuer);
 
@@ -1666,6 +2186,7 @@ async fn journal_load_rejects_admission_routing_that_disagrees_with_the_canonica
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("physical routing corruption must be detected by the exact run loader");
+    let store_identity = store.store_identity().clone();
     let tenant_scope_id = admission
         .tenant_scope_id
         .parse::<TenantScopeId>()
@@ -1674,22 +2195,27 @@ async fn journal_load_rejects_admission_routing_that_disagrees_with_the_canonica
         .run_id
         .parse::<RunId>()
         .expect("typed admission run");
-    let mut transaction = store
-        .writer_pool()
+    let mut transaction = database
+        .pool
         .begin()
         .await
         .expect("begin hostile admission load");
-    store
-        .pin_transaction_schema(&mut transaction)
-        .await
-        .expect("pin hostile admission schema");
+    sqlx::query(
+        "SELECT pg_catalog.set_config( \
+             'search_path', pg_catalog.format('%I, pg_catalog', $1), TRUE \
+         )",
+    )
+    .bind(&database.schema)
+    .execute(&mut *transaction)
+    .await
+    .expect("pin hostile admission schema");
     sqlx::query("SET LOCAL ROLE mfm_store_application")
         .execute(&mut *transaction)
         .await
         .expect("use the application role for the hostile load");
     let error = crate::journal_store::verify_persisted_run_for_test(
         &mut transaction,
-        &store,
+        &store_identity,
         &tenant_scope_id,
         &run_id,
     )
@@ -1983,16 +2509,18 @@ async fn configured_values_resolve_only_the_exact_immutable_admission_key() {
     let contract = retained_contract("configured-value");
     let bytes =
         PlainCanonicalJsonBytes::from_json_str(r#"{"enabled":true}"#).expect("configured bytes");
-    let key = ConfiguredValueKey::new(store.store_scope_id(), &tenant, &entry_point, &target)
+    let store_scope_id = store.store_identity().store_scope_id().clone();
+    let key = ConfiguredValueKey::new(&store_scope_id, &tenant, &entry_point, &target)
         .expect("configured key");
     let producer =
-        ProducerBinding::configured_value(store.store_scope_id(), &tenant, &entry_point, &target)
+        ProducerBinding::configured_value(&store_scope_id, &tenant, &entry_point, &target)
             .expect("configured producer");
     let value_ref = derive_value_ref(&contract, &producer, bytes.as_bytes());
     let binding = ConfiguredValueBinding::new(&key, &value_ref).expect("configured binding");
     provision_configured_value(&database.pool, &binding, bytes.as_bytes()).await;
+    let (writer, reader) = store.split();
 
-    let resolved = store
+    let resolved = reader
         .resolve_configured_value(&authority, &entry_point, &target, &contract)
         .await
         .expect("resolve exact configured value");
@@ -2001,7 +2529,7 @@ async fn configured_values_resolve_only_the_exact_immutable_admission_key() {
     assert_eq!(resolved.bytes(), bytes.as_bytes());
 
     let missing_target = StableId::new("other-settings").expect("other target");
-    let missing = match store
+    let missing = match reader
         .resolve_configured_value(&authority, &entry_point, &missing_target, &contract)
         .await
     {
@@ -2015,7 +2543,7 @@ async fn configured_values_resolve_only_the_exact_immutable_admission_key() {
     ));
 
     let mismatched_contract = retained_contract("different-configured-value");
-    let mismatch = match store
+    let mismatch = match reader
         .resolve_configured_value(&authority, &entry_point, &target, &mismatched_contract)
         .await
     {
@@ -2042,7 +2570,7 @@ async fn configured_values_resolve_only_the_exact_immutable_admission_key() {
 
     let other_scope = StoreScopeId::new("mfm.store_scope.v1:00000000000000000000000000000000")
         .expect("other store scope");
-    assert_ne!(&other_scope, store.store_scope_id());
+    assert_ne!(&other_scope, &store_scope_id);
     let mut transaction = database
         .pool
         .begin()
@@ -2079,7 +2607,8 @@ async fn configured_values_resolve_only_the_exact_immutable_admission_key() {
         Some("23503")
     );
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     database.cleanup().await;
 }
 
@@ -2090,6 +2619,7 @@ async fn commit_failure_selector_is_exact_non_consuming_and_one_shot() {
     let (store, _issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
         .await
         .expect("qualify failure-selector store");
+    let (writer, reader) = store.split();
     let selected = run_id("failure-selector-selected")
         .parse::<RunId>()
         .expect("selected run id");
@@ -2097,17 +2627,17 @@ async fn commit_failure_selector_is_exact_non_consuming_and_one_shot() {
         .parse::<RunId>()
         .expect("unrelated run id");
 
-    store
+    writer
         .inject_commit_failure(
             selected.clone(),
             BatchPurpose::PureSettlement,
             TestCommitFailurePoint::BeforeCommit,
         )
         .expect("arm exact commit failure");
-    assert!(store
+    assert!(writer
         .commit_failure_is_armed()
         .expect("inspect armed selector"));
-    assert!(store
+    assert!(writer
         .inject_commit_failure(
             selected.clone(),
             BatchPurpose::PureSettlement,
@@ -2115,37 +2645,38 @@ async fn commit_failure_selector_is_exact_non_consuming_and_one_shot() {
         )
         .is_err());
     assert_eq!(
-        store
+        writer
             .take_commit_failure(&unrelated, BatchPurpose::PureSettlement)
             .expect("unrelated run does not consume"),
         None
     );
     assert_eq!(
-        store
+        writer
             .take_commit_failure(&selected, BatchPurpose::ReadSettlement)
             .expect("unrelated purpose does not consume"),
         None
     );
-    assert!(store
+    assert!(writer
         .commit_failure_is_armed()
         .expect("selector remains armed"));
     assert_eq!(
-        store
+        writer
             .take_commit_failure(&selected, BatchPurpose::PureSettlement)
             .expect("matching append consumes once"),
         Some(TestCommitFailurePoint::BeforeCommit)
     );
-    assert!(!store
+    assert!(!writer
         .commit_failure_is_armed()
         .expect("selector is disarmed"));
     assert_eq!(
-        store
+        writer
             .take_commit_failure(&selected, BatchPurpose::PureSettlement)
             .expect("consumed selector stays absent"),
         None
     );
 
-    drop(store);
+    drop(writer);
+    drop(reader);
     database.cleanup().await;
 }
 
@@ -2908,13 +3439,13 @@ impl AuthoritativeWriterFence for GenerationFence {
 }
 
 async fn append_and_close_legal_fixture(
-    store: &crate::QualifiedPostgresStore,
+    writer: &PostgresWriter,
     issuer: &RunAccessAuthorityIssuer,
     fixture: &LegalAdmissionFixture,
     prepared: PreparedLegalAdmission,
 ) -> VerifiedRunView {
     let (authority, admission) = prepared.into_parts();
-    let run_id = match store
+    let run_id = match writer
         .append_admission(&authority, admission)
         .await
         .expect("append legal fixture admission")
@@ -2925,8 +3456,8 @@ async fn append_and_close_legal_fixture(
         _ => panic!("legal fixture admission must be newly appended"),
     };
     let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
-    let view = store
-        .load_committed_journal(&drive)
+    let view = writer
+        .load_for_drive(&drive)
         .await
         .expect("load open legal fixture run")
         .verify_recorded_history()
@@ -2945,13 +3476,13 @@ async fn append_and_close_legal_fixture(
     let output_ordinal = certified_output.output_ordinal();
     let output_path = certified_output.field_path().clone();
     let output_contract = certified_output.value_contract().clone();
-    let frame = store
+    let frame = writer
         .prepare_frame(&drive, &view, &node_id)
         .await
         .expect("prepare legal fixture frame");
     let output = PlainCanonicalJsonBytes::from_json_str(r#"{"result":"settled"}"#)
         .expect("canonical legal fixture output");
-    let successor = store
+    let successor = writer
         .prepare_append(
             &drive,
             &view,
@@ -2971,7 +3502,7 @@ async fn append_and_close_legal_fixture(
         )
         .expect("prepare legal fixture settlement");
     assert!(matches!(
-        store
+        writer
             .append(&drive, successor)
             .await
             .expect("append legal fixture settlement"),
@@ -2979,8 +3510,8 @@ async fn append_and_close_legal_fixture(
     ));
 
     let final_drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id);
-    store
-        .load_committed_journal(&final_drive)
+    writer
+        .load_for_drive(&final_drive)
         .await
         .expect("load closed legal fixture run")
         .verify_recorded_history()
@@ -3075,6 +3606,19 @@ impl TestDatabase {
         self.database_url
             .parse()
             .expect("parse PostgreSQL test URL")
+    }
+
+    async fn independent_store_pool(&self) -> PgPool {
+        let options = self
+            .database_url
+            .parse::<PgConnectOptions>()
+            .expect("parse PostgreSQL test URL")
+            .options([("search_path", self.schema.as_str())]);
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("connect independent isolated store pool")
     }
 
     async fn create_unqualified_login_role(&mut self) -> String {

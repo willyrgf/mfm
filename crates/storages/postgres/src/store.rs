@@ -1,6 +1,5 @@
-use std::sync::Arc;
 #[cfg(any(test, feature = "parity-tests"))]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(any(test, feature = "parity-tests"))]
 use mfm_ids::{AppendRequestId, RunId};
@@ -14,7 +13,7 @@ use crate::error::{database_error, PostgresStoreError, Result};
 use crate::qualification::{AuthoritativeWriterContext, WriterQualification};
 use crate::schema::{APPLICATION_ROLE, SCHEMA_CONTRACT_VERSION};
 
-struct QualifiedPostgresStoreInner {
+struct PostgresRunJournalBackendInner {
     writer_pool: PgPool,
     writer_context: AuthoritativeWriterContext,
     authority: StoreAuthorityContext,
@@ -26,7 +25,8 @@ struct QualifiedPostgresStoreInner {
 
 #[cfg(any(test, feature = "parity-tests"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TestCommitFailurePoint {
+#[doc(hidden)]
+pub enum TestCommitFailurePoint {
     BeforeCommit,
     AfterCommitBeforeAcknowledgement,
 }
@@ -47,7 +47,8 @@ struct TestAdmissionRunLockHookArm {
 
 #[cfg(any(test, feature = "parity-tests"))]
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct TestAdmissionRunLockHook {
+#[doc(hidden)]
+pub struct TestAdmissionRunLockHook {
     reached: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
@@ -55,11 +56,13 @@ pub(crate) struct TestAdmissionRunLockHook {
 #[cfg(any(test, feature = "parity-tests"))]
 #[cfg_attr(not(test), allow(dead_code))]
 impl TestAdmissionRunLockHook {
-    pub(crate) async fn wait_until_reached(&self) {
+    /// Waits until the exact backend lock point is reached.
+    pub async fn wait_until_reached(&self) {
         self.reached.notified().await;
     }
 
-    pub(crate) fn release(self) {
+    /// Releases the paused append.
+    pub fn release(self) {
         self.release.notify_one();
     }
 }
@@ -71,17 +74,13 @@ impl Drop for TestAdmissionRunLockHook {
     }
 }
 
-/// PostgreSQL store bound to one deployment-qualified authoritative writer.
-///
-/// This type has no raw-pool constructor or pool accessor. Clones share the same already-qualified
-/// pool; constructing a store for another pool, reconnect, restore, or promotion requires a fresh
-/// call to [`crate::open_authoritative`].
-#[derive(Clone)]
-pub struct QualifiedPostgresStore {
-    inner: Arc<QualifiedPostgresStoreInner>,
+/// Deployment-qualified PostgreSQL backend hidden behind MFM history wrappers.
+#[doc(hidden)]
+pub struct PostgresRunJournalBackend {
+    inner: PostgresRunJournalBackendInner,
 }
 
-impl QualifiedPostgresStore {
+impl PostgresRunJournalBackend {
     pub(crate) fn from_qualification(
         writer_pool: PgPool,
         qualification: WriterQualification,
@@ -91,7 +90,7 @@ impl QualifiedPostgresStore {
         let (authority, issuer) = StoreAuthorityContext::bootstrap(identity);
         (
             Self {
-                inner: Arc::new(QualifiedPostgresStoreInner {
+                inner: PostgresRunJournalBackendInner {
                     writer_pool,
                     writer_context: writer,
                     authority,
@@ -99,7 +98,7 @@ impl QualifiedPostgresStore {
                     commit_failure: Mutex::new(None),
                     #[cfg(any(test, feature = "parity-tests"))]
                     admission_run_lock_hook: Mutex::new(None),
-                }),
+                },
             },
             issuer,
         )
@@ -120,7 +119,7 @@ impl QualifiedPostgresStore {
     ///
     /// Readiness proves only connection, writer, retained lineage, and minimum schema authority.
     /// It performs no provider, network, semantic callback, or run-progress work.
-    pub async fn check_ready(&self) -> Result<()> {
+    pub(crate) async fn check_ready(&self) -> Result<()> {
         let mut transaction = self
             .writer_pool()
             .begin()

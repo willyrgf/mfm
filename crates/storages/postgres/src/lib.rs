@@ -19,7 +19,11 @@ pub use qualification::{
     AuthoritativeWriterFenceFuture,
 };
 pub use schema::PostgresSchema;
-pub use store::QualifiedPostgresStore;
+#[doc(hidden)]
+pub use store::PostgresRunJournalBackend;
+#[cfg(any(test, feature = "parity-tests"))]
+#[doc(hidden)]
+pub use store::{TestAdmissionRunLockHook, TestCommitFailurePoint};
 
 #[cfg(all(test, feature = "parity-tests"))]
 mod tests;

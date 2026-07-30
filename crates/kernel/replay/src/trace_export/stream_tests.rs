@@ -4,9 +4,10 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, ContentRef, SchemaId};
 use mfm_store::v1::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
 use mfm_store::v1::{
-    AppendOutcome, AsyncInMemoryRunStore, ExistingRunAppendMaterial, NewlyAppended,
-    ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot, RunAccessAuthorityIssuer,
-    RunJournalStore, SettlementMaterial, TransitionMaterial, VerifiedRunView,
+    open_in_memory, AppendOutcome, ExistingRunAppendMaterial, InMemoryRunJournalBackend,
+    NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
+    RunAccessAuthorityIssuer, RunHistoryReader, RunHistoryWriter, SettlementMaterial,
+    TransitionMaterial, VerifiedRunView,
 };
 
 use super::{
@@ -17,23 +18,6 @@ use super::{
 #[tokio::test]
 async fn closure_wide_lookup_returns_dependency_only_retained_bytes() {
     let source_a = LegalAdmissionFixture::new(0x60).expect("source A fixture");
-    let (store, issuer) = AsyncInMemoryRunStore::new(source_a.store_identity().clone());
-    source_a
-        .provision_in_memory(&store)
-        .expect("provision source A");
-    let prepared_a = source_a
-        .prepare_on(&store, &issuer)
-        .await
-        .expect("prepare source A");
-    let view_a = settle_fixture(
-        &store,
-        &issuer,
-        &source_a,
-        prepared_a,
-        r#"{"result":"source-a"}"#,
-    )
-    .await;
-
     let source_b = LegalAdmissionFixture::for_store_in_tenant(
         source_a.store_identity().clone(),
         source_a.tenant_scope_id().clone(),
@@ -41,25 +25,6 @@ async fn closure_wide_lookup_returns_dependency_only_retained_bytes() {
     )
     .expect("source B fixture")
     .with_effective_output_source();
-    source_b
-        .provision_in_memory(&store)
-        .expect("provision source B");
-    let proposed_a = source_b
-        .proposed_effective_output_sources(&view_a)
-        .expect("propose A to B");
-    let prepared_b = source_b
-        .prepare_on_with_sources(&store, &issuer, proposed_a)
-        .await
-        .expect("prepare source B");
-    let view_b = settle_fixture(
-        &store,
-        &issuer,
-        &source_b,
-        prepared_b,
-        r#"{"result":"source-b"}"#,
-    )
-    .await;
-
     let root = LegalAdmissionFixture::for_store_in_tenant(
         source_a.store_identity().clone(),
         source_a.tenant_scope_id().clone(),
@@ -67,16 +32,68 @@ async fn closure_wide_lookup_returns_dependency_only_retained_bytes() {
     )
     .expect("root fixture")
     .with_effective_output_source();
+    let (store, issuer) = open_in_memory(source_a.store_identity().clone());
+    source_a
+        .provision_in_memory(&store)
+        .expect("provision source A");
+    source_b
+        .provision_in_memory(&store)
+        .expect("provision source B");
     root.provision_in_memory(&store).expect("provision root");
+    let support_a = source_a
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify source A");
+    let support_b = source_b
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify source B");
+    let support_root = root
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify root");
+    let (writer, reader) = store.split();
+    let prepared_a = source_a
+        .prepare_on(&writer, &reader, &issuer, &support_a)
+        .await
+        .expect("prepare source A");
+    let view_a = settle_fixture(
+        &writer,
+        &reader,
+        &issuer,
+        &source_a,
+        prepared_a,
+        r#"{"result":"source-a"}"#,
+    )
+    .await;
+
+    let proposed_a = source_b
+        .proposed_effective_output_sources(&view_a)
+        .expect("propose A to B");
+    let prepared_b = source_b
+        .prepare_on_with_sources(&writer, &reader, &issuer, &support_b, proposed_a)
+        .await
+        .expect("prepare source B");
+    let view_b = settle_fixture(
+        &writer,
+        &reader,
+        &issuer,
+        &source_b,
+        prepared_b,
+        r#"{"result":"source-b"}"#,
+    )
+    .await;
+
     let proposed_b = root
         .proposed_effective_output_sources(&view_b)
         .expect("propose B to root");
     let prepared_root = root
-        .prepare_on_with_sources(&store, &issuer, proposed_b)
+        .prepare_on_with_sources(&writer, &reader, &issuer, &support_root, proposed_b)
         .await
         .expect("prepare root");
     let root_view = settle_fixture(
-        &store,
+        &writer,
+        &reader,
         &issuer,
         &root,
         prepared_root,
@@ -130,7 +147,7 @@ async fn closure_wide_lookup_returns_dependency_only_retained_bytes() {
     ];
     let mut bytes = Vec::new();
     let metadata = write_portable_run_export_stream(
-        &store,
+        &reader,
         &root_authority,
         &dependency_authorities,
         ExportKind::Semantic,
@@ -155,7 +172,7 @@ async fn closure_wide_lookup_returns_dependency_only_retained_bytes() {
 
     let replay_authority =
         issuer.authorize_replay(root.tenant_scope_id().clone(), root_view.run_id().clone());
-    let history = crate::v1::verify_recorded_history(&store, &replay_authority)
+    let history = crate::v1::verify_recorded_history(&reader, &replay_authority)
         .await
         .expect("verify root history");
     let stream = history
@@ -181,14 +198,15 @@ fn content_identities(view: &VerifiedRunView) -> BTreeSet<(SchemaId, ContentDige
 }
 
 async fn settle_fixture(
-    store: &AsyncInMemoryRunStore,
+    writer: &RunHistoryWriter<InMemoryRunJournalBackend>,
+    reader: &RunHistoryReader<InMemoryRunJournalBackend>,
     issuer: &RunAccessAuthorityIssuer,
     fixture: &LegalAdmissionFixture,
     prepared: PreparedLegalAdmission,
     output: &str,
 ) -> VerifiedRunView {
     let (admit, append) = prepared.into_parts();
-    let outcome = store
+    let outcome = writer
         .append_admission(&admit, append)
         .await
         .expect("append fixture admission");
@@ -197,8 +215,8 @@ async fn settle_fixture(
     };
     let drive =
         issuer.authorize_drive(fixture.tenant_scope_id().clone(), admitted.run_id().clone());
-    let open = store
-        .load_committed_journal(&drive)
+    let open = writer
+        .load_for_drive(&drive)
         .await
         .expect("load open fixture")
         .verify_recorded_history()
@@ -209,12 +227,12 @@ async fn settle_fixture(
     let [output_slot] = node.settlement_contract().output_slots() else {
         panic!("fixture must certify exactly one output");
     };
-    let frame = store
+    let frame = writer
         .prepare_frame(&drive, &open, node.node_id())
         .await
         .expect("prepare fixture frame");
     let output = PlainCanonicalJsonBytes::from_json_str(output).expect("canonical fixture output");
-    let append = store
+    let append = writer
         .prepare_append(
             &drive,
             &open,
@@ -234,14 +252,16 @@ async fn settle_fixture(
         )
         .expect("prepare fixture settlement");
     assert!(matches!(
-        store
+        writer
             .append(&drive, append)
             .await
             .expect("append settlement"),
         AppendOutcome::NewlyAppended(NewlyAppended::Transition(_))
     ));
-    store
-        .load_committed_journal(&drive)
+    reader
+        .load_for_replay(
+            &issuer.authorize_replay(fixture.tenant_scope_id().clone(), admitted.run_id().clone()),
+        )
         .await
         .expect("load closed fixture")
         .verify_recorded_history()

@@ -23,8 +23,8 @@ use mfm_journal::v1::{
 };
 use mfm_store::v1::{
     verify_offline_recorded_material, CommittedJournalCommit, CommittedJournalRecord,
-    CommittedObject, Export, RunAccessAuthority, RunJournalStore, StoreIdentity,
-    UntrustedObjectPayload, VerifiedRunView,
+    CommittedObject, Export, RunAccessAuthority, RunHistoryReader, RunJournalBackend,
+    StoreIdentity, UntrustedObjectPayload, VerifiedRunView,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -359,30 +359,31 @@ struct PreparedExportPayload {
 /// The root and every discovered source run are loaded through their own
 /// `Export` grant before the first output byte is written. The writer is
 /// flushed and shut down after the terminal frame.
-pub async fn write_portable_run_export_stream<S, W>(
-    store: &S,
+pub async fn write_portable_run_export_stream<B, W>(
+    reader: &RunHistoryReader<B>,
     root_authority: &RunAccessAuthority<Export>,
     dependency_authorities: &[RunAccessAuthority<Export>],
     kind: ExportKind,
     writer: &mut W,
 ) -> Result<PortableRunExportMetadata>
 where
-    S: RunJournalStore,
+    B: RunJournalBackend,
     W: AsyncWrite + Unpin,
 {
     let closure =
-        prepare_export_closure(store, root_authority, dependency_authorities, kind).await?;
+        prepare_export_closure(reader, root_authority, dependency_authorities, kind).await?;
     closure.write_to(writer).await
 }
 
-async fn prepare_export_closure<S: RunJournalStore>(
-    store: &S,
+async fn prepare_export_closure<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
     root_authority: &RunAccessAuthority<Export>,
     dependency_authorities: &[RunAccessAuthority<Export>],
     kind: ExportKind,
 ) -> Result<PreparedExportClosure> {
     let mut state = SourceLoadStep::Pending(
-        AuthorizedSourceSession::begin(store, root_authority, dependency_authorities, kind).await?,
+        AuthorizedSourceSession::begin(reader, root_authority, dependency_authorities, kind)
+            .await?,
     );
     let closure = loop {
         match state {
@@ -427,8 +428,8 @@ enum SourceLoadStep<T, C> {
     Complete(C),
 }
 
-struct AuthorizedSourceSession<'authority, S> {
-    store: &'authority S,
+struct AuthorizedSourceSession<'authority, B> {
+    reader: &'authority RunHistoryReader<B>,
     authorities: BTreeMap<RunId, &'authority RunAccessAuthority<Export>>,
     store_identity: StoreIdentity,
     tenant_scope_id: TenantScopeId,
@@ -449,15 +450,15 @@ struct VerifiedSourceClosure {
     views: BTreeMap<RunId, (VerifiedRunView, u64)>,
 }
 
-impl<'authority, S: RunJournalStore> AuthorizedSourceSession<'authority, S> {
+impl<'authority, B: RunJournalBackend> AuthorizedSourceSession<'authority, B> {
     async fn begin(
-        store: &'authority S,
+        reader: &'authority RunHistoryReader<B>,
         root_authority: &'authority RunAccessAuthority<Export>,
         dependency_authorities: &'authority [RunAccessAuthority<Export>],
         kind: ExportKind,
     ) -> Result<Self> {
         let root_run_id = root_authority.run_id().clone();
-        let root_view = load_export_view(store, root_authority).await?;
+        let root_view = load_export_view(reader, root_authority).await?;
         let store_identity = root_view.store_identity().clone();
         let tenant_scope_id = root_view.tenant_scope_id().clone();
         let (coordinate, root_cutoff) = root_export_coordinate(&root_view, kind)?;
@@ -475,7 +476,7 @@ impl<'authority, S: RunJournalStore> AuthorizedSourceSession<'authority, S> {
         append_source_requirements(&root_run_id, &root_view, &mut graph, &mut pending)?;
         let views = BTreeMap::from([(root_run_id.clone(), (root_view, root_cutoff))]);
         Ok(Self {
-            store,
+            reader,
             authorities,
             store_identity,
             tenant_scope_id,
@@ -504,7 +505,7 @@ impl<'authority, S: RunJournalStore> AuthorizedSourceSession<'authority, S> {
                 .get(&run_id)
                 .copied()
                 .ok_or(ReplayError::SourceRunExportDenied)?;
-            let view = load_export_dependency_view(self.store, authority).await?;
+            let view = load_export_dependency_view(self.reader, authority).await?;
             if view.store_identity() != &self.store_identity
                 || view.tenant_scope_id() != &self.tenant_scope_id
                 || view.run_id() != &run_id
@@ -2013,12 +2014,12 @@ fn validate_export_coordinate(
     Ok(())
 }
 
-async fn load_export_view<S: RunJournalStore>(
-    store: &S,
+async fn load_export_view<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
     authority: &RunAccessAuthority<Export>,
 ) -> Result<VerifiedRunView> {
-    let journal = store
-        .load_committed_journal(authority)
+    let journal = reader
+        .load_for_export(authority)
         .await
         .map_err(|error| store_error(&error))?;
     journal
@@ -2026,11 +2027,11 @@ async fn load_export_view<S: RunJournalStore>(
         .map_err(|error| store_error(&error))
 }
 
-async fn load_export_dependency_view<S: RunJournalStore>(
-    store: &S,
+async fn load_export_dependency_view<B: RunJournalBackend>(
+    reader: &RunHistoryReader<B>,
     authority: &RunAccessAuthority<Export>,
 ) -> Result<VerifiedRunView> {
-    load_export_view(store, authority)
+    load_export_view(reader, authority)
         .await
         .map_err(classify_export_dependency_load_error)
 }

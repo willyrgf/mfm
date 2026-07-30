@@ -1031,7 +1031,7 @@ mod tests {
     use mfm_ids::JournalCommitDigest;
     use mfm_journal::v1::JournalHead;
     use mfm_store::v1::test_support::LegalAdmissionFixture;
-    use mfm_store::v1::{AppendOutcome, AsyncInMemoryRunStore, NewlyAppended, RunJournalStore};
+    use mfm_store::v1::{open_in_memory, AppendOutcome, NewlyAppended};
     use serde::Deserialize;
     use static_assertions::assert_not_impl_any;
 
@@ -1111,16 +1111,21 @@ mod tests {
     #[tokio::test]
     async fn sealed_store_public_view_maps_without_changing_verified_bytes() {
         let fixture = LegalAdmissionFixture::new(31).expect("fixture");
-        let (store, issuer) = AsyncInMemoryRunStore::new(fixture.store_identity().clone());
+        let (store, issuer) = open_in_memory(fixture.store_identity().clone());
         fixture
             .provision_in_memory(&store)
             .expect("provision configured value");
+        let support = fixture
+            .qualify_on(&store, &issuer)
+            .await
+            .expect("qualify fixture support");
+        let (writer, reader) = store.split();
         let prepared = fixture
-            .prepare_on(&store, &issuer)
+            .prepare_on(&writer, &reader, &issuer, &support)
             .await
             .expect("prepare admission");
         let (admission_authority, append) = prepared.into_parts();
-        let outcome = store
+        let outcome = writer
             .append_admission(&admission_authority, append)
             .await
             .expect("append admission");
@@ -1130,7 +1135,7 @@ mod tests {
         let run_id = admitted.run_id().clone();
         let expected_authority =
             issuer.authorize_read_public(fixture.tenant_scope_id().clone(), run_id.clone());
-        let expected = store
+        let expected = reader
             .read_public_run(&expected_authority)
             .await
             .expect("read expected public view")
@@ -1138,7 +1143,7 @@ mod tests {
         let mapped_authority =
             issuer.authorize_read_public(fixture.tenant_scope_id().clone(), run_id);
         let mapped = PublicRunView::from_verified(
-            store
+            reader
                 .read_public_run(&mapped_authority)
                 .await
                 .expect("read mapped public view"),

@@ -59,7 +59,7 @@ async fn postgres_executes_and_round_trips_the_complete_frozen_corpus() {
 
     round_trip_all_vectors(&database.pool, &vectors).await;
     assert_eq!(
-        qualified.store_scope_id().as_str(),
+        qualified.store_identity().store_scope_id().as_str(),
         database.validated_store_scope_id().await,
         "physical corpus writes must remain in the qualified store scope"
     );

@@ -30,12 +30,12 @@ use mfm_spec::v1::{
 
 use super::objects::validate_value_contract;
 use super::{
-    AdmissionMaterial, AdmissionSourceBackend, AdmissionSourceStore, Admit, AdmitRun,
-    AsyncInMemoryRunStore, ConfiguredValueBackend, ConfiguredValueStore, ProposedAdmissionInput,
+    AdmissionMaterial, AdmissionSourceBackend, Admit, AdmitRun, AdmittedSupportGraph,
+    ConfiguredValueBackend, InMemoryRunJournalBackend, ProposedAdmissionInput,
     ProposedAdmissionSourceRoot, ProposedAdmissionSources, QualifiedDeploymentAuthority,
-    QualifiedSupportGraph, QualifiedSupportMember, Result, RunAccessAuthority,
-    RunAccessAuthorityIssuer, RunJournalBackend, RunJournalStore, StoreError, StoreIdentity,
-    SupportBackend, SupportStore, VerifiedRunView,
+    QualifiedRunStore, QualifiedSupportGraph, QualifiedSupportMember, Result, RunAccessAuthority,
+    RunAccessAuthorityIssuer, RunHistoryReader, RunHistoryWriter, RunJournalBackend, StoreError,
+    StoreIdentity, SupportBackend, VerifiedRunView,
 };
 
 const CONFIG_TARGET: &str = "fixture-config";
@@ -359,7 +359,10 @@ impl LegalAdmissionFixture {
     }
 
     /// Provisions this fixture's immutable configured value in the in-memory test backend.
-    pub fn provision_in_memory(&self, store: &AsyncInMemoryRunStore) -> Result<()> {
+    pub fn provision_in_memory(
+        &self,
+        store: &QualifiedRunStore<InMemoryRunJournalBackend>,
+    ) -> Result<()> {
         store.provision_configured_value(
             self.configured_binding.clone(),
             self.configured_bytes.to_vec(),
@@ -472,32 +475,63 @@ impl LegalAdmissionFixture {
         )?])
     }
 
-    /// Resolves all sealed prerequisites and asks the store to prepare the legal admission.
+    /// Admits this fixture's exact qualified support before the one-shot history split.
+    pub async fn qualify_on<B>(
+        &self,
+        store: &QualifiedRunStore<B>,
+        issuer: &RunAccessAuthorityIssuer,
+    ) -> std::result::Result<AdmittedSupportGraph, B::Error>
+    where
+        B: RunJournalBackend + SupportBackend,
+    {
+        let deployment_authority = self.authorize_qualified_deployment(issuer);
+        let support = self
+            .certification_closure()
+            .map_err(B::Error::from)?
+            .support;
+        store
+            .admit_support_graph(&deployment_authority, support)
+            .await
+    }
+
+    /// Resolves all post-split prerequisites and asks the writer to prepare the legal admission.
     pub async fn prepare_on<B>(
         &self,
-        store: &B,
+        writer: &RunHistoryWriter<B>,
+        reader: &RunHistoryReader<B>,
         issuer: &RunAccessAuthorityIssuer,
+        support: &AdmittedSupportGraph,
     ) -> std::result::Result<PreparedLegalAdmission, B::Error>
     where
-        B: RunJournalBackend + SupportBackend + ConfiguredValueBackend + AdmissionSourceBackend,
+        B: RunJournalBackend + ConfiguredValueBackend + AdmissionSourceBackend,
     {
-        self.prepare_on_with_append_request_id(store, issuer, self.append_request_id.clone())
-            .await
+        self.prepare_on_with_append_request_id(
+            writer,
+            reader,
+            issuer,
+            support,
+            self.append_request_id.clone(),
+        )
+        .await
     }
 
     /// Verifies a proposed direct source set and prepares this fixture's legal admission.
     pub async fn prepare_on_with_sources<B>(
         &self,
-        store: &B,
+        writer: &RunHistoryWriter<B>,
+        reader: &RunHistoryReader<B>,
         issuer: &RunAccessAuthorityIssuer,
+        support: &AdmittedSupportGraph,
         proposed_sources: ProposedAdmissionSources,
     ) -> std::result::Result<PreparedLegalAdmission, B::Error>
     where
-        B: RunJournalBackend + SupportBackend + ConfiguredValueBackend + AdmissionSourceBackend,
+        B: RunJournalBackend + ConfiguredValueBackend + AdmissionSourceBackend,
     {
         self.prepare_on_with_request_and_sources(
-            store,
+            writer,
+            reader,
             issuer,
+            support,
             self.append_request_id.clone(),
             Some(proposed_sources),
         )
@@ -507,68 +541,85 @@ impl LegalAdmissionFixture {
     /// Prepares the same immutable root with the fixture's distinct retry request identity.
     pub async fn prepare_retry_on<B>(
         &self,
-        store: &B,
+        writer: &RunHistoryWriter<B>,
+        reader: &RunHistoryReader<B>,
         issuer: &RunAccessAuthorityIssuer,
+        support: &AdmittedSupportGraph,
     ) -> std::result::Result<PreparedLegalAdmission, B::Error>
     where
-        B: RunJournalBackend + SupportBackend + ConfiguredValueBackend + AdmissionSourceBackend,
+        B: RunJournalBackend + ConfiguredValueBackend + AdmissionSourceBackend,
     {
-        self.prepare_on_with_append_request_id(store, issuer, self.retry_append_request_id.clone())
-            .await
+        self.prepare_on_with_append_request_id(
+            writer,
+            reader,
+            issuer,
+            support,
+            self.retry_append_request_id.clone(),
+        )
+        .await
     }
 
     /// Resolves sealed prerequisites and prepares the root under an explicit request identity.
     pub async fn prepare_on_with_append_request_id<B>(
         &self,
-        store: &B,
+        writer: &RunHistoryWriter<B>,
+        reader: &RunHistoryReader<B>,
         issuer: &RunAccessAuthorityIssuer,
+        support: &AdmittedSupportGraph,
         append_request_id: AppendRequestId,
     ) -> std::result::Result<PreparedLegalAdmission, B::Error>
     where
-        B: RunJournalBackend + SupportBackend + ConfiguredValueBackend + AdmissionSourceBackend,
+        B: RunJournalBackend + ConfiguredValueBackend + AdmissionSourceBackend,
     {
-        self.prepare_on_with_request_and_sources(store, issuer, append_request_id, None)
-            .await
+        self.prepare_on_with_request_and_sources(
+            writer,
+            reader,
+            issuer,
+            support,
+            append_request_id,
+            None,
+        )
+        .await
     }
 
     async fn prepare_on_with_request_and_sources<B>(
         &self,
-        store: &B,
+        writer: &RunHistoryWriter<B>,
+        reader: &RunHistoryReader<B>,
         issuer: &RunAccessAuthorityIssuer,
+        support: &AdmittedSupportGraph,
         append_request_id: AppendRequestId,
         proposed_sources: Option<ProposedAdmissionSources>,
     ) -> std::result::Result<PreparedLegalAdmission, B::Error>
     where
-        B: RunJournalBackend + SupportBackend + ConfiguredValueBackend + AdmissionSourceBackend,
+        B: RunJournalBackend + ConfiguredValueBackend + AdmissionSourceBackend,
     {
         let authority = self.authorize_admission(issuer);
-        let deployment_authority = self.authorize_qualified_deployment(issuer);
         let closure = self.certification_closure().map_err(B::Error::from)?;
-        let support =
-            SupportStore::admit_support_graph(store, &deployment_authority, closure.support)
-                .await?;
-        let configured = ConfiguredValueStore::resolve_configured_value(
-            store,
-            &authority,
-            &self.entry_point_id,
-            &self.configured_target,
-            &self.configured_contract,
-        )
-        .await?;
+        let configured = reader
+            .resolve_configured_value(
+                &authority,
+                &self.entry_point_id,
+                &self.configured_target,
+                &self.configured_contract,
+            )
+            .await?;
         let sources = match proposed_sources {
             Some(proposed) => {
-                AdmissionSourceStore::verify_admission_sources(store, &authority, proposed).await?
+                reader
+                    .verify_admission_sources(&authority, proposed)
+                    .await?
             }
-            None => AdmissionSourceStore::verify_no_admission_sources(store, &authority).await?,
+            None => reader.verify_no_admission_sources(&authority).await?,
         };
         let input = self.proposed_input().map_err(B::Error::from)?;
-        let append = RunJournalStore::prepare_admission(
-            store,
-            &authority,
-            append_request_id,
-            AdmissionMaterial::new(closure.artifacts, input, &configured, &support, &sources),
-        )
-        .map_err(B::Error::from)?;
+        let append = writer
+            .prepare_admission(
+                &authority,
+                append_request_id,
+                AdmissionMaterial::new(closure.artifacts, input, &configured, support, &sources),
+            )
+            .map_err(B::Error::from)?;
         Ok(PreparedLegalAdmission { authority, append })
     }
 
@@ -1058,48 +1109,17 @@ const fn fixture_error(message: &'static str) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use mfm_canonical::{CanonicalJsonBytes, PlainCanonicalJsonBytes, RecoverabilityContractV2};
     use mfm_ids::TenantScopeId;
 
     use super::{LegalAdmissionFixture, PreparedLegalAdmission, OUTPUT_PATH};
     use crate::v1::{
-        AppendOutcome, AsyncInMemoryRunStore, AsyncStoreFuture, CommittedRunJournal,
-        ComparisonSettlementKind, ComparisonTransitionKind, ExistingRunAppendMaterial,
-        JournalAppendVerifier, JournalLoadVerifier, NewlyAppended, ObjectGraphProposal,
-        ProducedObjectRoot, ProducedOutputSlot, RunAccessAuthorityIssuer, RunJournalBackend,
-        RunJournalStore, SettlementMaterial, StoreAuthorityContext, StoreError, TransitionMaterial,
+        open_in_memory, AppendOutcome, ComparisonSettlementKind, ComparisonTransitionKind,
+        ExistingRunAppendMaterial, InMemoryRunJournalBackend, NewlyAppended, ObjectGraphProposal,
+        ProducedObjectRoot, ProducedOutputSlot, RunAccessAuthorityIssuer, RunHistoryReader,
+        RunHistoryWriter, SettlementMaterial, StoreError, TransitionMaterial,
         TransitionTracePageRequest, VerifiedRunView, VerifiedTransitionTracePage,
     };
-
-    struct CountingRunBackend {
-        store: AsyncInMemoryRunStore,
-        loads: AtomicUsize,
-    }
-
-    impl RunJournalBackend for CountingRunBackend {
-        type Error = StoreError;
-
-        fn store_authority_context(&self) -> &StoreAuthorityContext {
-            RunJournalBackend::store_authority_context(&self.store)
-        }
-
-        fn backend_append<'a>(
-            &'a self,
-            verifier: JournalAppendVerifier,
-        ) -> AsyncStoreFuture<'a, AppendOutcome, Self::Error> {
-            RunJournalBackend::backend_append(&self.store, verifier)
-        }
-
-        fn backend_load<'a>(
-            &'a self,
-            verifier: JournalLoadVerifier,
-        ) -> AsyncStoreFuture<'a, CommittedRunJournal, Self::Error> {
-            self.loads.fetch_add(1, Ordering::SeqCst);
-            RunJournalBackend::backend_load(&self.store, verifier)
-        }
-    }
 
     #[test]
     fn legal_fixture_builds_one_coherent_certification_closure() {
@@ -1116,12 +1136,17 @@ mod tests {
     #[tokio::test]
     async fn public_read_performs_exactly_one_backend_load() {
         let fixture = LegalAdmissionFixture::new(13).expect("fixture identifiers");
-        let (store, issuer) = AsyncInMemoryRunStore::new(fixture.store_identity().clone());
+        let (store, issuer) = open_in_memory(fixture.store_identity().clone());
         fixture
             .provision_in_memory(&store)
             .expect("provision configured value");
+        let support = fixture
+            .qualify_on(&store, &issuer)
+            .await
+            .expect("qualify fixture");
+        let (store, reader) = store.split();
         let prepared = fixture
-            .prepare_on(&store, &issuer)
+            .prepare_on(&store, &reader, &issuer, &support)
             .await
             .expect("prepare legal admission");
         let (admit, append) = prepared.into_parts();
@@ -1132,18 +1157,15 @@ mod tests {
         let AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(admitted)) = outcome else {
             panic!("fixture admission must be new");
         };
-        let counting = CountingRunBackend {
-            store: store.clone(),
-            loads: AtomicUsize::new(0),
-        };
         let authority = issuer
             .authorize_read_public(fixture.tenant_scope_id().clone(), admitted.run_id().clone());
+        let before = reader.backend_load_count_for_test();
 
-        counting
+        reader
             .read_public_run(&authority)
             .await
             .expect("read public run");
-        assert_eq!(counting.loads.load(Ordering::SeqCst), 1);
+        assert_eq!(reader.backend_load_count_for_test(), before + 1);
     }
 
     #[test]
@@ -1173,12 +1195,17 @@ mod tests {
     #[tokio::test]
     async fn legal_fixture_prepares_appends_and_projects_a_pure_settlement() {
         let fixture = LegalAdmissionFixture::new(8).expect("fixture identifiers");
-        let (store, issuer) = AsyncInMemoryRunStore::new(fixture.store_identity().clone());
+        let (store, issuer) = open_in_memory(fixture.store_identity().clone());
         fixture
             .provision_in_memory(&store)
             .expect("provision configured value");
+        let support = fixture
+            .qualify_on(&store, &issuer)
+            .await
+            .expect("qualify fixture");
+        let (store, reader) = store.split();
         let prepared = fixture
-            .prepare_on(&store, &issuer)
+            .prepare_on(&store, &reader, &issuer, &support)
             .await
             .expect("prepare legal admission");
         let (authority, append) = prepared.into_parts();
@@ -1203,7 +1230,7 @@ mod tests {
 
         let drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
         let open = store
-            .load_committed_journal(&drive)
+            .load_for_drive(&drive)
             .await
             .expect("load admitted fixture")
             .verify_recorded_history()
@@ -1221,7 +1248,7 @@ mod tests {
         let output_schema_id = output_contract.schema_id().clone();
         let public =
             issuer.authorize_read_public(fixture.tenant_scope_id().clone(), open.run_id().clone());
-        let open_public = store
+        let open_public = reader
             .read_public_run(&public)
             .await
             .expect("read active public view")
@@ -1280,14 +1307,14 @@ mod tests {
 
         let closed_drive = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id);
         let closed = store
-            .load_committed_journal(&closed_drive)
+            .load_for_drive(&closed_drive)
             .await
             .expect("load closed fixture")
             .verify_recorded_history()
             .expect("verify closed fixture");
         let public = issuer
             .authorize_read_public(fixture.tenant_scope_id().clone(), closed.run_id().clone());
-        let closed_public = store
+        let closed_public = reader
             .read_public_run(&public)
             .await
             .expect("read succeeded public view")
@@ -1368,7 +1395,7 @@ mod tests {
                 .expect("other tenant");
         assert_ne!(&other_tenant, fixture.tenant_scope_id());
         let cross_tenant = issuer.authorize_read_public(other_tenant, closed.run_id().clone());
-        let cross_tenant_error = match store.read_public_run(&cross_tenant).await {
+        let cross_tenant_error = match reader.read_public_run(&cross_tenant).await {
             Ok(_) => panic!("cross-tenant load must not reveal the run"),
             Err(error) => error,
         };
@@ -1379,15 +1406,15 @@ mod tests {
         assert_ne!(&absent_run, closed.run_id());
         let absent = issuer.authorize_read_public(fixture.tenant_scope_id().clone(), absent_run);
         assert!(matches!(
-            store.read_public_run(&absent).await,
+            reader.read_public_run(&absent).await,
             Err(StoreError::RunNotFound)
         ));
 
-        let (_, other_issuer) = AsyncInMemoryRunStore::new(store.store_identity().clone());
+        let (_, other_issuer) = open_in_memory(reader.store_identity().clone());
         let foreign = other_issuer
             .authorize_read_public(fixture.tenant_scope_id().clone(), closed.run_id().clone());
         assert!(matches!(
-            store.read_public_run(&foreign).await,
+            reader.read_public_run(&foreign).await,
             Err(StoreError::AccessDenied {
                 purpose: "read_public"
             })
@@ -1395,7 +1422,7 @@ mod tests {
 
         let trace_authority = issuer
             .authorize_inspect_trace(fixture.tenant_scope_id().clone(), closed.run_id().clone());
-        let requirements = store
+        let requirements = reader
             .discover_transition_trace_sources(
                 &trace_authority,
                 TransitionTracePageRequest::new(None, 0, 1).expect("trace page request"),
@@ -1403,7 +1430,7 @@ mod tests {
             .await
             .expect("discover trace source requirements");
         assert!(requirements.source_run_ids().is_empty());
-        let trace_page = store
+        let trace_page = reader
             .inspect_transition_trace(&trace_authority, requirements, &[])
             .await
             .expect("inspect transition trace");
@@ -1427,16 +1454,22 @@ mod tests {
         let fixture = LegalAdmissionFixture::new(11)
             .expect("fixture identifiers")
             .with_nested_public_output_bindings();
-        let (store, issuer) = AsyncInMemoryRunStore::new(fixture.store_identity().clone());
+        let (store, issuer) = open_in_memory(fixture.store_identity().clone());
         fixture
             .provision_in_memory(&store)
             .expect("provision configured value");
+        let support = fixture
+            .qualify_on(&store, &issuer)
+            .await
+            .expect("qualify fixture");
+        let (store, reader) = store.split();
         let prepared = fixture
-            .prepare_on(&store, &issuer)
+            .prepare_on(&store, &reader, &issuer, &support)
             .await
             .expect("prepare legal admission");
         let closed = settle_fixture(
             &store,
+            &reader,
             &issuer,
             &fixture,
             prepared,
@@ -1445,7 +1478,7 @@ mod tests {
         .await;
         let authority = issuer
             .authorize_read_public(fixture.tenant_scope_id().clone(), closed.run_id().clone());
-        let public = store
+        let public = reader
             .read_public_run(&authority)
             .await
             .expect("read nested public view")
@@ -1488,12 +1521,17 @@ mod tests {
     #[tokio::test]
     async fn public_read_projects_failed_closure_without_public_outputs() {
         let fixture = LegalAdmissionFixture::new(12).expect("fixture identifiers");
-        let (store, issuer) = AsyncInMemoryRunStore::new(fixture.store_identity().clone());
+        let (store, issuer) = open_in_memory(fixture.store_identity().clone());
         fixture
             .provision_in_memory(&store)
             .expect("provision configured value");
+        let support = fixture
+            .qualify_on(&store, &issuer)
+            .await
+            .expect("qualify fixture");
+        let (store, reader) = store.split();
         let prepared = fixture
-            .prepare_on(&store, &issuer)
+            .prepare_on(&store, &reader, &issuer, &support)
             .await
             .expect("prepare legal admission");
         let (admit, append) = prepared.into_parts();
@@ -1507,7 +1545,7 @@ mod tests {
         let drive =
             issuer.authorize_drive(fixture.tenant_scope_id().clone(), admitted.run_id().clone());
         let open = store
-            .load_committed_journal(&drive)
+            .load_for_drive(&drive)
             .await
             .expect("load open fixture")
             .verify_recorded_history()
@@ -1548,7 +1586,7 @@ mod tests {
 
         let authority = issuer
             .authorize_read_public(fixture.tenant_scope_id().clone(), admitted.run_id().clone());
-        let public = store
+        let public = reader
             .read_public_run(&authority)
             .await
             .expect("read failed public view")
@@ -1562,16 +1600,16 @@ mod tests {
 
     #[tokio::test]
     async fn trace_requires_canonical_independent_source_authorities() {
-        let (store, issuer, tenant, source_run_id, consumer_run_id) =
+        let (_store, reader, issuer, tenant, source_run_id, consumer_run_id) =
             closed_cross_run_consumer().await;
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         assert_eq!(
             requirements.source_run_ids(),
             std::slice::from_ref(&source_run_id)
         );
-        let redacted = store
+        let redacted = reader
             .inspect_transition_trace(&root, requirements, &[])
             .await
             .expect("inspect redacted trace");
@@ -1580,9 +1618,9 @@ mod tests {
         assert!(!redacted_json.contains(source_run_id.as_str()));
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         let source = issuer.authorize_inspect_trace(tenant.clone(), source_run_id.clone());
-        let authorized = store
+        let authorized = reader
             .inspect_transition_trace(&root, requirements, &[source])
             .await
             .expect("inspect authorized trace");
@@ -1591,7 +1629,7 @@ mod tests {
         assert!(authorized_json.contains(r#""result":"source""#));
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let empty_page_requirements = store
+        let empty_page_requirements = reader
             .discover_transition_trace_sources(
                 &root,
                 TransitionTracePageRequest::new(None, 1, 1).expect("second trace page"),
@@ -1602,20 +1640,20 @@ mod tests {
             empty_page_requirements.source_run_ids().is_empty(),
             "a source used only outside the requested page must not be discovered"
         );
-        let empty_page = store
+        let empty_page = reader
             .inspect_transition_trace(&root, empty_page_requirements, &[])
             .await
             .expect("inspect empty second page");
         assert!(empty_page.transitions().is_empty());
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         let duplicate_sources = [
             issuer.authorize_inspect_trace(tenant.clone(), source_run_id.clone()),
             issuer.authorize_inspect_trace(tenant.clone(), source_run_id.clone()),
         ];
         assert!(matches!(
-            store
+            reader
                 .inspect_transition_trace(&root, requirements, &duplicate_sources)
                 .await,
             Err(StoreError::InvalidTracePage {
@@ -1624,12 +1662,12 @@ mod tests {
         ));
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         let other_run = mfm_ids::RunId::parse(format!("run:sha256-jcs-v1:{}", "e".repeat(64)))
             .expect("other run");
         let extra = issuer.authorize_inspect_trace(tenant.clone(), other_run);
         assert!(matches!(
-            store
+            reader
                 .inspect_transition_trace(&root, requirements, &[extra])
                 .await,
             Err(StoreError::InvalidTracePage {
@@ -1638,14 +1676,14 @@ mod tests {
         ));
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         let other_tenant =
             TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "d".repeat(32)))
                 .expect("other tenant");
         assert_ne!(other_tenant, tenant);
         let wrong_tenant = issuer.authorize_inspect_trace(other_tenant, source_run_id.clone());
         assert!(matches!(
-            store
+            reader
                 .inspect_transition_trace(&root, requirements, &[wrong_tenant])
                 .await,
             Err(StoreError::InvalidTracePage {
@@ -1654,10 +1692,10 @@ mod tests {
         ));
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         let wrong_root = issuer.authorize_inspect_trace(tenant.clone(), source_run_id.clone());
         assert!(matches!(
-            store
+            reader
                 .inspect_transition_trace(&wrong_root, requirements, &[])
                 .await,
             Err(StoreError::AccessDenied {
@@ -1666,11 +1704,11 @@ mod tests {
         ));
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
-        let (_, other_issuer) = AsyncInMemoryRunStore::new(store.store_identity().clone());
+        let requirements = trace_requirements(&reader, &root).await;
+        let (_, other_issuer) = open_in_memory(reader.store_identity().clone());
         let wrong_store_root = other_issuer.authorize_inspect_trace(tenant, consumer_run_id);
         assert!(matches!(
-            store
+            reader
                 .inspect_transition_trace(&wrong_store_root, requirements, &[])
                 .await,
             Err(StoreError::AccessDenied {
@@ -1681,24 +1719,24 @@ mod tests {
 
     #[tokio::test]
     async fn authorized_absent_trace_source_matches_omitted_redaction() {
-        let (store, issuer, tenant, source_run_id, consumer_run_id) =
+        let (store, reader, issuer, tenant, source_run_id, consumer_run_id) =
             closed_cross_run_consumer().await;
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id.clone());
-        let requirements = trace_requirements(&store, &root).await;
-        let omitted = store
+        let requirements = trace_requirements(&reader, &root).await;
+        let omitted = reader
             .inspect_transition_trace(&root, requirements, &[])
             .await
             .expect("inspect omitted source");
         let omitted_json = only_trace_json(&omitted);
 
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id);
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         store
             .remove_run_for_trace_test(&source_run_id)
             .expect("remove source run for authorized-absence test");
         let source = issuer.authorize_inspect_trace(tenant, source_run_id);
-        let absent = store
+        let absent = reader
             .inspect_transition_trace(&root, requirements, &[source])
             .await
             .expect("authorized absent source remains redacted");
@@ -1707,16 +1745,16 @@ mod tests {
 
     #[tokio::test]
     async fn corrupt_authorized_trace_source_fails_instead_of_redacting() {
-        let (store, issuer, tenant, source_run_id, consumer_run_id) =
+        let (store, reader, issuer, tenant, source_run_id, consumer_run_id) =
             closed_cross_run_consumer().await;
         let root = issuer.authorize_inspect_trace(tenant.clone(), consumer_run_id);
-        let requirements = trace_requirements(&store, &root).await;
+        let requirements = trace_requirements(&reader, &root).await;
         store
             .remove_transition_output_for_trace_test(&source_run_id)
             .expect("corrupt source object authority");
         let source = issuer.authorize_inspect_trace(tenant, source_run_id);
         assert!(matches!(
-            store
+            reader
                 .inspect_transition_trace(&root, requirements, &[source])
                 .await,
             Err(StoreError::MissingObjectAuthority { .. })
@@ -1724,23 +1762,44 @@ mod tests {
     }
 
     async fn closed_cross_run_consumer() -> (
-        AsyncInMemoryRunStore,
+        RunHistoryWriter<InMemoryRunJournalBackend>,
+        RunHistoryReader<InMemoryRunJournalBackend>,
         RunAccessAuthorityIssuer,
         TenantScopeId,
         mfm_ids::RunId,
         mfm_ids::RunId,
     ) {
         let source_fixture = LegalAdmissionFixture::new(20).expect("source fixture");
-        let (store, issuer) = AsyncInMemoryRunStore::new(source_fixture.store_identity().clone());
+        let consumer_fixture = LegalAdmissionFixture::for_store_in_tenant(
+            source_fixture.store_identity().clone(),
+            source_fixture.tenant_scope_id().clone(),
+            21,
+        )
+        .expect("consumer fixture")
+        .with_effective_output_source();
+        let (store, issuer) = open_in_memory(source_fixture.store_identity().clone());
         source_fixture
             .provision_in_memory(&store)
             .expect("provision source");
+        consumer_fixture
+            .provision_in_memory(&store)
+            .expect("provision consumer");
+        let source_support = source_fixture
+            .qualify_on(&store, &issuer)
+            .await
+            .expect("qualify source");
+        let consumer_support = consumer_fixture
+            .qualify_on(&store, &issuer)
+            .await
+            .expect("qualify consumer");
+        let (store, reader) = store.split();
         let source_prepared = source_fixture
-            .prepare_on(&store, &issuer)
+            .prepare_on(&store, &reader, &issuer, &source_support)
             .await
             .expect("prepare source");
         let source_view = settle_fixture(
             &store,
+            &reader,
             &issuer,
             &source_fixture,
             source_prepared,
@@ -1749,25 +1808,16 @@ mod tests {
         .await;
         let source_run_id = source_view.run_id().clone();
 
-        let consumer_fixture = LegalAdmissionFixture::for_store_in_tenant(
-            source_fixture.store_identity().clone(),
-            source_fixture.tenant_scope_id().clone(),
-            21,
-        )
-        .expect("consumer fixture")
-        .with_effective_output_source();
-        consumer_fixture
-            .provision_in_memory(&store)
-            .expect("provision consumer");
         let proposed = consumer_fixture
             .proposed_effective_output_sources(&source_view)
             .expect("propose source");
         let consumer_prepared = consumer_fixture
-            .prepare_on_with_sources(&store, &issuer, proposed)
+            .prepare_on_with_sources(&store, &reader, &issuer, &consumer_support, proposed)
             .await
             .expect("prepare consumer");
         let consumer_view = settle_fixture(
             &store,
+            &reader,
             &issuer,
             &consumer_fixture,
             consumer_prepared,
@@ -1777,6 +1827,7 @@ mod tests {
         let consumer_run_id = consumer_view.run_id().clone();
         (
             store,
+            reader,
             issuer,
             source_fixture.tenant_scope_id().clone(),
             source_run_id,
@@ -1785,7 +1836,8 @@ mod tests {
     }
 
     async fn settle_fixture(
-        store: &AsyncInMemoryRunStore,
+        store: &RunHistoryWriter<InMemoryRunJournalBackend>,
+        reader: &RunHistoryReader<InMemoryRunJournalBackend>,
         issuer: &RunAccessAuthorityIssuer,
         fixture: &LegalAdmissionFixture,
         prepared: PreparedLegalAdmission,
@@ -1802,7 +1854,7 @@ mod tests {
         let drive =
             issuer.authorize_drive(fixture.tenant_scope_id().clone(), admitted.run_id().clone());
         let open = store
-            .load_committed_journal(&drive)
+            .load_for_drive(&drive)
             .await
             .expect("load open fixture")
             .verify_recorded_history()
@@ -1845,8 +1897,11 @@ mod tests {
                 .expect("append settlement"),
             AppendOutcome::NewlyAppended(NewlyAppended::Transition(_))
         ));
-        store
-            .load_committed_journal(&drive)
+        reader
+            .load_for_replay(
+                &issuer
+                    .authorize_replay(fixture.tenant_scope_id().clone(), admitted.run_id().clone()),
+            )
             .await
             .expect("load closed fixture")
             .verify_recorded_history()
@@ -1854,7 +1909,7 @@ mod tests {
     }
 
     async fn trace_requirements(
-        store: &AsyncInMemoryRunStore,
+        store: &RunHistoryReader<InMemoryRunJournalBackend>,
         root: &crate::v1::RunAccessAuthority<crate::v1::InspectTrace>,
     ) -> crate::v1::TransitionTraceSourceRequirements {
         store

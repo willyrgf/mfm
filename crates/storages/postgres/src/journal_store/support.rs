@@ -9,12 +9,12 @@ use mfm_store::v1::{
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::error::{ambiguous_commit_error, database_error, PostgresStoreError, Result};
-use crate::store::QualifiedPostgresStore;
+use crate::store::PostgresRunJournalBackend;
 
 const SUPPORT_LOCK_DOMAIN: &str = "mfm.postgres.qualified-support-lock.v1";
 
 pub(super) async fn admit_graph(
-    store: &QualifiedPostgresStore,
+    store: &PostgresRunJournalBackend,
     verifier: SupportGraphAdmissionVerifier,
 ) -> Result<AdmittedSupportGraph> {
     let prepared = verifier.prepared();

@@ -17,16 +17,17 @@ use mfm_replay::trace_export::{
 use mfm_replay::v1::{
     compare_current, required_export_source_run_ids, verify_recorded_history, ReplayErrorKind,
 };
-use mfm_runtime::{DriveOutcome, Runtime};
+use mfm_runtime::{AuthorizedAdmissionPlan, DriveOutcome, Runtime};
 use mfm_store::{
-    AppendOutcome, AsyncInMemoryRunStore, ExistingRunAppendMaterial, NewlyAppended,
-    ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot, RunAccessAuthorityIssuer,
-    RunJournalStore, SettlementMaterial, StoreIdentity, TransitionMaterial,
+    open_in_memory, AdmissionMaterial, AppendOutcome, ExistingRunAppendMaterial,
+    InMemoryRunJournalBackend, NewlyAppended, ObjectGraphProposal, ProducedObjectRoot,
+    ProducedOutputSlot, QualifiedRunStore, RunAccessAuthorityIssuer, RunHistoryReader,
+    SettlementMaterial, StoreIdentity, TransitionMaterial,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 struct ClosedQualifiedRun {
-    store: AsyncInMemoryRunStore,
+    reader: RunHistoryReader<InMemoryRunJournalBackend>,
     issuer: RunAccessAuthorityIssuer,
     fixture: QualifiedRunFixture,
     registry: Arc<QualifiedProgramRegistry>,
@@ -39,14 +40,14 @@ impl ClosedQualifiedRun {
             .issuer
             .authorize_export(self.fixture.tenant_scope_id().clone(), self.run_id.clone());
         assert!(
-            required_export_source_run_ids(&self.store, &export_authority)
+            required_export_source_run_ids(&self.reader, &export_authority)
                 .await
                 .expect("discover source-free export closure")
                 .is_empty()
         );
         let mut bytes = Vec::new();
         let metadata = write_portable_run_export_stream(
-            &self.store,
+            &self.reader,
             &export_authority,
             &[],
             ExportKind::Semantic,
@@ -60,16 +61,6 @@ impl ClosedQualifiedRun {
     async fn portable_history(&self) -> VerifiedExportStream {
         let (bytes, metadata) = self.portable_stream().await;
         bind_portable_history(self, bytes, metadata).await
-    }
-
-    async fn candidate_registry(
-        &self,
-        fixture: &QualifiedRunFixture,
-    ) -> Arc<QualifiedProgramRegistry> {
-        prepare(&self.store, &self.issuer, fixture)
-            .await
-            .registry()
-            .clone()
     }
 }
 
@@ -85,7 +76,7 @@ fn store_identity(discriminator: u8) -> StoreIdentity {
     )
 }
 
-fn provision(store: &AsyncInMemoryRunStore, fixture: &QualifiedRunFixture) {
+fn provision(store: &QualifiedRunStore<InMemoryRunJournalBackend>, fixture: &QualifiedRunFixture) {
     store
         .provision_configured_value(
             fixture.configured_binding().clone(),
@@ -95,30 +86,35 @@ fn provision(store: &AsyncInMemoryRunStore, fixture: &QualifiedRunFixture) {
 }
 
 async fn prepare(
-    store: &AsyncInMemoryRunStore,
+    reader: &RunHistoryReader<InMemoryRunJournalBackend>,
     issuer: &RunAccessAuthorityIssuer,
     fixture: &QualifiedRunFixture,
+    registry: Arc<QualifiedProgramRegistry>,
 ) -> PreparedQualifiedRun {
-    provision(store, fixture);
     fixture
-        .prepare_on(store, issuer)
+        .prepare_on(reader, issuer, registry)
         .await
         .expect("prepare genuine qualified run")
 }
 
-async fn admit(
-    store: &AsyncInMemoryRunStore,
+fn admission_plan(
+    fixture: &QualifiedRunFixture,
     prepared: PreparedQualifiedRun,
-) -> (Arc<QualifiedProgramRegistry>, RunId) {
-    let (registry, authority, append) = prepared.into_parts();
-    let outcome = store
-        .append_admission(&authority, append)
-        .await
-        .expect("append genuine qualified admission");
-    let AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(admitted)) = outcome else {
-        panic!("genuine admission was not newly committed");
-    };
-    (registry, admitted.run_id().clone())
+) -> (Arc<QualifiedProgramRegistry>, AuthorizedAdmissionPlan) {
+    let (registry, authority, append_request_id, artifacts, input, configured, sources) =
+        prepared.into_parts();
+    let plan = AuthorizedAdmissionPlan::new(
+        authority,
+        append_request_id,
+        fixture.entry_point_id().clone(),
+        fixture.entry_point_operation_id().clone(),
+        fixture.invocation_identity().clone(),
+        artifacts,
+        input,
+        configured,
+        sources,
+    );
+    (registry, plan)
 }
 
 async fn close_with_runtime(
@@ -126,31 +122,54 @@ async fn close_with_runtime(
     fixture_discriminator: u8,
 ) -> ClosedQualifiedRun {
     let identity = store_identity(identity_discriminator);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
     let fixture =
         QualifiedRunFixture::for_store(identity, fixture_discriminator).expect("qualified fixture");
-    close_fixture_with_runtime(store, issuer, fixture).await
+    close_fixture_with_runtime(fixture, None).await.0
 }
 
-async fn close_two_node_run(
-    identity_discriminator: u8,
-    fixture_discriminator: u8,
-) -> ClosedQualifiedRun {
-    let identity = store_identity(identity_discriminator);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
-    let fixture = QualifiedRunFixture::for_store(identity, fixture_discriminator)
-        .expect("qualified fixture")
-        .with_two_node_chain();
-    close_fixture_with_runtime(store, issuer, fixture).await
+async fn close_with_candidate(
+    fixture: QualifiedRunFixture,
+    candidate: &QualifiedRunFixture,
+) -> (ClosedQualifiedRun, Arc<QualifiedProgramRegistry>) {
+    let (run, registry) = close_fixture_with_runtime(fixture, Some(candidate)).await;
+    (
+        run,
+        registry.expect("candidate registry was requested before the history split"),
+    )
 }
 
 async fn close_fixture_with_runtime(
-    store: AsyncInMemoryRunStore,
-    issuer: RunAccessAuthorityIssuer,
     fixture: QualifiedRunFixture,
-) -> ClosedQualifiedRun {
-    let (registry, run_id) = admit(&store, prepare(&store, &issuer, &fixture).await).await;
-    let runtime = Runtime::new(store.clone(), Arc::clone(&registry));
+    candidate: Option<&QualifiedRunFixture>,
+) -> (ClosedQualifiedRun, Option<Arc<QualifiedProgramRegistry>>) {
+    let (store, issuer) = open_in_memory(fixture.store_identity().clone());
+    provision(&store, &fixture);
+    if let Some(candidate) = candidate {
+        provision(&store, candidate);
+    }
+    let registry = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify genuine run");
+    let candidate_registry = match candidate {
+        Some(candidate) => Some(
+            candidate
+                .qualify_on(&store, &issuer)
+                .await
+                .expect("qualify candidate registry"),
+        ),
+        None => None,
+    };
+    let (writer, reader) = store.split();
+    let prepared = prepare(&reader, &issuer, &fixture, Arc::clone(&registry)).await;
+    let (_, plan) = admission_plan(&fixture, prepared);
+    let runtime = Runtime::new(writer, Arc::clone(&registry));
+    let run_id = runtime
+        .admit(plan)
+        .await
+        .expect("admit genuine qualified run")
+        .run_id()
+        .clone();
 
     for _ in 0..8 {
         let outcome = runtime
@@ -160,13 +179,16 @@ async fn close_fixture_with_runtime(
         match outcome {
             DriveOutcome::Advanced { .. } => {}
             DriveOutcome::Closed { .. } => {
-                return ClosedQualifiedRun {
-                    store,
-                    issuer,
-                    fixture,
-                    registry,
-                    run_id,
-                };
+                return (
+                    ClosedQualifiedRun {
+                        reader,
+                        issuer,
+                        fixture,
+                        registry,
+                        run_id,
+                    },
+                    candidate_registry,
+                );
             }
             DriveOutcome::Waiting { reason, .. } => {
                 panic!("source-free genuine run unexpectedly waited: {reason:?}");
@@ -181,16 +203,45 @@ async fn close_panicking_history_manually(
     fixture_discriminator: u8,
 ) -> ClosedQualifiedRun {
     let identity = store_identity(identity_discriminator);
-    let (store, issuer) = AsyncInMemoryRunStore::new(identity.clone());
+    let (store, issuer) = open_in_memory(identity.clone());
     let fixture = QualifiedRunFixture::for_store(identity, fixture_discriminator)
         .expect("qualified fixture")
         .with_panicking_state_callback()
         .expect("panicking fixture");
-    let (registry, run_id) = admit(&store, prepare(&store, &issuer, &fixture).await).await;
+    provision(&store, &fixture);
+    let registry = fixture
+        .qualify_on(&store, &issuer)
+        .await
+        .expect("qualify panicking fixture");
+    let (writer, reader) = store.split();
+    let prepared = prepare(&reader, &issuer, &fixture, Arc::clone(&registry)).await;
+    let (registry, authority, append_request_id, artifacts, input, configured, sources) =
+        prepared.into_parts();
+    let append = writer
+        .prepare_admission(
+            &authority,
+            append_request_id,
+            AdmissionMaterial::new(
+                artifacts,
+                input,
+                &configured,
+                registry.admitted_support(),
+                &sources,
+            ),
+        )
+        .expect("prepare genuine admission");
+    let outcome = writer
+        .append_admission(&authority, append)
+        .await
+        .expect("append genuine qualified admission");
+    let AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(admitted)) = outcome else {
+        panic!("genuine admission was not newly committed");
+    };
+    let run_id = admitted.run_id().clone();
 
     let drive_authority = issuer.authorize_drive(fixture.tenant_scope_id().clone(), run_id.clone());
-    let view = store
-        .load_committed_journal(&drive_authority)
+    let view = writer
+        .load_for_drive(&drive_authority)
         .await
         .expect("load genuine admitted history")
         .verify_recorded_history()
@@ -201,7 +252,7 @@ async fn close_panicking_history_manually(
     let [output_slot] = node.settlement_contract().output_slots() else {
         panic!("panicking fixture must certify exactly one output");
     };
-    let frame = store
+    let frame = writer
         .prepare_frame(&drive_authority, &view, node.node_id())
         .await
         .expect("prepare verified historical frame");
@@ -217,7 +268,7 @@ async fn close_panicking_history_manually(
         .to_string(),
     )
     .expect("canonical historical output");
-    let append = store
+    let append = writer
         .prepare_append(
             &drive_authority,
             &view,
@@ -240,7 +291,7 @@ async fn close_panicking_history_manually(
         )
         .expect("prepare genuine recorded settlement");
     assert!(matches!(
-        store
+        writer
             .append(&drive_authority, append)
             .await
             .expect("append genuine recorded settlement"),
@@ -248,7 +299,7 @@ async fn close_panicking_history_manually(
     ));
 
     ClosedQualifiedRun {
-        store,
+        reader,
         issuer,
         fixture,
         registry,
@@ -281,7 +332,7 @@ async fn bind_portable_history(
     let replay_authority = run
         .issuer
         .authorize_replay(run.fixture.tenant_scope_id().clone(), run.run_id.clone());
-    let verified = verify_recorded_history(&run.store, &replay_authority)
+    let verified = verify_recorded_history(&run.reader, &replay_authority)
         .await
         .expect("verify callback-free recorded history");
     verified
@@ -495,7 +546,7 @@ async fn portable_stream_is_deterministic_and_rejects_structural_tampering() {
         .issuer
         .authorize_export(run.fixture.tenant_scope_id().clone(), run.run_id.clone());
     let short_metadata = write_portable_run_export_stream(
-        &run.store,
+        &run.reader,
         &export_authority,
         &[],
         ExportKind::Semantic,
@@ -724,15 +775,17 @@ async fn exact_current_candidate_agrees_and_binds_every_identity() {
 
 #[tokio::test]
 async fn absent_current_operation_is_candidate_unavailable() {
-    let run = close_with_runtime(0x32, 0x42).await;
-    let historical = run.portable_history().await;
+    let identity = store_identity(0x32);
+    let fixture =
+        QualifiedRunFixture::for_store(identity.clone(), 0x42).expect("historical fixture");
     let unavailable = QualifiedRunFixture::for_store_with_operation(
-        run.fixture.store_identity().clone(),
+        identity,
         0x42,
         StableId::new("mfm.fixture/unavailable-replay-operation").expect("operation"),
     )
     .expect("unavailable candidate fixture");
-    let registry = run.candidate_registry(&unavailable).await;
+    let (run, registry) = close_with_candidate(fixture, &unavailable).await;
+    let historical = run.portable_history().await;
 
     let error =
         compare_current(&historical, &registry).expect_err("candidate operation must be absent");
@@ -757,13 +810,14 @@ async fn panicking_candidate_is_redaction_safe_execution_failure() {
 
 #[tokio::test]
 async fn candidate_frame_decode_integrity_is_comparison_integrity_failure() {
-    let run = close_with_runtime(0x34, 0x44).await;
+    let identity = store_identity(0x34);
+    let fixture =
+        QualifiedRunFixture::for_store(identity.clone(), 0x44).expect("historical fixture");
+    let integrity_failing = QualifiedRunFixture::for_store(identity, 0x44)
+        .expect("candidate fixture")
+        .with_integrity_failing_state_callback();
+    let (run, registry) = close_with_candidate(fixture, &integrity_failing).await;
     let historical = run.portable_history().await;
-    let integrity_failing =
-        QualifiedRunFixture::for_store(run.fixture.store_identity().clone(), 0x44)
-            .expect("candidate fixture")
-            .with_integrity_failing_state_callback();
-    let registry = run.candidate_registry(&integrity_failing).await;
 
     let error = compare_current(&historical, &registry)
         .expect_err("candidate typed frame decode must fail integrity");
@@ -773,14 +827,17 @@ async fn candidate_frame_decode_integrity_is_comparison_integrity_failure() {
 
 #[tokio::test]
 async fn global_not_comparable_skips_every_candidate_callback() {
-    let run = close_two_node_run(0x35, 0x45).await;
-    let historical = run.portable_history().await;
-    let incompatible = QualifiedRunFixture::for_store(run.fixture.store_identity().clone(), 0x45)
+    let identity = store_identity(0x35);
+    let fixture = QualifiedRunFixture::for_store(identity.clone(), 0x45)
+        .expect("historical fixture")
+        .with_two_node_chain();
+    let incompatible = QualifiedRunFixture::for_store(identity, 0x45)
         .expect("candidate fixture")
         .with_two_node_divergent_candidate()
         .with_incompatible_planning_profile();
     incompatible.reset_candidate_callback_counts();
-    let registry = run.candidate_registry(&incompatible).await;
+    let (run, registry) = close_with_candidate(fixture, &incompatible).await;
+    let historical = run.portable_history().await;
 
     let result =
         compare_current(&historical, &registry).expect("incompatible candidate must not execute");
@@ -809,13 +866,16 @@ async fn global_not_comparable_skips_every_candidate_callback() {
 
 #[tokio::test]
 async fn transition_comparisons_use_recorded_frames_not_prior_candidate_outputs() {
-    let run = close_two_node_run(0x36, 0x46).await;
-    let historical = run.portable_history().await;
-    let divergent = QualifiedRunFixture::for_store(run.fixture.store_identity().clone(), 0x46)
+    let identity = store_identity(0x36);
+    let fixture = QualifiedRunFixture::for_store(identity.clone(), 0x46)
+        .expect("historical fixture")
+        .with_two_node_chain();
+    let divergent = QualifiedRunFixture::for_store(identity, 0x46)
         .expect("candidate fixture")
         .with_two_node_divergent_candidate();
     divergent.reset_candidate_callback_counts();
-    let registry = run.candidate_registry(&divergent).await;
+    let (run, registry) = close_with_candidate(fixture, &divergent).await;
+    let historical = run.portable_history().await;
 
     let result = compare_current(&historical, &registry).expect("compare divergent candidate");
     let result = parse_result(&result);

@@ -12,7 +12,12 @@ Its public surface has one current model:
   It grants no journal or object authority.
 - `AdmitRun`, `CommitTransition`, `AuthorizeExternalAccess`, and
   `ObserveExternalAccess` are the only prepared append variants.
-- `RunJournalStore` is the purpose-authorized application surface.
+- `QualifiedRunStore<B>` is the affine pre-runtime assembly. It owns the only backend handle and
+  mutation seal, admits qualified support, and can be split exactly once.
+- `RunHistoryWriter<B>` is the non-cloneable post-bootstrap mutation capability consumed by
+  `mfm-runtime`.
+- `RunHistoryReader<B>` is the cloneable purpose-authorized read, replay, inspection, and export
+  surface. It exposes no append or support-admission operation.
 - `RunJournalBackend` is the durable adapter seam. It receives store-created verifiers and has no
   raw append operation.
 
@@ -20,6 +25,7 @@ Backends must publish the complete assigned commit, its object admissions and bi
 tenant fact coordinate atomically. They revalidate every non-admission successor against the
 current `VerifiedRunView` inside the same serialization boundary before assignment.
 
+The writer loads only for `Drive`; the reader loads for `Replay` and `Export`.
 Only `Drive`, `Replay`, and `Export` authorities satisfy the sealed
 `CommittedJournalLoadGrant` bound for a complete journal load. `ReadPublic`, `InspectAudit`, and
 `InspectTrace` authorities use dedicated store methods instead. A public read performs one backend
@@ -70,8 +76,10 @@ Portable replay may call `verify_offline_recorded_history` with decoded immutabl
 complete exact object closure. That function runs the same physical verifier and semantic reducer
 as an authorized backend load and creates no live store or mutation authority.
 
-With the `test-support` feature, `AsyncInMemoryRunStore::new(StoreIdentity)` returns the store and
-its sole issuer as a pair. The in-memory backend stages changes in a scratch copy and swaps once,
-preserving the same all-or-nothing and compare-and-swap contract required of durable backends.
+With the `test-support` feature, `open_in_memory(StoreIdentity)` returns a
+`QualifiedRunStore<InMemoryRunJournalBackend>` and its sole issuer. Tests provision configured
+values and admit support before consuming the assembly with `split`; the in-memory backend stages
+changes in a scratch copy and swaps once, preserving the same all-or-nothing and compare-and-swap
+contract required of durable backends.
 
 [`docs/design.md`](../../../docs/design.md) is the authoritative semantic contract.

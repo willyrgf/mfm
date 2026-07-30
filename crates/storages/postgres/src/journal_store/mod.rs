@@ -11,31 +11,28 @@ use mfm_store::v1::{
     AdmissionSourceBackend, AdmissionSourceVerifier, AdmittedSupportGraph, AppendOutcome,
     AsyncStoreFuture, CommittedRunJournal, FactAttestationLoadVerifier, FactScanBackend,
     FactScanPage, FactScanPageVerifier, JournalAppendVerifier, JournalLoadVerifier,
-    PersistedFactScanAttestation, RunJournalBackend, StoreAuthorityContext, SupportBackend,
-    SupportGraphAdmissionVerifier, VerifiedAdmissionSources,
+    PersistedFactScanAttestation, RunHistoryReadinessBackend, RunJournalBackend,
+    StoreAuthorityContext, SupportBackend, SupportGraphAdmissionVerifier, VerifiedAdmissionSources,
 };
+#[cfg(any(test, feature = "parity-tests"))]
+use mfm_store::v1::{RunHistoryAdmissionLockTestBackend, RunHistoryCommitFailureBackend};
 
 use crate::error::PostgresStoreError;
-use crate::store::QualifiedPostgresStore;
+use crate::store::PostgresRunJournalBackend;
 
 #[cfg(all(test, feature = "parity-tests"))]
 pub(crate) async fn verify_persisted_run_for_test(
     connection: &mut sqlx::PgConnection,
-    store: &QualifiedPostgresStore,
+    store_identity: &mfm_store::v1::StoreIdentity,
     tenant_scope_id: &mfm_ids::TenantScopeId,
     run_id: &mfm_ids::RunId,
 ) -> crate::Result<()> {
-    rows::load_run(
-        connection,
-        store.store_authority_context().store_identity(),
-        tenant_scope_id,
-        run_id,
-    )
-    .await
-    .map(drop)
+    rows::load_run(connection, store_identity, tenant_scope_id, run_id)
+        .await
+        .map(drop)
 }
 
-impl RunJournalBackend for QualifiedPostgresStore {
+impl RunJournalBackend for PostgresRunJournalBackend {
     type Error = PostgresStoreError;
 
     fn store_authority_context(&self) -> &StoreAuthorityContext {
@@ -57,7 +54,7 @@ impl RunJournalBackend for QualifiedPostgresStore {
     }
 }
 
-impl AdmissionSourceBackend for QualifiedPostgresStore {
+impl AdmissionSourceBackend for PostgresRunJournalBackend {
     fn backend_verify_admission_sources<'a>(
         &'a self,
         mut verifier: AdmissionSourceVerifier,
@@ -72,7 +69,7 @@ impl AdmissionSourceBackend for QualifiedPostgresStore {
     }
 }
 
-impl FactScanBackend for QualifiedPostgresStore {
+impl FactScanBackend for PostgresRunJournalBackend {
     fn backend_fact_scan_page<'a>(
         &'a self,
         verifier: FactScanPageVerifier,
@@ -88,11 +85,55 @@ impl FactScanBackend for QualifiedPostgresStore {
     }
 }
 
-impl SupportBackend for QualifiedPostgresStore {
+impl SupportBackend for PostgresRunJournalBackend {
     fn backend_admit_support_graph<'a>(
         &'a self,
         verifier: SupportGraphAdmissionVerifier,
     ) -> AsyncStoreFuture<'a, AdmittedSupportGraph, Self::Error> {
         Box::pin(async move { support::admit_graph(self, verifier).await })
+    }
+}
+
+impl RunHistoryReadinessBackend for PostgresRunJournalBackend {
+    fn backend_check_ready(&self) -> AsyncStoreFuture<'_, (), Self::Error> {
+        Box::pin(async move { self.check_ready().await })
+    }
+}
+
+#[cfg(any(test, feature = "parity-tests"))]
+impl RunHistoryCommitFailureBackend for PostgresRunJournalBackend {
+    type FailurePoint = crate::store::TestCommitFailurePoint;
+
+    fn backend_inject_commit_failure(
+        &self,
+        run_id: mfm_ids::RunId,
+        batch_purpose: mfm_journal::v1::BatchPurpose,
+        point: Self::FailurePoint,
+    ) -> Result<(), Self::Error> {
+        self.inject_commit_failure(run_id, batch_purpose, point)
+    }
+
+    fn backend_commit_failure_is_armed(&self) -> Result<bool, Self::Error> {
+        self.commit_failure_is_armed()
+    }
+
+    fn backend_take_commit_failure(
+        &self,
+        run_id: &mfm_ids::RunId,
+        batch_purpose: mfm_journal::v1::BatchPurpose,
+    ) -> Result<Option<Self::FailurePoint>, Self::Error> {
+        self.take_commit_failure(run_id, batch_purpose)
+    }
+}
+
+#[cfg(any(test, feature = "parity-tests"))]
+impl RunHistoryAdmissionLockTestBackend for PostgresRunJournalBackend {
+    type Hook = crate::store::TestAdmissionRunLockHook;
+
+    fn backend_inject_before_admission_run_lock(
+        &self,
+        append_request_id: mfm_ids::AppendRequestId,
+    ) -> Result<Self::Hook, Self::Error> {
+        self.inject_before_admission_run_lock(append_request_id)
     }
 }

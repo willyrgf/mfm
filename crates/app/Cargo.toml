@@ -49,6 +49,6 @@ tempfile = "3.0"
 [dev-dependencies]
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-store = { path = "../kernel/store", features = ["test-support"] }
+mfm-store = { path = "../kernel/store", features = ["backend-conformance"] }
 trybuild = "1.0"
 static_assertions = "1"

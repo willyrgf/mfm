@@ -2773,6 +2773,7 @@ dependencies = [
  "mfm-ids",
  "mfm-journal",
  "mfm-qualified-run-test-support",
+ "mfm-runtime",
  "mfm-spec",
  "mfm-store",
  "serde_json",

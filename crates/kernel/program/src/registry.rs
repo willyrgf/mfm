@@ -3428,6 +3428,33 @@ impl QualifiedProgramRegistry {
         self.certify_current(registration, &authored_program)
     }
 
+    /// Revalidates an app-authored admission artifact set against this exact current registry.
+    ///
+    /// Runtime calls this immediately before store preparation so an artifact set authored by a
+    /// foreign registry, executable, entry point, planner, or manifest set cannot be appended.
+    pub fn validate_current_admission_artifacts(
+        &self,
+        entry_point_id: &EntryPointId,
+        artifacts: &CertifiedAdmissionArtifacts,
+    ) -> Result<()> {
+        let registration = self.entry_point(entry_point_id).ok_or_else(|| {
+            ProgramError::Registry("entry point is absent from the qualified registry".to_owned())
+        })?;
+        let state_manifest =
+            sole_registry_value(self.definition.state_manifests(), "current state manifest")?;
+        let capability_manifest = sole_registry_value(
+            self.definition.capability_manifests(),
+            "current capability manifest",
+        )?;
+        self.validate_current_certification_artifacts(
+            registration,
+            artifacts.authored_program(),
+            state_manifest,
+            capability_manifest,
+            artifacts,
+        )
+    }
+
     fn certify_current(
         &self,
         registration: &QualifiedEntryPointRegistration,
