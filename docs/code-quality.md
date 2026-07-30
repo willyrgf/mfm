@@ -1,54 +1,43 @@
 # Code Quality Policy
 
-This policy applies to every code, test, documentation, build, and workflow change in this
-repository.
+This policy applies to every code, test, documentation, build, and workflow change.
 
 ## One Current Design
 
-Optimize the repository as a whole for fewer concepts, code paths, public types and schemas,
-duplicated responsibilities, and places a future change must touch. Each responsibility should
-have one clear owner and one implementation.
+MFM is in clean-slate, pre-release development. Superseded revisions and their data have no
+compatibility claim unless the current design deliberately retains a historical input for an
+invariant or hostile-input test. Only an explicit repository-wide policy change creates
+compatibility obligations; versioning alone does not.
 
-Reducing lines of code is valuable when it removes duplication, indirection, or obsolete behavior.
-Do not obtain a smaller codebase by compressing readable code or removing validation, security
-controls, tests, or necessary documentation.
+Optimize the whole repository for the fewest concepts, code paths, public types and schemas,
+duplicated responsibilities, and future change sites. Give each responsibility one owner and
+implementation. Breaking APIs, CLI/REST contracts, schemas, persisted formats, and documented
+behavior is allowed.
 
-## Replace; Do Not Preserve
-
-MFM maintains no backward compatibility. Breaking APIs, CLI/REST contracts, schemas, persisted
-formats, and documented behavior is allowed. Prefer the best current design over preserving an
-inferior previous one.
-
-When a design changes, complete the cutover and delete the superseded implementation, types, entry
-points, aliases, adapters, feature flags, readers/writers, tests, fixtures, and documentation. Do
-not deprecate old paths, hide them, or retain compatibility shims, dual paths, or fallbacks for old
-behavior. Git history is the source archive.
-
-Update every current in-repository producer and consumer in the same logical change. For a changed
-persisted contract, update or reset its baseline and reject old data explicitly; never reinterpret
-old bytes, rewrite append-only history, or retain a legacy reader. Version identifiers may remain
-when the current contract needs them for hashing, domain separation, or hostile-input rejection.
-
-A breaking change never relaxes correctness, security, data-integrity, or design invariants.
+Never add legacy decoders or migrations, compatibility shims, dual or mixed-version paths,
+downgrade or software-version rollback support, or fallbacks. The target must still be
+implementable, testable, and operable while preserving correctness, security, data integrity, and
+design invariants. Remove LOC by deleting duplication, indirection, or obsolete behavior—not
+readability, validation, controls, tests, or necessary docs.
 
 ## Complete Changes
 
-Fix the underlying design or add missing support properly. Do not introduce hacks, monkey patches,
-partial workarounds, fragile schema shims, or parallel implementations. If a correct complete
-solution is not possible, report the blocker instead of approximating it.
+Complete each cutover in one logical change: update all current producers, consumers, tests,
+fixtures, and docs; delete all superseded code, APIs, schemas, tests, fixtures, and docs. Do not
+deprecate or hide them. Git history is the archive.
 
-`docs/design.md` describes the one current design contract. Update it, the architecture
-documentation, and affected contract tests deliberately when that design changes; do not preserve
-obsolete code merely because the current documentation describes it.
+For a changed persisted contract, update or reset its baseline and reject old data. Never
+reinterpret old bytes, rewrite append-only history, or retain a legacy reader. Keep version
+identifiers only for a current hashing, domain-separation, or hostile-input requirement.
 
-## Logical Commits
+Fix the underlying design or add missing support completely. Do not add hacks, partial workarounds,
+schema shims, or parallel implementations; report a blocker instead. Update `docs/design.md`,
+architecture documentation, and contract tests when their design changes.
 
-Divide non-trivial work into a sequence of logical commits. Each commit must represent one coherent
-change, include its required tests and documentation, and leave the repository internally
-consistent. Do not mix unrelated cleanup with behavior changes or create temporary compatibility
-paths merely to stage a refactor; keep inseparable cutovers in one commit.
+## Commits and Reporting
 
-## Reporting
+Divide non-trivial work into ordered logical commits. Each must contain one coherent, internally
+consistent design plus its tests and documentation. Keep inseparable cutovers together and
+unrelated cleanup separate.
 
-Report what changed, what was deleted, which verification ran, and any remaining unverified risk or
-blocker.
+Report what changed and was deleted, verification run, and remaining unverified risks or blockers.
