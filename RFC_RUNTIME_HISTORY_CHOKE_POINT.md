@@ -332,8 +332,6 @@ The stronger design must combine:
 - Preserve one stable, queryable classification for every normally returned provider or transport
   fault through either its certified `SafeFailure` contract or the closed non-domain fault
   code/context relation, without retaining provider-controlled diagnostics.
-- Keep retry legality in the persisted disposition while allowing a future qualified scheduling
-  policy to consult the closed fault code after commit; every retry remains a new authorization.
 - Distinguish one observation's stable logical identity from each predecessor-bound physical append
   attempt.
 - Let semantic transitions consume only freshly verified committed observations.
@@ -360,8 +358,7 @@ The stronger design must combine:
 - Turning runtime authorization, retry, observation, or persistence phases into domain behavior.
 - Pre-expanding an unbounded number of access attempts into a finite certified graph.
 - Making audit attempt count, latency, worker identity, or retry timing part of semantic state.
-- Treating a persisted fault code as an instruction to retry, or permitting an adapter to retry or
-  fail over invisibly inside one authorization.
+- Defining code-specific retry scheduling, backoff, circuit-breaking, or provider-failover policy.
 - Absorbing executor delivery or resource streams into the MFM run history.
 - Persisting raw provider text, bodies, paths, endpoints, credentials, signatures, signed
   envelopes, or arbitrary diagnostics.
@@ -485,14 +482,12 @@ boundary or returned-value totalization becomes a closed `NonDomainFailure` with
 entry status, closed disposition, and `NonDomainFailureCode`. The code plus its history-derived
 `NonDomainFailureLayer` preserves the reviewed origin/category without provider-controlled text.
 It cannot yield normal success until that observation commits, and it cannot become a domain
-failure, accepted result, or state-consumable safe failure. `RetryableOperational` permits, but
-does not command, a later separately authorized attempt after commit; `IntegrityBlocked`
-deterministically blocks. A future qualified scheduler may use the committed code to select
-operational policy, but the code cannot mint authority, override the disposition, or cause an
-invisible adapter retry. Journal corruption, journal unavailability, an unresolved append, or a
-changed-content observation conflict is instead a history-persistence interruption and may prevent
-any new observation from being committed; in those cases no pending value escapes and durable
-history remains authoritative.
+failure, accepted result, or state-consumable safe failure. `RetryableOperational` permits a later
+separately authorized attempt after commit; `IntegrityBlocked` deterministically blocks. Journal
+corruption, journal unavailability, an unresolved append, or a changed-content observation
+conflict is instead a history-persistence interruption and may prevent any new observation from
+being committed; in those cases no pending value escapes and durable history remains
+authoritative.
 
 ### G-08: Process loss is not fabricated
 
@@ -959,11 +954,9 @@ map. A normally returned provider or transport error may not use an outer `Resul
 routes. Panic, abort, task loss, and process loss return no classification and remain an unmatched
 authorization.
 
-`NonDomainDisposition` is the authority-level retry gate. `RetryableOperational` only makes a later
-freshly authorized attempt legal; it does not require immediate retry. The closed code and layer
-may support future qualified choices such as backoff or circuit breaking after the observation
-commits, but they cannot override `IntegrityBlocked`, alter replay, reuse an authorization, or hide
-another provider call inside the original attempt.
+`NonDomainDisposition` retains the existing fixed retryable-operational or integrity-blocked
+projection. This tracking decision defines no code-specific retry scheduling, backoff,
+circuit-breaking, or provider-failover policy.
 
 The design uses a distinct outcome rather than reusing `DidNotEnter` or `Indeterminate`, because
 certified state policy may consume an admitted safe failure. Operational platform faults and
@@ -1709,8 +1702,6 @@ operation is legal, and whether recovery repeats IO.
   integrity-blocked projection.
 - Unknown non-domain codes, illegal contextual layers, and invalid code/status/disposition
   relations are rejected rather than projected through a fallback.
-- Any future code-guided operational retry policy must prove that it acts only after the prior
-  observation commits and only under a new authorization.
 - No non-domain failure can be reinterpreted as a domain failure or safe failure.
 - Provider text, endpoints, paths, credentials, raw response bodies, signatures, and signed
   envelopes never enter records, objects, diagnostics, errors, audit DTOs, or exports.
@@ -1752,8 +1743,6 @@ The implementation satisfies the following accepted criteria:
   integrity-blocked disposition;
 - every normally returned provider or transport fault has a linked, closed, queryable
   safe-failure or non-domain classification with no open diagnostic escape;
-- a non-domain code may refine future qualified retry scheduling but cannot itself authorize,
-  require, or hide a retry;
 - only committed observations can enter semantic evaluation;
 - process loss remains an unmatched authorization without invented evidence;
 - effect recovery still uses the independently fenced executor ledger;
@@ -1890,9 +1879,7 @@ The runtime protocol must:
 - preserve zeroizing transient buffers where required;
 - never expose append or access authority through trace, audit, replay, or export;
 - fail closed when authorization append is unavailable or ambiguous;
-- conservatively classify entry status and non-domain disposition;
-- never interpret a non-domain code as fresh authority or permission to bypass its persisted
-  disposition; and
+- conservatively classify entry status and non-domain disposition; and
 - keep every non-domain failure non-consumable.
 
 The passive writer must never be exposed through trace, audit, replay, export, application, CLI, or
@@ -1918,10 +1905,6 @@ success.
 Observation retry cannot repeat external IO. A definite exact-head conflict retains
 the pending observation and prepares a new physical attempt against the new head. Acknowledgement
 ambiguity must resolve the unchanged old attempt before any such rebase.
-
-Future code-guided backoff or circuit-breaking policy operates only after a retryable observation
-commits. It must not add an invisible transport retry within one authorization or make timing,
-worker identity, or transient routing choice part of semantic state.
 
 Any future batching optimization must retain one authorization and one observation identity per
 independently meaningful operation and prove partial-return and cancellation semantics separately.
@@ -2007,8 +1990,7 @@ The following decisions are accepted by this RFC:
   `RetryableOperational | IntegrityBlocked` disposition;
 - `NonDomainFailureCode` plus the history-derived contextual layer is the closed non-domain fault
   classification; normally returned provider/transport faults use either that relation or their
-  certified `SafeFailure` relation, and a code may guide future policy only after commit and under a
-  new authorization; and
+  certified `SafeFailure` relation; and
 - completion algebra, shared access composition, observation retry, and persisted-schema changes
   are one inseparable implementation commit.
 
@@ -2060,9 +2042,7 @@ The implemented current design is:
 - one mandatory linked observation before successful escape;
 - one mandatory audit-only `NonDomainFailure` representation with fixed
   `RetryableOperational | IntegrityBlocked` disposition;
-- one closed `NonDomainFailureCode` plus history-derived layer for non-domain fault trackability,
-  with code-guided future retry policy subordinate to committed disposition and fresh
-  authorization;
+- one closed `NonDomainFailureCode` plus history-derived layer for non-domain fault trackability;
 - semantic settlement only from freshly verified committed observations;
 - honest unmatched authorization for interruption and process loss;
 - five distinct persisted run-history record families;
