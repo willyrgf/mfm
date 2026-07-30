@@ -109,6 +109,12 @@ EVM read audit records may retain exact reviewed HTTP status, JSON-RPC numeric c
 response-invalid discriminator through the EVM diagnostic union. Semantic source mismatch and
 anchor change are typed returned values interpreted by the state, not provider diagnostics.
 
+Every normally returned provider or transport fault takes exactly one persisted route: a
+capability-certified `SafeFailure`, or the audit-only non-domain relation below. The linked
+authorization identifies the exact qualified operation, request, and binding. No outer error may
+bypass both routes; panic, abort, task loss, and process loss instead leave an unmatched
+authorization.
+
 ### Audit-only non-domain failure
 
 `NonDomainFailure` is a distinct closed observation outcome:
@@ -129,13 +135,15 @@ NonDomainFailure {
 }
 ```
 
-The schema fixes each permitted code/status/disposition relation and each permitted read, fact,
-ensure, or executor-target layer. It contains no diagnostic reference, provider text, path,
-endpoint, credential, response body, source chain, arbitrary map, or typed domain value.
+The layer is not a caller-authored field: store and replay derive it from committed history. The
+schema fixes each permitted code/status/disposition relation and each permitted read, fact, ensure,
+or executor-target layer. It contains no diagnostic reference, provider text, path, endpoint,
+credential, response body, source chain, arbitrary map, or typed domain value.
 `RetryableOperational` may enable a later separately authorized call after the observation commits;
-`IntegrityBlocked` blocks progress. Both are audit-only: neither is a `SafeFailure`, neither enters
-a state callback, neither can satisfy a settlement, and neither can be transformed into a domain
-failure by replay or a public renderer.
+it defines no code-specific scheduling, backoff, circuit breaking, provider failover, or hidden
+adapter retry. `IntegrityBlocked` blocks progress. Both are audit-only: neither is a `SafeFailure`,
+neither enters a state callback, neither can satisfy a settlement, and neither can be transformed
+into a domain failure by replay or a public renderer.
 
 ### Transient EVM transport ownership
 

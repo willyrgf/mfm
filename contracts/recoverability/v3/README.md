@@ -1,9 +1,8 @@
 # Recoverability v3 authority
 
 `annex.json` and `corpus.json` are the sole current production recoverability
-contract. Both files are exact, float-free canonical JSON bytes. The complete
-v1 and v2 directories remain byte-identical archival and hostile-input
-references; production consumers must not load either archive.
+contract. Both files are exact, float-free canonical JSON bytes. No superseded
+contract artifacts are retained or accepted.
 
 This is a destructive lineage cutover. There is no compatibility parser,
 database migration, checkpoint upgrade, dual reader, or fallback.

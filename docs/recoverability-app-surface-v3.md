@@ -1,7 +1,6 @@
 # Recoverability App, CLI, and REST Surface v3
 
-Status: implemented schema-frozen current contract established by the atomic cutover described by
-[`RFC_REFACTOR_RECOVERABILITY.md`](../RFC_REFACTOR_RECOVERABILITY.md)
+Status: implemented schema-frozen current contract
 
 Contract id: `mfm.recoverability-app-surface.v3`
 
@@ -9,10 +8,8 @@ This document records the frozen minimal application and transport surface for r
 Its current encodings and vectors are fixed by
 `contracts/recoverability/v3/annex.json`, `contracts/recoverability/v3/corpus.json`, and
 `contracts/recoverability/v3/README.md`.
-It is the exact current application and transport contract. The retained pre-cutover inventory and
-gate evidence live in
-[`recoverability-cutover-gates-v2.md`](recoverability-cutover-gates-v2.md). No compatibility
-commands, routes, DTOs, or readers survive.
+It is the exact current application and transport contract. No compatibility commands, routes,
+DTOs, or readers survive.
 
 ## Canonical annex boundary
 

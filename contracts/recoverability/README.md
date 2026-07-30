@@ -1,10 +1,8 @@
 # Recoverability contract index
 
-[`v2`](v2/README.md) is the sole current production recoverability registry
+[`v3`](v3/README.md) is the sole current production recoverability registry
 and conformance corpus. Production code and tests load only
-`v2/annex.json` and `v2/corpus.json`.
+`v3/annex.json` and `v3/corpus.json`.
 
-[`v1`](v1/README.md) is a byte-identical archive of the completed v1 cutover.
-Its annex, corpus, and historical README remain frozen for audit and explicit
-hostile legacy-input rejection; they are not a compatibility registry or
-supported reader.
+No superseded registry or artifact tree is retained. Git history is the
+archive; current readers fail closed on any non-current contract identity.
